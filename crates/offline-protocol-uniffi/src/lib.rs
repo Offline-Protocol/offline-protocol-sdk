@@ -10185,8 +10185,8 @@ mod tests {
             .unwrap();
 
         let address = protocol.local_address().expect("address after init");
-        let address_tag = offline_protocol_transport::routing_tag_for_device_id(&address).unwrap();
-        let profile_tag = offline_protocol_transport::routing_tag_for_device_id(&profile).unwrap();
+        let address_tag = offline_protocol_transport::routing_tag_for_address(&address).unwrap();
+        let profile_tag = offline_protocol_transport::routing_tag_for_address(&profile).unwrap();
 
         assert_eq!(
             protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
@@ -10246,7 +10246,7 @@ mod tests {
             .nostr_get_subscription_filter("sub".to_string())
             .expect("the rebuild installs the transport");
         let address = protocol.local_address().expect("address after init");
-        let address_tag = offline_protocol_transport::routing_tag_for_device_id(&address).unwrap();
+        let address_tag = offline_protocol_transport::routing_tag_for_address(&address).unwrap();
         assert!(
             filter.contains(&address_tag),
             "the filter must carry the address-derived tag: {filter}"

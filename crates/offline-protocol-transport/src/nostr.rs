@@ -15,7 +15,7 @@
 //! payloads via [`NostrTransport::on_data_received`].
 //!
 //! Addressing uses public routing tags derived from device IDs
-//! ([`nostr_crypto::routing_tag_for_device_id`]); event signing uses a
+//! ([`nostr_crypto::routing_tag_for_address`]); event signing uses a
 //! per-install secret key that starts out ephemeral and is upgraded to a
 //! persisted identity via [`NostrTransport::install_signing_secret`].
 
@@ -237,12 +237,16 @@ pub struct NostrTransport {
     /// protocol-state record and re-installs it on launch. Without that this is
     /// a per-process value and every cold start replays a full backfill window.
     receive_watermark: Mutex<Option<i64>>,
-    /// The publicly computable keypair whose public half is `routing_tag`.
+    /// The publicly computable keypair for our own address.
     ///
-    /// Held only to unseal (and seal) bootstrap-leg frames — see
-    /// [`NostrKeypair::derivable_for_device_id`], which documents why this is
-    /// not a secret and must never authenticate anything.
-    derivable_keypair: NostrKeypair,
+    /// Held to unseal bootstrap-leg frames and to seal our published records —
+    /// see [`nostr_crypto::record_seal_keypair_for_address`], which documents
+    /// why this is not a secret and must never authenticate anything.
+    ///
+    /// Its public half used to *be* `routing_tag`. It is now a separate,
+    /// domain-separated derivation, so the two are unequal and neither can be
+    /// mistaken for the other.
+    record_seal_keypair: NostrKeypair,
     /// Peer user ID → that peer's real per-install Nostr public key, learned
     /// from the `nostr_pubkey` field of their signed key package. Populated by
     /// the engine via [`Self::set_peer_nostr_pubkey`]; a peer absent here takes
@@ -344,15 +348,15 @@ impl NostrTransport {
                 "Nostr transport requires this device's derived address: {e}"
             ))
         })?;
-        let routing_tag = nostr_crypto::routing_tag_for_device_id(&device_id)?;
-        let derivable_keypair = NostrKeypair::derivable_for_device_id(&device_id)?;
+        let routing_tag = nostr_crypto::routing_tag_for_address(&device_id)?;
+        let record_seal_keypair = nostr_crypto::record_seal_keypair_for_address(&device_id)?;
         let keypair = RwLock::new(NostrKeypair::generate_ephemeral()?);
         Ok(Self {
             device_id,
             keypair,
             routing_tag,
             receive_watermark: Mutex::new(None),
-            derivable_keypair,
+            record_seal_keypair,
             peer_nostr_pubkeys: RwLock::new(HashMap::new()),
             sealing_enabled: Mutex::new(true),
             cold_contact_enabled: Mutex::new(true),
@@ -654,7 +658,7 @@ impl NostrTransport {
             }
         };
 
-        let routing_tag = nostr_crypto::routing_tag_for_device_id(&user_id)?;
+        let routing_tag = nostr_crypto::routing_tag_for_address(&user_id)?;
         let query_id = new_query_id();
         let req_json = nostr_crypto::create_key_package_query_message(&routing_tag, &query_id)?;
 
@@ -812,7 +816,7 @@ impl NostrTransport {
         // the whole reason a record sealed to it stays fetchable by anyone
         // entitled to fetch it, while remaining opaque to a relay scraping by
         // kind alone.
-        let peer_key = NostrKeypair::derivable_for_device_id(&user_id)?;
+        let peer_key = nostr_crypto::record_seal_keypair_for_address(&user_id)?;
         match nostr_crypto::open_key_package_publication(&peer_key, author, &sealed) {
             Ok(plaintext) => Ok(Some((author.to_string(), plaintext))),
             Err(e) => {
@@ -940,7 +944,7 @@ impl NostrTransport {
             }
         }
 
-        match nostr_crypto::unwrap_gift_wrap(&self.derivable_keypair, sender_pubkey_hex, data) {
+        match nostr_crypto::unwrap_gift_wrap(&self.record_seal_keypair, sender_pubkey_hex, data) {
             Ok(plaintext) => {
                 tracing::debug!("Unsealed a bootstrap-leg Nostr frame");
                 Cow::Owned(plaintext)
@@ -962,7 +966,7 @@ impl NostrTransport {
     /// key, and timestamp — not just in how `content` is encoded.
     fn build_event(&self, message: &Message) -> Result<nostr_crypto::NostrEvent> {
         let recipient_device_id = message.recipient.as_str();
-        let recipient_tag = nostr_crypto::routing_tag_for_device_id(recipient_device_id)?;
+        let recipient_tag = nostr_crypto::routing_tag_for_address(recipient_device_id)?;
         let data = self.serialize_message(message)?;
 
         if !self.sealing_enabled() {
@@ -993,7 +997,12 @@ impl NostrTransport {
                 // re-resolved on the next send rather than waiting for a fresh
                 // key-package exchange.
                 self.enqueue_resolution(recipient_device_id);
-                recipient_tag.clone()
+                // Their record-seal key, reconstructed from their address —
+                // no longer the routing tag, which since the key split is a
+                // label with no private half anyone holds.
+                nostr_crypto::record_seal_keypair_for_address(recipient_device_id)?
+                    .public_key_hex()
+                    .to_string()
             }
         };
 
@@ -1028,6 +1037,7 @@ impl NostrTransport {
                 nostr_crypto::NostrEvent::create_key_package_publication(
                     &keypair,
                     &self.routing_tag,
+                    self.record_seal_keypair.public_key_hex(),
                     &pending.slot_id,
                     &pending.payload,
                 )?
@@ -2049,7 +2059,7 @@ mod tests {
     #[test]
     fn test_subscription_filters_on_routing_tag_not_signing_key() {
         let transport = NostrTransport::new(addr("device1")).unwrap();
-        let expected_tag = nostr_crypto::routing_tag_for_device_id(&addr("device1")).unwrap();
+        let expected_tag = nostr_crypto::routing_tag_for_address(&addr("device1")).unwrap();
 
         assert_eq!(transport.routing_tag(), expected_tag);
         // The signing key is random per install and must never leak into the
@@ -2079,7 +2089,7 @@ mod tests {
         // Addressing is untouched by the key swap.
         assert_eq!(
             transport_a.routing_tag(),
-            nostr_crypto::routing_tag_for_device_id(&addr("device1")).unwrap()
+            nostr_crypto::routing_tag_for_address(&addr("device1")).unwrap()
         );
     }
 
@@ -2330,7 +2340,7 @@ mod tests {
         transport.send(&msg).unwrap();
 
         let signed = transport.get_next_signed_event().unwrap().unwrap();
-        let bob_tag = nostr_crypto::routing_tag_for_device_id(&addr("bob")).unwrap();
+        let bob_tag = nostr_crypto::routing_tag_for_address(&addr("bob")).unwrap();
         assert!(
             signed.event_json.contains(&bob_tag),
             "event must be addressed to the recipient's routing tag"
@@ -2409,7 +2419,7 @@ mod tests {
         // The only thing a relay legitimately learns is the recipient's routing
         // tag — an opaque label it cannot invert without already knowing the
         // user id it is looking for.
-        let bob_tag = nostr_crypto::routing_tag_for_device_id(&addr("bob")).unwrap();
+        let bob_tag = nostr_crypto::routing_tag_for_address(&addr("bob")).unwrap();
         assert!(wire.contains(&bob_tag));
     }
 
@@ -2533,7 +2543,7 @@ mod tests {
         // ordinary decoder reject it as one undecodable frame — the same
         // outcome as random junk, which is what it is to us.
         let bob = NostrTransport::new(addr("bob")).unwrap();
-        let carol_tag = nostr_crypto::routing_tag_for_device_id(&addr("carol")).unwrap();
+        let carol_tag = nostr_crypto::routing_tag_for_address(&addr("carol")).unwrap();
 
         let event =
             nostr_crypto::NostrEvent::create_gift_wrap(&carol_tag, &carol_tag, b"not for bob")
@@ -2553,7 +2563,7 @@ mod tests {
         // pubkey. A bridge wired to it would otherwise enqueue ciphertext as if
         // it were a message.
         let bob = NostrTransport::new(addr("bob")).unwrap();
-        let bob_tag = nostr_crypto::routing_tag_for_device_id(&addr("bob")).unwrap();
+        let bob_tag = nostr_crypto::routing_tag_for_address(&addr("bob")).unwrap();
         let event =
             nostr_crypto::NostrEvent::create_gift_wrap(&bob_tag, &bob_tag, b"sealed").unwrap();
         let sealed = base64::engine::general_purpose::STANDARD
@@ -2701,7 +2711,7 @@ mod tests {
         assert_eq!(tags[1][1].as_str(), Some(transport.routing_tag()));
 
         // A stranger who knows only the username can open it.
-        let stranger_view = NostrKeypair::derivable_for_device_id(&addr("alice")).unwrap();
+        let stranger_view = nostr_crypto::record_seal_keypair_for_address(&addr("alice")).unwrap();
         let sealed = base64::engine::general_purpose::STANDARD
             .decode(event["content"].as_str().unwrap())
             .unwrap();
@@ -2753,7 +2763,7 @@ mod tests {
         let sealed = base64::engine::general_purpose::STANDARD
             .decode(event["content"].as_str().unwrap())
             .unwrap();
-        let key = NostrKeypair::derivable_for_device_id(&addr("alice")).unwrap();
+        let key = nostr_crypto::record_seal_keypair_for_address(&addr("alice")).unwrap();
         let opened = nostr_crypto::open_key_package_publication(
             &key,
             event["pubkey"].as_str().unwrap(),
@@ -2879,7 +2889,7 @@ mod tests {
         );
 
         let query = transport.next_query().unwrap().expect("resolution queued");
-        let expected_tag = nostr_crypto::routing_tag_for_device_id(&addr("bob")).unwrap();
+        let expected_tag = nostr_crypto::routing_tag_for_address(&addr("bob")).unwrap();
         assert!(query.req_json.contains(&expected_tag));
         assert!(query
             .req_json

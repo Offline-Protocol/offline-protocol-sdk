@@ -11,7 +11,7 @@ use crate::test_identity::{id, session_slot};
 use chrono::Duration as ChronoDuration;
 use offline_protocol_core::{AppId, ContentType, MessagePriority, ServiceDescriptor, UserId};
 use offline_protocol_transport::{
-    mock::MockTransport, nostr::NostrTransport, nostr_crypto::routing_tag_for_device_id, Transport,
+    mock::MockTransport, nostr::NostrTransport, nostr_crypto::routing_tag_for_address, Transport,
     TransportMetrics, TransportStatus, TransportType,
 };
 use std::sync::{Arc, Barrier, Mutex};
@@ -2616,7 +2616,7 @@ fn outgoing_key_package_advertises_our_nostr_pubkey_only_when_nostr_is_on() {
     // an upgrade.
     assert_ne!(
         advertised.as_deref(),
-        Some(routing_tag_for_device_id(&id("alice")).unwrap().as_str())
+        Some(routing_tag_for_address(&id("alice")).unwrap().as_str())
     );
 }
 

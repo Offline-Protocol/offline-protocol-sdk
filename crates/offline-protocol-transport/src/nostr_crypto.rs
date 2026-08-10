@@ -8,23 +8,39 @@
 //!
 //! # Key model
 //!
-//! Two independent values are in play, and they must not be conflated:
+//! Three values are in play, and they must not be conflated:
 //!
-//! - **Routing tag** ([`routing_tag_for_device_id`]): a public rendezvous
-//!   label derived deterministically from a device/user ID. Senders put the
+//! - **Routing tag** ([`routing_tag_for_address`]): a public rendezvous label
+//!   derived deterministically from a device's address. Senders put the
 //!   recipient's tag in the event's `#p` tag; the recipient subscribes on its
-//!   own tag. It carries no secret — anyone who knows a device ID can (and
-//!   must be able to) compute it, exactly like an email address.
-//! - **Signing key** ([`NostrKeypair`]): the secp256k1 private key that signs
-//!   outgoing events. It is derived via HKDF-SHA256 from a per-install random
-//!   secret ([`NostrKeypair::from_install_secret`]) and is never derivable
-//!   from any public identifier.
+//!   own. It is a *label*: nothing signs with it, nothing seals to it, and
+//!   anyone who knows an address can — and must be able to — compute it,
+//!   exactly like an email address.
+//! - **Signing key** ([`NostrKeypair::from_install_secret`]): the secp256k1
+//!   private key that signs outgoing events, derived via HKDF-SHA256 from a
+//!   per-install random secret. Never derivable from any public value.
+//! - **Record-seal key** ([`record_seal_keypair_for_address`]): a keypair
+//!   *anyone who knows an address can reconstruct*, holding one job — sealing
+//!   the published key-package record and the bootstrap leg of a conversation,
+//!   so a relay scraping by kind sees ciphertext instead of a directory. Its
+//!   private half is public by construction, so it must never authenticate
+//!   anything.
 //!
-//! Historically both roles were served by `SHA-256(device_id)`, which let
-//! anyone who knew a device ID reconstruct that device's private key and sign
-//! events as it. Only the routing-tag role legitimately needs to be publicly
-//! derivable, so only it retains the deterministic derivation (unchanged on
-//! the wire for interoperability with older peers).
+//! Two historical conflations are worth knowing about, because both looked
+//! harmless until they weren't.
+//!
+//! Originally the *signing* key was `SHA-256(device_id)` too, so anyone who
+//! knew a device id could sign events as that device. That one was fixed by
+//! moving signing onto a per-install secret.
+//!
+//! What survived until the address migration was subtler: the record-seal
+//! key's public half **was** the routing tag, bit for bit. Nothing was wrong
+//! with it on its own — the two roles happened to want the same derivation —
+//! but it left every routing tag standing as a public key whose private half
+//! was computable, which is a live footgun the moment anything adds NIP-42
+//! AUTH or pubkey-based filtering. They are now separately domain-separated
+//! and deliberately unequal, pinned by
+//! `test_record_seal_key_is_not_the_routing_tag`.
 
 use crate::constants::{NOSTR_CREATED_AT_JITTER_SECS, NOSTR_INITIAL_QUERY_LIMIT};
 use crate::nip44::{self, ConversationKey};
@@ -39,6 +55,15 @@ use zeroize::Zeroizing;
 /// per-install secret. A trailing counter byte is appended per attempt so an
 /// (astronomically unlikely) invalid scalar can be retried deterministically.
 const SIGNING_KEY_HKDF_INFO: &[u8] = b"offline-protocol/nostr/v1/signing-key/";
+
+/// Domain-separation prefix for the publicly computable record-seal key.
+///
+/// Distinct from [`SIGNING_KEY_HKDF_INFO`] because these two keys have
+/// opposite security properties — one is an unforgeable identity, the other is
+/// reconstructible by anyone holding the address — and sharing a derivation
+/// between them is the kind of thing that is fine until someone reuses one
+/// where they meant the other.
+const RECORD_SEAL_HKDF_INFO: &[u8] = b"offline-protocol/nostr/v1/record-seal-key/";
 
 /// Upper bound on HKDF derivation attempts. Each attempt fails with
 /// probability ~2^-128 (scalar of zero or above the curve order), so more
@@ -58,7 +83,7 @@ const MIN_INSTALL_SECRET_LEN: usize = 16;
 ///
 /// The keypair authenticates this install to Nostr relays (event signatures,
 /// NIP-42 style auth). It is intentionally *not* derivable from the device
-/// ID; message addressing uses the separate [`routing_tag_for_device_id`]
+/// ID; message addressing uses the separate [`routing_tag_for_address`]
 /// label instead.
 pub struct NostrKeypair {
     signing_key: SigningKey,
@@ -138,35 +163,60 @@ impl NostrKeypair {
         &self.public_key_hex
     }
 
-    /// Reconstructs the keypair whose public half is
-    /// [`routing_tag_for_device_id`] — the *publicly computable* keypair.
-    ///
-    /// # This key is not a secret
-    ///
-    /// Its private half is `SHA-256(device_id)`, so anyone who knows a device
-    /// ID holds it. It exists for exactly one purpose: unsealing (and sealing)
-    /// the **first** frame of a conversation, before the two sides have learned
-    /// each other's real per-install Nostr keys. That gives bulk-collection
-    /// resistance — a relay operator scraping everything cannot read it — and
-    /// nothing more: an observer who guesses the username can.
-    ///
-    /// It must therefore **never** be used to authenticate anything: not
-    /// NIP-42 AUTH, not inbound sender attribution, not any decision that
-    /// treats "this decrypted" as evidence of who sent it. Sender authenticity
-    /// on this transport comes from the protocol-layer Ed25519 + derivation gate and
-    /// MLS, both of which sit above this function and are unaffected by it.
-    /// [`Self::from_install_secret`] is the only unforgeable identity here.
-    pub fn derivable_for_device_id(device_id: &str) -> Result<Self> {
-        let scalar = Sha256::digest(device_id.as_bytes());
-        let signing_key = SigningKey::from_bytes(scalar.as_slice()).map_err(|e| {
-            Error::CryptoError(format!("Invalid derivable key for device_id: {}", e))
-        })?;
-        let public_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
-        Ok(Self {
-            signing_key,
-            public_key_hex,
-        })
+}
+
+/// Reconstructs the keypair that seals content addressed to `address`.
+///
+/// # This key is not a secret
+///
+/// It is derived from the address alone, so **anyone who knows an address
+/// holds this keypair for it**. That is the point: it lets a stranger seal a
+/// first frame to a peer they have never exchanged keys with, and lets them
+/// open that peer's published key-package record — while a relay scraping by
+/// kind, which knows tags but not addresses, sees only ciphertext.
+///
+/// What that is worth changed with the address migration, and it is worth
+/// being precise about. When the preimage was a username, "anyone who knows
+/// it" meant anyone who could *guess* `bob`. An address is a 160-bit hash of
+/// an identity key: it cannot be guessed, only learned — from an invite, a QR
+/// code, or a frame the holder already sent you. So the audience for this key
+/// is now the same set of people who could already send you traffic, rather
+/// than everyone with a dictionary.
+///
+/// It must **never** authenticate anything: not NIP-42 AUTH, not inbound
+/// sender attribution, not any decision that treats "this decrypted" as
+/// evidence of who sent it. Sender authenticity comes from the protocol-layer
+/// Ed25519 + derivation gate and from MLS, both above this function.
+/// [`NostrKeypair::from_install_secret`] is the only unforgeable identity
+/// here.
+///
+/// Domain-separated so this is *not* the routing tag's scalar. Nothing breaks
+/// if they coincide, but a routing label that doubles as a public key whose
+/// private half is computable is a trap for whoever next touches this file.
+pub fn record_seal_keypair_for_address(address: &str) -> Result<NostrKeypair> {
+    let hkdf = Hkdf::<Sha256>::new(None, address.as_bytes());
+    let mut info = Vec::with_capacity(RECORD_SEAL_HKDF_INFO.len() + 1);
+    for counter in 0..MAX_DERIVE_ATTEMPTS {
+        info.clear();
+        info.extend_from_slice(RECORD_SEAL_HKDF_INFO);
+        info.push(counter);
+
+        let mut candidate = Zeroizing::new([0u8; 32]);
+        hkdf.expand(&info, &mut *candidate)
+            .map_err(|e| Error::CryptoError(format!("HKDF expand failed: {}", e)))?;
+
+        if let Ok(signing_key) = SigningKey::from_bytes(&*candidate) {
+            let public_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
+            return Ok(NostrKeypair {
+                signing_key,
+                public_key_hex,
+            });
+        }
     }
+
+    Err(Error::CryptoError(
+        "Failed to derive a record-seal key for the address".to_string(),
+    ))
 }
 
 /// Current wall-clock time as unix seconds — the unit every Nostr timestamp
@@ -181,21 +231,35 @@ pub(crate) fn now_unix_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Computes the public routing tag for a device/user ID.
+/// Computes the public routing tag for a device's address.
 ///
-/// Derivation: `SHA-256(device_id)` → scalar → x-only secp256k1 public key
-/// hex — byte-identical to the legacy shared derivation, so old and new
-/// versions address each other without a migration.
+/// Derivation: `SHA-256(address)` → scalar → x-only secp256k1 public key hex.
 ///
 /// Senders place the recipient's tag in the `#p` tag of outgoing events and
-/// recipients subscribe on their own tag. It is a rendezvous label only:
-/// nothing signs with the corresponding scalar, and incoming events are never
-/// authenticated against it (sender authenticity comes from the
-/// protocol-layer MLS signatures).
-pub fn routing_tag_for_device_id(device_id: &str) -> Result<String> {
-    let tag_scalar = Sha256::digest(device_id.as_bytes());
+/// recipients subscribe on their own. It is a rendezvous label only: nothing
+/// signs with the corresponding scalar, nothing seals to it, and incoming
+/// events are never authenticated against it (sender authenticity comes from
+/// the protocol layer).
+///
+/// # Why an identity-derived label is acceptable here
+///
+/// Deriving a delivery address from stable identity material is normally the
+/// wrong move — it lets an observer precompute the label for any identity it
+/// cares about and confirm traffic without holding a key. The Marmot protocol
+/// forbids it for *group* addressing for exactly that reason, and carves out
+/// the case this is: an account-level inbox, "because reaching a specific
+/// account is the purpose of an inbox". NIP-59 goes further and puts the
+/// recipient's actual pubkey in `p`.
+///
+/// So the tag is not obscurity and is not load-bearing for privacy. What it
+/// does buy is non-invertibility: knowing a tag does not yield the address, so
+/// a relay cannot turn its subscriber list back into an address book. That
+/// property is the reason the published record stays sealed — publishing it in
+/// the clear would hand the address back at the tag it sits on.
+pub fn routing_tag_for_address(address: &str) -> Result<String> {
+    let tag_scalar = Sha256::digest(address.as_bytes());
     let tag_key = SigningKey::from_bytes(tag_scalar.as_slice())
-        .map_err(|e| Error::CryptoError(format!("Invalid routing tag for device_id: {}", e)))?;
+        .map_err(|e| Error::CryptoError(format!("Invalid routing tag for address: {}", e)))?;
     Ok(hex::encode(tag_key.verifying_key().to_bytes()))
 }
 
@@ -273,7 +337,7 @@ impl NostrEvent {
     ///
     /// - `keypair`: Sender's signing keypair (per-install secret key).
     /// - `recipient_pubkey_hex`: Recipient's routing tag (64-char hex, from
-    ///   [`routing_tag_for_device_id`]).
+    ///   [`routing_tag_for_address`]).
     /// - `content_base64`: Base64-encoded protocol message bytes.
     pub fn create_dm(
         keypair: &NostrKeypair,
@@ -342,24 +406,28 @@ impl NostrEvent {
     ///
     /// # Why the content is sealed even though the record is public
     ///
-    /// An MLS key package carries its owner's user id twice over: once in the
-    /// `KeyPackagePayload` field and once, unremovably, in the leaf credential —
-    /// this SDK's credentials are basic credentials holding the raw user id, as
-    /// `verify_credential_identity` relies on. Published in the clear, a filter
-    /// naming only this kind and no tag would therefore return a directory of
-    /// every username on the relay, handing over exactly the preimages the
-    /// `SHA-256(user_id)` routing tag exists to withhold.
+    /// The original reason was that an MLS key package carries its owner's
+    /// user id twice over — in the `KeyPackagePayload` field and, unremovably,
+    /// in the leaf credential — so a cleartext record would have let
+    /// `{"kinds":[30443]}` return **a directory of every username on the
+    /// relay**. That reason expired: credentials now hold the derived address,
+    /// and an address is not a name.
     ///
-    /// So the content is NIP-44-sealed to *our own* publicly computable key.
-    /// That costs nothing in reach: fetching the record at all requires knowing
-    /// the routing tag, which requires knowing the username, which is precisely
-    /// the knowledge needed to reconstruct the derivable key and open it. The
-    /// audience is unchanged and a scraper sees an opaque blob.
+    /// The seal stays anyway, for a narrower reason that did not expire. The
+    /// routing tag is one-way — a relay holding tags cannot recover addresses
+    /// from them. A cleartext record publishes the address *at* its own tag,
+    /// which hands that inversion back for the whole userbase to anyone willing
+    /// to scrape one kind. Sealing keeps the tag one-way.
     ///
-    /// This is the one encryption use of the derivable key that survives
-    /// publication: real messages seal to the per-install key resolved *from*
-    /// this record, so the weak key protects only a self-published record whose
-    /// sole reader already knows who it belongs to.
+    /// Worth knowing that this is where we diverge from Marmot, which
+    /// publishes kind-30443 key packages in the clear and is right to: their
+    /// leaf credential *is* the Nostr pubkey the event is already signed by, so
+    /// a cleartext record discloses nothing the event's own `pubkey` field did
+    /// not. Ours names a different identity, so ours has something to hide.
+    ///
+    /// Sealing costs nothing in reach: opening the record needs the address,
+    /// and so does finding it — the tag you fetch from is derived from that
+    /// same address.
     ///
     /// `created_at` is the true current time, deliberately **not** jittered into
     /// the past like a gift wrap's. Relays keep the newest event per
@@ -367,15 +435,21 @@ impl NostrEvent {
     /// would be silently discarded — leaving a consumed key package standing as
     /// the live record. Nothing is lost by it: this is a standing record, not a
     /// message, so its timestamp correlates with no conversation.
+    ///
+    /// `routing_tag` addresses the record; `seal_pubkey` is our own
+    /// record-seal public key, which is what a fetcher reconstructs from our
+    /// address to open it. They used to be the same value and are now
+    /// deliberately not, so the two arguments say which job each is doing.
     pub fn create_key_package_publication(
         keypair: &NostrKeypair,
         routing_tag: &str,
+        seal_pubkey: &str,
         slot_id: &str,
         plaintext: &[u8],
     ) -> Result<Self> {
-        let tag_bytes = hex::decode(routing_tag)
-            .map_err(|e| Error::CryptoError(format!("Invalid routing tag: {}", e)))?;
-        let conversation_key = ConversationKey::derive(&keypair.signing_key, &tag_bytes)?;
+        let seal_bytes = hex::decode(seal_pubkey)
+            .map_err(|e| Error::CryptoError(format!("Invalid record-seal pubkey: {}", e)))?;
+        let conversation_key = ConversationKey::derive(&keypair.signing_key, &seal_bytes)?;
         let sealed = nip44::encrypt(plaintext, &conversation_key)?;
 
         let tags = vec![
@@ -466,7 +540,7 @@ impl NostrEvent {
 }
 
 /// Creates a NIP-01 REQ subscription message for DMs addressed to `pubkey_hex`
-/// (this device's own routing tag, from [`routing_tag_for_device_id`]).
+/// (this device's own routing tag, from [`routing_tag_for_address`]).
 ///
 /// Returns
 /// `["REQ", "<sub_id>", {"#p": ["<pubkey>"], "kinds": [4, 1059], "since": T, "limit": N}]`.
@@ -641,7 +715,7 @@ mod tests {
         // the routing tag stays publicly derivable, the signing key does not.
         let secret = Sha256::digest("alice".as_bytes());
         let kp = NostrKeypair::from_install_secret(secret.as_slice()).unwrap();
-        let tag = routing_tag_for_device_id("alice").unwrap();
+        let tag = routing_tag_for_address("alice").unwrap();
         assert_ne!(kp.public_key_hex(), tag);
     }
 
@@ -667,15 +741,15 @@ mod tests {
         // These golden values were computed from the pre-split derivation and
         // must never change, or addressing breaks against deployed peers.
         assert_eq!(
-            routing_tag_for_device_id("alice").unwrap(),
+            routing_tag_for_address("alice").unwrap(),
             "9997a497d964fc1a62885b05a51166a65a90df00492c8d7cf61d6accf54803be"
         );
         assert_eq!(
-            routing_tag_for_device_id("bob").unwrap(),
+            routing_tag_for_address("bob").unwrap(),
             "4edfcf9dfe6c0b5c83d1ab3f78d1b39a46ebac6798e08e19761f5ed89ec83c10"
         );
         assert_eq!(
-            routing_tag_for_device_id("device1").unwrap(),
+            routing_tag_for_address("device1").unwrap(),
             "01194098eb3146ae142447c78a1fcf8df55b72b6d54f9eaa4b5b1c2a11826295"
         );
     }
@@ -683,7 +757,7 @@ mod tests {
     #[test]
     fn test_create_dm_event() {
         let sender = NostrKeypair::generate_ephemeral().unwrap();
-        let recipient_pubkey = routing_tag_for_device_id("bob").unwrap();
+        let recipient_pubkey = routing_tag_for_address("bob").unwrap();
 
         let event = NostrEvent::create_dm(&sender, &recipient_pubkey, "dGVzdCBtZXNzYWdl").unwrap();
 
@@ -700,7 +774,7 @@ mod tests {
     #[test]
     fn test_event_id_is_sha256_of_serialization() {
         let sender = NostrKeypair::generate_ephemeral().unwrap();
-        let recipient_pubkey = routing_tag_for_device_id("bob").unwrap();
+        let recipient_pubkey = routing_tag_for_address("bob").unwrap();
 
         let event = NostrEvent::create_dm(&sender, &recipient_pubkey, "dGVzdCBtZXNzYWdl").unwrap();
 
@@ -718,7 +792,7 @@ mod tests {
     #[test]
     fn test_signature_verification() {
         let sender = NostrKeypair::generate_ephemeral().unwrap();
-        let recipient_pubkey = routing_tag_for_device_id("bob").unwrap();
+        let recipient_pubkey = routing_tag_for_address("bob").unwrap();
 
         let event = NostrEvent::create_dm(&sender, &recipient_pubkey, "dGVzdCBtZXNzYWdl").unwrap();
 
@@ -737,7 +811,7 @@ mod tests {
     #[test]
     fn test_to_relay_message() {
         let sender = NostrKeypair::generate_ephemeral().unwrap();
-        let recipient_pubkey = routing_tag_for_device_id("bob").unwrap();
+        let recipient_pubkey = routing_tag_for_address("bob").unwrap();
 
         let event = NostrEvent::create_dm(&sender, &recipient_pubkey, "dGVzdCBtZXNzYWdl").unwrap();
         let relay_msg = event.to_relay_message().unwrap();
@@ -750,7 +824,7 @@ mod tests {
 
     #[test]
     fn test_create_subscription_message() {
-        let pubkey = routing_tag_for_device_id("alice").unwrap();
+        let pubkey = routing_tag_for_address("alice").unwrap();
         let msg = create_subscription_message(&pubkey, "sub123", 1_700_000_000).unwrap();
 
         assert!(msg.starts_with("[\"REQ\",\"sub123\",{"));
@@ -767,7 +841,7 @@ mod tests {
         // from before sealing still publishes kind 4. Dropping kind 4 from the
         // filter would make those peers silently undeliverable — no error, no
         // event, just nothing arriving — so both kinds stay requested.
-        let pubkey = routing_tag_for_device_id("alice").unwrap();
+        let pubkey = routing_tag_for_address("alice").unwrap();
         let msg = create_subscription_message(&pubkey, "sub123", 1_700_000_000).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
@@ -786,7 +860,7 @@ mod tests {
         // The wrapper's signing key must be fresh per event: a stable one would
         // let a relay group every message this device ever publishes, which is
         // most of the metadata that sealing exists to remove.
-        let bob_tag = routing_tag_for_device_id("bob").unwrap();
+        let bob_tag = routing_tag_for_address("bob").unwrap();
 
         let a = NostrEvent::create_gift_wrap(&bob_tag, &bob_tag, b"hello").unwrap();
         let b = NostrEvent::create_gift_wrap(&bob_tag, &bob_tag, b"hello").unwrap();
@@ -803,7 +877,7 @@ mod tests {
     #[test]
     fn test_gift_wrap_round_trips_to_the_recipients_key() {
         let bob = NostrKeypair::from_install_secret(&[77u8; 32]).unwrap();
-        let bob_tag = routing_tag_for_device_id("bob").unwrap();
+        let bob_tag = routing_tag_for_address("bob").unwrap();
 
         let event =
             NostrEvent::create_gift_wrap(&bob_tag, bob.public_key_hex(), b"payload").unwrap();
@@ -819,42 +893,75 @@ mod tests {
         // Sealed to Bob's install key, so Bob's *derivable* key must not open
         // it — otherwise the steady-state seal would be no better than the
         // bootstrap one.
-        let bob_derivable = NostrKeypair::derivable_for_device_id("bob").unwrap();
+        let bob_derivable = record_seal_keypair_for_address("bob").unwrap();
         assert!(unwrap_gift_wrap(&bob_derivable, &event.pubkey, &sealed).is_err());
     }
 
     #[test]
-    fn test_bootstrap_wrap_opens_with_the_derivable_key() {
-        // First contact: the sender knows only the recipient's user id, so it
-        // seals to the publicly computable key — which is the routing tag.
-        let bob_tag = routing_tag_for_device_id("bob").unwrap();
-        let event = NostrEvent::create_gift_wrap(&bob_tag, &bob_tag, b"first contact").unwrap();
+    fn test_bootstrap_wrap_opens_with_the_record_seal_key() {
+        // First contact: the sender knows only the recipient's address, so it
+        // addresses the frame to their tag and seals it to their record-seal
+        // key. Those are now two different values, which is the whole point of
+        // keeping them as two arguments.
+        let bob_tag = routing_tag_for_address("bob").unwrap();
+        let bob_seal = record_seal_keypair_for_address("bob").unwrap();
+
+        let event =
+            NostrEvent::create_gift_wrap(&bob_tag, bob_seal.public_key_hex(), b"first contact")
+                .unwrap();
         let sealed = base64::engine::general_purpose::STANDARD
             .decode(&event.content)
             .unwrap();
 
-        let bob_derivable = NostrKeypair::derivable_for_device_id("bob").unwrap();
         assert_eq!(
-            unwrap_gift_wrap(&bob_derivable, &event.pubkey, &sealed).unwrap(),
+            unwrap_gift_wrap(&bob_seal, &event.pubkey, &sealed).unwrap(),
             b"first contact"
+        );
+        assert_eq!(
+            event.tags[0],
+            vec!["p".to_string(), bob_tag],
+            "the frame is addressed to the tag even though it is sealed to the key"
         );
     }
 
     #[test]
-    fn test_derivable_public_half_is_exactly_the_routing_tag() {
-        // Load-bearing coincidence: the bootstrap seal targets the same value
-        // that appears in `#p`. If these ever diverged, first-contact frames
-        // would be addressed to one key and sealed to another — undeliverable,
-        // with nothing in the logs pointing at the cause.
+    fn test_record_seal_key_is_not_the_routing_tag() {
+        // These were the same value for most of this transport's life. Nothing
+        // was broken by it, but it left every routing tag standing as a public
+        // key whose private half anyone could compute — which stops being
+        // harmless the moment something adds NIP-42 AUTH or pubkey filtering
+        // and reaches for "the key matching this tag".
+        //
+        // Separate derivations, so there is no such key.
         for id in ["alice", "bob", "device1", "a-very-long-user-id-with-dashes"] {
-            assert_eq!(
-                NostrKeypair::derivable_for_device_id(id)
-                    .unwrap()
-                    .public_key_hex(),
-                routing_tag_for_device_id(id).unwrap(),
-                "derivable key and routing tag diverged for {id}"
+            assert_ne!(
+                record_seal_keypair_for_address(id).unwrap().public_key_hex(),
+                routing_tag_for_address(id).unwrap(),
+                "the record-seal key must not be the routing tag for {id}"
             );
         }
+    }
+
+    #[test]
+    fn test_record_seal_key_is_deterministic_and_address_specific() {
+        // Deterministic because both sides derive it independently — the
+        // publisher to seal, a fetcher to open — and they never exchange it.
+        assert_eq!(
+            record_seal_keypair_for_address("alice")
+                .unwrap()
+                .public_key_hex(),
+            record_seal_keypair_for_address("alice")
+                .unwrap()
+                .public_key_hex()
+        );
+        assert_ne!(
+            record_seal_keypair_for_address("alice")
+                .unwrap()
+                .public_key_hex(),
+            record_seal_keypair_for_address("bob")
+                .unwrap()
+                .public_key_hex()
+        );
     }
 
     #[test]
@@ -863,7 +970,7 @@ mod tests {
         // filtered out by peers' `until` bounds and, on our own receive path,
         // is exactly what `NOSTR_FUTURE_DATED_TOLERANCE_SECS` refuses to let
         // advance the watermark.
-        let bob_tag = routing_tag_for_device_id("bob").unwrap();
+        let bob_tag = routing_tag_for_address("bob").unwrap();
         let mut saw_jitter = false;
 
         for _ in 0..64 {
@@ -894,7 +1001,7 @@ mod tests {
         // Without a `limit` the filter is unbounded, so every relay
         // (re)connect replays the relay's whole retention window — which
         // NIP-11 no longer advertises, so it cannot even be reasoned about.
-        let pubkey = routing_tag_for_device_id("alice").unwrap();
+        let pubkey = routing_tag_for_address("alice").unwrap();
         let msg = create_subscription_message(&pubkey, "sub123", 1_700_000_000).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
@@ -909,7 +1016,7 @@ mod tests {
 
     #[test]
     fn test_subscription_filter_carries_since() {
-        let pubkey = routing_tag_for_device_id("alice").unwrap();
+        let pubkey = routing_tag_for_address("alice").unwrap();
         let msg = create_subscription_message(&pubkey, "sub123", 1_700_000_000).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
@@ -926,7 +1033,7 @@ mod tests {
         // A negative `since` is not a valid NIP-01 filter value; relays may
         // reject the whole REQ, which would take the subscription down rather
         // than merely widening it.
-        let pubkey = routing_tag_for_device_id("alice").unwrap();
+        let pubkey = routing_tag_for_address("alice").unwrap();
         let msg = create_subscription_message(&pubkey, "sub123", -42).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
