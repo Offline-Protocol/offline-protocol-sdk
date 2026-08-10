@@ -224,10 +224,12 @@ internal class CentralGattClient(
      * What a peer advertised in `DEVICE_ID`, held between that read and the
      * `IDENTITY` read that either proves it or refuses it.
      *
-     * An entry here is an unproven claim and is never announced. It is
-     * consumed by [handleIdentityRead] and dropped by every teardown path, so
-     * a reconnect cannot pair this connection's device id with the next
-     * connection's identity.
+     * An entry here is an unproven claim and is never announced. It is read by
+     * [handleIdentityRead] and removed by [rejectPeer] and by every teardown
+     * path, so a reconnect cannot pair this connection's device id with the
+     * next connection's identity. (A verified entry is left in place for the
+     * life of the link rather than consumed — it is keyed by device address,
+     * so it is overwritten by the next connection's own read.)
      */
     private val advertisedDeviceIds = ConcurrentHashMap<String, String>()
 

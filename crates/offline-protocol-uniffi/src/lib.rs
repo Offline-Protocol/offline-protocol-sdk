@@ -9922,6 +9922,44 @@ mod tests {
         );
     }
 
+    /// Reads a React Native bridge source file and flattens it to a single
+    /// line of code with comments stripped.
+    ///
+    /// Shared by the source-text guards below, which assert on Swift and
+    /// Kotlin read as text because CI typechecks one bridge half and executes
+    /// neither. Flattening lets an assertion match a call that the formatter
+    /// has wrapped across lines, and stripping comments keeps a guard from
+    /// passing on prose that merely *describes* the call it is meant to pin —
+    /// including the rationale comments these very call sites carry, which
+    /// quote the code around them almost verbatim.
+    ///
+    /// Panics if the file cannot be read: a guard that silently passes on a
+    /// moved or renamed file is worse than no guard.
+    fn rn_source_code_only(rel: &str) -> String {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let path = path.join(rel);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        source
+            .lines()
+            .map(str::trim)
+            // `///` and `//!` are covered by the `//` prefix; `/*` and `*/`
+            // cover block delimiters, and a bare `*` the continuation lines
+            // of both block and KDoc comments.
+            .filter(|l| {
+                !l.starts_with("//")
+                    && !l.starts_with('*')
+                    && !l.starts_with("/*")
+                    && !l.starts_with("*/")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// The BLE discovery gate: a peer is announced only under an address it
     /// proved, and the MTU still lands before the announce.
     ///
@@ -9949,33 +9987,13 @@ mod tests {
     ///    fails at compile time.
     #[test]
     fn react_native_ble_announces_only_cross_checked_addresses() {
-        fn code_only(source: &str) -> String {
-            source
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.starts_with("//") && !l.starts_with('*') && !l.starts_with("///"))
-                .collect::<Vec<_>>()
-                .join(" ")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-        }
-
-        let rn_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
-        let read = |rel: &str| -> String {
-            let path = rn_dir.join(rel);
-            std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
-        };
-
-        let swift = code_only(&read("ios/BleManager.swift"));
-        let kotlin = code_only(&read(
+        let swift = rn_source_code_only("ios/BleManager.swift");
+        let kotlin = rn_source_code_only(
             "android/src/main/java/com/offlineprotocol/ble/CentralGattClient.kt",
-        ));
-        let facade = code_only(&read(
+        );
+        let facade = rn_source_code_only(
             "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
-        ));
+        );
 
         // --- 1. The peripheral advertises the derived address ----------------
         assert!(
@@ -10010,6 +10028,22 @@ mod tests {
         assert!(
             kotlin.contains("PeerIdentityBinding.resolve(advertised, derivedAddress)"),
             "CentralGattClient.kt must route discovery through PeerIdentityBinding.resolve"
+        );
+        // iOS issues both reads up front and joins whichever lands second, so
+        // a peer missing EITHER characteristic leaves the join half-finished
+        // forever — `completePeerHandshake` returns early waiting for a read
+        // that will never be issued, holding a connection slot on both ends.
+        // Android cannot hit this (its reads are sequential, and the identity
+        // read is issued from the device-id handler), so the check has to be
+        // pinned on the iOS side specifically.
+        assert!(
+            swift.contains(
+                "if !characteristics.contains(where: { $0.uuid == DEVICE_ID_CHAR_UUID })"
+            ) && swift
+                .contains("!characteristics.contains(where: { $0.uuid == IDENTITY_CHAR_UUID })"),
+            "BleManager.swift must reject a peer that exposes neither DEVICE_ID nor IDENTITY. \
+             Both halves are required to announce, so an absent characteristic must reject \
+             rather than leave completePeerHandshake waiting on a read nobody will issue"
         );
         assert!(
             swift.matches("blePeerDiscovered(").count() == 1
@@ -10069,37 +10103,18 @@ mod tests {
     /// an auto key exchange toward it.
     #[test]
     fn react_native_wifi_direct_announces_no_unproven_peer_ids() {
-        fn code_only(source: &str) -> String {
-            source
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.starts_with("//") && !l.starts_with('*') && !l.starts_with("///"))
-                .collect::<Vec<_>>()
-                .join(" ")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-        }
-
-        let rn_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
-        let read = |rel: &str| -> String {
-            let path = rn_dir.join(rel);
-            std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
-        };
-
-        for (label, source) in [
+        for (label, code) in [
             (
                 "ios/WifiDirectManager.swift",
-                read("ios/WifiDirectManager.swift"),
+                rn_source_code_only("ios/WifiDirectManager.swift"),
             ),
             (
                 "android/.../WifiDirectManager.kt",
-                read("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt"),
+                rn_source_code_only(
+                    "android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
+                ),
             ),
         ] {
-            let code = code_only(&source);
             for entry_point in [
                 "wifiDirectPeerConnected(",
                 "wifiDirectPeerDisconnected(",

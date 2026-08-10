@@ -940,8 +940,8 @@ public class BleManager: NSObject, TransportManager {
             return
         }
         
-        setupGattServer()
-        
+        let servicePublishable = setupGattServer()
+
         // Wait for GATT service to be ready before advertising
         guard isGattServiceReady else {
             pendingAdvertiseAfterServiceReady = true
@@ -956,7 +956,7 @@ public class BleManager: NSObject, TransportManager {
             // re-enters this path. `scheduleAdvertisingRestart` carries the
             // interval floor and jitter, so an instance that never initializes
             // MLS re-checks at a bounded rate rather than spinning.
-            if deviceIdCharacteristic == nil {
+            if !servicePublishable {
                 scheduleAdvertisingRestart(reason: "awaiting_local_address")
             }
             return
@@ -1020,12 +1020,26 @@ public class BleManager: NSObject, TransportManager {
         DispatchQueue.main.asyncAfter(deadline: .now() + cooldown + jitter, execute: work)
     }
     
-    private func setupGattServer() {
-        guard let peripheral = peripheralManager else { return }
+    /// Publishes the GATT service, and reports whether publication is possible
+    /// at all.
+    ///
+    /// Returns `false` only for the one recoverable refusal — no local address
+    /// yet — so the caller knows no `didAdd` callback is coming and must
+    /// reschedule itself. `true` means the service is published, already
+    /// published, or awaiting its `didAdd`. Callers must not infer this from
+    /// whether a characteristic is nil: the characteristics outlive a
+    /// `stop()`/`start()` cycle, so their nil-ness answers "was one ever
+    /// built", not "did this call publish".
+    ///
+    /// Deliberately NOT `@discardableResult`: ignoring a `false` here is the
+    /// bug this return value exists to prevent — advertising then waits on a
+    /// `didAdd` that never comes.
+    private func setupGattServer() -> Bool {
+        guard let peripheral = peripheralManager else { return true }
         if messageCharacteristic != nil && deviceIdCharacteristic != nil && identityCharacteristic != nil && isGattServiceReady {
-            return
+            return true
         }
-        
+
         // What this device advertises as its identity is its derived address,
         // never the app-chosen `deviceId` (the profile). A profile is not an
         // identity: it is a local storage selector, commonly a shared constant
@@ -1048,7 +1062,7 @@ public class BleManager: NSObject, TransportManager {
                     "reason": "mls_not_initialized"
                 ])
             }
-            return
+            return false
         }
 
         // Reset flag - service registration is asynchronous
@@ -1109,6 +1123,7 @@ public class BleManager: NSObject, TransportManager {
         peripheral.add(service)
         print("[BleManager] GATT server setup initiated, waiting for service registration callback...")
         emitDiagnostic("info", "GATT server setup initiated")
+        return true
     }
     
     /// Updates the signed identity data for GATT serving.
@@ -1137,7 +1152,27 @@ public class BleManager: NSObject, TransportManager {
                 advertisementData: advertisementData
             )
             
-            // Update the GATT characteristic value
+            // Update the GATT characteristic value.
+            //
+            // This only reaches remote readers when it runs BEFORE
+            // `peripheral.add(service)` — see the caching contract in
+            // `setupGattServer`. On the refresh calls that happen after
+            // publication it updates `cachedSignedIdentity` (which the
+            // peripheral-role read path serves) but not what centrals read
+            // from the published service, which stays frozen at the value
+            // captured at `add(service)`.
+            //
+            // That is safe because the address inside it cannot change: the
+            // core's `initialize_mls` is idempotent and refuses to run once
+            // the protocol has started, so an instance's address is fixed for
+            // its lifetime, and a new identity means a new instance — which on
+            // this bridge means `destroy()`, which stops and releases this
+            // manager. What DOES go stale is the mesh advertisement the
+            // signature covers; that is a clustering hint, not an identity.
+            //
+            // If a future change ever makes the address mutable in-process,
+            // this is the line that will silently serve the old one, and the
+            // service must be torn down and rebuilt instead.
             if let identity = cachedSignedIdentity {
                 identityCharacteristic?.value = identity.encode()
                 print("[BleManager] Updated signed identity for GATT serving")
@@ -2783,11 +2818,18 @@ extension BleManager: CBPeripheralDelegate {
             }
         }
 
-        // A peer that exposes no identity characteristic can never prove the
-        // id it advertises, so the handshake cannot complete. Say so and drop
-        // the link now rather than holding a connection open for a read that
-        // will never be issued.
-        if !characteristics.contains(where: { $0.uuid == IDENTITY_CHAR_UUID }) {
+        // A peer missing either characteristic can never complete the
+        // handshake: `completePeerHandshake` waits for both halves and no
+        // further read will ever be issued for the absent one. Reject here
+        // rather than holding a connection open on a join that cannot finish
+        // — both arms are required, so both are checked.
+        if !characteristics.contains(where: { $0.uuid == DEVICE_ID_CHAR_UUID }) {
+            rejectPeerHandshake(
+                for: peripheral,
+                reason: PeerIdentityBinding.Reason.missingDeviceId,
+                detail: "peer exposes no device id characteristic"
+            )
+        } else if !characteristics.contains(where: { $0.uuid == IDENTITY_CHAR_UUID }) {
             rejectPeerHandshake(
                 for: peripheral,
                 reason: PeerIdentityBinding.Reason.unverifiedIdentity,
@@ -2876,8 +2918,12 @@ extension BleManager: CBPeripheralDelegate {
         let derived = verifiedPeerAddresses[peripheral.identifier]
 
         // Still waiting on the other read — not a failure, just incomplete.
-        // A read that will never arrive is handled by the error and
-        // missing-characteristic paths, which reject rather than wait.
+        // Waiting is only ever bounded because every way a read can fail to
+        // arrive rejects instead of leaving this pending: a characteristic
+        // absent from the service (checked for BOTH uuids in
+        // `didDiscoverCharacteristicsFor`), a read that errors, and a device
+        // id that is not UTF-8. Adding a third required half means adding its
+        // absence check there too, or this guard waits forever.
         guard advertised != nil, derived != nil else { return }
 
         let outcome = PeerIdentityBinding.resolve(
