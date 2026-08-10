@@ -686,6 +686,18 @@ mod tests {
     use super::*;
     use base64::Engine;
 
+    /// The address a test label stands for.
+    ///
+    /// Both derivations here take an address, and an address is not a name —
+    /// writing `routing_tag_for_address("bob")` would still compute *a* tag,
+    /// and would quietly teach the next reader that usernames are valid input.
+    fn addr(label: &str) -> String {
+        let digest = Sha256::digest(label.as_bytes());
+        let mut hash = [0u8; offline_protocol_core::Address::HASH_LEN];
+        hash.copy_from_slice(&digest[..offline_protocol_core::Address::HASH_LEN]);
+        offline_protocol_core::Address::from_hash_bytes(hash).to_string()
+    }
+
     #[test]
     fn test_from_install_secret_deterministic() {
         let secret = [7u8; 32];
@@ -710,13 +722,26 @@ mod tests {
     }
 
     #[test]
-    fn test_signing_key_not_derivable_from_device_id() {
-        // The signing key must NOT equal the legacy SHA-256(device_id) key:
-        // the routing tag stays publicly derivable, the signing key does not.
-        let secret = Sha256::digest("alice".as_bytes());
+    fn test_signing_key_is_not_derivable_from_the_address() {
+        // The oldest invariant in this file, kept because the thing it guards
+        // against is the whole reason the key model has three entries: a
+        // signing key anyone can recompute from a public identifier is not an
+        // identity. Feeding the address straight into the install-secret
+        // derivation must not land on either public value.
+        let address = addr("alice");
+        let secret = Sha256::digest(address.as_bytes());
         let kp = NostrKeypair::from_install_secret(secret.as_slice()).unwrap();
-        let tag = routing_tag_for_address("alice").unwrap();
-        assert_ne!(kp.public_key_hex(), tag);
+
+        assert_ne!(
+            kp.public_key_hex(),
+            routing_tag_for_address(&address).unwrap()
+        );
+        assert_ne!(
+            kp.public_key_hex(),
+            record_seal_keypair_for_address(&address)
+                .unwrap()
+                .public_key_hex()
+        );
     }
 
     #[test]
@@ -735,29 +760,61 @@ mod tests {
     }
 
     #[test]
-    fn test_routing_tag_wire_compat_golden_values() {
-        // The routing tag is a cross-version wire contract: peers on older
-        // SDK versions derive our tag as SHA-256(device_id) → x-only pubkey.
-        // These golden values were computed from the pre-split derivation and
-        // must never change, or addressing breaks against deployed peers.
+    fn test_routing_tag_golden_values() {
+        // Re-pinned on addresses. The previous vectors were computed from
+        // usernames and carried a comment saying they "must never change, or
+        // addressing breaks against deployed peers" — which was true when the
+        // preimage was a username, and stopped being true twice over: the
+        // preimage is now the derived address, and the identity migration is a
+        // deliberate clean cutover with no fleet to break.
+        //
+        // So this is no longer a backward-compatibility contract. What it
+        // still guards is that two builds computing a tag for the same address
+        // agree — the failure it catches is a silent one, where both sides
+        // think they are talking and each subscribes to a label the other
+        // never writes to.
+        //
+        // Written out as literal addresses rather than through `addr()`: a
+        // golden vector that derives its own input can only ever agree with
+        // itself.
         assert_eq!(
-            routing_tag_for_address("alice").unwrap(),
-            "9997a497d964fc1a62885b05a51166a65a90df00492c8d7cf61d6accf54803be"
+            routing_tag_for_address("off1qy4aspkf0u8qptc6rlpn9ra8vw5jd9ereq4cwpfs").unwrap(),
+            "2ba510b01e5a0f1a76ed8e66beb430642960e740aedf7d8f1c8b21cb11028fc2"
         );
         assert_eq!(
-            routing_tag_for_address("bob").unwrap(),
-            "4edfcf9dfe6c0b5c83d1ab3f78d1b39a46ebac6798e08e19761f5ed89ec83c10"
+            routing_tag_for_address("off1qxqmvd7clnfvdknrt8nfvvgn5ytsmeu4us5lrr0g").unwrap(),
+            "32d26c7b8fbbb9268aba57a45d84a5554cc23e880aef5a7b2ce06e490a1ba35c"
         );
         assert_eq!(
-            routing_tag_for_address("device1").unwrap(),
-            "01194098eb3146ae142447c78a1fcf8df55b72b6d54f9eaa4b5b1c2a11826295"
+            routing_tag_for_address("off1qyv04gxa02f8jpkt8cu06nlk3x0mu35wdqyxt6jq").unwrap(),
+            "e7505f56a2de5a5d3946949ab58bde530b452f46f4c11f85130c18e48b7bbd51"
+        );
+    }
+
+    /// The record-seal key is a wire contract in the same way the tag is: a
+    /// publisher seals with it and a fetcher, on some other build, reconstructs
+    /// it independently. If the two derivations ever disagree, every published
+    /// record silently stops opening.
+    #[test]
+    fn test_record_seal_key_golden_values() {
+        assert_eq!(
+            record_seal_keypair_for_address("off1qy4aspkf0u8qptc6rlpn9ra8vw5jd9ereq4cwpfs")
+                .unwrap()
+                .public_key_hex(),
+            "62f2835dc8788282d7ce92864fd1819b12b472e209b0116c17a1d06a5f9eebb0"
+        );
+        assert_eq!(
+            record_seal_keypair_for_address("off1qxqmvd7clnfvdknrt8nfvvgn5ytsmeu4us5lrr0g")
+                .unwrap()
+                .public_key_hex(),
+            "c6c428f62e777b97c29a8e1a8d7fb2aaaa14bf55e5adf3ced4ed30a5c3c27755"
         );
     }
 
     #[test]
     fn test_create_dm_event() {
         let sender = NostrKeypair::generate_ephemeral().unwrap();
-        let recipient_pubkey = routing_tag_for_address("bob").unwrap();
+        let recipient_pubkey = routing_tag_for_address(&addr("bob")).unwrap();
 
         let event = NostrEvent::create_dm(&sender, &recipient_pubkey, "dGVzdCBtZXNzYWdl").unwrap();
 
@@ -774,7 +831,7 @@ mod tests {
     #[test]
     fn test_event_id_is_sha256_of_serialization() {
         let sender = NostrKeypair::generate_ephemeral().unwrap();
-        let recipient_pubkey = routing_tag_for_address("bob").unwrap();
+        let recipient_pubkey = routing_tag_for_address(&addr("bob")).unwrap();
 
         let event = NostrEvent::create_dm(&sender, &recipient_pubkey, "dGVzdCBtZXNzYWdl").unwrap();
 
@@ -792,7 +849,7 @@ mod tests {
     #[test]
     fn test_signature_verification() {
         let sender = NostrKeypair::generate_ephemeral().unwrap();
-        let recipient_pubkey = routing_tag_for_address("bob").unwrap();
+        let recipient_pubkey = routing_tag_for_address(&addr("bob")).unwrap();
 
         let event = NostrEvent::create_dm(&sender, &recipient_pubkey, "dGVzdCBtZXNzYWdl").unwrap();
 
@@ -811,7 +868,7 @@ mod tests {
     #[test]
     fn test_to_relay_message() {
         let sender = NostrKeypair::generate_ephemeral().unwrap();
-        let recipient_pubkey = routing_tag_for_address("bob").unwrap();
+        let recipient_pubkey = routing_tag_for_address(&addr("bob")).unwrap();
 
         let event = NostrEvent::create_dm(&sender, &recipient_pubkey, "dGVzdCBtZXNzYWdl").unwrap();
         let relay_msg = event.to_relay_message().unwrap();
@@ -824,7 +881,7 @@ mod tests {
 
     #[test]
     fn test_create_subscription_message() {
-        let pubkey = routing_tag_for_address("alice").unwrap();
+        let pubkey = routing_tag_for_address(&addr("alice")).unwrap();
         let msg = create_subscription_message(&pubkey, "sub123", 1_700_000_000).unwrap();
 
         assert!(msg.starts_with("[\"REQ\",\"sub123\",{"));
@@ -841,7 +898,7 @@ mod tests {
         // from before sealing still publishes kind 4. Dropping kind 4 from the
         // filter would make those peers silently undeliverable — no error, no
         // event, just nothing arriving — so both kinds stay requested.
-        let pubkey = routing_tag_for_address("alice").unwrap();
+        let pubkey = routing_tag_for_address(&addr("alice")).unwrap();
         let msg = create_subscription_message(&pubkey, "sub123", 1_700_000_000).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
@@ -860,7 +917,7 @@ mod tests {
         // The wrapper's signing key must be fresh per event: a stable one would
         // let a relay group every message this device ever publishes, which is
         // most of the metadata that sealing exists to remove.
-        let bob_tag = routing_tag_for_address("bob").unwrap();
+        let bob_tag = routing_tag_for_address(&addr("bob")).unwrap();
 
         let a = NostrEvent::create_gift_wrap(&bob_tag, &bob_tag, b"hello").unwrap();
         let b = NostrEvent::create_gift_wrap(&bob_tag, &bob_tag, b"hello").unwrap();
@@ -877,7 +934,7 @@ mod tests {
     #[test]
     fn test_gift_wrap_round_trips_to_the_recipients_key() {
         let bob = NostrKeypair::from_install_secret(&[77u8; 32]).unwrap();
-        let bob_tag = routing_tag_for_address("bob").unwrap();
+        let bob_tag = routing_tag_for_address(&addr("bob")).unwrap();
 
         let event =
             NostrEvent::create_gift_wrap(&bob_tag, bob.public_key_hex(), b"payload").unwrap();
@@ -893,7 +950,7 @@ mod tests {
         // Sealed to Bob's install key, so Bob's *derivable* key must not open
         // it — otherwise the steady-state seal would be no better than the
         // bootstrap one.
-        let bob_derivable = record_seal_keypair_for_address("bob").unwrap();
+        let bob_derivable = record_seal_keypair_for_address(&addr("bob")).unwrap();
         assert!(unwrap_gift_wrap(&bob_derivable, &event.pubkey, &sealed).is_err());
     }
 
@@ -903,8 +960,8 @@ mod tests {
         // addresses the frame to their tag and seals it to their record-seal
         // key. Those are now two different values, which is the whole point of
         // keeping them as two arguments.
-        let bob_tag = routing_tag_for_address("bob").unwrap();
-        let bob_seal = record_seal_keypair_for_address("bob").unwrap();
+        let bob_tag = routing_tag_for_address(&addr("bob")).unwrap();
+        let bob_seal = record_seal_keypair_for_address(&addr("bob")).unwrap();
 
         let event =
             NostrEvent::create_gift_wrap(&bob_tag, bob_seal.public_key_hex(), b"first contact")
@@ -947,18 +1004,18 @@ mod tests {
         // Deterministic because both sides derive it independently — the
         // publisher to seal, a fetcher to open — and they never exchange it.
         assert_eq!(
-            record_seal_keypair_for_address("alice")
+            record_seal_keypair_for_address(&addr("alice"))
                 .unwrap()
                 .public_key_hex(),
-            record_seal_keypair_for_address("alice")
+            record_seal_keypair_for_address(&addr("alice"))
                 .unwrap()
                 .public_key_hex()
         );
         assert_ne!(
-            record_seal_keypair_for_address("alice")
+            record_seal_keypair_for_address(&addr("alice"))
                 .unwrap()
                 .public_key_hex(),
-            record_seal_keypair_for_address("bob")
+            record_seal_keypair_for_address(&addr("bob"))
                 .unwrap()
                 .public_key_hex()
         );
@@ -970,7 +1027,7 @@ mod tests {
         // filtered out by peers' `until` bounds and, on our own receive path,
         // is exactly what `NOSTR_FUTURE_DATED_TOLERANCE_SECS` refuses to let
         // advance the watermark.
-        let bob_tag = routing_tag_for_address("bob").unwrap();
+        let bob_tag = routing_tag_for_address(&addr("bob")).unwrap();
         let mut saw_jitter = false;
 
         for _ in 0..64 {
@@ -1001,7 +1058,7 @@ mod tests {
         // Without a `limit` the filter is unbounded, so every relay
         // (re)connect replays the relay's whole retention window — which
         // NIP-11 no longer advertises, so it cannot even be reasoned about.
-        let pubkey = routing_tag_for_address("alice").unwrap();
+        let pubkey = routing_tag_for_address(&addr("alice")).unwrap();
         let msg = create_subscription_message(&pubkey, "sub123", 1_700_000_000).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
@@ -1016,7 +1073,7 @@ mod tests {
 
     #[test]
     fn test_subscription_filter_carries_since() {
-        let pubkey = routing_tag_for_address("alice").unwrap();
+        let pubkey = routing_tag_for_address(&addr("alice")).unwrap();
         let msg = create_subscription_message(&pubkey, "sub123", 1_700_000_000).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
@@ -1033,7 +1090,7 @@ mod tests {
         // A negative `since` is not a valid NIP-01 filter value; relays may
         // reject the whole REQ, which would take the subscription down rather
         // than merely widening it.
-        let pubkey = routing_tag_for_address("alice").unwrap();
+        let pubkey = routing_tag_for_address(&addr("alice")).unwrap();
         let msg = create_subscription_message(&pubkey, "sub123", -42).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
