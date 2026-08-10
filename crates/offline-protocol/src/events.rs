@@ -1292,7 +1292,11 @@ pub enum Event {
     TypingIndicatorReceived {
         /// User who is typing (or stopped typing).
         sender: String,
-        /// Conversation identifier (recipient username for DMs, group_id for groups).
+        /// Conversation identifier, echoed back verbatim from the sender.
+        ///
+        /// Opaque to the SDK — never parsed or routed on. Whatever key the
+        /// sender chose (conventionally a peer address for a DM, the group
+        /// id for a group) arrives here unchanged.
         conversation_id: String,
         /// Whether the user is currently typing.
         is_typing: bool,

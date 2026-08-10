@@ -125,7 +125,7 @@ This requires a Reticulum node configured as a TCP server that your app connects
 ```typescript
 const protocol = new OfflineProtocol({
   appId: 'my-app',
-  userId: 'user123',
+  profile: 'user123',
   transports: {
     ble: { enabled: true },
     reticulum: { enabled: true },
@@ -137,7 +137,7 @@ const protocol = new OfflineProtocol({
 ```kotlin
 val config = ProtocolConfig(
     appId = "my-app",
-    userId = "user123",
+    profile = "user123",
     bleEnabled = true,
     reticulumEnabled = true,
     // ... other fields
@@ -148,7 +148,7 @@ val config = ProtocolConfig(
 ```swift
 let config = ProtocolConfig(
     appId: "my-app",
-    userId: "user123",
+    profile: "user123",
     bleEnabled: true,
     reticulumEnabled: true,
     // ... other fields

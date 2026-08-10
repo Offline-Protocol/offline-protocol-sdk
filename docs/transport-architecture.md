@@ -330,6 +330,19 @@ class NewTransportManager(
 
 #### iOS
 
+> **A transport's device id must be this device's derived address, never
+> `config.profile`.** The profile is a local storage-namespace selector chosen
+> by the app; it is not an identity and no peer can verify it. A transport
+> seeded with it announces — or, for a transport like Nostr, *publishes* — a
+> label anyone can recompute from a guessable string, and the core will reject
+> the resulting frames anyway because it stamps `localAddress()` on them.
+>
+> The address does not exist at `create()` time: it is derived during
+> `initializeMlsWithSecureStorage`. A transport that must be built earlier
+> should be rebuilt against the address afterwards — see
+> `rebuild_transports_for_identity` in the UniFFI crate, which does exactly
+> this for the four bundled transports.
+
 Update `OfflineProtocolModule.swift`:
 
 ```swift
@@ -342,7 +355,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         
         // Initialize new transport if enabled
         if config.newTransportEnabled {
-            newTransportManager = NewTransportManager(protocol: proto, deviceId: config.userId)
+            newTransportManager = NewTransportManager(protocol: proto, deviceId: proto.localAddress() ?? "")
         }
     }
     
@@ -379,7 +392,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         
         // Initialize new transport if enabled
         if (config.newTransportEnabled) {
-            newTransportManager = NewTransportManager(reactApplicationContext, proto, config.userId)
+            newTransportManager = NewTransportManager(reactApplicationContext, proto, proto.localAddress() ?: "")
         }
     }
     
@@ -408,7 +421,7 @@ Add configuration options in `bindings/react-native/src/types.ts`:
 ```typescript
 export interface ProtocolConfig {
   appId: string;
-  userId: string;
+  profile: string;
   transports?: {
     ble?: {
       enabled: boolean;

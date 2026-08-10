@@ -5724,7 +5724,10 @@ impl OfflineProtocol {
     }
 
     /// Send a typing indicator to a peer via the protocol (routed through DORS).
-    /// For direct messages, conversation_id should be the recipient's username.
+    /// `conversation_id` is opaque to the SDK: it is carried to the peer and
+    /// echoed back on the event, never parsed or routed on. Pick a stable key
+    /// — the peer's address is a reasonable default for a DM, the group id for
+    /// a group. Do not derive it from a display name: those change.
     /// For group chats, conversation_id should be the group_id.
     pub fn send_typing_indicator(
         &self,

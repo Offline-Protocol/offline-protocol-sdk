@@ -309,7 +309,7 @@ import { useOfflineProtocol } from './hooks/useOfflineProtocol';
 export default function App() {
   const { isStarted, start, stop, sendMessage } = useOfflineProtocol({
     appId: 'my-app',
-    userId: 'user123',
+    profile: 'user123',
     transports: {
       ble: { enabled: true },
       internet: { enabled: true },
@@ -382,7 +382,7 @@ useEffect(() => {
 const config: ProtocolConfig = {
   // Required
   appId: 'my-app-id',
-  userId: 'current-user-id',
+  profile: 'current-user-id',
 
   // Transport configuration
   transports: {
@@ -605,23 +605,36 @@ protocol.on('all', (event) => {
 });
 ```
 
-### Hardcoding User IDs
+### Expecting `profile` to be your identity
 
 **Problem:**
 ```typescript
 const config = {
   appId: 'my-app',
-  userId: 'user123', // Same for all users!
+  profile: 'user123',
 };
+// ...then treating 'user123' as this device's address:
+sendTo(peerId, { from: 'user123' });   // wrong — no peer knows this string
 ```
+
+`profile` selects which stored identity this instance runs as. It never leaves
+the device. Your identity on the wire is the `off1…` address the SDK derives
+from a key it generates for itself.
 
 **Solution:**
 ```typescript
 const config = {
   appId: 'my-app',
-  userId: getCurrentUserId(), // Unique per user
+  profile: getCurrentUserId(),  // one namespace per account on this device
 };
+
+// Read the real identity once it exists:
+const myAddress = await protocol.localAddress();       // "off1q…" | null
+protocol.on('identity_ready', ({ address }) => setMyAddress(address));
 ```
+
+Use `profile` to keep accounts separate on a shared device, and the address for
+anything a peer sees: `recipient`, "is this message mine", conversation keys.
 
 ## Testing Checklist
 

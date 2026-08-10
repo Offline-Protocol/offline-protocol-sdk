@@ -239,7 +239,9 @@ function sanitize<T extends object>(value: T | undefined | null): T | undefined 
  * ```typescript
  * const protocol = new OfflineProtocol({
  *   appId: 'my-app',
- *   userId: 'user123',
+ *   // Selects which stored identity to run as. Local only — never on the
+ *   // wire. Your identity to peers is the address derived below.
+ *   profile: 'user123',
  * });
  *
  * // Listen for events
@@ -250,9 +252,14 @@ function sanitize<T extends object>(value: T | undefined | null): T | undefined 
  * // Start protocol (BLE automatically starts scanning and advertising)
  * await protocol.start();
  *
- * // Send message (routing handled automatically by DORS)
+ * // This device's identity, derived from a key it generates for itself.
+ * const myAddress = await protocol.localAddress();   // "off1q…"
+ *
+ * // Send message (routing handled automatically by DORS).
+ * // `recipient` is the peer's address — get it from an invite/QR exchange
+ * // or from `neighbor_discovered`.
  * const messageId = await protocol.sendMessage({
- *   recipient: 'user456',
+ *   recipient: 'off1qxqmvd7clnfvdknrt8nfvvgn5ytsmeu4us5lrr0g',
  *   content: 'Hello!',
  *   priority: MessagePriority.High,
  * });
@@ -3504,7 +3511,15 @@ export class OfflineProtocol {
    * Sends a typing indicator to a peer.
    *
    * @param recipient - Recipient's user ID
-   * @param conversationId - Conversation identifier (recipient username for DMs, group_id for groups)
+   * @param conversationId - Opaque conversation key. The SDK carries it to
+   *   the peer and echoes it back on `typing_indicator_received`; it is never
+   *   parsed or routed on. Conventionally the peer's `off1…` address for a
+   *   DM and the group id for a group.
+   *
+   *   Whatever you choose, make sure it is stable: if your app keys stored
+   *   conversations by this value, deriving it from a display name (or any
+   *   other mutable label) means the key changes under you and the history
+   *   stops being found.
    * @param isTyping - Whether the user is currently typing
    * @returns Message ID
    */

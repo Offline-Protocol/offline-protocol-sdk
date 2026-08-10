@@ -34,7 +34,7 @@ import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol({
   appId: 'my-app',
-  userId: 'user123',
+  profile: 'user123',
   // Encryption is enabled by default!
 });
 
@@ -68,7 +68,7 @@ from offline_protocol_sdk.offline_protocol import ProtocolConfig, OverflowPolicy
 
 config = ProtocolConfig(
     app_id="my-app",
-    user_id="user123",
+    profile="user123",
     ble_enabled=False,
     wifi_direct_enabled=False,
     internet_enabled=True,
@@ -105,7 +105,7 @@ still being established are queued and delivered encrypted once it is ready.
 ```typescript
 const protocol = new OfflineProtocol({
   appId: 'my-app',
-  userId: 'user123',
+  profile: 'user123',
   encryption: {
     enabled: true,           // Auto-encrypt (default)
     autoKeyExchange: true,   // Exchange keys on peer discovery (default)
