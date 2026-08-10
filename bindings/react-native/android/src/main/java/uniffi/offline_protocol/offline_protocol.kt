@@ -910,6 +910,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_set_peer_mtu(
@@ -1326,6 +1328,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_d
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_lost(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_recipient_not_among_peers_count(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_return_fragment(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_set_peer_mtu(`ptr`: Long,`peerId`: RustBuffer.ByValue,`maxPayload`: Int,uniffi_out_err: UniffiRustCallStatus, 
@@ -1811,6 +1815,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost() != 38687.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count() != 46559.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment() != 4155.toShort()) {
@@ -3227,6 +3234,8 @@ public interface OfflineProtocolInterface {
     
     fun `blePeerLost`(`peerId`: kotlin.String)
     
+    fun `bleRecipientNotAmongPeersCount`(): kotlin.ULong
+    
     fun `bleReturnFragment`()
     
     fun `bleSetPeerMtu`(`peerId`: kotlin.String, `maxPayload`: kotlin.UInt)
@@ -3745,6 +3754,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
 }
     }
     
+    
+
+    override fun `bleRecipientNotAmongPeersCount`(): kotlin.ULong {
+            return FfiConverterULong.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_recipient_not_among_peers_count(
+        it,
+        _status)
+}
+    }
+    )
+    }
     
 
     override fun `bleReturnFragment`()

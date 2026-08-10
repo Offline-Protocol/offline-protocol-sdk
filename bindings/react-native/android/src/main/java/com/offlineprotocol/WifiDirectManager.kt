@@ -24,6 +24,40 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * WiFi Direct Manager implementing TransportManager for WiFi P2P communication
+ *
+ * ## wifiDirectPeerIdIsUnavailable — why nothing here reaches the protocol layer
+ *
+ * This manager used to pass `socket.remoteSocketAddress.toString()` (and
+ * `"go:<ip>"` for the group-owner link) to `wifiDirectPeerConnected`,
+ * `wifiDirectMessageReceived` and `wifiDirectPeerDisconnected`. Those
+ * parameters are documented as the peer's **user-level id** — the value the
+ * core keys `connected_links` by and matches against `Message.sender` — and a
+ * TCP endpoint is not one. The mismatch was survivable while ids were opaque
+ * nicknames; under derived addresses it is not.
+ *
+ * There is no correct value to pass instead. Unlike BLE, which carries a
+ * DEVICE_ID and a signed IDENTITY characteristic, this transport has no
+ * handshake at all: the socket protocol is a bare `writeInt(len) + bytes`
+ * stream, discovery yields only a device name and a MAC, and no service
+ * record advertises anything. The only identity on the wire is
+ * `Message.sender` *inside* the frame, which is precisely the value the
+ * transport peer id exists to cross-check and therefore cannot supply.
+ *
+ * So the announcements are gone rather than wrong. Nothing is lost by that:
+ * `WifiDirectTransport` is never registered with the transport manager (see
+ * `OfflineProtocol::new` and `rebuild_transports_for_identity` in the UniFFI
+ * crate), so inbound frames were already dropped and no send could ever leave.
+ * What the announcements *did* do was reach `notify_neighbor_reachable` →
+ * `on_neighbor_discovered`, which entered the socket string into `known_peers`
+ * and started an auto key exchange toward it — burning a slot in a
+ * capacity-bounded map that evicts genuine neighbors, and emitting a
+ * `neighbor_discovered` whose `peer_id` the public API promises is an `off1…`
+ * address usable as a `recipient`.
+ *
+ * Restoring the transport means adding an identity exchange — the natural
+ * shape is a length-prefixed preamble carrying the same signed blob the BLE
+ * IDENTITY characteristic serves, cross-checked the same way — and registering
+ * `WifiDirectTransport`. Both are out of scope here.
  */
 class WifiDirectManager(
     private val context: Context,
@@ -429,16 +463,15 @@ class WifiDirectManager(
             ))
             
             connectedPeers[clientAddress] = socket
-            
-            // Notify protocol
-            mainHandler.post {
-                try {
-                    protocol.wifiDirectPeerConnected(clientAddress)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error notifying protocol of peer connected", e)
-                }
-            }
-            
+
+            // NOT announced to the protocol layer — see [wifiDirectPeerIdIsUnavailable].
+            // `clientAddress` is a TCP endpoint ("/192.168.49.1:8988"), not a
+            // protocol id, and this transport has no handshake that would
+            // yield one.
+            emitDiagnostic("warning", "Wi-Fi Direct peer not announced: no protocol id available", mapOf(
+                "socket" to clientAddress
+            ))
+
             // Handle incoming messages
             try {
                 val inputStream = DataInputStream(socket.getInputStream())
@@ -452,13 +485,15 @@ class WifiDirectManager(
                             val data = ByteArray(length)
                             inputStream.readFully(data)
 
-                            // Process message
+                            // Dropped, not ingested — see
+                            // [wifiDirectPeerIdIsUnavailable]. Handing this to
+                            // `wifiDirectMessageReceived` would attribute the
+                            // frame to a socket string, which the core would
+                            // then compare against `Message.sender` and reject.
                             mainHandler.post {
                                 try {
-                                    protocol.wifiDirectMessageReceived(clientAddress, data.map { it.toUByte() })
-                                    
-                                    emitDiagnostic("debug", "Message received", mapOf(
-                                        "from" to clientAddress,
+                                    emitDiagnostic("warning", "Wi-Fi Direct frame dropped: sender cannot be identified", mapOf(
+                                        "socket" to clientAddress,
                                         "size" to length
                                     ))
                                 } catch (e: Exception) {
@@ -487,13 +522,11 @@ class WifiDirectManager(
                     // Ignore
                 }
                 
-                mainHandler.post {
-                    try {
-                        protocol.wifiDirectPeerDisconnected(clientAddress)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error notifying protocol of peer disconnected", e)
-                    }
-                }
+                // No disconnect notification either: nothing was announced, so
+                // there is no neighbor for the core to lose.
+                emitDiagnostic("info", "Wi-Fi Direct socket closed", mapOf(
+                    "socket" to clientAddress
+                ))
             }
         }
     }
@@ -510,15 +543,10 @@ class WifiDirectManager(
                 emitDiagnostic("info", "Connected to group owner", mapOf(
                     "address" to address
                 ))
-                
-                mainHandler.post {
-                    try {
-                        protocol.wifiDirectPeerConnected(peerAddress)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error notifying protocol", e)
-                    }
-                }
-                
+
+                // Not announced — see [wifiDirectPeerIdIsUnavailable]. "go:<ip>"
+                // is no more a protocol id than the socket string is.
+
                 // Handle incoming messages
                 handleClientConnection(socket)
                 

@@ -810,6 +810,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func blePeerLost(peerId: String) throws 
     
+    func bleRecipientNotAmongPeersCount()  -> UInt64
+    
     func bleReturnFragment() 
     
     func bleSetPeerMtu(peerId: String, maxPayload: UInt32) throws 
@@ -1242,6 +1244,14 @@ open func blePeerLost(peerId: String)throws   {try rustCallWithError(FfiConverte
         FfiConverterString.lower(peerId),$0
     )
 }
+}
+    
+open func bleRecipientNotAmongPeersCount() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_recipient_not_among_peers_count(
+            self.uniffiCloneHandle(),$0
+    )
+})
 }
     
 open func bleReturnFragment()  {try! rustCall() {
@@ -9725,6 +9735,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost() != 38687) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count() != 46559) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment() != 4155) {

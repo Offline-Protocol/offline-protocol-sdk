@@ -2227,7 +2227,19 @@ export class OfflineProtocol {
   /**
    * Handles an incoming WiFi Direct message.
    *
-   * @param senderId - Sender peer ID
+   * @deprecated The bundled Wi-Fi Direct managers no longer call this, and no
+   * application should. `senderId` is treated by the core as the peer's
+   * *proven* user-level id: it becomes the frame's transport peer identity and
+   * is matched against `Message.sender`, so a value the peer did not prove is
+   * either rejected or — worse — accepted into routing state under a name
+   * anyone could claim. Wi-Fi Direct has no handshake that yields such a
+   * value; the only identity on that wire is the `Message.sender` inside the
+   * frame, which is the very thing this parameter exists to cross-check.
+   * `WifiDirectTransport` is also not registered, so frames passed here are
+   * dropped. Restoring the transport requires a signed identity preamble
+   * cross-checked the way BLE's IDENTITY characteristic is.
+   *
+   * @param senderId - Sender peer ID. Must be a verified `off1…` address.
    * @param data - Message data as array of bytes
    */
   async wifiDirectMessageReceived(
@@ -2255,7 +2267,13 @@ export class OfflineProtocol {
   /**
    * Notifies the protocol that a WiFi Direct peer has connected.
    *
-   * @param peerId - Peer ID
+   * @deprecated See {@link OfflineProtocol.wifiDirectMessageReceived}. An
+   * unproven `peerId` here is entered into the core's capacity-bounded
+   * `known_peers` — evicting genuine neighbours — and starts an automatic key
+   * exchange toward a peer that cannot answer it. The bundled managers no
+   * longer call this.
+   *
+   * @param peerId - Peer ID. Must be a verified `off1…` address.
    */
   async wifiDirectPeerConnected(peerId: string): Promise<void> {
     return await OfflineProtocolNativeModule.wifiDirectPeerConnected(peerId);
@@ -2264,7 +2282,10 @@ export class OfflineProtocol {
   /**
    * Notifies the protocol that a WiFi Direct peer has disconnected.
    *
-   * @param peerId - Peer ID
+   * @deprecated See {@link OfflineProtocol.wifiDirectMessageReceived}. The
+   * bundled managers no longer call this.
+   *
+   * @param peerId - Peer ID. Must be a verified `off1…` address.
    */
   async wifiDirectPeerDisconnected(peerId: string): Promise<void> {
     return await OfflineProtocolNativeModule.wifiDirectPeerDisconnected(peerId);

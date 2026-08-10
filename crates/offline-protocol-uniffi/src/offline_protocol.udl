@@ -1047,6 +1047,18 @@ interface OfflineProtocol {
     // then silently regressing to the 185-byte floor.
     u64 ble_fragment_fallback_count();
 
+    // Monotonic lifetime counter of sends that found the recipient absent
+    // from the connected BLE peer set *while other peers were connected*.
+    // "No BLE peers at all" is the ordinary offline case and is not counted.
+    // A non-empty peer map missing only this recipient is the suspicious
+    // case: the device is meshing with someone, just not the addressed id.
+    // The dominant cause is a recipient ↔ ble_peer_discovered keying
+    // mismatch, which makes an in-range peer look unreachable and silently
+    // routes the message to Internet. The sibling canary to
+    // ble_fragment_fallback_count: both go non-zero when the id a peer
+    // advertises stops matching the one messages are addressed to.
+    u64 ble_recipient_not_among_peers_count();
+
     // Internet transport operations
     [Throws=ProtocolError]
     void internet_status_changed(boolean is_connected);

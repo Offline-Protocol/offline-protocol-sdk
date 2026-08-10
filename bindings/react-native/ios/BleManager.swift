@@ -107,7 +107,25 @@ public class BleManager: NSObject, TransportManager {
     
     /// Verified peer identities (peripheral UUID -> SignedIdentityData)
     private var verifiedPeerIdentities: [UUID: SignedIdentityData] = [:]
-    
+
+    /// Half-finished handshakes: what a peripheral advertised in `DEVICE_ID`,
+    /// before its `IDENTITY` has been read and verified.
+    ///
+    /// The two reads are issued together in `didDiscoverCharacteristicsFor`
+    /// and complete in either order, so neither handler can act alone — each
+    /// records its half and calls `completePeerHandshake`, which fires exactly
+    /// once, when both are in. Nothing is announced from either half.
+    private var advertisedDeviceIds: [UUID: String] = [:]
+
+    /// Addresses derived from a peripheral's *verified* `IDENTITY` key — the
+    /// other half of the join above. Present only when the signature checked
+    /// out, so its presence is the proof, not the blob's arrival.
+    private var verifiedPeerAddresses: [UUID: String] = [:]
+
+    /// Peripherals already announced via `blePeerDiscovered`, so a re-read of
+    /// either characteristic on a live link cannot announce twice.
+    private var announcedPeripherals: Set<UUID> = []
+
     // Fragment sending (event-driven, no polling)
     private let fragmentQueue = DispatchQueue(label: "com.offlineprotocol.ble.fragments")
     
@@ -922,14 +940,24 @@ public class BleManager: NSObject, TransportManager {
             return
         }
         
-        setupGattServer()
-        
+        let servicePublishable = setupGattServer()
+
         // Wait for GATT service to be ready before advertising
         guard isGattServiceReady else {
             pendingAdvertiseAfterServiceReady = true
             if logThrottler.shouldLog(key: "advert_waiting_gatt", interval: 5) {
                 print("[BleManager] Waiting for GATT service to be ready before advertising (reason: \(reason))")
                 emitDiagnostic("info", "Waiting for GATT service registration", context: ["reason": reason])
+            }
+            // `pendingAdvertiseAfterServiceReady` is armed for the `didAdd`
+            // callback, which only fires if a service was actually submitted.
+            // When `setupGattServer` declined to publish — no local address
+            // yet — nothing will ever call back, so schedule the retry that
+            // re-enters this path. `scheduleAdvertisingRestart` carries the
+            // interval floor and jitter, so an instance that never initializes
+            // MLS re-checks at a bounded rate rather than spinning.
+            if !servicePublishable {
+                scheduleAdvertisingRestart(reason: "awaiting_local_address")
             }
             return
         }
@@ -992,15 +1020,54 @@ public class BleManager: NSObject, TransportManager {
         DispatchQueue.main.asyncAfter(deadline: .now() + cooldown + jitter, execute: work)
     }
     
-    private func setupGattServer() {
-        guard let peripheral = peripheralManager else { return }
+    /// Publishes the GATT service, and reports whether publication is possible
+    /// at all.
+    ///
+    /// Returns `false` only for the one recoverable refusal — no local address
+    /// yet — so the caller knows no `didAdd` callback is coming and must
+    /// reschedule itself. `true` means the service is published, already
+    /// published, or awaiting its `didAdd`. Callers must not infer this from
+    /// whether a characteristic is nil: the characteristics outlive a
+    /// `stop()`/`start()` cycle, so their nil-ness answers "was one ever
+    /// built", not "did this call publish".
+    ///
+    /// Deliberately NOT `@discardableResult`: ignoring a `false` here is the
+    /// bug this return value exists to prevent — advertising then waits on a
+    /// `didAdd` that never comes.
+    private func setupGattServer() -> Bool {
+        guard let peripheral = peripheralManager else { return true }
         if messageCharacteristic != nil && deviceIdCharacteristic != nil && identityCharacteristic != nil && isGattServiceReady {
-            return
+            return true
         }
-        
+
+        // What this device advertises as its identity is its derived address,
+        // never the app-chosen `deviceId` (the profile). A profile is not an
+        // identity: it is a local storage selector, commonly a shared constant
+        // like "default", and nothing binds it to any key. Serving it here is
+        // what let a peer claim any name it liked, and — since the core stamps
+        // `localAddress()` as `Message.sender` — it also made every control
+        // frame we sent fail the receiver's `validate_transport_sender`, which
+        // compares that sender against the id the transport resolved for us.
+        //
+        // No address means no advertisement. Publishing the service without
+        // one would announce a device that no peer can bind to a key, and the
+        // cross-check on the central side would refuse it anyway; failing
+        // closed here keeps the two ends agreeing about why. `startAdvertising`
+        // reschedules, so this self-heals as soon as `initialize_mls` runs.
+        guard let advertisedAddress = protocolInstance.localAddress(),
+              !advertisedAddress.isEmpty else {
+            if logThrottler.shouldLog(key: "gatt_no_local_address", interval: 10) {
+                print("[BleManager] No local address yet; deferring GATT service registration")
+                emitDiagnostic("info", "Deferring GATT registration until the local address exists", context: [
+                    "reason": "mls_not_initialized"
+                ])
+            }
+            return false
+        }
+
         // Reset flag - service registration is asynchronous
         isGattServiceReady = false
-        
+
         // Create message characteristic (write without response + notify)
         messageCharacteristic = CBMutableCharacteristic(
             type: MESSAGE_CHAR_UUID,
@@ -1008,9 +1075,9 @@ public class BleManager: NSObject, TransportManager {
             value: nil,
             permissions: [.writeable]
         )
-        
+
         // Create device ID characteristic (read)
-        let deviceIdData = deviceId.data(using: .utf8)
+        let deviceIdData = advertisedAddress.data(using: .utf8)
         deviceIdCharacteristic = CBMutableCharacteristic(
             type: DEVICE_ID_CHAR_UUID,
             properties: [.read],
@@ -1019,17 +1086,35 @@ public class BleManager: NSObject, TransportManager {
         )
         
         // Create identity characteristic (read) - contains public key + signature
-        // Value is set dynamically when advertising starts via updateSignedIdentity()
+        //
+        // CACHING CONTRACT — why `updateSignedIdentity()` must run before
+        // `peripheral.add(service)` below, and why nothing may reorder them.
+        // CoreBluetooth decides once, at `add(service:)`, whether a
+        // characteristic is static or dynamic: a non-nil `value` at that moment
+        // is cached and served by the framework, and a nil one makes the
+        // characteristic dynamic, answered only through
+        // `peripheralManager(_:didReceiveRead:)` — which this class does not
+        // implement. Assigning `.value` afterwards does not convert one into
+        // the other. So publishing with a nil identity means this device serves
+        // no identity for the lifetime of the service, and `setupGattServer`'s
+        // early return means it is never rebuilt.
+        //
+        // That used to degrade to "discoverable but unverified". It no longer
+        // does: a central that cannot read this blob cannot bind our DEVICE_ID
+        // to a key and will not surface us at all. The address guard above is
+        // what makes it safe — it holds back publication until
+        // `initialize_mls` has run, which is the same precondition
+        // `updateSignedIdentity` needs, so the two can no longer disagree.
         identityCharacteristic = CBMutableCharacteristic(
             type: IDENTITY_CHAR_UUID,
             properties: [.read],
             value: nil,
             permissions: [.readable]
         )
-        
-        // Update the signed identity data
+
+        // Fills in identityCharacteristic.value — see the caching contract above.
         updateSignedIdentity()
-        
+
         // Create service
         let service = CBMutableService(type: SERVICE_UUID, primary: true)
         service.characteristics = [messageCharacteristic!, deviceIdCharacteristic!, identityCharacteristic!]
@@ -1038,6 +1123,7 @@ public class BleManager: NSObject, TransportManager {
         peripheral.add(service)
         print("[BleManager] GATT server setup initiated, waiting for service registration callback...")
         emitDiagnostic("info", "GATT server setup initiated")
+        return true
     }
     
     /// Updates the signed identity data for GATT serving.
@@ -1066,7 +1152,27 @@ public class BleManager: NSObject, TransportManager {
                 advertisementData: advertisementData
             )
             
-            // Update the GATT characteristic value
+            // Update the GATT characteristic value.
+            //
+            // This only reaches remote readers when it runs BEFORE
+            // `peripheral.add(service)` — see the caching contract in
+            // `setupGattServer`. On the refresh calls that happen after
+            // publication it updates `cachedSignedIdentity` (which the
+            // peripheral-role read path serves) but not what centrals read
+            // from the published service, which stays frozen at the value
+            // captured at `add(service)`.
+            //
+            // That is safe because the address inside it cannot change: the
+            // core's `initialize_mls` is idempotent and refuses to run once
+            // the protocol has started, so an instance's address is fixed for
+            // its lifetime, and a new identity means a new instance — which on
+            // this bridge means `destroy()`, which stops and releases this
+            // manager. What DOES go stale is the mesh advertisement the
+            // signature covers; that is a clustering hint, not an identity.
+            //
+            // If a future change ever makes the address mutable in-process,
+            // this is the line that will silently serve the old one, and the
+            // service must be torn down and rebuilt instead.
             if let identity = cachedSignedIdentity {
                 identityCharacteristic?.value = identity.encode()
                 print("[BleManager] Updated signed identity for GATT serving")
@@ -2546,6 +2652,16 @@ extension BleManager: CBCentralManagerDelegate {
     public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         let wasConnected = connections.connectedPeripheral(for: peripheral.identifier) != nil
         _ = connections.removePeripheral(peripheral.identifier)
+
+        // Drop the handshake state with the link. Keeping it would let a
+        // reconnect pair a device id read from the previous connection with an
+        // identity read from this one — a cross-connection join the binding
+        // was never asked to reason about — and would leave the announce
+        // suppressed by `announcedPeripherals` after a re-pair.
+        advertisedDeviceIds.removeValue(forKey: peripheral.identifier)
+        verifiedPeerAddresses.removeValue(forKey: peripheral.identifier)
+        verifiedPeerIdentities.removeValue(forKey: peripheral.identifier)
+        announcedPeripherals.remove(peripheral.identifier)
         if logThrottler.shouldLog(key: "disconnect_\(peripheral.identifier.uuidString)", interval: 10) {
             let errorDescription = (error as NSError?)?.localizedDescription ?? "none"
             print("[BleManager] Disconnected from \(peripheral.identifier) error=\(errorDescription)")
@@ -2682,7 +2798,11 @@ extension BleManager: CBPeripheralDelegate {
         }
         
         guard let characteristics = service.characteristics else { return }
-        
+
+        // Both reads are issued here and complete in either order; the peer is
+        // announced by whichever one lands second, through
+        // `completePeerHandshake`. Neither is sufficient alone — see that
+        // method for why the identity is no longer optional.
         for characteristic in characteristics {
             if characteristic.uuid == MESSAGE_CHAR_UUID {
                 // Enable notifications for message characteristic
@@ -2697,119 +2817,69 @@ extension BleManager: CBPeripheralDelegate {
                 peripheral.readValue(for: characteristic)
             }
         }
+
+        // A peer missing either characteristic can never complete the
+        // handshake: `completePeerHandshake` waits for both halves and no
+        // further read will ever be issued for the absent one. Reject here
+        // rather than holding a connection open on a join that cannot finish
+        // — both arms are required, so both are checked.
+        if !characteristics.contains(where: { $0.uuid == DEVICE_ID_CHAR_UUID }) {
+            rejectPeerHandshake(
+                for: peripheral,
+                reason: PeerIdentityBinding.Reason.missingDeviceId,
+                detail: "peer exposes no device id characteristic"
+            )
+        } else if !characteristics.contains(where: { $0.uuid == IDENTITY_CHAR_UUID }) {
+            rejectPeerHandshake(
+                for: peripheral,
+                reason: PeerIdentityBinding.Reason.unverifiedIdentity,
+                detail: "peer exposes no identity characteristic"
+            )
+        }
     }
     
     public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
             print("[BleManager] Error reading characteristic: \(error)")
             emitDiagnostic("error", "Error reading characteristic", context: ["error": error.localizedDescription])
+            // Either read failing means the handshake can never complete: the
+            // device id and the identity are both required, and neither is
+            // re-issued. Reject explicitly so the link is dropped and the
+            // failure is named, instead of leaving a connected peripheral that
+            // is silently never announced.
+            if characteristic.uuid == DEVICE_ID_CHAR_UUID {
+                rejectPeerHandshake(
+                    for: peripheral,
+                    reason: PeerIdentityBinding.Reason.missingDeviceId,
+                    detail: "device id read failed: \(error.localizedDescription)"
+                )
+            } else if characteristic.uuid == IDENTITY_CHAR_UUID {
+                rejectPeerHandshake(
+                    for: peripheral,
+                    reason: PeerIdentityBinding.Reason.unverifiedIdentity,
+                    detail: "identity read failed: \(error.localizedDescription)"
+                )
+            }
             return
         }
-        
+
         guard let data = characteristic.value else { return }
-        
+
         if characteristic.uuid == DEVICE_ID_CHAR_UUID {
-            // Store device ID
+            // Record this half of the handshake. Nothing is announced here —
+            // the advertised string is an unproven claim until the identity
+            // read binds it to a key. `completePeerHandshake` is the only
+            // place that acts on it.
             if let deviceId = String(data: data, encoding: .utf8) {
-                print("[BleManager] ✅ Resolved device ID for peripheral \(peripheral.identifier): \(deviceId)")
-                connections.setPeripheralDeviceId(deviceId, for: peripheral.identifier)
-                connections.setCentralDeviceId(deviceId, for: peripheral.identifier)
-                connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
-
-                // ORDERING INVARIANT — DO NOT REORDER.
-                //
-                // `bleSetPeerMtu` MUST run before `blePeerDiscovered`.
-                // This is the entire point of commit ac8cce8: any
-                // fragmenting send that lands between announcing the
-                // peer to the protocol layer and flushing the MTU
-                // into the Rust transport will key-miss `peer_mtus`,
-                // fall back to the 185-byte floor, and silently
-                // waste ~60% of the negotiated BLE 5 bandwidth for
-                // every fragment in that window. The Rust side pins
-                // this from its end via
-                // `test_ble_golden_path_handshake_never_falls_back`
-                // and the `ble_fragment_fallback_count` telemetry
-                // counter, which fires the moment a registered peer
-                // has to fall back.
-                //
-                // CoreBluetooth performs MTU negotiation automatically
-                // on connect and exposes the already header-adjusted
-                // max-write length as a stable property — we just
-                // read it once at the moment we know the device id.
-                let maxPayload = peripheral.maximumWriteValueLength(for: .withoutResponse)
-                do {
-                    try self.protocolInstance.bleSetPeerMtu(peerId: deviceId, maxPayload: UInt32(maxPayload))
-                    emitDiagnostic("info", "BLE per-peer MTU flushed to Rust", context: [
-                        "deviceId": deviceId,
-                        "peripheral": peripheral.identifier.uuidString,
-                        "maxPayload": maxPayload,
-                    ])
-                } catch {
-                    // A UniFFI throw here (lock poisoning is the only
-                    // expected cause) is categorically different from
-                    // the ordering-invariant regression that
-                    // `ble_fragment_fallback_count` is designed to
-                    // surface: the peer will still be announced below
-                    // and, absent an MTU entry, the first fragmenting
-                    // send will tick the fallback counter. Tag the
-                    // diagnostic with `cause: "uniffi_throw"` and emit
-                    // at error level so dashboards can filter these
-                    // out of the ordering-invariant alarm.
-                    emitDiagnostic("error", "bleSetPeerMtu failed", context: [
-                        "deviceId": deviceId,
-                        "error": error.localizedDescription,
-                        "cause": "uniffi_throw",
-                    ])
-                }
-
-                // ORDERING INVARIANT: this line MUST come AFTER
-                // `bleSetPeerMtu` above. See comment block preceding
-                // the MTU flush. If you are tempted to move this
-                // earlier "for clarity", don't.
-                let rssi = peripheralRSSI[peripheral.identifier] ?? -60
-                try? self.protocolInstance.blePeerDiscovered(peerId: deviceId, rssi: rssi)
-                let role = connections.consumePendingRole(for: peripheral.identifier) ?? connections.connectionRole(for: deviceId) ?? .member
-                meshController.registerConnection(peerId: deviceId, role: role)
-                connections.setConnectionRole(role, for: deviceId)
-                meshController.markPeerActive(deviceId)
-                meshController.markPeerActive(self.deviceId)
-                refreshSelfMetrics()
-                meshController.updatePeerMetrics(peerId: deviceId, metrics: MeshController.PeerMetrics(rssi: Int(rssi)))
-                DispatchQueue.main.async {
-                    self.refreshAdvertising(reason: "membership_change")
-                }
-
-                //  Process any pending fragments for this device immediately
-                // This is essential for Android → iOS messages that were queued while waiting for device ID
-                // When Android writes to iOS, iOS receives the write with Android's central UUID
-                // When iOS connects to Android to read device ID, it uses Android's peripheral UUID
-                // Both UUIDs should be the same, but we process fragments for both to be safe
-                print("[BleManager] 🔄 Processing pending fragments for device ID: \(deviceId), peripheral: \(peripheral.identifier)")
-                processPendingFragments(for: peripheral.identifier, deviceId: deviceId)
-                
-                //  Also check all pending fragments and process any that match this device ID
-                // This handles the case where Android wrote to iOS before iOS connected to Android
-                // The central UUID (from write) might be the same as peripheral UUID, but we check all
-                let pendingCentralIds: [UUID] = self.fragmentQueue.sync { Array(self.pendingFragments.keys) }
-                for centralId in pendingCentralIds {
-                    // Check if this central ID now maps to the device ID we just resolved
-                    let centralDeviceId = self.connections.centralDeviceId(for: centralId)
-                    let peripheralDeviceId = self.connections.peripheralDeviceId(for: centralId)
-                    if centralDeviceId == deviceId || peripheralDeviceId == deviceId {
-                        print("[BleManager] 🔄 Processing pending fragments for central \(centralId) (now maps to device \(deviceId))")
-                        processPendingFragments(for: centralId, deviceId: deviceId)
-                    }
-                }
-
-                // The recipient -> peripheral mapping and MESSAGE characteristic
-                // now exist, so flush any OUTBOUND fragments parked while this
-                // connection was still forming. drainAndSendFragments previously
-                // ran only on connect / onFragmentsAvailable, so the FIRST message
-                // a user sent into a still-connecting peer (already popped out of
-                // the Rust queue and parked in pendingOutboundFragments) had
-                // nothing to re-trigger it and stalled until a later fragment
-                // event or the 30s expiry — the iOS->Android first-message stall.
-                self.drainAndSendFragments()
+                print("[BleManager] Read advertised device id for peripheral \(peripheral.identifier): \(deviceId)")
+                advertisedDeviceIds[peripheral.identifier] = deviceId
+                completePeerHandshake(for: peripheral)
+            } else {
+                rejectPeerHandshake(
+                    for: peripheral,
+                    reason: PeerIdentityBinding.Reason.missingDeviceId,
+                    detail: "device id characteristic is not valid UTF-8"
+                )
             }
         } else if characteristic.uuid == MESSAGE_CHAR_UUID {
             // Handle received message fragment
@@ -2819,16 +2889,236 @@ extension BleManager: CBPeripheralDelegate {
             handleReceivedIdentity(data, for: peripheral)
         }
     }
-    
-    /// Handles received identity data from a peer.
-    /// Verifies the signature and stores the verified identity.
+
+    /// Announces a peer, once both halves of its handshake are in and agree.
+    ///
+    /// This is the only place `blePeerDiscovered` is called from the central
+    /// role, and it runs at most once per peripheral. Before it, a connected
+    /// peripheral is invisible to the protocol layer: it has no entry in the
+    /// Rust `peers` map, no MTU, no mesh registration, and no route.
+    ///
+    /// # Why the identity is no longer best-effort
+    ///
+    /// The announced id is load-bearing all the way down — it keys `peers` and
+    /// `peer_mtus`, it is what the app puts in `Message.recipient`, and it
+    /// comes back as `transport_peer_id` on every frame this peer sends, where
+    /// the core matches it against `Message.sender`. Announcing a peer under a
+    /// string it merely claimed is what let anyone advertise any name; and
+    /// since the sender a peer stamps is its derived address, a claim that is
+    /// anything else also makes its own control frames unroutable.
+    ///
+    /// So a peer that will not or cannot prove its id is not surfaced at all.
+    /// That is a real availability cost — an older build advertising its
+    /// profile becomes invisible rather than degraded — and it is the intended
+    /// cutover: its control frames would be rejected by the core anyway.
+    private func completePeerHandshake(for peripheral: CBPeripheral) {
+        guard !announcedPeripherals.contains(peripheral.identifier) else { return }
+
+        let advertised = advertisedDeviceIds[peripheral.identifier]
+        let derived = verifiedPeerAddresses[peripheral.identifier]
+
+        // Still waiting on the other read — not a failure, just incomplete.
+        // Waiting is only ever bounded because every way a read can fail to
+        // arrive rejects instead of leaving this pending: a characteristic
+        // absent from the service (checked for BOTH uuids in
+        // `didDiscoverCharacteristicsFor`), a read that errors, and a device
+        // id that is not UTF-8. Adding a third required half means adding its
+        // absence check there too, or this guard waits forever.
+        guard advertised != nil, derived != nil else { return }
+
+        let outcome = PeerIdentityBinding.resolve(
+            advertisedDeviceId: advertised,
+            derivedAddress: derived
+        )
+        guard case let .verified(peerId) = outcome else {
+            if case let .rejected(reason) = outcome {
+                rejectPeerHandshake(
+                    for: peripheral,
+                    reason: reason,
+                    detail: "advertised=\(advertised ?? "nil") derived=\(derived ?? "nil")"
+                )
+            }
+            return
+        }
+
+        announcedPeripherals.insert(peripheral.identifier)
+        print("[BleManager] ✅ Verified peer \(peerId) for peripheral \(peripheral.identifier)")
+
+        // `peerId` is the derived address, not the advertised string. They are
+        // equal here by construction — the binding rejects anything else — but
+        // every downstream key is taken from the proof so a future relaxation
+        // of that comparison cannot leak an unproven id into the registry, the
+        // MTU map, or the protocol layer.
+        connections.setPeripheralDeviceId(peerId, for: peripheral.identifier)
+        connections.setCentralDeviceId(peerId, for: peripheral.identifier)
+        connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
+
+        // ORDERING INVARIANT — DO NOT REORDER.
+        //
+        // `bleSetPeerMtu` MUST run before `blePeerDiscovered`.
+        // This is the entire point of commit ac8cce8: any
+        // fragmenting send that lands between announcing the
+        // peer to the protocol layer and flushing the MTU
+        // into the Rust transport will key-miss `peer_mtus`,
+        // fall back to the 185-byte floor, and silently
+        // waste ~60% of the negotiated BLE 5 bandwidth for
+        // every fragment in that window. The Rust side pins
+        // this from its end via
+        // `test_ble_golden_path_handshake_never_falls_back`
+        // and the `ble_fragment_fallback_count` telemetry
+        // counter, which fires the moment a registered peer
+        // has to fall back.
+        //
+        // The identity cross-check moved BOTH of these later — they used to
+        // run in the DEVICE_ID read handler, and now run here, once the peer
+        // has proved its id. Their order relative to each other is unchanged
+        // and must stay that way: the invariant is that no fragmenting send
+        // can observe an announced peer that has no MTU on file, and the
+        // window between these two calls is still the only place that could
+        // happen.
+        //
+        // CoreBluetooth performs MTU negotiation automatically
+        // on connect and exposes the already header-adjusted
+        // max-write length as a stable property — we just
+        // read it once, here, at the moment the peer becomes real to us.
+        let maxPayload = peripheral.maximumWriteValueLength(for: .withoutResponse)
+        do {
+            try self.protocolInstance.bleSetPeerMtu(peerId: peerId, maxPayload: UInt32(maxPayload))
+            emitDiagnostic("info", "BLE per-peer MTU flushed to Rust", context: [
+                "deviceId": peerId,
+                "peripheral": peripheral.identifier.uuidString,
+                "maxPayload": maxPayload,
+            ])
+        } catch {
+            // A UniFFI throw here (lock poisoning is the only
+            // expected cause) is categorically different from
+            // the ordering-invariant regression that
+            // `ble_fragment_fallback_count` is designed to
+            // surface: the peer will still be announced below
+            // and, absent an MTU entry, the first fragmenting
+            // send will tick the fallback counter. Tag the
+            // diagnostic with `cause: "uniffi_throw"` and emit
+            // at error level so dashboards can filter these
+            // out of the ordering-invariant alarm.
+            emitDiagnostic("error", "bleSetPeerMtu failed", context: [
+                "deviceId": peerId,
+                "error": error.localizedDescription,
+                "cause": "uniffi_throw",
+            ])
+        }
+
+        // ORDERING INVARIANT: this line MUST come AFTER
+        // `bleSetPeerMtu` above. See comment block preceding
+        // the MTU flush. If you are tempted to move this
+        // earlier "for clarity", don't.
+        let rssi = peripheralRSSI[peripheral.identifier] ?? -60
+        try? self.protocolInstance.blePeerDiscovered(peerId: peerId, rssi: rssi)
+        let role = connections.consumePendingRole(for: peripheral.identifier) ?? connections.connectionRole(for: peerId) ?? .member
+        meshController.registerConnection(peerId: peerId, role: role)
+        connections.setConnectionRole(role, for: peerId)
+        meshController.markPeerActive(peerId)
+        meshController.markPeerActive(self.deviceId)
+        refreshSelfMetrics()
+        meshController.updatePeerMetrics(peerId: peerId, metrics: MeshController.PeerMetrics(rssi: Int(rssi)))
+        DispatchQueue.main.async {
+            self.refreshAdvertising(reason: "membership_change")
+        }
+
+        // Seed the route with the same verified address. This used to live in
+        // the identity handler, which ran after the announce and could learn a
+        // route to a peer the protocol layer had never been told about.
+        let quality = Float(min(1.0, max(0.0, (Double(rssi) + 100.0) / 80.0)))
+        protocolInstance.learnRoute(
+            destination: peerId,
+            nextHop: peerId,
+            hopCount: 1,
+            quality: quality,
+            sequenceNumber: 0
+        )
+
+        //  Process any pending fragments for this device immediately
+        // This is essential for Android → iOS messages that were queued while waiting for device ID
+        // When Android writes to iOS, iOS receives the write with Android's central UUID
+        // When iOS connects to Android to read device ID, it uses Android's peripheral UUID
+        // Both UUIDs should be the same, but we process fragments for both to be safe
+        print("[BleManager] 🔄 Processing pending fragments for device ID: \(peerId), peripheral: \(peripheral.identifier)")
+        processPendingFragments(for: peripheral.identifier, deviceId: peerId)
+
+        //  Also check all pending fragments and process any that match this device ID
+        // This handles the case where Android wrote to iOS before iOS connected to Android
+        // The central UUID (from write) might be the same as peripheral UUID, but we check all
+        let pendingCentralIds: [UUID] = self.fragmentQueue.sync { Array(self.pendingFragments.keys) }
+        for centralId in pendingCentralIds {
+            // Check if this central ID now maps to the device ID we just resolved
+            let centralDeviceId = self.connections.centralDeviceId(for: centralId)
+            let peripheralDeviceId = self.connections.peripheralDeviceId(for: centralId)
+            if centralDeviceId == peerId || peripheralDeviceId == peerId {
+                print("[BleManager] 🔄 Processing pending fragments for central \(centralId) (now maps to device \(peerId))")
+                processPendingFragments(for: centralId, deviceId: peerId)
+            }
+        }
+
+        // The recipient -> peripheral mapping and MESSAGE characteristic
+        // now exist, so flush any OUTBOUND fragments parked while this
+        // connection was still forming. drainAndSendFragments previously
+        // ran only on connect / onFragmentsAvailable, so the FIRST message
+        // a user sent into a still-connecting peer (already popped out of
+        // the Rust queue and parked in pendingOutboundFragments) had
+        // nothing to re-trigger it and stalled until a later fragment
+        // event or the 30s expiry — the iOS->Android first-message stall.
+        self.drainAndSendFragments()
+    }
+
+    /// Abandons a handshake that can never complete, and drops the link.
+    ///
+    /// Called for a failed or absent read on either characteristic, a
+    /// non-UTF-8 device id, and — the case this all exists for — an advertised
+    /// id that the peer's own key does not derive to. Nothing about the peer
+    /// reaches the protocol layer: no announce has happened yet, by
+    /// construction, so there is nothing to retract.
+    ///
+    /// The connection is closed rather than left open unannounced. A live link
+    /// we will never use still costs a connection slot on both ends, and
+    /// dropping it lets the peer's own reconnect logic retry — which is what
+    /// recovers the case where the peer simply had not finished initializing
+    /// its identity yet.
+    private func rejectPeerHandshake(for peripheral: CBPeripheral, reason: String, detail: String) {
+        // Clear the half-state so a reconnect starts a fresh join rather than
+        // pairing a stale device id with a newly read identity.
+        advertisedDeviceIds.removeValue(forKey: peripheral.identifier)
+        verifiedPeerAddresses.removeValue(forKey: peripheral.identifier)
+        verifiedPeerIdentities.removeValue(forKey: peripheral.identifier)
+
+        print("[BleManager] ⚠️ Refusing peer \(peripheral.identifier): \(reason) (\(detail))")
+        emitDiagnostic("warning", "BLE peer refused: unproven identity", context: [
+            "peripheral": peripheral.identifier.uuidString,
+            "reason": reason,
+            "detail": detail,
+        ])
+
+        centralManager?.cancelPeripheralConnection(peripheral)
+        _ = connections.removePeripheral(peripheral.identifier)
+    }
+
+
+    /// Verifies a peer's signed identity and records the address it proves.
+    ///
+    /// This is the half of the handshake that establishes *what the peer can
+    /// prove*; `completePeerHandshake` decides whether that matches what it
+    /// claimed. Every failure below leaves `verifiedPeerAddresses` unset, which
+    /// is what makes the binding refuse the peer — so an unverifiable identity
+    /// and an absent one are the same thing to the gate, deliberately.
     private func handleReceivedIdentity(_ data: Data, for peripheral: CBPeripheral) {
         guard let signedIdentity = SignedIdentityData.decode(data) else {
             print("[BleManager] Failed to decode identity data from \(peripheral.identifier)")
-            emitDiagnostic("warning", "Failed to decode peer identity", context: ["peripheral": peripheral.identifier.uuidString])
+            rejectPeerHandshake(
+                for: peripheral,
+                reason: PeerIdentityBinding.Reason.unverifiedIdentity,
+                detail: "identity blob did not decode"
+            )
             return
         }
-        
+
         // Verify the signature
         do {
             let isValid = try protocolInstance.verifySignature(
@@ -2836,7 +3126,7 @@ extension BleManager: CBPeripheralDelegate {
                 data: [UInt8](signedIdentity.advertisementData),
                 signature: [UInt8](signedIdentity.signature)
             )
-            
+
             if isValid {
                 // Store the verified identity
                 verifiedPeerIdentities[peripheral.identifier] = signedIdentity
@@ -2846,7 +3136,11 @@ extension BleManager: CBPeripheralDelegate {
                 // 32-byte key, so the throw is unreachable here.
                 guard let derivedAddress = try? deriveAddress(publicKey: [UInt8](signedIdentity.publicKey)) else {
                     print("[BleManager] Failed to derive address for \(peripheral.identifier)")
-                    emitDiagnostic("warning", "Failed to derive peer address", context: ["peripheral": peripheral.identifier.uuidString])
+                    rejectPeerHandshake(
+                        for: peripheral,
+                        reason: PeerIdentityBinding.Reason.unverifiedIdentity,
+                        detail: "address derivation failed"
+                    )
                     return
                 }
                 print("[BleManager] ✅ Verified peer identity: \(derivedAddress) for \(peripheral.identifier)")
@@ -2855,23 +3149,27 @@ extension BleManager: CBPeripheralDelegate {
                     "derivedAddress": derivedAddress
                 ])
 
-                // Update routing with the cryptographically derived address.
-                // This ensures routing tables only contain verified peers.
-                let rssi = peripheralRSSI[peripheral.identifier] ?? -60
-                protocolInstance.learnRoute(
-                    destination: derivedAddress,
-                    nextHop: derivedAddress,
-                    hopCount: 1,
-                    quality: Float(min(1.0, max(0.0, (Double(rssi) + 100.0) / 80.0))),
-                    sequenceNumber: 0
-                )
+                // Record the proof and join it against the advertised id. The
+                // route is seeded there rather than here: learning a route to
+                // a peer the protocol layer has not been told about put an
+                // address in the routing table that `peers` had no entry for.
+                verifiedPeerAddresses[peripheral.identifier] = derivedAddress
+                completePeerHandshake(for: peripheral)
             } else {
                 print("[BleManager] ⚠️ Invalid signature for peer \(peripheral.identifier)")
-                emitDiagnostic("warning", "Invalid peer signature", context: ["peripheral": peripheral.identifier.uuidString])
+                rejectPeerHandshake(
+                    for: peripheral,
+                    reason: PeerIdentityBinding.Reason.unverifiedIdentity,
+                    detail: "identity signature did not verify"
+                )
             }
         } catch {
             print("[BleManager] Failed to verify signature: \(error)")
-            emitDiagnostic("error", "Signature verification failed", context: ["error": error.localizedDescription])
+            rejectPeerHandshake(
+                for: peripheral,
+                reason: PeerIdentityBinding.Reason.unverifiedIdentity,
+                detail: "signature verification threw: \(error.localizedDescription)"
+            )
         }
     }
     
