@@ -37,7 +37,6 @@ public class NostrManager: NSObject, TransportManager {
     // MARK: - Properties
 
     private let protocolInstance: OfflineProtocol
-    private let deviceId: String
 
     // Relay connections: URL string -> URLSessionWebSocketTask
     private var relayUrls: [String] = []
@@ -119,9 +118,15 @@ public class NostrManager: NSObject, TransportManager {
 
     // MARK: - Initialization
 
-    public init(protocol protocolInstance: OfflineProtocol, deviceId: String) {
+    /// The profile is deliberately not taken here.
+    ///
+    /// This manager is built at configure time, before the protocol has an
+    /// identity, so any id passed in could only be the app-chosen profile —
+    /// and the one thing this transport must never carry is a value a
+    /// username can be recomputed from. The address is read from the protocol
+    /// at `start()`, which is the first moment it is both known and needed.
+    public init(protocol protocolInstance: OfflineProtocol) {
         self.protocolInstance = protocolInstance
-        self.deviceId = deviceId
         super.init()
     }
 
@@ -181,8 +186,40 @@ public class NostrManager: NSObject, TransportManager {
             throw TransportError.notAvailable("No relay URLs configured. Call configure(relayUrls:) first.")
         }
 
+        // Refused without an identity, and refused *here* rather than at the
+        // one call site that enables the transport: `start()` is the single
+        // point that opens a socket, and the first thing a socket does is
+        // publish this device's routing tag to a third-party relay.
+        //
+        // That tag is derived from the address. With no identity there is no
+        // address — the core installs no Nostr transport at all — so starting
+        // anyway would open relay connections that can never subscribe, which
+        // is indistinguishable from "nobody is talking to us".
+        guard let address = protocolInstance.localAddress(), !address.isEmpty else {
+            throw TransportError.notAvailable(
+                "Nostr requires the protocol identity. Initialize MLS (or leave encryption enabled) before enabling Nostr."
+            )
+        }
+
+        // An identity is necessary but not sufficient. The core registers the
+        // Nostr transport during the identity rebuild and only when Nostr was
+        // enabled in the config `create()` received, so `enableTransport("nostr")`
+        // against a config that had it off arrives here with an address and no
+        // transport behind it.
+        //
+        // Probed with the subscription filter because that is the exact call the
+        // socket-open callback makes, and a nil answer *there* is not a safe
+        // failure: it is logged and returned from with no retry, so the socket
+        // stays connected to a relay it never subscribes on for the rest of its
+        // life. Refusing before any socket exists is the recoverable shape.
+        guard protocolInstance.nostrGetSubscriptionFilter(subscriptionId: "startup-probe") != nil else {
+            throw TransportError.notAvailable(
+                "No Nostr transport is registered. Enable Nostr in the protocol configuration before starting it."
+            )
+        }
+
         emitDiagnostic("info", "Starting Nostr transport", context: [
-            "deviceId": deviceId,
+            "address": address,
             "relayCount": relayUrls.count,
             "publicKey": publicKeyHex
         ])

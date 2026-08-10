@@ -4253,8 +4253,13 @@ impl OfflineProtocol {
     /// This gives the install a stable Nostr identity (event signatures,
     /// relay-visible pubkey) across restarts. The signing key is intentionally
     /// not derivable from any public identifier (SEC-M4); message addressing
-    /// is unaffected because it uses the separate routing tag, which remains
-    /// derived from the device ID.
+    /// is unaffected because it uses the separate routing tag, which is
+    /// derived from this device's address.
+    ///
+    /// Registering the Nostr transport *after* this has run leaves it on its
+    /// ephemeral key — see [`Self::restore_nostr_transport_state`], which is
+    /// how the bindings layer (whose transport cannot exist until the address
+    /// does) gets a second pass.
     ///
     /// Idempotent across repeated initialization attempts via
     /// `nostr_secret_persisted`. All
@@ -4528,6 +4533,29 @@ impl OfflineProtocol {
                  keeping the live mark and rewriting on the next accepted event"
             );
         }
+    }
+
+    /// Installs the persisted Nostr state into a transport that was registered
+    /// *after* [`Self::initialize_mls`] ran.
+    ///
+    /// Both restores below are no-ops when no Nostr transport is registered,
+    /// which is exactly the state `initialize_mls` runs them in for the FFI:
+    /// the Nostr transport is derived from this device's address, so the
+    /// bindings layer cannot construct it until `initialize_mls` has produced
+    /// one, and it installs the transport immediately afterwards. Without this
+    /// second pass that transport keeps the ephemeral signing key it was
+    /// constructed with — rotating this install's Nostr identity on every
+    /// launch, so peers who sealed to the pubkey we advertised last time get
+    /// frames we can no longer open — and starts with no receive watermark, so
+    /// every cold start replays the full first-run backfill window.
+    ///
+    /// Safe to call whether or not the first pass found a transport: the
+    /// signing-secret restore is guarded by `nostr_secret_persisted`, which a
+    /// transport-less pass leaves unset, and the watermark only ever moves
+    /// forward.
+    pub fn restore_nostr_transport_state(&mut self) {
+        self.restore_or_init_nostr_signing_secret();
+        self.restore_nostr_watermark();
     }
 
     /// Installs `secret` as the telemetry fallback secret and rebuilds the

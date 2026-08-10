@@ -16,7 +16,17 @@ export const PROTOCOL_CONFIG = {
     },
   },
   encryption: {
-    enabled: false, // Disabled for simple transport testing
+    // Not optional for Nostr, and not merely for encryption's sake.
+    //
+    // Disabling it skips MLS initialization, which is what derives this
+    // device's address — and the Nostr routing tag is derived from that
+    // address. With no identity there is no tag, so the SDK installs no Nostr
+    // transport and `enableTransport('nostr')` is refused.
+    //
+    // This used to "work": the transport fell back to the profile, so the
+    // subscription filter published a label anyone could recompute from the
+    // username to three public relays. It doesn't do that any more.
+    enabled: true,
   },
   network: {initialTtl: 8},
 };

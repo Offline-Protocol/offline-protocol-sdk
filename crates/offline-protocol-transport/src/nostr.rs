@@ -14,8 +14,8 @@
 //! [`NostrTransport::report_send_failure`], and injects inbound event
 //! payloads via [`NostrTransport::on_data_received`].
 //!
-//! Addressing uses public routing tags derived from device IDs
-//! ([`nostr_crypto::routing_tag_for_device_id`]); event signing uses a
+//! Addressing uses public routing tags derived from this device's address
+//! ([`nostr_crypto::routing_tag_for_address`]); event signing uses a
 //! per-install secret key that starts out ephemeral and is upgraded to a
 //! persisted identity via [`NostrTransport::install_signing_secret`].
 
@@ -25,9 +25,11 @@ use crate::constants::{
     NOSTR_MAX_TRACKED_PEER_KEYS, NOSTR_PENDING_CONFIRMATION_TIMEOUT_SECS,
 };
 use crate::nostr_crypto::{self, now_unix_secs, NostrKeypair};
-use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
+use crate::{
+    Error, Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType,
+};
 use base64::Engine;
-use offline_protocol_core::{Message, MutexExt, RwLockExt};
+use offline_protocol_core::{Address, Message, MutexExt, RwLockExt};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
@@ -235,12 +237,16 @@ pub struct NostrTransport {
     /// protocol-state record and re-installs it on launch. Without that this is
     /// a per-process value and every cold start replays a full backfill window.
     receive_watermark: Mutex<Option<i64>>,
-    /// The publicly computable keypair whose public half is `routing_tag`.
+    /// The publicly computable keypair for our own address.
     ///
-    /// Held only to unseal (and seal) bootstrap-leg frames — see
-    /// [`NostrKeypair::derivable_for_device_id`], which documents why this is
-    /// not a secret and must never authenticate anything.
-    derivable_keypair: NostrKeypair,
+    /// Held to unseal bootstrap-leg frames and to seal our published records —
+    /// see [`nostr_crypto::record_seal_keypair_for_address`], which documents
+    /// why this is not a secret and must never authenticate anything.
+    ///
+    /// Its public half used to *be* `routing_tag`. It is now a separate,
+    /// domain-separated derivation, so the two are unequal and neither can be
+    /// mistaken for the other.
+    record_seal_keypair: NostrKeypair,
     /// Peer user ID → that peer's real per-install Nostr public key, learned
     /// from the `nostr_pubkey` field of their signed key package. Populated by
     /// the engine via [`Self::set_peer_nostr_pubkey`]; a peer absent here takes
@@ -309,20 +315,48 @@ impl NostrTransport {
 
     /// Creates a new Nostr transport with custom configuration.
     ///
+    /// # `device_id` must be this device's derived address
+    ///
+    /// Not a profile, not an app-chosen string: the id given here is the sole
+    /// preimage of the routing tag, which is the label this device subscribes
+    /// on and the one peers publish to. Both ways of getting it wrong are
+    /// silent, and one of them is a disclosure:
+    ///
+    /// - a *guessable* preimage (a username-shaped profile) puts a label on a
+    ///   public relay that anyone can recompute from the name, which is the
+    ///   property the derived address exists to remove;
+    /// - a preimage that is merely *different* from the address peers know
+    ///   addresses this device where nobody writes, so every Nostr-carried
+    ///   frame is simply never seen — no error, no event, nothing arriving.
+    ///
+    /// Neither failure surfaces anywhere at runtime, so the id is refused
+    /// here rather than hashed. See
+    /// [`test_construction_refuses_an_id_that_is_not_an_address`](self#tests),
+    /// and — for the caller that made this necessary —
+    /// `test_nostr_is_absent_until_the_identity_rebuild_installs_it` in the
+    /// bindings crate.
+    ///
     /// The signing keypair starts out ephemeral (random for this process);
     /// call [`Self::install_signing_secret`] once persisted storage is
     /// available to give the install a stable Nostr identity.
     pub fn with_config(device_id: impl Into<String>, config: NostrConfig) -> Result<Self> {
         let device_id = device_id.into();
-        let routing_tag = nostr_crypto::routing_tag_for_device_id(&device_id)?;
-        let derivable_keypair = NostrKeypair::derivable_for_device_id(&device_id)?;
+        // The value is deliberately absent from the error: it is the rejected
+        // id, which in the case this check exists for is the app's profile.
+        device_id.parse::<Address>().map_err(|e| {
+            Error::ConfigurationError(format!(
+                "Nostr transport requires this device's derived address: {e}"
+            ))
+        })?;
+        let routing_tag = nostr_crypto::routing_tag_for_address(&device_id)?;
+        let record_seal_keypair = nostr_crypto::record_seal_keypair_for_address(&device_id)?;
         let keypair = RwLock::new(NostrKeypair::generate_ephemeral()?);
         Ok(Self {
             device_id,
             keypair,
             routing_tag,
             receive_watermark: Mutex::new(None),
-            derivable_keypair,
+            record_seal_keypair,
             peer_nostr_pubkeys: RwLock::new(HashMap::new()),
             sealing_enabled: Mutex::new(true),
             cold_contact_enabled: Mutex::new(true),
@@ -573,7 +607,12 @@ impl NostrTransport {
     /// through building an event, to tell it something it is about to look for
     /// anyway.
     fn enqueue_resolution(&self, user_id: &str) -> bool {
-        if !self.cold_contact_enabled() || user_id.is_empty() {
+        // A queued id becomes the `#p` tag of a relay query, so it is held to
+        // the same address requirement as a send recipient — and held here,
+        // at the queue's only gate, so `next_query` can never pop an id whose
+        // tag derivation fails after the entry was already consumed. Subsumes
+        // the emptiness check this replaces: an empty id is not an address.
+        if !self.cold_contact_enabled() || user_id.parse::<Address>().is_err() {
             return false;
         }
 
@@ -624,7 +663,7 @@ impl NostrTransport {
             }
         };
 
-        let routing_tag = nostr_crypto::routing_tag_for_device_id(&user_id)?;
+        let routing_tag = nostr_crypto::routing_tag_for_address(&user_id)?;
         let query_id = new_query_id();
         let req_json = nostr_crypto::create_key_package_query_message(&routing_tag, &query_id)?;
 
@@ -782,7 +821,7 @@ impl NostrTransport {
         // the whole reason a record sealed to it stays fetchable by anyone
         // entitled to fetch it, while remaining opaque to a relay scraping by
         // kind alone.
-        let peer_key = NostrKeypair::derivable_for_device_id(&user_id)?;
+        let peer_key = nostr_crypto::record_seal_keypair_for_address(&user_id)?;
         match nostr_crypto::open_key_package_publication(&peer_key, author, &sealed) {
             Ok(plaintext) => Ok(Some((author.to_string(), plaintext))),
             Err(e) => {
@@ -910,7 +949,7 @@ impl NostrTransport {
             }
         }
 
-        match nostr_crypto::unwrap_gift_wrap(&self.derivable_keypair, sender_pubkey_hex, data) {
+        match nostr_crypto::unwrap_gift_wrap(&self.record_seal_keypair, sender_pubkey_hex, data) {
             Ok(plaintext) => {
                 tracing::debug!("Unsealed a bootstrap-leg Nostr frame");
                 Cow::Owned(plaintext)
@@ -932,7 +971,7 @@ impl NostrTransport {
     /// key, and timestamp — not just in how `content` is encoded.
     fn build_event(&self, message: &Message) -> Result<nostr_crypto::NostrEvent> {
         let recipient_device_id = message.recipient.as_str();
-        let recipient_tag = nostr_crypto::routing_tag_for_device_id(recipient_device_id)?;
+        let recipient_tag = nostr_crypto::routing_tag_for_address(recipient_device_id)?;
         let data = self.serialize_message(message)?;
 
         if !self.sealing_enabled() {
@@ -963,7 +1002,12 @@ impl NostrTransport {
                 // re-resolved on the next send rather than waiting for a fresh
                 // key-package exchange.
                 self.enqueue_resolution(recipient_device_id);
-                recipient_tag.clone()
+                // Their record-seal key, reconstructed from their address —
+                // no longer the routing tag, which since the key split is a
+                // label with no private half anyone holds.
+                nostr_crypto::record_seal_keypair_for_address(recipient_device_id)?
+                    .public_key_hex()
+                    .to_string()
             }
         };
 
@@ -998,6 +1042,7 @@ impl NostrTransport {
                 nostr_crypto::NostrEvent::create_key_package_publication(
                     &keypair,
                     &self.routing_tag,
+                    self.record_seal_keypair.public_key_hex(),
                     &pending.slot_id,
                     &pending.payload,
                 )?
@@ -1342,6 +1387,30 @@ impl Transport for NostrTransport {
             )));
         }
 
+        // The recipient is the sole preimage of the `#p` tag this frame is
+        // published under, so it is refused here rather than hashed — the same
+        // rule `with_config` applies to our own id, and for the same two silent
+        // failures: a username-shaped id puts a label anyone can recompute from
+        // the name onto third-party relays, and any non-address id addresses
+        // the frame where nobody subscribes.
+        //
+        // Refused at `send` rather than in `build_event` because a build
+        // failure is retriable by the drain: a permanently undeliverable
+        // recipient would burn the whole `MAX_SIGN_RETRIES` ladder, republishing
+        // that label each time, before failing. Here it costs one error to the
+        // caller, which routes to another transport or fails the message.
+        //
+        // The value stays out of the error for the reason `with_config` keeps
+        // it out: the id this rejects is, in the case worth catching, a
+        // username.
+        if message.recipient.as_str().parse::<Address>().is_err() {
+            return Err(crate::Error::PeerNotReachable(
+                "Nostr addresses peers by their derived address, and the \
+                 recipient id is not one"
+                    .to_string(),
+            ));
+        }
+
         let queue_len = {
             let mut queue = self.send_queue.lock_or_recover();
             queue.push_back(message.clone());
@@ -1596,26 +1665,145 @@ mod tests {
     use crate::constants::DEFAULT_MAX_MESSAGE_SIZE;
     use offline_protocol_core::{AppId, UserId};
 
+    /// The address a test label stands for.
+    ///
+    /// Every id this transport touches — its own, a recipient's, a peer being
+    /// resolved — is a derived address now, and construction refuses anything
+    /// else, so a fixture cannot simply *be* `"alice"`. It can hold the same
+    /// address every time it says `"alice"`, which is what this gives.
+    ///
+    /// Seeded from the label rather than randomly so a failure reproduces, and
+    /// built straight from the hash rather than through a real keypair because
+    /// nothing here verifies the address against a key: the transport only
+    /// hashes it. The core crate's `test_identity::id` is the version that does
+    /// come from a key, for fixtures that also have to satisfy MLS.
+    fn addr(label: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(label.as_bytes());
+        let mut hash = [0u8; Address::HASH_LEN];
+        hash.copy_from_slice(&digest[..Address::HASH_LEN]);
+        Address::from_hash_bytes(hash).to_string()
+    }
+
     fn create_test_message() -> Message {
         Message::new(
-            UserId::new("alice").unwrap(),
-            UserId::new("bob").unwrap(),
+            UserId::new(addr("alice")).unwrap(),
+            UserId::new(addr("bob")).unwrap(),
             AppId::new("test").unwrap(),
             "Test message",
         )
     }
 
+    /// An id that is not an address is refused, not hashed into a tag.
+    ///
+    /// The two failures this prevents are both silent — a guessable preimage
+    /// is a disclosure nothing reports, a merely-wrong one addresses this
+    /// device where nobody writes — so construction is the only place either
+    /// can be made to surface.
+    #[test]
+    fn test_construction_refuses_an_id_that_is_not_an_address() {
+        for bad in [
+            "device1",
+            "alice",
+            "",
+            // Right shape, wrong checksum: the check must be the real address
+            // parse, not a prefix or length test.
+            "off1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+            // Canonical address, uppercased. Accepting both spellings would
+            // give one identity two routing tags.
+            &addr("alice").to_uppercase(),
+        ] {
+            assert!(
+                NostrTransport::new(bad).is_err(),
+                "construction must refuse a non-address id: {bad:?}"
+            );
+        }
+
+        assert!(
+            NostrTransport::new(addr("alice")).is_ok(),
+            "a derived address is exactly what construction accepts"
+        );
+    }
+
+    /// A recipient that is not an address is refused at `send`, not hashed
+    /// into a public routing tag.
+    ///
+    /// The constructor already refuses a non-address for *our* id; this is the
+    /// same rule on the other side of the frame, and it has the same two silent
+    /// failure modes. It is asserted at `send` specifically because that is the
+    /// only queue writer: past it, the drain would treat the failure as
+    /// retriable and republish the label `MAX_SIGN_RETRIES` times.
+    #[test]
+    fn test_send_refuses_a_recipient_that_is_not_an_address() {
+        let transport = NostrTransport::new(addr("alice")).unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        let msg = Message::new(
+            UserId::new(addr("alice")).unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test").unwrap(),
+            "for a username",
+        );
+
+        assert!(
+            transport.send(&msg).is_err(),
+            "a username-shaped recipient must not reach the send queue"
+        );
+        assert!(
+            !transport.has_pending_sends(),
+            "the refused message must not be queued"
+        );
+        assert!(
+            transport.get_next_signed_event().unwrap().is_none(),
+            "nothing may be published for a refused recipient"
+        );
+
+        // The address form of the same peer is what does go out.
+        let ok = Message::new(
+            UserId::new(addr("alice")).unwrap(),
+            UserId::new(addr("bob")).unwrap(),
+            AppId::new("test").unwrap(),
+            "for an address",
+        );
+        assert!(transport.send(&ok).is_ok());
+    }
+
+    /// The resolution queue applies the same rule at its only gate, so
+    /// `next_query` cannot pop an id whose tag derivation would fail after the
+    /// entry was already consumed.
+    #[test]
+    fn test_resolution_refuses_a_peer_id_that_is_not_an_address() {
+        let transport = NostrTransport::new(addr("alice")).unwrap();
+
+        for bad in ["bob", "", "off1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"] {
+            assert!(
+                !transport.request_peer_key_packages(bad),
+                "a non-address peer id must not be queued for resolution: {bad:?}"
+            );
+        }
+        assert!(
+            transport.next_query().unwrap().is_none(),
+            "no query may be issued for a refused peer id"
+        );
+
+        assert!(
+            transport.request_peer_key_packages(&addr("bob")),
+            "an address is exactly what the resolution queue accepts"
+        );
+    }
+
     #[test]
     fn test_nostr_transport_creation() {
-        let transport = NostrTransport::new("device1").unwrap();
-        assert_eq!(transport.device_id(), "device1");
+        let transport = NostrTransport::new(addr("device1")).unwrap();
+        assert_eq!(transport.device_id(), addr("device1"));
         assert_eq!(transport.transport_type(), TransportType::Nostr);
         assert_eq!(transport.status(), TransportStatus::Unavailable);
     }
 
     #[test]
     fn test_builder() {
-        let transport = NostrTransportBuilder::new("device1")
+        let transport = NostrTransportBuilder::new(addr("device1"))
             .relay_urls(vec!["wss://relay.example.com".to_string()])
             .add_relay_url("wss://relay2.example.com")
             .connection_timeout(Duration::from_secs(60))
@@ -1636,7 +1824,7 @@ mod tests {
 
     #[test]
     fn test_send_receive() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -1653,20 +1841,20 @@ mod tests {
 
     #[test]
     fn test_send_when_unavailable_fails() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         let msg = create_test_message();
         assert!(transport.send(&msg).is_err());
     }
 
     #[test]
     fn test_receive_when_empty_returns_none() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         assert!(transport.receive().unwrap().is_none());
     }
 
     #[test]
     fn test_confirmation_loop() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -1683,7 +1871,7 @@ mod tests {
 
     #[test]
     fn test_send_failure_reporting() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -1700,7 +1888,7 @@ mod tests {
 
     #[test]
     fn test_fail_all_pending_on_disconnect() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -1716,7 +1904,7 @@ mod tests {
 
     #[test]
     fn test_stop_fails_pending() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -1732,7 +1920,7 @@ mod tests {
 
     #[test]
     fn test_serialization() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         let msg = create_test_message();
         let data = transport.serialize_message(&msg).unwrap();
         let deserialized = transport.deserialize_message(&data).unwrap();
@@ -1741,7 +1929,7 @@ mod tests {
 
     #[test]
     fn test_reconnect_logic() {
-        let transport = NostrTransportBuilder::new("device1")
+        let transport = NostrTransportBuilder::new(addr("device1"))
             .max_reconnect_attempts(3)
             .build()
             .unwrap();
@@ -1756,7 +1944,7 @@ mod tests {
 
     #[test]
     fn test_on_data_received_invalid_json_drops_ok() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         let result = transport.on_data_received(b"not json".to_vec());
         assert!(result.is_ok());
         assert!(transport.receive().unwrap().is_none());
@@ -1764,7 +1952,7 @@ mod tests {
 
     #[test]
     fn test_on_data_received_rejects_oversized_payload() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         let oversized = vec![0u8; DEFAULT_MAX_MESSAGE_SIZE + 1];
         let result = transport.on_data_received(oversized);
         assert!(result.is_err());
@@ -1772,7 +1960,7 @@ mod tests {
 
     #[test]
     fn test_on_messages_available_callback() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -1791,7 +1979,7 @@ mod tests {
     fn test_messages_available_callback_reentrant_send() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let transport = Arc::new(NostrTransport::new("device1").unwrap());
+        let transport = Arc::new(NostrTransport::new(addr("device1")).unwrap());
         transport.on_status_changed(TransportStatus::Available);
 
         let reentered = Arc::new(AtomicBool::new(false));
@@ -1814,7 +2002,7 @@ mod tests {
 
     #[test]
     fn test_update_metrics_preserves_confirmation_counts() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -1834,7 +2022,7 @@ mod tests {
 
     #[test]
     fn test_platform_handle() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         assert!(transport.platform_handle().is_none());
         transport.set_platform_handle(42);
         assert_eq!(transport.platform_handle(), Some(42));
@@ -1842,7 +2030,7 @@ mod tests {
 
     #[test]
     fn test_drain_expired_pending_expires_old_entries() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -1884,7 +2072,7 @@ mod tests {
 
     #[test]
     fn test_has_pending_sends() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -1897,7 +2085,7 @@ mod tests {
 
     #[test]
     fn test_pending_confirmation_count() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -1925,7 +2113,7 @@ mod tests {
 
     #[test]
     fn test_get_next_signed_event() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -1949,7 +2137,7 @@ mod tests {
 
     #[test]
     fn test_get_next_signed_event_confirm_flow() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -1967,8 +2155,8 @@ mod tests {
 
     #[test]
     fn test_subscription_filters_on_routing_tag_not_signing_key() {
-        let transport = NostrTransport::new("device1").unwrap();
-        let expected_tag = nostr_crypto::routing_tag_for_device_id("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
+        let expected_tag = nostr_crypto::routing_tag_for_address(&addr("device1")).unwrap();
 
         assert_eq!(transport.routing_tag(), expected_tag);
         // The signing key is random per install and must never leak into the
@@ -1982,8 +2170,8 @@ mod tests {
 
     #[test]
     fn test_install_signing_secret_gives_stable_identity() {
-        let transport_a = NostrTransport::new("device1").unwrap();
-        let transport_b = NostrTransport::new("device1").unwrap();
+        let transport_a = NostrTransport::new(addr("device1")).unwrap();
+        let transport_b = NostrTransport::new(addr("device1")).unwrap();
 
         // Ephemeral keys are random: two instances differ.
         assert_ne!(transport_a.public_key_hex(), transport_b.public_key_hex());
@@ -1998,19 +2186,19 @@ mod tests {
         // Addressing is untouched by the key swap.
         assert_eq!(
             transport_a.routing_tag(),
-            nostr_crypto::routing_tag_for_device_id("device1").unwrap()
+            nostr_crypto::routing_tag_for_address(&addr("device1")).unwrap()
         );
     }
 
     #[test]
     fn test_oversized_event_is_dropped_permanently_and_does_not_block_queue() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
         let oversized = Message::new(
-            UserId::new("alice").unwrap(),
-            UserId::new("bob").unwrap(),
+            UserId::new(addr("alice")).unwrap(),
+            UserId::new(addr("bob")).unwrap(),
             AppId::new("test").unwrap(),
             "x".repeat(NOSTR_MAX_PAYLOAD_SIZE),
         );
@@ -2046,7 +2234,7 @@ mod tests {
 
     #[test]
     fn test_size_cap_measures_the_relay_message_not_the_inner_payload() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -2054,8 +2242,8 @@ mod tests {
         // pushes the event a relay actually sees over it. Capping the inner
         // payload instead would let this onto the wire to be rejected there.
         let msg = Message::new(
-            UserId::new("alice").unwrap(),
-            UserId::new("bob").unwrap(),
+            UserId::new(addr("alice")).unwrap(),
+            UserId::new(addr("bob")).unwrap(),
             AppId::new("test").unwrap(),
             "x".repeat(50_000),
         );
@@ -2081,7 +2269,7 @@ mod tests {
         // 32 KiB DEFAULT_CHUNK_SIZE that is ~156 KB on the wire, well past
         // both this cap and the 64-128 KB relays typically accept. Such events
         // were never deliverable; they now fail here instead of at the relay.
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -2117,7 +2305,7 @@ mod tests {
         // A zero (or absent) `since` is the unbounded filter the watermark
         // exists to remove, and no-watermark is the *common* case: the bridges
         // subscribe on every relay connect, which can precede the restore.
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         assert!(transport.receive_watermark_secs().is_none());
 
         let since = subscription_filter(&transport)["since"].as_i64().unwrap();
@@ -2133,7 +2321,7 @@ mod tests {
 
     #[test]
     fn test_since_follows_the_watermark_with_a_jitter_and_skew_overlap() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         let mark = now_unix_secs() - 30;
         assert!(transport.advance_receive_watermark(mark));
 
@@ -2154,7 +2342,7 @@ mod tests {
         // the very relay query meant to fetch them — a silent delivery loss
         // with no error anywhere. This pins the two uses of the constant
         // together.
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         let mark = now_unix_secs();
         transport.advance_receive_watermark(mark);
 
@@ -2167,7 +2355,7 @@ mod tests {
 
     #[test]
     fn test_watermark_only_advances() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         let base = now_unix_secs() - 3600;
 
         assert!(transport.advance_receive_watermark(base));
@@ -2192,7 +2380,7 @@ mod tests {
         // publisher wrote. Accepting a far-future value would pin the mark
         // there and every later subscription would ask for events `since` the
         // far future — receiving nothing, permanently, with no error raised.
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         let honest = now_unix_secs() - 10;
         transport.advance_receive_watermark(honest);
 
@@ -2214,7 +2402,7 @@ mod tests {
     fn test_non_positive_created_at_is_ignored() {
         // A missing `created_at` reaches the FFI as 0; a malformed one can be
         // negative. Neither is receive progress.
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         assert!(!transport.advance_receive_watermark(0));
         assert!(!transport.advance_receive_watermark(-1));
         assert!(transport.receive_watermark_secs().is_none());
@@ -2225,7 +2413,7 @@ mod tests {
         // stop() clears in-flight queues, but receive progress is not undone by
         // a restart — resetting it here would replay a full backfill window on
         // every stop/start cycle.
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         let mark = now_unix_secs() - 60;
         transport.advance_receive_watermark(mark);
 
@@ -2236,7 +2424,7 @@ mod tests {
 
     #[test]
     fn test_signed_event_uses_recipient_routing_tag_and_own_signing_key() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
         // Addressing is a property of the unsealed path too; assert it there so
@@ -2249,7 +2437,7 @@ mod tests {
         transport.send(&msg).unwrap();
 
         let signed = transport.get_next_signed_event().unwrap().unwrap();
-        let bob_tag = nostr_crypto::routing_tag_for_device_id("bob").unwrap();
+        let bob_tag = nostr_crypto::routing_tag_for_address(&addr("bob")).unwrap();
         assert!(
             signed.event_json.contains(&bob_tag),
             "event must be addressed to the recipient's routing tag"
@@ -2285,13 +2473,13 @@ mod tests {
         // excluded only *after* pinning its sealed shape — it is random bytes,
         // and a case-folded substring assertion over its base64 spells "bob"
         // roughly once per hundred runs, failing CI with no leak present.
-        let transport = NostrTransport::new("alice").unwrap();
+        let transport = NostrTransport::new(addr("alice")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
         let msg = Message::new(
-            UserId::new("alice").unwrap(),
-            UserId::new("bob").unwrap(),
+            UserId::new(addr("alice")).unwrap(),
+            UserId::new(addr("bob")).unwrap(),
             AppId::new("fernweh").unwrap(),
             "the quick brown fox",
         );
@@ -2328,13 +2516,13 @@ mod tests {
         // The only thing a relay legitimately learns is the recipient's routing
         // tag — an opaque label it cannot invert without already knowing the
         // user id it is looking for.
-        let bob_tag = nostr_crypto::routing_tag_for_device_id("bob").unwrap();
+        let bob_tag = nostr_crypto::routing_tag_for_address(&addr("bob")).unwrap();
         assert!(wire.contains(&bob_tag));
     }
 
     #[test]
     fn test_sealed_event_is_a_gift_wrap_not_signed_by_our_install_key() {
-        let transport = NostrTransport::new("alice").unwrap();
+        let transport = NostrTransport::new(addr("alice")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
         transport.send(&create_test_message()).unwrap();
@@ -2358,14 +2546,14 @@ mod tests {
     fn test_sealed_frame_round_trips_through_the_recipients_transport() {
         // End-to-end over the two transports, which is what proves the send and
         // receive halves agree about which key seals what.
-        let alice = NostrTransport::new("alice").unwrap();
+        let alice = NostrTransport::new(addr("alice")).unwrap();
         alice.start().unwrap();
         alice.on_status_changed(TransportStatus::Available);
 
-        let bob = NostrTransport::new("bob").unwrap();
+        let bob = NostrTransport::new(addr("bob")).unwrap();
         bob.install_signing_secret(&[88u8; 32]).unwrap();
         // Alice has seen Bob's key package, so this is the steady state.
-        alice.set_peer_nostr_pubkey("bob", &bob.public_key_hex());
+        alice.set_peer_nostr_pubkey(&addr("bob"), &bob.public_key_hex());
 
         let msg = create_test_message();
         alice.send(&msg).unwrap();
@@ -2380,7 +2568,7 @@ mod tests {
         let plaintext = bob.unseal_event_payload(sender_pubkey, &sealed);
         let received = bob.deserialize_message(&plaintext).unwrap();
         assert_eq!(received.id, msg.id);
-        assert_eq!(received.sender.as_str(), "alice");
+        assert_eq!(received.sender.as_str(), addr("alice"));
     }
 
     #[test]
@@ -2388,11 +2576,11 @@ mod tests {
         // Cold first contact: Alice knows only Bob's user id. The frame is
         // sealed to Bob's publicly computable key, and Bob's receive path finds
         // it on the second attempt.
-        let alice = NostrTransport::new("alice").unwrap();
+        let alice = NostrTransport::new(addr("alice")).unwrap();
         alice.start().unwrap();
         alice.on_status_changed(TransportStatus::Available);
 
-        let bob = NostrTransport::new("bob").unwrap();
+        let bob = NostrTransport::new(addr("bob")).unwrap();
         bob.install_signing_secret(&[91u8; 32]).unwrap();
         // Deliberately NOT calling set_peer_nostr_pubkey.
 
@@ -2421,7 +2609,7 @@ mod tests {
         // A peer on a build from before sealing publishes the old cleartext
         // envelope. It must pass straight through, or upgrading breaks every
         // conversation with a peer that has not upgraded yet.
-        let alice = NostrTransport::new("alice").unwrap();
+        let alice = NostrTransport::new(addr("alice")).unwrap();
         alice.set_sealing_enabled(false);
         alice.start().unwrap();
         alice.on_status_changed(TransportStatus::Available);
@@ -2439,7 +2627,7 @@ mod tests {
             .decode(event["content"].as_str().unwrap())
             .unwrap();
 
-        let bob = NostrTransport::new("bob").unwrap();
+        let bob = NostrTransport::new(addr("bob")).unwrap();
         let passed_through = bob.unseal_event_payload(event["pubkey"].as_str().unwrap(), &legacy);
         assert_eq!(passed_through.as_ref(), legacy.as_slice());
         assert_eq!(bob.deserialize_message(&passed_through).unwrap().id, msg.id);
@@ -2451,8 +2639,8 @@ mod tests {
         // must fail closed. Returning the ciphertext unchanged lets the
         // ordinary decoder reject it as one undecodable frame — the same
         // outcome as random junk, which is what it is to us.
-        let bob = NostrTransport::new("bob").unwrap();
-        let carol_tag = nostr_crypto::routing_tag_for_device_id("carol").unwrap();
+        let bob = NostrTransport::new(addr("bob")).unwrap();
+        let carol_tag = nostr_crypto::routing_tag_for_address(&addr("carol")).unwrap();
 
         let event =
             nostr_crypto::NostrEvent::create_gift_wrap(&carol_tag, &carol_tag, b"not for bob")
@@ -2471,8 +2659,8 @@ mod tests {
         // `on_data_received` cannot unseal — it has no access to the wrapper's
         // pubkey. A bridge wired to it would otherwise enqueue ciphertext as if
         // it were a message.
-        let bob = NostrTransport::new("bob").unwrap();
-        let bob_tag = nostr_crypto::routing_tag_for_device_id("bob").unwrap();
+        let bob = NostrTransport::new(addr("bob")).unwrap();
+        let bob_tag = nostr_crypto::routing_tag_for_address(&addr("bob")).unwrap();
         let event =
             nostr_crypto::NostrEvent::create_gift_wrap(&bob_tag, &bob_tag, b"sealed").unwrap();
         let sealed = base64::engine::general_purpose::STANDARD
@@ -2485,18 +2673,21 @@ mod tests {
 
     #[test]
     fn test_peer_key_map_is_bounded_and_rejects_malformed_keys() {
-        let transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new(addr("device1")).unwrap();
 
-        transport.set_peer_nostr_pubkey("bob", "not-hex");
-        transport.set_peer_nostr_pubkey("bob", &"ab".repeat(31)); // 62 chars
+        transport.set_peer_nostr_pubkey(&addr("bob"), "not-hex");
+        transport.set_peer_nostr_pubkey(&addr("bob"), &"ab".repeat(31)); // 62 chars
         transport.set_peer_nostr_pubkey("", &"ab".repeat(32));
-        assert!(transport.peer_nostr_pubkey("bob").is_none());
+        assert!(transport.peer_nostr_pubkey(&addr("bob")).is_none());
 
         // Case is normalized: `#p`-style values are lowercase hex by spec, and a
         // mixed-case duplicate must not seal to a different string.
         let key = "AB".repeat(32);
-        transport.set_peer_nostr_pubkey("bob", &key);
-        assert_eq!(transport.peer_nostr_pubkey("bob"), Some(key.to_lowercase()));
+        transport.set_peer_nostr_pubkey(&addr("bob"), &key);
+        assert_eq!(
+            transport.peer_nostr_pubkey(&addr("bob")),
+            Some(key.to_lowercase())
+        );
 
         for i in 0..NOSTR_MAX_TRACKED_PEER_KEYS + 10 {
             transport.set_peer_nostr_pubkey(&format!("peer{i}"), &"cd".repeat(32));
@@ -2512,11 +2703,11 @@ mod tests {
         // The kill switch gates the send side only. A peer that keeps sealing
         // must stay readable, or flipping the flag on one device would sever
         // conversations rather than merely un-protecting our own traffic.
-        let alice = NostrTransport::new("alice").unwrap();
+        let alice = NostrTransport::new(addr("alice")).unwrap();
         alice.start().unwrap();
         alice.on_status_changed(TransportStatus::Available);
 
-        let bob = NostrTransport::new("bob").unwrap();
+        let bob = NostrTransport::new(addr("bob")).unwrap();
         bob.set_sealing_enabled(false);
         assert!(!bob.sealing_enabled());
 
@@ -2538,13 +2729,13 @@ mod tests {
         // payload before base64 — considerably more than the ~33% a base64
         // layer alone would suggest. Ordinary text messages must still fit
         // comfortably, and the cap must be measured on the sealed event.
-        let transport = NostrTransport::new("alice").unwrap();
+        let transport = NostrTransport::new(addr("alice")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
         let msg = Message::new(
-            UserId::new("alice").unwrap(),
-            UserId::new("bob").unwrap(),
+            UserId::new(addr("alice")).unwrap(),
+            UserId::new(addr("bob")).unwrap(),
             AppId::new("test").unwrap(),
             "x".repeat(4096),
         );
@@ -2571,7 +2762,7 @@ mod tests {
     /// preimage the `SHA-256(user_id)` routing tag exists to withhold.
     #[test]
     fn test_published_key_package_record_leaks_no_username() {
-        let transport = NostrTransport::new("alice-the-identifiable").unwrap();
+        let transport = NostrTransport::new(addr("alice-the-identifiable")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -2590,7 +2781,7 @@ mod tests {
 
     #[test]
     fn test_published_record_is_addressable_and_opens_with_the_derivable_key() {
-        let transport = NostrTransport::new("alice").unwrap();
+        let transport = NostrTransport::new(addr("alice")).unwrap();
         transport.install_signing_secret(&[7u8; 32]).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
@@ -2617,7 +2808,7 @@ mod tests {
         assert_eq!(tags[1][1].as_str(), Some(transport.routing_tag()));
 
         // A stranger who knows only the username can open it.
-        let stranger_view = NostrKeypair::derivable_for_device_id("alice").unwrap();
+        let stranger_view = nostr_crypto::record_seal_keypair_for_address(&addr("alice")).unwrap();
         let sealed = base64::engine::general_purpose::STANDARD
             .decode(event["content"].as_str().unwrap())
             .unwrap();
@@ -2636,7 +2827,7 @@ mod tests {
     /// key package standing as the live record.
     #[test]
     fn test_republication_is_not_backdated_below_the_record_it_replaces() {
-        let transport = NostrTransport::new("alice").unwrap();
+        let transport = NostrTransport::new(addr("alice")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -2657,7 +2848,7 @@ mod tests {
     /// publishing both would briefly stand a consumed package back up.
     #[test]
     fn test_requeued_slot_collapses_to_the_newer_payload() {
-        let transport = NostrTransport::new("alice").unwrap();
+        let transport = NostrTransport::new(addr("alice")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -2669,7 +2860,7 @@ mod tests {
         let sealed = base64::engine::general_purpose::STANDARD
             .decode(event["content"].as_str().unwrap())
             .unwrap();
-        let key = NostrKeypair::derivable_for_device_id("alice").unwrap();
+        let key = nostr_crypto::record_seal_keypair_for_address(&addr("alice")).unwrap();
         let opened = nostr_crypto::open_key_package_publication(
             &key,
             event["pubkey"].as_str().unwrap(),
@@ -2686,7 +2877,7 @@ mod tests {
 
     #[test]
     fn test_publications_drain_ahead_of_messages() {
-        let transport = NostrTransport::new("alice").unwrap();
+        let transport = NostrTransport::new(addr("alice")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -2708,7 +2899,7 @@ mod tests {
     /// process while the relays hold nothing.
     #[test]
     fn test_rejected_publication_is_reported_back_for_republication() {
-        let transport = NostrTransport::new("alice").unwrap();
+        let transport = NostrTransport::new(addr("alice")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -2736,7 +2927,7 @@ mod tests {
     /// in-flight event, and a publication among them is no exception.
     #[test]
     fn test_disconnect_reports_in_flight_publications_for_republication() {
-        let transport = NostrTransport::new("alice").unwrap();
+        let transport = NostrTransport::new(addr("alice")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -2756,7 +2947,7 @@ mod tests {
     /// slot set is keyed on the synthetic publication id and nothing else.
     #[test]
     fn test_message_failure_reports_no_publication_slot() {
-        let transport = NostrTransport::new("alice").unwrap();
+        let transport = NostrTransport::new(addr("alice")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -2769,20 +2960,20 @@ mod tests {
 
     #[test]
     fn test_cold_contact_disabled_publishes_nothing_and_resolves_nothing() {
-        let transport = NostrTransport::new("alice").unwrap();
+        let transport = NostrTransport::new(addr("alice")).unwrap();
         transport.set_cold_contact_enabled(false);
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
         transport.publish_key_package("slot-a", b"kp".to_vec());
         assert!(!transport.has_pending_publications());
-        assert!(!transport.request_peer_key_packages("bob"));
+        assert!(!transport.request_peer_key_packages(&addr("bob")));
         assert!(transport.next_query().unwrap().is_none());
     }
 
     #[test]
     fn test_send_to_an_unknown_peer_queues_a_resolution_and_still_sends() {
-        let transport = NostrTransport::new("alice").unwrap();
+        let transport = NostrTransport::new(addr("alice")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -2795,7 +2986,7 @@ mod tests {
         );
 
         let query = transport.next_query().unwrap().expect("resolution queued");
-        let expected_tag = nostr_crypto::routing_tag_for_device_id("bob").unwrap();
+        let expected_tag = nostr_crypto::routing_tag_for_address(&addr("bob")).unwrap();
         assert!(query.req_json.contains(&expected_tag));
         assert!(query
             .req_json
@@ -2804,19 +2995,19 @@ mod tests {
 
     #[test]
     fn test_resolution_is_rate_limited_per_peer() {
-        let transport = NostrTransport::new("alice").unwrap();
-        assert!(transport.request_peer_key_packages("bob"));
+        let transport = NostrTransport::new(addr("alice")).unwrap();
+        assert!(transport.request_peer_key_packages(&addr("bob")));
         assert!(
-            !transport.request_peer_key_packages("bob"),
+            !transport.request_peer_key_packages(&addr("bob")),
             "a peer who has published nothing must not mint a round-trip per frame"
         );
-        assert!(transport.request_peer_key_packages("carol"));
+        assert!(transport.request_peer_key_packages(&addr("carol")));
     }
 
     #[test]
     fn test_query_event_opens_only_for_the_peer_it_was_issued_for() {
-        let alice = NostrTransport::new("alice").unwrap();
-        let bob = NostrTransport::new("bob").unwrap();
+        let alice = NostrTransport::new(addr("alice")).unwrap();
+        let bob = NostrTransport::new(addr("bob")).unwrap();
         bob.install_signing_secret(&[9u8; 32]).unwrap();
         bob.start().unwrap();
         bob.on_status_changed(TransportStatus::Available);
@@ -2826,7 +3017,7 @@ mod tests {
         let event = event_object(&published);
         let event_json = serde_json::to_string(&event).unwrap();
 
-        alice.request_peer_key_packages("bob");
+        alice.request_peer_key_packages(&addr("bob"));
         let query = alice.next_query().unwrap().unwrap();
 
         let opened = alice
@@ -2837,7 +3028,7 @@ mod tests {
 
         // The same record delivered under a query for someone else does not
         // open: the query id is what says whose key to try.
-        alice.request_peer_key_packages("carol");
+        alice.request_peer_key_packages(&addr("carol"));
         let other = alice.next_query().unwrap().unwrap();
         assert!(alice
             .open_query_event(&other.query_id, &event_json)
@@ -2847,8 +3038,8 @@ mod tests {
 
     #[test]
     fn test_query_event_for_an_unknown_or_completed_query_is_dropped() {
-        let alice = NostrTransport::new("alice").unwrap();
-        alice.request_peer_key_packages("bob");
+        let alice = NostrTransport::new(addr("alice")).unwrap();
+        alice.request_peer_key_packages(&addr("bob"));
         let query = alice.next_query().unwrap().unwrap();
         alice.complete_query(&query.query_id);
 
@@ -2867,8 +3058,8 @@ mod tests {
     /// than failing the query.
     #[test]
     fn test_query_event_ignores_wrong_kinds_and_unopenable_content() {
-        let alice = NostrTransport::new("alice").unwrap();
-        alice.request_peer_key_packages("bob");
+        let alice = NostrTransport::new(addr("alice")).unwrap();
+        alice.request_peer_key_packages(&addr("bob"));
         let query = alice.next_query().unwrap().unwrap();
 
         let wrong_kind = r#"{"kind":1059,"pubkey":"aa","content":"AQID"}"#;
@@ -2899,7 +3090,7 @@ mod tests {
     /// deprioritise Nostr for traffic that delivers perfectly well.
     #[test]
     fn test_publication_failures_stay_out_of_the_delivery_metrics() {
-        let transport = NostrTransport::new("alice").unwrap();
+        let transport = NostrTransport::new(addr("alice")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -2944,7 +3135,7 @@ mod tests {
     /// inflate the ratio and mask real message failures.
     #[test]
     fn test_publication_successes_do_not_mask_message_failures() {
-        let transport = NostrTransport::new("alice").unwrap();
+        let transport = NostrTransport::new(addr("alice")).unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -2976,8 +3167,8 @@ mod tests {
     /// import a package we already hold.
     #[test]
     fn test_duplicate_records_from_several_relays_open_once() {
-        let alice = NostrTransport::new("alice").unwrap();
-        let bob = NostrTransport::new("bob").unwrap();
+        let alice = NostrTransport::new(addr("alice")).unwrap();
+        let bob = NostrTransport::new(addr("bob")).unwrap();
         bob.install_signing_secret(&[9u8; 32]).unwrap();
         bob.start().unwrap();
         bob.on_status_changed(TransportStatus::Available);
@@ -2986,7 +3177,7 @@ mod tests {
         let published = bob.get_next_signed_event().unwrap().unwrap();
         let event_json = serde_json::to_string(&event_object(&published)).unwrap();
 
-        alice.request_peer_key_packages("bob");
+        alice.request_peer_key_packages(&addr("bob"));
         let query = alice.next_query().unwrap().unwrap();
 
         assert!(
@@ -3012,8 +3203,8 @@ mod tests {
     /// call — so the ceiling has to be ours, not the relay's.
     #[test]
     fn test_a_query_stops_accepting_events_at_its_ceiling() {
-        let alice = NostrTransport::new("alice").unwrap();
-        let bob = NostrTransport::new("bob").unwrap();
+        let alice = NostrTransport::new(addr("alice")).unwrap();
+        let bob = NostrTransport::new(addr("bob")).unwrap();
         bob.install_signing_secret(&[9u8; 32]).unwrap();
         bob.start().unwrap();
         bob.on_status_changed(TransportStatus::Available);
@@ -3021,7 +3212,7 @@ mod tests {
         let published = bob.get_next_signed_event().unwrap().unwrap();
         let genuine = serde_json::to_string(&event_object(&published)).unwrap();
 
-        alice.request_peer_key_packages("bob");
+        alice.request_peer_key_packages(&addr("bob"));
         let query = alice.next_query().unwrap().unwrap();
 
         // Distinct ids, so it is the ceiling that stops this and not the dedup.
@@ -3046,8 +3237,8 @@ mod tests {
 
         // The record itself is fine, and the ceiling is per query: a fresh one
         // opens it.
-        let alice2 = NostrTransport::new("alice").unwrap();
-        alice2.request_peer_key_packages("bob");
+        let alice2 = NostrTransport::new(addr("alice")).unwrap();
+        alice2.request_peer_key_packages(&addr("bob"));
         let fresh = alice2.next_query().unwrap().unwrap();
         assert!(alice2
             .open_query_event(&fresh.query_id, &genuine)
@@ -3063,7 +3254,7 @@ mod tests {
     /// hostile event was enough; it must be an unopenable frame instead.
     #[test]
     fn test_malformed_event_pubkey_does_not_abort_the_receive_path() {
-        let transport = NostrTransport::new("alice").unwrap();
+        let transport = NostrTransport::new(addr("alice")).unwrap();
         let sealed = vec![0x02u8; 160];
 
         for pubkey in ["", "aa", "abcd", &"ab".repeat(64)] {
@@ -3082,21 +3273,21 @@ mod tests {
     /// the peer instead waits out `RESOLUTION_RETRY_INTERVAL`.
     #[test]
     fn test_a_resolution_refused_at_capacity_does_not_burn_the_rate_limit() {
-        let transport = NostrTransport::new("alice").unwrap();
+        let transport = NostrTransport::new(addr("alice")).unwrap();
 
         for i in 0..MAX_PENDING_RESOLUTIONS {
-            assert!(transport.request_peer_key_packages(&format!("peer-{}", i)));
+            assert!(transport.request_peer_key_packages(&addr(&format!("peer-{}", i))));
         }
 
         assert!(
-            !transport.request_peer_key_packages("bob"),
+            !transport.request_peer_key_packages(&addr("bob")),
             "the queue is full, so this request is refused"
         );
 
         // Draining one makes room; bob must be admitted straight away.
         transport.next_query().unwrap().unwrap();
         assert!(
-            transport.request_peer_key_packages("bob"),
+            transport.request_peer_key_packages(&addr("bob")),
             "a request dropped at capacity burned the retry interval"
         );
     }
