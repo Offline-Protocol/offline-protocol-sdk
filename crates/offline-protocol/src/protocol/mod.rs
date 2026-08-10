@@ -310,6 +310,16 @@ pub struct OfflineProtocol {
     /// limit.
     pub(crate) plaintext_receive_warned: std::collections::HashSet<String>,
 
+    /// Which control-gate rejection codes have already been reported per peer,
+    /// as a bitmask (see `OfflineProtocol::control_gate_warning_bit`), so a
+    /// peer whose control traffic keeps being refused warns once per code
+    /// instead of once per frame.
+    ///
+    /// Keys are wire-claimed (attacker-controllable) sender ids, so the map is
+    /// bounded: it resets at `MAX_CONTROL_GATE_WARNED_PEERS` instead of growing
+    /// without limit.
+    pub(crate) control_gate_warned: HashMap<String, u8>,
+
     /// Bounded pending decryption queue for encrypted messages received before
     /// the MLS session is ready.
     pub(crate) pending_queue: PendingDecryptionQueue,
@@ -676,6 +686,7 @@ impl OfflineProtocol {
             peer_rich_attested: std::collections::HashSet::new(),
             plaintext_send_warned: std::collections::HashSet::new(),
             plaintext_receive_warned: std::collections::HashSet::new(),
+            control_gate_warned: HashMap::new(),
             pending_queue: PendingDecryptionQueue::default(),
             secure_storage: None,
             protocol_state_storage: None,
@@ -1059,11 +1070,10 @@ impl OfflineProtocol {
     /// # Bounded by refusal, never by eviction
     ///
     /// Some marking paths are reachable without authentication: an unsigned
-    /// `__MLS_WELCOME__` from a never-pinned sender marks it (deliberately —
+    /// `__MLS_WELCOME__` from a never-verified sender marks it (deliberately —
     /// see `handle_welcome_message` — so a failing handshake does not leave the
-    /// gate open), and `tofu_check_or_pin` marks before its own store-full
-    /// branch. The keys are therefore wire-claimed ids and need their own cap,
-    /// like every other map keyed that way.
+    /// gate open). The keys are therefore wire-claimed ids and need their own
+    /// cap, like every other map keyed that way.
     ///
     /// It has to be a refusal. Evicting would un-mark a peer that really is
     /// encryption-capable — the fail-open direction this field exists to
@@ -1075,14 +1085,26 @@ impl OfflineProtocol {
     /// costs anyone the protection they already had.
     ///
     /// Legitimate peers are also first in line by construction: restore seeds
-    /// the set from the session list and the TOFU pins during `initialize_mls`,
-    /// before `start()` admits any traffic.
-    pub(crate) fn mark_encryption_capable(&mut self, peer_id: &str) {
+    /// the set from the session list and the durable capability records during
+    /// `initialize_mls`, before `start()` admits any traffic.
+    ///
+    /// # Return value
+    ///
+    /// `true` when `peer_id` is in the set on return — whether this call added
+    /// it or a previous one did. This is what bounds the *durable* record:
+    /// [`Self::record_encryption_capable`](crate::OfflineProtocol) persists only
+    /// when this returns `true`, so the storage category can never hold more
+    /// peers than the cap below. Without that coupling a Sybil flood — cheap,
+    /// since each identity is one Ed25519 keygen that signs honestly as itself
+    /// — would write unbounded records, and the restore walk (bounded by
+    /// `MAX_RESTORE_KEYS_PER_CATEGORY`) could then miss a legitimate peer's
+    /// record and re-open the plaintext gate for them on the next launch.
+    pub(crate) fn mark_encryption_capable(&mut self, peer_id: &str) -> bool {
         if peer_id.is_empty() || peer_id == self.local_id {
-            return;
+            return false;
         }
         if self.encryption_capable_peers.contains(peer_id) {
-            return;
+            return true;
         }
         if self.encryption_capable_peers.len() >= MAX_ENCRYPTION_CAPABLE_PEERS {
             debug!(
@@ -1090,7 +1112,7 @@ impl OfflineProtocol {
                 cap = MAX_ENCRYPTION_CAPABLE_PEERS,
                 "Encryption-capability set at capacity; peer falls back to the session-state check"
             );
-            return;
+            return false;
         }
         self.encryption_capable_peers.insert(peer_id.to_string());
         debug!(peer_id = %peer_id, "Peer marked encryption-capable");
@@ -1104,6 +1126,7 @@ impl OfflineProtocol {
                  session-state check. Expected only under a forged-sender flood."
             );
         }
+        true
     }
 
     /// Whether `peer_id` is known to run MLS. See

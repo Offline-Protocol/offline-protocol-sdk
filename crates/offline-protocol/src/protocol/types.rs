@@ -184,6 +184,13 @@ pub(crate) const CTRL_SIGN_DOMAIN: &[u8] = b"offline-ctrl-v1";
 /// the TOFU pin store with is written only *after* a signature verifies, but
 /// the Welcome path marks its sender without one.
 ///
+/// It bounds the durable `encryption_capable_peers` storage category as well,
+/// because `OfflineProtocol::record_encryption_capable` persists only for a
+/// peer this cap admitted. A signature proves the signer owns the address it
+/// claims — it does not prove the address belongs to anyone real, and minting
+/// one costs a keygen — so "written only after a signature verifies" is not by
+/// itself a bound on anything.
+///
 /// Unlike the other maps keyed by a wire-claimed id, this one **refuses** at
 /// capacity instead of resetting or evicting: forgetting a peer here is the
 /// fail-open direction. See `OfflineProtocol::mark_encryption_capable`.
@@ -200,6 +207,19 @@ pub(crate) const MAX_BLOCKED_USERS: usize = 10_000;
 /// senders degrades the throttle to once-per-peer-per-generation while
 /// memory stays capped.
 pub(crate) const MAX_PLAINTEXT_RECEIVE_WARNED_PEERS: usize = 1000;
+
+/// Maximum number of peers tracked for once-per-peer-per-code control-gate
+/// warning suppression.
+///
+/// Every rejection the control gate reports is reachable from an unauthenticated
+/// frame carrying an attacker-chosen sender id — that is what a gate rejection
+/// *is* — so without a throttle an off-path injector turns the app's event
+/// stream into a flood and desensitizes operators to the one code that has no
+/// benign reading (`SENDER_ADDRESS_MISMATCH`). Bounded and reset at capacity for
+/// the same reason as [`MAX_PLAINTEXT_RECEIVE_WARNED_PEERS`]: the keys are
+/// attacker-controlled, so a forged-sender flood degrades the throttle to
+/// once-per-peer-per-generation rather than growing memory without bound.
+pub(crate) const MAX_CONTROL_GATE_WARNED_PEERS: usize = 1000;
 
 /// Maximum number of pending (received-but-unused) peer key packages retained
 /// in memory and in durable `MlsStorage`.

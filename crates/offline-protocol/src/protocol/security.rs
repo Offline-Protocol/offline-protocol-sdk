@@ -4,8 +4,8 @@ use super::storage::MAX_RESTORE_KEYS_PER_CATEGORY;
 use super::{
     base64_decode, base64_encode, storage_keys, ControlGateOutcome, EncryptionCapableEntry,
     InternalMessageResult, OfflineProtocol, CTRL_PK_META_KEY, CTRL_SIGN_DOMAIN, CTRL_SIG_META_KEY,
-    DATA_PLANE_PREFIXES, INTERNAL_PREFIXES, MAX_PLAINTEXT_RECEIVE_WARNED_PEERS,
-    RELAY_ANSWER_PREFIXES,
+    DATA_PLANE_PREFIXES, INTERNAL_PREFIXES, MAX_CONTROL_GATE_WARNED_PEERS,
+    MAX_PLAINTEXT_RECEIVE_WARNED_PEERS, RELAY_ANSWER_PREFIXES,
 };
 use crate::events::{Event, SecurityWarningCode};
 use crate::{Error, Result};
@@ -198,7 +198,7 @@ impl OfflineProtocol {
     /// control frame whose sender is not an address is refused outright. This
     /// is also what makes the check unconditional in the sense that matters:
     /// there is no input for which it declines to run.
-    fn verify_sender_derivation(&self, sender: &str, public_key: &[u8]) -> Result<()> {
+    fn verify_sender_derivation(&mut self, sender: &str, public_key: &[u8]) -> Result<()> {
         let claimed = sender.parse::<Address>().map_err(|e| {
             Error::Other(format!(
                 "Control message sender '{}' is not an address: {}",
@@ -215,7 +215,7 @@ impl OfflineProtocol {
                 derived = %derived,
                 "Control message signing key does not derive to the claimed sender"
             );
-            self.emit_security_warning(
+            self.warn_control_gate_rejection(
                 sender,
                 SecurityWarningCode::SenderAddressMismatch,
                 "Signing key does not derive to the claimed sender address (impersonation attempt)",
@@ -236,9 +236,27 @@ impl OfflineProtocol {
     /// would come up knowing nothing about a peer it had verified and re-open
     /// the gate for them. The TOFU store used to be that record as a side
     /// effect of holding pins; it is now the only thing this category does.
+    ///
+    /// # Why the write is gated on the in-memory mark
+    ///
+    /// `mark_encryption_capable` refuses past
+    /// [`MAX_ENCRYPTION_CAPABLE_PEERS`](super::MAX_ENCRYPTION_CAPABLE_PEERS),
+    /// and persisting regardless would leave the durable category unbounded
+    /// while the set it feeds is capped. That gap is reachable: minting an
+    /// identity that signs honestly as itself costs one Ed25519 keygen, so an
+    /// attacker can write records without limit. The damage is not the disk —
+    /// it is that `restore_encryption_capable_peers` reads only the first
+    /// [`MAX_RESTORE_KEYS_PER_CATEGORY`] keys the store lists, so a flooded
+    /// category can push a legitimate peer's record out of the restore window
+    /// and re-open the plaintext gate for them on the next launch. Writing only
+    /// what the capped set accepted holds the category under that cap, which is
+    /// what makes the restore walk's "durable records are first in line" claim
+    /// true rather than aspirational. The deleted TOFU store had this property
+    /// too — its store-full branch declined to pin *and* to persist.
     pub(super) fn record_encryption_capable(&mut self, peer_id: &str) {
-        self.mark_encryption_capable(peer_id);
-        self.persist_encryption_capable(peer_id);
+        if self.mark_encryption_capable(peer_id) {
+            self.persist_encryption_capable(peer_id);
+        }
     }
 
     /// Security gate for control messages. Validates transport-level sender
@@ -272,7 +290,7 @@ impl OfflineProtocol {
                 message_id = %message.id,
                 "Dropping control message: sender/transport identity mismatch or missing"
             );
-            self.emit_security_warning(
+            self.warn_control_gate_rejection(
                 sender,
                 SecurityWarningCode::TransportIdentityMismatch,
                 "Control message sender does not match transport peer identity",
@@ -334,7 +352,7 @@ impl OfflineProtocol {
                     message_id = %message.id,
                     "Dropping unsigned control message: control traffic must be signed"
                 );
-                self.emit_security_warning(
+                self.warn_control_gate_rejection(
                     sender,
                     SecurityWarningCode::UnsignedControlRejected,
                     "Unsigned control message rejected: control traffic must carry a signature \
@@ -350,7 +368,7 @@ impl OfflineProtocol {
                     error = %err,
                     "Dropping control message: signature verification failed"
                 );
-                self.emit_security_warning(
+                self.warn_control_gate_rejection(
                     sender,
                     SecurityWarningCode::ControlSignatureInvalid,
                     format!("Control message rejected: {}", err),
@@ -479,6 +497,71 @@ impl OfflineProtocol {
             reason_code,
             reason.into(),
         ));
+    }
+
+    /// The bit [`Self::warn_control_gate_rejection`] tracks for `code`.
+    ///
+    /// Zero for anything the control gate does not emit, which reads as "no bit
+    /// to suppress on" and lets such a code through unthrottled — the throttle
+    /// is deliberately scoped to the gate's own rejections rather than to
+    /// security warnings in general.
+    fn control_gate_warning_bit(code: SecurityWarningCode) -> u8 {
+        match code {
+            SecurityWarningCode::TransportIdentityMismatch => 1 << 0,
+            SecurityWarningCode::ControlSignatureInvalid => 1 << 1,
+            SecurityWarningCode::UnsignedControlRejected => 1 << 2,
+            SecurityWarningCode::SenderAddressMismatch => 1 << 3,
+            _ => 0,
+        }
+    }
+
+    /// Emits a control-gate rejection warning for `peer_id`, at most once per
+    /// peer per reason code (tracked in a bounded map that resets at
+    /// [`MAX_CONTROL_GATE_WARNED_PEERS`], so a peer may re-warn after a
+    /// forged-sender flood).
+    ///
+    /// Every one of these codes is reachable from an unauthenticated frame
+    /// naming an attacker-chosen sender — a gate rejection is by definition a
+    /// frame that proved nothing — so emitting per frame hands an off-path
+    /// injector a way to bury the signal that matters
+    /// ([`SecurityWarningCode::SenderAddressMismatch`], which per its own docs
+    /// has no benign reading) under noise. The per-rejection `warn!` logs stay
+    /// at the call sites; this throttles only the app-facing event.
+    ///
+    /// Suppression is per code, not per peer, so a peer that first trips one
+    /// rejection still surfaces a later, different one. A single frame can
+    /// legitimately report two codes — a derivation mismatch reports the
+    /// specific `SenderAddressMismatch` and then the gate's general
+    /// `ControlSignatureInvalid` — and both are bounded to one event each.
+    pub(super) fn warn_control_gate_rejection(
+        &mut self,
+        peer_id: &str,
+        reason_code: SecurityWarningCode,
+        reason: impl Into<String>,
+    ) {
+        let bit = Self::control_gate_warning_bit(reason_code);
+        if bit != 0 {
+            if self
+                .control_gate_warned
+                .get(peer_id)
+                .is_some_and(|mask| mask & bit != 0)
+            {
+                return;
+            }
+            // The keys are attacker-controlled, so the map resets at capacity
+            // rather than growing without bound — same trade as
+            // `warn_plaintext_receive_rejected`.
+            if self.control_gate_warned.len() >= MAX_CONTROL_GATE_WARNED_PEERS
+                && !self.control_gate_warned.contains_key(peer_id)
+            {
+                self.control_gate_warned.clear();
+            }
+            *self
+                .control_gate_warned
+                .entry(peer_id.to_string())
+                .or_default() |= bit;
+        }
+        self.emit_security_warning(peer_id, reason_code, reason);
     }
 
     /// Emits a [`SecurityWarningCode::PlaintextSend`] warning for `peer_id`,
@@ -627,6 +710,14 @@ impl OfflineProtocol {
     /// by refusal rather than eviction, and restore runs before `start()`
     /// admits traffic — so peers with durable records are first in line for
     /// the capacity a forged-sender flood would otherwise consume.
+    ///
+    /// That ordering is only worth anything because the category itself is
+    /// bounded by the same cap: [`Self::record_encryption_capable`] writes a
+    /// record only for a peer the capped set accepted. Were it not, a flood of
+    /// self-consistent identities could fill the category past
+    /// [`MAX_RESTORE_KEYS_PER_CATEGORY`] and push a legitimate peer's record
+    /// outside the window this walk reads — losing exactly the protection the
+    /// category exists to carry.
     pub(super) fn restore_encryption_capable_peers(&mut self) {
         let Some(storage) = &self.secure_storage else {
             return;

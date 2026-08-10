@@ -32506,3 +32506,185 @@ fn capability_restore_skips_unreadable_records() {
         "a storage-hostile key must not be admitted as a peer id"
     );
 }
+
+/// The durable category is bounded by the same cap as the set it feeds.
+///
+/// `test_encryption_capability_set_is_bounded_without_evicting` pins the
+/// in-memory half; this is the durable half, and it is not the same property.
+/// Persisting regardless of whether the capped set accepted the peer would
+/// leave the category unbounded — reachable, because an identity that signs
+/// honestly as itself costs one keygen, so an attacker can mint them without
+/// limit. The damage is not disk: `restore_encryption_capable_peers` reads only
+/// the first `MAX_RESTORE_KEYS_PER_CATEGORY` keys the store lists, so a flooded
+/// category can push a real peer's record out of the restore window and re-open
+/// the plaintext gate for them on the next launch — the exact failure this
+/// category exists to prevent.
+#[test]
+fn durable_capability_records_are_bounded_by_the_capability_cap() {
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (mut alice, _handle) = mixed_mode_node("alice", &secure, &state);
+
+    // Positive control: without this the bound assertion below could pass on a
+    // build that never writes a record at all.
+    alice.record_encryption_capable(&id("bob"));
+    assert!(
+        secure
+            .load(storage_keys::ENCRYPTION_CAPABLE_PEERS, &id("bob"))
+            .unwrap()
+            .is_some(),
+        "a verified peer must get a durable record"
+    );
+
+    for i in 0..(MAX_ENCRYPTION_CAPABLE_PEERS + 50) {
+        alice.record_encryption_capable(&format!("flood-{i}"));
+    }
+
+    let stored = secure
+        .list_keys(storage_keys::ENCRYPTION_CAPABLE_PEERS)
+        .unwrap()
+        .len();
+    assert!(
+        stored <= MAX_ENCRYPTION_CAPABLE_PEERS,
+        "the durable category must not outgrow the capability cap, got {stored}"
+    );
+    assert!(
+        secure
+            .load(storage_keys::ENCRYPTION_CAPABLE_PEERS, &id("bob"))
+            .unwrap()
+            .is_some(),
+        "a flood must not displace the record of a peer we already authenticated"
+    );
+}
+
+/// The capability restore walk stops at the category bound, and ignores the
+/// tail rather than pruning it.
+///
+/// The other half of the bound above, and the reason that one matters: the walk
+/// reads only a bounded prefix of what `list_keys` returns, so a category that
+/// outgrew the prefix would silently strand real records outside it. Both
+/// halves have to hold — cap the writes *and* keep the read window enforced —
+/// or a peer we authenticated comes back unknown and the plaintext gate reopens.
+///
+/// The tail is deliberately ignored, never pruned. The two cache restores
+/// delete their overflow because a dropped key package costs only a
+/// re-exchange; one of these records is the sole durable evidence that a peer
+/// runs MLS, so stranding it is the strictly safer failure.
+#[test]
+fn capability_restore_stops_at_the_category_bound_without_pruning() {
+    use super::storage::MAX_RESTORE_KEYS_PER_CATEGORY;
+
+    let padding = 4 * MAX_RESTORE_KEYS_PER_CATEGORY;
+    let counting = Arc::new(CountingSecureStorage {
+        inner: crate::mls::InMemoryStorage::new(),
+        padding,
+        loads: Mutex::new(0),
+    });
+
+    // One real record, so the walk has something legitimate to recover too.
+    let entry = serde_json::to_vec(&EncryptionCapableEntry { last_seen_ms: 1 }).unwrap();
+    counting
+        .inner
+        .store(storage_keys::ENCRYPTION_CAPABLE_PEERS, &id("bob"), &entry)
+        .unwrap();
+
+    let secure_handle: Arc<dyn MlsStorage> = counting.clone();
+    let state_backend: Arc<dyn MlsStorage> = Arc::new(InMemoryStorage::new());
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(TestProtocolStateStorage {
+        storage: state_backend,
+    });
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    let loads = *counting.loads.lock().unwrap();
+    assert!(
+        loads <= MAX_RESTORE_KEYS_PER_CATEGORY,
+        "capability restore loaded {loads} entries, over the {MAX_RESTORE_KEYS_PER_CATEGORY} bound"
+    );
+    assert!(
+        loads > 0,
+        "capability restore must still walk the bounded prefix"
+    );
+
+    // Nothing was deleted: an over-cap record is stranded, never dropped.
+    assert!(
+        counting
+            .inner
+            .load(storage_keys::ENCRYPTION_CAPABLE_PEERS, &id("bob"))
+            .unwrap()
+            .is_some(),
+        "a bounded walk must not prune the store it could not finish reading"
+    );
+}
+
+/// Control-gate rejections warn once per peer per code, not once per frame.
+///
+/// Every code the gate emits is reachable from an unauthenticated frame naming
+/// an attacker-chosen sender — that is what a gate rejection is — so emitting
+/// per frame lets an off-path injector bury the one code with no benign reading
+/// (`SENDER_ADDRESS_MISMATCH`) under noise.
+#[test]
+fn control_gate_warnings_are_throttled_per_peer_per_code() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let handle = Arc::clone(&events);
+    protocol.on_event(move |e| handle.lock().unwrap().push(e));
+
+    let count = |code: SecurityWarningCode| {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(
+                |e| matches!(e, Event::SecurityWarning { reason_code, .. } if *reason_code == code),
+            )
+            .count()
+    };
+
+    let unsigned_from = |peer: &str| {
+        unsigned_frame(
+            peer,
+            "user123",
+            format!("{}{{\"data\":\"x\"}}", internal_prefixes::CONN_REQUEST),
+        )
+    };
+
+    // Same peer, same refusal, many frames — one event.
+    for _ in 0..5 {
+        protocol.security_gate_control_message(&unsigned_from(&id("alice")), None);
+    }
+    assert_eq!(
+        count(SecurityWarningCode::UnsignedControlRejected),
+        1,
+        "a repeated refusal from one peer must not re-warn per frame"
+    );
+
+    // A different peer is still reported: the throttle is per peer, so a flood
+    // from one sender cannot mask a genuine refusal from another.
+    protocol.security_gate_control_message(&unsigned_from(&id("carol")), None);
+    assert_eq!(count(SecurityWarningCode::UnsignedControlRejected), 2);
+
+    // A different code for an already-warned peer is still reported: alice has
+    // used up her unsigned slot, but an impersonation attempt is a distinct
+    // fact and must surface.
+    let mut forged = unsigned_from(&id("alice"));
+    crate::test_identity::sign_as("mallory", &mut forged);
+    protocol.security_gate_control_message(&forged, None);
+    assert_eq!(
+        count(SecurityWarningCode::SenderAddressMismatch),
+        1,
+        "suppression must be per code, not per peer"
+    );
+
+    // The map is keyed by wire-claimed ids, so it stays bounded.
+    for i in 0..(MAX_CONTROL_GATE_WARNED_PEERS + 50) {
+        protocol.security_gate_control_message(&unsigned_from(&format!("flood-{i}")), None);
+    }
+    assert!(
+        protocol.control_gate_warned.len() <= MAX_CONTROL_GATE_WARNED_PEERS,
+        "the throttle map must stay bounded, got {}",
+        protocol.control_gate_warned.len()
+    );
+}
