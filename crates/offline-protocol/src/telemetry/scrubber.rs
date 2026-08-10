@@ -83,9 +83,9 @@ impl Scrubber {
     /// supplied per-instance secret when the config does not carry one of
     /// its own.
     ///
-    /// Scaffolding for the emission-wiring follow-up; the protocol engine
-    /// does not yet invoke this path.
-    #[allow(dead_code)]
+    /// This is the production construction path: `TelemetryContext::new`
+    /// calls it once when an app installs a sink, and the resulting scrubber
+    /// runs on every event `SharedState::emit_event` fans out.
     pub fn from_config(config: &TelemetryConfig, fallback_secret: [u8; 16]) -> Self {
         Self {
             enabled: config.scrub_ids(),
