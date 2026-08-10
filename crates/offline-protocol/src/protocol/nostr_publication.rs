@@ -427,10 +427,12 @@ impl OfflineProtocol {
     /// never went past the receive loop's dedup and block checks.
     ///
     /// What survives the gate is *not* trusted here either. It goes through
-    /// `process_internal_message_via`, so the Ed25519 control gate and TOFU
-    /// decide whose key package it is: a record planted at the queried peer's
-    /// tag by somebody else registers under **that** signer's identity, never
-    /// under the peer we asked about.
+    /// `process_internal_message_via`, so the Ed25519 signature and the
+    /// sender-address derivation decide whose key package it is: a record
+    /// planted at the queried peer's tag by somebody else is signed by *that*
+    /// party's key, which derives to *that* party's address, so it registers
+    /// under their identity — never under the peer we asked about. A record
+    /// signed by nobody is refused outright.
     pub fn handle_resolved_key_package(&mut self, data: &[u8]) -> Result<()> {
         let transport = self
             .transport_manager

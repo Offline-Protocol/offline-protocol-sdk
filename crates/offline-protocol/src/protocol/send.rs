@@ -3616,8 +3616,8 @@ impl OfflineProtocol {
     /// opaque `SendMessage` frames so the Ed25519 control signature in the
     /// message metadata survives to the receiver's security gate. The former
     /// relay-native translation (`SendConnectionRequest` & co.) rebuilt them
-    /// unsigned on the receiving bridge, which the gate rejects as a
-    /// signature downgrade once the sender's key is TOFU-pinned. Verbatim
+    /// unsigned on the receiving bridge, which the gate now rejects
+    /// unconditionally — control traffic must be signed. Verbatim
     /// also gains the relay's push-notification fallback for offline
     /// recipients, which the relay-native connection frames never had. The
     /// cost is that pre-SDK relay clients (which only speak the relay-native

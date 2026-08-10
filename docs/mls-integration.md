@@ -529,7 +529,8 @@ content**, which an earlier version of this document claimed outright and should
 not have. Substituting a cached record in `peer_key_packages` was enough to make
 this node build a session around an attacker's leaf — MLS keys never left the
 credential store, but they did not need to. That category is now sealed *and*
-every use of a key package is checked against the peer's pinned signature key.
+every use of a key package is checked by re-deriving the address from its leaf
+signature key.
 
 On stock iOS and Android the app container is writable only by the app itself,
 so this matters on a rooted or jailbroken device, or wherever else your threat

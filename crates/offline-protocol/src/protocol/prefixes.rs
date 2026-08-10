@@ -134,7 +134,7 @@ define_internal_prefixes! {
 /// - `GROUP_MSG` (`__GROUP_MSG__`): the relay's group fan-out. The relay
 ///   re-emits it per member from only `{group_id, sender, content}`, so the
 ///   bridge-rebuilt frame is structurally unsigned — Ed25519-gating it
-///   silently dropped fan-out from every TOFU-pinned sender. Authentication
+///   silently dropped fan-out from every sender. Authentication
 ///   happens after the gate instead: `handle_relay_group_message_with_mls`
 ///   MLS-decrypts and binds the wire-claimed sender to the MLS-authenticated
 ///   sender (`SenderIdentityMismatch` → rejected), and plaintext naming an
@@ -145,7 +145,7 @@ define_internal_prefixes! {
 ///
 /// **Maintenance note:** Only add prefixes here if their handler enforces
 /// MLS authentication. All other internal prefixes are control-plane and
-/// require signature verification + TOFU enforcement.
+/// require signature verification + sender-address derivation.
 pub(crate) const DATA_PLANE_PREFIXES: &[&str] =
     &[internal_prefixes::ENCRYPTED, internal_prefixes::GROUP_MSG];
 

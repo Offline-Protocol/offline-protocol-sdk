@@ -76,6 +76,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   unsigned. The actor still rides the payload, which is what the handlers read;
   `__GROUP_MSG__` keeps its attribution (a data-plane prefix is never gated) and
   remains the reachability signal for a relayed sender.
+- **BREAKING (behaviour): relay-native member-removal reconciliation is inert.**
+  `__GROUP_MEMBER_REMOVED__` is authorized off the *wire* `sender`, which must
+  now be an admin; the relay's own answer is injected unattributed, so its
+  placeholder sender never is. The frame is dropped and **no
+  `group_member_removed` event fires** for it. Previously the bridges passed the
+  relay-reported `removed_by` as the sender, so the reconciliation could take
+  effect for an admin nobody had pinned yet. The working path is unchanged and
+  is the one the SDK itself uses: the removing admin's own signed direct
+  notification (`removeMember` → a signed `__GROUP_MEMBER_REMOVED__` to the
+  removed member). Apps that relied on relay-orchestrated removal to update a
+  roster must either drive removals through the SDK or await the follow-up that
+  moves relay answers onto dedicated FFI entry points. `__GROUP_MEMBER_ADDED__`
+  is unaffected — its handler reads the payload and runs no sender check.
 - `requireTransportIdentity` keeps its `false` default and no longer gates the
   signature requirement, which is now unconditional. Its one remaining effect is
   to reject frames arriving with no transport peer identity — which on a

@@ -663,10 +663,10 @@ impl NostrTransport {
     /// there. The caller drops those and keeps going.
     ///
     /// What comes back is *not* trusted here. It is fed through the same
-    /// receive path as any inbound frame, so the Ed25519 control gate and TOFU
-    /// decide whose key package it is — and a record placed at this peer's tag
-    /// by somebody else therefore registers under *that* signer's identity, not
-    /// under the peer we asked about.
+    /// receive path as any inbound frame, so the Ed25519 control gate and the
+    /// sender-address derivation decide whose key package it is — and a record
+    /// placed at this peer's tag by somebody else therefore registers under
+    /// *that* signer's identity, not under the peer we asked about.
     ///
     /// # What squatting a tag does buy
     ///

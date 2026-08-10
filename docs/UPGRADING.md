@@ -105,7 +105,7 @@ storage contracts with two different lifecycles.
 
 | | `MlsStorageProvider` | `ProtocolStateStorageProvider` |
 |---|---|---|
-| Holds | MLS identity, sessions, groups, TOFU pins, install secrets, the record-sealing key | Outbox, pending messages, session/Welcome lifecycles, peer snapshots, media descriptors, block list, Lamport clock |
+| Holds | MLS identity, sessions, groups, peer capability records, install secrets, the record-sealing key | Outbox, pending messages, session/Welcome lifecycles, peer snapshots, media descriptors, block list, Lamport clock |
 | Backing store | Platform credential store (Keychain, Keystore-backed encrypted prefs, Secret Service) | **App container** — must be removed when the app is deleted |
 | Value type | `sequence<u8>` (unchanged) | `bytes` (see [§2](#2-protocol-state-values-are-bytes-not-an-element-wise-sequence)) |
 
@@ -335,8 +335,8 @@ Protocol-state key types (the closed set the sweep moves out of secure storage):
 | `lamport_clock` | `current` | ❌ |
 | `protocol_state_adoption` | `v1` (sweep marker) | ❌ |
 
-Stays in secure storage: all MLS/OpenMLS material, `tofu_keys`,
-`scrub_secret`, `nostr_signing_secret`, and `protocol_state_record_key`.
+Stays in secure storage: all MLS/OpenMLS material,
+`encryption_capable_peers`, `scrub_secret`, `nostr_signing_secret`, and `protocol_state_record_key`.
 
 ### 1.8 Confidentiality: what sealing does and does not cover
 
@@ -443,9 +443,10 @@ What changes in practice:
   open. The trade-off is that an injected frame naming a plaintext-only peer can
   mark that peer capable and suppress their cleartext for the rest of the run.
   It does not persist — a restart clears it, since restore seeds only from
-  sessions and verified-signature records. **If a
-  legacy peer goes unreadable with `PLAINTEXT_RECEIVE_REJECTED` and you hold no
-  session or pin for them, that is the case you are looking at.** The set is
+  sessions and durable capability records. **If a legacy peer goes unreadable
+  with `PLAINTEXT_RECEIVE_REJECTED` and you hold no session for them and have
+  verified no signed control frame from them, that is the case you are looking
+  at.** The set is
   also capped; past the cap new peers fall back to the old session-state check
   rather than displacing anyone already in it.
 
@@ -826,7 +827,7 @@ empty block list. That is reported, never silent:
 | Python | `SecureStorage(...).legacy_adoption`, plus a logged warning |
 
 **What to do:** log and alert on those diagnostics. They mean a user lost their
-sessions, groups, TOFU pins, queued messages, and block list. If your app
+sessions, groups, peer capability records, queued messages, and block list. If your app
 supports multiple accounts on one device, decide which one should inherit — the
 SDK's answer is "whichever launches first", which may not be yours.
 
@@ -1202,7 +1203,7 @@ Ed25519 signature *and* the key that produced it re-derives to the address in
 point, where whoever claimed a name first became its owner — so impersonation
 goes from winning a race to finding a 160-bit second preimage.
 
-**Two behaviour changes to plan for:**
+**Three behaviour changes to plan for:**
 
 1. **Unsigned control frames are refused, always.** Previously they were
    accepted from any peer without a pin, and refused only from peers with one
@@ -1221,6 +1222,23 @@ goes from winning a race to finding a 160-bit second preimage.
    address**, arriving as a new contact. If you see this code, the frame was
    signed by someone who is not who they say they are. Surface it as such; do
    not offer a "trust anyway" affordance.
+3. **Relay-native member-removal reconciliation is now inert.** A
+   `__GROUP_MEMBER_REMOVED__` frame is authorized off its *wire* `sender`, which
+   must be a group admin. The relay's own answer is injected unattributed (that
+   is what the exemption above requires), so its placeholder sender can never be
+   an admin: the frame is dropped and **no `group_member_removed` event fires**.
+   Before this release the bridges passed the relay-reported `removed_by` as the
+   sender, so the reconciliation could take effect for an admin no pin had been
+   established for yet.
+
+   The path the SDK itself uses is unchanged and still works: the removing admin
+   sends a signed `__GROUP_MEMBER_REMOVED__` directly to the removed member
+   (`removeMember`). **If your app removes members by calling the relay
+   directly**, the other members will no longer see the roster update — drive
+   removals through the SDK instead, or wait for the follow-up that moves relay
+   answers onto dedicated FFI entry points (the same work that closes the
+   exemption's residual). `__GROUP_MEMBER_ADDED__` is unaffected: its handler
+   reads the payload and runs no sender check.
 
 `requireTransportIdentity` keeps its `false` default and no longer gates the
 signature requirement. Its one remaining effect is to reject control frames that

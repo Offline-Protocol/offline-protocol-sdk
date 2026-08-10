@@ -231,7 +231,9 @@ impl OfflineProtocol {
                             }
                             InternalMessageResult::SecurityRejected => {
                                 // Security gate rejected this message (spoofed sender,
-                                // bad signature, TOFU violation). Do NOT send a delivery
+                                // bad signature, unsigned control traffic, or a signing
+                                // key that does not derive to the claimed sender
+                                // address). Do NOT send a delivery
                                 // ACK — acknowledging would confirm to the attacker that
                                 // the target peer is online and processing messages.
                                 // Forget the id too, or an exact replay would hit the

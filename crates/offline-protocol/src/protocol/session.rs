@@ -596,7 +596,8 @@ impl OfflineProtocol {
     /// **SECURITY — this trigger is unauthenticated, and cannot be made
     /// otherwise.** `peer_id` is the *wire-claimed* sender. Three facts compose:
     /// `__MLS_ENC__` is a data-plane prefix, deliberately exempt from the
-    /// Ed25519 + TOFU control-message gate (see `DATA_PLANE_PREFIXES`); OpenMLS
+    /// Ed25519 + derivation control-message gate (see `DATA_PLANE_PREFIXES`);
+    /// OpenMLS
     /// validates the framing header — group id, then epoch — *before* any AEAD,
     /// sender-data decryption or signature check, so `WrongEpoch` /
     /// `NoPastEpochData` is produced with the sender still entirely unverified;

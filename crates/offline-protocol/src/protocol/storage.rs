@@ -305,10 +305,12 @@ pub(crate) enum RestorableRecord<T> {
 /// Categories whose live insert path is capped get a tighter bound derived from
 /// that cap instead (see [`OUTBOX_RESTORE_KEY_CAP`]).
 ///
-/// `restore_tofu_keys` uses this bound too, even though TOFU pins never left
-/// the credential store: the argument for bounding *work* on the boot path does
-/// not depend on which store is easier to write to. It is the one category that
-/// bounds its walk without ever pruning the tail — see the rationale there.
+/// `restore_encryption_capable_peers` uses this bound too, even though those
+/// records never leave the credential store: the argument for bounding *work* on
+/// the boot path does not depend on which store is easier to write to. It is the
+/// one category that bounds its walk without ever pruning the tail — dropping a
+/// record there re-opens the plaintext gate for that peer, so stranding the
+/// overflow is the safer failure. See the rationale there.
 pub(super) const MAX_RESTORE_KEYS_PER_CATEGORY: usize = 4 * MAX_PENDING_MESSAGES_GLOBAL;
 
 /// Restore-walk bound for the outbox.

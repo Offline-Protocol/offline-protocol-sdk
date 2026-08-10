@@ -510,12 +510,11 @@ pub(crate) struct KeyPackagePayload {
     /// passively, for as long as the value stands.
     ///
     /// `build_canonical_payload` covers the whole `__MLS_KEY_PKG__` body under
-    /// the sender's Ed25519 signature and TOFU pin — but the security gate
-    /// deliberately accepts an *unsigned* control message from a peer it has
-    /// never pinned (`security_gate_control_message`, the TOFU first-contact
-    /// window), so arriving in a key package is not by itself evidence of who
-    /// sent it. `handle_key_package_message` therefore consumes this field only
-    /// when the gate reports the frame was actually signed, which costs nothing:
+    /// the sender's Ed25519 signature, which the gate now verifies against the
+    /// key their address derives from — so on this prefix an unsigned frame no
+    /// longer reaches dispatch at all.
+    /// `handle_key_package_message` still consumes this field only when the gate
+    /// reports the frame was actually signed, which costs nothing:
     /// a key package exists only once MLS is initialized, and `send_key_package_to`
     /// signs unconditionally in that state, so every genuine package carrying
     /// this field is signed.
@@ -1028,17 +1027,18 @@ impl PeerCapabilities {
 pub(crate) enum ControlGateOutcome {
     /// The message may proceed to dispatch.
     ///
-    /// `signed` is `true` **only** when an Ed25519 signature was present and
-    /// verified against the sender's TOFU-pinned (or newly pinned) key. It is
-    /// deliberately `false` for both of the other ways a message reaches
-    /// dispatch — an unsigned legacy frame from a not-yet-pinned peer, and a
-    /// prefix the gate does not cover at all — so a handler that keys on it
-    /// fails closed without having to know which case it is in.
+    /// `signed` is `true` **only** when an Ed25519 signature was present,
+    /// verified, and produced by the key the sender's address derives from. It
+    /// is deliberately `false` for both of the other ways a message reaches
+    /// dispatch — a relay-originated answer, which no peer signs
+    /// (`RELAY_ANSWER_PREFIXES`), and a prefix the gate does not cover at all —
+    /// so a handler that keys on it fails closed without having to know which
+    /// case it is in.
     ///
-    /// Note the bit means "this frame carried a valid signature", not "this
-    /// peer is pinned": a valid signature that could not be pinned because the
-    /// TOFU store was full still counts, because the authenticity it proves is
-    /// exactly the same.
+    /// Since unsigned control traffic is now refused outright, `false` no
+    /// longer reaches any *gated* handler; the bit survives because those two
+    /// ungated paths still produce it, and because a handler that treats a
+    /// payload field as authenticated should say so at the point it does.
     Proceed { signed: bool },
     /// The gate rejected the message; the caller must return this result
     /// without dispatching.
@@ -1051,7 +1051,8 @@ pub(crate) enum InternalMessageResult {
     /// Message was consumed internally (don't surface to app).
     Consumed,
     /// Message was rejected by the security gate (spoofed sender, bad
-    /// signature, TOFU violation, etc.). Like `Consumed`, the message is not
+    /// signature, unsigned control traffic, or a signing key that does not
+    /// derive to the claimed sender address). Like `Consumed`, the message is not
     /// surfaced to the app — but unlike `Consumed`, a delivery ACK must NOT
     /// be sent back, to avoid confirming to the attacker that the target is
     /// online and processing messages.

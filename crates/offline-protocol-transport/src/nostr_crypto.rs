@@ -153,7 +153,7 @@ impl NostrKeypair {
     /// It must therefore **never** be used to authenticate anything: not
     /// NIP-42 AUTH, not inbound sender attribution, not any decision that
     /// treats "this decrypted" as evidence of who sent it. Sender authenticity
-    /// on this transport comes from the protocol-layer Ed25519/TOFU gate and
+    /// on this transport comes from the protocol-layer Ed25519 + derivation gate and
     /// MLS, both of which sit above this function and are unaffected by it.
     /// [`Self::from_install_secret`] is the only unforgeable identity here.
     pub fn derivable_for_device_id(device_id: &str) -> Result<Self> {

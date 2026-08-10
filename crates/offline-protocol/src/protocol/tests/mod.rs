@@ -904,7 +904,7 @@ fn test_encrypted_receive_drops_relay_injected_reply_context() {
         }
     });
 
-    // Establish the MLS session directly (shortcut, same as the TOFU test).
+    // Establish the MLS session directly (shortcut).
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.get_or_create_key_package().unwrap()
@@ -2532,9 +2532,10 @@ fn peer_nostr_pubkey_is_case_normalized() {
 
 #[test]
 fn unsigned_key_package_cannot_set_or_clear_the_sealing_key() {
-    // The security gate accepts an *unsigned* control message from a peer it
-    // has never pinned (the TOFU first-contact window), so arriving in a key
-    // package is not on its own evidence of who sent it. That is tolerable for
+    // Arriving in a key package is not on its own evidence of who sent it.
+    // The gate refuses unsigned control traffic, so this is defence in depth
+    // rather than the only check — but it is the difference between trusting
+    // the frame and trusting the field. That is tolerable for
     // the capability lists — a wrong value costs a fallback — but not for
     // `nostr_pubkey`: it is a public key we then seal envelope metadata *to*,
     // so honouring an unsigned one would hand that metadata to whoever injected
@@ -3163,7 +3164,7 @@ fn attested_rich_does_not_clobber_a_record_it_could_not_read() {
 #[test]
 fn attested_rich_flood_eviction_clears_at_cap() {
     // Bounded like the direct sets: keyed by ids from (signed but
-    // TOFU-trusted) group control frames, so reset at capacity rather than
+    // untrusted) group control frames, so reset at capacity rather than
     // growing without bound. Forgetting costs one re-attestation/backfill.
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = protocol_with_mls_storage(storage);
@@ -18895,7 +18896,7 @@ fn test_seen_discovery_queries_cleanup() {
 }
 
 // ========================================================================
-// SECURITY: prefix injection, transport identity, TOFU key pinning
+// SECURITY: prefix injection, transport identity, sender-address derivation
 // ========================================================================
 
 #[test]
@@ -19255,7 +19256,7 @@ fn test_internal_prefixes_completeness() {
 
     // Only DATA_PLANE_PREFIXES entries should be excluded from security
     // gating. Any internal prefix NOT in DATA_PLANE_PREFIXES is
-    // automatically security-gated (signature + TOFU). If this assertion
+    // automatically security-gated (signature + derivation). If this assertion
     // fails, a new prefix was added to INTERNAL_PREFIXES but also needs to
     // be evaluated: should it be in DATA_PLANE_PREFIXES (MLS-authenticated)
     // or remain security-gated (control-plane, Ed25519-signed)?
@@ -19302,7 +19303,7 @@ fn test_sign_and_verify_control_message_roundtrip() {
         "Signed message must contain public key metadata"
     );
 
-    // Verify it — should succeed and TOFU-pin alice's key
+    // Verify it — should succeed and record alice as encryption-capable
     let result = protocol.verify_control_message(&msg);
     assert!(
         matches!(result, Ok(true)),
@@ -19310,7 +19311,7 @@ fn test_sign_and_verify_control_message_roundtrip() {
         result
     );
 
-    // Verify again — TOFU-pinned key should match
+    // Verify again — the same key still derives to the same address
     let result2 = protocol.verify_control_message(&msg);
     assert!(
         matches!(result2, Ok(true)),
@@ -19445,7 +19446,7 @@ fn test_verify_control_message_signature_without_public_key() {
 }
 
 // ========================================================================
-// INTEGRATION: full transport → receive → verify → TOFU round-trip
+// INTEGRATION: full transport → receive → verify → derivation round-trip
 // ========================================================================
 
 #[test]
@@ -20000,7 +20001,7 @@ fn test_welcome_with_mismatched_inviter_id_rejected() {
 }
 
 // ========================================================================
-// TOFU PERSISTENCE
+// DURABLE ENCRYPTION-CAPABILITY RECORDS
 // ========================================================================
 
 #[test]
@@ -20126,14 +20127,14 @@ fn test_relayed_signed_control_passes_when_identity_required() {
 }
 
 /// End-to-end regression for the internet relay path: a SIGNED __CONN_REQ__
-/// from a TOFU-pinned sender, in exactly the shape the bridge delivers relay
+/// from a known sender, in exactly the shape the bridge delivers relay
 /// ingest (hop 0, transport_peer_id stamped with the relay-authenticated
 /// uploader), must pass the gate and emit ConnectionRequestReceived. This is
 /// the wire shape connection requests use now that they ship verbatim — the
 /// former relay-native translation arrived unsigned and was dropped as a
 /// signature downgrade precisely for pinned senders.
 #[test]
-fn test_signed_conn_request_from_pinned_sender_with_internet_identity() {
+fn test_signed_conn_request_from_known_sender_with_internet_identity() {
     let mut protocol = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
     protocol.initialize_mls_for_test(storage).unwrap();
@@ -28356,7 +28357,7 @@ fn test_internet_control_op_classification() {
     // Connection ops ship verbatim so the Ed25519 control signature in the
     // message metadata survives to the receiver's security gate — a
     // relay-native replacement would arrive unsigned and be rejected as a
-    // signature downgrade once the sender's key is TOFU-pinned.
+    // unsigned control frame, which the gate refuses unconditionally.
     for content in [
         "__CONN_REQ__{\"sender_name\":\"Alice\"}",
         "__CONN_ACC__{\"accepted_by_name\":\"Alice\"}",
@@ -31239,15 +31240,17 @@ fn test_encryption_capability_set_is_bounded_without_evicting() {
 }
 
 // ============================================================================
-// KEY PACKAGE / TOFU PIN BINDING
+// KEY PACKAGE ADDRESS BINDING
 // ============================================================================
 
 #[test]
-fn test_ffi_key_package_import_is_checked_against_the_pin() {
-    // `mls_import_key_package` used to reach straight for the MlsManager, which
-    // cannot see the TOFU store — so an app (or anything holding the FFI
+fn test_ffi_key_package_import_is_checked_against_the_derivation() {
+    // `mls_import_key_package` used to reach straight for the MlsManager and
+    // pass `KeyPackageTrust::FirstUse` — so an app (or anything holding the FFI
     // handle) could import a key package under any peer id with no correlation
-    // to that peer's pinned key. It now routes through the protocol object.
+    // to that peer. The package now proves its own address inside
+    // `import_key_package`; this still routes through the protocol object so
+    // the import also records the peer as encryption-capable.
     let secure = Arc::new(InMemoryStorage::new());
     let state = Arc::new(InMemoryStorage::new());
     let (mut alice, _handle) = mixed_mode_node("alice", &secure, &state);

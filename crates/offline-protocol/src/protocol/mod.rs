@@ -223,10 +223,13 @@ pub struct OfflineProtocol {
     /// reach.
     ///
     /// Both sources here are credential-store-resident: the MLS session list
-    /// and the TOFU pin store. Neither is sufficient alone. A session can exist
-    /// with no pin (`security_gate_control_message` accepts an *unsigned*
-    /// control message from a not-yet-pinned peer), and a pin can outlive its
-    /// session. The union is what actually tracks "this peer speaks MLS".
+    /// and the durable capability records
+    /// ([`storage_keys::ENCRYPTION_CAPABLE_PEERS`]). Neither is sufficient
+    /// alone. A session can exist for a peer that has never signed a control
+    /// frame we verified (it is established from key packages, and the Welcome
+    /// path marks capability without a signature), and a record can outlive the
+    /// session it was learned alongside. The union is what actually tracks
+    /// "this peer speaks MLS".
     ///
     /// # Monotone within a run — deliberately, and this is load-bearing
     ///
@@ -2041,14 +2044,16 @@ impl OfflineProtocol {
         Ok(welcome)
     }
 
-    /// Imports a contact's key package, applying this node's TOFU verdict.
+    /// Imports a contact's key package and records them encryption-capable.
     ///
     /// The entry point for bindings that expose low-level MLS APIs. It exists
-    /// because the FFI wrapper used to reach straight for the `MlsManager`,
-    /// which cannot see the TOFU store — so an app could import a key package
-    /// under any peer id with no correlation to the pinned key for that peer,
-    /// bypassing the check `establish_secure_session` performs. Routing through
-    /// the protocol object closes that, and leaves the FFI signature untouched.
+    /// because the FFI wrapper used to reach straight for the `MlsManager` and
+    /// pass `KeyPackageTrust::FirstUse` — so an app could import a key package
+    /// under any peer id with no correlation to that peer, bypassing the check
+    /// `establish_secure_session` performs. The identity claim no longer needs
+    /// the detour: `import_key_package` re-derives the address from the leaf
+    /// signature key and refuses a mismatch on its own. The routing stays
+    /// because the capability record lives here, not on the manager.
     pub fn manual_mls_import_key_package(
         &mut self,
         peer_id: &str,
