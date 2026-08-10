@@ -1005,10 +1005,25 @@ export class OfflineProtocol {
         await this.enableTransport("nostr", nostrConfig);
         console.log("[OfflineProtocol] Nostr transport auto-enabled");
       } catch (error) {
-        console.warn(
-          "[OfflineProtocol] Failed to auto-enable nostr transport:",
+        // error, not warn: Nostr was asked for, is not running, and nothing
+        // retries this — the app is offline over Nostr for the whole session
+        // with no other signal that it happened.
+        console.error(
+          "[OfflineProtocol] Nostr transport is configured but was NOT enabled:",
           error
         );
+        if (!encryptionEnabled) {
+          // Almost certainly the cause, and the rejection cannot say so: it
+          // reports the missing identity, not the config line that removed it.
+          // Nostr's routing tag is derived from the identity MLS
+          // initialization creates, and `encryption.enabled: false` skips that
+          // initialization entirely.
+          console.error(
+            "[OfflineProtocol] Nostr requires the protocol identity created by MLS " +
+              "initialization, which `encryption.enabled: false` skips. Set " +
+              "`encryption.enabled: true` to use Nostr."
+          );
+        }
       }
     }
 

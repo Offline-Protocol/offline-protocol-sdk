@@ -201,6 +201,23 @@ public class NostrManager: NSObject, TransportManager {
             )
         }
 
+        // An identity is necessary but not sufficient. The core registers the
+        // Nostr transport during the identity rebuild and only when Nostr was
+        // enabled in the config `create()` received, so `enableTransport("nostr")`
+        // against a config that had it off arrives here with an address and no
+        // transport behind it.
+        //
+        // Probed with the subscription filter because that is the exact call the
+        // socket-open callback makes, and a nil answer *there* is not a safe
+        // failure: it is logged and returned from with no retry, so the socket
+        // stays connected to a relay it never subscribes on for the rest of its
+        // life. Refusing before any socket exists is the recoverable shape.
+        guard protocolInstance.nostrGetSubscriptionFilter(subscriptionId: "startup-probe") != nil else {
+            throw TransportError.notAvailable(
+                "No Nostr transport is registered. Enable Nostr in the protocol configuration before starting it."
+            )
+        }
+
         emitDiagnostic("info", "Starting Nostr transport", context: [
             "address": address,
             "relayCount": relayUrls.count,
