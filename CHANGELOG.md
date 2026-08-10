@@ -103,6 +103,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   packages are checked by re-deriving the address from the leaf signature key,
   which — unlike the pin it replaces — also runs on first contact and on every
   read of a cached package.
+- **BREAKING**: the Nostr routing tag is derived from the address rather than
+  the app-chosen id, and the Nostr transport now **requires** the protocol
+  identity. It is installed by the identity rebuild rather than by the
+  constructor, so `enableTransport('nostr')` before `initializeMls` — including
+  any config with `encryption.enabled: false` — is refused instead of falling
+  back. See Security below for why the fallback had to go rather than be fixed.
+- **BREAKING**: the publicly-computable key that seals published key-package
+  records and bootstrap frames is no longer the routing tag. Both are still
+  derived from the address, but through separate domain-separated derivations,
+  so no routing tag has a private half anyone can compute. The old shape was
+  not exploitable — nothing signs with a tag, and inbound is never authenticated
+  by pubkey — but it is a trap for anything that later adds NIP-42 AUTH or
+  pubkey-based filtering. `derivable_for_device_id` is replaced by
+  `record_seal_keypair_for_address`, and `routing_tag_for_device_id` by
+  `routing_tag_for_address`.
+- **BREAKING (behaviour): cold contact by username is gone**, because a
+  username no longer resolves to anything. Cold contact by *address* works
+  exactly as before — a peer reachable from an invite or QR code still resolves
+  over published key packages with no prior exchange. Published records stay
+  sealed, though for a narrower reason than the one documented: the
+  username-directory leak they were built to prevent expired when credentials
+  became addresses, and what remains is that a cleartext record would publish
+  its own address at a tag that is otherwise one-way.
+
+### Security
+
+- **A username-derived routing tag could reach public relays, and did.** The
+  tag is `SHA-256(id)` and both bridges send the subscription filter carrying
+  it to every relay the moment a socket opens, unconditionally. Since the
+  identity rebuild the id is the derived address — but the rebuild is
+  skippable: `encryption.enabled: false` skips `initializeMls` outright, and a
+  thrown one is caught and warned past by the React Native layer, after which a
+  retry is refused for the life of the instance. Either way the transport built
+  from the app's **profile** was still installed when the relays connected, so
+  a label anyone could recompute from a username was published to third-party
+  archival relays with nothing to retract it and no error anywhere. The bundled
+  `nostr-example` app shipped exactly that configuration against three public
+  relays. Nostr now refuses to run without an identity, and the transport
+  refuses an id that is not a derived address rather than hashing it into a
+  tag.
 
 ### Added
 

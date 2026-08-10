@@ -162,7 +162,6 @@ impl NostrKeypair {
     pub fn public_key_hex(&self) -> &str {
         &self.public_key_hex
     }
-
 }
 
 /// Reconstructs the keypair that seals content addressed to `address`.
@@ -992,7 +991,9 @@ mod tests {
         // Separate derivations, so there is no such key.
         for id in ["alice", "bob", "device1", "a-very-long-user-id-with-dashes"] {
             assert_ne!(
-                record_seal_keypair_for_address(id).unwrap().public_key_hex(),
+                record_seal_keypair_for_address(id)
+                    .unwrap()
+                    .public_key_hex(),
                 routing_tag_for_address(id).unwrap(),
                 "the record-seal key must not be the routing tag for {id}"
             );
