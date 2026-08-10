@@ -313,6 +313,21 @@ pub struct OfflineProtocol {
     /// limit.
     pub(crate) plaintext_receive_warned: std::collections::HashSet<String>,
 
+    /// Peers whose durable `encryption_capable_peers` record is known to be on
+    /// disk — either restored from it at boot or written successfully this run.
+    ///
+    /// Purely a write-elision cache for
+    /// [`OfflineProtocol::record_encryption_capable`]: a verified control frame
+    /// arrives on chatty prefixes (`__TYPING__`, `__PRESENCE__`), and the record
+    /// it would rewrite carries no field any decision reads. Tracking *landed
+    /// writes* rather than set membership is what keeps a best-effort storage
+    /// failure retryable on the peer's next frame instead of stranded for the
+    /// process.
+    ///
+    /// A subset of [`Self::encryption_capable_peers`] by construction, so
+    /// `MAX_ENCRYPTION_CAPABLE_PEERS` bounds it too.
+    pub(crate) encryption_capable_persisted: HashSet<String>,
+
     /// Which control-gate rejection codes have already been reported per peer,
     /// as a bitmask (see `OfflineProtocol::control_gate_warning_bit`), so a
     /// peer whose control traffic keeps being refused warns once per code
@@ -689,6 +704,7 @@ impl OfflineProtocol {
             peer_rich_attested: std::collections::HashSet::new(),
             plaintext_send_warned: std::collections::HashSet::new(),
             plaintext_receive_warned: std::collections::HashSet::new(),
+            encryption_capable_persisted: HashSet::new(),
             control_gate_warned: HashMap::new(),
             pending_queue: PendingDecryptionQueue::default(),
             secure_storage: None,
@@ -1136,6 +1152,20 @@ impl OfflineProtocol {
     /// [`Self::encryption_capable_peers`] for why this is not a storage read.
     pub(crate) fn is_encryption_capable(&self, peer_id: &str) -> bool {
         self.encryption_capable_peers.contains(peer_id)
+    }
+
+    /// Drops `peer_id` from the in-memory capability set **only**, leaving its
+    /// durable record and write-elision cache entry in place.
+    ///
+    /// Test-only, and deliberately not a general "forget" — the set has no
+    /// removal path by design (see [`Self::encryption_capable_peers`]). It
+    /// reproduces one specific state that production does reach: the rollback in
+    /// `initialize_mls` restores the pre-restore snapshot of the set while
+    /// [`Self::encryption_capable_persisted`] keeps what the restore walk read,
+    /// so the two disagree until the peer's next verified frame re-marks them.
+    #[cfg(test)]
+    pub(crate) fn forget_encryption_capable_for_test(&mut self, peer_id: &str) {
+        self.encryption_capable_peers.remove(peer_id);
     }
 
     /// Returns whether auto-encryption should be applied.

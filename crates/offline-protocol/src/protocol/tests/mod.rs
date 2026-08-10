@@ -32578,6 +32578,42 @@ fn durable_capability_records_are_bounded_by_the_capability_cap() {
     );
 }
 
+/// `record_encryption_capable` elides the repeat *write*, never the *mark*.
+///
+/// The durable record carries no field any decision reads back, so rewriting it
+/// per verified frame is pure cost — and the gated prefixes include the chatty
+/// ones, so on mobile that is a Keychain round-trip per typing indicator. The
+/// elision cache is therefore correct; skipping the mark along with the write is
+/// not, and the two are one `return` apart.
+///
+/// The window where they disagree is real rather than theoretical: a failed
+/// `initialize_mls` rolls `encryption_capable_peers` back to its pre-restore
+/// snapshot while the cache still holds what restore read off disk. A peer in
+/// that state must still be re-marked on their next verified frame, or the
+/// plaintext gate stands open for exactly the peers whose records we *do* hold.
+#[test]
+fn capability_write_elision_never_skips_the_in_memory_mark() {
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (mut alice, _handle) = mixed_mode_node("alice", &secure, &state);
+
+    alice.record_encryption_capable(&id("bob"));
+    assert!(alice.is_encryption_capable(&id("bob")));
+
+    // Reproduce the disagreement the rollback creates: the durable record and
+    // its cache entry stand, the in-memory set does not.
+    alice.forget_encryption_capable_for_test(&id("bob"));
+    assert!(!alice.is_encryption_capable(&id("bob")));
+
+    // The next verified frame must put it back, cache hit or not.
+    alice.record_encryption_capable(&id("bob"));
+    assert!(
+        alice.is_encryption_capable(&id("bob")),
+        "a cached durable record must not suppress the mark that holds the \
+         plaintext gate shut"
+    );
+}
+
 /// The capability restore walk stops at the category bound, and ignores the
 /// tail rather than pruning it.
 ///

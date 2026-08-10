@@ -253,9 +253,46 @@ impl OfflineProtocol {
     /// what makes the restore walk's "durable records are first in line" claim
     /// true rather than aspirational. The deleted TOFU store had this property
     /// too — its store-full branch declined to pin *and* to persist.
+    ///
+    /// # Why the write is skipped once the record is known durable
+    ///
+    /// The record's presence *is* the fact; its `last_seen_ms` is diagnostic and
+    /// nothing reads it back as a policy input (see [`EncryptionCapableEntry`]).
+    /// Rewriting it on every verified frame would mean a synchronous credential-
+    /// store write per control message — on iOS and Android a Keychain/Keystore
+    /// round-trip — to refresh a field no decision depends on, and the gated
+    /// prefixes include the chatty ones (`__TYPING__`, `__READ_RECEIPT__`,
+    /// `__PRESENCE__`). The pin store this replaced did rewrite per frame, but
+    /// it had to: the timestamp drove its LRU eviction. Nothing evicts here.
+    ///
+    /// The skip keys on [`Self::encryption_capable_persisted`] — writes that
+    /// actually landed — rather than on set membership, because
+    /// [`Self::persist_encryption_capable`] is best-effort. Keying on the
+    /// in-memory set would let one transient storage failure strand the peer
+    /// unwritten for the rest of the process, which is precisely the state that
+    /// re-opens the plaintext gate for them on the next launch. Keyed this way
+    /// a failed write is simply retried on their next verified frame.
+    ///
+    /// # The mark is never skipped, only the write
+    ///
+    /// Note the ordering: `mark_encryption_capable` runs *before* the cache is
+    /// consulted. Returning early on a cache hit would skip the mark too, and
+    /// the two can legitimately disagree — a failed `initialize_mls` rolls
+    /// `encryption_capable_peers` back to its pre-restore snapshot while the
+    /// cache still remembers the records restore read off disk. A peer in that
+    /// window would then be waved through here without ever entering the set
+    /// that holds the plaintext gate shut for them: the exact fail-open this
+    /// field exists to prevent, bought for a saved write.
     pub(super) fn record_encryption_capable(&mut self, peer_id: &str) {
-        if self.mark_encryption_capable(peer_id) {
-            self.persist_encryption_capable(peer_id);
+        if !self.mark_encryption_capable(peer_id) {
+            return;
+        }
+        if self.encryption_capable_persisted.contains(peer_id) {
+            return;
+        }
+        if self.persist_encryption_capable(peer_id) {
+            self.encryption_capable_persisted
+                .insert(peer_id.to_string());
         }
     }
 
@@ -667,23 +704,32 @@ impl OfflineProtocol {
     /// time this runs, so a storage failure costs the knowledge only across a
     /// restart — and costs it in the safe direction, since the peer re-proves
     /// capability on their next signed control message.
-    pub(super) fn persist_encryption_capable(&self, peer_id: &str) {
+    ///
+    /// Returns whether the record is now durable, which is what lets
+    /// [`Self::record_encryption_capable`] skip the repeat write without
+    /// stranding a peer whose write failed. A node with no secure storage
+    /// answers `false` forever — correctly: nothing was persisted, and there is
+    /// no cost to re-answering that on each frame.
+    pub(super) fn persist_encryption_capable(&self, peer_id: &str) -> bool {
         let Some(storage) = &self.secure_storage else {
-            return;
+            return false;
         };
         let entry = EncryptionCapableEntry {
             last_seen_ms: Utc::now().timestamp_millis(),
         };
         match serde_json::to_vec(&entry) {
             Ok(data) => {
-                if let Err(e) =
-                    storage.store(storage_keys::ENCRYPTION_CAPABLE_PEERS, peer_id, &data)
-                {
-                    warn!(peer_id = %peer_id, error = %e, "Failed to persist encryption-capability record");
+                match storage.store(storage_keys::ENCRYPTION_CAPABLE_PEERS, peer_id, &data) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        warn!(peer_id = %peer_id, error = %e, "Failed to persist encryption-capability record");
+                        false
+                    }
                 }
             }
             Err(e) => {
                 warn!(peer_id = %peer_id, error = %e, "Failed to serialize encryption-capability record");
+                false
             }
         }
     }
@@ -758,6 +804,11 @@ impl OfflineProtocol {
         }
         let restored = capable.len() as u32;
         for peer_id in capable {
+            // Read back from the category, so the record demonstrably exists:
+            // seeding the elision cache here is what keeps the first verified
+            // frame from a restored peer from rewriting a record that is
+            // already on disk.
+            self.encryption_capable_persisted.insert(peer_id.clone());
             self.mark_encryption_capable(&peer_id);
         }
         if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
