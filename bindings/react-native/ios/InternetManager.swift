@@ -1661,14 +1661,25 @@ public class InternetManager: NSObject, TransportManager {
             controlOpTranslator.onGroupAnswered(groupId: groupId)
             let userId = json["user_id"] as? String ?? ""
             let addedBy = json["added_by"] as? String ?? ""
-            injectGroupInternalMessage(actorId: addedBy.isEmpty ? nil : addedBy, prefix: "__GROUP_MEMBER_ADDED__", payload: ["group_id": groupId, "user_id": userId, "added_by": addedBy])
+            // Unattributed: a relay answer must keep the synthesized shape the
+            // core's signature-gate exemption recognizes. See
+            // injectGroupInternalMessage, INVARIANT 2. `added_by` rides the
+            // payload, which is what the core's handler reads.
+            injectGroupInternalMessage(actorId: nil, prefix: "__GROUP_MEMBER_ADDED__", payload: ["group_id": groupId, "user_id": userId, "added_by": addedBy])
             
         case "GroupMemberRemoved":
             guard let groupId = json["group_id"] as? String, !groupId.isEmpty else { return }
             controlOpTranslator.onGroupAnswered(groupId: groupId)
             let userId = json["user_id"] as? String ?? ""
             let removedBy = json["removed_by"] as? String ?? ""
-            injectGroupInternalMessage(actorId: removedBy.isEmpty ? nil : removedBy, prefix: "__GROUP_MEMBER_REMOVED__", payload: ["group_id": groupId, "user_id": userId, "removed_by": removedBy])
+            // Unattributed, as above. Note this frame's admin check reads the
+            // wire `sender`, which is the "relay" placeholder, so relay
+            // reconciliation cannot pass it — structurally, since an unsignable
+            // frame can never authenticate an admin. The functioning path is
+            // the removing admin's own signed notification; this one stays
+            // inert, and now does so quietly instead of raising a security
+            // warning.
+            injectGroupInternalMessage(actorId: nil, prefix: "__GROUP_MEMBER_REMOVED__", payload: ["group_id": groupId, "user_id": userId, "removed_by": removedBy])
             
         case "GroupError":
             let reason = json["reason"] as? String ?? "Unknown error"
@@ -1825,6 +1836,24 @@ public class InternetManager: NSObject, TransportManager {
     /// selects unattributed ingest, which the core supports and tests
     /// explicitly (`test_internet_message_received_empty_sender_*`).
     ///
+    /// INVARIANT 2: every prefix in the core's `RELAY_ANSWER_PREFIXES` must be
+    /// injected with `actorId: nil`. Control traffic is signature-gated
+    /// unconditionally, and nothing here can sign — no peer sent these, so no
+    /// key exists anywhere in the path. The core exempts them, but the
+    /// exemption requires the frame to carry *no transport peer identity*,
+    /// which is what a locally synthesized answer looks like. A non-nil
+    /// `actorId` selects `on_data_received_from`, which sets that identity, so
+    /// the frame stops looking synthesized and is dropped as unsigned — with a
+    /// spurious `UNSIGNED_CONTROL_REJECTED` warning raised against a legitimate
+    /// relay notification.
+    ///
+    /// The cost is that these frames no longer assert the actor's reachability.
+    /// That is the right trade: the frame is the point, reachability was a side
+    /// effect, and `__GROUP_MSG__` still carries it — being a data-plane prefix
+    /// it is never gated, so it keeps its attribution. The actor itself is not
+    /// lost either; it rides the payload (`added_by` / `removed_by`), which is
+    /// what the core's handlers actually read.
+    ///
     /// The message *body* still needs a non-empty `sender` (Rust `UserId`
     /// rejects empty), so it keeps the "relay" placeholder — inert, because
     /// no reachability or ACK path acts on it once the two changes above are
@@ -1833,15 +1862,19 @@ public class InternetManager: NSObject, TransportManager {
         messageQueue.async { [weak self] in
             guard let self = self else { return }
             do {
+                // INVARIANT 2, enforced rather than trusted to the call sites:
+                // a relay answer reaches the core unattributed or it is dropped
+                // as unsigned.
+                let actor = RelayAnswerPrefixes.attributableActor(prefix: prefix, actorId: actorId)
                 let payloadData = try JSONSerialization.data(withJSONObject: payload)
                 guard let payloadStr = String(data: payloadData, encoding: .utf8) else { return }
                 let content = prefix + payloadStr
                 let messageData = try self.buildInternalMessageData(
-                    senderId: actorId ?? Self.relayPlaceholderSender,
+                    senderId: actor ?? Self.relayPlaceholderSender,
                     content: content
                 )
                 let bytes = [UInt8](messageData)
-                try self.protocolInstance.internetMessageReceived(senderId: actorId ?? "", data: bytes)
+                try self.protocolInstance.internetMessageReceived(senderId: actor ?? "", data: bytes)
             } catch {
                 self.emitDiagnostic("error", "Error injecting group message", context: [
                     "prefix": prefix,

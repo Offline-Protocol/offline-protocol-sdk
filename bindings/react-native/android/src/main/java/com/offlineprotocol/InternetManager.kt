@@ -1380,7 +1380,11 @@ class InternetManager(
                     put("user_id", userId)
                     put("added_by", addedBy)
                 }
-                injectGroupInternalMessage(addedBy.ifEmpty { null }, "__GROUP_MEMBER_ADDED__", payloadJson)
+                // Unattributed: a relay answer must keep the synthesized shape
+                // the core's signature-gate exemption recognizes. See
+                // injectGroupInternalMessage, INVARIANT 2. `added_by` rides the
+                // payload above, which is what the core's handler reads.
+                injectGroupInternalMessage(null, "__GROUP_MEMBER_ADDED__", payloadJson)
             }
             
             "GroupMemberRemoved" -> {
@@ -1394,7 +1398,14 @@ class InternetManager(
                     put("user_id", userId)
                     put("removed_by", removedBy)
                 }
-                injectGroupInternalMessage(removedBy.ifEmpty { null }, "__GROUP_MEMBER_REMOVED__", payloadJson)
+                // Unattributed, as above. Note this frame's admin check reads
+                // the wire `sender`, which is the "relay" placeholder, so relay
+                // reconciliation cannot pass it — structurally, since an
+                // unsignable frame can never authenticate an admin. The
+                // functioning path is the removing admin's own signed
+                // notification; this one stays inert, and now does so quietly
+                // instead of raising a security warning.
+                injectGroupInternalMessage(null, "__GROUP_MEMBER_REMOVED__", payloadJson)
             }
             
             "GroupError" -> {
@@ -1595,12 +1606,34 @@ class InternetManager(
      * rejects empty), so it keeps the "relay" placeholder — inert, because no
      * reachability or ACK path acts on it once the two changes above are in
      * place.
+     *
+     * INVARIANT 2: every prefix in the core's `RELAY_ANSWER_PREFIXES` must be
+     * injected with `actorId = null`. Control traffic is signature-gated
+     * unconditionally, and nothing here can sign — no peer sent these, so no
+     * key exists anywhere in the path. The core exempts them, but the exemption
+     * requires the frame to carry *no transport peer identity*, which is what a
+     * locally synthesized answer looks like. A non-null `actorId` selects
+     * `on_data_received_from`, which sets that identity, so the frame stops
+     * looking synthesized and is dropped as unsigned — with a spurious
+     * `UNSIGNED_CONTROL_REJECTED` warning raised against a legitimate relay
+     * notification.
+     *
+     * The cost is that these frames no longer assert the actor's reachability.
+     * That is the right trade: the frame is the point, reachability was a side
+     * effect, and `__GROUP_MSG__` still carries it — being a data-plane prefix
+     * it is never gated, so it keeps its attribution. The actor itself is not
+     * lost either; it rides the payload (`added_by` / `removed_by`), which is
+     * what the core's handlers actually read.
      */
     private fun injectGroupInternalMessage(actorId: String?, prefix: String, payloadJson: org.json.JSONObject) {
         try {
+            // INVARIANT 2, enforced rather than trusted to the call sites: a
+            // relay answer reaches the core unattributed or it is dropped as
+            // unsigned.
+            val actor = RelayAnswerPrefixes.attributableActor(prefix, actorId)
             val content = prefix + payloadJson.toString()
-            val messageBytes = buildInternalMessageBytes(actorId ?: RELAY_PLACEHOLDER_SENDER, content)
-            protocol.internetMessageReceived(actorId ?: "", messageBytes.map { it.toUByte() })
+            val messageBytes = buildInternalMessageBytes(actor ?: RELAY_PLACEHOLDER_SENDER, content)
+            protocol.internetMessageReceived(actor ?: "", messageBytes.map { it.toUByte() })
         } catch (e: Exception) {
             emitDiagnostic("error", "Error injecting group message", mapOf(
                 "prefix" to prefix,

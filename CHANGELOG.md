@@ -68,6 +68,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   not attribute the frame to a peer. Closing that residual means moving relay
   answers onto dedicated FFI entry points, as
   `internet_group_report_received` already does; that is follow-up work.
+  Because the exemption also requires the frame to be unattributed, the RN
+  bridges now inject **every** relay answer with a null actor — previously
+  `__GROUP_MEMBER_ADDED__` and `__GROUP_MEMBER_REMOVED__` carried the
+  relay-reported `added_by` / `removed_by` as a reachability assertion, which
+  set a transport peer identity and would have had those frames dropped as
+  unsigned. The actor still rides the payload, which is what the handlers read;
+  `__GROUP_MSG__` keeps its attribution (a data-plane prefix is never gated) and
+  remains the reachability signal for a relayed sender.
 - `requireTransportIdentity` keeps its `false` default and no longer gates the
   signature requirement, which is now unconditional. Its one remaining effect is
   to reject frames arriving with no transport peer identity — which on a
