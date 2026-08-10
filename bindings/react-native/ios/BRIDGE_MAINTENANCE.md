@@ -137,6 +137,19 @@ xcrun --sdk iphoneos swiftc -typecheck \
 Introduce a deliberate error — call a method you know does not exist — re-run,
 and check it is reported; then remove it.
 
+**Adding a new Swift file? This recipe will not tell you if you forgot to
+register it.** The `$(ls *.swift)` glob above picks up anything you drop in
+the directory, but the four places that actually build this code list their
+sources *explicitly*, and a new file has to be added to each one by hand:
+
+- `Package.swift` — `sources:` (and `tests`' `sources:` for a new suite)
+- `MeshSdk.podspec` — `s.source_files`
+- `.github/workflows/ci.yml` — the "iOS bridge typecheck" file list
+
+Miss the ci.yml one and this recipe stays green while CI fails with `cannot
+find 'YourNewType' in scope`, because the glob compiled the new file and CI's
+enumerated list did not. Ask me how I know.
+
 Reasoning about React types by hand is unreliable: an `@objc optional`
 protocol member read through the existential gives a *double* optional whose
 `!= nil` is always true, which compiles, reads correctly, and gates on

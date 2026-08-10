@@ -1126,8 +1126,6 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_requ
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle(
 ): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reset_tofu_for_peer(
-): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent(
@@ -1544,8 +1542,6 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_gr
 ): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle(`ptr`: Long,`username`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reset_tofu_for_peer(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_confirm_sent(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2139,9 +2135,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle() != 50933.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reset_tofu_for_peer() != 11300.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596.toShort()) {
@@ -3449,8 +3442,6 @@ public interface OfflineProtocolInterface {
     fun `requestGroupRelayRegistration`(`groupId`: kotlin.String): kotlin.Boolean
     
     fun `requestPrekeyBundle`(`username`: kotlin.String): kotlin.String
-    
-    fun `resetTofuForPeer`(`peerId`: kotlin.String): kotlin.Boolean
     
     fun `resume`()
     
@@ -5169,20 +5160,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle(
         it,
         FfiConverterString.lower(`username`),_status)
-}
-    }
-    )
-    }
-    
-
-    
-    @Throws(ProtocolException::class)override fun `resetTofuForPeer`(`peerId`: kotlin.String): kotlin.Boolean {
-            return FfiConverterBoolean.lift(
-    callWithHandle {
-    uniffiRustCallWithError(ProtocolException) { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reset_tofu_for_peer(
-        it,
-        FfiConverterString.lower(`peerId`),_status)
 }
     }
     )

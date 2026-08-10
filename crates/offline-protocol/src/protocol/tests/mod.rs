@@ -145,13 +145,43 @@ fn seed_split_sealed_state_record(
     state.store(key_type, key_id, &sealed).unwrap();
 }
 
-fn pending_test_message(sender: &str, content: &str) -> Message {
+/// A frame from `sender` to `recipient`, signed when the content is a
+/// security-gated control prefix.
+///
+/// Control traffic is unconditionally signature-gated and the signature is
+/// checked against the sender's own address, so a fixture that hands an
+/// unsigned control frame to `process_internal_message` exercises the
+/// rejection path rather than the behaviour it names. Signing here — at
+/// construction, where the sender is already stated — keeps every such test
+/// honest without each one having to remember.
+///
+/// Gated prefixes only: a data-plane frame (`__MLS_ENC__`, `__GRP_MLS_MSG__`)
+/// is authenticated by MLS, not by this metadata, and stamping it anyway would
+/// inflate the byte counts the wire-size report measures.
+///
+/// Tolerant of senders that are not seeded test identities — those cannot be
+/// signed for, which is precisely the shape of a forged frame.
+fn signed_frame(sender: &str, recipient: &str, content: impl AsRef<str>) -> Message {
+    let content = content.as_ref();
+    let mut message = unsigned_frame(sender, recipient, content);
+    if OfflineProtocol::is_security_gated_prefix(content) {
+        crate::test_identity::try_sign_as_sender(&mut message);
+    }
+    message
+}
+
+/// An unsigned frame, for tests whose subject *is* the unsigned path.
+fn unsigned_frame(sender: &str, recipient: &str, content: impl AsRef<str>) -> Message {
     Message::new(
         UserId::new(sender).unwrap(),
-        UserId::new(&id("user123")).unwrap(),
+        UserId::new(recipient).unwrap(),
         AppId::new("test-app").unwrap(),
-        content,
+        content.as_ref(),
     )
+}
+
+fn pending_test_message(sender: &str, content: &str) -> Message {
+    signed_frame(sender, &id("user123"), content)
 }
 
 #[derive(Debug, Clone)]
@@ -764,12 +794,7 @@ fn test_receive_message() {
     mock_transport.start().unwrap();
 
     // Queue a message in the mock transport
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "Test message",
-    );
+    let message = signed_frame(&id("alice"), "user123", "Test message");
     mock_transport.queue_message(message.clone());
 
     protocol
@@ -879,7 +904,7 @@ fn test_encrypted_receive_drops_relay_injected_reply_context() {
         }
     });
 
-    // Establish the MLS session directly (shortcut, same as the TOFU test).
+    // Establish the MLS session directly (shortcut).
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.get_or_create_key_package().unwrap()
@@ -887,11 +912,7 @@ fn test_encrypted_receive_drops_relay_injected_reply_context() {
     {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         let welcome = manager.create_session(&id("bob")).unwrap();
         let bob_manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
@@ -1202,11 +1223,7 @@ fn test_mls_observability_emits_encryption_used_for_successful_encrypt() {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap();
     }
@@ -1244,12 +1261,7 @@ fn test_mls_observability_emits_decryption_failed_not_initialized() {
         internal_prefixes::ENCRYPTED,
         serde_json::to_string(&encrypted).unwrap()
     );
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("alice"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -1311,12 +1323,7 @@ fn test_mls_observability_session_ready_emits_once_for_idempotent_confirm() {
             state: WelcomeDeliveryState::Sent,
             attempt: 1,
             unreachable_parks: 0,
-            welcome_message: Message::new(
-                UserId::new(&id("user123")).unwrap(),
-                UserId::new(&id("bob")).unwrap(),
-                AppId::new("test-app").unwrap(),
-                "__MLS_WELCOME__{}",
-            ),
+            welcome_message: signed_frame(&id("user123"), &id("bob"), "__MLS_WELCOME__{}"),
             next_retry_at: None,
             last_reason_code: None,
             last_transport_error: None,
@@ -1795,12 +1802,12 @@ fn test_on_neighbor_lost_clears_tracking() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Simulate that we've sent a key package to a peer (by inserting into tracking set)
-    protocol.key_package_sent_to.insert("peer123".to_string());
-    assert!(protocol.key_package_sent_to.contains("peer123"));
+    protocol.key_package_sent_to.insert(id("peer123"));
+    assert!(protocol.key_package_sent_to.contains(&id("peer123")));
 
     // Neighbor lost should remove from tracking
-    protocol.on_neighbor_lost("peer123");
-    assert!(!protocol.key_package_sent_to.contains("peer123"));
+    protocol.on_neighbor_lost(&id("peer123"));
+    assert!(!protocol.key_package_sent_to.contains(&id("peer123")));
 }
 
 #[test]
@@ -1856,12 +1863,7 @@ fn feed_key_package(protocol: &mut OfflineProtocol, sender: &str, wire_versions:
         internal_prefixes::KEY_PACKAGE,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = Message::new(
-        UserId::new(sender).unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(sender, "user123", &content);
     protocol.process_internal_message(&message);
 }
 
@@ -1875,13 +1877,13 @@ fn binary_wire_negotiation_marks_capable_peer() {
 
     feed_key_package(
         &mut protocol,
-        "peer-bin",
+        &id("peer-bin"),
         vec![offline_protocol_core::WIRE_VERSION_V1],
     );
 
     assert!(protocol
         .transport_manager
-        .peer_supports_binary_wire("peer-bin"));
+        .peer_supports_binary_wire(&id("peer-bin")));
 }
 
 #[test]
@@ -1892,11 +1894,11 @@ fn binary_wire_negotiation_ignores_legacy_peer() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Legacy peer omits wire_versions (empty) -> stays on JSON.
-    feed_key_package(&mut protocol, "peer-legacy", Vec::new());
+    feed_key_package(&mut protocol, &id("peer-legacy"), Vec::new());
 
     assert!(!protocol
         .transport_manager
-        .peer_supports_binary_wire("peer-legacy"));
+        .peer_supports_binary_wire(&id("peer-legacy")));
 }
 
 #[test]
@@ -1910,13 +1912,13 @@ fn binary_wire_kill_switch_prevents_recording() {
     // Peer advertises binary, but with the codec disabled we do not record it.
     feed_key_package(
         &mut protocol,
-        "peer-bin",
+        &id("peer-bin"),
         vec![offline_protocol_core::WIRE_VERSION_V1],
     );
 
     assert!(!protocol
         .transport_manager
-        .peer_supports_binary_wire("peer-bin"));
+        .peer_supports_binary_wire(&id("peer-bin")));
 }
 
 /// Helper: like [`feed_key_package`] but advertising `env_versions`
@@ -1939,12 +1941,7 @@ fn feed_key_package_with_env(protocol: &mut OfflineProtocol, sender: &str, env_v
         internal_prefixes::KEY_PACKAGE,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = Message::new(
-        UserId::new(sender).unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(sender, "user123", &content);
     protocol.process_internal_message(&message);
 }
 
@@ -1969,9 +1966,13 @@ fn compact_envelope_negotiation_marks_capable_peer() {
     // compact_envelope_enabled defaults to true.
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
-    feed_key_package_with_env(&mut protocol, "peer-compact", vec![MLS_ENVELOPE_COMPACT_V1]);
+    feed_key_package_with_env(
+        &mut protocol,
+        &id("peer-compact"),
+        vec![MLS_ENVELOPE_COMPACT_V1],
+    );
 
-    assert!(protocol.peer_compact_envelope.contains("peer-compact"));
+    assert!(protocol.peer_compact_envelope.contains(&id("peer-compact")));
 }
 
 #[test]
@@ -1982,9 +1983,9 @@ fn compact_envelope_negotiation_ignores_legacy_peer() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Legacy peer omits env_versions (empty) -> stays on the JSON envelope.
-    feed_key_package_with_env(&mut protocol, "peer-legacy", Vec::new());
+    feed_key_package_with_env(&mut protocol, &id("peer-legacy"), Vec::new());
 
-    assert!(!protocol.peer_compact_envelope.contains("peer-legacy"));
+    assert!(!protocol.peer_compact_envelope.contains(&id("peer-legacy")));
 }
 
 #[test]
@@ -1996,8 +1997,12 @@ fn compact_envelope_kill_switch_prevents_recording_and_sealing() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Peer advertises the capability, but with the flag off we do not record it.
-    feed_key_package_with_env(&mut protocol, "peer-compact", vec![MLS_ENVELOPE_COMPACT_V1]);
-    assert!(!protocol.peer_compact_envelope.contains("peer-compact"));
+    feed_key_package_with_env(
+        &mut protocol,
+        &id("peer-compact"),
+        vec![MLS_ENVELOPE_COMPACT_V1],
+    );
+    assert!(!protocol.peer_compact_envelope.contains(&id("peer-compact")));
 
     // Defense in depth: even a (stale) recorded capability must not produce a
     // compact envelope while the flag is off.
@@ -2021,13 +2026,13 @@ fn compact_envelope_downgrade_removes_capability() {
     config.encryption.auto_key_exchange = true;
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
-    feed_key_package_with_env(&mut protocol, "peer", vec![MLS_ENVELOPE_COMPACT_V1]);
-    assert!(protocol.peer_compact_envelope.contains("peer"));
+    feed_key_package_with_env(&mut protocol, &id("peer"), vec![MLS_ENVELOPE_COMPACT_V1]);
+    assert!(protocol.peer_compact_envelope.contains(&id("peer")));
 
     // A fresh key package without the capability (peer downgraded or flipped
     // its own kill switch) must remove it.
-    feed_key_package_with_env(&mut protocol, "peer", Vec::new());
-    assert!(!protocol.peer_compact_envelope.contains("peer"));
+    feed_key_package_with_env(&mut protocol, &id("peer"), Vec::new());
+    assert!(!protocol.peer_compact_envelope.contains(&id("peer")));
 }
 
 #[test]
@@ -2038,14 +2043,18 @@ fn seal_encrypted_content_picks_envelope_per_recipient_capability() {
     let encrypted = sample_encrypted_message();
 
     // Unknown capability -> legacy JSON envelope (the permanent floor).
-    let sealed = protocol.seal_encrypted_content("peer", &encrypted).unwrap();
+    let sealed = protocol
+        .seal_encrypted_content(&id("peer"), &encrypted)
+        .unwrap();
     let body = sealed.strip_prefix(internal_prefixes::ENCRYPTED).unwrap();
     assert!(body.starts_with('{'));
 
     // Advertised capability -> compact envelope: base64, never '{', and far
     // smaller than the JSON form (whose ciphertext is an integer array).
-    feed_key_package_with_env(&mut protocol, "peer", vec![MLS_ENVELOPE_COMPACT_V1]);
-    let sealed = protocol.seal_encrypted_content("peer", &encrypted).unwrap();
+    feed_key_package_with_env(&mut protocol, &id("peer"), vec![MLS_ENVELOPE_COMPACT_V1]);
+    let sealed = protocol
+        .seal_encrypted_content(&id("peer"), &encrypted)
+        .unwrap();
     let body = sealed.strip_prefix(internal_prefixes::ENCRYPTED).unwrap();
     assert!(!body.starts_with('{'));
     let json_len = serde_json::to_string(&encrypted).unwrap().len();
@@ -2113,12 +2122,7 @@ pub(crate) fn feed_key_package_with_rich(
         internal_prefixes::KEY_PACKAGE,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = Message::new(
-        UserId::new(sender).unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(sender, "user123", &content);
     protocol.process_internal_message(&message);
 }
 
@@ -2155,10 +2159,10 @@ fn rich_payload_negotiation_marks_capable_peer() {
     // rich_payload_enabled defaults to true.
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
-    feed_key_package_with_rich(&mut protocol, "peer-rich", vec![RICH_PAYLOAD_V1]);
+    feed_key_package_with_rich(&mut protocol, &id("peer-rich"), vec![RICH_PAYLOAD_V1]);
 
-    assert!(protocol.peer_rich_payload.contains("peer-rich"));
-    assert!(protocol.rich_seal_active("peer-rich"));
+    assert!(protocol.peer_rich_payload.contains(&id("peer-rich")));
+    assert!(protocol.rich_seal_active(&id("peer-rich")));
 }
 
 #[test]
@@ -2169,10 +2173,10 @@ fn rich_payload_negotiation_ignores_legacy_peer() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Legacy peer omits rich_versions (empty) -> plain text only.
-    feed_key_package_with_rich(&mut protocol, "peer-legacy", Vec::new());
+    feed_key_package_with_rich(&mut protocol, &id("peer-legacy"), Vec::new());
 
-    assert!(!protocol.peer_rich_payload.contains("peer-legacy"));
-    assert!(!protocol.rich_seal_active("peer-legacy"));
+    assert!(!protocol.peer_rich_payload.contains(&id("peer-legacy")));
+    assert!(!protocol.rich_seal_active(&id("peer-legacy")));
 }
 
 #[test]
@@ -2184,13 +2188,13 @@ fn rich_payload_kill_switch_prevents_recording_and_sealing() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Peer advertises the capability, but with the flag off we do not record it.
-    feed_key_package_with_rich(&mut protocol, "peer-rich", vec![RICH_PAYLOAD_V1]);
-    assert!(!protocol.peer_rich_payload.contains("peer-rich"));
+    feed_key_package_with_rich(&mut protocol, &id("peer-rich"), vec![RICH_PAYLOAD_V1]);
+    assert!(!protocol.peer_rich_payload.contains(&id("peer-rich")));
 
     // Defense in depth: even a (stale) recorded capability must not seal
     // while the flag is off.
     protocol.peer_rich_payload.insert("peer-rich".to_string());
-    assert!(!protocol.rich_seal_active("peer-rich"));
+    assert!(!protocol.rich_seal_active(&id("peer-rich")));
 }
 
 #[test]
@@ -2200,13 +2204,13 @@ fn rich_payload_downgrade_removes_capability() {
     config.encryption.auto_key_exchange = true;
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
-    feed_key_package_with_rich(&mut protocol, "peer", vec![RICH_PAYLOAD_V1]);
-    assert!(protocol.peer_rich_payload.contains("peer"));
+    feed_key_package_with_rich(&mut protocol, &id("peer"), vec![RICH_PAYLOAD_V1]);
+    assert!(protocol.peer_rich_payload.contains(&id("peer")));
 
     // A fresh key package without the capability (peer downgraded or flipped
     // its own kill switch) must remove it.
-    feed_key_package_with_rich(&mut protocol, "peer", Vec::new());
-    assert!(!protocol.peer_rich_payload.contains("peer"));
+    feed_key_package_with_rich(&mut protocol, &id("peer"), Vec::new());
+    assert!(!protocol.peer_rich_payload.contains(&id("peer")));
 }
 
 /// Feeds a key package advertising both end-to-end capabilities (compact
@@ -2235,12 +2239,7 @@ fn feed_key_package_with_caps(
         internal_prefixes::KEY_PACKAGE,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = Message::new(
-        UserId::new(sender).unwrap(),
-        UserId::new(&id("user123")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(sender, &id("user123"), &content);
     protocol.process_internal_message(&message);
 }
 
@@ -2303,12 +2302,7 @@ fn as_nostr(transport: &Arc<dyn Transport>) -> &NostrTransport {
 #[cfg(test)]
 fn seal_one_message(nostr: &NostrTransport, recipient: &str) -> (Vec<u8>, String) {
     use base64::Engine;
-    let message = Message::new(
-        UserId::new(&id("user123")).unwrap(),
-        UserId::new(recipient).unwrap(),
-        AppId::new("test-app").unwrap(),
-        "hello",
-    );
+    let message = signed_frame(&id("user123"), recipient, "hello");
     nostr.send(&message).unwrap();
     let signed = nostr.get_next_signed_event().unwrap().unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&signed.event_json).unwrap();
@@ -2324,25 +2318,25 @@ fn peer_capabilities_persist_across_restart() {
     let mut protocol = protocol_with_mls_storage(storage.clone());
     feed_key_package_with_caps(
         &mut protocol,
-        "peer",
+        &id("peer"),
         vec![MLS_ENVELOPE_COMPACT_V1],
         vec![RICH_PAYLOAD_V1],
     );
-    assert!(protocol.peer_compact_envelope.contains("peer"));
-    assert!(protocol.peer_rich_payload.contains("peer"));
+    assert!(protocol.peer_compact_envelope.contains(&id("peer")));
+    assert!(protocol.peer_rich_payload.contains(&id("peer")));
 
     // Restart: a fresh instance on the same storage must re-learn both
     // capabilities from the durable record, without any live exchange.
     let restarted = protocol_with_mls_storage(storage);
     assert!(
-        restarted.peer_compact_envelope.contains("peer"),
+        restarted.peer_compact_envelope.contains(&id("peer")),
         "compact envelope capability must survive a restart"
     );
     assert!(
-        restarted.peer_rich_payload.contains("peer"),
+        restarted.peer_rich_payload.contains(&id("peer")),
         "rich payload capability must survive a restart"
     );
-    assert!(restarted.peer_supports_rich_payload("peer"));
+    assert!(restarted.peer_supports_rich_payload(&id("peer")));
 }
 
 /// Feeds a key package advertising a Nostr public key, as a peer with the
@@ -2369,12 +2363,7 @@ fn key_package_message_with_nostr_pubkey(
         internal_prefixes::KEY_PACKAGE,
         serde_json::to_string(&payload).unwrap()
     );
-    Message::new(
-        UserId::new(sender).unwrap(),
-        UserId::new(recipient).unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    )
+    signed_frame(sender, recipient, &content)
 }
 
 /// Feeds a key package that is **signed** by `sender`, as a real peer's is.
@@ -2393,11 +2382,17 @@ fn feed_key_package_with_nostr_pubkey(
 ) {
     // A separate instance owning `sender`'s MLS identity, so the signature is
     // produced the same way `send_key_package_to` produces it.
+    //
+    // `sender` is a *label*: the peer runs as the address that label's identity
+    // key derives to, and the frame has to claim that address rather than the
+    // label, or the gate rejects it for the signing key not deriving to the
+    // claimed sender — which is the whole point of the gate, not a fixture quirk.
     let mut peer = OfflineProtocol::new(create_test_config_for_user(sender)).unwrap();
     peer.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
-    let mut message = key_package_message_with_nostr_pubkey(sender, &id("user123"), nostr_pubkey);
+    let mut message =
+        key_package_message_with_nostr_pubkey(&id(sender), &id("user123"), nostr_pubkey);
     peer.sign_control_message(&mut message).unwrap();
     assert!(
         message.metadata.contains_key(CTRL_SIG_META_KEY),
@@ -2420,7 +2415,9 @@ fn peer_nostr_pubkey_persists_across_restart() {
     feed_key_package_with_nostr_pubkey(&mut protocol, "peer", Some(&pubkey));
 
     let restarted = protocol_with_mls_storage(storage);
-    let restored = restarted.load_peer_capabilities_record("peer").unwrap();
+    let restored = restarted
+        .load_peer_capabilities_record(&id("peer"))
+        .unwrap();
     assert_eq!(restored.nostr_pubkey.as_deref(), Some(pubkey.as_str()));
 }
 
@@ -2435,7 +2432,7 @@ fn peer_nostr_pubkey_reaches_the_nostr_transport() {
     feed_key_package_with_nostr_pubkey(&mut protocol, "bob", Some(&bob_pubkey));
 
     let handle = nostr_transport_of(&protocol);
-    let (sealed, wrapper_pubkey) = seal_one_message(as_nostr(&handle), "bob");
+    let (sealed, wrapper_pubkey) = seal_one_message(as_nostr(&handle), &id("bob"));
 
     // Bob's install key opens it — which is only possible if the advertised
     // key travelled from the key package to the transport's sealing map.
@@ -2450,7 +2447,7 @@ fn peer_nostr_pubkey_reaches_the_nostr_transport() {
             .unwrap()
             .recipient
             .as_str(),
-        "bob"
+        id("bob")
     );
 
     // And a *different* install of Bob's user id cannot: that is the whole
@@ -2476,14 +2473,14 @@ fn unblock_clears_the_cached_peer_nostr_key() {
     bob.install_signing_secret(&[70u8; 32]).unwrap();
     feed_key_package_with_nostr_pubkey(&mut protocol, "bob", Some(&bob.public_key_hex()));
 
-    protocol.block_user("bob").unwrap();
-    protocol.unblock_user("bob").unwrap();
+    protocol.block_user(&id("bob")).unwrap();
+    protocol.unblock_user(&id("bob")).unwrap();
 
     // Reverted to the bootstrap key, not to "unsealed" and not to a dead key:
     // still a gift wrap, and readable by whatever install Bob is on now.
     let handle = nostr_transport_of(&protocol);
-    let (sealed, wrapper_pubkey) = seal_one_message(as_nostr(&handle), "bob");
-    let fresh_install = NostrTransport::new("bob").unwrap();
+    let (sealed, wrapper_pubkey) = seal_one_message(as_nostr(&handle), &id("bob"));
+    let fresh_install = NostrTransport::new(&id("bob")).unwrap();
     fresh_install.install_signing_secret(&[71u8; 32]).unwrap();
     let plaintext = fresh_install.unseal_event_payload(&wrapper_pubkey, &sealed);
     assert_eq!(
@@ -2492,7 +2489,7 @@ fn unblock_clears_the_cached_peer_nostr_key() {
             .unwrap()
             .recipient
             .as_str(),
-        "bob"
+        id("bob")
     );
 }
 
@@ -2508,7 +2505,7 @@ fn malformed_peer_nostr_pubkey_is_not_persisted() {
         feed_key_package_with_nostr_pubkey(&mut protocol, "peer", Some(bad));
         assert!(
             protocol
-                .load_peer_capabilities_record("peer")
+                .load_peer_capabilities_record(&id("peer"))
                 .and_then(|c| c.nostr_pubkey)
                 .is_none(),
             "malformed pubkey {bad:?} must not persist"
@@ -2526,7 +2523,7 @@ fn peer_nostr_pubkey_is_case_normalized() {
 
     assert_eq!(
         protocol
-            .load_peer_capabilities_record("peer")
+            .load_peer_capabilities_record(&id("peer"))
             .and_then(|c| c.nostr_pubkey)
             .as_deref(),
         Some("ab".repeat(32).as_str())
@@ -2535,9 +2532,10 @@ fn peer_nostr_pubkey_is_case_normalized() {
 
 #[test]
 fn unsigned_key_package_cannot_set_or_clear_the_sealing_key() {
-    // The security gate accepts an *unsigned* control message from a peer it
-    // has never pinned (the TOFU first-contact window), so arriving in a key
-    // package is not on its own evidence of who sent it. That is tolerable for
+    // Arriving in a key package is not on its own evidence of who sent it.
+    // The gate refuses unsigned control traffic, so this is defence in depth
+    // rather than the only check — but it is the difference between trusting
+    // the frame and trusting the field. That is tolerable for
     // the capability lists — a wrong value costs a fallback — but not for
     // `nostr_pubkey`: it is a public key we then seal envelope metadata *to*,
     // so honouring an unsigned one would hand that metadata to whoever injected
@@ -2558,7 +2556,7 @@ fn unsigned_key_package_cannot_set_or_clear_the_sealing_key() {
     protocol.process_internal_message(&unsigned);
     assert!(
         protocol
-            .load_peer_capabilities_record("peer")
+            .load_peer_capabilities_record(&id("peer"))
             .and_then(|c| c.nostr_pubkey)
             .is_none(),
         "an unsigned key package must not set the sealing key"
@@ -2569,7 +2567,7 @@ fn unsigned_key_package_cannot_set_or_clear_the_sealing_key() {
     feed_key_package_with_nostr_pubkey(&mut protocol, "peer", Some(&real_key));
     assert_eq!(
         protocol
-            .load_peer_capabilities_record("peer")
+            .load_peer_capabilities_record(&id("peer"))
             .and_then(|c| c.nostr_pubkey)
             .as_deref(),
         Some(real_key.as_str())
@@ -2578,14 +2576,14 @@ fn unsigned_key_package_cannot_set_or_clear_the_sealing_key() {
     // 3. An unsigned package must not *clear* it either — a downgrade to the
     //    publicly computable bootstrap key on demand is still an attack, so the
     //    stored value is carried forward rather than overwritten. (Reaching
-    //    this at all takes an unpinned peer: once TOFU has pinned them, the
-    //    gate rejects unsigned frames outright as a signature downgrade.)
-    assert!(protocol.reset_tofu_for_peer("peer"));
+    //    Note the unsigned frame never reaches dispatch on the real receive
+    //    path any more — the gate refuses it — so this exercises the
+    //    carry-forward directly, which is the invariant being pinned.)
     let unsigned_clear = key_package_message_with_nostr_pubkey("peer", "user123", None);
     protocol.process_internal_message(&unsigned_clear);
     assert_eq!(
         protocol
-            .load_peer_capabilities_record("peer")
+            .load_peer_capabilities_record(&id("peer"))
             .and_then(|c| c.nostr_pubkey)
             .as_deref(),
         Some(real_key.as_str()),
@@ -2626,15 +2624,20 @@ fn outgoing_key_package_advertises_our_nostr_pubkey_only_when_nostr_is_on() {
 fn peer_capability_downgrade_survives_restart() {
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = protocol_with_mls_storage(storage.clone());
-    feed_key_package_with_caps(&mut protocol, "peer", Vec::new(), vec![RICH_PAYLOAD_V1]);
+    feed_key_package_with_caps(
+        &mut protocol,
+        &id("peer"),
+        Vec::new(),
+        vec![RICH_PAYLOAD_V1],
+    );
     // A fresh key package without the capability removes it — the durable
     // record must follow, or a restart would resurrect the stale grant.
-    feed_key_package_with_caps(&mut protocol, "peer", Vec::new(), Vec::new());
-    assert!(!protocol.peer_rich_payload.contains("peer"));
+    feed_key_package_with_caps(&mut protocol, &id("peer"), Vec::new(), Vec::new());
+    assert!(!protocol.peer_rich_payload.contains(&id("peer")));
 
     let restarted = protocol_with_mls_storage(storage);
     assert!(
-        !restarted.peer_rich_payload.contains("peer"),
+        !restarted.peer_rich_payload.contains(&id("peer")),
         "a downgraded capability must not come back after restart"
     );
 }
@@ -2643,7 +2646,12 @@ fn peer_capability_downgrade_survives_restart() {
 fn peer_capability_restore_respects_kill_switch_but_keeps_record() {
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = protocol_with_mls_storage(storage.clone());
-    feed_key_package_with_caps(&mut protocol, "peer", Vec::new(), vec![RICH_PAYLOAD_V1]);
+    feed_key_package_with_caps(
+        &mut protocol,
+        &id("peer"),
+        Vec::new(),
+        vec![RICH_PAYLOAD_V1],
+    );
 
     // Restart with the kill switch off: the capability must not be applied…
     let mut config = create_test_config();
@@ -2651,30 +2659,35 @@ fn peer_capability_restore_respects_kill_switch_but_keeps_record() {
     config.encryption.rich_payload_enabled = false;
     let mut gated = OfflineProtocol::new(config).unwrap();
     gated.initialize_mls_for_test(storage.clone()).unwrap();
-    assert!(!gated.peer_rich_payload.contains("peer"));
-    assert!(!gated.peer_supports_rich_payload("peer"));
+    assert!(!gated.peer_rich_payload.contains(&id("peer")));
+    assert!(!gated.peer_supports_rich_payload(&id("peer")));
 
     // …but the record survives, so flipping the switch back on restores it
     // on the next run — same semantics as toggling the switch live.
     let restored = protocol_with_mls_storage(storage);
-    assert!(restored.peer_rich_payload.contains("peer"));
+    assert!(restored.peer_rich_payload.contains(&id("peer")));
 }
 
 #[test]
 fn peer_capability_unblock_clears_record() {
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = protocol_with_mls_storage(storage.clone());
-    feed_key_package_with_caps(&mut protocol, "peer", Vec::new(), vec![RICH_PAYLOAD_V1]);
+    feed_key_package_with_caps(
+        &mut protocol,
+        &id("peer"),
+        Vec::new(),
+        vec![RICH_PAYLOAD_V1],
+    );
 
     // Unblock runs the clean-slate cleanup: capability forgotten in memory
     // and on disk, to be re-learned from the fresh exchange.
-    protocol.block_user("peer").unwrap();
-    protocol.unblock_user("peer").unwrap();
-    assert!(!protocol.peer_rich_payload.contains("peer"));
+    protocol.block_user(&id("peer")).unwrap();
+    protocol.unblock_user(&id("peer")).unwrap();
+    assert!(!protocol.peer_rich_payload.contains(&id("peer")));
 
     let restarted = protocol_with_mls_storage(storage);
     assert!(
-        !restarted.peer_rich_payload.contains("peer"),
+        !restarted.peer_rich_payload.contains(&id("peer")),
         "unblock's clean slate must extend to the durable capability record"
     );
 }
@@ -2718,18 +2731,18 @@ fn peer_capability_restore_prunes_overflow() {
 /// manager level (import + create), without needing the peer to process the
 /// Welcome — `has_session`/`list_sessions` are local.
 #[cfg(test)]
-fn create_local_session_with(protocol: &OfflineProtocol, peer: &str) {
-    let peer_mgr =
-        crate::mls::MlsManager::new(peer, Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+fn create_local_session_with(protocol: &OfflineProtocol, peer_label: &str) {
+    let peer = id(peer_label);
+    let peer = peer.as_str();
+    let peer_mgr = crate::test_identity::manager_for(
+        peer_label,
+        crate::test_identity::seeded_storage(peer_label),
+    );
     let peer_kp = peer_mgr.generate_key_package().unwrap();
     let mls = protocol.mls_manager.as_ref().unwrap().clone();
     let manager = mls.read().unwrap();
     manager
-        .import_key_package(
-            peer,
-            &peer_kp.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
+        .import_key_package(peer, &peer_kp.key_package_data)
         .unwrap();
     manager.create_session(peer).unwrap();
 }
@@ -2743,12 +2756,12 @@ fn peer_capability_eviction_spares_session_peers() {
     // Bob re-advertises after his own restart: the package is inserted into
     // pending_key_packages but never consumed (the session already exists),
     // so bob IS in the eviction candidate pool despite the session.
-    feed_key_package_with_caps(&mut alice, "bob", Vec::new(), vec![RICH_PAYLOAD_V1]);
-    assert!(alice.pending_key_packages.contains_key("bob"));
+    feed_key_package_with_caps(&mut alice, &id("bob"), Vec::new(), vec![RICH_PAYLOAD_V1]);
+    assert!(alice.pending_key_packages.contains_key(&id("bob")));
     // Make bob the deterministic soonest-to-expire victim.
     alice
         .pending_key_packages
-        .get_mut("bob")
+        .get_mut(&id("bob"))
         .unwrap()
         .local_expires_at_ms = 1;
 
@@ -2766,31 +2779,41 @@ fn peer_capability_eviction_spares_session_peers() {
     // …and the next forged package evicts bob's key package. His durable
     // capability record must survive, or the flood would silently degrade
     // rich sends to him after the next relaunch (the #200 window).
-    feed_key_package_with_caps(&mut alice, "trigger-1", Vec::new(), vec![RICH_PAYLOAD_V1]);
-    assert!(!alice.pending_key_packages.contains_key("bob"));
+    feed_key_package_with_caps(
+        &mut alice,
+        &id("trigger-1"),
+        Vec::new(),
+        vec![RICH_PAYLOAD_V1],
+    );
+    assert!(!alice.pending_key_packages.contains_key(&id("bob")));
     assert!(
         storage
-            .load(storage_keys::PEER_CAPABILITIES, "bob")
+            .load(storage_keys::PEER_CAPABILITIES, &id("bob"))
             .unwrap()
             .is_some(),
         "a session peer's durable capability record must survive eviction"
     );
-    assert!(alice.peer_rich_payload.contains("bob"));
+    assert!(alice.peer_rich_payload.contains(&id("bob")));
 
     // A non-session victim's record goes with its key package — both are
     // recoverable via re-exchange, and this ties the durable capability
     // count to the flood bound.
-    feed_key_package_with_caps(&mut alice, "carol", Vec::new(), vec![RICH_PAYLOAD_V1]);
+    feed_key_package_with_caps(&mut alice, &id("carol"), Vec::new(), vec![RICH_PAYLOAD_V1]);
     alice
         .pending_key_packages
-        .get_mut("carol")
+        .get_mut(&id("carol"))
         .unwrap()
         .local_expires_at_ms = 1;
-    feed_key_package_with_caps(&mut alice, "trigger-2", Vec::new(), vec![RICH_PAYLOAD_V1]);
-    assert!(!alice.pending_key_packages.contains_key("carol"));
+    feed_key_package_with_caps(
+        &mut alice,
+        &id("trigger-2"),
+        Vec::new(),
+        vec![RICH_PAYLOAD_V1],
+    );
+    assert!(!alice.pending_key_packages.contains_key(&id("carol")));
     assert!(
         storage
-            .load(storage_keys::PEER_CAPABILITIES, "carol")
+            .load(storage_keys::PEER_CAPABILITIES, &id("carol"))
             .unwrap()
             .is_none(),
         "a non-session victim's capability record is evicted with its key package"
@@ -2804,7 +2827,7 @@ fn peer_capability_restore_prefers_session_peers() {
     create_local_session_with(&alice, "bob");
     feed_key_package_with_caps(
         &mut alice,
-        "bob",
+        &id("bob"),
         vec![MLS_ENVELOPE_COMPACT_V1],
         vec![RICH_PAYLOAD_V1],
     );
@@ -2832,11 +2855,11 @@ fn peer_capability_restore_prefers_session_peers() {
 
     let restarted = protocol_with_mls_storage(storage.clone());
     assert!(
-        restarted.peer_rich_payload.contains("bob"),
+        restarted.peer_rich_payload.contains(&id("bob")),
         "the session peer's record must always survive an over-cap prune"
     );
     assert!(storage
-        .load(storage_keys::PEER_CAPABILITIES, "bob")
+        .load(storage_keys::PEER_CAPABILITIES, &id("bob"))
         .unwrap()
         .is_some());
     assert_eq!(
@@ -2852,14 +2875,14 @@ fn peer_capability_restore_prefers_session_peers() {
 fn peer_capability_restore_deletes_corrupt_record() {
     let storage = Arc::new(InMemoryStorage::new());
     storage
-        .store(storage_keys::PEER_CAPABILITIES, "mangled", b"not-json")
+        .store(storage_keys::PEER_CAPABILITIES, &id("mangled"), b"not-json")
         .unwrap();
     let protocol = protocol_with_mls_storage(storage.clone());
-    assert!(!protocol.peer_rich_payload.contains("mangled"));
-    assert!(!protocol.peer_compact_envelope.contains("mangled"));
+    assert!(!protocol.peer_rich_payload.contains(&id("mangled")));
+    assert!(!protocol.peer_compact_envelope.contains(&id("mangled")));
     assert!(
         storage
-            .load(storage_keys::PEER_CAPABILITIES, "mangled")
+            .load(storage_keys::PEER_CAPABILITIES, &id("mangled"))
             .unwrap()
             .is_none(),
         "a corrupt record must be deleted, not re-parsed on every boot"
@@ -2874,10 +2897,10 @@ fn peer_capability_persist_truncates_version_lists() {
     let mut protocol = protocol_with_mls_storage(storage.clone());
     let mut rich_versions = vec![RICH_PAYLOAD_V1];
     rich_versions.extend(2..=200u8);
-    feed_key_package_with_caps(&mut protocol, "peer", Vec::new(), rich_versions);
+    feed_key_package_with_caps(&mut protocol, &id("peer"), Vec::new(), rich_versions);
 
     let data = storage
-        .load(storage_keys::PEER_CAPABILITIES, "peer")
+        .load(storage_keys::PEER_CAPABILITIES, &id("peer"))
         .unwrap()
         .expect("record must persist");
     let caps: PeerCapabilities = serde_json::from_slice(&data).unwrap();
@@ -2892,20 +2915,21 @@ fn attested_rich_gates_group_seal_only_and_persists() {
     // leak into DM sealing (that path always has direct knowledge).
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = protocol_with_mls_storage(storage.clone());
-    let members = vec![id("user123"), "peer".to_string()];
+    let members = vec![id("user123"), id("peer")];
     assert!(!protocol.group_rich_seal_active(&members));
 
-    protocol.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
-    assert!(protocol.peer_rich_attested.contains("peer"));
+    protocol.record_attested_rich(&id("peer"), &[RICH_PAYLOAD_V1]);
+    assert!(protocol.peer_rich_attested.contains(&id("peer")));
     assert!(protocol.group_rich_seal_active(&members));
     assert!(
-        !protocol.rich_seal_active("peer") && !protocol.peer_supports_rich_payload("peer"),
+        !protocol.rich_seal_active(&id("peer"))
+            && !protocol.peer_supports_rich_payload(&id("peer")),
         "attestation must never open the DM seal gate"
     );
 
     let restarted = protocol_with_mls_storage(storage);
     assert!(
-        restarted.peer_rich_attested.contains("peer"),
+        restarted.peer_rich_attested.contains(&id("peer")),
         "attested capability must survive a restart"
     );
     assert!(restarted.group_rich_seal_active(&members));
@@ -2915,8 +2939,8 @@ fn attested_rich_gates_group_seal_only_and_persists() {
 fn attested_rich_ignores_non_v1_and_self() {
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = protocol_with_mls_storage(storage);
-    protocol.record_attested_rich("peer", &[99]);
-    assert!(!protocol.peer_rich_attested.contains("peer"));
+    protocol.record_attested_rich(&id("peer"), &[99]);
+    assert!(!protocol.peer_rich_attested.contains(&id("peer")));
     protocol.record_attested_rich(&id("user123"), &[RICH_PAYLOAD_V1]);
     assert!(!protocol.peer_rich_attested.contains(&id("user123")));
 }
@@ -2928,28 +2952,28 @@ fn direct_key_package_overrides_attested_rich() {
     // and one with it moves the peer to the direct set.
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = protocol_with_mls_storage(storage.clone());
-    let members = vec![id("user123"), "peer".to_string()];
+    let members = vec![id("user123"), id("peer")];
 
-    protocol.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
-    feed_key_package_with_rich(&mut protocol, "peer", Vec::new());
-    assert!(!protocol.peer_rich_attested.contains("peer"));
+    protocol.record_attested_rich(&id("peer"), &[RICH_PAYLOAD_V1]);
+    feed_key_package_with_rich(&mut protocol, &id("peer"), Vec::new());
+    assert!(!protocol.peer_rich_attested.contains(&id("peer")));
     assert!(!protocol.group_rich_seal_active(&members));
     let restarted = protocol_with_mls_storage(storage.clone());
     assert!(
-        !restarted.peer_rich_attested.contains("peer"),
+        !restarted.peer_rich_attested.contains(&id("peer")),
         "a direct downgrade must also kill the durable attested record"
     );
 
-    protocol.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
-    feed_key_package_with_rich(&mut protocol, "peer", vec![RICH_PAYLOAD_V1]);
-    assert!(protocol.peer_rich_payload.contains("peer"));
-    assert!(!protocol.peer_rich_attested.contains("peer"));
+    protocol.record_attested_rich(&id("peer"), &[RICH_PAYLOAD_V1]);
+    feed_key_package_with_rich(&mut protocol, &id("peer"), vec![RICH_PAYLOAD_V1]);
+    assert!(protocol.peer_rich_payload.contains(&id("peer")));
+    assert!(!protocol.peer_rich_attested.contains(&id("peer")));
     assert!(protocol.group_rich_seal_active(&members));
 
     // Attesting a directly-known peer is a no-op — the direct entry already
     // covers it, and a stale attested duplicate would outlive a downgrade.
-    protocol.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
-    assert!(!protocol.peer_rich_attested.contains("peer"));
+    protocol.record_attested_rich(&id("peer"), &[RICH_PAYLOAD_V1]);
+    assert!(!protocol.peer_rich_attested.contains(&id("peer")));
 }
 
 #[test]
@@ -2963,26 +2987,26 @@ fn attested_rich_kill_switch_gates_memory_but_keeps_record() {
     config.encryption.rich_payload_enabled = false;
     let mut gated = OfflineProtocol::new(config).unwrap();
     gated.initialize_mls_for_test(storage.clone()).unwrap();
-    gated.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
-    assert!(!gated.peer_rich_attested.contains("peer"));
+    gated.record_attested_rich(&id("peer"), &[RICH_PAYLOAD_V1]);
+    assert!(!gated.peer_rich_attested.contains(&id("peer")));
 
     let restored = protocol_with_mls_storage(storage);
-    assert!(restored.peer_rich_attested.contains("peer"));
+    assert!(restored.peer_rich_attested.contains(&id("peer")));
 }
 
 #[test]
 fn attested_rich_unblock_clears_record() {
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = protocol_with_mls_storage(storage.clone());
-    protocol.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
+    protocol.record_attested_rich(&id("peer"), &[RICH_PAYLOAD_V1]);
 
-    protocol.block_user("peer").unwrap();
-    protocol.unblock_user("peer").unwrap();
-    assert!(!protocol.peer_rich_attested.contains("peer"));
+    protocol.block_user(&id("peer")).unwrap();
+    protocol.unblock_user(&id("peer")).unwrap();
+    assert!(!protocol.peer_rich_attested.contains(&id("peer")));
 
     let restarted = protocol_with_mls_storage(storage);
     assert!(
-        !restarted.peer_rich_attested.contains("peer"),
+        !restarted.peer_rich_attested.contains(&id("peer")),
         "unblock's clean slate must extend to the attested record"
     );
 }
@@ -2995,17 +3019,17 @@ fn attested_rich_persist_truncates_and_merges_with_direct_record() {
     let mut protocol = protocol_with_mls_storage(storage.clone());
     feed_key_package_with_caps(
         &mut protocol,
-        "peer",
+        &id("peer"),
         vec![MLS_ENVELOPE_COMPACT_V1],
         Vec::new(),
     );
 
     let mut versions = vec![RICH_PAYLOAD_V1];
     versions.extend(2..=200u8);
-    protocol.record_attested_rich("peer", &versions);
+    protocol.record_attested_rich(&id("peer"), &versions);
 
     let data = storage
-        .load(storage_keys::PEER_CAPABILITIES, "peer")
+        .load(storage_keys::PEER_CAPABILITIES, &id("peer"))
         .unwrap()
         .expect("record must persist");
     let caps: PeerCapabilities = serde_json::from_slice(&data).unwrap();
@@ -3096,24 +3120,24 @@ fn attested_rich_does_not_clobber_a_record_it_could_not_read() {
 
     feed_key_package_with_caps(
         &mut protocol,
-        "peer",
+        &id("peer"),
         vec![MLS_ENVELOPE_COMPACT_V1],
         Vec::new(),
     );
-    assert!(protocol.peer_compact_envelope.contains("peer"));
-    assert!(!protocol.peer_rich_payload.contains("peer"));
+    assert!(protocol.peer_compact_envelope.contains(&id("peer")));
+    assert!(!protocol.peer_rich_payload.contains(&id("peer")));
 
     // The attestation lands while the peer's record cannot be read.
     state.fail.store(true, std::sync::atomic::Ordering::SeqCst);
-    protocol.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
+    protocol.record_attested_rich(&id("peer"), &[RICH_PAYLOAD_V1]);
     state.fail.store(false, std::sync::atomic::Ordering::SeqCst);
 
     // In memory the attestation still opens the group gate for this run: it is
     // the durable record that must survive untouched.
-    assert!(protocol.peer_rich_attested.contains("peer"));
+    assert!(protocol.peer_rich_attested.contains(&id("peer")));
 
     let data = backing
-        .load(storage_keys::PEER_CAPABILITIES, "peer")
+        .load(storage_keys::PEER_CAPABILITIES, &id("peer"))
         .unwrap()
         .expect("the directly-advertised record must still be there");
     let caps: PeerCapabilities = serde_json::from_slice(&data).unwrap();
@@ -3132,7 +3156,7 @@ fn attested_rich_does_not_clobber_a_record_it_could_not_read() {
     .unwrap();
     restarted.initialize_mls_for_test(backing).unwrap();
     assert!(
-        restarted.peer_compact_envelope.contains("peer"),
+        restarted.peer_compact_envelope.contains(&id("peer")),
         "the peer's advertised envelope capability must survive the failed attestation"
     );
 }
@@ -3140,7 +3164,7 @@ fn attested_rich_does_not_clobber_a_record_it_could_not_read() {
 #[test]
 fn attested_rich_flood_eviction_clears_at_cap() {
     // Bounded like the direct sets: keyed by ids from (signed but
-    // TOFU-trusted) group control frames, so reset at capacity rather than
+    // untrusted) group control frames, so reset at capacity rather than
     // growing without bound. Forgetting costs one re-attestation/backfill.
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = protocol_with_mls_storage(storage);
@@ -3148,13 +3172,13 @@ fn attested_rich_flood_eviction_clears_at_cap() {
         protocol.record_attested_rich(&format!("peer-{i}"), &[RICH_PAYLOAD_V1]);
     }
     assert_eq!(protocol.peer_rich_attested.len(), MAX_KEY_PACKAGE_SENT_TO);
-    protocol.record_attested_rich("one-more", &[RICH_PAYLOAD_V1]);
+    protocol.record_attested_rich(&id("one-more"), &[RICH_PAYLOAD_V1]);
     assert_eq!(
         protocol.peer_rich_attested.len(),
         1,
         "at capacity the set resets before inserting"
     );
-    assert!(protocol.peer_rich_attested.contains("one-more"));
+    assert!(protocol.peer_rich_attested.contains(&id("one-more")));
 }
 
 #[test]
@@ -3164,12 +3188,7 @@ fn seal_rich_payload_round_trips_through_apply_decrypted_content() {
         OfflineProtocol::seal_rich_payload("hello rich", &extras, ContentType::Image).unwrap();
     assert!(sealed.starts_with(internal_prefixes::RICH_V1));
 
-    let mut message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "cipher-placeholder",
-    );
+    let mut message = signed_frame(&id("alice"), "user123", "cipher-placeholder");
     // Relay-injected outer quote: must never survive into the restored fields.
     message.reply_context = Some(offline_protocol_core::ReplyContext {
         sender: UserId::new("mallory").unwrap(),
@@ -3222,12 +3241,7 @@ fn apply_decrypted_content_rich_body_is_authoritative_over_outer_fields() {
     let sealed =
         OfflineProtocol::seal_rich_payload("bare rich", &extras, ContentType::default()).unwrap();
 
-    let mut message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "cipher-placeholder",
-    );
+    let mut message = signed_frame(&id("alice"), "user123", "cipher-placeholder");
     message.media_metadata = Some(sample_media_metadata(7));
     message.forwarded_from = Some(offline_protocol_core::ForwardInfo {
         original_sender: UserId::new("mallory").unwrap(),
@@ -3253,12 +3267,7 @@ fn apply_decrypted_content_rich_body_is_authoritative_over_outer_fields() {
 fn apply_decrypted_content_rich_parse_failure_surfaces_raw_text() {
     // Malformed JSON after the prefix -> raw text fallback, nothing restored.
     let raw = format!("{}not-json", internal_prefixes::RICH_V1);
-    let mut message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "cipher-placeholder",
-    );
+    let mut message = signed_frame(&id("alice"), "user123", "cipher-placeholder");
     OfflineProtocol::apply_decrypted_content(&mut message, raw.clone());
     assert_eq!(message.content, raw);
     assert!(message.reply_context.is_none());
@@ -3275,12 +3284,7 @@ fn apply_decrypted_content_rich_parse_failure_surfaces_raw_text() {
         internal_prefixes::RICH_V1,
         r#"{"text":"x","reply_context":{"sender":"evil/path","text":"q"}}"#
     );
-    let mut message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "cipher-placeholder",
-    );
+    let mut message = signed_frame(&id("alice"), "user123", "cipher-placeholder");
     OfflineProtocol::apply_decrypted_content(&mut message, hostile.clone());
     assert_eq!(message.content, hostile);
     assert!(message.reply_context.is_none());
@@ -3296,12 +3300,7 @@ fn apply_decrypted_content_legacy_rich_body_keeps_outer_content_type() {
         internal_prefixes::RICH_V1,
         r#"{"text":"old sender"}"#
     );
-    let mut message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "cipher-placeholder",
-    );
+    let mut message = signed_frame(&id("alice"), "user123", "cipher-placeholder");
     message.content_type = ContentType::VoiceNote;
     OfflineProtocol::apply_decrypted_content(&mut message, legacy);
     assert_eq!(message.content, "old sender");
@@ -3320,12 +3319,7 @@ fn apply_decrypted_content_refuses_sealed_file_chunk_content_type() {
         internal_prefixes::RICH_V1,
         r#"{"text":"smuggled","content_type":"file_chunk"}"#
     );
-    let mut message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "cipher-placeholder",
-    );
+    let mut message = signed_frame(&id("alice"), "user123", "cipher-placeholder");
     OfflineProtocol::apply_decrypted_content(&mut message, hostile);
     assert_eq!(message.content, "smuggled");
     assert_eq!(
@@ -3346,12 +3340,7 @@ fn apply_decrypted_content_unknown_sealed_content_type_degrades_to_file() {
         internal_prefixes::RICH_V1,
         r#"{"text":"vote now","content_type":"some_future_type"}"#
     );
-    let mut message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "cipher-placeholder",
-    );
+    let mut message = signed_frame(&id("alice"), "user123", "cipher-placeholder");
     OfflineProtocol::apply_decrypted_content(&mut message, future);
     assert_eq!(message.content, "vote now");
     assert_eq!(message.content_type, ContentType::File);
@@ -3464,12 +3453,7 @@ fn test_process_internal_message_key_package() {
         serde_json::to_string(&key_pkg_payload).unwrap()
     );
 
-    let message = Message::new(
-        UserId::new("sender123").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("sender123"), "user123", &content);
 
     // Process the message
     let result = protocol.process_internal_message(&message);
@@ -3478,8 +3462,8 @@ fn test_process_internal_message_key_package() {
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
     // Key package should be stored
-    assert!(protocol.pending_key_packages.contains_key("sender123"));
-    let received = protocol.pending_key_packages.get("sender123").unwrap();
+    assert!(protocol.pending_key_packages.contains_key(&id("sender123")));
+    let received = protocol.pending_key_packages.get(&id("sender123")).unwrap();
     assert_eq!(received.key_package_data, vec![1u8, 2, 3, 4]);
     assert!(received.local_expires_at_ms > 0);
 }
@@ -3506,12 +3490,7 @@ fn test_process_internal_message_connection_request_event() {
         serde_json::to_string(&payload).unwrap()
     );
 
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("alice"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -3526,7 +3505,7 @@ fn test_process_internal_message_connection_request_event() {
             key_package,
             initial_message,
         } => {
-            assert_eq!(sender, "alice");
+            assert_eq!(sender, &id("alice"));
             assert_eq!(sender_name, "Alice");
             assert_eq!(*timestamp, 12345);
             assert_eq!(key_package.as_ref(), Some(&vec![9, 8, 7]));
@@ -3555,42 +3534,6 @@ fn test_connection_request_payload_without_initial_message_parses() {
 }
 
 #[test]
-fn test_tofu_key_mismatch_emits_security_warning_with_stable_code() {
-    // Consumers gate a peer re-handshake on this exact signal, so the
-    // reason_code contract must not drift. A pinned peer presenting a
-    // different key (reinstall / new device / impersonation) must be rejected
-    // AND emit SecurityWarning carrying a stable TOFU_KEY_MISMATCH code — not
-    // merely a human-readable `reason` string that could be reworded.
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
-    let events_handle = Arc::clone(&events);
-    protocol.on_event(move |event| {
-        events_handle.lock().unwrap().push(event);
-    });
-
-    // First contact pins the key; a different key for the same peer mismatches.
-    assert!(protocol.tofu_check_or_pin("alice", vec![1, 2, 3]).is_ok());
-    assert!(protocol.tofu_check_or_pin("alice", vec![4, 5, 6]).is_err());
-
-    let captured = events.lock().unwrap();
-    let (peer_id, reason_code) = captured
-        .iter()
-        .find_map(|e| match e {
-            Event::SecurityWarning {
-                peer_id,
-                reason_code,
-                ..
-            } => Some((peer_id.clone(), *reason_code)),
-            _ => None,
-        })
-        .expect("a SecurityWarning event should have been emitted on key mismatch");
-    assert_eq!(peer_id, "alice".to_string());
-    assert_eq!(reason_code, SecurityWarningCode::TofuKeyMismatch);
-    // The serialized code is the stable string JS consumers match on.
-    assert_eq!(reason_code.as_str(), "TOFU_KEY_MISMATCH");
-}
-
-#[test]
 fn test_process_internal_message_connection_accepted_event() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3611,12 +3554,7 @@ fn test_process_internal_message_connection_accepted_event() {
         serde_json::to_string(&payload).unwrap()
     );
 
-    let message = Message::new(
-        UserId::new("bob").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("bob"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -3630,7 +3568,7 @@ fn test_process_internal_message_connection_accepted_event() {
             timestamp,
             key_package,
         } => {
-            assert_eq!(accepted_by, "bob");
+            assert_eq!(accepted_by, &id("bob"));
             assert_eq!(accepted_by_name, "Bob");
             assert_eq!(*timestamp, 99999);
             assert_eq!(key_package.as_ref(), Some(&vec![1, 2, 3, 4]));
@@ -3650,12 +3588,7 @@ fn test_process_internal_message_connection_rejected_event() {
     });
 
     let content = internal_prefixes::CONN_REJECT.to_string();
-    let message = Message::new(
-        UserId::new("carol").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("carol"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -3664,7 +3597,7 @@ fn test_process_internal_message_connection_rejected_event() {
     assert_eq!(captured.len(), 1);
     match &captured[0] {
         Event::ConnectionRejected { rejected_by } => {
-            assert_eq!(rejected_by, "carol");
+            assert_eq!(rejected_by, &id("carol"));
         }
         _ => panic!("Wrong event type"),
     }
@@ -4319,12 +4252,7 @@ fn test_process_internal_message_connection_cancelled_event() {
     });
 
     let content = internal_prefixes::CONN_CANCEL.to_string();
-    let message = Message::new(
-        UserId::new("carol").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("carol"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -4333,7 +4261,7 @@ fn test_process_internal_message_connection_cancelled_event() {
     assert_eq!(captured.len(), 1);
     match &captured[0] {
         Event::ConnectionRequestCancelled { cancelled_by } => {
-            assert_eq!(cancelled_by, "carol");
+            assert_eq!(cancelled_by, &id("carol"));
         }
         _ => panic!("Wrong event type"),
     }
@@ -4384,12 +4312,7 @@ fn test_process_internal_message_presence_update_event() {
         serde_json::to_string(&payload).unwrap()
     );
 
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("alice"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -4404,7 +4327,7 @@ fn test_process_internal_message_presence_update_event() {
             last_seen_ms,
             source,
         } => {
-            assert_eq!(peer_id, "alice");
+            assert_eq!(peer_id, &id("alice"));
             assert_eq!(*status, PresenceStatus::Online);
             assert_eq!(*timestamp, 12345);
             assert_eq!(*last_seen_ms, None);
@@ -4435,12 +4358,7 @@ fn test_process_internal_message_typing_indicator_event() {
         serde_json::to_string(&payload).unwrap()
     );
 
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("alice"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -4454,7 +4372,7 @@ fn test_process_internal_message_typing_indicator_event() {
             is_typing,
             timestamp,
         } => {
-            assert_eq!(sender, "alice");
+            assert_eq!(sender, &id("alice"));
             assert_eq!(conversation_id, "bob");
             assert!(*is_typing);
             assert_eq!(*timestamp, 67890);
@@ -4484,12 +4402,7 @@ fn test_process_internal_message_typing_indicator_stopped() {
         serde_json::to_string(&payload).unwrap()
     );
 
-    let message = Message::new(
-        UserId::new("bob").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("bob"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -4503,7 +4416,7 @@ fn test_process_internal_message_typing_indicator_stopped() {
             is_typing,
             ..
         } => {
-            assert_eq!(sender, "bob");
+            assert_eq!(sender, &id("bob"));
             assert_eq!(conversation_id, "group-123");
             assert!(!*is_typing);
         }
@@ -4535,12 +4448,7 @@ fn test_process_internal_message_read_receipt_event() {
         serde_json::to_string(&payload).unwrap()
     );
 
-    let message = Message::new(
-        UserId::new("carol").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("carol"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -4553,7 +4461,7 @@ fn test_process_internal_message_read_receipt_event() {
             message_ids,
             timestamp,
         } => {
-            assert_eq!(sender, "carol");
+            assert_eq!(sender, &id("carol"));
             assert_eq!(message_ids, &vec!["msg-1", "msg-2", "msg-3"]);
             assert_eq!(*timestamp, 11111);
         }
@@ -4690,12 +4598,7 @@ fn test_process_internal_message_presence_malformed_payload() {
     });
 
     let content = format!("{}not-valid-json", internal_prefixes::PRESENCE);
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("alice"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -4721,12 +4624,7 @@ fn test_process_internal_message_presence_negative_timestamp() {
         internal_prefixes::PRESENCE,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("alice"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -4753,12 +4651,7 @@ fn test_process_internal_message_typing_empty_conversation_id() {
         internal_prefixes::TYPING_INDICATOR,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("alice"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -4784,12 +4677,7 @@ fn test_process_internal_message_read_receipt_empty_ids() {
         internal_prefixes::READ_RECEIPT,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("alice"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -4816,12 +4704,7 @@ fn test_process_internal_message_read_receipt_exceeds_max_ids() {
         internal_prefixes::READ_RECEIPT,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("alice"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -4928,12 +4811,7 @@ fn test_process_internal_message_typing_negative_timestamp() {
         internal_prefixes::TYPING_INDICATOR,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("alice"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -4959,12 +4837,7 @@ fn test_process_internal_message_read_receipt_negative_timestamp() {
         internal_prefixes::READ_RECEIPT,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("alice"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -4979,10 +4852,9 @@ fn test_process_internal_message_regular_message() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Create a regular (non-internal) message
-    let message = Message::new(
-        UserId::new("sender123").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
+    let message = signed_frame(
+        &id("sender123"),
+        "user123",
         "Hello, this is a regular message!",
     );
 
@@ -5334,11 +5206,7 @@ fn test_require_encryption_returns_typed_failures() {
             .read()
             .unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap();
     }
@@ -5596,11 +5464,7 @@ fn test_require_encryption_pending_flush_encrypts_and_delivers() {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap();
     }
@@ -5660,11 +5524,7 @@ fn test_flush_pending_message_keeps_queued_id() {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap();
     }
@@ -6159,7 +6019,7 @@ fn test_sensitive_state_is_not_persisted_in_the_clear_without_the_record_key() {
         .write_state_record(
             state_storage.as_ref(),
             storage_keys::SESSION_STATES,
-            "bob",
+            &id("bob"),
             b"\"Confirmed\"",
         )
         .expect("non-sealed categories must still persist");
@@ -7885,12 +7745,7 @@ fn test_flush_terminal_welcome_failure_drops_pending_without_resurrection() {
             state: WelcomeDeliveryState::Expired,
             attempt: 1,
             unreachable_parks: 0,
-            welcome_message: Message::new(
-                UserId::new(&id("user123")).unwrap(),
-                UserId::new(&id("bob")).unwrap(),
-                AppId::new("test-app").unwrap(),
-                "__MLS_WELCOME__{}",
-            ),
+            welcome_message: signed_frame(&id("user123"), &id("bob"), "__MLS_WELCOME__{}"),
             next_retry_at: None,
             last_reason_code: None,
             last_transport_error: None,
@@ -8023,11 +7878,7 @@ fn test_flush_dedup_hit_drops_already_dispatched_message() {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap();
     }
@@ -8345,12 +8196,7 @@ fn test_unreachable_media_chunk_resolves_file_id() {
     // Plant a media outbox entry + chunk mapping directly (a full MLS
     // media transfer setup is exercised elsewhere; this test targets the
     // lookup wiring).
-    let chunk_message = Message::new(
-        UserId::new("user123").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "chunk-bytes",
-    );
+    let chunk_message = signed_frame(&id("user123"), "bob", "chunk-bytes");
     let chunk_id = chunk_message.id.clone();
     protocol.media_outbox.insert(
         chunk_id.clone(),
@@ -8854,12 +8700,7 @@ fn test_unreachable_media_chunk_is_not_parked() {
         .add_transport(TransportType::Internet, Box::new(mock_transport));
     protocol.start().unwrap();
 
-    let chunk_message = Message::new(
-        UserId::new("user123").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "chunk-bytes",
-    );
+    let chunk_message = signed_frame(&id("user123"), "bob", "chunk-bytes");
     let chunk_id = chunk_message.id.clone();
     protocol.media_outbox.insert(
         chunk_id.clone(),
@@ -9161,12 +9002,7 @@ fn test_unpark_cancel_spares_connection_request_ack() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     let (dm_id, _internet_mock, _ble_mock) = park_and_fire_probe(&mut protocol);
 
-    let conn_request = Message::new(
-        UserId::new("user123").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "__CONN_REQ__:{}",
-    );
+    let conn_request = signed_frame(&id("user123"), "bob", "__CONN_REQ__:{}");
     let conn_id = conn_request.id.clone();
     protocol.outbox.insert(
         conn_id.clone(),
@@ -9344,12 +9180,7 @@ fn test_unpark_cancel_spares_welcome_ack() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     let (dm_id, _internet_mock, _ble_mock) = park_and_fire_probe(&mut protocol);
 
-    let welcome = Message::new(
-        UserId::new("user123").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "__MLS_WELCOME__{}",
-    );
+    let welcome = signed_frame(&id("user123"), "bob", "__MLS_WELCOME__{}");
     let welcome_id = welcome.id.clone();
     protocol.outbox.insert(
         welcome_id.clone(),
@@ -9559,12 +9390,7 @@ fn test_cleanup_outbox_absolute_lifetime_cap_is_terminal_in_process() {
         );
 
     let make_entry = |first_sent_at| {
-        let message = Message::new(
-            UserId::new("user123").unwrap(),
-            UserId::new("bob").unwrap(),
-            AppId::new("test-app").unwrap(),
-            "hello",
-        );
+        let message = signed_frame(&id("user123"), "bob", "hello");
         let id = message.id.clone();
         (
             id,
@@ -9886,12 +9712,7 @@ fn test_session_confirmation_persists_across_restart_bidirectional_send() {
         .find(|msg| msg.content.starts_with(internal_prefixes::WELCOME))
         .map(|msg| msg.content)
         .expect("expected welcome message sent by initiator");
-    let welcome_msg = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        &welcome_wire,
-    );
+    let welcome_msg = signed_frame(&id("alice"), &id("bob"), &welcome_wire);
     let _ = bob.process_internal_message(&welcome_msg);
 
     // Bob sends encrypted message; Alice decrypts and confirms.
@@ -10075,11 +9896,7 @@ fn test_auto_send_and_manual_mls_share_single_state_under_concurrency() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap();
     }
@@ -10186,11 +10003,7 @@ fn test_manual_welcome_processing_confirms_session_for_auto_encrypt_flow() {
         manager.get_or_create_key_package().unwrap()
     };
     bob_manager
-        .import_key_package(
-            &id("alice"),
-            &alice_key_package.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
+        .import_key_package(&id("alice"), &alice_key_package.key_package_data)
         .unwrap();
     let welcome = bob_manager.create_session(&id("alice")).unwrap();
 
@@ -10237,11 +10050,7 @@ fn test_manual_delete_session_clears_protocol_session_state() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap();
     }
@@ -10378,11 +10187,7 @@ fn test_encrypt_confirmed_session_transient_error_preserves_cache() {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap();
     }
@@ -10443,11 +10248,7 @@ fn test_externally_deleted_confirmed_session_queues_message() {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap();
     }
@@ -10514,11 +10315,7 @@ fn test_confirmation_crash_recovery_before_first_send() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         let welcome = manager.create_session(&id("bob")).unwrap();
         bob_manager.join_session(&welcome).unwrap();
@@ -11089,11 +10886,7 @@ fn test_adopter_resends_confirm_on_welcome_retransmit_without_owner_keep() {
         manager.get_or_create_key_package().unwrap()
     };
     zoe_manager
-        .import_key_package(
-            &id("bob"),
-            &bob_key_package.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
+        .import_key_package(&id("bob"), &bob_key_package.key_package_data)
         .unwrap();
     let welcome = zoe_manager.create_session(&id("bob")).unwrap();
     let welcome_content = format!(
@@ -11101,14 +10894,7 @@ fn test_adopter_resends_confirm_on_welcome_retransmit_without_owner_keep() {
         internal_prefixes::WELCOME,
         serde_json::to_string(&welcome).unwrap()
     );
-    let make_welcome_msg = || {
-        Message::new(
-            UserId::new(&id("zoe")).unwrap(),
-            UserId::new(&id("bob")).unwrap(),
-            AppId::new("test-app").unwrap(),
-            &welcome_content,
-        )
-    };
+    let make_welcome_msg = || signed_frame(&id("zoe"), &id("bob"), &welcome_content);
 
     // First Welcome: bob joins and proactively confirms its own side.
     bob.process_internal_message(&make_welcome_msg());
@@ -11155,12 +10941,7 @@ fn test_welcome_terminal_lifecycle_can_be_overwritten() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls_for_test(storage).unwrap();
 
-    let message = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        "__MLS_WELCOME__dummy".to_string(),
-    );
+    let message = signed_frame(&id("alice"), &id("bob"), "__MLS_WELCOME__dummy".to_string());
     protocol
         .upsert_welcome_lifecycle(&id("bob"), "session:bob:1", message.clone(), "test_created")
         .unwrap();
@@ -11190,12 +10971,7 @@ fn test_welcome_non_terminal_lifecycle_cannot_be_overwritten() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls_for_test(storage).unwrap();
 
-    let message = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        "__MLS_WELCOME__dummy".to_string(),
-    );
+    let message = signed_frame(&id("alice"), &id("bob"), "__MLS_WELCOME__dummy".to_string());
     protocol
         .upsert_welcome_lifecycle(&id("bob"), "session:bob:1", message.clone(), "test_created")
         .unwrap();
@@ -11348,12 +11124,7 @@ fn test_welcome_restore_repairs_failed_without_retry_schedule() {
     let mut protocol = OfflineProtocol::new(config.clone()).unwrap();
     protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
-    let message = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        "__MLS_WELCOME__dummy".to_string(),
-    );
+    let message = signed_frame(&id("alice"), &id("bob"), "__MLS_WELCOME__dummy".to_string());
     protocol
         .upsert_welcome_lifecycle(&id("bob"), "session:bob:1", message, "test_created")
         .unwrap();
@@ -11399,12 +11170,7 @@ fn test_welcome_restore_promotes_retry_exhausted_failed_to_expired() {
     let mut protocol = OfflineProtocol::new(config.clone()).unwrap();
     protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
-    let message = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        "__MLS_WELCOME__dummy".to_string(),
-    );
+    let message = signed_frame(&id("alice"), &id("bob"), "__MLS_WELCOME__dummy".to_string());
     protocol
         .upsert_welcome_lifecycle(&id("bob"), "session:bob:1", message, "test_created")
         .unwrap();
@@ -11749,12 +11515,7 @@ fn test_welcome_restart_keeps_no_carrier_lifecycle_alive() {
 
     // A Welcome that stalled with no carrier and then aged past its TTL while
     // the device was offline, with no retry scheduled.
-    let message = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        "__MLS_WELCOME__dummy".to_string(),
-    );
+    let message = signed_frame(&id("alice"), &id("bob"), "__MLS_WELCOME__dummy".to_string());
     protocol
         .upsert_welcome_lifecycle(&id("bob"), "session:bob:1", message, "test_created")
         .unwrap();
@@ -12044,11 +11805,7 @@ fn test_session_confirms_via_ack_when_welcome_is_send_attempted() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap();
     }
@@ -12092,10 +11849,9 @@ fn test_session_confirms_via_ack_when_welcome_is_send_attempted() {
     );
 
     // Simulate: Bob received our welcome and sends a confirmation ack
-    let ack_msg = Message::new(
-        UserId::new(&id("bob")).unwrap(),
-        UserId::new(&id("user123")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let ack_msg = signed_frame(
+        &id("bob"),
+        &id("user123"),
         internal_prefixes::SESSION_CONFIRM_ACK,
     );
     transport_handle.queue_message(ack_msg);
@@ -12138,11 +11894,7 @@ fn test_both_create_owner_confirms_via_decrypt_after_welcome_expired() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap();
     }
@@ -12286,12 +12038,7 @@ fn test_session_owner_emits_established_on_decrypt_confirmation() {
         .find(|msg| msg.content.starts_with(internal_prefixes::WELCOME))
         .map(|msg| msg.content)
         .expect("expected welcome message sent by owner");
-    let welcome_msg = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        &welcome_wire,
-    );
+    let welcome_msg = signed_frame(&id("alice"), &id("bob"), &welcome_wire);
     let _ = bob.process_internal_message(&welcome_msg);
 
     // The owner has only SENT a Welcome — it must stay Pending (and silent) until a
@@ -12426,31 +12173,25 @@ fn test_welcome_reordered_after_encrypted_message_flushes_pending_decryption() {
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package(
-            &id("bob"),
-            &bob_key_package.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
+        .import_key_package(&id("bob"), &bob_key_package.key_package_data)
         .unwrap();
     let welcome = alice_manager.create_session(&id("bob")).unwrap();
     let encrypted = alice_manager
         .encrypt_for_user(&id("bob"), b"encrypted-before-welcome")
         .unwrap();
 
-    let encrypted_wire = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let encrypted_wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::ENCRYPTED,
             serde_json::to_string(&encrypted).unwrap()
         ),
     );
-    let welcome_wire = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let welcome_wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::WELCOME,
@@ -12472,7 +12213,7 @@ fn test_welcome_reordered_after_encrypted_message_flushes_pending_decryption() {
         Some(InternalMessageResult::Consumed)
     ));
     assert!(bob.confirmed_sessions.contains(&id("alice")));
-    assert!(!bob.pending_queue.contains_peer(&id("alice")));
+    assert!(!bob.pending_queue.contains_peer("alice"));
 
     let delayed_received = bob
         .receive_message()
@@ -12534,11 +12275,7 @@ fn test_deferred_encrypted_dm_defers_ack_then_recovers_without_loss_or_dup() {
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package(
-            &id("bob"),
-            &bob_key_package.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
+        .import_key_package(&id("bob"), &bob_key_package.key_package_data)
         .unwrap();
     let welcome = alice_manager.create_session(&id("bob")).unwrap();
     let encrypted = alice_manager
@@ -12546,10 +12283,9 @@ fn test_deferred_encrypted_dm_defers_ack_then_recovers_without_loss_or_dup() {
         .unwrap();
 
     // One encrypted wire message, cloned for every resend so the id is stable.
-    let encrypted_wire = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let encrypted_wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::ENCRYPTED,
@@ -12599,10 +12335,9 @@ fn test_deferred_encrypted_dm_defers_ack_then_recovers_without_loss_or_dup() {
     assert!(received.lock().unwrap().is_empty());
 
     // 3) Welcome arrives: session confirmed, queue drains, message surfaces once.
-    let welcome_wire = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let welcome_wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::WELCOME,
@@ -12612,7 +12347,7 @@ fn test_deferred_encrypted_dm_defers_ack_then_recovers_without_loss_or_dup() {
     bob_handle.queue_message(welcome_wire);
     while bob.receive_message().is_some() {}
     assert!(
-        !bob.pending_queue.contains_peer(&id("alice")),
+        !bob.pending_queue.contains_peer("alice"),
         "queue must drain on Welcome"
     );
     assert_eq!(
@@ -12682,17 +12417,12 @@ fn test_crypto_recovery_disabled_falls_back_to_drop_and_ack() {
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package(
-            &id("bob"),
-            &bob_key_package.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
+        .import_key_package(&id("bob"), &bob_key_package.key_package_data)
         .unwrap();
     let welcome = alice_manager.create_session(&id("bob")).unwrap();
-    let welcome_wire = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let welcome_wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::WELCOME,
@@ -12709,10 +12439,9 @@ fn test_crypto_recovery_disabled_falls_back_to_drop_and_ack() {
     let encrypted = alice_manager
         .encrypt_for_user(&id("bob"), b"after-fork")
         .unwrap();
-    let encrypted_wire = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let encrypted_wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::ENCRYPTED,
@@ -12795,17 +12524,12 @@ fn test_desync_dm_withholds_ack_and_triggers_rekey() {
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package(
-            &id("bob"),
-            &bob_key_package.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
+        .import_key_package(&id("bob"), &bob_key_package.key_package_data)
         .unwrap();
     let welcome = alice_manager.create_session(&id("bob")).unwrap();
-    let welcome_wire = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let welcome_wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::WELCOME,
@@ -12824,10 +12548,9 @@ fn test_desync_dm_withholds_ack_and_triggers_rekey() {
     let encrypted = alice_manager
         .encrypt_for_user(&id("bob"), b"after-fork")
         .unwrap();
-    let encrypted_wire = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let encrypted_wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::ENCRYPTED,
@@ -12854,7 +12577,7 @@ fn test_desync_dm_withholds_ack_and_triggers_rekey() {
         "an undecryptable desync DM must not surface to the app"
     );
     assert!(
-        !bob.pending_queue.contains_peer(&id("alice")),
+        !bob.pending_queue.contains_peer("alice"),
         "a desync DM must NOT be enqueued (its ciphertext can never drain)"
     );
 
@@ -12901,17 +12624,12 @@ fn hard_failure_pair(
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package(
-            &id("bob"),
-            &bob_key_package.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
+        .import_key_package(&id("bob"), &bob_key_package.key_package_data)
         .unwrap();
     let welcome = alice_manager.create_session(&id("bob")).unwrap();
-    let welcome_wire = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let welcome_wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::WELCOME,
@@ -12931,10 +12649,9 @@ fn encrypted_wire(
     encrypted: &offline_protocol_mls::EncryptedMessage,
     reuse_id: Option<MessageId>,
 ) -> Message {
-    let mut wire = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let mut wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::ENCRYPTED,
@@ -13204,10 +12921,9 @@ fn test_unparseable_mls_envelope_withholds_ack_and_recovers_on_resend() {
 
     // Neither JSON (no leading `{`) nor base64 (`!` is outside the alphabet),
     // so every branch of `parse_encrypted_payload` refuses it.
-    let unparseable = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
+    let unparseable = signed_frame(
+        &id("alice"),
+        "bob",
         &format!("{}!!!not-an-envelope!!!", internal_prefixes::ENCRYPTED),
     );
     let msg_id = unparseable.id.clone();
@@ -13270,10 +12986,9 @@ fn test_unparseable_mls_envelope_withholds_ack_and_recovers_on_resend() {
 fn test_unparseable_mls_envelope_disabled_falls_back_to_drop_and_ack() {
     let (mut bob, bob_handle, _alice_manager) = hard_failure_pair(false);
 
-    let unparseable = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let unparseable = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!("{}!!!not-an-envelope!!!", internal_prefixes::ENCRYPTED),
     );
     let msg_id = unparseable.id.clone();
@@ -13426,12 +13141,8 @@ fn test_reseal_on_resend_recovers_after_recipient_rekeys_to_new_epoch() {
     let bob_kp = bob_manager.get_or_create_key_package().unwrap();
     {
         let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
-        mgr.import_key_package(
-            &id("bob"),
-            &bob_kp.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
-        .unwrap();
+        mgr.import_key_package(&id("bob"), &bob_kp.key_package_data)
+            .unwrap();
     }
     let welcome = {
         let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
@@ -13471,12 +13182,8 @@ fn test_reseal_on_resend_recovers_after_recipient_rekeys_to_new_epoch() {
     let bob_kp2 = bob_manager.get_or_create_key_package().unwrap();
     {
         let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
-        mgr.import_key_package(
-            &id("bob"),
-            &bob_kp2.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
-        .unwrap();
+        mgr.import_key_package(&id("bob"), &bob_kp2.key_package_data)
+            .unwrap();
     }
     let welcome2 = {
         let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
@@ -13530,12 +13237,7 @@ fn test_reseal_is_noop_without_provenance() {
         .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
-    let mut plain = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        "not encrypted",
-    );
+    let mut plain = signed_frame(&id("alice"), &id("bob"), "not encrypted");
     let before = plain.content.clone();
     alice.reseal_for_resend_in_place(&mut plain);
     assert_eq!(
@@ -13600,12 +13302,7 @@ fn establish_confirmed_session(
     };
     let welcome = {
         let m = b.mls_manager.as_ref().unwrap().read().unwrap();
-        m.import_key_package(
-            a_id,
-            &a_kp.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
-        .unwrap();
+        m.import_key_package(a_id, &a_kp.key_package_data).unwrap();
         m.create_session(a_id).unwrap()
     };
     {
@@ -13684,12 +13381,7 @@ fn feed_session_reset_key_package(
         serde_json::to_string(&payload).unwrap()
     );
     let target_id = target.config.profile.clone();
-    let message = Message::new(
-        UserId::new(from_id).unwrap(),
-        UserId::new(&target_id).unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(from_id, &target_id, &content);
     target.process_internal_message(&message);
 }
 
@@ -14030,11 +13722,7 @@ fn test_evicted_pending_message_recovers_on_resend_after_session_ready() {
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package(
-            &id("bob"),
-            &bob_key_package.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
+        .import_key_package(&id("bob"), &bob_key_package.key_package_data)
         .unwrap();
     let welcome = alice_manager.create_session(&id("bob")).unwrap();
 
@@ -14050,10 +13738,9 @@ fn test_evicted_pending_message_recovers_on_resend_after_session_ready() {
         .unwrap();
 
     let wire = |encrypted: &_| {
-        Message::new(
-            UserId::new(&id("alice")).unwrap(),
-            UserId::new(&id("bob")).unwrap(),
-            AppId::new("test-app").unwrap(),
+        signed_frame(
+            &id("alice"),
+            &id("bob"),
             &format!(
                 "{}{}",
                 internal_prefixes::ENCRYPTED,
@@ -14100,10 +13787,9 @@ fn test_evicted_pending_message_recovers_on_resend_after_session_ready() {
 
     // 3) Welcome establishes the session and drains the queue. Only the evictor
     //    surfaces; the evicted message is provably gone (never delivered).
-    let welcome_wire = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let welcome_wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::WELCOME,
@@ -14254,7 +13940,7 @@ fn test_pending_queue_drains_on_decrypt_confirmation_owner_path() {
         "owner must confirm via decrypt_success"
     );
     assert!(
-        !alice.pending_queue.contains_peer(&id("bob")),
+        !alice.pending_queue.contains_peer("bob"),
         "the decrypt-confirmation must drain the pending queue (change-6)"
     );
     assert!(
@@ -14286,11 +13972,7 @@ fn test_deferred_media_chunk_defers_ack_then_recovers() {
         let mls = alice.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_kp.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap()
     };
@@ -14344,10 +14026,9 @@ fn test_deferred_media_chunk_defers_ack_then_recovers() {
     assert_eq!(acks_for_chunk(&bob_handle), 0);
 
     // 3) Welcome establishes the session and drains the chunk to completion.
-    let welcome_wire = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let welcome_wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::WELCOME,
@@ -14357,7 +14038,7 @@ fn test_deferred_media_chunk_defers_ack_then_recovers() {
     bob_handle.queue_message(welcome_wire);
     while bob.receive_message().is_some() {}
     assert!(
-        !bob.pending_queue.contains_peer(&id("alice")),
+        !bob.pending_queue.contains_peer("alice"),
         "chunk queue must drain on Welcome"
     );
     assert_eq!(
@@ -14417,21 +14098,16 @@ fn test_deferred_dm_is_acked_on_drain_without_a_resend() {
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package(
-            &id("bob"),
-            &bob_key_package.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
+        .import_key_package(&id("bob"), &bob_key_package.key_package_data)
         .unwrap();
     let welcome = alice_manager.create_session(&id("bob")).unwrap();
     let encrypted = alice_manager
         .encrypt_for_user(&id("bob"), b"before-welcome")
         .unwrap();
 
-    let encrypted_wire = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let encrypted_wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::ENCRYPTED,
@@ -14459,10 +14135,9 @@ fn test_deferred_dm_is_acked_on_drain_without_a_resend() {
 
     // Welcome drains the queue. The drain must ACK the surfaced message on its
     // recorded arrival transport — with NO resend from the sender.
-    let welcome_wire = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let welcome_wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::WELCOME,
@@ -14471,7 +14146,7 @@ fn test_deferred_dm_is_acked_on_drain_without_a_resend() {
     );
     bob_handle.queue_message(welcome_wire);
     while bob.receive_message().is_some() {}
-    assert!(!bob.pending_queue.contains_peer(&id("alice")));
+    assert!(!bob.pending_queue.contains_peer("alice"));
     assert_eq!(
         acks_for_msg(&bob_handle),
         1,
@@ -14585,17 +14260,12 @@ fn test_welcome_duplicate_delivery_emits_single_established_event() {
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package(
-            &id("bob"),
-            &bob_key_package.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
+        .import_key_package(&id("bob"), &bob_key_package.key_package_data)
         .unwrap();
     let welcome = alice_manager.create_session(&id("bob")).unwrap();
-    let welcome_wire = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let welcome_wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::WELCOME,
@@ -14638,11 +14308,7 @@ fn test_restore_session_state_migrates_legacy_session_to_pending_without_inferen
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         let welcome = manager.create_session(&id("bob")).unwrap();
         bob_manager.join_session(&welcome).unwrap();
@@ -14711,11 +14377,7 @@ fn test_corrupt_session_state_record_does_not_fail_initialization() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         let welcome = manager.create_session(&id("bob")).unwrap();
         bob_manager.join_session(&welcome).unwrap();
@@ -14788,11 +14450,7 @@ fn test_restore_session_state_keeps_missing_state_pending_when_queue_exists() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         let welcome = manager.create_session(&id("bob")).unwrap();
         bob_manager.join_session(&welcome).unwrap();
@@ -14851,11 +14509,7 @@ fn test_start_flushes_restored_pending_messages_for_confirmed_session() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         let welcome = manager.create_session(&id("bob")).unwrap();
         bob_manager.join_session(&welcome).unwrap();
@@ -14931,11 +14585,7 @@ fn test_pending_sessions_reconcile_via_probe_after_restart() {
     let welcome = {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap()
     };
@@ -15075,11 +14725,7 @@ fn test_pending_sessions_reconcile_on_send_without_process_tick() {
     let welcome = {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap()
     };
@@ -15240,11 +14886,7 @@ fn test_pending_sessions_reconcile_on_concurrent_send_after_restart() {
     let welcome = {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap()
     };
@@ -15514,11 +15156,7 @@ fn test_send_message_fails_closed_when_confirmation_state_is_corrupted() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         let welcome = manager.create_session(&id("bob")).unwrap();
         bob_manager.join_session(&welcome).unwrap();
@@ -15568,11 +15206,7 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
     let welcome = {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap()
     };
@@ -15724,12 +15358,7 @@ fn test_pending_decryption_queue() {
     assert!(protocol.pending_queue.is_empty());
 
     // Queue an encrypted message for a sender
-    let message = Message::new(
-        UserId::new("sender123").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "encrypted content",
-    );
+    let message = signed_frame(&id("sender123"), "user123", "encrypted content");
 
     protocol.enqueue_pending_decryption("sender123", &message);
 
@@ -15738,12 +15367,7 @@ fn test_pending_decryption_queue() {
     assert_eq!(protocol.pending_queue.peer_queue_len("sender123"), 1);
 
     // Queue another message from same sender
-    let message2 = Message::new(
-        UserId::new("sender123").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "more encrypted content",
-    );
+    let message2 = signed_frame(&id("sender123"), "user123", "more encrypted content");
 
     protocol.enqueue_pending_decryption("sender123", &message2);
 
@@ -15758,12 +15382,7 @@ fn test_session_confirmation_clears_pending_decryption() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Queue some pending decryption messages
-    let message = Message::new(
-        UserId::new("sender123").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "encrypted content",
-    );
+    let message = signed_frame(&id("sender123"), "user123", "encrypted content");
 
     protocol.enqueue_pending_decryption("sender123", &message);
 
@@ -15786,15 +15405,15 @@ fn test_on_neighbor_lost_clears_confirmed_session() {
 
     // Add a confirmed session
     protocol.confirmed_sessions.insert("peer123".to_string());
-    protocol.key_package_sent_to.insert("peer123".to_string());
+    protocol.key_package_sent_to.insert(id("peer123"));
 
     assert!(protocol.confirmed_sessions.contains("peer123"));
 
     // When neighbor is lost, the key_package_sent_to is cleared
     // (confirmed_sessions might still remain - it's the crypto state)
-    protocol.on_neighbor_lost("peer123");
+    protocol.on_neighbor_lost(&id("peer123"));
 
-    assert!(!protocol.key_package_sent_to.contains("peer123"));
+    assert!(!protocol.key_package_sent_to.contains(&id("peer123")));
 }
 
 #[test]
@@ -15816,12 +15435,7 @@ fn test_welcome_message_confirms_session() {
         internal_prefixes::WELCOME
     );
 
-    let message = Message::new(
-        UserId::new("sender123").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &welcome_content,
-    );
+    let message = signed_frame(&id("sender123"), "user123", &welcome_content);
 
     // Process the message
     let result = protocol.process_internal_message(&message);
@@ -15847,12 +15461,7 @@ fn test_encrypted_message_before_session_queued() {
         slot
     );
 
-    let message = Message::new(
-        UserId::new("sender123").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &encrypted_content,
-    );
+    let message = signed_frame(&id("sender123"), "user123", &encrypted_content);
 
     // Process the message without MLS initialized - should be consumed and signaled as an error
     let result = protocol.process_internal_message(&message);
@@ -15899,11 +15508,7 @@ fn test_mls_pipeline_happy_path_init_send_encrypted_receive_decrypted() {
     let welcome = {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap()
     };
@@ -15976,11 +15581,7 @@ fn test_mls_pipeline_missing_session_applies_drop_newest_policy() {
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package(
-            &id("bob"),
-            &bob_key_package.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
+        .import_key_package(&id("bob"), &bob_key_package.key_package_data)
         .unwrap();
     alice_manager.create_session(&id("bob")).unwrap();
 
@@ -15991,20 +15592,18 @@ fn test_mls_pipeline_missing_session_applies_drop_newest_policy() {
         .encrypt_for_user(&id("bob"), b"second")
         .unwrap();
 
-    let first_message = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let first_message = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::ENCRYPTED,
             serde_json::to_string(&encrypted_one).unwrap()
         ),
     );
-    let second_message = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let second_message = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::ENCRYPTED,
@@ -16061,12 +15660,7 @@ fn test_encrypted_message_decryption_failure_emits_app_error_event() {
         internal_prefixes::ENCRYPTED,
         slot
     );
-    let message = Message::new(
-        UserId::new("sender123").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &encrypted_content,
-    );
+    let message = signed_frame(&id("sender123"), "user123", &encrypted_content);
 
     let _ = protocol.process_internal_message(&message);
 
@@ -16079,7 +15673,7 @@ fn test_encrypted_message_decryption_failure_emits_app_error_event() {
             code,
             reason,
         } if message_id == &message.id.as_str()
-            && sender == "sender123"
+            && sender == &id("sender123")
             && code == &DecryptionFailureCode::NotInitialized
             && reason.contains("not initialized")
     )));
@@ -16110,12 +15704,7 @@ fn test_invalid_encrypted_payload_emits_app_error_event_and_is_deferred() {
     });
 
     let malformed_payload = format!("{}{{\"group_id\":\"bad\"", internal_prefixes::ENCRYPTED);
-    let message = Message::new(
-        UserId::new("sender123").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &malformed_payload,
-    );
+    let message = signed_frame(&id("sender123"), "user123", &malformed_payload);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Deferred)));
@@ -16129,7 +15718,7 @@ fn test_invalid_encrypted_payload_emits_app_error_event_and_is_deferred() {
             code,
             reason,
         } if message_id == &message.id.as_str()
-            && sender == "sender123"
+            && sender == &id("sender123")
             && code == &DecryptionFailureCode::InvalidPayload
             && reason.contains("Invalid encrypted payload")
     )));
@@ -16174,12 +15763,7 @@ fn test_internal_prefix_malformed_payload_fuzz_is_panic_free() {
 
     for prefix in prefixes {
         for payload in &malformed_payloads {
-            let message = Message::new(
-                UserId::new("sender123").unwrap(),
-                UserId::new("user123").unwrap(),
-                AppId::new("test-app").unwrap(),
-                &format!("{prefix}{payload}"),
-            );
+            let message = signed_frame(&id("sender123"), "user123", &format!("{prefix}{payload}"));
 
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 protocol.process_internal_message(&message)
@@ -16229,12 +15813,7 @@ fn test_receive_message_decrypt_failure_emits_error_without_message_received() {
         internal_prefixes::ENCRYPTED,
         slot
     );
-    let message = Message::new(
-        UserId::new("sender123").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &encrypted_content,
-    );
+    let message = signed_frame(&id("sender123"), "user123", &encrypted_content);
     mock_transport.queue_message(message.clone());
 
     protocol
@@ -16254,7 +15833,7 @@ fn test_receive_message_decrypt_failure_emits_error_without_message_received() {
             code,
             ..
         } if message_id == &message.id.as_str()
-            && sender == "sender123"
+            && sender == &id("sender123")
             && code == &DecryptionFailureCode::NotInitialized
     )));
     assert!(!captured
@@ -16274,25 +15853,22 @@ fn test_encrypted_message_group_not_found_is_queued_with_typed_classification() 
 
     // The receive path binds the envelope's slot to the claimed sender, so the
     // slot has to be the one those two ids actually derive — not a literal.
-    let slot = offline_protocol_mls::GroupId::for_session(&id("user123"), "sender123").unwrap();
+    let slot =
+        offline_protocol_mls::GroupId::for_session(&id("user123"), &id("sender123")).unwrap();
     let encrypted_content = format!(
-        "{}{{\"group_id\":\"{}\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
+        "{}{{\"group_id\":\"{}\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"{}\",\"timestamp_ms\":12345}}",
         internal_prefixes::ENCRYPTED,
-        slot
+        slot,
+        id("sender123")
     );
 
-    let message = Message::new(
-        UserId::new("sender123").unwrap(),
-        UserId::new(&id("user123")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        &encrypted_content,
-    );
+    let message = signed_frame(&id("sender123"), &id("user123"), &encrypted_content);
 
     let result = protocol.process_internal_message(&message);
 
     assert!(matches!(result, Some(InternalMessageResult::Deferred)));
-    assert!(protocol.pending_queue.contains_peer("sender123"));
-    assert_eq!(protocol.pending_queue.peer_queue_len("sender123"), 1);
+    assert!(protocol.pending_queue.contains_peer(&id("sender123")));
+    assert_eq!(protocol.pending_queue.peer_queue_len(&id("sender123")), 1);
 }
 
 #[test]
@@ -16306,7 +15882,7 @@ fn test_pending_queue_stress_memory_plateaus_with_unfinished_handshake() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     for idx in 0..10_000 {
-        let msg = pending_test_message("sender123", &format!("encrypted-{idx}"));
+        let msg = pending_test_message(&id("sender123"), &format!("encrypted-{idx}"));
         protocol.enqueue_pending_decryption("sender123", &msg);
     }
 
@@ -16341,9 +15917,10 @@ fn test_pending_queue_sustained_mixed_invalid_and_early_encrypted_is_bounded() {
         .unwrap();
 
     let early_slot =
-        offline_protocol_mls::GroupId::for_session(&id("user123"), "sender123").unwrap();
+        offline_protocol_mls::GroupId::for_session(&id("user123"), &id("sender123")).unwrap();
+    let sender_address = id("sender123");
     let valid_early_encrypted = format!(
-        "{}{{\"group_id\":\"{early_slot}\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
+        "{}{{\"group_id\":\"{early_slot}\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"{sender_address}\",\"timestamp_ms\":12345}}",
         internal_prefixes::ENCRYPTED
     );
     let malformed_variants = [
@@ -16368,12 +15945,7 @@ fn test_pending_queue_sustained_mixed_invalid_and_early_encrypted_is_bounded() {
             valid_early_encrypted.as_str()
         };
 
-        let message = Message::new(
-            UserId::new("sender123").unwrap(),
-            UserId::new(&id("user123")).unwrap(),
-            AppId::new("test-app").unwrap(),
-            content,
-        );
+        let message = signed_frame(&id("sender123"), &id("user123"), content);
         let result = protocol.process_internal_message(&message);
         // Both shapes defer, but for different reasons — and only one of them
         // queues. A valid-but-early encrypted message is queued and not ACKed
@@ -16417,13 +15989,13 @@ fn test_pending_queue_flood_respects_per_peer_fairness() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     for idx in 0..100 {
-        let msg = pending_test_message("noisy-peer", &format!("noisy-{idx}"));
+        let msg = pending_test_message(&id("noisy-peer"), &format!("noisy-{idx}"));
         protocol.enqueue_pending_decryption("noisy-peer", &msg);
     }
     for idx in 0..3 {
-        let msg = pending_test_message("peer-a", &format!("a-{idx}"));
+        let msg = pending_test_message(&id("peer-a"), &format!("a-{idx}"));
         protocol.enqueue_pending_decryption("peer-a", &msg);
-        let msg = pending_test_message("peer-b", &format!("b-{idx}"));
+        let msg = pending_test_message(&id("peer-b"), &format!("b-{idx}"));
         protocol.enqueue_pending_decryption("peer-b", &msg);
     }
 
@@ -16443,8 +16015,8 @@ fn test_pending_queue_drop_newest_policy_enforced_for_per_peer_limit() {
     config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropNewest;
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    let first = pending_test_message("peer-a", "first");
-    let second = pending_test_message("peer-a", "second");
+    let first = pending_test_message(&id("peer-a"), "first");
+    let second = pending_test_message(&id("peer-a"), "second");
     protocol.enqueue_pending_decryption("peer-a", &first);
     protocol.enqueue_pending_decryption("peer-a", &second);
 
@@ -16477,13 +16049,13 @@ fn test_pending_queue_global_limit_fail_closed_when_global_index_corrupted() {
     config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropOldest;
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.enqueue_pending_decryption("peer-a", &pending_test_message("peer-a", "m1"));
+    protocol.enqueue_pending_decryption("peer-a", &pending_test_message(&id("peer-a"), "m1"));
     assert_eq!(protocol.pending_queue.total(), 1);
 
     // Simulate index drift: queue has data but global-order index is empty.
     protocol.pending_queue.corrupt_clear_global_order();
 
-    protocol.enqueue_pending_decryption("peer-b", &pending_test_message("peer-b", "m2"));
+    protocol.enqueue_pending_decryption("peer-b", &pending_test_message(&id("peer-b"), "m2"));
 
     assert_eq!(protocol.pending_queue.total(), 1);
     assert!(!protocol.pending_queue.contains_peer("peer-b"));
@@ -16506,8 +16078,8 @@ fn test_pending_queue_ttl_expiration_is_deterministic_and_monotonic() {
     config.encryption.pending_queue.pending_ttl_ms = 1_000;
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    let old_msg = pending_test_message("sender123", "old");
-    let fresh_msg = pending_test_message("sender123", "fresh");
+    let old_msg = pending_test_message(&id("sender123"), "old");
+    let fresh_msg = pending_test_message(&id("sender123"), "fresh");
     protocol.enqueue_pending_decryption("sender123", &old_msg);
     protocol.enqueue_pending_decryption("sender123", &fresh_msg);
 
@@ -16546,11 +16118,7 @@ fn test_pending_messages_replay_decrypt_after_session_readiness() {
         manager.get_or_create_key_package().unwrap()
     };
     let welcome = alice_manager
-        .import_key_package(
-            &id("bob"),
-            &bob_key_package.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
+        .import_key_package(&id("bob"), &bob_key_package.key_package_data)
         .and_then(|_| alice_manager.create_session(&id("bob")))
         .unwrap();
 
@@ -16562,12 +16130,7 @@ fn test_pending_messages_replay_decrypt_after_session_readiness() {
         internal_prefixes::ENCRYPTED,
         serde_json::to_string(&encrypted).unwrap()
     );
-    let incoming = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        &encrypted_payload,
-    );
+    let incoming = signed_frame(&id("alice"), &id("bob"), &encrypted_payload);
 
     let result = bob.process_internal_message(&incoming);
     assert!(matches!(result, Some(InternalMessageResult::Deferred)));
@@ -16579,7 +16142,7 @@ fn test_pending_messages_replay_decrypt_after_session_readiness() {
     }
 
     bob.process_pending_decryption(&id("alice"));
-    assert!(!bob.pending_queue.contains_peer(&id("alice")));
+    assert!(!bob.pending_queue.contains_peer("alice"));
     let metrics = bob.pending_queue_metrics();
     assert_eq!(metrics.pending_messages_received_total, 1);
 }
@@ -16599,12 +16162,7 @@ fn test_pending_queue_concurrency_multi_peer_enqueue_is_bounded() {
         handles.push(thread::spawn(move || {
             let peer = format!("peer-{peer_idx}");
             for msg_idx in 0..50 {
-                let msg = Message::new(
-                    UserId::new(&peer).unwrap(),
-                    UserId::new("user123").unwrap(),
-                    AppId::new("test-app").unwrap(),
-                    &format!("concurrent-{msg_idx}"),
-                );
+                let msg = signed_frame(&peer, "user123", &format!("concurrent-{msg_idx}"));
                 protocol
                     .lock()
                     .unwrap()
@@ -16661,12 +16219,7 @@ fn test_lamport_clock_merges_on_receive() {
     mock_transport.start().unwrap();
 
     // Create a message with a high Lamport clock from a peer
-    let mut message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "Hello",
-    );
+    let mut message = signed_frame(&id("alice"), "user123", "Hello");
     message.lamport_clock = LamportClock::from_value(50);
     mock_transport.queue_message(message);
 
@@ -16703,12 +16256,7 @@ fn test_lamport_clock_monotonic_across_send_receive() {
     assert_eq!(protocol.lamport_clock.value(), 1);
 
     // Receive a message with lower clock (clock should still advance)
-    let mut message = Message::new(
-        UserId::new("bob").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "reply",
-    );
+    let mut message = signed_frame(&id("bob"), "user123", "reply");
     message.lamport_clock = LamportClock::from_value(0);
     mock_transport.queue_message(message);
 
@@ -16718,12 +16266,7 @@ fn test_lamport_clock_monotonic_across_send_receive() {
     assert_eq!(protocol.lamport_clock.value(), 1);
 
     // Now receive a message with higher clock
-    let mut message2 = Message::new(
-        UserId::new("bob").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "another",
-    );
+    let mut message2 = signed_frame(&id("bob"), "user123", "another");
     message2.lamport_clock = LamportClock::from_value(10);
     mock_transport.queue_message(message2);
 
@@ -16924,12 +16467,7 @@ fn test_lamport_clock_merge_on_internal_message() {
         internal_prefixes::KEY_PACKAGE,
         serde_json::to_string(&key_pkg_payload).unwrap()
     );
-    let mut message = Message::new(
-        UserId::new("sender456").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let mut message = signed_frame(&id("sender456"), "user123", &content);
     message.lamport_clock = LamportClock::from_value(100);
     mock_transport.queue_message(message);
 
@@ -16958,12 +16496,7 @@ fn test_lamport_clock_merge_on_duplicate_message() {
     mock_transport.start().unwrap();
 
     // Create two copies of the same message (simulate duplicate delivery)
-    let mut message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "Hello",
-    );
+    let mut message = signed_frame(&id("alice"), "user123", "Hello");
     message.lamport_clock = LamportClock::from_value(42);
     let message_dup = message.clone();
 
@@ -17008,12 +16541,7 @@ fn test_receive_internal_connection_request_sends_delivery_ack() {
         internal_prefixes::CONN_REQUEST,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("alice"), "user123", &content);
     mock_transport.queue_message(message.clone());
 
     protocol
@@ -17044,12 +16572,7 @@ fn test_receive_duplicate_message_reacks_when_requires_ack() {
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
 
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "Hello",
-    );
+    let message = signed_frame(&id("alice"), "user123", "Hello");
     let message_dup = message.clone();
     mock_transport.queue_message(message);
     mock_transport.queue_message(message_dup.clone());
@@ -17153,18 +16676,16 @@ fn test_key_package_remaining_lifetime_ms() {
         internal_prefixes::KEY_PACKAGE,
         serde_json::to_string(&key_pkg_payload).unwrap()
     );
-    let message = Message::new(
-        UserId::new("legacy_peer").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("legacy_peer"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
     // Should have stored with a 30-day default lifetime
-    let received = protocol.pending_key_packages.get("legacy_peer").unwrap();
+    let received = protocol
+        .pending_key_packages
+        .get(&id("legacy_peer"))
+        .unwrap();
     let now_ms = Utc::now().timestamp_millis() as u64;
     let thirty_days_ms: u64 = 30 * 24 * 60 * 60 * 1000;
     // Should expire roughly 30 days from now (within 1 second tolerance)
@@ -17204,7 +16725,9 @@ fn test_key_package_expired_discarded() {
     // Attempting to establish session should detect expiry and discard
     let result = protocol.establish_secure_session("expired_peer");
     assert!(result.is_err());
-    assert!(!protocol.pending_key_packages.contains_key("expired_peer"));
+    assert!(!protocol
+        .pending_key_packages
+        .contains_key(&id("expired_peer")));
 }
 
 #[test]
@@ -17236,12 +16759,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             internal_prefixes::KEY_PACKAGE,
             serde_json::to_string(&key_pkg_payload).unwrap()
         );
-        let message = Message::new(
-            UserId::new(&id("bob")).unwrap(),
-            UserId::new(&id("alice")).unwrap(),
-            AppId::new("test-app").unwrap(),
-            &content,
-        );
+        let message = signed_frame(&id("bob"), &id("alice"), &content);
         let _ = protocol.process_internal_message(&message);
         // Session is auto-established, key package consumed
         assert!(
@@ -17327,12 +16845,7 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
         internal_prefixes::KEY_PACKAGE,
         serde_json::to_string(&key_pkg_payload).unwrap()
     );
-    let message = Message::new(
-        UserId::new("attacker").unwrap(),
-        UserId::new(&id("user123")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("attacker"), &id("user123"), &content);
     let _ = protocol.process_internal_message(&message);
 
     assert_eq!(
@@ -17341,11 +16854,11 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
         "map must stay bounded at the cap, not grow past it"
     );
     assert!(
-        protocol.pending_key_packages.contains_key("attacker"),
+        protocol.pending_key_packages.contains_key(&id("attacker")),
         "the new key package should be inserted"
     );
     assert!(
-        !protocol.pending_key_packages.contains_key("victim"),
+        !protocol.pending_key_packages.contains_key(&id("victim")),
         "the soonest-to-expire entry should have been evicted"
     );
 }
@@ -17381,18 +16894,13 @@ fn test_received_key_package_lifetime_is_clamped() {
         internal_prefixes::KEY_PACKAGE,
         serde_json::to_string(&key_pkg_payload).unwrap()
     );
-    let message = Message::new(
-        UserId::new("attacker").unwrap(),
-        UserId::new(&id("user123")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("attacker"), &id("user123"), &content);
     let _ = protocol.process_internal_message(&message);
     let after_ms = chrono::Utc::now().timestamp_millis() as u64;
 
     let pkg = protocol
         .pending_key_packages
-        .get("attacker")
+        .get(&id("attacker"))
         .expect("key package should be inserted");
     // Expiry is anchored to *our* clock and bounded by the clamp: it lands in
     // [before + MAX, after + MAX], never u64::MAX (which the unclamped
@@ -18203,11 +17711,7 @@ fn test_session_state_restore_deletes_come_out_of_the_shared_pool() {
             let key_package = peer_manager.get_or_create_key_package().unwrap();
             let manager = writer.mls_manager.as_ref().unwrap().read().unwrap();
             manager
-                .import_key_package(
-                    peer,
-                    &key_package.key_package_data,
-                    offline_protocol_mls::KeyPackageTrust::FirstUse,
-                )
+                .import_key_package(peer, &key_package.key_package_data)
                 .unwrap();
             let welcome = manager.create_session(peer).unwrap();
             peer_manager.join_session(&welcome).unwrap();
@@ -18720,12 +18224,7 @@ fn test_unreadable_welcome_lifecycle_record_does_not_fail_initialization() {
         state: WelcomeDeliveryState::Sent,
         attempt: 1,
         unreachable_parks: 0,
-        welcome_message: Message::new(
-            UserId::new(&id("user123")).unwrap(),
-            UserId::new(peer).unwrap(),
-            AppId::new("test-app").unwrap(),
-            "__MLS_WELCOME__{}",
-        ),
+        welcome_message: signed_frame(&id("user123"), peer, "__MLS_WELCOME__{}"),
         next_retry_at: None,
         last_reason_code: None,
         last_transport_error: None,
@@ -18793,11 +18292,7 @@ fn test_unreadable_session_state_record_is_neither_fatal_nor_overwritten() {
         {
             let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
             manager
-                .import_key_package(
-                    &id("bob"),
-                    &bob_key_package.key_package_data,
-                    offline_protocol_mls::KeyPackageTrust::FirstUse,
-                )
+                .import_key_package(&id("bob"), &bob_key_package.key_package_data)
                 .unwrap();
             let welcome = manager.create_session(&id("bob")).unwrap();
             bob_manager.join_session(&welcome).unwrap();
@@ -18871,11 +18366,7 @@ fn test_establishment_state_returns_correct_states() {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap();
     }
@@ -18923,12 +18414,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             internal_prefixes::KEY_PACKAGE,
             serde_json::to_string(&key_pkg_payload).unwrap()
         );
-        let message = Message::new(
-            UserId::new(&id("bob")).unwrap(),
-            UserId::new(&id("alice")).unwrap(),
-            AppId::new("test-app").unwrap(),
-            &content,
-        );
+        let message = signed_frame(&id("bob"), &id("alice"), &content);
         let _ = protocol.process_internal_message(&message);
         // Auto-establish consumed the key package and created the session
         assert!(
@@ -19009,12 +18495,7 @@ fn test_process_svc_discover_query_with_match() {
             "remaining_hops": 10
         })
     );
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("alice"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -19042,14 +18523,7 @@ fn test_process_svc_discover_query_dedup() {
         })
     );
 
-    let make_msg = || {
-        Message::new(
-            UserId::new("alice").unwrap(),
-            UserId::new("user123").unwrap(),
-            AppId::new("test-app").unwrap(),
-            &content,
-        )
-    };
+    let make_msg = || signed_frame(&id("alice"), "user123", &content);
 
     // First time: processes normally
     let r1 = protocol.process_internal_message(&make_msg());
@@ -19079,17 +18553,12 @@ fn test_process_svc_discover_response_emits_event() {
             "query_id": "q-123",
             "service_id": "weather",
             "version": "2.0",
-            "provider_peer_id": "bob",
+            "provider_peer_id": id("bob"),
             "capabilities": {},
             "hop_count": 1
         })
     );
-    let message = Message::new(
-        UserId::new("bob").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("bob"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -19108,7 +18577,7 @@ fn test_process_svc_discover_response_emits_event() {
             assert_eq!(query_id, "q-123");
             assert_eq!(service_id, "weather");
             assert_eq!(version, "2.0");
-            assert_eq!(provider_peer_id, "bob");
+            assert_eq!(provider_peer_id, &id("bob"));
             assert_eq!(*hop_count, 1);
         }
         other => panic!("Wrong event type: {:?}", other),
@@ -19138,12 +18607,7 @@ fn test_process_svc_request_unregistered_auto_not_found() {
             "body": "{}"
         })
     );
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("alice"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -19187,12 +18651,7 @@ fn test_process_svc_request_registered_emits_event() {
             "body": "hello"
         })
     );
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("alice"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -19211,7 +18670,7 @@ fn test_process_svc_request_registered_emits_event() {
             assert_eq!(service_id, "echo");
             assert_eq!(method, "ping");
             assert_eq!(body, "hello");
-            assert_eq!(sender, "alice");
+            assert_eq!(sender, &id("alice"));
         }
         other => panic!("Wrong event type: {:?}", other),
     }
@@ -19239,12 +18698,7 @@ fn test_process_svc_response_emits_event() {
             "body": "pong"
         })
     );
-    let message = Message::new(
-        UserId::new("bob").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("bob"), "user123", &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -19263,7 +18717,7 @@ fn test_process_svc_response_emits_event() {
             assert_eq!(service_id, "echo");
             assert_eq!(status, "ok");
             assert_eq!(body, "pong");
-            assert_eq!(provider_peer_id, "bob");
+            assert_eq!(provider_peer_id, &id("bob"));
         }
         other => panic!("Wrong event type: {:?}", other),
     }
@@ -19273,12 +18727,7 @@ fn test_process_svc_response_emits_event() {
 fn test_process_regular_message_not_consumed_by_service_handlers() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "Hello, this is a normal message",
-    );
+    let message = signed_frame(&id("alice"), "user123", "Hello, this is a normal message");
 
     let result = protocol.process_internal_message(&message);
     assert!(result.is_none(), "Regular messages should not be consumed");
@@ -19447,7 +18896,7 @@ fn test_seen_discovery_queries_cleanup() {
 }
 
 // ========================================================================
-// SECURITY: prefix injection, transport identity, TOFU key pinning
+// SECURITY: prefix injection, transport identity, sender-address derivation
 // ========================================================================
 
 #[test]
@@ -19549,13 +18998,8 @@ fn test_is_internal_prefix() {
 fn test_validate_transport_sender_match() {
     let protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "hello",
-    );
-    msg.set_transport_peer_id("alice".to_string()).unwrap();
+    let mut msg = signed_frame(&id("alice"), "user123", "hello");
+    msg.set_transport_peer_id(id("alice")).unwrap();
 
     assert!(protocol.validate_transport_sender(&msg));
 }
@@ -19564,13 +19008,8 @@ fn test_validate_transport_sender_match() {
 fn test_validate_transport_sender_mismatch() {
     let protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "hello",
-    );
-    msg.set_transport_peer_id("eve".to_string()).unwrap();
+    let mut msg = signed_frame(&id("alice"), "user123", "hello");
+    msg.set_transport_peer_id(id("eve")).unwrap();
 
     assert!(!protocol.validate_transport_sender(&msg));
 }
@@ -19579,12 +19018,7 @@ fn test_validate_transport_sender_mismatch() {
 fn test_validate_transport_sender_no_transport_id() {
     let protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "hello",
-    );
+    let msg = signed_frame(&id("alice"), "user123", "hello");
     // No transport_peer_id — should pass (best effort, default config)
     assert!(protocol.validate_transport_sender(&msg));
 }
@@ -19595,12 +19029,7 @@ fn test_validate_transport_sender_no_transport_id_required() {
     config.security.require_transport_identity = true;
     let protocol = OfflineProtocol::new(config).unwrap();
 
-    let msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "hello",
-    );
+    let msg = signed_frame(&id("alice"), "user123", "hello");
     // No transport_peer_id — should FAIL when require_transport_identity is true
     assert!(!protocol.validate_transport_sender(&msg));
 }
@@ -19611,13 +19040,8 @@ fn test_validate_transport_sender_match_with_require_identity() {
     config.security.require_transport_identity = true;
     let protocol = OfflineProtocol::new(config).unwrap();
 
-    let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "hello",
-    );
-    msg.set_transport_peer_id("alice".to_string()).unwrap();
+    let mut msg = signed_frame(&id("alice"), "user123", "hello");
+    msg.set_transport_peer_id(id("alice")).unwrap();
     // Matching transport_peer_id — should pass regardless of config
     assert!(protocol.validate_transport_sender(&msg));
 }
@@ -19626,16 +19050,11 @@ fn test_validate_transport_sender_match_with_require_identity() {
 fn test_validate_transport_sender_relayed_hop_mismatch_passes() {
     let protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "hello",
-    );
+    let mut msg = signed_frame(&id("alice"), "user123", "hello");
     // A mesh-relayed frame: the transport identity names the carrier ("carol"),
     // not the origin ("alice"). hop_count >= 1 exempts it from the strict match.
     msg.increment_hop().unwrap();
-    msg.set_transport_peer_id("carol".to_string()).unwrap();
+    msg.set_transport_peer_id(id("carol")).unwrap();
 
     assert!(
         protocol.validate_transport_sender(&msg),
@@ -19647,14 +19066,9 @@ fn test_validate_transport_sender_relayed_hop_mismatch_passes() {
 fn test_validate_transport_sender_hop_zero_mismatch_still_rejected() {
     let protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "hello",
-    );
+    let mut msg = signed_frame(&id("alice"), "user123", "hello");
     // hop_count == 0 claims the carrier IS the origin — mismatch is spoofing.
-    msg.set_transport_peer_id("eve".to_string()).unwrap();
+    msg.set_transport_peer_id(id("eve")).unwrap();
 
     assert!(!protocol.validate_transport_sender(&msg));
 }
@@ -19666,11 +19080,11 @@ fn test_relayed_control_message_with_carrier_identity_not_security_rejected() {
     // A control message from "sender123" relayed by "carol" (hop 1): the
     // security gate must not drop it for the carrier/origin mismatch.
     let mut msg = pending_test_message(
-        "sender123",
+        &id("sender123"),
         &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
     msg.increment_hop().unwrap();
-    msg.set_transport_peer_id("carol".to_string()).unwrap();
+    msg.set_transport_peer_id(id("carol")).unwrap();
 
     let result = protocol.process_internal_message(&msg);
     assert!(
@@ -19688,10 +19102,10 @@ fn test_control_message_with_transport_mismatch_is_dropped() {
 
     // Create a control message claiming to be from "alice" but delivered by "eve"
     let mut msg = pending_test_message(
-        "sender123",
+        &id("sender123"),
         &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
-    msg.set_transport_peer_id("eve".to_string()).unwrap();
+    msg.set_transport_peer_id(id("eve")).unwrap();
 
     // process_internal_message should reject (drop without ACK) the message
     let result = protocol.process_internal_message(&msg);
@@ -19702,120 +19116,9 @@ fn test_control_message_with_transport_mismatch_is_dropped() {
 }
 
 #[test]
-fn test_tofu_key_pinning_and_mismatch() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-
-    // Pin a key for "alice"
-    let fake_pk = vec![1u8; 32];
-    protocol.known_peer_public_keys.insert(
-        "alice".to_string(),
-        TofuEntry {
-            public_key: fake_pk.clone(),
-            last_seen_ms: 1000,
-        },
-    );
-
-    // Verify same key passes TOFU check
-    assert_eq!(
-        protocol
-            .known_peer_public_keys
-            .get("alice")
-            .unwrap()
-            .public_key,
-        fake_pk
-    );
-
-    // A different key should be detected
-    let different_pk = vec![2u8; 32];
-    assert_ne!(
-        protocol
-            .known_peer_public_keys
-            .get("alice")
-            .unwrap()
-            .public_key,
-        different_pk,
-    );
-}
-
-#[test]
-fn test_tofu_store_bounded_capacity_with_lru_eviction() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-
-    // Use timestamps old enough to be eviction-eligible (beyond the
-    // TOFU_MIN_EVICTION_AGE_MS threshold).
-    let old_base = Utc::now().timestamp_millis() - TOFU_MIN_EVICTION_AGE_MS - 100_000;
-
-    // Fill the TOFU store to capacity with ascending last_seen timestamps
-    for i in 0..MAX_TOFU_PEERS {
-        protocol.known_peer_public_keys.insert(
-            format!("peer_{}", i),
-            TofuEntry {
-                public_key: vec![i as u8; 32],
-                last_seen_ms: old_base + i as i64, // peer_0 has oldest timestamp
-            },
-        );
-    }
-    assert_eq!(protocol.known_peer_public_keys.len(), MAX_TOFU_PEERS);
-
-    // tofu_check_or_pin should evict the oldest entry and add the new one.
-    let result = protocol.tofu_check_or_pin("new_peer", vec![99u8; 32]);
-    assert!(result.is_ok());
-
-    // Size should still be at the cap
-    assert_eq!(protocol.known_peer_public_keys.len(), MAX_TOFU_PEERS);
-    assert!(protocol.known_peer_public_keys.contains_key("new_peer"));
-    assert!(
-        !protocol.known_peer_public_keys.contains_key("peer_0"),
-        "LRU entry should have been evicted"
-    );
-    // peer_1 should still be present (it wasn't the LRU)
-    assert!(protocol.known_peer_public_keys.contains_key("peer_1"));
-}
-
-#[test]
-fn test_tofu_eviction_refuses_when_all_entries_too_recent() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-
-    // Fill with entries that are all recent (within the min eviction age).
-    let recent = Utc::now().timestamp_millis();
-    for i in 0..MAX_TOFU_PEERS {
-        protocol.known_peer_public_keys.insert(
-            format!("recent_peer_{}", i),
-            TofuEntry {
-                public_key: vec![i as u8; 32],
-                last_seen_ms: recent - i as i64, // all very recent
-            },
-        );
-    }
-    assert_eq!(protocol.known_peer_public_keys.len(), MAX_TOFU_PEERS);
-
-    // Attempt to pin a new peer — should succeed (signature was valid)
-    // but should NOT evict any entry or pin the new key.
-    let result = protocol.tofu_check_or_pin("attacker_peer", vec![42u8; 32]);
-    assert!(result.is_ok(), "Should accept message despite full store");
-    assert!(
-        !protocol
-            .known_peer_public_keys
-            .contains_key("attacker_peer"),
-        "Should not pin new peer when all entries are too recent to evict"
-    );
-    assert_eq!(
-        protocol.known_peer_public_keys.len(),
-        MAX_TOFU_PEERS,
-        "Store size should be unchanged"
-    );
-}
-
-#[test]
 fn test_transport_peer_id_not_serialized() {
-    let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "hello",
-    );
-    msg.set_transport_peer_id("ble-device-42".to_string())
-        .unwrap();
+    let mut msg = signed_frame(&id("alice"), "bob", "hello");
+    msg.set_transport_peer_id(id("ble-device-42")).unwrap();
 
     let json = serde_json::to_string(&msg).unwrap();
     assert!(
@@ -19832,141 +19135,45 @@ fn test_transport_peer_id_not_serialized() {
     assert!(deserialized.transport_peer_id().is_none());
 }
 
+/// The gate's refusal of an unsigned frame reaches the *dispatcher*, not just
+/// `security_gate_control_message` in isolation.
+///
+/// `unsigned_control_is_refused_for_known_and_unknown_senders` pins the gate
+/// itself; this pins that `process_internal_message` honours the verdict instead
+/// of falling through to a handler.
+///
+/// Two things this test used to get wrong, both worth stating so they are not
+/// reintroduced. It asserted `result.is_some()`, which the old contract (handler
+/// consumes the frame) and the new one (gate rejects it) both satisfy — so it
+/// could not fail in either world. And it built its frame with
+/// `pending_test_message`, which *signs* whenever the sender is a seeded
+/// identity, so the "unsigned" frame in a test named for unsigned traffic
+/// carried a valid signature.
 #[test]
-fn test_unsigned_control_message_rejected_when_tofu_pinned() {
+fn test_unsigned_control_message_rejected_by_the_dispatcher() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    // Pin a key for "alice" (simulating a prior signed exchange)
-    protocol.known_peer_public_keys.insert(
-        "alice".to_string(),
-        TofuEntry {
-            public_key: vec![1u8; 32],
-            last_seen_ms: 1000,
-        },
-    );
+    // Nothing known about bob: no session, no verified control frame.
+    assert!(!protocol.is_encryption_capable(&id("bob")));
 
-    // Create an unsigned control message from "alice"
-    let msg = pending_test_message(
-        "alice",
-        &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+    // `unsigned_frame`, deliberately: the helper that signs would defeat the
+    // premise silently.
+    let msg = unsigned_frame(
+        &id("bob"),
+        &id("user123"),
+        format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
-    // No __ctrl_sig / __ctrl_pk metadata → unsigned
-
-    // Should be rejected because alice has a TOFU-pinned key
-    let result = protocol.process_internal_message(&msg);
     assert!(
-        matches!(result, Some(InternalMessageResult::SecurityRejected)),
-        "Unsigned control message from TOFU-pinned peer should be rejected by security gate"
-    );
-}
-
-#[test]
-fn test_unsigned_control_message_allowed_from_unknown_peer() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-
-    // No TOFU entry for "bob"
-    assert!(!protocol.known_peer_public_keys.contains_key("bob"));
-
-    // Create an unsigned control message from "bob"
-    let msg = pending_test_message(
-        "bob",
-        &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        !msg.metadata.contains_key(CTRL_SIG_META_KEY),
+        "the frame under test must actually be unsigned"
     );
 
-    // Should be allowed through (legacy peer, no TOFU key pinned)
-    let result = protocol.process_internal_message(&msg);
-    // CONN_REQUEST handler will attempt to parse the payload — it won't
-    // return None (it will be Consumed by the handler or by parsing logic).
-    // The key point is that it was NOT rejected by the security gate.
     assert!(
-        result.is_some(),
-        "Unsigned control message from unknown peer should pass the security gate"
-    );
-}
-
-#[test]
-fn test_verify_control_message_tofu_violation() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-
-    // We need MLS initialized for signing. Since we can't easily init MLS
-    // in unit tests, we test the verify path directly by constructing a
-    // message with valid-looking but mismatched TOFU state.
-
-    // Pin a key for "alice"
-    let pinned_pk = vec![1u8; 32];
-    protocol.known_peer_public_keys.insert(
-        "alice".to_string(),
-        TofuEntry {
-            public_key: pinned_pk,
-            last_seen_ms: 1000,
-        },
-    );
-
-    // Create a message with a different public key in metadata
-    let different_pk = vec![2u8; 32];
-    let mut msg = pending_test_message(
-        "alice",
-        &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
-    );
-    // Put a fake signature and the different public key
-    msg.metadata
-        .insert(CTRL_SIG_META_KEY.to_string(), base64_encode(&vec![0u8; 64]));
-    msg.metadata
-        .insert(CTRL_PK_META_KEY.to_string(), base64_encode(&different_pk));
-
-    // verify_control_message should fail because the signature won't verify
-    // (we used a fake signature), OR it would fail on TOFU mismatch.
-    // Either way it should be an error.
-    let result = protocol.verify_control_message(&msg);
-    assert!(
-        result.is_err(),
-        "Should reject: bad signature or TOFU mismatch"
-    );
-}
-
-#[test]
-fn test_tofu_lru_eviction_removes_oldest() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-
-    // Use timestamps old enough to be eviction-eligible
-    let old_base = Utc::now().timestamp_millis() - TOFU_MIN_EVICTION_AGE_MS - 100_000;
-
-    // Insert 3 entries with different timestamps
-    protocol.known_peer_public_keys.insert(
-        "old_peer".to_string(),
-        TofuEntry {
-            public_key: vec![1u8; 32],
-            last_seen_ms: old_base,
-        },
-    );
-    protocol.known_peer_public_keys.insert(
-        "medium_peer".to_string(),
-        TofuEntry {
-            public_key: vec![2u8; 32],
-            last_seen_ms: old_base + 100,
-        },
-    );
-    protocol.known_peer_public_keys.insert(
-        "new_peer".to_string(),
-        TofuEntry {
-            public_key: vec![3u8; 32],
-            last_seen_ms: old_base + 200,
-        },
-    );
-
-    // Find the LRU entry (among eviction-eligible ones)
-    let eviction_cutoff = Utc::now().timestamp_millis() - TOFU_MIN_EVICTION_AGE_MS;
-    let lru = protocol
-        .known_peer_public_keys
-        .iter()
-        .filter(|(_, e)| e.last_seen_ms < eviction_cutoff)
-        .min_by_key(|(_, e)| e.last_seen_ms)
-        .map(|(k, _)| k.clone())
-        .unwrap();
-
-    assert_eq!(
-        lru, "old_peer",
-        "LRU eviction should target the oldest entry"
+        matches!(
+            protocol.process_internal_message(&msg),
+            Some(InternalMessageResult::SecurityRejected)
+        ),
+        "the dispatcher must honour the gate's refusal of unsigned control traffic"
     );
 }
 
@@ -19974,12 +19181,7 @@ fn test_tofu_lru_eviction_removes_oldest() {
 fn test_canonical_signing_payload_is_length_prefixed() {
     // Verify the canonical payload uses a domain separator followed by
     // length-prefixed encoding to prevent ambiguity and cross-context reuse.
-    let msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "__CONN_REQ__payload",
-    );
+    let msg = signed_frame(&id("alice"), "bob", "__CONN_REQ__payload");
 
     let canonical = OfflineProtocol::build_canonical_payload(&msg).unwrap();
 
@@ -20003,7 +19205,7 @@ fn test_canonical_signing_payload_is_length_prefixed() {
     }
 
     assert_eq!(fields.len(), 4, "canonical payload should have 4 fields");
-    assert_eq!(fields[0], "alice".to_string());
+    assert_eq!(fields[0], id("alice"));
     assert_eq!(fields[1], msg.id.as_str());
     assert_eq!(fields[2], "bob".to_string());
     assert_eq!(fields[3], "__CONN_REQ__payload");
@@ -20013,18 +19215,8 @@ fn test_canonical_signing_payload_is_length_prefixed() {
 fn test_canonical_payload_no_collision_with_similar_sender() {
     // Regression test: ensure that a longer sender does NOT produce the
     // same payload as a shorter sender with matching content.
-    let msg_a = Message::new(
-        UserId::new("alice-extra").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "content",
-    );
-    let msg_b = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "content",
-    );
+    let msg_a = signed_frame(&id("alice-extra"), "bob", "content");
+    let msg_b = signed_frame(&id("alice"), "bob", "content");
 
     let payload_a = OfflineProtocol::build_canonical_payload(&msg_a).unwrap();
     let payload_b = OfflineProtocol::build_canonical_payload(&msg_b).unwrap();
@@ -20064,7 +19256,7 @@ fn test_internal_prefixes_completeness() {
 
     // Only DATA_PLANE_PREFIXES entries should be excluded from security
     // gating. Any internal prefix NOT in DATA_PLANE_PREFIXES is
-    // automatically security-gated (signature + TOFU). If this assertion
+    // automatically security-gated (signature + derivation). If this assertion
     // fails, a new prefix was added to INTERNAL_PREFIXES but also needs to
     // be evaluated: should it be in DATA_PLANE_PREFIXES (MLS-authenticated)
     // or remain security-gated (control-plane, Ed25519-signed)?
@@ -20092,10 +19284,9 @@ fn test_sign_and_verify_control_message_roundtrip() {
     protocol.initialize_mls_for_test(storage).unwrap();
 
     // Create a control message from &id("alice")
-    let mut msg = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let mut msg = signed_frame(
+        &id("alice"),
+        &id("bob"),
         format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
 
@@ -20112,7 +19303,7 @@ fn test_sign_and_verify_control_message_roundtrip() {
         "Signed message must contain public key metadata"
     );
 
-    // Verify it — should succeed and TOFU-pin alice's key
+    // Verify it — should succeed and record alice as encryption-capable
     let result = protocol.verify_control_message(&msg);
     assert!(
         matches!(result, Ok(true)),
@@ -20120,7 +19311,7 @@ fn test_sign_and_verify_control_message_roundtrip() {
         result
     );
 
-    // Verify again — TOFU-pinned key should match
+    // Verify again — the same key still derives to the same address
     let result2 = protocol.verify_control_message(&msg);
     assert!(
         matches!(result2, Ok(true)),
@@ -20134,10 +19325,9 @@ fn test_sign_and_verify_rejects_tampered_content() {
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
     protocol.initialize_mls_for_test(storage).unwrap();
 
-    let mut msg = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let mut msg = signed_frame(
+        &id("alice"),
+        &id("bob"),
         format!(
             "{}{{\"data\":\"original\"}}",
             internal_prefixes::CONN_REQUEST
@@ -20159,13 +19349,15 @@ fn test_sign_and_verify_rejects_tampered_content() {
 
 #[test]
 fn test_sign_control_message_without_mls_sends_unsigned() {
-    // No MLS initialization — sign_control_message should gracefully no-op
+    // No MLS initialization — sign_control_message should gracefully no-op.
+    // Built unsigned on purpose: the subject is what `sign_control_message`
+    // does (nothing) when there is no identity to sign with, so a fixture that
+    // pre-signed would assert nothing.
     let protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut msg = Message::new(
-        UserId::new("user123").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
+    let mut msg = unsigned_frame(
+        &id("user123"),
+        "bob",
         format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
 
@@ -20186,7 +19378,7 @@ fn test_verify_control_message_malformed_base64_signature() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
     let mut msg = pending_test_message(
-        "alice",
+        &id("alice"),
         &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
     msg.metadata.insert(
@@ -20214,7 +19406,7 @@ fn test_verify_control_message_empty_signature() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
     let mut msg = pending_test_message(
-        "alice",
+        &id("alice"),
         &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
     // Empty signature (0 bytes) — Ed25519 expects 64 bytes
@@ -20231,8 +19423,9 @@ fn test_verify_control_message_empty_signature() {
 fn test_verify_control_message_signature_without_public_key() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut msg = pending_test_message(
-        "alice",
+    let mut msg = unsigned_frame(
+        &id("alice"),
+        &id("user123"),
         &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
     // Has signature but no public key
@@ -20253,7 +19446,7 @@ fn test_verify_control_message_signature_without_public_key() {
 }
 
 // ========================================================================
-// INTEGRATION: full transport → receive → verify → TOFU round-trip
+// INTEGRATION: full transport → receive → verify → derivation round-trip
 // ========================================================================
 
 #[test]
@@ -20272,10 +19465,9 @@ fn test_integration_signed_control_message_via_mock_transport() {
     mock_transport.start().unwrap();
 
     // Alice creates and signs a control message destined for bob.
-    let mut msg = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let mut msg = signed_frame(
+        &id("alice"),
+        &id("bob"),
         format!("{}{{\"data\":\"hello\"}}", internal_prefixes::CONN_REQUEST),
     );
     alice.sign_control_message(&mut msg).unwrap();
@@ -20301,10 +19493,10 @@ fn test_integration_signed_control_message_via_mock_transport() {
         "Control message should be consumed, not surfaced"
     );
 
-    // Alice's key should now be TOFU-pinned in bob's store.
+    // Verifying alice's frame proved she runs MLS, so bob records it.
     assert!(
-        bob.known_peer_public_keys.contains_key(&id("alice")),
-        "Bob should have TOFU-pinned alice's public key"
+        bob.is_encryption_capable(&id("alice")),
+        "Bob should have recorded alice as encryption-capable"
     );
 }
 
@@ -20323,10 +19515,9 @@ fn test_integration_spoofed_transport_identity_rejected() {
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
 
-    let mut msg = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let mut msg = signed_frame(
+        &id("alice"),
+        &id("bob"),
         format!("{}{{\"data\":\"evil\"}}", internal_prefixes::CONN_REQUEST),
     );
     alice.sign_control_message(&mut msg).unwrap();
@@ -20344,8 +19535,8 @@ fn test_integration_spoofed_transport_identity_rejected() {
         "Spoofed message should be consumed (dropped)"
     );
     assert!(
-        !bob.known_peer_public_keys.contains_key(&id("alice")),
-        "Spoofed message must not TOFU-pin alice's key"
+        !bob.is_encryption_capable(&id("alice")),
+        "A spoofed message must not record anything about alice"
     );
 }
 
@@ -20360,10 +19551,9 @@ fn test_integration_relay_forwarded_message_no_transport_peer_id() {
     mock_transport.start().unwrap();
 
     // Simulate a relay-forwarded control message: no transport_peer_id.
-    let msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
+    let msg = signed_frame(
+        "alice",
+        "bob",
         format!(
             "{}{{\"data\":\"relayed\"}}",
             internal_prefixes::CONN_REQUEST
@@ -20390,141 +19580,6 @@ fn test_integration_relay_forwarded_message_no_transport_peer_id() {
     );
 }
 
-#[test]
-fn test_integration_encrypted_message_survives_security_gate_after_tofu_pin() {
-    // Critical regression test: after a signed control message exchange
-    // TOFU-pins the sender's key, subsequent __MLS_ENC__ (data-plane)
-    // messages from that sender must NOT be rejected as "signature
-    // downgrade". MLS provides its own authentication for encrypted
-    // messages; they are not signed with the control-plane Ed25519 key.
-    //
-    // Without the DATA_PLANE_PREFIXES exclusion in
-    // `is_security_gated_prefix`, this test would fail because the
-    // security gate would treat __MLS_ENC__ as a control message and
-    // reject it for being unsigned from a TOFU-pinned peer.
-
-    use crate::mls::InMemoryStorage;
-
-    // --- Set up Alice (sender) with MLS ---
-    let mut alice_config = create_test_config_for_user("alice");
-    alice_config.encryption.enabled = true;
-    alice_config.encryption.store_pending = true;
-    let mut alice = OfflineProtocol::new(alice_config).unwrap();
-    alice
-        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
-        .unwrap();
-
-    let alice_transport = MockTransport::new(TransportType::BLE);
-    alice_transport.start().unwrap();
-    let alice_transport_handle = alice_transport.clone();
-    alice
-        .transport_manager_mut()
-        .add_transport(TransportType::BLE, Box::new(alice_transport));
-    alice.start().unwrap();
-
-    // --- Set up Bob (receiver) with MLS ---
-    let mut bob_config = create_test_config_for_user("bob");
-    bob_config.encryption.enabled = true;
-    bob_config.encryption.store_pending = true;
-    let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
-        .unwrap();
-
-    let bob_transport = MockTransport::new(TransportType::BLE);
-    bob_transport.start().unwrap();
-    let bob_transport_handle = bob_transport.clone();
-    bob.transport_manager_mut()
-        .add_transport(TransportType::BLE, Box::new(bob_transport));
-    bob.start().unwrap();
-
-    // --- Step 1: Alice sends a signed control message (key package) ---
-    // Manually create and sign a CONN_REQUEST from Alice to Bob.
-    let mut ctrl_msg = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        format!(
-            "{}{{\"sender_name\":\"alice\",\"timestamp_ms\":1234}}",
-            internal_prefixes::CONN_REQUEST
-        ),
-    );
-    alice.sign_control_message(&mut ctrl_msg).unwrap();
-    assert!(
-        ctrl_msg.metadata.contains_key(CTRL_SIG_META_KEY),
-        "Control message should be signed"
-    );
-
-    // Bob receives it — this will TOFU-pin Alice's public key.
-    bob_transport_handle.queue_message_from(ctrl_msg, id("alice"));
-    let _ = bob.receive_message(); // consumed internally
-
-    // Verify Alice's key is now TOFU-pinned at Bob.
-    assert!(
-        bob.known_peer_public_keys.contains_key(&id("alice")),
-        "Alice's key should be TOFU-pinned at Bob after signed control message"
-    );
-
-    // --- Step 2: Set up MLS session directly (shortcut) ---
-    let bob_key_package = {
-        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
-        manager.get_or_create_key_package().unwrap()
-    };
-    {
-        let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
-        manager
-            .import_key_package(
-                &id("bob"),
-                &bob_key_package.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
-            .unwrap();
-        let welcome = manager.create_session(&id("bob")).unwrap();
-        let bob_manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
-        bob_manager.join_session(&welcome).unwrap();
-    }
-    alice
-        .confirm_session_state(&id("bob"), "test_setup")
-        .unwrap();
-    bob.confirm_session_state(&id("alice"), "test_setup")
-        .unwrap();
-
-    // --- Step 3: Alice sends an encrypted message ---
-    alice
-        .send_message(
-            &id("bob"),
-            "hello after TOFU pin",
-            None::<MessagePriority>,
-            None::<String>,
-        )
-        .unwrap();
-
-    let encrypted_wire = alice_transport_handle
-        .sent_messages()
-        .last()
-        .expect("expected encrypted message from alice")
-        .clone();
-    assert!(
-        encrypted_wire
-            .content
-            .starts_with(internal_prefixes::ENCRYPTED),
-        "Message should be MLS-encrypted"
-    );
-
-    // --- Step 4: Bob receives the encrypted message ---
-    // This is the critical assertion: the __MLS_ENC__ message must NOT
-    // be rejected by the security gate, even though Alice has a
-    // TOFU-pinned key and this message is unsigned.
-    bob_transport_handle.queue_message(encrypted_wire);
-    let received = bob
-        .receive_message()
-        .expect("Encrypted message must NOT be dropped by security gate after TOFU pin");
-    assert_eq!(received.content, "hello after TOFU pin");
-    assert_eq!(
-        received.metadata.get("encrypted").map(String::as_str),
-        Some("true")
-    );
-}
-
 // ========================================================================
 // SECURITY: parameterized security gate, edge cases, ACK bypass
 // ========================================================================
@@ -20546,8 +19601,8 @@ fn test_security_gate_rejects_spoofed_transport_for_all_gated_prefixes() {
     );
 
     for prefix in gated_prefixes {
-        let mut msg = pending_test_message("sender123", &format!("{}test_payload", prefix));
-        msg.set_transport_peer_id("eve".to_string()).unwrap();
+        let mut msg = pending_test_message(&id("sender123"), &format!("{}test_payload", prefix));
+        msg.set_transport_peer_id(id("eve")).unwrap();
 
         let result = protocol.process_internal_message(&msg);
         assert!(
@@ -20562,25 +19617,25 @@ fn test_security_gate_rejects_spoofed_transport_for_all_gated_prefixes() {
 fn test_data_plane_prefixes_bypass_security_gate() {
     // __MLS_ENC__ messages are data-plane (MLS provides its own
     // authentication) and must NOT be rejected by the security gate,
-    // even when the sender has a TOFU-pinned key.
+    // even when the sender is known to run MLS.
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    // First, TOFU-pin a key for "alice" to simulate a prior signed
-    // control message exchange.
-    protocol.tofu_check_or_pin("alice", vec![1u8; 32]).unwrap();
-    assert!(protocol.known_peer_public_keys.contains_key("alice"));
+    // Mark "alice" encryption-capable, as a prior verified control message
+    // would have.
+    protocol.record_encryption_capable("alice");
+    assert!(protocol.is_encryption_capable("alice"));
 
     // Now send an unsigned __MLS_ENC__ message from alice — this is the
     // normal data path after MLS session establishment.
     let msg = pending_test_message(
-        "alice",
+        &id("alice"),
         &format!(
             "{}{{\"group_id\":\"session:alice:bob\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"alice\",\"timestamp_ms\":12345}}",
             internal_prefixes::ENCRYPTED
         ),
     );
 
-    let result = protocol.security_gate_control_message(&msg);
+    let result = protocol.security_gate_control_message(&msg, None);
     assert!(
         matches!(result, ControlGateOutcome::Proceed { .. }),
         "Security gate must NOT block __MLS_ENC__ messages — MLS provides its own authentication"
@@ -20590,13 +19645,13 @@ fn test_data_plane_prefixes_bypass_security_gate() {
     // member without the origin's Ed25519 metadata, and MLS authenticates
     // the payload after the gate instead.
     let msg = pending_test_message(
-        "alice",
+        &id("alice"),
         &format!(
             "{}{{\"group_id\":\"g1\",\"sender\":\"alice\",\"content\":\"AAECAw==\"}}",
             internal_prefixes::GROUP_MSG
         ),
     );
-    let result = protocol.security_gate_control_message(&msg);
+    let result = protocol.security_gate_control_message(&msg, None);
     assert!(
         matches!(result, ControlGateOutcome::Proceed { .. }),
         "Security gate must NOT block __GROUP_MSG__ fan-out — MLS authenticates it after the gate"
@@ -20606,26 +19661,30 @@ fn test_data_plane_prefixes_bypass_security_gate() {
 /// Regression for the relay group fan-out drop: a `GroupMessageReceived`
 /// frame is rebuilt by the bridge as an unsigned `__GROUP_MSG__` (hop 0,
 /// transport identity = the relay-authenticated sender). Before
-/// `__GROUP_MSG__` was data-plane, a TOFU-pinned sender made the gate drop
-/// the whole frame as a signature downgrade — group messages over the relay
+/// `__GROUP_MSG__` was data-plane, a known-MLS sender made the gate drop the
+/// whole frame as a signature downgrade — group messages over the relay
 /// silently vanished for exactly the peers you'd already talked to. The
 /// frame must now reach dispatch (not SecurityRejected); sender
 /// authentication is MLS's job at decrypt time.
+///
+/// This matters more since control frames became unconditionally signature-
+/// gated: data-plane classification is now the *only* thing keeping these
+/// frames alive, so the boundary has to hold.
 #[test]
-fn test_unsigned_group_msg_from_pinned_sender_reaches_dispatch() {
+fn test_unsigned_group_msg_from_known_mls_sender_reaches_dispatch() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    protocol.tofu_check_or_pin("alice", vec![1u8; 32]).unwrap();
-    assert!(protocol.known_peer_public_keys.contains_key("alice"));
+    protocol.record_encryption_capable("alice");
+    assert!(protocol.is_encryption_capable("alice"));
 
     let mut msg = pending_test_message(
-        "alice",
+        &id("alice"),
         &format!(
             "{}{{\"group_id\":\"g1\",\"sender\":\"alice\",\"content\":\"AAECAw==\"}}",
             internal_prefixes::GROUP_MSG
         ),
     );
-    msg.set_transport_peer_id("alice".to_string()).unwrap();
+    msg.set_transport_peer_id(id("alice")).unwrap();
 
     let result = protocol.process_internal_message(&msg);
     assert!(
@@ -20641,8 +19700,9 @@ fn test_verify_control_message_pk_without_signature_is_malformed() {
     // be treated as malformed (not as unsigned/legacy).
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut msg = pending_test_message(
-        "alice",
+    let mut msg = unsigned_frame(
+        &id("alice"),
+        &id("user123"),
         &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
     // Public key present but no signature
@@ -20669,7 +19729,7 @@ fn test_security_gate_rejects_pk_only_no_signature() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
     let mut msg = pending_test_message(
-        "alice",
+        &id("alice"),
         &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
     msg.metadata
@@ -20689,7 +19749,7 @@ fn test_ack_messages_bypass_security_gate() {
     // interfere with them — even if transport_peer_id mismatches.
     // ACK-like message: content is just the acked message ID, not an
     // internal prefix.
-    let msg = pending_test_message("alice", "some-message-id-being-acked");
+    let msg = pending_test_message(&id("alice"), "some-message-id-being-acked");
     assert!(
         !OfflineProtocol::is_internal_prefix(&msg.content),
         "ACK content must not be detected as an internal prefix"
@@ -20705,38 +19765,12 @@ fn test_ack_messages_bypass_security_gate() {
 
 #[test]
 fn test_set_transport_peer_id_rejects_empty_string() {
-    let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "hello",
-    );
+    let mut msg = signed_frame(&id("alice"), "bob", "hello");
     let result = msg.set_transport_peer_id("".to_string());
     assert!(result.is_err(), "Empty transport_peer_id must be rejected");
     assert!(
         msg.transport_peer_id().is_none(),
         "transport_peer_id should remain None after rejected empty set"
-    );
-}
-
-#[test]
-fn test_tofu_rejects_empty_public_key() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-
-    let result = protocol.tofu_check_or_pin("alice", vec![]);
-    assert!(
-        result.is_err(),
-        "Empty public key must be rejected by TOFU store"
-    );
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("empty public key"),
-        "Error should mention empty public key, got: {}",
-        err_msg
-    );
-    assert!(
-        !protocol.known_peer_public_keys.contains_key("alice"),
-        "Empty key must not be pinned"
     );
 }
 
@@ -20747,7 +19781,7 @@ fn test_verify_control_message_zero_byte_public_key_rejected() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
     let mut msg = pending_test_message(
-        "alice",
+        &id("alice"),
         &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
     msg.metadata
@@ -20759,108 +19793,6 @@ fn test_verify_control_message_zero_byte_public_key_rejected() {
     assert!(
         result.is_err(),
         "Zero-byte public key must be rejected during verification"
-    );
-}
-
-#[test]
-fn test_signature_downgrade_detection_for_tofu_pinned_peer() {
-    // A peer that has previously sent signed control messages (TOFU-pinned)
-    // must have subsequent unsigned control messages rejected as a possible
-    // downgrade attack (impersonation attempt).
-    let mut protocol = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
-    let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls_for_test(storage).unwrap();
-
-    // Set up &id("alice") as a sender with MLS so she can sign.
-    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
-    let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
-    alice.initialize_mls_for_test(storage_a).unwrap();
-
-    // Alice creates and signs a control message.
-    let mut signed_msg = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        format!("{}{{\"data\":\"first\"}}", internal_prefixes::CONN_REQUEST),
-    );
-    alice.sign_control_message(&mut signed_msg).unwrap();
-    assert!(signed_msg.metadata.contains_key(CTRL_SIG_META_KEY));
-
-    // Bob verifies — this TOFU-pins alice's key.
-    let result = protocol.verify_control_message(&signed_msg);
-    assert!(
-        matches!(result, Ok(true)),
-        "First signed message should verify"
-    );
-    assert!(
-        protocol.known_peer_public_keys.contains_key(&id("alice")),
-        "Alice's key should be TOFU-pinned"
-    );
-
-    // Now &id("alice") (or an impersonator) sends an unsigned control message.
-    let unsigned_msg = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        format!(
-            "{}{{\"data\":\"unsigned\"}}",
-            internal_prefixes::CONN_REQUEST
-        ),
-    );
-    assert!(!unsigned_msg.metadata.contains_key(CTRL_SIG_META_KEY));
-
-    // The security gate should reject this as a signature downgrade.
-    let gate_result = protocol.security_gate_control_message(&unsigned_msg);
-    assert!(
-        matches!(
-            gate_result,
-            ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected)
-        ),
-        "Unsigned message from TOFU-pinned peer should be rejected as signature downgrade"
-    );
-}
-
-#[test]
-fn test_second_signed_message_from_tofu_pinned_peer_passes_gate() {
-    // After TOFU-pinning, a subsequent correctly-signed control message
-    // from the same peer (with the same key) should pass the security gate.
-    let mut protocol = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
-    let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls_for_test(storage).unwrap();
-
-    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
-    let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
-    alice.initialize_mls_for_test(storage_a).unwrap();
-
-    // First signed message — pins alice's key.
-    let mut msg1 = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        format!("{}{{\"data\":\"first\"}}", internal_prefixes::CONN_REQUEST),
-    );
-    alice.sign_control_message(&mut msg1).unwrap();
-
-    let gate1 = protocol.security_gate_control_message(&msg1);
-    assert!(
-        matches!(gate1, ControlGateOutcome::Proceed { signed: true }),
-        "First signed message should pass the security gate"
-    );
-    assert!(protocol.known_peer_public_keys.contains_key(&id("alice")));
-
-    // Second signed message — same key, should also pass.
-    let mut msg2 = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        format!("{}{{\"data\":\"second\"}}", internal_prefixes::CONN_ACCEPT),
-    );
-    alice.sign_control_message(&mut msg2).unwrap();
-
-    let gate2 = protocol.security_gate_control_message(&msg2);
-    assert!(
-        matches!(gate2, ControlGateOutcome::Proceed { signed: true }),
-        "Second signed message from same TOFU-pinned peer should pass the security gate"
     );
 }
 
@@ -20877,10 +19809,9 @@ fn test_security_rejected_does_not_send_ack() {
     let transport_handle = mock_transport.clone();
 
     // Create a spoofed control message: sender says &id("alice"), transport says "eve"
-    let mut spoofed = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let mut spoofed = signed_frame(
+        &id("alice"),
+        &id("bob"),
         format!("{}{{\"data\":\"evil\"}}", internal_prefixes::CONN_REQUEST),
     );
     spoofed.requires_ack = true;
@@ -20926,11 +19857,7 @@ fn test_mls_enc_spoofed_sender_security_rejected() {
         let mls = alice.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_kp.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap()
     };
@@ -20947,12 +19874,7 @@ fn test_mls_enc_spoofed_sender_security_rejected() {
     );
 
     // ...but the wire envelope claims it came from &id("mallory").
-    let message = Message::new(
-        UserId::new(&id("mallory")).unwrap(),
-        UserId::new(&id("alice")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("mallory"), &id("alice"), &content);
 
     let result = alice.process_internal_message(&message);
     assert!(
@@ -20971,12 +19893,7 @@ fn test_mls_enc_spoofed_sender_security_rejected() {
         internal_prefixes::ENCRYPTED,
         serde_json::to_string(&encrypted2).unwrap()
     );
-    let honest = Message::new(
-        UserId::new(&id("bob")).unwrap(),
-        UserId::new(&id("alice")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content2,
-    );
+    let honest = signed_frame(&id("bob"), &id("alice"), &content2);
     let result2 = alice.process_internal_message(&honest);
     assert!(
         matches!(result2, Some(InternalMessageResult::Decrypted(_))),
@@ -21010,11 +19927,7 @@ fn test_mls_enc_non_utf8_plaintext_rejected() {
         let mls = alice.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_kp.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap()
     };
@@ -21029,12 +19942,7 @@ fn test_mls_enc_non_utf8_plaintext_rejected() {
         internal_prefixes::ENCRYPTED,
         serde_json::to_string(&encrypted).unwrap()
     );
-    let message = Message::new(
-        UserId::new(&id("bob")).unwrap(),
-        UserId::new(&id("alice")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("bob"), &id("alice"), &content);
 
     let result = alice.process_internal_message(&message);
     assert!(
@@ -21071,11 +19979,7 @@ fn test_welcome_with_mismatched_inviter_id_rejected() {
         manager.get_or_create_key_package().unwrap()
     };
     zoe_manager
-        .import_key_package(
-            &id("bob"),
-            &bob_key_package.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
+        .import_key_package(&id("bob"), &bob_key_package.key_package_data)
         .unwrap();
     let mut welcome = zoe_manager.create_session(&id("bob")).unwrap();
     // Tamper: the payload claims a different inviter than the wire sender.
@@ -21086,12 +19990,7 @@ fn test_welcome_with_mismatched_inviter_id_rejected() {
         internal_prefixes::WELCOME,
         serde_json::to_string(&welcome).unwrap()
     );
-    let message = Message::new(
-        UserId::new(&id("zoe")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        &content,
-    );
+    let message = signed_frame(&id("zoe"), &id("bob"), &content);
     bob.process_internal_message(&message);
 
     let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
@@ -21102,225 +20001,8 @@ fn test_welcome_with_mismatched_inviter_id_rejected() {
 }
 
 // ========================================================================
-// TOFU PERSISTENCE
+// DURABLE ENCRYPTION-CAPABILITY RECORDS
 // ========================================================================
-
-#[test]
-fn test_tofu_entries_persisted_via_storage() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls_for_test(storage.clone()).unwrap();
-
-    // Pin a key for &id("alice")
-    let pk = vec![42u8; 32];
-    protocol
-        .tofu_check_or_pin(&id("alice"), pk.clone())
-        .unwrap();
-
-    // Verify the entry was persisted to raw storage
-    let raw = storage
-        .load(storage_keys::TOFU_KEYS, &id("alice"))
-        .unwrap()
-        .expect("TOFU entry should be persisted");
-    let restored: TofuEntry = serde_json::from_slice(&raw).unwrap();
-    assert_eq!(restored.public_key, pk);
-}
-
-#[test]
-fn test_tofu_entries_restored_on_restart() {
-    let storage = Arc::new(crate::mls::InMemoryStorage::new());
-
-    // Protocol A pins a key for &id("alice")
-    {
-        let mut protocol_a = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
-        protocol_a.initialize_mls_for_test(storage.clone()).unwrap();
-        protocol_a
-            .tofu_check_or_pin(&id("alice"), vec![10u8; 32])
-            .unwrap();
-    }
-
-    // Protocol B uses the same storage — simulates restart
-    let mut protocol_b = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
-    protocol_b.initialize_mls_for_test(storage.clone()).unwrap();
-
-    // The restored TOFU store should contain alice's pinned key
-    assert!(
-        protocol_b.known_peer_public_keys.contains_key(&id("alice")),
-        "TOFU entry for alice should be restored from storage"
-    );
-    assert_eq!(
-        protocol_b.known_peer_public_keys[&id("alice")].public_key,
-        vec![10u8; 32]
-    );
-
-    // A different key for alice should be rejected (TOFU mismatch)
-    let result = protocol_b.tofu_check_or_pin(&id("alice"), vec![99u8; 32]);
-    assert!(
-        result.is_err(),
-        "TOFU mismatch should be detected after restore"
-    );
-}
-
-#[test]
-fn test_tofu_eviction_deletes_from_storage() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls_for_test(storage.clone()).unwrap();
-
-    // Fill the TOFU store with old entries
-    let old_base = Utc::now().timestamp_millis() - TOFU_MIN_EVICTION_AGE_MS - 100_000;
-    for i in 0..MAX_TOFU_PEERS {
-        let entry = TofuEntry {
-            public_key: vec![i as u8; 32],
-            last_seen_ms: old_base + i as i64,
-        };
-        protocol
-            .known_peer_public_keys
-            .insert(format!("peer_{}", i), entry.clone());
-        protocol.persist_tofu_entry(&format!("peer_{}", i), &entry);
-    }
-
-    // Verify peer_0 is in storage
-    assert!(
-        storage
-            .load(storage_keys::TOFU_KEYS, "peer_0")
-            .unwrap()
-            .is_some(),
-        "peer_0 should be in storage before eviction"
-    );
-
-    // Pin a new peer — should evict peer_0 (oldest)
-    protocol
-        .tofu_check_or_pin("new_peer", vec![0xFFu8; 32])
-        .unwrap();
-
-    // peer_0 should be deleted from storage
-    assert!(
-        storage
-            .load(storage_keys::TOFU_KEYS, "peer_0")
-            .unwrap()
-            .is_none(),
-        "Evicted peer_0 should be deleted from storage"
-    );
-
-    // new_peer should be persisted
-    assert!(
-        storage
-            .load(storage_keys::TOFU_KEYS, "new_peer")
-            .unwrap()
-            .is_some(),
-        "Newly pinned peer should be persisted"
-    );
-}
-
-#[test]
-fn test_tofu_last_seen_update_persisted() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls_for_test(storage.clone()).unwrap();
-
-    let pk = vec![7u8; 32];
-    protocol
-        .tofu_check_or_pin(&id("carol"), pk.clone())
-        .unwrap();
-
-    let raw1 = storage
-        .load(storage_keys::TOFU_KEYS, &id("carol"))
-        .unwrap()
-        .unwrap();
-    let entry1: TofuEntry = serde_json::from_slice(&raw1).unwrap();
-    let first_seen = entry1.last_seen_ms;
-
-    // Re-verify the same key (updates last_seen)
-    std::thread::sleep(std::time::Duration::from_millis(5));
-    protocol.tofu_check_or_pin(&id("carol"), pk).unwrap();
-
-    let raw2 = storage
-        .load(storage_keys::TOFU_KEYS, &id("carol"))
-        .unwrap()
-        .unwrap();
-    let entry2: TofuEntry = serde_json::from_slice(&raw2).unwrap();
-    assert!(
-        entry2.last_seen_ms >= first_seen,
-        "last_seen_ms should be updated after re-verification"
-    );
-}
-
-#[test]
-fn test_tofu_restore_skips_corrupted_entries() {
-    let storage = Arc::new(crate::mls::InMemoryStorage::new());
-
-    // Write a valid entry
-    let valid_entry = TofuEntry {
-        public_key: vec![1u8; 32],
-        last_seen_ms: Utc::now().timestamp_millis(),
-    };
-    storage
-        .store(
-            storage_keys::TOFU_KEYS,
-            "valid_peer",
-            &serde_json::to_vec(&valid_entry).unwrap(),
-        )
-        .unwrap();
-
-    // Write corrupted data for another peer
-    storage
-        .store(
-            storage_keys::TOFU_KEYS,
-            "corrupted_peer",
-            b"not valid json{{{",
-        )
-        .unwrap();
-
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol
-        .enable_message_persistence_for_test(storage)
-        .unwrap();
-
-    // Valid entry should be restored, corrupted should be skipped
-    assert!(
-        protocol.known_peer_public_keys.contains_key("valid_peer"),
-        "Valid TOFU entry should be restored"
-    );
-    assert!(
-        !protocol
-            .known_peer_public_keys
-            .contains_key("corrupted_peer"),
-        "Corrupted TOFU entry should be skipped"
-    );
-}
-
-#[test]
-fn test_tofu_restore_caps_at_max_peers() {
-    let storage = Arc::new(crate::mls::InMemoryStorage::new());
-
-    // Store more entries than MAX_TOFU_PEERS
-    let now = Utc::now().timestamp_millis();
-    for i in 0..(MAX_TOFU_PEERS + 50) {
-        let entry = TofuEntry {
-            public_key: vec![i as u8; 32],
-            last_seen_ms: now,
-        };
-        storage
-            .store(
-                storage_keys::TOFU_KEYS,
-                &format!("peer_{}", i),
-                &serde_json::to_vec(&entry).unwrap(),
-            )
-            .unwrap();
-    }
-
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol
-        .enable_message_persistence_for_test(storage)
-        .unwrap();
-
-    assert!(
-        protocol.known_peer_public_keys.len() <= MAX_TOFU_PEERS,
-        "Restored TOFU entries should be capped at MAX_TOFU_PEERS, got {}",
-        protocol.known_peer_public_keys.len()
-    );
-}
 
 #[test]
 fn test_security_gate_rejects_missing_transport_id_when_required() {
@@ -21335,16 +20017,15 @@ fn test_security_gate_rejects_missing_transport_id_when_required() {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
     alice.initialize_mls_for_test(storage_a).unwrap();
 
-    let mut msg = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let mut msg = signed_frame(
+        &id("alice"),
+        &id("bob"),
         format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
     alice.sign_control_message(&mut msg).unwrap();
     // No transport_peer_id set — should be rejected by security gate
 
-    let result = protocol.security_gate_control_message(&msg);
+    let result = protocol.security_gate_control_message(&msg, None);
     assert!(
         matches!(
             result,
@@ -21367,16 +20048,15 @@ fn test_security_gate_passes_with_matching_transport_id_when_required() {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
     alice.initialize_mls_for_test(storage_a).unwrap();
 
-    let mut msg = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let mut msg = signed_frame(
+        &id("alice"),
+        &id("bob"),
         format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
     alice.sign_control_message(&mut msg).unwrap();
     msg.set_transport_peer_id(id("alice")).unwrap();
 
-    let result = protocol.security_gate_control_message(&msg);
+    let result = protocol.security_gate_control_message(&msg, None);
     assert!(
         matches!(result, ControlGateOutcome::Proceed { signed: true }),
         "Signed control message with matching transport identity should pass"
@@ -21395,16 +20075,15 @@ fn test_relayed_unsigned_control_rejected_when_identity_required() {
     config.security.require_transport_identity = true;
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
-    let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
+    let mut msg = unsigned_frame(
+        &id("alice"),
+        "bob",
         format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
     msg.increment_hop().unwrap();
-    msg.set_transport_peer_id("carol".to_string()).unwrap();
+    msg.set_transport_peer_id(id("carol")).unwrap();
 
-    let result = protocol.security_gate_control_message(&msg);
+    let result = protocol.security_gate_control_message(&msg, None);
     assert!(
         matches!(
             result,
@@ -21431,17 +20110,16 @@ fn test_relayed_signed_control_passes_when_identity_required() {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
     alice.initialize_mls_for_test(storage_a).unwrap();
 
-    let mut msg = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let mut msg = signed_frame(
+        &id("alice"),
+        &id("bob"),
         format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
     alice.sign_control_message(&mut msg).unwrap();
     msg.increment_hop().unwrap();
-    msg.set_transport_peer_id("carol".to_string()).unwrap();
+    msg.set_transport_peer_id(id("carol")).unwrap();
 
-    let result = protocol.security_gate_control_message(&msg);
+    let result = protocol.security_gate_control_message(&msg, None);
     assert!(
         matches!(result, ControlGateOutcome::Proceed { signed: true }),
         "signed mesh-relayed control frame must pass the strict gate"
@@ -21449,14 +20127,14 @@ fn test_relayed_signed_control_passes_when_identity_required() {
 }
 
 /// End-to-end regression for the internet relay path: a SIGNED __CONN_REQ__
-/// from a TOFU-pinned sender, in exactly the shape the bridge delivers relay
+/// from a known sender, in exactly the shape the bridge delivers relay
 /// ingest (hop 0, transport_peer_id stamped with the relay-authenticated
 /// uploader), must pass the gate and emit ConnectionRequestReceived. This is
 /// the wire shape connection requests use now that they ship verbatim — the
 /// former relay-native translation arrived unsigned and was dropped as a
 /// signature downgrade precisely for pinned senders.
 #[test]
-fn test_signed_conn_request_from_pinned_sender_with_internet_identity() {
+fn test_signed_conn_request_from_known_sender_with_internet_identity() {
     let mut protocol = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
     protocol.initialize_mls_for_test(storage).unwrap();
@@ -21467,10 +20145,9 @@ fn test_signed_conn_request_from_pinned_sender_with_internet_identity() {
 
     // Pin alice's key first — any prior signed control contact does this,
     // which is what made the unsigned relay-native rebuild undeliverable.
-    let mut pin_msg = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let mut pin_msg = signed_frame(
+        &id("alice"),
+        &id("bob"),
         format!("{}{{\"data\":\"first\"}}", internal_prefixes::CONN_REQUEST),
     );
     alice.sign_control_message(&mut pin_msg).unwrap();
@@ -21478,7 +20155,7 @@ fn test_signed_conn_request_from_pinned_sender_with_internet_identity() {
         protocol.verify_control_message(&pin_msg),
         Ok(true)
     ));
-    assert!(protocol.known_peer_public_keys.contains_key(&id("alice")));
+    assert!(protocol.is_encryption_capable(&id("alice")));
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
     let events_handle = Arc::clone(&events);
@@ -21492,10 +20169,9 @@ fn test_signed_conn_request_from_pinned_sender_with_internet_identity() {
         key_package: None,
         initial_message: None,
     };
-    let mut message = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let mut message = signed_frame(
+        &id("alice"),
+        &id("bob"),
         &format!(
             "{}{}",
             internal_prefixes::CONN_REQUEST,
@@ -21517,217 +20193,6 @@ fn test_signed_conn_request_from_pinned_sender_with_internet_identity() {
         )),
         "signed conn request from pinned sender must emit ConnectionRequestReceived"
     );
-}
-
-#[test]
-fn test_enable_message_persistence_restores_tofu_keys() {
-    let storage = Arc::new(crate::mls::InMemoryStorage::new());
-
-    // Pre-populate storage with a TOFU entry
-    let entry = TofuEntry {
-        public_key: vec![55u8; 32],
-        last_seen_ms: Utc::now().timestamp_millis(),
-    };
-    storage
-        .store(
-            storage_keys::TOFU_KEYS,
-            &id("dave"),
-            &serde_json::to_vec(&entry).unwrap(),
-        )
-        .unwrap();
-
-    // Use enable_message_persistence (not initialize_mls)
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol
-        .enable_message_persistence_for_test(storage)
-        .unwrap();
-
-    assert!(
-        protocol.known_peer_public_keys.contains_key(&id("dave")),
-        "TOFU entry should be restored via enable_message_persistence path"
-    );
-    assert_eq!(
-        protocol.known_peer_public_keys[&id("dave")].public_key,
-        vec![55u8; 32]
-    );
-}
-
-#[test]
-fn test_tofu_restore_skips_invalid_peer_ids() {
-    let storage = Arc::new(crate::mls::InMemoryStorage::new());
-
-    // Write a valid entry
-    let valid_entry = TofuEntry {
-        public_key: vec![1u8; 32],
-        last_seen_ms: Utc::now().timestamp_millis(),
-    };
-    storage
-        .store(
-            storage_keys::TOFU_KEYS,
-            "valid_peer",
-            &serde_json::to_vec(&valid_entry).unwrap(),
-        )
-        .unwrap();
-
-    // Write entries with hostile peer IDs (pre-validation-era data)
-    let hostile_entry = TofuEntry {
-        public_key: vec![2u8; 32],
-        last_seen_ms: Utc::now().timestamp_millis(),
-    };
-    for hostile_id in &["../evil", "peer/slash", "peer:colon", "peer\0nul"] {
-        storage
-            .store(
-                storage_keys::TOFU_KEYS,
-                hostile_id,
-                &serde_json::to_vec(&hostile_entry).unwrap(),
-            )
-            .unwrap();
-    }
-
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol
-        .enable_message_persistence_for_test(storage)
-        .unwrap();
-
-    assert!(
-        protocol.known_peer_public_keys.contains_key("valid_peer"),
-        "Valid peer ID should be restored"
-    );
-    assert!(
-        !protocol.known_peer_public_keys.contains_key("../evil"),
-        "Path-traversal peer ID should be skipped"
-    );
-    assert!(
-        !protocol.known_peer_public_keys.contains_key("peer/slash"),
-        "Slash peer ID should be skipped"
-    );
-    assert!(
-        !protocol.known_peer_public_keys.contains_key("peer:colon"),
-        "Colon peer ID should be skipped"
-    );
-    assert_eq!(
-        protocol.known_peer_public_keys.len(),
-        1,
-        "Only the valid peer should be restored"
-    );
-}
-
-#[test]
-fn test_tofu_restore_truncation_deterministic_on_equal_timestamps() {
-    let storage = Arc::new(crate::mls::InMemoryStorage::new());
-
-    // Store more entries than MAX_TOFU_PEERS, all with the same timestamp
-    let now = Utc::now().timestamp_millis();
-    let count = MAX_TOFU_PEERS + 10;
-    for i in 0..count {
-        let entry = TofuEntry {
-            public_key: vec![i as u8; 32],
-            last_seen_ms: now, // identical timestamps
-        };
-        storage
-            .store(
-                storage_keys::TOFU_KEYS,
-                &format!("peer_{:04}", i),
-                &serde_json::to_vec(&entry).unwrap(),
-            )
-            .unwrap();
-    }
-
-    // Restore twice and verify we get the same set both times
-    let mut protocol_a = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol_a
-        .enable_message_persistence_for_test(storage.clone())
-        .unwrap();
-    let keys_a: std::collections::BTreeSet<String> =
-        protocol_a.known_peer_public_keys.keys().cloned().collect();
-
-    let mut protocol_b = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol_b
-        .enable_message_persistence_for_test(storage)
-        .unwrap();
-    let keys_b: std::collections::BTreeSet<String> =
-        protocol_b.known_peer_public_keys.keys().cloned().collect();
-
-    assert_eq!(keys_a.len(), MAX_TOFU_PEERS);
-    assert_eq!(
-        keys_a, keys_b,
-        "Truncation should be deterministic when timestamps are equal"
-    );
-}
-
-#[test]
-fn test_reset_tofu_for_peer_removes_pinned_key() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-
-    // Pin a key for "alice"
-    protocol.known_peer_public_keys.insert(
-        "alice".to_string(),
-        TofuEntry {
-            public_key: vec![1u8; 32],
-            last_seen_ms: 1000,
-        },
-    );
-    assert!(protocol.known_peer_public_keys.contains_key("alice"));
-
-    // Reset should succeed and return true
-    let removed = protocol.reset_tofu_for_peer("alice");
-    assert!(removed);
-    assert!(!protocol.known_peer_public_keys.contains_key("alice"));
-}
-
-#[test]
-fn test_reset_tofu_for_peer_unknown_peer_is_idempotent() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-
-    // Resetting a peer that was never pinned should return false, not error
-    let removed = protocol.reset_tofu_for_peer("nonexistent");
-    assert!(!removed);
-}
-
-#[test]
-fn test_reset_tofu_for_peer_double_reset_is_idempotent() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-
-    protocol.known_peer_public_keys.insert(
-        "alice".to_string(),
-        TofuEntry {
-            public_key: vec![1u8; 32],
-            last_seen_ms: 1000,
-        },
-    );
-
-    assert!(protocol.reset_tofu_for_peer("alice"));
-    // Second reset on same peer should return false (already removed)
-    assert!(!protocol.reset_tofu_for_peer("alice"));
-}
-
-#[test]
-fn test_reset_tofu_for_peer_allows_repinning() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-
-    let old_key = vec![1u8; 32];
-    protocol.known_peer_public_keys.insert(
-        "alice".to_string(),
-        TofuEntry {
-            public_key: old_key.clone(),
-            last_seen_ms: 1000,
-        },
-    );
-
-    // Reset the key
-    assert!(protocol.reset_tofu_for_peer("alice"));
-
-    // Simulate re-pinning with a new key
-    let new_key = vec![2u8; 32];
-    protocol.known_peer_public_keys.insert(
-        "alice".to_string(),
-        TofuEntry {
-            public_key: new_key.clone(),
-            last_seen_ms: 2000,
-        },
-    );
-
-    assert_eq!(protocol.known_peer_public_keys["alice"].public_key, new_key);
 }
 
 // ========================================================================
@@ -21754,12 +20219,7 @@ fn test_relay_forwards_third_party_message() {
     let transport_handle = mock.clone();
 
     // Create a message from alice to bob (not for us = user123)
-    let msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "Hello bob via relay",
-    );
+    let msg = signed_frame(&id("alice"), "bob", "Hello bob via relay");
     let original_ttl = msg.ttl.value();
     let original_hops = msg.hop_count.value();
     mock.queue_message(msg);
@@ -21807,7 +20267,7 @@ fn test_relay_forwards_third_party_message() {
             remaining_ttl,
             ..
         } => {
-            assert_eq!(sender, "alice");
+            assert_eq!(sender, &id("alice"));
             assert_eq!(recipient, "bob");
             assert_eq!(*hop_count, original_hops + 1);
             assert_eq!(*remaining_ttl, original_ttl - 1);
@@ -21834,12 +20294,7 @@ fn neighbors_carried_to_at_battery(level: Option<u8>, is_charging: bool) -> usiz
     mock.add_connected_peer("carol", -55);
     let transport_handle = mock.clone();
 
-    mock.queue_message(Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "carry me if you can",
-    ));
+    mock.queue_message(signed_frame(&id("alice"), "bob", "carry me if you can"));
 
     protocol
         .transport_manager_mut()
@@ -21967,12 +20422,7 @@ fn a_forward_whose_links_all_failed_is_kept_rather_than_dropped() {
     mock.add_connected_peer("carol", -55);
     let transport_handle = mock.clone();
 
-    let msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "carry me",
-    );
+    let msg = signed_frame(&id("alice"), "bob", "carry me");
     mock.queue_message(msg);
 
     protocol
@@ -22028,12 +20478,7 @@ fn a_forward_with_no_usable_neighbor_is_kept_rather_than_dropped() {
     mock.add_connected_peer("dave", -55);
     let transport_handle = mock.clone();
 
-    let msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "nowhere to go yet",
-    );
+    let msg = signed_frame(&id("alice"), "bob", "nowhere to go yet");
     // Dave handed it to us, so dave is excluded as a target and no other link
     // exists.
     mock.queue_message_from(msg, "dave".to_string());
@@ -22080,12 +20525,7 @@ fn relay_restamps_binary_for_capable_third_party() {
 
     // From alice to bob — a third party, since we are user123 — so it is relayed
     // rather than delivered locally.
-    let msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "relay me",
-    );
+    let msg = signed_frame(&id("alice"), "bob", "relay me");
     mock.queue_message(msg);
 
     protocol
@@ -22136,12 +20576,7 @@ fn test_relay_drops_exhausted_ttl() {
     mock.start().unwrap();
 
     // Create a message from alice to bob, then exhaust its TTL
-    let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "expiring",
-    );
+    let mut msg = signed_frame(&id("alice"), "bob", "expiring");
     // Exhaust TTL by decrementing to 0
     while !msg.is_ttl_exhausted() {
         let _ = msg.decrement_ttl();
@@ -22186,12 +20621,7 @@ fn test_relay_disabled_does_not_forward() {
     let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
 
-    let msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "should not relay",
-    );
+    let msg = signed_frame(&id("alice"), "bob", "should not relay");
     mock.queue_message(msg);
 
     protocol
@@ -22229,12 +20659,7 @@ fn test_relay_preserves_original_sender() {
     mock.add_connected_peer("carol", -55);
     let transport_handle = mock.clone();
 
-    let msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "original content",
-    );
+    let msg = signed_frame(&id("alice"), "bob", "original content");
     let original_id = msg.id.as_str();
     mock.queue_message(msg);
 
@@ -22250,7 +20675,7 @@ fn test_relay_preserves_original_sender() {
     // accounting: a carrier must not rewrite what it carries.
     let forwarded = transport_handle.peer_sends();
     assert_eq!(forwarded.len(), 1);
-    assert_eq!(forwarded[0].1.sender.as_str(), "alice".to_string());
+    assert_eq!(forwarded[0].1.sender.as_str(), id("alice"));
     assert_eq!(forwarded[0].1.content, "original content");
 
     let events = relay_events.lock().unwrap();
@@ -22263,7 +20688,7 @@ fn test_relay_preserves_original_sender() {
             ..
         } => {
             assert_eq!(message_id, &original_id, "Message ID must be preserved");
-            assert_eq!(sender, "alice", "Sender must be preserved");
+            assert_eq!(sender, &id("alice"), "Sender must be preserved");
             assert_eq!(recipient, "bob", "Recipient must be preserved");
         }
         _ => panic!("Expected MessageRelayed event"),
@@ -22286,12 +20711,7 @@ fn test_local_message_not_relayed() {
     mock.start().unwrap();
 
     // Message addressed to us (user123)
-    let msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("user123").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "Hello user123",
-    );
+    let msg = signed_frame(&id("alice"), "user123", "Hello user123");
     mock.queue_message(msg.clone());
 
     protocol
@@ -22757,12 +21177,7 @@ fn outbox_persistence_config() -> ProtocolConfig {
 }
 
 fn test_message(recipient: &str, content: &str) -> Message {
-    Message::new(
-        UserId::new("user123").unwrap(),
-        UserId::new(recipient).unwrap(),
-        AppId::new("test-app").unwrap(),
-        content,
-    )
+    signed_frame(&id("user123"), recipient, content)
 }
 
 fn store_outbox_entry(storage: &InMemoryStorage, entry: &OutboxEntry) {
@@ -24173,12 +22588,7 @@ fn test_legacy_dors_events_still_fire_with_routing_callback_wired() {
         .unwrap();
 
     // Trigger a DORS scoring pass by sending a message.
-    let msg = Message::new(
-        UserId::new("user123").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "ping",
-    );
+    let msg = signed_frame(&id("user123"), "bob", "ping");
     protocol.transport_manager_mut().send(&msg).unwrap();
 
     let legacy_events = captured.lock().unwrap().clone();
@@ -24359,12 +22769,7 @@ fn test_routing_diagnostic_populates_scores_when_enabled() {
         )
         .unwrap();
 
-    let msg = Message::new(
-        UserId::new("user123").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "ping",
-    );
+    let msg = signed_frame(&id("user123"), "bob", "ping");
     protocol.transport_manager_mut().send(&msg).unwrap();
 
     let records = sink.take();
@@ -24412,12 +22817,7 @@ fn test_routing_diagnostic_default_leaves_scores_empty() {
         .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
         .unwrap();
 
-    let msg = Message::new(
-        UserId::new("user123").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "ping",
-    );
+    let msg = signed_frame(&id("user123"), "bob", "ping");
     protocol.transport_manager_mut().send(&msg).unwrap();
 
     let records = sink.take();
@@ -24554,12 +22954,7 @@ fn test_install_before_start_wires_routing_callback() {
         .unwrap();
     protocol.start().unwrap();
 
-    let msg = Message::new(
-        UserId::new("user123").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "ping",
-    );
+    let msg = signed_frame(&id("user123"), "bob", "ping");
     protocol.transport_manager_mut().send(&msg).unwrap();
 
     let records = sink.take();
@@ -24596,12 +22991,7 @@ fn test_routing_callback_persists_across_stop_start_cycle() {
     // can narrow the assertion below to the post-restart send().
     let _ = sink.take();
 
-    let msg = Message::new(
-        UserId::new("user123").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "ping",
-    );
+    let msg = signed_frame(&id("user123"), "bob", "ping");
     protocol.transport_manager_mut().send(&msg).unwrap();
 
     let records = sink.take();
@@ -24897,12 +23287,7 @@ fn test_sink_panic_in_routing_decision_does_not_poison_shared_state() {
 
     // Trigger a routing decision via send — the routing-decision callback
     // fires inside `TransportManager::send`.
-    let msg = Message::new(
-        UserId::new("user123").unwrap(),
-        UserId::new("bob").unwrap(),
-        AppId::new("test-app").unwrap(),
-        "ping",
-    );
+    let msg = signed_frame(&id("user123"), "bob", "ping");
     protocol.transport_manager_mut().send(&msg).unwrap();
 
     // If the sink panic poisoned `SharedState`, this `emit_event` call
@@ -25735,11 +24120,7 @@ fn establish_media_session(alice: &mut OfflineProtocol, bob: &mut OfflineProtoco
         let mls = alice.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package(
-                &bob_id,
-                &bob_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&bob_id, &bob_kp.key_package_data)
             .unwrap();
         manager.create_session(&bob_id).unwrap()
     };
@@ -25824,12 +24205,7 @@ fn legacy_chunk_message(sender: &str, recipient: &str, data: &[u8]) -> Message {
         file_checksum: format!("{:x}", Sha256::digest(data)),
     };
 
-    let mut msg = Message::new(
-        UserId::new(sender).unwrap(),
-        UserId::new(recipient).unwrap(),
-        AppId::new("test-app").unwrap(),
-        "",
-    );
+    let mut msg = signed_frame(sender, recipient, "");
     msg.content_type = ContentType::FileChunk;
     msg.binary_content = Some(chunk.to_bytes());
     msg
@@ -25930,11 +24306,7 @@ fn compact_envelope_interop_legacy_recipient_and_ungated_parsing() {
         let mls = dave.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package(
-                &id("carol"),
-                &carol_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("carol"), &carol_kp.key_package_data)
             .unwrap();
         manager.create_session(&id("carol")).unwrap()
     };
@@ -26223,12 +24595,7 @@ fn rich_send_seals_content_type_against_relay_rewrite() {
 /// `forward_message` — download URL plus the content-encryption secrets.
 #[cfg(test)]
 fn cloud_media_original(sender: &str, recipient: &str) -> Message {
-    let mut original = Message::new(
-        UserId::new(sender).unwrap(),
-        UserId::new(recipient).unwrap(),
-        AppId::new("test-app").unwrap(),
-        "check out this photo",
-    );
+    let mut original = signed_frame(sender, recipient, "check out this photo");
     original.content_type = ContentType::Image;
     let mut media = sample_media_metadata(42);
     media.download_url = Some("https://cdn.example/blob/1".to_string());
@@ -26621,22 +24988,20 @@ fn flush_pending_preserves_content_type_without_rich_extras() {
 fn wire_size_and_fragment_report_for_encrypted_dms() {
     use offline_protocol_transport::constants::{BLE_MAX_FRAGMENT_SIZE, FRAGMENT_HEADER_FIXED};
 
-    let alice_id = "3sK9vT2mQ8xW5nRbY7cJ4dHpZ1e"; // 27 chars, base58-shaped
-    let bob_id = "9fLm2wN6qA1sD4gK8jP3xC7vB5t";
+    // Real `off1…` addresses (~43 chars), which is what a frame actually
+    // carries — the report exists to measure the wire, so the identifiers in
+    // it have to be the ones the wire uses.
+    let alice_id = &id("alice");
+    let bob_id = &id("bob");
 
     // A real MLS session so the ciphertext has authentic OpenMLS overhead.
     let alice_mgr =
-        crate::mls::MlsManager::new(alice_id, Arc::new(crate::mls::InMemoryStorage::new()))
-            .unwrap();
+        crate::test_identity::manager_for("alice", crate::test_identity::seeded_storage("alice"));
     let bob_mgr =
-        crate::mls::MlsManager::new(bob_id, Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+        crate::test_identity::manager_for("bob", crate::test_identity::seeded_storage("bob"));
     let bob_kp = bob_mgr.generate_key_package().unwrap();
     alice_mgr
-        .import_key_package(
-            bob_id,
-            &bob_kp.key_package_data,
-            offline_protocol_mls::KeyPackageTrust::FirstUse,
-        )
+        .import_key_package(bob_id, &bob_kp.key_package_data)
         .unwrap();
     let welcome = alice_mgr.create_session(bob_id).unwrap();
     bob_mgr.join_session(&welcome).unwrap();
@@ -27553,12 +25918,7 @@ fn test_plaintext_media_rejected_when_encryption_required() {
 
 /// Builds a plaintext (no internal prefix) text message.
 fn plaintext_text_message(sender: &str, recipient: &str, content: &str) -> Message {
-    Message::new(
-        UserId::new(sender).unwrap(),
-        UserId::new(recipient).unwrap(),
-        AppId::new("test-app").unwrap(),
-        content,
-    )
+    signed_frame(sender, recipient, content)
 }
 
 #[test]
@@ -27876,11 +26236,7 @@ fn test_encrypted_media_chunk_queued_until_session_ready() {
         let mls = alice.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_kp.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap()
     };
@@ -27953,11 +26309,7 @@ fn test_encrypted_media_chunk_with_mismatched_group_rejected() {
             let mls = carol.mls_manager.as_ref().unwrap().clone();
             let manager = mls.read().unwrap();
             manager
-                .import_key_package(
-                    &id("bob"),
-                    &bob_kp.key_package_data,
-                    offline_protocol_mls::KeyPackageTrust::FirstUse,
-                )
+                .import_key_package(&id("bob"), &bob_kp.key_package_data)
                 .unwrap();
             manager.create_session(&id("bob")).unwrap()
         };
@@ -28014,12 +26366,7 @@ fn test_encrypted_media_chunk_with_mismatched_group_rejected() {
     };
 
     // ...delivered with wire sender &id("alice").
-    let mut msg = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        "",
-    );
+    let mut msg = signed_frame(&id("alice"), &id("bob"), "");
     msg.content_type = ContentType::FileChunk;
     msg.binary_content = Some(encode_media_envelope(
         &encrypted,
@@ -28131,11 +26478,7 @@ fn test_dropped_pending_media_chunk_fails_loudly() {
         let mls = alice.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package(
-                &id("bob"),
-                &bob_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("bob"), &bob_kp.key_package_data)
             .unwrap();
         manager.create_session(&id("bob")).unwrap();
     }
@@ -28215,12 +26558,7 @@ fn legacy_json_chunk_message(sender: &str, recipient: &str, data: &[u8]) -> Mess
         file_checksum: format!("{:x}", Sha256::digest(data)),
     };
 
-    let mut msg = Message::new(
-        UserId::new(sender).unwrap(),
-        UserId::new(recipient).unwrap(),
-        AppId::new("test-app").unwrap(),
-        chunk.to_json().unwrap(),
-    );
+    let mut msg = signed_frame(sender, recipient, chunk.to_json().unwrap());
     msg.content_type = ContentType::FileChunk;
     msg
 }
@@ -28412,12 +26750,7 @@ fn test_media_chunk_hard_decrypt_failure_emits_decryption_failed_event() {
     };
     encrypted.ciphertext = vec![0u8; 24];
 
-    let mut msg = Message::new(
-        UserId::new(&id("alice")).unwrap(),
-        UserId::new(&id("bob")).unwrap(),
-        AppId::new("test-app").unwrap(),
-        "",
-    );
+    let mut msg = signed_frame(&id("alice"), &id("bob"), "");
     msg.content_type = ContentType::FileChunk;
     msg.binary_content = Some(encode_media_envelope(
         &encrypted,
@@ -28509,7 +26842,7 @@ fn test_media_chunk_hard_decrypt_failure_withholds_ack_and_recovers() {
         "the chunk id must be unmarked so a resend re-enters processing"
     );
     assert!(
-        !bob.pending_queue.contains_peer(&id("alice")),
+        !bob.pending_queue.contains_peer("alice"),
         "an undecryptable chunk must NOT be enqueued: it could never drain"
     );
     assert_eq!(*files.lock().unwrap(), 0, "nothing completes yet");
@@ -28727,7 +27060,7 @@ fn test_undecodable_media_envelope_withholds_ack_and_recovers() {
         "the id must be unmarked so a resend re-enters processing"
     );
     assert!(
-        !bob.pending_queue.contains_peer(&id("alice")),
+        !bob.pending_queue.contains_peer("alice"),
         "an undecodable frame must NOT be enqueued: it could never become decodable"
     );
     assert_eq!(*files.lock().unwrap(), 0, "nothing completes yet");
@@ -28841,7 +27174,7 @@ fn test_drained_media_chunk_that_hard_fails_is_not_acked() {
         "it must stay unmarked so the sender's resend still recovers the transfer"
     );
     assert!(
-        !bob.pending_queue.contains_peer(&id("alice")),
+        !bob.pending_queue.contains_peer("alice"),
         "the dead chunk must not be re-queued: the drain removed it, so a \
          re-enqueue would restart its TTL on every drain"
     );
@@ -29005,7 +27338,7 @@ fn test_pending_queue_byte_budget_counts_metadata_not_just_payload() {
     let queue_config = protocol.config.encryption.pending_queue.clone();
 
     // ~3 KB of metadata behind a 2-byte payload.
-    let mut m1 = pending_test_message("peer", "hi");
+    let mut m1 = pending_test_message(&id("peer"), "hi");
     m1.metadata.insert("blob".to_string(), "x".repeat(3000));
     assert!(protocol
         .pending_queue
@@ -29019,7 +27352,7 @@ fn test_pending_queue_byte_budget_counts_metadata_not_just_payload() {
 
     // A second such message exceeds the 4096 budget, so the oldest is evicted
     // (DropOldest default): memory stays bounded instead of growing per message.
-    let mut m2 = pending_test_message("peer", "hi");
+    let mut m2 = pending_test_message(&id("peer"), "hi");
     m2.metadata.insert("blob".to_string(), "y".repeat(3000));
     protocol.pending_queue.enqueue(&queue_config, "peer", &m2);
     assert!(protocol.pending_queue.total_bytes() <= 4096);
@@ -29038,8 +27371,8 @@ fn test_peer_overflow_hits_pruned_on_drain() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let queue_config = protocol.config.encryption.pending_queue.clone();
 
-    let m1 = pending_test_message("peer", "a");
-    let m2 = pending_test_message("peer", "b");
+    let m1 = pending_test_message(&id("peer"), "a");
+    let m2 = pending_test_message(&id("peer"), "b");
     protocol.pending_queue.enqueue(&queue_config, "peer", &m1);
     // Second message trips the per-peer limit → records an overflow hit; with
     // DropNewest the queue keeps m1 (non-empty), so the counter is retained.
@@ -29064,8 +27397,8 @@ fn test_peer_overflow_hits_pruned_when_last_entry_evicted() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let queue_config = protocol.config.encryption.pending_queue.clone();
 
-    let m1 = pending_test_message("peer", "a");
-    let m2 = pending_test_message("peer", "b");
+    let m1 = pending_test_message(&id("peer"), "a");
+    let m2 = pending_test_message(&id("peer"), "b");
     protocol.pending_queue.enqueue(&queue_config, "peer", &m1);
     protocol.pending_queue.enqueue(&queue_config, "peer", &m2);
     assert!(protocol.pending_queue.has_overflow_hits("peer"));
@@ -30017,20 +28350,14 @@ fn test_welcome_pending_peers_tracks_unconfirmed_sessions() {
 #[test]
 fn test_internet_control_op_classification() {
     let protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    let make_from = |sender: &str, recipient: &str, content: &str| {
-        Message::new(
-            UserId::new(sender).unwrap(),
-            UserId::new(recipient).unwrap(),
-            AppId::new("test-app").unwrap(),
-            content,
-        )
-    };
+    let make_from =
+        |sender: &str, recipient: &str, content: &str| signed_frame(sender, recipient, content);
     let make = |recipient: &str, content: &str| make_from("user123", recipient, content);
 
     // Connection ops ship verbatim so the Ed25519 control signature in the
     // message metadata survives to the receiver's security gate — a
     // relay-native replacement would arrive unsigned and be rejected as a
-    // signature downgrade once the sender's key is TOFU-pinned.
+    // unsigned control frame, which the gate refuses unconditionally.
     for content in [
         "__CONN_REQ__{\"sender_name\":\"Alice\"}",
         "__CONN_ACC__{\"accepted_by_name\":\"Alice\"}",
@@ -30138,12 +28465,9 @@ fn test_internet_control_op_registry_is_closed() {
     for prefix in INTERNAL_PREFIXES {
         let content = format!("{}{{}}", prefix);
         for recipient in ["bob", "user123"] {
-            let msg = Message::new(
-                UserId::new("user123").unwrap(),
-                UserId::new(recipient).unwrap(),
-                AppId::new("test-app").unwrap(),
-                content.as_str(),
-            );
+            // `local_id` is the profile until MLS init derives an address, and
+            // this classification is keyed off it.
+            let msg = signed_frame("user123", recipient, content.as_str());
             if let Some((op, _)) = protocol.internet_control_op(&msg) {
                 ops.insert(op);
             }
@@ -30178,12 +28502,7 @@ fn test_relayed_frame_with_hops_never_classifies() {
         ("user123", "__GRP_RELAY_REG__{\"group_id\":\"g1\"}"),
         ("user123", "__GRP_RELAY_BCAST__{\"group_id\":\"g1\"}"),
     ] {
-        let mut msg = Message::new(
-            UserId::new("user123").unwrap(),
-            UserId::new(recipient).unwrap(),
-            AppId::new("test-app").unwrap(),
-            content,
-        );
+        let mut msg = signed_frame("user123", recipient, content);
         assert!(
             protocol.internet_control_op(&msg).is_some(),
             "sanity: {:?} classifies at hop 0",
@@ -30222,10 +28541,9 @@ fn test_inbound_frame_forging_our_origin_is_not_relayed() {
     // Relaying it would put a sender==self frame in our own outbox, where
     // the bridge would execute it as a relay-native op on our
     // authenticated connection.
-    let msg = Message::new(
-        UserId::new("user123").unwrap(),
-        UserId::new("carol").unwrap(),
-        AppId::new("test-app").unwrap(),
+    let msg = signed_frame(
+        &id("user123"),
+        "carol",
         "__GRP_MLS_LEAVE__{\"group_id\":\"g1\"}",
     );
     mock.queue_message(msg);
@@ -30273,10 +28591,9 @@ fn test_group_created_ack_gates_relay_sync() {
     // path) is spoofable by any peer and must NOT enable the broadcast
     // path — a false sync flag black-holes group sends into a relay that
     // never registered the group.
-    let ack = Message::new(
-        UserId::new("relay").unwrap(),
-        UserId::new(&id("user123")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let ack = signed_frame(
+        "relay",
+        &id("user123"),
         &format!(
             "__GROUP_CREATED__{{\"group_id\":\"{}\",\"name\":\"ack-gate-group\"}}",
             group_id
@@ -30310,10 +28627,9 @@ fn test_group_created_ack_gates_relay_sync() {
         .contains_key(&group_id));
 
     // An ack for a group we don't track locally must not create sync state.
-    let foreign_ack = Message::new(
-        UserId::new("relay").unwrap(),
-        UserId::new(&id("user123")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let foreign_ack = signed_frame(
+        &id("relay"),
+        &id("user123"),
         "__GROUP_CREATED__{\"group_id\":\"someone-elses-group\",\"name\":\"x\"}",
     );
     protocol.process_internal_message_via(&foreign_ack, Some(TransportType::Internet));
@@ -30324,16 +28640,15 @@ fn test_group_created_ack_gates_relay_sync() {
 
     // A group-scoped relay error revokes the sync AND the pending
     // correlation: fall back to per-member.
-    let error = Message::new(
-        UserId::new("relay").unwrap(),
-        UserId::new(&id("user123")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let error = signed_frame(
+        "relay",
+        &id("user123"),
         &format!(
             "__GROUP_ERROR__{{\"reason\":\"Only admins can sync this group\",\"group_id\":\"{}\"}}",
             group_id
         ),
     );
-    protocol.process_internal_message(&error);
+    protocol.process_internal_message_via(&error, Some(TransportType::Internet));
     assert!(!protocol.group_mesh.relay_synced.contains(&group_id));
 
     // The relay forwards peer message content verbatim, so a malicious peer
@@ -30457,10 +28772,9 @@ fn test_unanswered_relay_registration_expires_and_retries() {
         "an exhausted registration must not be re-sent"
     );
 
-    let forged_ack = Message::new(
-        UserId::new("relay").unwrap(),
-        UserId::new(&id("user123")).unwrap(),
-        AppId::new("test-app").unwrap(),
+    let forged_ack = signed_frame(
+        "relay",
+        &id("user123"),
         &format!(
             "__GROUP_CREATED__{{\"group_id\":\"{}\",\"name\":\"ack-timeout-group\"}}",
             group_id
@@ -30990,11 +29304,12 @@ fn touches_restoring(padded: &'static str, padding: usize) -> usize {
     touches
 }
 
-/// An [`MlsStorage`] that pads the TOFU listing with synthetic ids and counts
-/// the loads a restore then makes against that category.
+/// An [`MlsStorage`] that pads the encryption-capability listing with synthetic
+/// ids and counts the loads a restore then makes against that category.
 ///
-/// TOFU pins are the one restored category that never left the credential
-/// store, so the protocol-state `CountingStorage` above cannot observe them.
+/// Capability records are the one restored category that lives in the
+/// credential store, so the protocol-state `CountingStorage` above cannot
+/// observe them.
 struct CountingSecureStorage {
     inner: crate::mls::InMemoryStorage,
     padding: usize,
@@ -31016,7 +29331,7 @@ impl MlsStorage for CountingSecureStorage {
         key_type: &str,
         key_id: &str,
     ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
-        if key_type == storage_keys::TOFU_KEYS {
+        if key_type == storage_keys::ENCRYPTION_CAPABLE_PEERS {
             *self.loads.lock().unwrap() += 1;
         }
         self.inner.load(key_type, key_id)
@@ -31035,73 +29350,13 @@ impl MlsStorage for CountingSecureStorage {
         key_type: &str,
     ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
         let mut keys = self.inner.list_keys(key_type)?;
-        if key_type == storage_keys::TOFU_KEYS {
+        if key_type == storage_keys::ENCRYPTION_CAPABLE_PEERS {
             // Valid user ids, so the restore's own `UserId::new` gate does not
             // short-circuit the walk before it reaches a load.
             keys.extend((0..self.padding).map(|index| format!("padded-peer-{index:06}")));
         }
         Ok(keys)
     }
-}
-
-#[test]
-fn test_tofu_restore_stops_at_the_category_bound_without_pruning() {
-    // TOFU was the last category walk with no bound: it read whatever
-    // `list_keys` handed back, loading every entry into memory before applying
-    // `MAX_TOFU_PEERS`. Living in the credential store rather than the app
-    // container is a weaker threat model, not an absent one, and the bound is
-    // about work on the boot path either way.
-    //
-    // The tail is deliberately *ignored*, never pruned. The two cache restores
-    // delete their overflow because a dropped key package costs a re-exchange;
-    // a TOFU entry is a pin, and deleting one silently re-arms
-    // trust-on-first-use for that peer.
-    use super::storage::MAX_RESTORE_KEYS_PER_CATEGORY;
-
-    let padding = 4 * MAX_RESTORE_KEYS_PER_CATEGORY;
-    let counting = Arc::new(CountingSecureStorage {
-        inner: crate::mls::InMemoryStorage::new(),
-        padding,
-        loads: Mutex::new(0),
-    });
-
-    // One real pin, so the walk has something legitimate to recover too.
-    let entry = serde_json::to_vec(&TofuEntry {
-        public_key: b"bob-key".to_vec(),
-        last_seen_ms: 1,
-    })
-    .unwrap();
-    counting
-        .inner
-        .store(storage_keys::TOFU_KEYS, &id("bob"), &entry)
-        .unwrap();
-
-    let secure_handle: Arc<dyn MlsStorage> = counting.clone();
-    let state_backend: Arc<dyn MlsStorage> = Arc::new(InMemoryStorage::new());
-    let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(TestProtocolStateStorage {
-        storage: state_backend,
-    });
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol
-        .initialize_mls(secure_handle, state_handle)
-        .unwrap();
-
-    let loads = *counting.loads.lock().unwrap();
-    assert!(
-        loads <= MAX_RESTORE_KEYS_PER_CATEGORY,
-        "TOFU restore loaded {loads} entries, over the {MAX_RESTORE_KEYS_PER_CATEGORY} bound"
-    );
-    assert!(loads > 0, "TOFU restore must still walk the bounded prefix");
-
-    // Nothing was deleted: an over-cap pin is stranded, never unpinned.
-    assert!(
-        counting
-            .inner
-            .load(storage_keys::TOFU_KEYS, &id("bob"))
-            .unwrap()
-            .is_some(),
-        "a bounded TOFU walk must not prune the store it could not finish reading"
-    );
 }
 
 #[test]
@@ -32747,17 +31002,14 @@ fn establish_session_and_pin(protocol: &mut OfflineProtocol, peer_label: &str) {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package(
-                peer,
-                &peer_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(peer, &peer_kp.key_package_data)
             .unwrap();
         let welcome = manager.create_session(peer).unwrap();
         peer_manager.join_session(&welcome).unwrap();
     }
-    // What the real receive path does for any signed control message.
-    protocol.tofu_check_or_pin(peer, peer_identity).unwrap();
+    // What the real receive path does for any verified control message.
+    let _ = peer_identity;
+    protocol.record_encryption_capable(peer);
     protocol
         .persist_session_state(peer, SessionState::Confirmed, "test")
         .unwrap();
@@ -32912,76 +31164,6 @@ fn test_encryption_capability_survives_session_teardown() {
 }
 
 #[test]
-fn test_capability_survives_restart_through_persisted_tofu_pins() {
-    // The durability half. Seeding capability from `list_sessions()` alone
-    // would lose it across teardown-then-restart, which is exactly the sequence
-    // a forged desync frame can drive. TOFU pins persist to the credential
-    // store, so they carry the signal across the restart.
-    let secure = Arc::new(InMemoryStorage::new());
-    let state = Arc::new(InMemoryStorage::new());
-
-    {
-        let (mut alice, _handle) = mixed_mode_node("alice", &secure, &state);
-        establish_session_and_pin(&mut alice, "bob");
-        alice
-            .manual_mls_delete_session(&id("bob"))
-            .expect("session teardown succeeds");
-    }
-
-    let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
-    {
-        let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
-        assert!(
-            !manager.has_session(&id("bob")).unwrap(),
-            "precondition: no MLS session survives, so only the pin can carry capability"
-        );
-    }
-    assert!(
-        alice.is_encryption_capable(&id("bob")),
-        "the restored TOFU pin re-seeds capability"
-    );
-
-    handle.queue_message(plaintext_text_message(
-        &id("bob"),
-        &local_id(&alice),
-        "after restart",
-    ));
-    assert!(
-        alice.receive_message().is_none(),
-        "capability must not be forgotten across a restart"
-    );
-}
-
-#[test]
-fn test_reset_tofu_for_peer_clears_encryption_capability() {
-    // The one sanctioned way out of the set. `reset_tofu_for_peer` is an
-    // explicit operator action meaning "treat this identity as unknown", which
-    // is precisely when forgetting is right — unlike teardown, it cannot be
-    // driven by a remote frame.
-    let secure = Arc::new(InMemoryStorage::new());
-    let state = Arc::new(InMemoryStorage::new());
-    let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
-    establish_session_and_pin(&mut alice, "bob");
-
-    assert!(alice.reset_tofu_for_peer(&id("bob")), "an entry was pinned");
-    assert!(
-        !alice.is_encryption_capable(&id("bob")),
-        "an explicit identity reset forgets capability too"
-    );
-
-    handle.queue_message(plaintext_text_message(
-        &id("bob"),
-        &local_id(&alice),
-        "post-reset",
-    ));
-    assert!(
-        alice.receive_message().is_some(),
-        "after a deliberate reset the peer is a stranger again, so the mixed-mode \
-         opt-out applies to them like any other unknown peer"
-    );
-}
-
-#[test]
 fn test_legacy_plaintext_peer_is_still_accepted_in_mixed_mode() {
     // The interop mode this gate must not break: `enabled: true` +
     // `requireEncryption: false` exists so a node can auto-encrypt with capable
@@ -33008,9 +31190,8 @@ fn test_legacy_plaintext_peer_is_still_accepted_in_mixed_mode() {
 fn test_encryption_capability_set_is_bounded_without_evicting() {
     // The set is fed from paths reachable without authentication — a
     // well-formed `__MLS_WELCOME__` marks its sender even when the join fails,
-    // and `tofu_check_or_pin` marks before its own store-full branch — so the
-    // keys are wire-claimed ids and it needs a cap like every other map fed
-    // that way.
+    // and a verified control message marks its sender — so the keys are
+    // wire-claimed ids and it needs a cap like every other map fed that way.
     //
     // The cap must be a *refusal*. Evicting would un-mark a peer that really is
     // encryption-capable, which is the fail-open direction this set exists to
@@ -33059,15 +31240,17 @@ fn test_encryption_capability_set_is_bounded_without_evicting() {
 }
 
 // ============================================================================
-// KEY PACKAGE / TOFU PIN BINDING
+// KEY PACKAGE ADDRESS BINDING
 // ============================================================================
 
 #[test]
-fn test_ffi_key_package_import_is_checked_against_the_pin() {
-    // `mls_import_key_package` used to reach straight for the MlsManager, which
-    // cannot see the TOFU store — so an app (or anything holding the FFI
+fn test_ffi_key_package_import_is_checked_against_the_derivation() {
+    // `mls_import_key_package` used to reach straight for the MlsManager and
+    // pass `KeyPackageTrust::FirstUse` — so an app (or anything holding the FFI
     // handle) could import a key package under any peer id with no correlation
-    // to that peer's pinned key. It now routes through the protocol object.
+    // to that peer. The package now proves its own address inside
+    // `import_key_package`; this still routes through the protocol object so
+    // the import also records the peer as encryption-capable.
     let secure = Arc::new(InMemoryStorage::new());
     let state = Arc::new(InMemoryStorage::new());
     let (mut alice, _handle) = mixed_mode_node("alice", &secure, &state);
@@ -33079,15 +31262,14 @@ fn test_ffi_key_package_import_is_checked_against_the_pin() {
     // offer its own key package under bob's id.
     let impostor =
         crate::test_identity::manager_for("mallory", Arc::new(crate::mls::InMemoryStorage::new()));
-    let pin = real_bob.get_identity_public_key().unwrap();
-    alice.tofu_check_or_pin(&id("bob"), pin).unwrap();
+    let _ = real_bob;
 
     let impostor_kp = impostor.get_or_create_key_package().unwrap();
     let err = alice
         .manual_mls_import_key_package(&id("bob"), &impostor_kp.key_package_data)
         .unwrap_err();
     assert!(
-        err.to_string().contains("does not match the pinned key")
+        err.to_string().contains("not the claimed address")
             || err.to_string().contains("Credential identity mismatch"),
         "a substituted key package must be refused, got: {}",
         err
@@ -33578,7 +31760,7 @@ fn nostr_resolution_drops_anything_that_is_not_a_key_package() {
     // it either.
     bob.handle_resolved_key_package(&bytes).unwrap();
     assert!(
-        bob.load_peer_capabilities_record("mallory").is_none(),
+        bob.load_peer_capabilities_record(&id("mallory")).is_none(),
         "a non-key-package record was acted on"
     );
 }
@@ -34034,4 +32216,532 @@ fn test_identity_ready_event_carries_the_derived_address() {
         "exactly one identity_ready per initialization (got {addresses:?})"
     );
     assert_eq!(addresses[0], local_id(&protocol));
+}
+
+// ============================================================================
+// TRUST COLLAPSE: derivation replaces the TOFU pin store
+// ============================================================================
+
+/// The impersonation this PR exists to stop, and the one shape that survives a
+/// mandatory signature: a real signature from a real key, over a frame claiming
+/// somebody else's address.
+///
+/// Under the pin store this was only caught *after* first contact — the first
+/// key seen for a name became that name's key, so whoever spoke first won. The
+/// derivation check has no first-contact window: an address is the hash of its
+/// key, so mallory's signature re-derives to mallory's address no matter whose
+/// name is on the envelope.
+#[test]
+fn forged_sender_is_rejected_on_first_contact() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let handle = Arc::clone(&events);
+    protocol.on_event(move |e| handle.lock().unwrap().push(e));
+
+    // Claims to be alice; signed by mallory. Nothing about alice has ever been
+    // seen by this node, which is exactly the case the pin store could not judge.
+    let mut msg = unsigned_frame(
+        &id("alice"),
+        "user123",
+        format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+    );
+    crate::test_identity::sign_as("mallory", &mut msg);
+
+    let result = protocol.process_internal_message(&msg);
+    assert!(
+        matches!(result, Some(InternalMessageResult::SecurityRejected)),
+        "a frame signed by someone other than its claimed sender must be rejected, got {:?}",
+        result
+    );
+
+    let captured = events.lock().unwrap();
+    assert!(
+        captured.iter().any(|e| matches!(
+            e,
+            Event::SecurityWarning { reason_code, peer_id, .. }
+                if *reason_code == SecurityWarningCode::SenderAddressMismatch
+                    && peer_id == &id("alice")
+        )),
+        "the mismatch must be reported against the impersonated address, got {:?}",
+        captured
+    );
+    assert!(
+        !protocol.is_encryption_capable(&id("alice")),
+        "a rejected frame must teach this node nothing about the peer it named"
+    );
+}
+
+/// The genuine article still passes, on first contact and with no prior state.
+///
+/// The other half of the test above: the check is not merely refusing things.
+#[test]
+fn honestly_signed_sender_passes_on_first_contact() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mut msg = unsigned_frame(
+        &id("alice"),
+        "user123",
+        format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+    );
+    crate::test_identity::sign_as("alice", &mut msg);
+
+    assert!(matches!(protocol.verify_control_message(&msg), Ok(true)));
+    assert!(
+        protocol.is_encryption_capable(&id("alice")),
+        "verifying a peer's signature proves they run MLS"
+    );
+}
+
+/// The bypass the check must not have.
+///
+/// If a sender that is not an address answered "nothing to derive, pass", an
+/// attacker would simply claim a nickname and skip the gate entirely — so the
+/// unparseable case is an error, not a waiver. This is the assertion that makes
+/// the check unconditional in the sense that matters.
+#[test]
+fn a_nickname_sender_cannot_skip_the_derivation_check() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mut msg = unsigned_frame(
+        "alice",
+        "user123",
+        format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+    );
+    // Signed by a real identity, so only the *shape* of the sender is at issue.
+    crate::test_identity::sign_as("alice", &mut msg);
+
+    let err = protocol
+        .verify_control_message(&msg)
+        .expect_err("a non-address sender has no derivation to prove and must be refused");
+    assert!(
+        err.to_string().contains("is not an address"),
+        "expected the sender-shape refusal, got: {}",
+        err
+    );
+}
+
+/// Unsigned control traffic is refused whether or not the sender is known.
+///
+/// Both halves matter. The "known" case used to be the only rejection (a
+/// signature downgrade from a pinned peer); the "unknown" case used to be
+/// *accepted*, which is what let a forged-hop spoofer impersonate any
+/// not-yet-pinned peer without committing a key at all.
+#[test]
+fn unsigned_control_is_refused_for_known_and_unknown_senders() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    for known in [false, true] {
+        if known {
+            protocol.record_encryption_capable(&id("alice"));
+        }
+        let msg = unsigned_frame(
+            &id("alice"),
+            "user123",
+            format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        assert!(
+            matches!(
+                protocol.security_gate_control_message(&msg, None),
+                ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected)
+            ),
+            "unsigned control traffic must be refused (sender known: {known})"
+        );
+    }
+}
+
+/// `require_transport_identity` does not gate the signature requirement any
+/// more, in either direction.
+///
+/// It used to: unsigned frames were accepted unless the flag was set. Pinning
+/// both settings keeps a future change from quietly making the security of the
+/// control plane configurable again.
+#[test]
+fn unsigned_rejection_does_not_depend_on_require_transport_identity() {
+    for require_identity in [false, true] {
+        let mut config = create_test_config();
+        config.security.require_transport_identity = require_identity;
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+
+        let mut msg = unsigned_frame(
+            &id("alice"),
+            "user123",
+            format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        // A forged hop skips the transport-identity strict match, which is the
+        // path the flag was introduced to cover.
+        msg.increment_hop().unwrap();
+        msg.set_transport_peer_id(id("carol")).unwrap();
+
+        assert!(
+            matches!(
+                protocol.security_gate_control_message(&msg, None),
+                ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected)
+            ),
+            "unsigned control traffic must be refused with require_transport_identity={require_identity}"
+        );
+    }
+}
+
+/// The relay-answer exemption is narrow: prefix *and* transport *and* the
+/// absence of an attributed peer.
+///
+/// The exemption exists because no peer signs a relay answer (see
+/// `RELAY_ANSWER_PREFIXES`). If it keyed on the prefix alone, any mesh peer
+/// could borrow it to inject unsigned group state — so the two extra conditions
+/// are the load-bearing part, and this pins all three.
+#[test]
+fn relay_answer_exemption_does_not_extend_to_peer_delivered_frames() {
+    let ack = format!(
+        "{}{{\"group_id\":\"g1\",\"name\":\"Test\"}}",
+        internal_prefixes::GROUP_CREATED
+    );
+
+    // The genuine shape: relay ingest, no attributed peer.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let msg = unsigned_frame(&id("relay"), "user123", &ack);
+    assert!(
+        matches!(
+            protocol.security_gate_control_message(&msg, Some(TransportType::Internet)),
+            ControlGateOutcome::Proceed { signed: false }
+        ),
+        "a relay answer over relay ingest must be admitted — no peer signs one"
+    );
+
+    // Same prefix, arriving over the mesh: a peer sent this, so it must sign.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let msg = unsigned_frame(&id("relay"), "user123", &ack);
+    assert!(
+        matches!(
+            protocol.security_gate_control_message(&msg, Some(TransportType::BLE)),
+            ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected)
+        ),
+        "the exemption must not follow the prefix onto a mesh transport"
+    );
+
+    // Relay ingest, but the relay attributed it to a peer — so a peer sent it.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mut msg = unsigned_frame(&id("relay"), "user123", &ack);
+    msg.set_transport_peer_id(id("relay")).unwrap();
+    assert!(
+        matches!(
+            protocol.security_gate_control_message(&msg, Some(TransportType::Internet)),
+            ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected)
+        ),
+        "an attributed frame is a peer's frame, exempt prefix or not"
+    );
+
+    // And a peer-to-peer prefix is never exempt, whatever the transport.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let msg = unsigned_frame(
+        &id("alice"),
+        "user123",
+        format!("{}{{\"data\":\"x\"}}", internal_prefixes::CONN_REQUEST),
+    );
+    assert!(
+        matches!(
+            protocol.security_gate_control_message(&msg, Some(TransportType::Internet)),
+            ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected)
+        ),
+        "only the relay's own answers are exempt"
+    );
+}
+
+/// The half of the deleted TOFU store that had nothing to do with pinning: the
+/// durable record that a peer runs MLS, which keeps the plaintext-downgrade
+/// gate shut across a restart.
+///
+/// This is the property most at risk in the trust collapse. The pin store
+/// carried it as a side effect of holding keys, so deleting the store outright
+/// would have silently re-opened the gate for any peer whose session had been
+/// torn down — and session teardown is remotely triggerable, so an attacker
+/// could arrange the teardown, wait for a relaunch, and then be believed as
+/// cleartext under that peer's address. `encryption_capable_peers` is memory
+/// only; the record restored here is the only thing that survives the process.
+#[test]
+fn capability_survives_restart_through_the_durable_record() {
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    {
+        let (mut alice, _handle) = mixed_mode_node("alice", &secure, &state);
+        // A verified control message is the whole basis of the record: no
+        // session, no key package, just proof the peer signed as itself.
+        let mut signed = unsigned_frame(
+            &id("bob"),
+            &id("alice"),
+            format!("{}{{\"data\":\"x\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        crate::test_identity::sign_as("bob", &mut signed);
+        assert!(matches!(alice.verify_control_message(&signed), Ok(true)));
+        assert!(alice.is_encryption_capable(&id("bob")));
+    }
+
+    // Relaunch against the same containers, with no session and no key package
+    // in play — the record is the only carrier of the fact.
+    let (restarted, _handle) = mixed_mode_node("alice", &secure, &state);
+    assert!(
+        restarted.is_encryption_capable(&id("bob")),
+        "the durable record must reseed the capability set, or the plaintext \
+         gate re-opens for a peer we have already authenticated"
+    );
+}
+
+/// A corrupt or hostile record is skipped rather than believed, and skipping it
+/// costs only that peer's improvement.
+#[test]
+fn capability_restore_skips_unreadable_records() {
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    {
+        let (mut alice, _handle) = mixed_mode_node("alice", &secure, &state);
+        let mut signed = unsigned_frame(
+            &id("bob"),
+            &id("alice"),
+            format!("{}{{\"data\":\"x\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        crate::test_identity::sign_as("bob", &mut signed);
+        assert!(matches!(alice.verify_control_message(&signed), Ok(true)));
+    }
+
+    // Garbage in the record, and a second entry under a storage-hostile key.
+    secure
+        .store(
+            storage_keys::ENCRYPTION_CAPABLE_PEERS,
+            &id("bob"),
+            b"not json",
+        )
+        .unwrap();
+    secure
+        .store(storage_keys::ENCRYPTION_CAPABLE_PEERS, "../evil", b"{}")
+        .unwrap();
+
+    let (restarted, _handle) = mixed_mode_node("alice", &secure, &state);
+    assert!(
+        !restarted.is_encryption_capable(&id("bob")),
+        "an unreadable record is not evidence"
+    );
+    assert!(
+        !restarted.is_encryption_capable("../evil"),
+        "a storage-hostile key must not be admitted as a peer id"
+    );
+}
+
+/// The durable category is bounded by the same cap as the set it feeds.
+///
+/// `test_encryption_capability_set_is_bounded_without_evicting` pins the
+/// in-memory half; this is the durable half, and it is not the same property.
+/// Persisting regardless of whether the capped set accepted the peer would
+/// leave the category unbounded — reachable, because an identity that signs
+/// honestly as itself costs one keygen, so an attacker can mint them without
+/// limit. The damage is not disk: `restore_encryption_capable_peers` reads only
+/// the first `MAX_RESTORE_KEYS_PER_CATEGORY` keys the store lists, so a flooded
+/// category can push a real peer's record out of the restore window and re-open
+/// the plaintext gate for them on the next launch — the exact failure this
+/// category exists to prevent.
+#[test]
+fn durable_capability_records_are_bounded_by_the_capability_cap() {
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (mut alice, _handle) = mixed_mode_node("alice", &secure, &state);
+
+    // Positive control: without this the bound assertion below could pass on a
+    // build that never writes a record at all.
+    alice.record_encryption_capable(&id("bob"));
+    assert!(
+        secure
+            .load(storage_keys::ENCRYPTION_CAPABLE_PEERS, &id("bob"))
+            .unwrap()
+            .is_some(),
+        "a verified peer must get a durable record"
+    );
+
+    for i in 0..(MAX_ENCRYPTION_CAPABLE_PEERS + 50) {
+        alice.record_encryption_capable(&format!("flood-{i}"));
+    }
+
+    let stored = secure
+        .list_keys(storage_keys::ENCRYPTION_CAPABLE_PEERS)
+        .unwrap()
+        .len();
+    assert!(
+        stored <= MAX_ENCRYPTION_CAPABLE_PEERS,
+        "the durable category must not outgrow the capability cap, got {stored}"
+    );
+    assert!(
+        secure
+            .load(storage_keys::ENCRYPTION_CAPABLE_PEERS, &id("bob"))
+            .unwrap()
+            .is_some(),
+        "a flood must not displace the record of a peer we already authenticated"
+    );
+}
+
+/// `record_encryption_capable` elides the repeat *write*, never the *mark*.
+///
+/// The durable record carries no field any decision reads back, so rewriting it
+/// per verified frame is pure cost — and the gated prefixes include the chatty
+/// ones, so on mobile that is a Keychain round-trip per typing indicator. The
+/// elision cache is therefore correct; skipping the mark along with the write is
+/// not, and the two are one `return` apart.
+///
+/// The window where they disagree is real rather than theoretical: a failed
+/// `initialize_mls` rolls `encryption_capable_peers` back to its pre-restore
+/// snapshot while the cache still holds what restore read off disk. A peer in
+/// that state must still be re-marked on their next verified frame, or the
+/// plaintext gate stands open for exactly the peers whose records we *do* hold.
+#[test]
+fn capability_write_elision_never_skips_the_in_memory_mark() {
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (mut alice, _handle) = mixed_mode_node("alice", &secure, &state);
+
+    alice.record_encryption_capable(&id("bob"));
+    assert!(alice.is_encryption_capable(&id("bob")));
+
+    // Reproduce the disagreement the rollback creates: the durable record and
+    // its cache entry stand, the in-memory set does not.
+    alice.forget_encryption_capable_for_test(&id("bob"));
+    assert!(!alice.is_encryption_capable(&id("bob")));
+
+    // The next verified frame must put it back, cache hit or not.
+    alice.record_encryption_capable(&id("bob"));
+    assert!(
+        alice.is_encryption_capable(&id("bob")),
+        "a cached durable record must not suppress the mark that holds the \
+         plaintext gate shut"
+    );
+}
+
+/// The capability restore walk stops at the category bound, and ignores the
+/// tail rather than pruning it.
+///
+/// The other half of the bound above, and the reason that one matters: the walk
+/// reads only a bounded prefix of what `list_keys` returns, so a category that
+/// outgrew the prefix would silently strand real records outside it. Both
+/// halves have to hold — cap the writes *and* keep the read window enforced —
+/// or a peer we authenticated comes back unknown and the plaintext gate reopens.
+///
+/// The tail is deliberately ignored, never pruned. The two cache restores
+/// delete their overflow because a dropped key package costs only a
+/// re-exchange; one of these records is the sole durable evidence that a peer
+/// runs MLS, so stranding it is the strictly safer failure.
+#[test]
+fn capability_restore_stops_at_the_category_bound_without_pruning() {
+    use super::storage::MAX_RESTORE_KEYS_PER_CATEGORY;
+
+    let padding = 4 * MAX_RESTORE_KEYS_PER_CATEGORY;
+    let counting = Arc::new(CountingSecureStorage {
+        inner: crate::mls::InMemoryStorage::new(),
+        padding,
+        loads: Mutex::new(0),
+    });
+
+    // One real record, so the walk has something legitimate to recover too.
+    let entry = serde_json::to_vec(&EncryptionCapableEntry { last_seen_ms: 1 }).unwrap();
+    counting
+        .inner
+        .store(storage_keys::ENCRYPTION_CAPABLE_PEERS, &id("bob"), &entry)
+        .unwrap();
+
+    let secure_handle: Arc<dyn MlsStorage> = counting.clone();
+    let state_backend: Arc<dyn MlsStorage> = Arc::new(InMemoryStorage::new());
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(TestProtocolStateStorage {
+        storage: state_backend,
+    });
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    let loads = *counting.loads.lock().unwrap();
+    assert!(
+        loads <= MAX_RESTORE_KEYS_PER_CATEGORY,
+        "capability restore loaded {loads} entries, over the {MAX_RESTORE_KEYS_PER_CATEGORY} bound"
+    );
+    assert!(
+        loads > 0,
+        "capability restore must still walk the bounded prefix"
+    );
+
+    // Nothing was deleted: an over-cap record is stranded, never dropped.
+    assert!(
+        counting
+            .inner
+            .load(storage_keys::ENCRYPTION_CAPABLE_PEERS, &id("bob"))
+            .unwrap()
+            .is_some(),
+        "a bounded walk must not prune the store it could not finish reading"
+    );
+}
+
+/// Control-gate rejections warn once per peer per code, not once per frame.
+///
+/// Every code the gate emits is reachable from an unauthenticated frame naming
+/// an attacker-chosen sender — that is what a gate rejection is — so emitting
+/// per frame lets an off-path injector bury the one code with no benign reading
+/// (`SENDER_ADDRESS_MISMATCH`) under noise.
+#[test]
+fn control_gate_warnings_are_throttled_per_peer_per_code() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let handle = Arc::clone(&events);
+    protocol.on_event(move |e| handle.lock().unwrap().push(e));
+
+    let count = |code: SecurityWarningCode| {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(
+                |e| matches!(e, Event::SecurityWarning { reason_code, .. } if *reason_code == code),
+            )
+            .count()
+    };
+
+    let unsigned_from = |peer: &str| {
+        unsigned_frame(
+            peer,
+            "user123",
+            format!("{}{{\"data\":\"x\"}}", internal_prefixes::CONN_REQUEST),
+        )
+    };
+
+    // Same peer, same refusal, many frames — one event.
+    for _ in 0..5 {
+        protocol.security_gate_control_message(&unsigned_from(&id("alice")), None);
+    }
+    assert_eq!(
+        count(SecurityWarningCode::UnsignedControlRejected),
+        1,
+        "a repeated refusal from one peer must not re-warn per frame"
+    );
+
+    // A different peer is still reported: the throttle is per peer, so a flood
+    // from one sender cannot mask a genuine refusal from another.
+    protocol.security_gate_control_message(&unsigned_from(&id("carol")), None);
+    assert_eq!(count(SecurityWarningCode::UnsignedControlRejected), 2);
+
+    // A different code for an already-warned peer is still reported: alice has
+    // used up her unsigned slot, but an impersonation attempt is a distinct
+    // fact and must surface.
+    let mut forged = unsigned_from(&id("alice"));
+    crate::test_identity::sign_as("mallory", &mut forged);
+    protocol.security_gate_control_message(&forged, None);
+    assert_eq!(
+        count(SecurityWarningCode::SenderAddressMismatch),
+        1,
+        "suppression must be per code, not per peer"
+    );
+
+    // The map is keyed by wire-claimed ids, so it stays bounded.
+    for i in 0..(MAX_CONTROL_GATE_WARNED_PEERS + 50) {
+        protocol.security_gate_control_message(&unsigned_from(&format!("flood-{i}")), None);
+    }
+    assert!(
+        protocol.control_gate_warned.len() <= MAX_CONTROL_GATE_WARNED_PEERS,
+        "the throttle map must stay bounded, got {}",
+        protocol.control_gate_warned.len()
+    );
 }

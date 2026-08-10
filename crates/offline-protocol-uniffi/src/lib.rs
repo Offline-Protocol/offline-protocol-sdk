@@ -5272,9 +5272,10 @@ impl OfflineProtocol {
         key_package_data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
         // Routed through the protocol object rather than straight to the
-        // MlsManager: the TOFU store lives on `OfflineProtocol`, and without it
-        // this entry point imported a key package under any peer id with no
-        // check against that peer's pinned signature key.
+        // MlsManager so the import also marks the peer encryption-capable.
+        // The identity check itself no longer needs the detour — the key
+        // package proves its own address inside `import_key_package` — but the
+        // capability record still lives on `OfflineProtocol`.
         let mut guard = self.lock_inner()?;
         guard
             .manual_mls_import_key_package(&user_id, &key_package_data)
@@ -5867,17 +5868,6 @@ impl OfflineProtocol {
         guard
             .rename_group(&group_id, &new_name)
             .map_err(ProtocolError::from)
-    }
-
-    // ========================================================================
-    // TOFU MANAGEMENT
-    // ========================================================================
-
-    /// Reset the TOFU-pinned public key for a peer, allowing re-pinning on next contact.
-    /// Returns `true` if an entry was removed, `false` if no entry existed (idempotent).
-    pub fn reset_tofu_for_peer(&self, peer_id: String) -> Result<bool, ProtocolError> {
-        let mut guard = self.lock_inner()?;
-        Ok(guard.reset_tofu_for_peer(&peer_id))
     }
 
     // ========================================================================
@@ -7269,10 +7259,14 @@ mod tests {
             .internet_message_received("alice".to_string(), frame)
             .unwrap();
 
+        // Narrowed to the identity gate on purpose. These frames are unsigned,
+        // and control traffic is now unconditionally signature-gated, so an
+        // `UNSIGNED_CONTROL_REJECTED` warning is expected and orthogonal — the
+        // subject here is that the *transport identity* check does not fire.
         assert!(
             !drained_events(&receiver)
                 .iter()
-                .any(|e| e.contains("security_warning")),
+                .any(|e| e.contains("TRANSPORT_IDENTITY_MISMATCH")),
             "matched sender must pass the transport-identity gate"
         );
     }
@@ -7300,10 +7294,14 @@ mod tests {
             .internet_message_received("carol".to_string(), frame)
             .unwrap();
 
+        // Narrowed to the identity gate on purpose. These frames are unsigned,
+        // and control traffic is now unconditionally signature-gated, so an
+        // `UNSIGNED_CONTROL_REJECTED` warning is expected and orthogonal — the
+        // subject here is that the *transport identity* check does not fire.
         assert!(
             !drained_events(&receiver)
                 .iter()
-                .any(|e| e.contains("security_warning")),
+                .any(|e| e.contains("TRANSPORT_IDENTITY_MISMATCH")),
             "mesh-relayed control frame must not be rejected for carrier/origin mismatch"
         );
     }
@@ -7349,12 +7347,26 @@ mod tests {
 
         let events = drained_events(&receiver);
         assert!(
-            !events.iter().any(|e| e.contains("security_warning")),
+            !events
+                .iter()
+                .any(|e| e.contains("TRANSPORT_IDENTITY_MISMATCH")),
             "unattributed ingest must not strict-match against an empty identity"
         );
+        // It reaches the gate and is turned away for being *unsigned*, not for
+        // an identity mismatch — which is the distinction this test exists to
+        // draw. An empty `sender_id` means "nobody vouched for who sent this",
+        // and the frame is then judged on its own signature like any other.
+        // Peer-to-peer control traffic must carry one; the relay's own answers
+        // are the documented exception, and `__CONN_REQ__` is not one of them.
         assert!(
-            events.iter().any(|e| e.contains("connection_request")),
-            "unattributed control frame must still be processed best-effort"
+            events
+                .iter()
+                .any(|e| e.contains("UNSIGNED_CONTROL_REJECTED")),
+            "an unsigned peer control frame must be refused, whatever its attribution"
+        );
+        assert!(
+            !events.iter().any(|e| e.contains("connection_request")),
+            "a refused frame must not reach the app"
         );
     }
 

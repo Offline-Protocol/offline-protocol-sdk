@@ -698,9 +698,6 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
         Event::UserUnblocked { user_id } => {
             hash_string(user_id, scrubber);
         }
-        Event::TofuReset { peer_id } => {
-            hash_string(peer_id, scrubber);
-        }
     }
 }
 
@@ -780,8 +777,7 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::SecurityWarning { .. }
         | Event::MessageRelayed { .. }
         | Event::UserBlocked { .. }
-        | Event::UserUnblocked { .. }
-        | Event::TofuReset { .. } => (),
+        | Event::UserUnblocked { .. } => (),
     }
 }
 

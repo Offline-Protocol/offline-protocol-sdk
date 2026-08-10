@@ -134,7 +134,7 @@ define_internal_prefixes! {
 /// - `GROUP_MSG` (`__GROUP_MSG__`): the relay's group fan-out. The relay
 ///   re-emits it per member from only `{group_id, sender, content}`, so the
 ///   bridge-rebuilt frame is structurally unsigned — Ed25519-gating it
-///   silently dropped fan-out from every TOFU-pinned sender. Authentication
+///   silently dropped fan-out from every sender. Authentication
 ///   happens after the gate instead: `handle_relay_group_message_with_mls`
 ///   MLS-decrypts and binds the wire-claimed sender to the MLS-authenticated
 ///   sender (`SenderIdentityMismatch` → rejected), and plaintext naming an
@@ -145,6 +145,137 @@ define_internal_prefixes! {
 ///
 /// **Maintenance note:** Only add prefixes here if their handler enforces
 /// MLS authentication. All other internal prefixes are control-plane and
-/// require signature verification + TOFU enforcement.
+/// require signature verification + sender-address derivation.
 pub(crate) const DATA_PLANE_PREFIXES: &[&str] =
     &[internal_prefixes::ENCRYPTED, internal_prefixes::GROUP_MSG];
+
+/// Prefixes the **relay server** originates, which therefore cannot carry a
+/// peer signature.
+///
+/// These are not messages any peer transmitted. The relay answers over its
+/// WebSocket and the bridge *synthesizes* a frame from that answer
+/// (`injectGroupInternalMessage` in `InternetManager.{swift,kt}`), with a
+/// placeholder `sender` when the answer names no actor. There is no private key
+/// anywhere in that path, so requiring a signature would drop every one of them
+/// — taking group registration (and with it the `relay_synced` gate that group
+/// broadcast depends on), relay member add/remove, group info, the user's group
+/// list, and relay error reporting with it.
+///
+/// This is the same situation `GROUP_MSG` is in, and it is listed separately
+/// rather than added to [`DATA_PLANE_PREFIXES`] because the reason differs and
+/// the two must not be conflated: a data-plane frame is authenticated *later*
+/// by MLS, whereas these are not authenticated by this SDK at all.
+///
+/// # What actually protects them, and what does not
+///
+/// Two things, neither of them a signature:
+///
+/// 1. The bridge restricts these prefixes to the relay socket
+///    (`RelayControlOpTranslator`), so a mesh peer cannot deliver a crafted
+///    `__GROUP_CREATED__` through the ordinary message path.
+/// 2. The exemption here is narrower than the prefix: it applies only to a
+///    frame that arrived on [`TransportType::Internet`] carrying no transport
+///    peer identity — the shape a locally synthesized relay answer has. A peer
+///    frame on a mesh transport, or one carrying a carrier identity, is still
+///    required to be signed, so nothing on the peer-to-peer path is weakened by
+///    this list.
+///
+/// **Residual, stated plainly:** anything able to inject on the relay ingest
+/// path can forge these frames. That is the pre-existing relay-trust surface,
+/// unchanged by this work — it is exactly what these frames were exposed to
+/// before control traffic became signature-gated. Closing it means moving relay
+/// answers off the message plane and onto dedicated FFI entry points, the way
+/// `internet_group_report_received` already handles the group delivery report;
+/// that is deliberately out of scope here and left as the follow-up.
+///
+/// **Maintenance note:** this list is mirrored, by hand, in three places that
+/// no single compiler ever sees together — here, `RelayAnswerPrefixes.swift`,
+/// and `RelayAnswerPrefixes.kt`. Each bridge pins its own copy against the same
+/// literals ([`relay_answer_prefixes_are_pinned`] does it for this one), because
+/// a prefix present in one list and absent from another fails **silently**: the
+/// bridge injects the answer unattributed, this list declines to exempt it, and
+/// the frame is dropped as unsigned with no peer at fault. Edit all three.
+pub(crate) const RELAY_ANSWER_PREFIXES: &[&str] = &[
+    internal_prefixes::GROUP_CREATED,
+    internal_prefixes::GROUP_MEMBER_ADDED,
+    internal_prefixes::GROUP_MEMBER_REMOVED,
+    internal_prefixes::GROUP_INFO,
+    internal_prefixes::USER_GROUPS,
+    internal_prefixes::GROUP_ERROR,
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The membership of [`RELAY_ANSWER_PREFIXES`], pinned to literals.
+    ///
+    /// Written out rather than derived, for the same reason the bridges write
+    /// theirs out: this list is one of three hand-maintained copies, and a test
+    /// that recomputed it from the constant would agree with any edit — which
+    /// is precisely the failure mode. The literals here are the contract the
+    /// two bridge lists are also pinned against, so a divergence in any one of
+    /// the three now fails a test in its own language.
+    ///
+    /// Dropping an entry is the dangerous direction and the reason this test
+    /// exists: the bridge would keep injecting that answer unattributed, the
+    /// gate would refuse it as unsigned, and the visible symptom would be a
+    /// relay feature quietly not working (for `__USER_GROUPS__`, group sync;
+    /// for `__GROUP_CREATED__`, the `relay_synced` gate group broadcast rides
+    /// on) with an `UNSIGNED_CONTROL_REJECTED` warning naming the relay.
+    #[test]
+    fn relay_answer_prefixes_are_pinned() {
+        assert_eq!(
+            RELAY_ANSWER_PREFIXES,
+            [
+                "__GROUP_CREATED__",
+                "__GROUP_MEMBER_ADDED__",
+                "__GROUP_MEMBER_REMOVED__",
+                "__GROUP_INFO__",
+                "__USER_GROUPS__",
+                "__GROUP_ERROR__",
+            ],
+            "the relay-answer exemption list changed — update RelayAnswerPrefixes.swift \
+             and RelayAnswerPrefixes.kt to match, or the bridges and the gate will \
+             disagree silently"
+        );
+    }
+
+    /// The two exemption lists must stay disjoint.
+    ///
+    /// They are different mechanisms with different post-conditions — a
+    /// data-plane frame is authenticated later by MLS, a relay answer is not
+    /// authenticated by this SDK at all — and the doc on each says so. Listing a
+    /// prefix in both would make the narrow relay exemption (Internet ingest,
+    /// unattributed) unreachable for it, since `is_security_gated_prefix`
+    /// already excludes the data plane before the gate runs, so the three
+    /// conditions would silently stop applying.
+    #[test]
+    fn the_two_exemption_lists_do_not_overlap() {
+        for relay in RELAY_ANSWER_PREFIXES {
+            assert!(
+                !DATA_PLANE_PREFIXES.contains(relay),
+                "'{}' is exempt twice, by two different rules",
+                relay
+            );
+        }
+    }
+
+    /// Every exempt prefix must be an internal prefix, or it exempts nothing.
+    ///
+    /// The gate only consults [`RELAY_ANSWER_PREFIXES`] for content that
+    /// `is_security_gated_prefix` already matched, which requires membership in
+    /// [`INTERNAL_PREFIXES`]. A typo'd entry here is therefore not a widened
+    /// hole — it is dead text, and the answer it was meant to exempt gets
+    /// dropped as unsigned instead.
+    #[test]
+    fn every_exempt_prefix_is_an_internal_prefix() {
+        for relay in RELAY_ANSWER_PREFIXES {
+            assert!(
+                INTERNAL_PREFIXES.contains(relay),
+                "'{}' is not an internal prefix, so exempting it does nothing",
+                relay
+            );
+        }
+    }
+}

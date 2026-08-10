@@ -44,6 +44,65 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `hex(json(GroupId))` now that ids are 44 characters.
 - `wipePersistedState(appId, profile)` — same shape; pass a legacy user id to
   reach a pre-migration container.
+- **BREAKING**: trust-on-first-use is deleted. Deriving an identity from its key
+  makes a pin store redundant — a control message is now accepted only if its
+  Ed25519 signature verifies *and* the signing key re-derives to the address in
+  `sender`. Unlike a pin, that check has no first-contact window, which was the
+  window impersonation lived in: claiming a name went from winning a race to
+  finding a 160-bit second preimage. Removed with it: `resetTofuForPeer` (Rust,
+  UniFFI, React Native, Python), the `tofu_reset` event, and the
+  `TOFU_KEY_MISMATCH`, `TOFU_STORE_FULL`, and `SIGNATURE_DOWNGRADE` warning
+  codes.
+- **BREAKING**: `TOFU_KEY_MISMATCH` becomes `SENDER_ADDRESS_MISMATCH`, and it no
+  longer has a benign reading. The old code could not distinguish a reinstall
+  from an impersonator, which is why a reset action had to exist; an address is
+  the hash of its key, so a peer that re-keys arrives as a *different address*.
+  Treat this code as an impersonation attempt — do not offer "trust anyway".
+- **BREAKING**: unsigned control frames are refused unconditionally. They were
+  previously accepted from any peer without a pin. Consequence: `initializeMls`
+  is effectively mandatory, since an instance with no identity key cannot sign
+  and every peer will drop its control traffic. The relay server's own answers
+  (`__GROUP_CREATED__`, `__GROUP_MEMBER_ADDED__`, `__GROUP_MEMBER_REMOVED__`,
+  `__GROUP_INFO__`, `__USER_GROUPS__`, `__GROUP_ERROR__`) are exempt because no
+  peer signs them — narrowly, on relay ingest only and only when the relay did
+  not attribute the frame to a peer. Closing that residual means moving relay
+  answers onto dedicated FFI entry points, as
+  `internet_group_report_received` already does; that is follow-up work.
+  Because the exemption also requires the frame to be unattributed, the RN
+  bridges now inject **every** relay answer with a null actor — previously
+  `__GROUP_MEMBER_ADDED__` and `__GROUP_MEMBER_REMOVED__` carried the
+  relay-reported `added_by` / `removed_by` as a reachability assertion, which
+  set a transport peer identity and would have had those frames dropped as
+  unsigned. The actor still rides the payload, which is what the handlers read;
+  `__GROUP_MSG__` keeps its attribution (a data-plane prefix is never gated) and
+  remains the reachability signal for a relayed sender.
+- **BREAKING (behaviour): relay-native member-removal reconciliation is inert.**
+  `__GROUP_MEMBER_REMOVED__` is authorized off the *wire* `sender`, which must
+  now be an admin; the relay's own answer is injected unattributed, so its
+  placeholder sender never is. The frame is dropped and **no
+  `group_member_removed` event fires** for it. Previously the bridges passed the
+  relay-reported `removed_by` as the sender, so the reconciliation could take
+  effect for an admin nobody had pinned yet. The working path is unchanged and
+  is the one the SDK itself uses: the removing admin's own signed direct
+  notification (`removeMember` → a signed `__GROUP_MEMBER_REMOVED__` to the
+  removed member). Apps that relied on relay-orchestrated removal to update a
+  roster must either drive removals through the SDK or await the follow-up that
+  moves relay answers onto dedicated FFI entry points. `__GROUP_MEMBER_ADDED__`
+  is unaffected — its handler reads the payload and runs no sender check.
+- `requireTransportIdentity` keeps its `false` default and no longer gates the
+  signature requirement, which is now unconditional. Its one remaining effect is
+  to reject frames arriving with no transport peer identity — which on a
+  deployment running Nostr or sender-less relay delivery rejects that entire
+  control plane, so it stays off by default.
+- The durable record behind the inbound-plaintext gate is now a purpose-built
+  category (`encryption_capable_peers`) rather than a side effect of the pin
+  store. Same property, stated directly: a peer that has proved it runs MLS is
+  still known to after a restart, so a remotely-triggered session teardown
+  cannot re-open the cleartext path for them.
+- `MlsError::KeyPackagePinMismatch` → `MlsError::KeyPackageAddressMismatch`. Key
+  packages are checked by re-deriving the address from the leaf signature key,
+  which — unlike the pin it replaces — also runs on first contact and on every
+  read of a cached package.
 
 ### Added
 

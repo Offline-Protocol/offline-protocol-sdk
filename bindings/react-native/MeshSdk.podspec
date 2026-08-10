@@ -27,6 +27,7 @@ Pod::Spec.new do |s|
     "ios/BleManager.swift",
     "ios/InternetManager.swift",
     "ios/ForcedPresenceCheckQueue.swift",
+    "ios/RelayAnswerPrefixes.swift",
     "ios/RelayControlOpTranslator.swift",
     "ios/RelayGroupSnapshotBridge.swift",
     "ios/RelayRateLimiter.swift",

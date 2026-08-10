@@ -3184,7 +3184,7 @@ export class OfflineProtocol {
 
   /**
    * Erases every byte of persisted SDK state for one account: the namespaced
-   * secure store (MLS identity, sessions, TOFU pins, the Nostr signing secret,
+   * secure store (MLS identity, sessions, peer trust records, the Nostr signing secret,
    * the protocol-state record key), the account's protocol-state directory
    * (outbox, pending queues, block list, media descriptors), and — when this
    * account owns it, or nobody does — the pre-namespace store an upgraded
@@ -3508,17 +3508,6 @@ export class OfflineProtocol {
    */
   async isUserBlocked(userId: string): Promise<boolean> {
     return await OfflineProtocolNativeModule.isUserBlocked(userId);
-  }
-
-  /**
-   * Resets the TOFU-pinned public key for a peer.
-   * After reset, the next message from this peer will establish a new trust pin.
-   *
-   * @param peerId - Peer ID whose trust pin should be reset
-   * @returns true if an entry was removed, false if no entry existed
-   */
-  async resetTofuForPeer(peerId: string): Promise<boolean> {
-    return await OfflineProtocolNativeModule.resetTofuForPeer(peerId);
   }
 }
 

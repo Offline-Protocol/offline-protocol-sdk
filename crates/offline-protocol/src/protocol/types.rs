@@ -173,26 +173,23 @@ pub(crate) const CTRL_PK_META_KEY: &str = "__ctrl_pk";
 /// same MLS identity key but with a different domain separator.
 pub(crate) const CTRL_SIGN_DOMAIN: &[u8] = b"offline-ctrl-v1";
 
-/// Maximum number of TOFU-pinned peer public keys to retain.
-///
-/// Entries are persisted via `MlsStorage` (when available) so pinned keys
-/// survive process restarts and prevent key-substitution during re-pinning.
-///
-/// When a peer legitimately re-initializes MLS (e.g. app reinstall), the
-/// application should call `reset_tofu_for_peer()` to allow re-pinning
-/// with the new key. A signed key-rotation protocol may be added in a
-/// future version for automatic cross-device key updates.
-pub(crate) const MAX_TOFU_PEERS: usize = 1000;
-
 /// Maximum number of peers retained in the encryption-capability set that gates
 /// inbound plaintext.
 ///
-/// Sized to hold every legitimate source at once — [`MAX_TOFU_PEERS`] pins plus
-/// the MLS session list — with room to spare, so a real deployment never
-/// reaches it. The cap exists because several of the paths that mark a peer are
-/// reachable from unauthenticated frames keyed by a wire-claimed sender id, and
-/// because `tofu_check_or_pin` marks *before* its own store-full branch, so
-/// [`MAX_TOFU_PEERS`] does not transitively bound this set.
+/// Sized to hold every legitimate source at once — the durable capability
+/// records plus the MLS session list — with room to spare, so a real deployment
+/// never reaches it. The cap exists because several of the paths that mark a
+/// peer are reachable from unauthenticated frames keyed by a wire-claimed
+/// sender id, and nothing else bounds the set: the durable record this replaced
+/// the TOFU pin store with is written only *after* a signature verifies, but
+/// the Welcome path marks its sender without one.
+///
+/// It bounds the durable `encryption_capable_peers` storage category as well,
+/// because `OfflineProtocol::record_encryption_capable` persists only for a
+/// peer this cap admitted. A signature proves the signer owns the address it
+/// claims — it does not prove the address belongs to anyone real, and minting
+/// one costs a keygen — so "written only after a signature verifies" is not by
+/// itself a bound on anything.
 ///
 /// Unlike the other maps keyed by a wire-claimed id, this one **refuses** at
 /// capacity instead of resetting or evicting: forgetting a peer here is the
@@ -210,6 +207,19 @@ pub(crate) const MAX_BLOCKED_USERS: usize = 10_000;
 /// senders degrades the throttle to once-per-peer-per-generation while
 /// memory stays capped.
 pub(crate) const MAX_PLAINTEXT_RECEIVE_WARNED_PEERS: usize = 1000;
+
+/// Maximum number of peers tracked for once-per-peer-per-code control-gate
+/// warning suppression.
+///
+/// Every rejection the control gate reports is reachable from an unauthenticated
+/// frame carrying an attacker-chosen sender id — that is what a gate rejection
+/// *is* — so without a throttle an off-path injector turns the app's event
+/// stream into a flood and desensitizes operators to the one code that has no
+/// benign reading (`SENDER_ADDRESS_MISMATCH`). Bounded and reset at capacity for
+/// the same reason as [`MAX_PLAINTEXT_RECEIVE_WARNED_PEERS`]: the keys are
+/// attacker-controlled, so a forged-sender flood degrades the throttle to
+/// once-per-peer-per-generation rather than growing memory without bound.
+pub(crate) const MAX_CONTROL_GATE_WARNED_PEERS: usize = 1000;
 
 /// Maximum number of pending (received-but-unused) peer key packages retained
 /// in memory and in durable `MlsStorage`.
@@ -387,20 +397,22 @@ pub(crate) const MAX_REKEY_TRACKED_PEERS: usize = 1000;
 /// affects when we drop the *cached* copy, never crypto correctness.
 pub(crate) const MAX_KEY_PACKAGE_LIFETIME_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
-/// Minimum age (in milliseconds) a TOFU entry must have before it can be
-/// evicted by LRU. This prevents a cache-filling attack where an adversary
-/// rapidly registers many fake identities to evict legitimate pinned keys.
+/// Durable record that a peer has proved it runs MLS.
 ///
-/// Set to 1 hour.
-pub(crate) const TOFU_MIN_EVICTION_AGE_MS: i64 = 3_600_000;
-
-/// Entry in the TOFU key store, pairing the peer's public key with a
-/// last-seen timestamp used for LRU eviction.
+/// Written whenever a control message from that peer verifies — signature
+/// valid, and the signing key derives to the address the frame claims — and
+/// read back on `initialize_mls` to reseed
+/// [`OfflineProtocol::encryption_capable_peers`](crate::OfflineProtocol).
+///
+/// The timestamp is diagnostic, not a policy input. Its predecessor
+/// (`TofuEntry.last_seen_ms`) drove LRU eviction of a bounded pin store; there
+/// is no eviction here, because there is no longer any per-peer *secret* whose
+/// size needs bounding — only the fact, which the restore walk bounds on its
+/// own terms. Keeping the field costs nothing and makes a stale store readable
+/// by a human.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct TofuEntry {
-    pub(crate) public_key: Vec<u8>,
-    /// Milliseconds since epoch (UTC) when we last verified a signed message
-    /// from this peer.
+pub(crate) struct EncryptionCapableEntry {
+    /// Milliseconds since epoch (UTC) when this peer last proved it runs MLS.
     pub(crate) last_seen_ms: i64,
 }
 
@@ -498,12 +510,11 @@ pub(crate) struct KeyPackagePayload {
     /// passively, for as long as the value stands.
     ///
     /// `build_canonical_payload` covers the whole `__MLS_KEY_PKG__` body under
-    /// the sender's Ed25519 signature and TOFU pin — but the security gate
-    /// deliberately accepts an *unsigned* control message from a peer it has
-    /// never pinned (`security_gate_control_message`, the TOFU first-contact
-    /// window), so arriving in a key package is not by itself evidence of who
-    /// sent it. `handle_key_package_message` therefore consumes this field only
-    /// when the gate reports the frame was actually signed, which costs nothing:
+    /// the sender's Ed25519 signature, which the gate now verifies against the
+    /// key their address derives from — so on this prefix an unsigned frame no
+    /// longer reaches dispatch at all.
+    /// `handle_key_package_message` still consumes this field only when the gate
+    /// reports the frame was actually signed, which costs nothing:
     /// a key package exists only once MLS is initialized, and `send_key_package_to`
     /// signs unconditionally in that state, so every genuine package carrying
     /// this field is signed.
@@ -1016,17 +1027,18 @@ impl PeerCapabilities {
 pub(crate) enum ControlGateOutcome {
     /// The message may proceed to dispatch.
     ///
-    /// `signed` is `true` **only** when an Ed25519 signature was present and
-    /// verified against the sender's TOFU-pinned (or newly pinned) key. It is
-    /// deliberately `false` for both of the other ways a message reaches
-    /// dispatch — an unsigned legacy frame from a not-yet-pinned peer, and a
-    /// prefix the gate does not cover at all — so a handler that keys on it
-    /// fails closed without having to know which case it is in.
+    /// `signed` is `true` **only** when an Ed25519 signature was present,
+    /// verified, and produced by the key the sender's address derives from. It
+    /// is deliberately `false` for both of the other ways a message reaches
+    /// dispatch — a relay-originated answer, which no peer signs
+    /// (`RELAY_ANSWER_PREFIXES`), and a prefix the gate does not cover at all —
+    /// so a handler that keys on it fails closed without having to know which
+    /// case it is in.
     ///
-    /// Note the bit means "this frame carried a valid signature", not "this
-    /// peer is pinned": a valid signature that could not be pinned because the
-    /// TOFU store was full still counts, because the authenticity it proves is
-    /// exactly the same.
+    /// Since unsigned control traffic is now refused outright, `false` no
+    /// longer reaches any *gated* handler; the bit survives because those two
+    /// ungated paths still produce it, and because a handler that treats a
+    /// payload field as authenticated should say so at the point it does.
     Proceed { signed: bool },
     /// The gate rejected the message; the caller must return this result
     /// without dispatching.
@@ -1039,7 +1051,8 @@ pub(crate) enum InternalMessageResult {
     /// Message was consumed internally (don't surface to app).
     Consumed,
     /// Message was rejected by the security gate (spoofed sender, bad
-    /// signature, TOFU violation, etc.). Like `Consumed`, the message is not
+    /// signature, unsigned control traffic, or a signing key that does not
+    /// derive to the claimed sender address). Like `Consumed`, the message is not
     /// surfaced to the app — but unlike `Consumed`, a delivery ACK must NOT
     /// be sent back, to avoid confirming to the attacker that the target is
     /// online and processing messages.
@@ -1361,8 +1374,21 @@ pub(crate) mod storage_keys {
     pub const LAMPORT_CLOCK: &str = "lamport_clock";
     /// Key ID for the single Lamport clock entry.
     pub const LAMPORT_CLOCK_ID: &str = "current";
-    /// Key type for persisted TOFU (Trust-On-First-Use) peer public keys.
-    pub const TOFU_KEYS: &str = "tofu_keys";
+    /// Key type for the durable record that a peer has proved it runs MLS.
+    ///
+    /// Successor to the `tofu_keys` category, which stored a pinned public key
+    /// per peer. The pin is gone — an address *is* its key's hash, so nothing
+    /// needs storing to check one — but the store had a second job the
+    /// derivation does not do: it was the half of
+    /// `OfflineProtocol::encryption_capable_peers` that survived a restart, and
+    /// therefore what keeps the plaintext-downgrade gate shut for a peer whose
+    /// session was torn down. That job is all this category still does, so the
+    /// value is a timestamp and nothing else.
+    ///
+    /// A pre-migration `tofu_keys` record is left where it is: it is keyed by a
+    /// username, and no peer is named by one any more, so it can never be read
+    /// back under a live peer id.
+    pub const ENCRYPTION_CAPABLE_PEERS: &str = "encryption_capable_peers";
     /// Key type for persisted blocked user entries.
     pub const BLOCKED_USERS: &str = "blocked_users";
     /// Key type for the persistent per-install telemetry scrub secret.

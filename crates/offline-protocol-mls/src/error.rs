@@ -185,24 +185,29 @@ pub enum MlsError {
         found: String,
     },
 
-    /// A key package's leaf signature key is not the key already pinned for
-    /// the peer it claims to belong to.
+    /// A key package's leaf signature key does not derive to the address it
+    /// claims to belong to.
     ///
     /// Distinct from [`MlsError::CredentialIdentityMismatch`], and it has to
     /// be: credentials here are MLS *basic* credentials, whose content is a
     /// bare self-asserted identity string. Anyone can generate a signature
-    /// keypair and stamp `bob` on it, so the identity check catches only a
-    /// careless substitution. This one compares the *key*, against a pin
-    /// established when the peer's signature was verified, and so catches a
-    /// deliberate one.
+    /// keypair and stamp an address on it, so the identity check catches only a
+    /// careless substitution. This one recomputes the address *from the key*,
+    /// and so catches a deliberate one.
     ///
     /// RFC 9420 leaves credential validation to the application's
-    /// Authentication Service; for this SDK that service is TOFU, and this is
-    /// where its verdict is enforced at key-package use time.
-    #[error("Key package signature key does not match the pinned key for '{peer_id}'")]
-    KeyPackagePinMismatch {
-        /// The peer the key package was claimed to belong to.
-        peer_id: String,
+    /// Authentication Service. For this SDK that service is a pure derivation:
+    /// an address *is* `bech32m(0x01 ‖ SHA-256(signature_key)[..20])`, so the
+    /// claim carries its own proof and needs no prior contact to check. This is
+    /// where that verdict is enforced at key-package use time.
+    #[error(
+        "Key package signature key derives to '{derived}', not the claimed address '{claimed}'"
+    )]
+    KeyPackageAddressMismatch {
+        /// The address the key package was claimed to belong to.
+        claimed: String,
+        /// The address its leaf signature key actually derives to.
+        derived: String,
     },
 
     /// The MLS-authenticated sender of a decrypted message does not match

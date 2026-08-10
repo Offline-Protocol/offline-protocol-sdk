@@ -601,7 +601,6 @@ High-level group methods that handle MLS encryption and per-member fan-out autom
 | **unblockUser** | `unblockUser(userId: string): Promise<void>` | Unblocks a user. |
 | **getBlockedUsers** | `getBlockedUsers(): Promise<string[]>` | Returns all blocked user IDs. |
 | **isUserBlocked** | `isUserBlocked(userId: string): Promise<boolean>` | Whether a user is blocked. |
-| **resetTofuForPeer** | `resetTofuForPeer(peerId: string): Promise<boolean>` | Resets the TOFU-pinned public key for a peer. After reset, the next message from this peer establishes a new trust pin. Returns `true` if an entry was removed. |
 
 ---
 

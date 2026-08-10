@@ -1897,10 +1897,8 @@ export interface DorsEscalationTriggeredEvent extends BaseEvent {
  * logs/UI and may change between versions.
  */
 export type SecurityWarningCode =
-  | 'TOFU_KEY_MISMATCH'
-  | 'TOFU_STORE_FULL'
+  | 'SENDER_ADDRESS_MISMATCH'
   | 'TRANSPORT_IDENTITY_MISMATCH'
-  | 'SIGNATURE_DOWNGRADE'
   | 'CONTROL_SIGNATURE_INVALID'
   | 'UNSIGNED_CONTROL_REJECTED'
   | 'MEDIA_SENDER_GROUP_MISMATCH'
@@ -1912,10 +1910,17 @@ export type SecurityWarningCode =
   | 'PUSH_KEY_PACKAGE_POOL_EXHAUSTED';
 
 /**
- * A security-relevant anomaly was detected for a peer. `TOFU_KEY_MISMATCH`
- * signals the peer re-identified (reinstall / new device); the remedy, if the
- * change is legitimate, is `resetTofuForPeer` followed by re-establishing the
- * session.
+ * A security-relevant anomaly was detected for a peer.
+ *
+ * `SENDER_ADDRESS_MISMATCH` has no benign reading: an address is the hash of
+ * its owner's identity key, so a frame signed by anyone else re-derives to a
+ * different address. A peer that reinstalls does not re-key an address — it
+ * gets a *new* address, and reaches you as a new contact. Treat this as an
+ * impersonation attempt, not as a peer to re-trust.
+ *
+ * `UNSIGNED_CONTROL_REJECTED` fires when a control frame arrives without a
+ * signature. This is unconditional and not configurable: every peer running
+ * this protocol signs its control traffic.
  *
  * `SESSION_REKEY_TRIGGERED` is rate-based rather than per-event: a genuine
  * epoch fork heals this way occasionally, but the frame that triggers it is
@@ -1934,15 +1939,6 @@ export interface SecurityWarningEvent extends BaseEvent {
   peer_id: string;
   reason_code: SecurityWarningCode;
   reason: string;
-}
-
-/**
- * The TOFU-pinned key for a peer was reset (via `resetTofuForPeer`), allowing
- * the peer to re-pin with a new public key on next contact.
- */
-export interface TofuResetEvent extends BaseEvent {
-  type: 'tofu_reset';
-  peer_id: string;
 }
 
 /**
@@ -2131,7 +2127,6 @@ export type ProtocolEvent =
   | MessageUndeliverableEvent
   | MediaResendRequiredEvent
   | SecurityWarningEvent
-  | TofuResetEvent
   | UserBlockedEvent
   | UserUnblockedEvent;
 

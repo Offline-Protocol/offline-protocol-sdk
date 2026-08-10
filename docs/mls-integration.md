@@ -521,7 +521,7 @@ attacker-chosen sender.
 is the intuitive move: a seal authenticates bytes that are *present*, and this
 attack removes them. The fix was to stop deriving the answer from a deletable
 record. The gate now asks whether the peer is known to run MLS at all, sourced
-from the MLS session list and the TOFU pin store — both in the credential store,
+from the MLS session list and the durable encryption-capability records — both in the credential store,
 which a container write cannot reach.
 
 This also means **container write access can no longer be used to forge message
@@ -529,7 +529,8 @@ content**, which an earlier version of this document claimed outright and should
 not have. Substituting a cached record in `peer_key_packages` was enough to make
 this node build a session around an attacker's leaf — MLS keys never left the
 credential store, but they did not need to. That category is now sealed *and*
-every use of a key package is checked against the peer's pinned signature key.
+every use of a key package is checked by re-deriving the address from its leaf
+signature key.
 
 On stock iOS and Android the app container is writable only by the app itself,
 so this matters on a rooted or jailbroken device, or wherever else your threat

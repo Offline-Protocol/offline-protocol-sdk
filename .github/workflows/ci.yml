@@ -394,6 +394,7 @@ jobs:
             mesh/Mesh.swift ble/MeshConnectionRegistry.swift \
             ble/BleDiscoveryBootstrapPolicy.swift \
             Generated/offline_protocol.swift ForcedPresenceCheckQueue.swift \
+            RelayAnswerPrefixes.swift \
             RelayControlOpTranslator.swift RelayGroupSnapshotBridge.swift \
             RelayRateLimiter.swift LegacyRelayMessage.swift MonotonicClock.swift \
             PresenceWatchPolicy.swift RecipientInFlightTracker.swift \

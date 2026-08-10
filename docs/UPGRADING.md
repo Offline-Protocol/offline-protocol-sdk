@@ -105,7 +105,7 @@ storage contracts with two different lifecycles.
 
 | | `MlsStorageProvider` | `ProtocolStateStorageProvider` |
 |---|---|---|
-| Holds | MLS identity, sessions, groups, TOFU pins, install secrets, the record-sealing key | Outbox, pending messages, session/Welcome lifecycles, peer snapshots, media descriptors, block list, Lamport clock |
+| Holds | MLS identity, sessions, groups, peer capability records, install secrets, the record-sealing key | Outbox, pending messages, session/Welcome lifecycles, peer snapshots, media descriptors, block list, Lamport clock |
 | Backing store | Platform credential store (Keychain, Keystore-backed encrypted prefs, Secret Service) | **App container** — must be removed when the app is deleted |
 | Value type | `sequence<u8>` (unchanged) | `bytes` (see [§2](#2-protocol-state-values-are-bytes-not-an-element-wise-sequence)) |
 
@@ -335,8 +335,8 @@ Protocol-state key types (the closed set the sweep moves out of secure storage):
 | `lamport_clock` | `current` | ❌ |
 | `protocol_state_adoption` | `v1` (sweep marker) | ❌ |
 
-Stays in secure storage: all MLS/OpenMLS material, `tofu_keys`,
-`scrub_secret`, `nostr_signing_secret`, and `protocol_state_record_key`.
+Stays in secure storage: all MLS/OpenMLS material,
+`encryption_capable_peers`, `scrub_secret`, `nostr_signing_secret`, and `protocol_state_record_key`.
 
 ### 1.8 Confidentiality: what sealing does and does not cover
 
@@ -415,25 +415,26 @@ session existed with the claimed sender, which it answered from the
 `session_states` protocol-state record. That record lives in the app container,
 so deleting it made the peer look unconfirmed on the next launch and re-opened
 the gate for them. It now asks whether the peer is **known to run MLS at all**,
-sourced from the MLS session list and the TOFU pin store — both in the credential
-store.
+sourced from the MLS session list and the durable encryption-capability records
+— both in the credential store.
 
 What changes in practice:
 
-- Cleartext from a peer you hold an MLS session *or* a TOFU pin for is now
+- Cleartext from a peer you hold an MLS session for, *or* who has signed a
+  control message this install verified, is now
   rejected even when the session was never confirmed. No honest peer sends
   cleartext in that state (a sender with a pending session queues rather than
   downgrading), so this should only ever fire on an injection or a real
   downgrade.
 - Capability is **not** forgotten when a session is torn down, because teardown
-  can be triggered remotely by an injected frame. It is forgotten by
-  `resetTofuForPeer`, which is the deliberate "treat this identity as new"
-  action.
+  can be triggered remotely by an injected frame. It is never forgotten at all
+  (see §14): under derived addresses a peer that re-keys is a different address,
+  so nothing learned about the old one stops being true.
 - A peer that genuinely loses its MLS state — a failed `initialize_mls`, a
   reinstall — and then sends plaintext will have it rejected, with the usual
   once-per-peer `PLAINTEXT_RECEIVE_REJECTED` warning, and no delivery ACK, so
-  they will retry. Watch for that warning if you support such a downgrade;
-  `resetTofuForPeer` is the supported way to accept them as a new identity.
+  they will retry. Under derived addresses that peer comes back as a *new
+  address*, so it reaches you as a new contact rather than as a downgrade.
 - Peers that have never shown any MLS signal are unaffected, so plaintext-only
   interop keeps working.
 - Capability is learned from unauthenticated signals as well as authenticated
@@ -442,9 +443,10 @@ What changes in practice:
   open. The trade-off is that an injected frame naming a plaintext-only peer can
   mark that peer capable and suppress their cleartext for the rest of the run.
   It does not persist — a restart clears it, since restore seeds only from
-  sessions and pins — and `resetTofuForPeer` clears it immediately. **If a
-  legacy peer goes unreadable with `PLAINTEXT_RECEIVE_REJECTED` and you hold no
-  session or pin for them, that is the case you are looking at.** The set is
+  sessions and durable capability records. **If a legacy peer goes unreadable
+  with `PLAINTEXT_RECEIVE_REJECTED` and you hold no session for them and have
+  verified no signed control frame from them, that is the case you are looking
+  at.** The set is
   also capped; past the cap new peers fall back to the old session-state check
   rather than displacing anyone already in it.
 
@@ -825,7 +827,7 @@ empty block list. That is reported, never silent:
 | Python | `SecureStorage(...).legacy_adoption`, plus a logged warning |
 
 **What to do:** log and alert on those diagnostics. They mean a user lost their
-sessions, groups, TOFU pins, queued messages, and block list. If your app
+sessions, groups, peer capability records, queued messages, and block list. If your app
 supports multiple accounts on one device, decide which one should inherit — the
 SDK's answer is "whichever launches first", which may not be yours.
 
@@ -1187,6 +1189,62 @@ await protocol.wipePersistedState(appId, oldUserId);
 Relay accounts, JWTs, and group rosters move into address space with the
 server-side change; a build that sends address-shaped ids to a relay that still
 expects usernames will fail its identity check. Sequence the relay first.
+
+### Trust-on-first-use is gone
+
+Deriving the identity from the key makes the pin store redundant, so it is
+deleted. There is no `resetTofuForPeer` and no `tofu_reset` event, and the
+`TOFU_KEY_MISMATCH` / `TOFU_STORE_FULL` / `SIGNATURE_DOWNGRADE` warning codes no
+longer exist.
+
+**What replaces them.** A control message is accepted only if it carries an
+Ed25519 signature *and* the key that produced it re-derives to the address in
+`sender`. That check has no first-contact window — the pin store's weakest
+point, where whoever claimed a name first became its owner — so impersonation
+goes from winning a race to finding a 160-bit second preimage.
+
+**Three behaviour changes to plan for:**
+
+1. **Unsigned control frames are refused, always.** Previously they were
+   accepted from any peer without a pin, and refused only from peers with one
+   (or under `requireTransportIdentity`). Now every security-gated control
+   prefix must be signed. In practice this means **`initializeMls` is
+   mandatory** — an instance that never initializes has no identity key, so its
+   control traffic is dropped by every peer. The relay server's own answers
+   (`__GROUP_CREATED__`, `__GROUP_MEMBER_ADDED__`, `__GROUP_MEMBER_REMOVED__`,
+   `__GROUP_INFO__`, `__USER_GROUPS__`, `__GROUP_ERROR__`) are exempt, because
+   no peer signs them; that exemption is narrow — relay ingest only, and only
+   for frames the relay did not attribute to a peer.
+2. **`SENDER_ADDRESS_MISMATCH` replaces `TOFU_KEY_MISMATCH`, and means something
+   stronger.** The old code was ambiguous: a peer who reinstalled looked exactly
+   like an impersonator, which is why a reset action had to exist. The new one
+   is not ambiguous. A peer who reinstalls gets a new key and therefore a **new
+   address**, arriving as a new contact. If you see this code, the frame was
+   signed by someone who is not who they say they are. Surface it as such; do
+   not offer a "trust anyway" affordance.
+3. **Relay-native member-removal reconciliation is now inert.** A
+   `__GROUP_MEMBER_REMOVED__` frame is authorized off its *wire* `sender`, which
+   must be a group admin. The relay's own answer is injected unattributed (that
+   is what the exemption above requires), so its placeholder sender can never be
+   an admin: the frame is dropped and **no `group_member_removed` event fires**.
+   Before this release the bridges passed the relay-reported `removed_by` as the
+   sender, so the reconciliation could take effect for an admin no pin had been
+   established for yet.
+
+   The path the SDK itself uses is unchanged and still works: the removing admin
+   sends a signed `__GROUP_MEMBER_REMOVED__` directly to the removed member
+   (`removeMember`). **If your app removes members by calling the relay
+   directly**, the other members will no longer see the roster update — drive
+   removals through the SDK instead, or wait for the follow-up that moves relay
+   answers onto dedicated FFI entry points (the same work that closes the
+   exemption's residual). `__GROUP_MEMBER_ADDED__` is unaffected: its handler
+   reads the payload and runs no sender check.
+
+`requireTransportIdentity` keeps its `false` default and no longer gates the
+signature requirement. Its one remaining effect is to reject control frames that
+arrive with no transport peer identity at all — which on a deployment running
+Nostr or sender-less relay delivery rejects their entire control plane. Leave it
+off unless you run neither.
 
 ---
 

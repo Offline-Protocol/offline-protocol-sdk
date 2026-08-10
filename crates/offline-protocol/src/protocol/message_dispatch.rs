@@ -118,17 +118,22 @@ impl OfflineProtocol {
             // above. Those are feature hints — a wrong value costs a fallback.
             // This is a public key we then seal envelope metadata *to*, so a
             // wrong value hands that metadata to whoever supplied it, readable
-            // off a public relay, passively, forever. The security gate accepts
-            // an *unsigned* control message from a peer it has never pinned
-            // (`security_gate_control_message`, the TOFU first-contact window),
-            // so "it arrived in a key package" is not by itself evidence of who
-            // sent it — only the Ed25519 signature is. Nothing is lost by
-            // requiring it: a key package can only be produced once MLS is
-            // initialized, and `send_key_package_to` signs unconditionally in
+            // off a public relay, passively, forever. Nothing is lost by
+            // requiring a signature: a key package can only be produced once MLS
+            // is initialized, and `send_key_package_to` signs unconditionally in
             // that state, so every genuine package carrying this field is
             // signed. An unsigned one must not be able to *clear* it either —
             // that would be a downgrade to the bootstrap key on demand — so the
             // stored value is carried forward rather than overwritten.
+            //
+            // The `signed` check is now belt-and-braces rather than the load-
+            // bearing gate it was: `security_gate_control_message` refuses
+            // unsigned control traffic outright, so this handler is unreachable
+            // with `signed == false`. It is kept because the cost is a branch
+            // and the failure it guards against is silent and permanent — and
+            // because the one prefix class that *is* admitted unsigned (the
+            // relay's own answers) is data this check would correctly distrust
+            // if a future edit ever routed one here.
             let advertised_nostr_pubkey = if signed {
                 payload.nostr_pubkey.clone()
             } else {
@@ -1525,11 +1530,23 @@ impl OfflineProtocol {
                     // an admin matches every sibling membership handler (role
                     // change, rename, commit) and forces a forger to impersonate
                     // an admin identity — which the control-frame signature +
-                    // TOFU gate rejects for any pinned admin. The prior
-                    // `removed_by` fallback authenticated nothing: `removed_by`
-                    // is an unauthenticated payload field, so naming any real
-                    // admin passed the check and let an unpinned non-member
-                    // force-evict the victim (dropping local MLS group state).
+                    // derivation gate now refuses for *every* admin, not just a
+                    // pinned one: impersonating an address requires the private
+                    // key it hashes from. The prior `removed_by` fallback
+                    // authenticated nothing: `removed_by` is an unauthenticated
+                    // payload field, so naming any real admin passed the check
+                    // and let a non-member force-evict the victim (dropping
+                    // local MLS group state).
+                    //
+                    // CONSEQUENCE (see `RELAY_ANSWER_PREFIXES`): the relay's own
+                    // `__GROUP_MEMBER_REMOVED__` answer is injected *unattributed*
+                    // by the bridges, so its `sender` is a placeholder that can
+                    // never be an admin — this branch drops it, emitting nothing.
+                    // Relay-native removal reconciliation is therefore inert; the
+                    // functioning path is the removing admin's own signed direct
+                    // notification. Restoring it means moving relay answers onto
+                    // a dedicated FFI entry that is not sender-authenticated,
+                    // which is the same follow-up the exemption list names.
                     match self.check_is_admin(&payload.group_id, sender) {
                         Ok(true) => {}
                         Ok(false) => {

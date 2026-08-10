@@ -252,37 +252,42 @@ pub struct SecurityConfig {
     /// missing transport identity emits a `SecurityWarning` but allows the
     /// message through (best-effort / fail-open).
     ///
-    /// # Security implications of the default (`false`)
+    /// # Why the default (`false`) is not the weak setting it once was
     ///
-    /// With fail-open behavior, an attacker who can inject messages into the
-    /// transport layer (e.g., by compromising a relay server or being in BLE
-    /// range) can send spoofed control messages with a forged `sender` field.
-    /// Ed25519 control-message signing (TOFU) mitigates this for peers whose
-    /// keys have already been pinned, but the first contact with any peer is
-    /// vulnerable to man-in-the-middle if the transport identity is absent.
+    /// This flag used to carry real weight, because a forged `sender` was
+    /// otherwise cheap: identities were app-chosen strings and the only thing
+    /// standing behind one was a trust-on-first-use pin, so first contact with
+    /// any peer was open to a man-in-the-middle and transport identity was the
+    /// only independent corroboration available.
     ///
-    /// When a transport attaches an authenticated identity (Internet relay,
-    /// Reticulum), frames claiming direct origin (`hop_count == 0`) are
-    /// strict-matched against `message.sender` regardless of this flag —
-    /// spoofed hop-0 control frames on those transports are rejected even
-    /// with the default `false`. Frames claiming mesh relay
-    /// (`hop_count > 0`) skip the strict match (the identity names the
-    /// carrier, not the origin) and rest on the signature + TOFU gate.
+    /// Under self-certifying addressing it is not. Every security-gated control
+    /// frame must now carry an Ed25519 signature — unconditionally, no longer
+    /// gated on this flag — and the signing key must derive to the address in
+    /// `sender`. A forged `sender` therefore requires the private key behind
+    /// that address, on first contact as much as on the thousandth. Transport
+    /// identity adds no authenticity on top of that; it only cross-checks a
+    /// claim the signature already proved.
     ///
-    /// Enabling this flag therefore tightens two things: control frames
-    /// *without* any transport identity are rejected, and *unsigned*
-    /// security-gated control frames are rejected outright — otherwise a
-    /// spoofer could forge `hop_count > 0` to skip the strict match and do
-    /// better than a peer with no identity at all. The remaining trust
-    /// assumption is first-contact TOFU pinning.
+    /// The strict match on frames claiming direct origin (`hop_count == 0`) runs
+    /// regardless of this flag, as it always has, and is unaffected.
     ///
-    /// Set to `true` only when every enabled transport reliably attaches
-    /// peer identity AND all peers sign control traffic (MLS initialized —
-    /// legacy pre-MLS peers cannot interoperate with a strict deployment).
-    /// Today that means Internet + Reticulum deployments; BLE, WiFi Direct,
-    /// and Nostr inbound frames carry no transport identity, so `true`
-    /// would reject all their control messages, and mesh-forwarded frames
-    /// re-created by intermediate nodes legitimately lack identity as well.
+    /// # What enabling it still does, and what it costs
+    ///
+    /// Exactly one thing: control frames arriving with **no** transport identity
+    /// at all are rejected instead of falling through to the signature gate.
+    ///
+    /// That is a real cost with no matching benefit on most deployments. Nostr
+    /// frames carry no transport identity by construction — the Nostr pubkey is
+    /// an install signing key, not the protocol id, so attaching it would fail
+    /// the strict match (see `nostr_message_received_inner`) — and relay frames
+    /// that arrive without a named sender are in the same position. Turning this
+    /// on rejects **every** control message on those paths, including the
+    /// key-package exchange that cold contact depends on. Mesh-forwarded frames
+    /// re-created by intermediate nodes legitimately lack identity too.
+    ///
+    /// Set to `true` only on a deployment that runs neither Nostr nor
+    /// sender-less relay delivery, and wants frames without transport identity
+    /// refused as a matter of policy rather than of authentication.
     pub require_transport_identity: bool,
 }
 
