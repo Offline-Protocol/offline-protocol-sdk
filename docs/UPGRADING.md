@@ -22,7 +22,7 @@ introduced it (for example, `wipePersistedState` in
 you are already on `v0.17.0`, those labelled paragraphs are the only parts you
 still need — coming from `v0.18.x` that means
 [§1.10](#110-the-inbound-plaintext-gate-no-longer-reads-session_states) and
-[§1.11](#111-key-packages-are-checked-against-the-pinned-signing-key), two
+[§1.11](#111-key-packages-are-checked-against-the-peers-identity), two
 receive-side behaviour changes in `v0.19.0` that compile fine and can still
 surprise you at runtime.
 
@@ -68,6 +68,7 @@ cannot be undone later.
 | 11 | [Events you must handle](#11-events-you-must-now-handle) | all | all | all | all |
 | 12 | [Build & packaging](#12-build-and-packaging) | — | regenerate bindings | rebuild native | — |
 | 12.1 | [iOS: delete your manual `pod 'MeshSdk'` line](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) | n/a | n/a | **breaking** (`pod install` fails) | n/a |
+| 13 | [Upgrade test checklist](#13-upgrade-test-checklist) | — | — | — | — |
 | 14 | [Your identity is derived, not chosen](#14-your-identity-is-derived-not-chosen-unreleased) | **breaking** | **breaking** | **breaking** | **breaking** |
 
 ---
@@ -450,17 +451,26 @@ What changes in practice:
   also capped; past the cap new peers fall back to the old session-state check
   rather than displacing anyone already in it.
 
-### 1.11 Key packages are checked against the pinned signing key
+### 1.11 Key packages are checked against the peer's identity
 
 *New in `v0.19.0`.* `peer_key_packages` is now a sealed category, and every use
-of a key package is checked against the peer's TOFU-pinned signature key.
+of a key package is checked against the peer's identity.
+
+> **Superseded by [§14](#14-your-identity-is-derived-not-chosen-unreleased).**
+> In `v0.19.0` the check compared the key package against a TOFU-*pinned*
+> signature key. The pin store is gone; the check now re-derives the address
+> from the key package's own signature key and compares it to the peer id the
+> package arrived under. The observable behaviour below is unchanged — a key
+> package that does not match its peer is still refused — but there is no pin
+> to manage, reset, or lose, and the error code is `SENDER_ADDRESS_MISMATCH`
+> rather than `TOFU_KEY_MISMATCH`.
 
 - **Cached key packages written by earlier builds are unsealed and will be
   dropped on first launch after upgrade.** This is not an error and does not
   fail initialization; it costs one key-package re-exchange with those peers,
   which the SDK performs automatically on next contact.
 - `mlsImportKeyPackage` now applies the same check, and returns an error if the
-  package's leaf signature key is not the pinned key for that peer id. Apps
+  package's leaf signature key does not correspond to that peer id. Apps
   driving the low-level MLS API against a *different* identity than the one the
   peer signed with will start seeing that error — which is the point, but it is
   a behaviour change for that entry point. The FFI signature is unchanged, so no
@@ -896,8 +906,10 @@ Three things to know before wiring it in:
 
 - **It rotates the account's MLS *and* Nostr identities.** Peers holding a
   session will see a desync on next contact and re-establish from a fresh key
-  package. Peers holding a TOFU pin for the old identity will treat the new one
-  as a new peer.
+  package. Because the identity key is what the address derives from, wiping it
+  gives this device a **new address**: peers reach the old one and find nobody,
+  and must be given the new one out of band. Read it back with `localAddress()`
+  after the next `initializeMls`.
 - **It is irreversible and it is not a "clear my messages" button.** There is no
   partial mode; the outbox, block list, and every group membership go together.
 - **Retry on failure.** The wipe is idempotent, attempts every store even if one
@@ -1097,6 +1109,65 @@ regeneration** — only `bindings/react-native/src/types.ts`, which can drift.
 
 ---
 
+## 13. Upgrade test checklist
+
+Run these against a build of your **previous** version, then upgrade in place.
+
+**Migration correctness**
+
+- [ ] An install with queued (undelivered) messages still has them after upgrade,
+      and they deliver.
+- [ ] An install with blocked peers still has them blocked after upgrade. *(This
+      is the sharpest failure mode — verify it explicitly.)*
+- [ ] MLS identity survives *within a release line*: existing sessions still
+      decrypt and existing groups still work. **This does not hold across
+      [§14](#14-your-identity-is-derived-not-chosen-unreleased)** — the identity
+      becomes the MLS credential there, so every session and group from a
+      pre-§14 build is invalidated by design. Upgrading across §14, verify the
+      opposite: that peers re-establish cleanly from fresh key packages rather
+      than appearing stuck.
+- [ ] Multi-account installs: exactly one account inherits; the others log the
+      `error` diagnostic and start clean without crashing.
+- [ ] Uninstall removes protocol state (Python: verify your installer removes
+      `state_root`).
+- [ ] Kill the app mid-first-launch, relaunch: the sweep resumes and converges.
+- [ ] A failed `initialize_mls` is surfaced and retried, not treated as success
+      ([§1.9](#19-initialize_mls-failure-modes-moved-in-both-directions)).
+
+**New rejections**
+
+- [ ] No code path sends to a `:`-containing recipient (`unresolved:`, `did:`,
+      `npub:`) — including presence, typing, read receipts, and service
+      requests.
+- [ ] Oversized text sends are caught at your composer, not surfaced as an
+      opaque error.
+- [ ] No reliability config passes `0` for `maxTrackedMessages` or
+      `retentionTimeSecs`.
+- [ ] Swift: all three `update*Config` calls compile with `try` and handle the
+      throw.
+
+**Events**
+
+- [ ] Event callback is installed **before** `start()`.
+- [ ] `message_failed` handler is idempotent and can render a burst without
+      looking like a mass failure.
+- [ ] `convergence_diag` / `pending_state_lost` is at least logged.
+- [ ] RN: `Failed to apply … configuration` warnings are surfaced, not buried.
+
+**Custom providers only**
+
+- [ ] `store` is durable before it returns (test with a forced power loss or an
+      fsync-counting fake).
+- [ ] `load` refuses over 8 MiB without allocating it.
+- [ ] Destroyed records report `CorruptedData`; transient failures report
+      `LoadFailed`.
+- [ ] Entries are addressed by digest, not by an encoding of the key.
+- [ ] A custom `MlsStorageProvider` reads through to your previous location, or
+      you migrated the pre-split key types yourself
+      ([§1.6](#16-the-custom-mlsstorageprovider-upgrade-trap)).
+
+---
+
 ## 14. Your identity is derived, not chosen (unreleased)
 
 **`ProtocolConfig.userId` is gone.** It is replaced by `profile`, and the two
@@ -1147,19 +1218,69 @@ UniFFI.
 
 ### What this breaks in your app
 
-The address is what peers must use to reach you, so anywhere your app *assumed*
-it knew an identity has to be re-pointed:
+**Read this before you re-key anything.** The single most common way to get
+this migration wrong is to conclude "our user id changed, so everything keyed
+by it must change". That is half right, and the wrong half destroys data.
+
+The migration splits in two, and only one side moves:
+
+| | Keyed by | Changes? |
+|---|---|---|
+| **Your own** storage — your local DB filename, MMKV/UserDefaults namespace, cache directories, the SDK storage namespace | the string you pass as `profile` | **No.** Keep passing the same string you passed as `userId`. |
+| **Peer** identity — `recipient`, conversation keys, contact rows, group rosters | the peer's `off1…` address | **Yes.** |
+
+`profile` never goes on the wire and no peer ever sees it. Passing your old
+`userId` through unchanged is not a migration shim — it is the intended use,
+and it keeps every namespace you derived from that same string intact.
+
+With that split in mind:
 
 - **Sending.** `recipient` must be a peer's address. A username reaches nobody.
 - **Comparing.** "Is this message mine?" compares against `localAddress()`, not
   against the profile.
-- **Storing.** Conversation rows, contact records, and group membership keyed
-  by username must be keyed by address. There is no mapping from the old ids to
-  the new ones — the identities genuinely changed.
+- **Storing peer-keyed rows.** Conversation rows, contact records, and group
+  membership keyed by a *peer's* username must be re-keyed by that peer's
+  address. There is no mapping from the old peer ids to the new ones — those
+  identities genuinely changed.
+- **Storing self-keyed state.** Leave it alone. See the two traps below.
 - **Displaying.** An `off1…` string is not a name. Keep your own display names
   (the `senderName` / `accepterName` fields already carry them) and treat the
   address the way you would a phone number: the thing you route on, not the
   thing you show.
+
+### Two ways this fails silently
+
+Both of these were hit by a real app during this migration. Neither throws,
+neither logs, and both look like a successful launch.
+
+**1. A per-user database or namespace opened under the new id.** Code shaped
+like this is extremely common:
+
+```ts
+const db = open(`db-${userId}.sqlite`);       // or `user-${userId}` for MMKV
+```
+
+An `off1…` address passes the usual identifier validation (it is plain
+lowercase alphanumerics), so this **opens a different, empty database**. No
+error, no fallback — the entire message history simply stops existing, and a
+fresh empty store looks exactly like a first launch.
+
+*Fix:* feed these the value you pass as `profile`, not the address.
+
+**2. A teardown/switch check that reads the id change as an account switch.**
+
+```ts
+const shouldWipe = nextUserId !== tornDownUserId;   // now true for everyone
+```
+
+If an id-changed comparison gates wiping SDK state, upgrading looks like every
+user switched accounts, and the app wipes its own MLS sessions on first launch.
+
+*Fix:* compare profiles, which do not change.
+
+The general rule: **if a string was doing double duty as "who I am" and "which
+storage is mine", the second job stays with `profile`.** Only the first job
+moves to the address.
 
 ### Cold contact by username is gone for now
 
@@ -1167,6 +1288,22 @@ Reaching someone by typing their username was only ever possible because
 usernames were addresses. Until a signed username-discovery layer lands, first
 contact is invite/QR only: exchange `{address, publicKey}` and verify it on the
 spot with `deriveAddress(publicKey) === address`.
+
+**If you already run an account system, do not wait for that layer.** A serverless
+discovery record is the right design for peers with no infrastructure, and the
+wrong one for an app that already has authenticated accounts and unique
+usernames — it is squattable by construction, where your own directory is
+authoritative. Binding an address to an account needs no new SDK surface; the
+four primitives already ship:
+
+1. Client calls `getIdentityPublicKey()` and `localAddress()`.
+2. Client signs a server-issued nonce with `signData(nonce)`.
+3. Server checks the signature and that `deriveAddress(publicKey) === address`.
+4. Server stores the address on the account row and serves it from its existing
+   user lookup.
+
+That gives reach-by-username back immediately, with your own uniqueness
+guarantees, and it stays correct after the discovery layer ships.
 
 ### There is no in-place migration, and that is deliberate
 
@@ -1245,60 +1382,6 @@ signature requirement. Its one remaining effect is to reject control frames that
 arrive with no transport peer identity at all — which on a deployment running
 Nostr or sender-less relay delivery rejects their entire control plane. Leave it
 off unless you run neither.
-
----
-
-## 13. Upgrade test checklist
-
-Run these against a build of your **previous** version, then upgrade in place.
-
-**Migration correctness**
-
-- [ ] An install with queued (undelivered) messages still has them after upgrade,
-      and they deliver.
-- [ ] An install with blocked peers still has them blocked after upgrade. *(This
-      is the sharpest failure mode — verify it explicitly.)*
-- [ ] MLS identity survives: existing sessions still decrypt, existing groups
-      still work, no TOFU mismatch warnings on peers you already trust.
-- [ ] Multi-account installs: exactly one account inherits; the others log the
-      `error` diagnostic and start clean without crashing.
-- [ ] Uninstall removes protocol state (Python: verify your installer removes
-      `state_root`).
-- [ ] Kill the app mid-first-launch, relaunch: the sweep resumes and converges.
-- [ ] A failed `initialize_mls` is surfaced and retried, not treated as success
-      ([§1.9](#19-initialize_mls-failure-modes-moved-in-both-directions)).
-
-**New rejections**
-
-- [ ] No code path sends to a `:`-containing recipient (`unresolved:`, `did:`,
-      `npub:`) — including presence, typing, read receipts, and service
-      requests.
-- [ ] Oversized text sends are caught at your composer, not surfaced as an
-      opaque error.
-- [ ] No reliability config passes `0` for `maxTrackedMessages` or
-      `retentionTimeSecs`.
-- [ ] Swift: all three `update*Config` calls compile with `try` and handle the
-      throw.
-
-**Events**
-
-- [ ] Event callback is installed **before** `start()`.
-- [ ] `message_failed` handler is idempotent and can render a burst without
-      looking like a mass failure.
-- [ ] `convergence_diag` / `pending_state_lost` is at least logged.
-- [ ] RN: `Failed to apply … configuration` warnings are surfaced, not buried.
-
-**Custom providers only**
-
-- [ ] `store` is durable before it returns (test with a forced power loss or an
-      fsync-counting fake).
-- [ ] `load` refuses over 8 MiB without allocating it.
-- [ ] Destroyed records report `CorruptedData`; transient failures report
-      `LoadFailed`.
-- [ ] Entries are addressed by digest, not by an encoding of the key.
-- [ ] A custom `MlsStorageProvider` reads through to your previous location, or
-      you migrated the pre-split key types yourself
-      ([§1.6](#16-the-custom-mlsstorageprovider-upgrade-trap)).
 
 ---
 
