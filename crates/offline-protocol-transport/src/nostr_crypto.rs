@@ -989,13 +989,14 @@ mod tests {
         // and reaches for "the key matching this tag".
         //
         // Separate derivations, so there is no such key.
-        for id in ["alice", "bob", "device1", "a-very-long-user-id-with-dashes"] {
+        for label in ["alice", "bob", "device1", "a-very-long-user-id-with-dashes"] {
+            let address = addr(label);
             assert_ne!(
-                record_seal_keypair_for_address(id)
+                record_seal_keypair_for_address(&address)
                     .unwrap()
                     .public_key_hex(),
-                routing_tag_for_address(id).unwrap(),
-                "the record-seal key must not be the routing tag for {id}"
+                routing_tag_for_address(&address).unwrap(),
+                "the record-seal key must not be the routing tag for {label}"
             );
         }
     }
