@@ -3123,13 +3123,20 @@ impl fmt::Debug for Event {
                 .field("reason_code", reason_code)
                 .field("reason_detail", reason_detail)
                 .finish(),
+            // The one arm that used to print `peer_id` verbatim, and the worst
+            // one to: a security warning is precisely the event an operator
+            // dumps into a log while investigating, and the peer it names is
+            // usually attacker-controlled — an injected frame carries whatever
+            // sender it likes, so this field doubles as a log-injection
+            // surface. The telemetry scrubber already hashed it; only `{:?}`
+            // disagreed.
             Self::SecurityWarning {
-                peer_id,
+                peer_id: _,
                 reason_code,
                 reason,
             } => f
                 .debug_struct("SecurityWarning")
-                .field("peer_id", peer_id)
+                .field("peer_id", &"[REDACTED]")
                 .field("reason_code", reason_code)
                 .field("reason", reason)
                 .finish(),
@@ -3551,6 +3558,110 @@ mod tests {
                 | SecurityWarningCode::NostrKeyPackageSlotExhausted
                 | SecurityWarningCode::PushKeyPackagePoolExhausted => {}
             }
+        }
+    }
+
+    #[test]
+    fn test_debug_redacts_every_peer_identifying_field() {
+        // `SecurityWarning` printed its `peer_id` verbatim while the other
+        // twelve peer-bearing arms redacted theirs, so a single missed arm was
+        // invisible: `{:?}` on any *other* event looked correct. Pinning one
+        // arm would leave the next omission just as invisible, so this
+        // enumerates every variant carrying a peer-identifying field and
+        // asserts the sentinel never survives formatting.
+        //
+        // Deliberately a *value* assertion rather than a field-name one: the
+        // question is whether the id reaches the log, not how the arm spells
+        // its placeholder.
+        const SENTINEL: &str = "off1qy4aspkf0u8qptc6rlpn9ra8vw5jd9ereq4cwpfs";
+
+        let events = vec![
+            Event::NeighborDiscovered {
+                peer_id: SENTINEL.to_string(),
+                transport: "ble".to_string(),
+                rssi: Some(-40),
+            },
+            Event::NeighborLost {
+                peer_id: SENTINEL.to_string(),
+            },
+            Event::SecureSessionEstablished {
+                peer_id: SENTINEL.to_string(),
+                group_id: "session:a:b".to_string(),
+                is_session: true,
+                initiated_by_local: true,
+            },
+            Event::SecureSessionFailed {
+                peer_id: SENTINEL.to_string(),
+                reason: "nope".to_string(),
+            },
+            Event::ConvergenceDiag {
+                stage: "stage".to_string(),
+                peer_id: SENTINEL.to_string(),
+                detail: "detail".to_string(),
+            },
+            Event::WelcomeSendAttempted {
+                peer_id: SENTINEL.to_string(),
+                message_id: "m1".to_string(),
+                group_id: "g1".to_string(),
+                attempt: 1,
+            },
+            Event::WelcomeSendSucceeded {
+                peer_id: SENTINEL.to_string(),
+                message_id: "m1".to_string(),
+                group_id: "g1".to_string(),
+                attempt: 1,
+            },
+            Event::WelcomeSendFailed {
+                peer_id: SENTINEL.to_string(),
+                message_id: "m1".to_string(),
+                group_id: "g1".to_string(),
+                attempt: 1,
+                reason_code: WelcomeReasonCode::Timeout,
+                transport_error: None,
+                retryable: true,
+                next_retry_at: None,
+            },
+            Event::WelcomeSendExpired {
+                peer_id: SENTINEL.to_string(),
+                message_id: "m1".to_string(),
+                attempt: 3,
+                reason_code: WelcomeReasonCode::RetryExhausted,
+            },
+            Event::ServiceDiscovered {
+                query_id: "q1".to_string(),
+                service_id: "s1".to_string(),
+                version: "1".to_string(),
+                provider_peer_id: SENTINEL.to_string(),
+                capabilities: HashMap::new(),
+                hop_count: 1,
+            },
+            Event::ServiceResponseReceived {
+                request_id: "r1".to_string(),
+                service_id: "s1".to_string(),
+                status: "ok".to_string(),
+                body: "body".to_string(),
+                provider_peer_id: SENTINEL.to_string(),
+            },
+            Event::PresenceUpdated {
+                peer_id: SENTINEL.to_string(),
+                status: PresenceStatus::Online,
+                timestamp: 0,
+                last_seen_ms: None,
+                source: PresenceSource::Peer,
+            },
+            Event::SecurityWarning {
+                peer_id: SENTINEL.to_string(),
+                reason_code: SecurityWarningCode::SenderAddressMismatch,
+                reason: "mismatch".to_string(),
+            },
+        ];
+
+        for event in &events {
+            let rendered = format!("{:?}", event);
+            assert!(
+                !rendered.contains(SENTINEL),
+                "Debug leaked a peer identifier: {rendered}",
+            );
         }
     }
 
