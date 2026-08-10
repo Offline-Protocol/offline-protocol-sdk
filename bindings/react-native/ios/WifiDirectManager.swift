@@ -12,6 +12,27 @@ import MultipeerConnectivity
 
 /// WiFi Direct Manager implementing TransportManager for peer-to-peer WiFi communication
 /// Uses Apple's MultipeerConnectivity framework which provides WiFi Direct-like functionality
+///
+/// ## wifiDirectPeerIdIsUnavailable — why nothing here reaches the protocol layer
+///
+/// `MCPeerID.displayName` carries the remote's `deviceId`, which is its
+/// app-chosen `profile`: a local storage selector, commonly a shared constant
+/// like "default", with no key behind it. Announcing it as a protocol id is
+/// the same unauthenticated-advertisement problem the BLE cross-check closes,
+/// except MultipeerConnectivity offers no signed identity to check it against
+/// — nothing here can prove a name.
+///
+/// So peers are not announced and inbound frames are not ingested. Nothing is
+/// lost by that: `WifiDirectTransport` is never registered with the transport
+/// manager (see `OfflineProtocol::new` and `rebuild_transports_for_identity`
+/// in the UniFFI crate), so frames were already dropped and no send could ever
+/// leave. What the announcements *did* do was enter an unprovable id into the
+/// core's capacity-bounded `known_peers` — evicting genuine neighbours — and
+/// start an auto key exchange toward it.
+///
+/// Restoring the transport means exchanging and verifying the same signed
+/// identity blob BLE serves, and registering `WifiDirectTransport`. Both are
+/// out of scope here. Mirrors android's WifiDirectManager.kt.
 public class WifiDirectManager: NSObject, TransportManager {
     
     // MARK: - TransportManager Protocol
@@ -250,26 +271,26 @@ extension WifiDirectManager: MCSessionDelegate {
             case .connected:
                 let peerId = peerID.displayName
                 self.connectedPeers[peerID] = peerId
-                
-                self.emitDiagnostic("info", "Peer connected", context: [
-                    "peerId": peerId
+
+                // NOT announced to the protocol layer — see
+                // `wifiDirectPeerIdIsUnavailable` on the type. `displayName`
+                // is the remote's app-chosen profile, which nothing binds to a
+                // key and which is commonly a shared constant.
+                self.emitDiagnostic("warning", "Wi-Fi Direct peer not announced: unproven id", context: [
+                    "displayName": peerId
                 ])
-                
-                // Notify protocol
-                try? self.protocolInstance.wifiDirectPeerConnected(peerId: peerId)
-                
+
             case .notConnected:
                 if let peerId = self.connectedPeers[peerID] {
                     self.connectedPeers.removeValue(forKey: peerID)
-                    
-                    self.emitDiagnostic("info", "Peer disconnected", context: [
-                        "peerId": peerId
+
+                    // No disconnect notification: nothing was announced, so
+                    // there is no neighbor for the core to lose.
+                    self.emitDiagnostic("info", "Wi-Fi Direct peer disconnected", context: [
+                        "displayName": peerId
                     ])
-                    
-                    // Notify protocol
-                    try? self.protocolInstance.wifiDirectPeerDisconnected(peerId: peerId)
                 }
-                
+
             case .connecting:
                 self.emitDiagnostic("debug", "Connecting to peer", context: [
                     "peerId": peerID.displayName
@@ -283,23 +304,17 @@ extension WifiDirectManager: MCSessionDelegate {
     
     public func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
         let senderId = connectedPeers[peerID] ?? peerID.displayName
-        
+
+        // Dropped, not ingested — see `wifiDirectPeerIdIsUnavailable`.
+        // Attributing the frame to an unproven `displayName` would set it as
+        // the transport peer identity, which the core then compares against
+        // `Message.sender` and rejects.
         messageQueue.async { [weak self] in
             guard let self = self else { return }
-            
-            do {
-                let bytes = [UInt8](data)
-                try self.protocolInstance.wifiDirectMessageReceived(senderId: senderId, data: bytes)
-                
-                self.emitDiagnostic("debug", "Message received from peer", context: [
-                    "senderId": senderId,
-                    "dataSize": data.count
-                ])
-            } catch {
-                self.emitDiagnostic("error", "Error processing received message", context: [
-                    "error": error.localizedDescription
-                ])
-            }
+            self.emitDiagnostic("warning", "Wi-Fi Direct frame dropped: sender cannot be identified", context: [
+                "displayName": senderId,
+                "dataSize": data.count
+            ])
         }
     }
     

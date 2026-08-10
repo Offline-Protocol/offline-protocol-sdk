@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.offlineprotocol.PeerIdentityBinding
 import com.offlineprotocol.mesh.MeshController
 import com.offlineprotocol.mesh.SignedIdentityData
 import uniffi.offline_protocol.OfflineProtocol
@@ -219,6 +220,17 @@ internal class CentralGattClient(
 
     private val deviceIdResolutionAttempts = ConcurrentHashMap<String, Long>()
 
+    /**
+     * What a peer advertised in `DEVICE_ID`, held between that read and the
+     * `IDENTITY` read that either proves it or refuses it.
+     *
+     * An entry here is an unproven claim and is never announced. It is
+     * consumed by [handleIdentityRead] and dropped by every teardown path, so
+     * a reconnect cannot pair this connection's device id with the next
+     * connection's identity.
+     */
+    private val advertisedDeviceIds = ConcurrentHashMap<String, String>()
+
     /** True if a successful CCCD write has been observed for [address]. */
     fun isLinkReady(address: String): Boolean = linkReady.contains(address)
 
@@ -227,6 +239,7 @@ internal class CentralGattClient(
         linkReady.remove(address)
         connectionRetryCount.remove(address)
         deviceIdResolutionAttempts.remove(address)
+        advertisedDeviceIds.remove(address)
         cancelMtuWatchdog(address)
     }
 
@@ -235,6 +248,7 @@ internal class CentralGattClient(
         linkReady.clear()
         connectionRetryCount.clear()
         deviceIdResolutionAttempts.clear()
+        advertisedDeviceIds.clear()
         mtuInFlight.clear()
         mtuWatchdogs.values.forEach { mainHandler.removeCallbacks(it) }
         mtuWatchdogs.clear()
@@ -839,11 +853,16 @@ internal class CentralGattClient(
                 "char" to charUuid.toString(),
                 "status" to status,
             ))
-            // Only the device-ID read is load-bearing for link setup. An
-            // identity read failure is diagnostic and should not tear the
-            // link down — the peer is still usable, just unverified.
+            // Both reads are load-bearing now. The identity read used to be
+            // diagnostic — "the peer is still usable, just unverified" — but
+            // an unverified peer is no longer usable: its advertised id is
+            // never announced, so the link would sit open addressing nobody.
+            // Close on either failure.
             if (charUuid == deviceIdCharUuid) {
                 closeGattClient(gatt, "device_id_read_failed")
+            } else if (charUuid == identityCharUuid) {
+                advertisedDeviceIds.remove(address)
+                closeGattClient(gatt, "identity_read_failed")
             }
             return
         }
@@ -857,7 +876,7 @@ internal class CentralGattClient(
     private fun handleDeviceIdRead(gatt: BluetoothGatt, value: ByteArray?) {
         val address = gatt.device.address
         val deviceIdValue = value?.toString(Charsets.UTF_8)
-        Log.i(TAG, "Read device ID from $address: $deviceIdValue")
+        Log.i(TAG, "Read advertised device id from $address: $deviceIdValue")
 
         if (deviceIdValue.isNullOrEmpty()) {
             Log.w(TAG, "Empty or null device ID from $address")
@@ -866,13 +885,79 @@ internal class CentralGattClient(
             return
         }
 
-        Log.i(TAG, "Mapping $address -> $deviceIdValue")
-        host.connections.setDeviceIdentifier(address, deviceIdValue)
+        // Record the claim and go get the proof. NOTHING is announced here:
+        // the advertised string is unauthenticated until the identity read
+        // binds it to a key, and everything that used to happen in this
+        // function — the registry mapping, the mesh registration, the MTU
+        // flush, `blePeerDiscovered`, the fragment drain — now happens in
+        // [announceVerifiedPeer], after that binding holds.
+        advertisedDeviceIds[address] = deviceIdValue
+
+        // Kick the identity read. It is no longer "diagnostic": it is the
+        // only thing that can make this peer real, so every path that fails
+        // to obtain it now closes the link instead of proceeding to CCCD.
+        // A peer we cannot bind to a key is one we will never address.
+        val service = gatt.getService(serviceUuid)
+        val identityChar = service?.getCharacteristic(identityCharUuid)
+        if (identityChar == null) {
+            Log.w(TAG, "Identity characteristic not found on $address; peer cannot prove its id")
+            rejectPeer(gatt, PeerIdentityBinding.Reason.UNVERIFIED_IDENTITY, "identity characteristic missing")
+            return
+        }
+        try {
+            val started = gatt.readCharacteristic(identityChar)
+            if (!started) {
+                Log.w(TAG, "readCharacteristic(identity) returned false for $address")
+                rejectPeer(gatt, PeerIdentityBinding.Reason.UNVERIFIED_IDENTITY, "identity read could not be started")
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Permission denied reading identity characteristic", e)
+            rejectPeer(gatt, PeerIdentityBinding.Reason.UNVERIFIED_IDENTITY, "identity read permission denied")
+        }
+    }
+
+    private fun handleIdentityRead(gatt: BluetoothGatt, value: ByteArray?) {
+        val address = gatt.device.address
+        val derivedAddress = verifyIdentityAndDerive(value, address)
+        val advertised = advertisedDeviceIds[address]
+
+        when (val outcome = PeerIdentityBinding.resolve(advertised, derivedAddress)) {
+            is PeerIdentityBinding.Outcome.Rejected -> {
+                rejectPeer(gatt, outcome.reason, "advertised=$advertised derived=$derivedAddress")
+                return
+            }
+            is PeerIdentityBinding.Outcome.Verified -> {
+                announceVerifiedPeer(gatt, outcome.peerId)
+                // Identity proved → now enable notifications.
+                enableNotificationsOnLink(gatt)
+            }
+        }
+    }
+
+    /**
+     * Publishes a peer that has proved the id it advertised.
+     *
+     * This is the only place `blePeerDiscovered` is reached from the central
+     * role. Before it, a connected peer has no entry in the Rust `peers` map,
+     * no MTU, no mesh registration and no route — it is connected but not
+     * addressable, which is the correct state for a peer whose id is still a
+     * claim.
+     *
+     * [peerId] is the *derived* address rather than the advertised string.
+     * They are equal by construction here — [PeerIdentityBinding] refuses
+     * anything else — but taking it from the proof means no future relaxation
+     * of that comparison can put an unproven id into the registry, the MTU
+     * map, or `Message.recipient`.
+     */
+    private fun announceVerifiedPeer(gatt: BluetoothGatt, peerId: String) {
+        val address = gatt.device.address
+        Log.i(TAG, "Verified peer $peerId, mapping $address -> $peerId")
+        host.connections.setDeviceIdentifier(address, peerId)
 
         val role = host.connections.consumePendingRole(address) ?: MeshController.MeshRole.MEMBER
-        host.meshController.registerConnection(deviceIdValue, role)
-        host.connections.setConnectionRole(deviceIdValue, role)
-        host.meshController.markPeerActive(deviceIdValue)
+        host.meshController.registerConnection(peerId, role)
+        host.connections.setConnectionRole(peerId, role)
+        host.meshController.markPeerActive(peerId)
         host.meshController.markPeerActive(host.selfDeviceId)
         host.refreshSelfMetrics()
         // Already on main — no extra hop needed.
@@ -882,7 +967,7 @@ internal class CentralGattClient(
         val rssiInt = host.rssiFor(address)?.toInt()
         if (rssiInt != null) {
             host.meshController.updatePeerMetrics(
-                deviceIdValue,
+                peerId,
                 MeshController.PeerMetrics(rssi = rssiInt),
             )
         }
@@ -904,59 +989,64 @@ internal class CentralGattClient(
         // which fires the moment a registered peer has to fall
         // back.
         //
+        // The identity cross-check moved BOTH calls out of
+        // `handleDeviceIdRead` and into this method, one GATT read later.
+        // Their order relative to each other is unchanged and must stay
+        // that way — the invariant is that no fragmenting send can observe
+        // an announced peer with no MTU on file.
+        //
         // If you are refactoring this function and think these two
         // calls should swap "for clarity", don't.
-        host.onDeviceIdResolved(address, deviceIdValue)
+        host.onDeviceIdResolved(address, peerId)
 
         val rssi = host.rssiFor(address) ?: (-60).toShort()
         try {
             // ORDERING INVARIANT: this line MUST come AFTER
             // `host.onDeviceIdResolved` above.
-            host.protocol.blePeerDiscovered(deviceIdValue, rssi)
+            host.protocol.blePeerDiscovered(peerId, rssi)
         } catch (e: Exception) {
             Log.e(TAG, "Error notifying peer discovered", e)
             diagnosticEmitter("error", "Error notifying peer discovered", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
         }
 
-        // Kick the next GATT op (identity read) BEFORE draining the pending
-        // fragment queue. Android's BLE stack runs the read on its own
-        // worker once the previous callback has returned, so issuing it now
-        // lets it proceed in parallel with the UniFFI burst that
-        // drainPendingInbound is about to execute on this thread. Draining
-        // first would serialise an arbitrary number of UniFFI round-trips
-        // before the identity handshake could even start.
-        val service = gatt.getService(serviceUuid)
-        val identityChar = service?.getCharacteristic(identityCharUuid)
-        if (identityChar == null) {
-            Log.w(TAG, "Identity characteristic not found on $address, skipping to CCCD")
-            enableNotificationsOnLink(gatt)
-        } else {
-            try {
-                val started = gatt.readCharacteristic(identityChar)
-                if (!started) {
-                    Log.w(TAG, "readCharacteristic(identity) returned false for $address; proceeding to CCCD")
-                    diagnosticEmitter("warning", "readCharacteristic(identity) returned false", mapOf("address" to address))
-                    // Identity is non-blocking — skip to CCCD instead of tearing the link down.
-                    enableNotificationsOnLink(gatt)
-                }
-            } catch (e: SecurityException) {
-                Log.e(TAG, "Permission denied reading identity characteristic", e)
-                diagnosticEmitter("error", "Permission denied reading identity characteristic", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-                enableNotificationsOnLink(gatt)
-            }
+        // Seed the route with the same verified address, now that the peer
+        // exists to the protocol layer. This used to run inside the identity
+        // handler ahead of the announce, which could learn a route to a peer
+        // `peers` had no entry for.
+        val quality = minOf(1.0f, maxOf(0.0f, (rssi.toFloat() + 100f) / 80f))
+        try {
+            host.protocol.learnRoute(peerId, peerId, 1.toUByte(), quality, 0u)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error learning route for $peerId", e)
         }
 
         // Drain all pending inbound fragments keyed by this address — the
         // same buffer holds central-side notify fragments and server-side
         // write fragments, since both paths queue under the
         // connection-specific address.
-        drainPendingInboundFor(address, deviceIdValue)
+        drainPendingInboundFor(address, peerId)
     }
 
-    private fun handleIdentityRead(gatt: BluetoothGatt, value: ByteArray?) {
-        handleReceivedIdentity(value, gatt.device.address)
-        // Identity read complete → now enable notifications.
-        enableNotificationsOnLink(gatt)
+    /**
+     * Closes a link whose peer could not prove the id it advertised.
+     *
+     * Nothing needs retracting: no announce happens before
+     * [announceVerifiedPeer], so a refused peer was never visible to the
+     * protocol layer. The link is dropped rather than kept unannounced —
+     * holding a connection we will never address costs a slot on both ends,
+     * and closing it lets the ordinary reconnect path retry, which is what
+     * recovers a peer that simply had not finished initializing its identity.
+     */
+    private fun rejectPeer(gatt: BluetoothGatt, reason: String, detail: String) {
+        val address = gatt.device.address
+        advertisedDeviceIds.remove(address)
+        Log.w(TAG, "Refusing peer $address: $reason ($detail)")
+        diagnosticEmitter(
+            "warning",
+            "BLE peer refused: unproven identity",
+            mapOf("address" to address, "reason" to reason, "detail" to detail),
+        )
+        closeGattClient(gatt, reason)
     }
 
     private fun enableNotificationsOnLink(gatt: BluetoothGatt) {
@@ -1022,23 +1112,35 @@ internal class CentralGattClient(
         }
         host.connections.removeGatt(address)
         linkReady.remove(address)
+        // Drop the unproven claim with the link, so a reconnect cannot pair
+        // this connection's device id with the next one's identity.
+        advertisedDeviceIds.remove(address)
         cancelMtuWatchdog(address)
     }
 
     /**
-     * Verifies a signed identity blob read from a peer. On success the
-     * cryptographically derived address is used to seed a direct
-     * routing entry for that peer.
+     * Verifies a signed identity blob read from a peer and returns the address
+     * its key derives to, or null if the peer proved nothing.
+     *
+     * Null covers every failure alike — absent, undecodable, bad signature,
+     * underivable key — because they are the same thing to the caller: no
+     * proof. [PeerIdentityBinding] turns that into a refusal; the specific
+     * cause is carried in the diagnostics rather than in the return type.
+     *
+     * The signature is over the peer's 19-byte mesh advertisement, so what it
+     * establishes is possession of the private key for `publicKey` — which is
+     * exactly what makes the derivation meaningful. Deriving without checking
+     * the signature would prove nothing at all: anyone can copy a public key.
      */
-    private fun handleReceivedIdentity(data: ByteArray?, address: String) {
+    private fun verifyIdentityAndDerive(data: ByteArray?, address: String): String? {
         val signedIdentity = SignedIdentityData.decode(data)
         if (signedIdentity == null) {
             Log.w(TAG, "Failed to decode identity data from $address")
             diagnosticEmitter("warning", "Failed to decode peer identity", mapOf("address" to address))
-            return
+            return null
         }
 
-        try {
+        return try {
             val isValid = host.protocol.verifySignature(
                 signedIdentity.publicKey.map { it.toUByte() },
                 signedIdentity.advertisementData.map { it.toUByte() },
@@ -1055,17 +1157,16 @@ internal class CentralGattClient(
                     "address" to address,
                     "derivedAddress" to derivedAddress,
                 ))
-
-                val rssi = host.rssiFor(address) ?: (-60).toShort()
-                val quality = minOf(1.0f, maxOf(0.0f, (rssi.toFloat() + 100f) / 80f))
-                host.protocol.learnRoute(derivedAddress, derivedAddress, 1.toUByte(), quality, 0u)
+                derivedAddress
             } else {
                 Log.w(TAG, "Invalid signature for peer $address")
                 diagnosticEmitter("warning", "Invalid peer signature", mapOf("address" to address))
+                null
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to verify signature: ${e.message}", e)
             diagnosticEmitter("error", "Signature verification failed", mapOf("error" to (e.message ?: "unknown")))
+            null
         }
     }
 

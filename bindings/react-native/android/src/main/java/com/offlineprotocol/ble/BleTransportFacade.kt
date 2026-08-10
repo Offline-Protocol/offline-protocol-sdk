@@ -496,6 +496,15 @@ class BleTransportFacade(
     @Volatile
     private var cachedSignedIdentity: com.offlineprotocol.mesh.SignedIdentityData? = null
 
+    // This device's derived address (`off1…`) — what DEVICE_ID serves.
+    // Same threading contract as [cachedSignedIdentity]: read by
+    // provideDeviceIdBytes() on the binder thread, written by
+    // updateSignedIdentity() on main. @Volatile so binder-thread readers see
+    // the latest value. Null until MLS is initialized, which is what makes
+    // the peripheral fail closed rather than advertise an unprovable id.
+    @Volatile
+    private var cachedLocalAddress: String? = null
+
     // Backoff state for updateSignedIdentity retries when MLS is not yet
     // initialized or signing fails. Main-thread only.
     private var identityRefreshRetryScheduled: Boolean = false
@@ -1423,6 +1432,19 @@ class BleTransportFacade(
                 Log.d(TAG, "MLS not initialized, cannot create signed identity")
                 return false
             }
+
+            // Cache the advertised address alongside the signed identity. Both
+            // are served from binder callbacks, which must never touch the
+            // protocol mutex, and both need MLS initialized — so they are
+            // primed together, on this thread, by the same retry ladder.
+            //
+            // This is what `DEVICE_ID` serves. It is deliberately not the
+            // `deviceId` constructor argument: that is the app-chosen profile,
+            // a local storage selector with no key behind it. Advertising it
+            // let a peer claim any name, and — because the core stamps
+            // `localAddress()` as `Message.sender` — also made our own control
+            // frames fail the receiver's `validate_transport_sender`.
+            cachedLocalAddress = protocol.localAddress()
 
             val publicKey = protocol.getIdentityPublicKey()
             val meshData = meshController.toAdvertisement()
@@ -3826,8 +3848,23 @@ class BleTransportFacade(
 
         override fun provideDeviceIdBytes(device: BluetoothDevice): ByteArray? {
             if (shuttingDown) return null
+            // Pure volatile read, for the same reason as provideIdentityBytes:
+            // this is a binder thread and `protocol.localAddress()` would take
+            // the protocol mutex, stalling every pending GATT op for this
+            // central.
+            //
+            // Null until MLS is initialized. Failing the read is the correct
+            // answer — a peer that cannot bind our id to a key must not
+            // surface us at all — and it is self-healing: the same refresh
+            // that primes the identity cache primes this, and the central
+            // retries on its next connection.
+            val address = cachedLocalAddress
+            if (address == null) {
+                mainHandler.post { ensureIdentityRefreshScheduled() }
+                return null
+            }
             Log.d(TAG, "Sent device ID to ${device.address}")
-            return deviceId.toByteArray(Charsets.UTF_8)
+            return address.toByteArray(Charsets.UTF_8)
         }
 
         override fun provideIdentityBytes(device: BluetoothDevice): ByteArray? {

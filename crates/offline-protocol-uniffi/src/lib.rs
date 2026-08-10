@@ -3466,6 +3466,30 @@ impl OfflineProtocol {
             .unwrap_or(0)
     }
 
+    /// Sends that found the recipient absent from the connected BLE peer set
+    /// while *other* peers were connected.
+    ///
+    /// The sibling canary to [`Self::ble_fragment_fallback_count`], and the
+    /// more direct one for an addressing regression: it counts a physically
+    /// in-range peer being treated as unreachable and the message silently
+    /// escalating to Internet. "No BLE peers at all" is the ordinary offline
+    /// case and is deliberately not counted — DORS escalating that send is
+    /// exactly right.
+    ///
+    /// It exists because the id a peer advertises and the id messages are
+    /// addressed to are two different strings that must agree. They are
+    /// bound together at the transport surface — the peer proves its
+    /// advertised id derives from its key, and that proved address is what
+    /// gets announced — but nothing in the type system enforces it, so this
+    /// counter is how a break shows up in production rather than in a bug
+    /// report about "BLE not working".
+    ///
+    /// Returns 0 when the BLE transport is not registered.
+    pub fn ble_recipient_not_among_peers_count(&self) -> u64 {
+        self.with_ble_transport(|ble_transport| ble_transport.recipient_not_among_peers_count())
+            .unwrap_or(0)
+    }
+
     /// BLE: Fragment received
     ///
     /// `sender_id` is the peer whose link the fragment arrived on. It is
@@ -9896,6 +9920,201 @@ mod tests {
             "OfflineProtocolModule.kt sendEvent must keep returning Boolean — the two platforms \
              report hand-over the same way or neither claim means anything"
         );
+    }
+
+    /// The BLE discovery gate: a peer is announced only under an address it
+    /// proved, and the MTU still lands before the announce.
+    ///
+    /// Three properties, all of which used to hold by convention and none of
+    /// which any Swift or Kotlin test can reach — `BleManager.swift` and the
+    /// GATT client's callback state machines sit behind CoreBluetooth and
+    /// `BluetoothGatt`, so CI only typechecks the first and never executes
+    /// either. The pure decision itself is tested on both platforms
+    /// (`PeerIdentityBindingTests` / `PeerIdentityBindingTest`); what cannot be
+    /// tested there is that the *call sites* use it, which is what this pins.
+    ///
+    /// 1. **What is advertised is the derived address.** Both peripherals used
+    ///    to serve `config.profile` in `DEVICE_ID` — a local storage selector,
+    ///    commonly the shared constant "default", with no key behind it. That
+    ///    let any peer claim any name, and, because the core stamps
+    ///    `local_address()` as `Message.sender`, it also made every control
+    ///    frame fail the receiver's [`validate_transport_sender`] — so BLE
+    ///    could not establish an MLS session at all.
+    /// 2. **The announce is downstream of the cross-check.** `blePeerDiscovered`
+    ///    must be reached only through the verified path, never from the
+    ///    DEVICE_ID read handler.
+    /// 3. **MTU-before-announce survived the move.** Both calls shifted one
+    ///    GATT read later, together; if a refactor separates them,
+    ///    `fragment_fallback_count` starts ticking in production and nothing
+    ///    fails at compile time.
+    #[test]
+    fn react_native_ble_announces_only_cross_checked_addresses() {
+        fn code_only(source: &str) -> String {
+            source
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with("//") && !l.starts_with('*') && !l.starts_with("///"))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            let path = rn_dir.join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+
+        let swift = code_only(&read("ios/BleManager.swift"));
+        let kotlin = code_only(&read(
+            "android/src/main/java/com/offlineprotocol/ble/CentralGattClient.kt",
+        ));
+        let facade = code_only(&read(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        ));
+
+        // --- 1. The peripheral advertises the derived address ----------------
+        assert!(
+            swift.contains("guard let advertisedAddress = protocolInstance.localAddress(),")
+                && swift.contains("value: deviceIdData,"),
+            "BleManager.swift must serve DEVICE_ID from localAddress(), and must refuse to \
+             publish the GATT service without one — advertising the profile is the \
+             unauthenticated-advertisement hole, and it also breaks our own control frames"
+        );
+        assert!(
+            !swift.contains("let deviceIdData = deviceId.data(using: .utf8)"),
+            "BleManager.swift must NOT serve the app-chosen profile as DEVICE_ID"
+        );
+        assert!(
+            facade.contains("cachedLocalAddress = protocol.localAddress()")
+                && facade.contains("val address = cachedLocalAddress"),
+            "BleTransportFacade.kt must serve DEVICE_ID from a cached localAddress(), primed on \
+             the main thread — provideDeviceIdBytes runs on a binder thread and must never take \
+             the protocol mutex"
+        );
+        assert!(
+            !facade.contains("return deviceId.toByteArray(Charsets.UTF_8)"),
+            "BleTransportFacade.kt must NOT serve the app-chosen profile as DEVICE_ID"
+        );
+
+        // --- 2. Announcing is reachable only through the cross-check ---------
+        assert!(
+            swift.contains("PeerIdentityBinding.resolve(")
+                && swift.contains("case let .verified(peerId) = outcome"),
+            "BleManager.swift must route discovery through PeerIdentityBinding.resolve"
+        );
+        assert!(
+            kotlin.contains("PeerIdentityBinding.resolve(advertised, derivedAddress)"),
+            "CentralGattClient.kt must route discovery through PeerIdentityBinding.resolve"
+        );
+        assert!(
+            swift.matches("blePeerDiscovered(").count() == 1
+                && kotlin.matches("blePeerDiscovered(").count() == 1,
+            "Each platform must announce from exactly one place — the verified path. A second \
+             call site is how an unproven id gets surfaced without anyone noticing"
+        );
+        assert!(
+            kotlin
+                .contains("private fun announceVerifiedPeer(gatt: BluetoothGatt, peerId: String)")
+                && kotlin.contains("host.protocol.blePeerDiscovered(peerId, rssi)"),
+            "CentralGattClient.kt must announce the peerId returned by the binding (the derived \
+             address), not the advertised string"
+        );
+        assert!(
+            !kotlin.contains("host.protocol.blePeerDiscovered(deviceIdValue"),
+            "CentralGattClient.kt must NOT announce the raw advertised DEVICE_ID value"
+        );
+
+        // --- 3. MTU still flushes immediately before the announce ------------
+        let swift_mtu = swift
+            .find("bleSetPeerMtu(peerId: peerId")
+            .expect("BleManager.swift must flush the per-peer MTU on the verified path");
+        let swift_announce = swift
+            .find("blePeerDiscovered(peerId: peerId")
+            .expect("BleManager.swift must announce on the verified path");
+        assert!(
+            swift_mtu < swift_announce,
+            "ORDERING INVARIANT: BleManager.swift must call bleSetPeerMtu BEFORE \
+             blePeerDiscovered. Announcing first lets a fragmenting send key-miss peer_mtus and \
+             silently fall back to the 185-byte floor — see \
+             test_ble_golden_path_handshake_never_falls_back"
+        );
+        let kotlin_mtu = kotlin
+            .find("host.onDeviceIdResolved(address, peerId)")
+            .expect("CentralGattClient.kt must flush the staged MTU on the verified path");
+        let kotlin_announce = kotlin
+            .find("host.protocol.blePeerDiscovered(peerId, rssi)")
+            .expect("CentralGattClient.kt must announce on the verified path");
+        assert!(
+            kotlin_mtu < kotlin_announce,
+            "ORDERING INVARIANT: CentralGattClient.kt must call onDeviceIdResolved (which \
+             flushes the staged MTU) BEFORE blePeerDiscovered"
+        );
+    }
+
+    /// Wi-Fi Direct announces nothing, because it can name nobody.
+    ///
+    /// Both managers used to pass a transport-level string — a TCP endpoint on
+    /// Android, the remote's profile on iOS — to the `wifi_direct_*` entry
+    /// points, whose parameters are documented as the peer's user-level id.
+    /// Neither is one, and this transport has no handshake that could supply
+    /// one. The frames were already going nowhere (`WifiDirectTransport` is
+    /// never registered), but the announcements still reached
+    /// `on_neighbor_discovered`, which entered the bogus id into the
+    /// capacity-bounded `known_peers` — evicting real neighbours — and started
+    /// an auto key exchange toward it.
+    #[test]
+    fn react_native_wifi_direct_announces_no_unproven_peer_ids() {
+        fn code_only(source: &str) -> String {
+            source
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with("//") && !l.starts_with('*') && !l.starts_with("///"))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            let path = rn_dir.join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+
+        for (label, source) in [
+            (
+                "ios/WifiDirectManager.swift",
+                read("ios/WifiDirectManager.swift"),
+            ),
+            (
+                "android/.../WifiDirectManager.kt",
+                read("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt"),
+            ),
+        ] {
+            let code = code_only(&source);
+            for entry_point in [
+                "wifiDirectPeerConnected(",
+                "wifiDirectPeerDisconnected(",
+                "wifiDirectMessageReceived(",
+            ] {
+                assert!(
+                    !code.contains(entry_point),
+                    "{label} must not call {entry_point}: the only ids it holds are a socket \
+                     endpoint or an app-chosen profile, and the core treats that value as the \
+                     peer's user-level id — matching it against Message.sender and entering it \
+                     into known_peers. Restoring these calls requires an identity exchange \
+                     first (see wifiDirectPeerIdIsUnavailable on the type)"
+                );
+            }
+        }
     }
 
     /// The one transport for which the post-identity rebuild is load-bearing.
