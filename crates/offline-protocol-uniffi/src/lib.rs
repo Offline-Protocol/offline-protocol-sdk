@@ -5243,6 +5243,14 @@ impl OfflineProtocol {
                 self.enabled_transports,
                 &address,
             )?;
+            // The Nostr transport did not exist while `initialize_mls` ran its
+            // restores — the line above is what installs it — so the persisted
+            // signing secret and receive watermark have to be installed now.
+            // Skipping this leaves the transport on its construction-time
+            // ephemeral key, which rotates this install's Nostr identity every
+            // launch and silently strands peers still sealing to the pubkey we
+            // last advertised.
+            protocol.restore_nostr_transport_state();
         }
         Ok(())
     }
@@ -6177,9 +6185,23 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
+    /// Backing store for [`TestMlsStorageProvider`], shareable so two protocol
+    /// instances can stand in for two launches of one device.
+    type TestStore = Arc<Mutex<HashMap<(String, String), Vec<u8>>>>;
+
     #[derive(Default)]
     struct TestMlsStorageProvider {
-        data: Mutex<HashMap<(String, String), Vec<u8>>>,
+        data: TestStore,
+    }
+
+    impl TestMlsStorageProvider {
+        /// A provider over an existing store, so a second instance reads what
+        /// the first one persisted.
+        fn over(store: &TestStore) -> Self {
+            Self {
+                data: store.clone(),
+            }
+        }
     }
 
     impl MlsStorageProvider for TestMlsStorageProvider {
@@ -10287,6 +10309,114 @@ mod tests {
         assert!(
             offline_protocol_transport::NostrTransport::new(address).is_ok(),
             "the derived address is exactly what the transport accepts"
+        );
+    }
+
+    /// One device, two launches: the same Nostr signing identity both times.
+    ///
+    /// The persisted signing secret is installed by a restore that runs inside
+    /// `initialize_mls` — at which point no Nostr transport exists, because the
+    /// transport is derived from the address `initialize_mls` is busy
+    /// producing. The rebuild installs it a moment later, so the restore has to
+    /// run again or the transport keeps the ephemeral key it was constructed
+    /// with. That failure is silent and remote: we advertise the ephemeral
+    /// pubkey in our key packages, peers persist it and seal to it, and after
+    /// our next launch their frames no longer open — while `build_event` only
+    /// re-resolves a peer it has *no* key for, so a stale one is never
+    /// refreshed.
+    #[test]
+    fn test_nostr_signing_identity_survives_a_restart() {
+        let secure = TestStore::default();
+        let state = TestStore::default();
+
+        let launch = |secure: &TestStore, state: &TestStore| {
+            let protocol = OfflineProtocol::new(ProtocolConfig {
+                profile: "restarting-device".to_string(),
+                nostr_enabled: true,
+                ..create_test_config()
+            })
+            .unwrap();
+            protocol
+                .initialize_mls(
+                    Box::new(TestMlsStorageProvider::over(secure)),
+                    Box::new(TestMlsStorageProvider::over(state)),
+                )
+                .unwrap();
+            protocol
+        };
+
+        let first = launch(&secure, &state);
+        let first_key = first
+            .nostr_get_public_key()
+            .expect("the rebuild installs a Nostr transport");
+
+        let second = launch(&secure, &state);
+        let second_key = second
+            .nostr_get_public_key()
+            .expect("the rebuild installs a Nostr transport");
+
+        assert_eq!(
+            first_key, second_key,
+            "the persisted signing secret must reach the transport the rebuild \
+             installed; an ephemeral key here rotates this install's Nostr \
+             identity on every launch"
+        );
+    }
+
+    /// The other half of the same restore: a restart resumes from the stored
+    /// receive watermark instead of replaying the whole first-run backfill.
+    #[test]
+    fn test_nostr_receive_watermark_survives_a_restart() {
+        let secure = TestStore::default();
+        let state = TestStore::default();
+        let data = serialized_message_from("sender-user", "receiver-user");
+
+        let first = OfflineProtocol::new(ProtocolConfig {
+            profile: "restarting-device".to_string(),
+            nostr_enabled: true,
+            ..create_test_config()
+        })
+        .unwrap();
+        first
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::over(&secure)),
+                Box::new(TestMlsStorageProvider::over(&state)),
+            )
+            .unwrap();
+        first.start().unwrap();
+
+        let first_run_since = nostr_subscription_since(&first);
+        let created_at = now_unix_secs() - 30;
+        first
+            .nostr_message_received_at("nostr-routing-pubkey".to_string(), data, created_at)
+            .unwrap();
+        let advanced_since = nostr_subscription_since(&first);
+        assert!(
+            advanced_since > first_run_since,
+            "watermark did not advance"
+        );
+
+        // stop() flushes the mark to protocol-state storage.
+        first.stop().unwrap();
+
+        let second = OfflineProtocol::new(ProtocolConfig {
+            profile: "restarting-device".to_string(),
+            nostr_enabled: true,
+            ..create_test_config()
+        })
+        .unwrap();
+        second
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::over(&secure)),
+                Box::new(TestMlsStorageProvider::over(&state)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            nostr_subscription_since(&second),
+            advanced_since,
+            "the second launch must resume from the persisted watermark rather \
+             than replaying the first-run backfill window"
         );
     }
 
