@@ -109,6 +109,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   constructor, so `enableTransport('nostr')` before `initializeMls` — including
   any config with `encryption.enabled: false` — is refused instead of falling
   back. See Security below for why the fallback had to go rather than be fixed.
+- **BREAKING**: a Nostr send whose *recipient* is not a derived address is
+  refused rather than published. The recipient is the sole preimage of the `#p`
+  tag the frame is addressed under, so a username-shaped one carries the same
+  disclosure the local id was refused for, and any non-address one addresses the
+  frame where no peer subscribes. Refused at `send`, so the caller can route
+  over another transport; the same rule gates the key-package resolution queue.
 - **BREAKING**: the publicly-computable key that seals published key-package
   records and bootstrap frames is no longer the routing tag. Both are still
   derived from the address, but through separate domain-separated derivations,

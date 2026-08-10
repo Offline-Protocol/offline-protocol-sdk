@@ -14,7 +14,7 @@
 //! [`NostrTransport::report_send_failure`], and injects inbound event
 //! payloads via [`NostrTransport::on_data_received`].
 //!
-//! Addressing uses public routing tags derived from device IDs
+//! Addressing uses public routing tags derived from this device's address
 //! ([`nostr_crypto::routing_tag_for_address`]); event signing uses a
 //! per-install secret key that starts out ephemeral and is upgraded to a
 //! persisted identity via [`NostrTransport::install_signing_secret`].
@@ -607,7 +607,12 @@ impl NostrTransport {
     /// through building an event, to tell it something it is about to look for
     /// anyway.
     fn enqueue_resolution(&self, user_id: &str) -> bool {
-        if !self.cold_contact_enabled() || user_id.is_empty() {
+        // A queued id becomes the `#p` tag of a relay query, so it is held to
+        // the same address requirement as a send recipient — and held here,
+        // at the queue's only gate, so `next_query` can never pop an id whose
+        // tag derivation fails after the entry was already consumed. Subsumes
+        // the emptiness check this replaces: an empty id is not an address.
+        if !self.cold_contact_enabled() || user_id.parse::<Address>().is_err() {
             return false;
         }
 
@@ -1382,6 +1387,30 @@ impl Transport for NostrTransport {
             )));
         }
 
+        // The recipient is the sole preimage of the `#p` tag this frame is
+        // published under, so it is refused here rather than hashed — the same
+        // rule `with_config` applies to our own id, and for the same two silent
+        // failures: a username-shaped id puts a label anyone can recompute from
+        // the name onto third-party relays, and any non-address id addresses
+        // the frame where nobody subscribes.
+        //
+        // Refused at `send` rather than in `build_event` because a build
+        // failure is retriable by the drain: a permanently undeliverable
+        // recipient would burn the whole `MAX_SIGN_RETRIES` ladder, republishing
+        // that label each time, before failing. Here it costs one error to the
+        // caller, which routes to another transport or fails the message.
+        //
+        // The value stays out of the error for the reason `with_config` keeps
+        // it out: the id this rejects is, in the case worth catching, a
+        // username.
+        if message.recipient.as_str().parse::<Address>().is_err() {
+            return Err(crate::Error::PeerNotReachable(
+                "Nostr addresses peers by their derived address, and the \
+                 recipient id is not one"
+                    .to_string(),
+            ));
+        }
+
         let queue_len = {
             let mut queue = self.send_queue.lock_or_recover();
             queue.push_back(message.clone());
@@ -1693,6 +1722,74 @@ mod tests {
         assert!(
             NostrTransport::new(addr("alice")).is_ok(),
             "a derived address is exactly what construction accepts"
+        );
+    }
+
+    /// A recipient that is not an address is refused at `send`, not hashed
+    /// into a public routing tag.
+    ///
+    /// The constructor already refuses a non-address for *our* id; this is the
+    /// same rule on the other side of the frame, and it has the same two silent
+    /// failure modes. It is asserted at `send` specifically because that is the
+    /// only queue writer: past it, the drain would treat the failure as
+    /// retriable and republish the label `MAX_SIGN_RETRIES` times.
+    #[test]
+    fn test_send_refuses_a_recipient_that_is_not_an_address() {
+        let transport = NostrTransport::new(addr("alice")).unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        let msg = Message::new(
+            UserId::new(addr("alice")).unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test").unwrap(),
+            "for a username",
+        );
+
+        assert!(
+            transport.send(&msg).is_err(),
+            "a username-shaped recipient must not reach the send queue"
+        );
+        assert!(
+            !transport.has_pending_sends(),
+            "the refused message must not be queued"
+        );
+        assert!(
+            transport.get_next_signed_event().unwrap().is_none(),
+            "nothing may be published for a refused recipient"
+        );
+
+        // The address form of the same peer is what does go out.
+        let ok = Message::new(
+            UserId::new(addr("alice")).unwrap(),
+            UserId::new(addr("bob")).unwrap(),
+            AppId::new("test").unwrap(),
+            "for an address",
+        );
+        assert!(transport.send(&ok).is_ok());
+    }
+
+    /// The resolution queue applies the same rule at its only gate, so
+    /// `next_query` cannot pop an id whose tag derivation would fail after the
+    /// entry was already consumed.
+    #[test]
+    fn test_resolution_refuses_a_peer_id_that_is_not_an_address() {
+        let transport = NostrTransport::new(addr("alice")).unwrap();
+
+        for bad in ["bob", "", "off1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"] {
+            assert!(
+                !transport.request_peer_key_packages(bad),
+                "a non-address peer id must not be queued for resolution: {bad:?}"
+            );
+        }
+        assert!(
+            transport.next_query().unwrap().is_none(),
+            "no query may be issued for a refused peer id"
+        );
+
+        assert!(
+            transport.request_peer_key_packages(&addr("bob")),
+            "an address is exactly what the resolution queue accepts"
         );
     }
 
@@ -3179,7 +3276,7 @@ mod tests {
         let transport = NostrTransport::new(addr("alice")).unwrap();
 
         for i in 0..MAX_PENDING_RESOLUTIONS {
-            assert!(transport.request_peer_key_packages(&format!("peer-{}", i)));
+            assert!(transport.request_peer_key_packages(&addr(&format!("peer-{}", i))));
         }
 
         assert!(
