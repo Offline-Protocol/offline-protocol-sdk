@@ -1440,36 +1440,6 @@ interface OfflineProtocol {
     string send_read_receipt(string recipient, sequence<string> message_ids);
 
     // ========================================================================
-    // RELAY SERVER API (JSON payload formatters for WebSocket relay)
-    // ========================================================================
-
-    // Check if a user is online via relay server.
-    // Returns JSON string to send via WebSocket relay.
-    [Throws=ProtocolError]
-    string check_presence(string username);
-
-    // Request prekey bundle for a user to establish encrypted communication.
-    // Returns JSON string to send via WebSocket relay.
-    [Throws=ProtocolError]
-    string request_prekey_bundle(string username);
-
-    // Upload identity key and prekeys for Signal Protocol.
-    // Returns JSON string to send via WebSocket relay.
-    // Parameters are JSON strings that will be parsed and included in the payload.
-    [Throws=ProtocolError]
-    string upload_keys(string identity_key, string signed_prekey_json, string one_time_prekeys_json);
-
-    // Set typing indicator via relay server (JSON payload formatter).
-    // Returns JSON string to send via WebSocket relay.
-    [Throws=ProtocolError]
-    string set_typing(string conversation_id);
-
-    // Clear typing indicator via relay server (JSON payload formatter).
-    // Returns JSON string to send via WebSocket relay.
-    [Throws=ProtocolError]
-    string clear_typing(string conversation_id);
-    
-    // ========================================================================
     // GROUP MESSAGING (MLS-encrypted, transport-agnostic)
     // ========================================================================
 
