@@ -19077,6 +19077,91 @@ fn test_validate_transport_sender_hop_zero_mismatch_still_rejected() {
     assert!(!protocol.validate_transport_sender(&msg));
 }
 
+/// The relay must attribute an uploader by the address it runs as, not by the
+/// account name it authenticated under.
+///
+/// This pins, from the SDK side, the contract relay work (TODO item 18) has to
+/// satisfy. Since #328 a frame's `sender` is the uploader's derived `off1…`
+/// address — `initialize_mls` takes `local_id` from the identity key — while
+/// the relay stamps its envelope `sender` from `resolve_username`, a username.
+/// The two meet here, at the `hop_count == 0` strict match, so a username
+/// attribution refuses every control frame the relay carries: `__MLS_KEY_PKG__`
+/// and `__MLS_WELCOME__` never land, and no new session can be established over
+/// the relay. `__MLS_ENC__` is data-plane and skips the gate entirely, which is
+/// why already-established sessions keep working and the break stays quiet.
+///
+/// This is deliberately *not* the same case as
+/// `test_validate_transport_sender_mismatch`, which names a different **peer**
+/// (`id("eve")`) — an impostor, correctly refused. Here both arms name the same
+/// peer and differ only in **namespace**: `id("alice")` is what alice's device
+/// signs as, `"alice"` is what the relay knows her as. Refusing the second is
+/// right for a frame that proves nothing, and is exactly why the relay cannot
+/// keep attributing in username space.
+///
+/// Neither assertion changes when item 18 ships. What changes is which arm
+/// production reaches: the relay starts stamping the address, so real traffic
+/// lands on the first arm instead of the second. The gate's contract is what is
+/// pinned here, not the relay's current behaviour, so this test stays green
+/// across the transition and fails loudly if the strict match is ever loosened
+/// to paper over the mismatch instead of fixing the attribution.
+#[test]
+fn test_relay_attribution_must_be_the_address_not_the_profile() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    // A gated prefix, deliberately: `security_gate_control_message` returns
+    // `Proceed` immediately for anything `is_security_gated_prefix` does not
+    // cover, so a frame carrying ordinary text would make both arms below pass
+    // without the identity check ever running. `KEY_PACKAGE` is also the frame
+    // the break actually blocks.
+    let control = format!("{}{{\"data\":\"test\"}}", internal_prefixes::KEY_PACKAGE);
+
+    // `signed_frame` signs only when the content is a gated prefix. Assert the
+    // signature is really there: unsigned control traffic is refused outright,
+    // so an unsigned frame would reject on *both* arms and the test would pass
+    // while proving nothing about transport identity.
+    let signed = signed_frame(&id("alice"), &id("user123"), &control);
+    assert!(
+        signed.metadata.contains_key(CTRL_SIG_META_KEY),
+        "the frame under test must actually be signed, or both arms reject for \
+         the unrelated unsigned-control reason"
+    );
+
+    // The two namespaces this whole item is about.
+    assert_ne!(
+        id("alice"),
+        "alice",
+        "the fixture must give alice an address distinct from her label, or \
+         this test cannot tell the two namespaces apart"
+    );
+
+    // What the relay must stamp after item 18: the uploader's address.
+    let mut as_address = signed.clone();
+    as_address.set_transport_peer_id(id("alice")).unwrap();
+    assert!(
+        matches!(
+            protocol.security_gate_control_message(&as_address, Some(TransportType::Internet)),
+            ControlGateOutcome::Proceed { signed: true }
+        ),
+        "a relay that attributes by address must let alice's own signed control \
+         frame through"
+    );
+
+    // What the relay stamps today: the account name. Same peer, same frame,
+    // same signature — refused, because the claim is unproven in this namespace.
+    let mut as_profile = signed;
+    as_profile
+        .set_transport_peer_id("alice".to_string())
+        .unwrap();
+    assert!(
+        matches!(
+            protocol.security_gate_control_message(&as_profile, Some(TransportType::Internet)),
+            ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected)
+        ),
+        "a username attribution must be refused: this is the relay break, and \
+         loosening the gate is not the fix — item 18 changes the attribution"
+    );
+}
+
 #[test]
 fn test_relayed_control_message_with_carrier_identity_not_security_rejected() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
