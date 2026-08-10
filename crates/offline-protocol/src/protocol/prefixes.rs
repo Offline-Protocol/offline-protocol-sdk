@@ -187,6 +187,14 @@ pub(crate) const DATA_PLANE_PREFIXES: &[&str] =
 /// answers off the message plane and onto dedicated FFI entry points, the way
 /// `internet_group_report_received` already handles the group delivery report;
 /// that is deliberately out of scope here and left as the follow-up.
+///
+/// **Maintenance note:** this list is mirrored, by hand, in three places that
+/// no single compiler ever sees together — here, `RelayAnswerPrefixes.swift`,
+/// and `RelayAnswerPrefixes.kt`. Each bridge pins its own copy against the same
+/// literals ([`relay_answer_prefixes_are_pinned`] does it for this one), because
+/// a prefix present in one list and absent from another fails **silently**: the
+/// bridge injects the answer unattributed, this list declines to exempt it, and
+/// the frame is dropped as unsigned with no peer at fault. Edit all three.
 pub(crate) const RELAY_ANSWER_PREFIXES: &[&str] = &[
     internal_prefixes::GROUP_CREATED,
     internal_prefixes::GROUP_MEMBER_ADDED,
@@ -195,3 +203,79 @@ pub(crate) const RELAY_ANSWER_PREFIXES: &[&str] = &[
     internal_prefixes::USER_GROUPS,
     internal_prefixes::GROUP_ERROR,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The membership of [`RELAY_ANSWER_PREFIXES`], pinned to literals.
+    ///
+    /// Written out rather than derived, for the same reason the bridges write
+    /// theirs out: this list is one of three hand-maintained copies, and a test
+    /// that recomputed it from the constant would agree with any edit — which
+    /// is precisely the failure mode. The literals here are the contract the
+    /// two bridge lists are also pinned against, so a divergence in any one of
+    /// the three now fails a test in its own language.
+    ///
+    /// Dropping an entry is the dangerous direction and the reason this test
+    /// exists: the bridge would keep injecting that answer unattributed, the
+    /// gate would refuse it as unsigned, and the visible symptom would be a
+    /// relay feature quietly not working (for `__USER_GROUPS__`, group sync;
+    /// for `__GROUP_CREATED__`, the `relay_synced` gate group broadcast rides
+    /// on) with an `UNSIGNED_CONTROL_REJECTED` warning naming the relay.
+    #[test]
+    fn relay_answer_prefixes_are_pinned() {
+        assert_eq!(
+            RELAY_ANSWER_PREFIXES,
+            [
+                "__GROUP_CREATED__",
+                "__GROUP_MEMBER_ADDED__",
+                "__GROUP_MEMBER_REMOVED__",
+                "__GROUP_INFO__",
+                "__USER_GROUPS__",
+                "__GROUP_ERROR__",
+            ],
+            "the relay-answer exemption list changed — update RelayAnswerPrefixes.swift \
+             and RelayAnswerPrefixes.kt to match, or the bridges and the gate will \
+             disagree silently"
+        );
+    }
+
+    /// The two exemption lists must stay disjoint.
+    ///
+    /// They are different mechanisms with different post-conditions — a
+    /// data-plane frame is authenticated later by MLS, a relay answer is not
+    /// authenticated by this SDK at all — and the doc on each says so. Listing a
+    /// prefix in both would make the narrow relay exemption (Internet ingest,
+    /// unattributed) unreachable for it, since `is_security_gated_prefix`
+    /// already excludes the data plane before the gate runs, so the three
+    /// conditions would silently stop applying.
+    #[test]
+    fn the_two_exemption_lists_do_not_overlap() {
+        for relay in RELAY_ANSWER_PREFIXES {
+            assert!(
+                !DATA_PLANE_PREFIXES.contains(relay),
+                "'{}' is exempt twice, by two different rules",
+                relay
+            );
+        }
+    }
+
+    /// Every exempt prefix must be an internal prefix, or it exempts nothing.
+    ///
+    /// The gate only consults [`RELAY_ANSWER_PREFIXES`] for content that
+    /// `is_security_gated_prefix` already matched, which requires membership in
+    /// [`INTERNAL_PREFIXES`]. A typo'd entry here is therefore not a widened
+    /// hole — it is dead text, and the answer it was meant to exempt gets
+    /// dropped as unsigned instead.
+    #[test]
+    fn every_exempt_prefix_is_an_internal_prefix() {
+        for relay in RELAY_ANSWER_PREFIXES {
+            assert!(
+                INTERNAL_PREFIXES.contains(relay),
+                "'{}' is not an internal prefix, so exempting it does nothing",
+                relay
+            );
+        }
+    }
+}

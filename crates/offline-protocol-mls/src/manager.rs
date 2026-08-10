@@ -2661,6 +2661,57 @@ mod tests {
         assert!(matches!(err, MlsError::CredentialIdentityMismatch { .. }));
     }
 
+    /// The *derivation* half of the cached-read check, which the poisoned-store
+    /// test above cannot reach.
+    ///
+    /// That test stores mallory's own genuine package under bob's key, so the
+    /// credential identity check ([`MlsManager::verify_credential_identity`])
+    /// refuses it first and
+    /// [`MlsManager::verify_address_binding`] never runs. A *substituted*
+    /// package — credential claiming bob's address, leaf key mallory's — sails
+    /// past the credential check by construction and can only be caught by
+    /// re-deriving the address from the key.
+    ///
+    /// This is the call site the re-check exists for. Import-time validation
+    /// does not travel with a cached package: it is re-read from the
+    /// install-scoped store long after the receive-time gate admitted it, which
+    /// is exactly the window a container write aims at. Deleting the
+    /// `verify_address_binding` line from `get_contact_key_package` leaves
+    /// every other test in this workspace green, so without this one the
+    /// second call site could be dropped by a refactor in silence.
+    #[test]
+    fn test_get_contact_key_package_rejects_a_substituted_package() {
+        let storage: Arc<dyn MlsStorage> = Arc::new(InMemoryStorage::new());
+        let (alice_keys, alice_address) = test_identity("alice");
+        seed_identity(&storage, &alice_keys);
+        let alice = MlsManager::new(alice_address.to_string(), storage.clone()).unwrap();
+
+        // Claims bob's address, signed by mallory's key.
+        let (mallorys_keys, _) = test_identity("mallory");
+        let forged = substituted_key_package(&addr("bob"), &mallorys_keys);
+
+        storage
+            .store(
+                StorageKeyType::ContactKeyPackage.as_str(),
+                &addr("bob"),
+                &forged,
+            )
+            .unwrap();
+
+        let err = alice.create_session(&addr("bob")).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MlsError::KeyPackageAddressMismatch { ref claimed, .. } if *claimed == addr("bob")
+            ),
+            "a substituted cached package must be refused at use time, got {:?}",
+            err
+        );
+
+        // And no session was built against mallory's leaf.
+        assert!(!alice.has_session(&addr("bob")).unwrap());
+    }
+
     #[test]
     fn test_replace_session_with_welcome_rejects_hostile_inviter_id() {
         // `inviter_id` arrives on the wire and is used as a raw storage key

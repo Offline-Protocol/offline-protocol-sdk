@@ -19134,27 +19134,45 @@ fn test_transport_peer_id_not_serialized() {
     assert!(deserialized.transport_peer_id().is_none());
 }
 
+/// The gate's refusal of an unsigned frame reaches the *dispatcher*, not just
+/// `security_gate_control_message` in isolation.
+///
+/// `unsigned_control_is_refused_for_known_and_unknown_senders` pins the gate
+/// itself; this pins that `process_internal_message` honours the verdict instead
+/// of falling through to a handler.
+///
+/// Two things this test used to get wrong, both worth stating so they are not
+/// reintroduced. It asserted `result.is_some()`, which the old contract (handler
+/// consumes the frame) and the new one (gate rejects it) both satisfy — so it
+/// could not fail in either world. And it built its frame with
+/// `pending_test_message`, which *signs* whenever the sender is a seeded
+/// identity, so the "unsigned" frame in a test named for unsigned traffic
+/// carried a valid signature.
 #[test]
-fn test_unsigned_control_message_allowed_from_unknown_peer() {
+fn test_unsigned_control_message_rejected_by_the_dispatcher() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    // Nothing known about "bob"
-    assert!(!protocol.is_encryption_capable("bob"));
+    // Nothing known about bob: no session, no verified control frame.
+    assert!(!protocol.is_encryption_capable(&id("bob")));
 
-    // Create an unsigned control message from "bob"
-    let msg = pending_test_message(
+    // `unsigned_frame`, deliberately: the helper that signs would defeat the
+    // premise silently.
+    let msg = unsigned_frame(
         &id("bob"),
-        &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        &id("user123"),
+        format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+    );
+    assert!(
+        !msg.metadata.contains_key(CTRL_SIG_META_KEY),
+        "the frame under test must actually be unsigned"
     );
 
-    // Should be allowed through (legacy peer, no TOFU key pinned)
-    let result = protocol.process_internal_message(&msg);
-    // CONN_REQUEST handler will attempt to parse the payload — it won't
-    // return None (it will be Consumed by the handler or by parsing logic).
-    // The key point is that it was NOT rejected by the security gate.
     assert!(
-        result.is_some(),
-        "Unsigned control message from unknown peer should pass the security gate"
+        matches!(
+            protocol.process_internal_message(&msg),
+            Some(InternalMessageResult::SecurityRejected)
+        ),
+        "the dispatcher must honour the gate's refusal of unsigned control traffic"
     );
 }
 
