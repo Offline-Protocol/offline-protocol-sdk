@@ -2761,12 +2761,9 @@ impl OfflineProtocol {
         let key_pkg = received_pkg.key_package_data.clone();
 
         // Add member via MLS — returns both Welcome (for invitee) and Commit (for existing members)
-        // Taken before the MLS guard: the verdict borrows `self`.
-        let trust = self.key_package_trust(invitee_user_id);
         let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id)?;
-        let (welcome, commit) =
-            mls_guard.add_group_member(&gid, invitee_user_id, &key_pkg, trust)?;
+        let (welcome, commit) = mls_guard.add_group_member(&gid, invitee_user_id, &key_pkg)?;
         let group_name = welcome.group_name.clone();
         drop(mls_guard);
 

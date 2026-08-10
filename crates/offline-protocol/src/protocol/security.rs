@@ -1,17 +1,17 @@
-//! Control message signing, verification, and TOFU key management.
+//! Control message signing, verification, and peer identity derivation.
 
 use super::storage::MAX_RESTORE_KEYS_PER_CATEGORY;
 use super::{
-    base64_decode, base64_encode, storage_keys, ControlGateOutcome, InternalMessageResult,
-    OfflineProtocol, TofuEntry, CTRL_PK_META_KEY, CTRL_SIGN_DOMAIN, CTRL_SIG_META_KEY,
-    DATA_PLANE_PREFIXES, INTERNAL_PREFIXES, MAX_PLAINTEXT_RECEIVE_WARNED_PEERS, MAX_TOFU_PEERS,
-    TOFU_MIN_EVICTION_AGE_MS,
+    base64_decode, base64_encode, storage_keys, ControlGateOutcome, EncryptionCapableEntry,
+    InternalMessageResult, OfflineProtocol, CTRL_PK_META_KEY, CTRL_SIGN_DOMAIN, CTRL_SIG_META_KEY,
+    DATA_PLANE_PREFIXES, INTERNAL_PREFIXES, MAX_PLAINTEXT_RECEIVE_WARNED_PEERS,
+    RELAY_ANSWER_PREFIXES,
 };
 use crate::events::{Event, SecurityWarningCode};
 use crate::{Error, Result};
 use chrono::Utc;
-use offline_protocol_core::{Message, UserId};
-use offline_protocol_mls::KeyPackageTrust;
+use offline_protocol_core::{Address, Message, UserId};
+use offline_protocol_transport::TransportType;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
@@ -27,7 +27,7 @@ impl OfflineProtocol {
     /// Each field is encoded as `<4-byte big-endian length><utf-8 bytes>`,
     /// making the encoding unambiguous regardless of field content (no
     /// delimiter-collision risk).
-    pub(super) fn build_canonical_payload(message: &Message) -> Result<Vec<u8>> {
+    pub(crate) fn build_canonical_payload(message: &Message) -> Result<Vec<u8>> {
         let fields: [&str; 4] = [
             message.sender.as_str(),
             &message.id.as_str(),
@@ -75,6 +75,20 @@ impl OfflineProtocol {
             }
         };
 
+        Self::sign_control_message_with(message, &manager)
+    }
+
+    /// Stamps `message` with an Ed25519 signature and public key from
+    /// `manager`'s identity.
+    ///
+    /// Split out from [`Self::sign_control_message`] so a caller that already
+    /// holds the signing identity — a test standing in for a peer's device —
+    /// can produce the same bytes the peer's own instance would, rather than
+    /// reimplementing the canonical payload and getting it subtly wrong.
+    pub(crate) fn sign_control_message_with(
+        message: &mut Message,
+        manager: &offline_protocol_mls::MlsManager,
+    ) -> Result<()> {
         let public_key = match manager.get_identity_public_key() {
             Ok(pk) => pk,
             Err(e) => {
@@ -102,12 +116,13 @@ impl OfflineProtocol {
         Ok(())
     }
 
-    /// Verifies a control message's Ed25519 signature from metadata.
+    /// Verifies a control message's Ed25519 signature from metadata, and that
+    /// the key which signed it is the one the claimed sender's address names.
     ///
     /// Returns:
-    /// - `Ok(true)`  — valid signature, TOFU key check passed
-    /// - `Ok(false)` — no signature metadata at all (legacy/unsigned message)
-    /// - `Err(..)` — signature invalid, key mismatch, TOFU violation, or
+    /// - `Ok(true)`  — valid signature, and the signing key derives to `sender`
+    /// - `Ok(false)` — no signature metadata at all (unsigned message)
+    /// - `Err(..)` — signature invalid, sender/key derivation mismatch, or
     ///   malformed metadata (e.g. public key present without a signature,
     ///   or vice versa)
     pub(super) fn verify_control_message(&mut self, message: &Message) -> Result<bool> {
@@ -152,136 +167,78 @@ impl OfflineProtocol {
             ));
         }
 
-        // TOFU: check/pin the public key for this sender
-        self.tofu_check_or_pin(message.sender.as_str(), public_key)
-    }
+        // The claim is now *proved*, not pinned: the address the frame claims
+        // to come from is the hash of the key that just signed it, or it is
+        // not this peer's frame.
+        self.verify_sender_derivation(message.sender.as_str(), &public_key)?;
 
-    /// The Authentication Service verdict for `peer_id`, for handing to code
-    /// that consumes a key package.
-    ///
-    /// [`KeyPackageTrust::FirstUse`] when no key is pinned. That is a truthful
-    /// "nothing to compare against", not a waiver: it is reached for a genuinely
-    /// new peer, and — because `security_gate_control_message` accepts an
-    /// unsigned control message from a peer that has never been pinned — for one
-    /// whose key package arrived unsigned. The pin lands on their first signed
-    /// message and every later use of their key package is checked against it.
-    ///
-    /// `pub(crate)` rather than `pub(super)` because `group_mesh` is a sibling
-    /// module of `protocol`, and the group invite path needs this too.
-    pub(crate) fn key_package_trust(&self, peer_id: &str) -> KeyPackageTrust<'_> {
-        match self.known_peer_public_keys.get(peer_id) {
-            Some(entry) => KeyPackageTrust::Pinned(&entry.public_key),
-            None => KeyPackageTrust::FirstUse,
-        }
-    }
-
-    /// Checks a verified public key against the TOFU store, or pins it on
-    /// first contact. Handles bounded-capacity eviction with a minimum age
-    /// threshold to resist cache-filling attacks.
-    ///
-    /// Returns `Ok(true)` on success, `Err(..)` on TOFU key mismatch or
-    /// invalid (empty) public key.
-    pub(super) fn tofu_check_or_pin(&mut self, sender: &str, public_key: Vec<u8>) -> Result<bool> {
-        if public_key.is_empty() {
-            return Err(Error::Other(
-                "Cannot TOFU-pin an empty public key".to_string(),
-            ));
-        }
-        // Reaching this function means `verify_control_message` already checked
-        // an Ed25519 signature over the canonical payload, and the signing key
-        // *is* the peer's MLS identity key (`get_identity_public_key` returns
-        // the credential's `signature_key`). So this is proof the peer runs
-        // MLS, independent of whether a pin is ultimately stored — the
-        // store-full branch below returns without pinning, and that peer is no
-        // less encryption-capable for it. Marked here rather than at the exits
-        // so no future branch can slip out without it.
-        self.mark_encryption_capable(sender);
-        let now_ms = Utc::now().timestamp_millis();
-
-        // Deferred persistence actions collected here to avoid borrow conflicts
-        // between `get_mut` on the HashMap and `&self` in persistence helpers.
-        enum TofuAction {
-            Persist(String, TofuEntry),
-            Delete(String),
-        }
-        let mut actions: Vec<TofuAction> = Vec::new();
-
-        if let Some(entry) = self.known_peer_public_keys.get_mut(sender) {
-            if entry.public_key != public_key {
-                warn!(
-                    sender = %sender,
-                    "TOFU key mismatch: peer presented a different public key"
-                );
-                self.emit_security_warning(
-                    sender,
-                    SecurityWarningCode::TofuKeyMismatch,
-                    "Public key changed for known peer (possible impersonation)",
-                );
-                return Err(Error::Other(format!(
-                    "TOFU key mismatch for peer '{}'",
-                    sender
-                )));
-            }
-            // Update last-seen timestamp for LRU tracking
-            entry.last_seen_ms = now_ms;
-            actions.push(TofuAction::Persist(sender.to_string(), entry.clone()));
-        } else {
-            // First contact — pin the key (with bounded capacity, LRU eviction)
-            if self.known_peer_public_keys.len() >= MAX_TOFU_PEERS {
-                // Only evict entries older than the minimum age to prevent a
-                // cache-filling attack where an adversary rapidly registers
-                // many fake identities to force eviction of legitimate peers.
-                let eviction_cutoff = now_ms - TOFU_MIN_EVICTION_AGE_MS;
-                let evict_key = self
-                    .known_peer_public_keys
-                    .iter()
-                    .filter(|(_, entry)| entry.last_seen_ms < eviction_cutoff)
-                    .min_by_key(|(_, entry)| entry.last_seen_ms)
-                    .map(|(k, _)| k.clone());
-
-                match evict_key {
-                    Some(key) => {
-                        debug!(evicted_peer = %key, "TOFU store full, evicting LRU entry");
-                        self.known_peer_public_keys.remove(&key);
-                        actions.push(TofuAction::Delete(key));
-                    }
-                    None => {
-                        warn!(
-                            sender = %sender,
-                            store_size = self.known_peer_public_keys.len(),
-                            "TOFU store full and no entry old enough to evict — \
-                             refusing to pin new peer (possible cache-filling attack)"
-                        );
-                        self.emit_security_warning(
-                            sender,
-                            SecurityWarningCode::TofuStoreFull,
-                            "TOFU store full, cannot pin new peer key",
-                        );
-                        // Still accept the message (signature was valid) but
-                        // don't pin — the peer will be re-verified each time.
-                        return Ok(true);
-                    }
-                }
-            }
-            debug!(sender = %sender, "TOFU: pinning public key for new peer");
-            let entry = TofuEntry {
-                public_key,
-                last_seen_ms: now_ms,
-            };
-            actions.push(TofuAction::Persist(sender.to_string(), entry.clone()));
-            self.known_peer_public_keys
-                .insert(sender.to_string(), entry);
-        }
-
-        // Execute deferred persistence actions (HashMap borrow is now released)
-        for action in actions {
-            match action {
-                TofuAction::Persist(peer_id, entry) => self.persist_tofu_entry(&peer_id, &entry),
-                TofuAction::Delete(peer_id) => self.delete_tofu_entry(&peer_id),
-            }
-        }
-
+        // Reaching here means an Ed25519 signature over the canonical payload
+        // verified against a key that derives to the claimed sender, and that
+        // key *is* the peer's MLS identity key (`get_identity_public_key`
+        // returns the credential's `signature_key`). So this is proof the peer
+        // runs MLS.
+        self.record_encryption_capable(message.sender.as_str());
         Ok(true)
+    }
+
+    /// Requires `public_key` to derive to the address in `sender`.
+    ///
+    /// This one function is what the TOFU pin store used to be. The store held
+    /// a key per peer so a later frame could be compared against the first one
+    /// seen; an address makes that comparison unnecessary, because the address
+    /// already *is* `bech32m(0x01 ‖ SHA-256(key)[..20])`. Impersonation stops
+    /// costing "be the first to claim the name" and starts costing a 160-bit
+    /// second preimage.
+    ///
+    /// # Why an unparseable sender is rejected
+    ///
+    /// A sender that is not an address has no derivation to check, and the
+    /// tempting answer — pass, there is nothing to compare — is the whole
+    /// bypass: an attacker would claim a nickname and skip the gate. So a
+    /// control frame whose sender is not an address is refused outright. This
+    /// is also what makes the check unconditional in the sense that matters:
+    /// there is no input for which it declines to run.
+    fn verify_sender_derivation(&self, sender: &str, public_key: &[u8]) -> Result<()> {
+        let claimed = sender.parse::<Address>().map_err(|e| {
+            Error::Other(format!(
+                "Control message sender '{}' is not an address: {}",
+                sender, e
+            ))
+        })?;
+
+        let derived = offline_protocol_mls::MlsManager::derive_address(public_key)
+            .map_err(|e| Error::Other(format!("Cannot derive an address from the key: {}", e)))?;
+
+        if derived != claimed {
+            warn!(
+                sender = %sender,
+                derived = %derived,
+                "Control message signing key does not derive to the claimed sender"
+            );
+            self.emit_security_warning(
+                sender,
+                SecurityWarningCode::SenderAddressMismatch,
+                "Signing key does not derive to the claimed sender address (impersonation attempt)",
+            );
+            return Err(Error::Other(format!(
+                "Sender address mismatch: '{}' claimed, key derives to '{}'",
+                sender, derived
+            )));
+        }
+        Ok(())
+    }
+
+    /// Marks `peer_id` encryption-capable, in memory and durably.
+    ///
+    /// The durable half is not bookkeeping: `encryption_capable_peers` is what
+    /// keeps the plaintext-downgrade gate shut, and a session can be torn down
+    /// remotely, so without a record that outlives the session the next launch
+    /// would come up knowing nothing about a peer it had verified and re-open
+    /// the gate for them. The TOFU store used to be that record as a side
+    /// effect of holding pins; it is now the only thing this category does.
+    pub(super) fn record_encryption_capable(&mut self, peer_id: &str) {
+        self.mark_encryption_capable(peer_id);
+        self.persist_encryption_capable(peer_id);
     }
 
     /// Security gate for control messages. Validates transport-level sender
@@ -297,6 +254,7 @@ impl OfflineProtocol {
     pub(super) fn security_gate_control_message(
         &mut self,
         message: &Message,
+        arrival_transport: Option<TransportType>,
     ) -> ControlGateOutcome {
         let content = &message.content;
         let sender = message.sender.as_str();
@@ -341,53 +299,51 @@ impl OfflineProtocol {
                 // Signed and verified — proceed
                 true
             }
-            Ok(false) => {
-                // Unsigned (legacy) — but if the sender already has a TOFU-pinned
-                // key, reject: a known-signed peer going unsigned is a suspicious
-                // downgrade that could indicate an impersonation attempt.
-                if self.known_peer_public_keys.contains_key(sender) {
-                    warn!(
-                        sender = %sender,
-                        message_id = %message.id,
-                        "Dropping unsigned control message from TOFU-pinned peer (signature downgrade)"
-                    );
-                    self.emit_security_warning(
-                        sender,
-                        SecurityWarningCode::SignatureDowngrade,
-                        "Unsigned control message from peer with pinned key (possible downgrade attack)",
-                    );
-                    return ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected);
-                }
-                // Strict deployments reject unsigned control traffic outright.
-                // The transport-identity strict match only covers frames
-                // claiming direct origin (`hop_count == 0`); a forged-hop
-                // frame skips it and lands here, so accepting unsigned frames
-                // would let a spoofer impersonate any not-yet-pinned peer
-                // without even committing a signing key. Requiring a
-                // signature forces the attacker to present a key that TOFU
-                // pins — and later flags when the real peer shows up.
-                if self.config.security.require_transport_identity {
-                    warn!(
-                        sender = %sender,
-                        message_id = %message.id,
-                        "Dropping unsigned control message (require_transport_identity demands signed control traffic)"
-                    );
-                    self.emit_security_warning(
-                        sender,
-                        SecurityWarningCode::UnsignedControlRejected,
-                        "Unsigned control message rejected by strict transport-identity policy",
-                    );
-                    return ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected);
-                }
+            Ok(false) if Self::is_unsignable_relay_answer(message, arrival_transport) => {
+                // A relay-originated answer, which no peer signed because no
+                // peer sent it. See `RELAY_ANSWER_PREFIXES` for why this cannot
+                // be signature-gated and what does and does not protect it.
                 debug!(
                     sender = %sender,
                     message_id = %message.id,
-                    "Received unsigned control message (legacy peer)"
+                    "Accepting unsigned relay-originated control frame (no peer signs these)"
                 );
                 false
             }
+            Ok(false) => {
+                // Unsigned control traffic is refused, unconditionally.
+                //
+                // This used to be a two-part policy: reject if the sender had a
+                // pin (a known-signed peer going quiet is a downgrade), else
+                // reject only under `require_transport_identity`. Both halves
+                // existed because an unsigned frame from a peer we knew nothing
+                // about was, at the time, indistinguishable from a legacy peer
+                // — there was no way to check an identity claim without prior
+                // contact, so refusing would have meant refusing first contact.
+                //
+                // Derived addresses remove that excuse: a signature is now
+                // *self-verifying* against the sender's own id, so a peer that
+                // will not sign is a peer making an unprovable claim, whether
+                // or not we have met them. Leaving any accepting path here
+                // would also leave the forged-`hop_count` bypass open — a
+                // spoofer who sets `hop_count > 0` skips the transport-identity
+                // strict match and lands exactly on this branch, and would then
+                // impersonate any peer without committing a signing key at all.
+                warn!(
+                    sender = %sender,
+                    message_id = %message.id,
+                    "Dropping unsigned control message: control traffic must be signed"
+                );
+                self.emit_security_warning(
+                    sender,
+                    SecurityWarningCode::UnsignedControlRejected,
+                    "Unsigned control message rejected: control traffic must carry a signature \
+                     from the key its sender address derives from",
+                );
+                return ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected);
+            }
             Err(err) => {
-                // Signature invalid, TOFU violation, or malformed metadata — drop
+                // Signature invalid, derivation mismatch, or malformed metadata — drop
                 warn!(
                     sender = %sender,
                     message_id = %message.id,
@@ -406,6 +362,31 @@ impl OfflineProtocol {
         ControlGateOutcome::Proceed { signed }
     }
 
+    /// Whether this frame is a relay answer that structurally cannot be signed.
+    ///
+    /// All three conditions are required, and the two beyond the prefix are what
+    /// keep this from being a hole in the peer-to-peer path:
+    ///
+    /// - the prefix is one the relay server originates
+    ///   ([`RELAY_ANSWER_PREFIXES`]);
+    /// - it arrived on the Internet transport, where the relay ingest lives;
+    /// - it carries no transport peer identity, which is what a locally
+    ///   synthesized answer looks like — a real peer's frame on this transport
+    ///   is attributed by the relay and would fail this.
+    ///
+    /// A peer sending one of these prefixes over the mesh, or over the relay
+    /// with an attributed identity, is therefore still required to sign it.
+    fn is_unsignable_relay_answer(
+        message: &Message,
+        arrival_transport: Option<TransportType>,
+    ) -> bool {
+        arrival_transport == Some(TransportType::Internet)
+            && message.transport_peer_id().is_none()
+            && RELAY_ANSWER_PREFIXES
+                .iter()
+                .any(|p| message.content.starts_with(p))
+    }
+
     /// Validates that the claimed `message.sender` matches the transport-level
     /// peer identity, if available. Returns `true` if validated or if no
     /// transport identity is available (best-effort). Returns `false` if
@@ -418,20 +399,26 @@ impl OfflineProtocol {
     /// `hop_count > 0` was mesh-relayed: the transport identity names the
     /// nearest carrier (the relaying peer), not the origin in
     /// `message.sender`, so a mismatch is expected and carries no spoofing
-    /// signal. Those frames fall back to the signature + TOFU gate.
+    /// signal. Those frames fall back to the signature + derivation gate.
     ///
-    /// A spoofer can forge `hop_count > 0` to skip this check. Under the
-    /// default configuration that lands it exactly on the no-identity
-    /// best-effort path (signature + TOFU) — never weaker. Under
-    /// `require_transport_identity = true` the no-identity path *rejects*,
-    /// so the forged-hop path would be strictly weaker if the gate accepted
-    /// unsigned frames there; to close that, the gate also rejects unsigned
-    /// control frames outright when the flag is set
-    /// ([`SecurityWarningCode::UnsignedControlRejected`]). The residual
-    /// trust assumption in every configuration is first-contact TOFU
-    /// pinning — a forged-hop spoofer must commit a signing key that TOFU
-    /// pins and later flags, exactly as on the identity-less mesh
-    /// transports.
+    /// A spoofer can forge `hop_count > 0` to skip this check, and that is now
+    /// uninteresting: the forged-hop path lands on the same signature +
+    /// derivation gate every other control frame passes, which refuses an
+    /// unsigned frame outright and refuses a signed one whose key does not
+    /// derive to the claimed sender. There is no configuration in which
+    /// skipping this check buys an attacker anything, because this check is no
+    /// longer what establishes identity — it only cross-checks an identity the
+    /// signature has already proved.
+    ///
+    /// That is also why `require_transport_identity` keeps its `false` default
+    /// rather than flipping with the rest of this work. Its remaining job is
+    /// the `None` branch below, and demanding transport identity there costs
+    /// real delivery for no authenticity: Nostr frames carry none by design
+    /// (the Nostr pubkey is not the protocol id — see
+    /// `nostr_message_received_inner`), and neither do relay frames that arrive
+    /// without a named sender. Turning it on rejects every control message on
+    /// those paths. Deleting the field belongs with the wider API sweep; until
+    /// then it is a hardening knob for deployments that run neither transport.
     ///
     /// # Relay / mesh forwarding
     ///
@@ -579,10 +566,10 @@ impl OfflineProtocol {
 
     /// Returns `true` if the message content starts with a control-plane
     /// prefix that requires security gate enforcement (transport identity +
-    /// signature verification + TOFU). Data-plane prefixes listed in
+    /// signature verification + sender derivation). Data-plane prefixes listed in
     /// `DATA_PLANE_PREFIXES` (e.g. `__MLS_ENC__`) are excluded because MLS
     /// provides its own authentication layer.
-    pub(super) fn is_security_gated_prefix(content: &str) -> bool {
+    pub(crate) fn is_security_gated_prefix(content: &str) -> bool {
         // A prefix is security-gated if it is an internal prefix AND not a
         // data-plane prefix. This derives the gated set from INTERNAL_PREFIXES
         // minus DATA_PLANE_PREFIXES, so any new internal prefix is automatically
@@ -591,196 +578,110 @@ impl OfflineProtocol {
             && !DATA_PLANE_PREFIXES.iter().any(|p| content.starts_with(p))
     }
 
-    /// Persists a single TOFU entry to storage.
-    pub(super) fn persist_tofu_entry(&self, peer_id: &str, entry: &TofuEntry) {
+    /// Persists the durable "this peer runs MLS" record.
+    ///
+    /// Best-effort and idempotent: the in-memory set is already updated by the
+    /// time this runs, so a storage failure costs the knowledge only across a
+    /// restart — and costs it in the safe direction, since the peer re-proves
+    /// capability on their next signed control message.
+    pub(super) fn persist_encryption_capable(&self, peer_id: &str) {
         let Some(storage) = &self.secure_storage else {
             return;
         };
-        match serde_json::to_vec(entry) {
+        let entry = EncryptionCapableEntry {
+            last_seen_ms: Utc::now().timestamp_millis(),
+        };
+        match serde_json::to_vec(&entry) {
             Ok(data) => {
-                if let Err(e) = storage.store(storage_keys::TOFU_KEYS, peer_id, &data) {
-                    warn!(peer_id = %peer_id, error = %e, "Failed to persist TOFU entry");
+                if let Err(e) =
+                    storage.store(storage_keys::ENCRYPTION_CAPABLE_PEERS, peer_id, &data)
+                {
+                    warn!(peer_id = %peer_id, error = %e, "Failed to persist encryption-capability record");
                 }
             }
             Err(e) => {
-                warn!(peer_id = %peer_id, error = %e, "Failed to serialize TOFU entry");
+                warn!(peer_id = %peer_id, error = %e, "Failed to serialize encryption-capability record");
             }
         }
     }
 
-    /// Deletes a TOFU entry from storage (e.g. on LRU eviction).
-    pub(super) fn delete_tofu_entry(&self, peer_id: &str) {
-        let Some(storage) = &self.secure_storage else {
-            return;
-        };
-        if let Err(e) = storage.delete(storage_keys::TOFU_KEYS, peer_id) {
-            warn!(peer_id = %peer_id, error = %e, "Failed to delete TOFU entry from storage");
-        }
-    }
-
-    /// Resets the TOFU-pinned public key for a specific peer, and drops any
-    /// existing MLS session with them.
+    /// Restores the durable encryption-capability records from storage.
     ///
-    /// Use this when a peer has legitimately re-initialized their MLS identity
-    /// (e.g., reinstalled the app, new device) — typically in response to a
-    /// [`Event::SecurityWarning`] carrying [`SecurityWarningCode::TofuKeyMismatch`].
-    /// Unpinning the key lets the peer re-pin with their new public key on next
-    /// contact.
-    ///
-    /// The stale MLS session is dropped in the same call because it is bound to
-    /// the peer's now-dead credential; without this, the next
-    /// `establish_secure_session` would be a no-op against the old session and
-    /// the new keys would never take effect. Session deletion is best-effort,
-    /// not atomic: the key un-pin is committed first (so this still returns
-    /// `true`), then the session is dropped — no existing session (or MLS not
-    /// initialized) is a harmless no-op, while a genuine deletion failure is
-    /// logged at `warn` and leaves the stale session in place.
-    ///
-    /// Returns `true` if a TOFU entry was removed, `false` if none existed.
-    /// The call is idempotent — resetting a peer with no pinned key is a no-op.
-    ///
-    /// Emits a `TofuReset` event only when an entry was actually removed.
-    pub fn reset_tofu_for_peer(&mut self, peer_id: &str) -> bool {
-        if self.known_peer_public_keys.remove(peer_id).is_some() {
-            self.delete_tofu_entry(peer_id);
-            // The one sanctioned way out of `encryption_capable_peers`. That
-            // set is otherwise monotone precisely because session teardown is
-            // remotely triggerable; this is not teardown, it is an explicit
-            // operator statement that the identity behind `peer_id` is to be
-            // treated as unknown from here on. If they are still an MLS peer
-            // they re-pin on their next signed control message and the entry
-            // comes straight back.
-            self.encryption_capable_peers.remove(peer_id);
-            // The peer re-identified, so any existing session is bound to their
-            // now-dead credential — drop it so re-establishment isn't a no-op
-            // against a stale session. The drop is best-effort, not atomic: the
-            // un-pin above is already committed. `delete_session` is idempotent
-            // (no session returns `Ok`) and `MlsNotInitialized` means none can
-            // exist, so both are benign. Any *other* error means the drop
-            // genuinely failed and the stale session may have outlived the
-            // un-pin (the next `establish_secure_session` would no-op against
-            // it), so surface it with a `warn!` instead of swallowing it.
-            match self.manual_mls_delete_session(peer_id) {
-                Ok(()) => {
-                    info!(peer_id = %peer_id, "TOFU key reset for peer (pinned key + stale MLS session cleared)");
-                }
-                Err(Error::MlsNotInitialized) => {
-                    info!(peer_id = %peer_id, "TOFU key reset for peer (pinned key cleared; MLS not initialized, no session to drop)");
-                }
-                Err(e) => {
-                    warn!(
-                        peer_id = %peer_id,
-                        error = %e,
-                        "TOFU key reset un-pinned the key but could NOT drop the stale MLS session; \
-                         re-establishment may no-op against it until it is cleared"
-                    );
-                }
-            }
-            self.emit_event(Event::TofuReset {
-                peer_id: peer_id.to_string(),
-            });
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Restores TOFU key entries from persistent storage.
-    ///
-    /// Skips corrupted entries with a warning (best-effort restore).
-    /// Caps the restored set at `MAX_TOFU_PEERS` to honour the in-memory
-    /// capacity limit even if storage contains more entries (e.g. after
-    /// the limit was lowered in a new version).
-    ///
-    /// Bounded by [`MAX_RESTORE_KEYS_PER_CATEGORY`] like every other category
-    /// walk on the restore path, so a store listing more entries than any
-    /// legitimate run can produce cannot turn the boot path into an unbounded
-    /// number of loads and allocations. The bound sits far above
-    /// `MAX_TOFU_PEERS`, so no store this SDK wrote is ever affected by it.
+    /// Skips corrupted entries with a warning (best-effort restore), and is
+    /// bounded by [`MAX_RESTORE_KEYS_PER_CATEGORY`] like every other category
+    /// walk on the boot path, so a store listing more entries than any
+    /// legitimate run can produce cannot turn initialization into an unbounded
+    /// number of loads.
     ///
     /// Unlike the two cache restores (`restore_peer_key_packages`,
     /// `restore_peer_capabilities`), the overflow is **not** pruned from
-    /// durable storage. A cached key package only costs a re-exchange when it
-    /// is dropped; a TOFU entry is a *pin*, and deleting one silently re-arms
-    /// trust-on-first-use for that peer — the next key it offers is accepted
-    /// without a mismatch warning. Stranding an over-cap entry is the strictly
-    /// safer failure, so this walk stops and says so rather than shrinking the
-    /// store.
-    pub(super) fn restore_tofu_keys(&mut self) {
+    /// durable storage, and there is no in-memory cap applied here. A cached
+    /// key package only costs a re-exchange when it is dropped; one of these
+    /// records is the sole durable evidence that a peer runs MLS, and dropping
+    /// it silently re-opens the plaintext gate for that peer. Stranding an
+    /// over-cap entry is the strictly safer failure, so this walk stops and
+    /// says so rather than shrinking the store.
+    ///
+    /// `mark_encryption_capable` applies its own bound
+    /// ([`MAX_ENCRYPTION_CAPABLE_PEERS`](super::MAX_ENCRYPTION_CAPABLE_PEERS)),
+    /// by refusal rather than eviction, and restore runs before `start()`
+    /// admits traffic — so peers with durable records are first in line for
+    /// the capacity a forged-sender flood would otherwise consume.
+    pub(super) fn restore_encryption_capable_peers(&mut self) {
         let Some(storage) = &self.secure_storage else {
             return;
         };
-        let peer_ids = match storage.list_keys(storage_keys::TOFU_KEYS) {
+        let peer_ids = match storage.list_keys(storage_keys::ENCRYPTION_CAPABLE_PEERS) {
             Ok(keys) => keys,
             Err(e) => {
-                warn!(error = %e, "Failed to list TOFU keys from storage, starting with empty store");
+                warn!(error = %e, "Failed to list encryption-capability records, starting empty");
                 return;
             }
         };
         let listed = peer_ids.len();
-        // Load all valid entries first so we can sort by last_seen_ms and
-        // keep the most recently seen peers when truncating.
-        let mut valid_entries: Vec<(String, TofuEntry)> = Vec::new();
+        // Collected before marking: `mark_encryption_capable` takes `&mut self`
+        // while `storage` is borrowed from `self`.
+        let mut capable: Vec<String> = Vec::new();
         for peer_id in peer_ids.iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
-            // Validate the peer_id: storage keys bypass UserId::new() so a
-            // corrupted or pre-validation-era entry could contain hostile chars.
+            // Storage keys bypass `UserId::new()`, so a corrupted or
+            // pre-validation-era entry could contain hostile characters.
             if UserId::new(peer_id).is_err() {
-                warn!(peer_id = %peer_id, "Skipping TOFU entry with invalid peer ID");
+                warn!(peer_id = %peer_id, "Skipping capability record with invalid peer ID");
                 continue;
             }
-            match storage.load(storage_keys::TOFU_KEYS, peer_id) {
-                Ok(Some(data)) => match serde_json::from_slice::<TofuEntry>(&data) {
-                    Ok(entry) => {
-                        valid_entries.push((peer_id.clone(), entry));
-                    }
+            match storage.load(storage_keys::ENCRYPTION_CAPABLE_PEERS, peer_id) {
+                Ok(Some(data)) => match serde_json::from_slice::<EncryptionCapableEntry>(&data) {
+                    // The record's presence *is* the fact; its timestamp is
+                    // diagnostic. Deserializing anyway keeps a garbage record
+                    // from being read as evidence.
+                    Ok(_) => capable.push(peer_id.clone()),
                     Err(e) => {
-                        warn!(peer_id = %peer_id, error = %e, "Skipping corrupted TOFU entry");
+                        warn!(peer_id = %peer_id, error = %e, "Skipping corrupted capability record");
                     }
                 },
                 Ok(None) => {}
                 Err(e) => {
-                    warn!(peer_id = %peer_id, error = %e, "Failed to load TOFU entry");
+                    warn!(peer_id = %peer_id, error = %e, "Failed to load capability record");
                 }
             }
         }
-        if valid_entries.len() > MAX_TOFU_PEERS {
-            warn!(
-                stored = valid_entries.len(),
-                limit = MAX_TOFU_PEERS,
-                "TOFU storage contains more entries than current limit, keeping most recent"
-            );
-            // Sort by last_seen_ms descending, then by peer_id ascending for
-            // deterministic ordering when timestamps are equal.
-            valid_entries.sort_by(|a, b| {
-                b.1.last_seen_ms
-                    .cmp(&a.1.last_seen_ms)
-                    .then_with(|| a.0.cmp(&b.0))
-            });
-            valid_entries.truncate(MAX_TOFU_PEERS);
+        let restored = capable.len() as u32;
+        for peer_id in capable {
+            self.mark_encryption_capable(&peer_id);
         }
         if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
             warn!(
                 listed,
                 cap = MAX_RESTORE_KEYS_PER_CATEGORY,
-                "TOFU store listed more peers than any legitimate run can produce; ignoring the \
-                 tail rather than pruning it, since a dropped pin silently re-arms \
-                 trust-on-first-use"
+                "Capability store listed more peers than any legitimate run can produce; ignoring \
+                 the tail rather than pruning it, since a dropped record re-opens the plaintext gate"
             );
         }
-        let restored = valid_entries.len() as u32;
-        for (peer_id, entry) in valid_entries {
-            // A restored pin is a durable record that this peer signed a
-            // control message with its MLS identity key, so it seeds the
-            // capability set exactly as a live pin does. This is the half that
-            // survives session teardown: an injected frame can drive both sides
-            // to delete their sessions, and without this the next launch would
-            // come up with no capability knowledge at all and re-open the
-            // plaintext gate for that peer.
-            self.mark_encryption_capable(&peer_id);
-            self.known_peer_public_keys.insert(peer_id, entry);
-        }
         if restored > 0 {
-            info!(count = restored, "Restored TOFU key entries from storage");
+            info!(
+                count = restored,
+                "Restored encryption-capability records from storage"
+            );
         }
     }
 }

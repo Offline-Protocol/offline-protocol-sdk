@@ -248,9 +248,13 @@ pub struct OfflineProtocol {
     /// **under**-approximate (which fails open). Anything that populates it may
     /// be lossy; nothing may prune it.
     ///
-    /// The one legitimate way out is [`Self::reset_tofu_for_peer`], an explicit
-    /// operator action meaning "treat this peer as new", which is exactly when
-    /// forgetting is correct.
+    /// There is no longer any way out at all, and that is now *correct* rather
+    /// than merely safe. The old escape hatch (`reset_tofu_for_peer`) meant
+    /// "this identity has re-keyed, treat it as new" — a thing that could
+    /// happen when an identity was a name. Under self-certifying addressing an
+    /// address is the hash of its key, so a peer that re-keys becomes a
+    /// *different address*: nothing about the old one ever stops being true,
+    /// and forgetting it could only ever be wrong.
     ///
     /// Bounded by [`MAX_ENCRYPTION_CAPABLE_PEERS`], enforced as a refusal rather
     /// than an eviction so the monotonicity above survives the cap — see
@@ -472,17 +476,6 @@ pub struct OfflineProtocol {
 
     /// Bundled state for mesh group messaging (member cache, dedup, pending commits).
     pub(crate) group_mesh: crate::group_mesh::GroupMeshState,
-
-    /// TOFU (Trust-On-First-Use) key store for peer Ed25519 public keys.
-    ///
-    /// The first signed control message from a peer pins their public key here.
-    /// Subsequent messages from the same peer must present the same key;
-    /// a mismatch triggers a security warning and the message is dropped.
-    /// Entries track a last-seen timestamp for LRU eviction when the store is full.
-    ///
-    /// Persisted via `MlsStorage` (when available) to survive restarts.
-    // Manual TOFU reset is available via `reset_tofu_for_peer()`; see MAX_TOFU_PEERS doc.
-    known_peer_public_keys: HashMap<String, TofuEntry>,
 
     /// Set of blocked user IDs. Messages from blocked users are silently
     /// dropped (no ACK, no event). Persisted via `ProtocolStateStorage`.
@@ -722,7 +715,6 @@ impl OfflineProtocol {
             restored_media_descriptors: HashMap::new(),
             mesh_services: MeshServices::new(),
             group_mesh: crate::group_mesh::GroupMeshState::default(),
-            known_peer_public_keys: HashMap::new(),
             blocked_users: HashSet::new(),
             last_reconciliation_at: None,
             last_metrics_emit_at: None,
@@ -836,7 +828,6 @@ impl OfflineProtocol {
         // it and `persist_lamport_clock`'s `wrapping_sub` reads that as an
         // enormous delta — writing on every tick instead of every interval.
         let previous_last_persisted_lamport = self.last_persisted_lamport;
-        let previous_tofu_keys = self.known_peer_public_keys.clone();
         let previous_blocked_users = self.blocked_users.clone();
         let previous_outbox = self.outbox.clone();
         let previous_peer_compact_envelope = self.peer_compact_envelope.clone();
@@ -937,7 +928,7 @@ impl OfflineProtocol {
         let restore_result = (|| {
             self.restore_pending_messages(&mut pending_prunes)?;
             self.restore_lamport_clock();
-            self.restore_tofu_keys();
+            self.restore_encryption_capable_peers();
             self.restore_blocked_users()?;
             self.restore_session_states_from_manager(manager.clone(), &mut advisory_prunes)?;
             self.restore_peer_key_packages(&manager, &mut advisory_prunes)?;
@@ -975,7 +966,6 @@ impl OfflineProtocol {
             self.welcome_lifecycles = previous_welcome_lifecycles;
             self.lamport_clock = LamportClock::from_value(previous_lamport_clock);
             self.last_persisted_lamport = previous_last_persisted_lamport;
-            self.known_peer_public_keys = previous_tofu_keys;
             self.blocked_users = previous_blocked_users;
             self.outbox = previous_outbox;
             self.peer_compact_envelope = previous_peer_compact_envelope;
@@ -1046,7 +1036,7 @@ impl OfflineProtocol {
         let mut outbox_prunes = PruneAllowance::pool();
         self.restore_pending_messages(&mut pending_prunes)?;
         self.restore_lamport_clock();
-        self.restore_tofu_keys();
+        self.restore_encryption_capable_peers();
         self.restore_blocked_users()?;
         self.restore_outbox(&mut outbox_prunes)?;
         self.restore_media_descriptors(&mut advisory_prunes)?;
@@ -1106,9 +1096,8 @@ impl OfflineProtocol {
         debug!(peer_id = %peer_id, "Peer marked encryption-capable");
         if self.encryption_capable_peers.len() == MAX_ENCRYPTION_CAPABLE_PEERS {
             // Emitted on the transition into full, so it cannot become a
-            // per-frame flood: the set only grows, so this line is reachable
-            // once per fill and a refill needs an intervening
-            // `reset_tofu_for_peer`.
+            // per-frame flood: the set only grows and has no removal path, so
+            // this line is reachable exactly once per process.
             warn!(
                 cap = MAX_ENCRYPTION_CAPABLE_PEERS,
                 "Encryption-capability set reached capacity; further peers fall back to the \
@@ -1916,11 +1905,10 @@ impl OfflineProtocol {
                 self.delete_peer_key_package_from_storage(peer_id);
             } else {
                 {
-                    let trust = self.key_package_trust(peer_id);
                     let manager = mls
                         .read()
                         .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-                    manager.import_key_package(peer_id, &received_pkg.key_package_data, trust)?;
+                    manager.import_key_package(peer_id, &received_pkg.key_package_data)?;
                 }
 
                 // Create session and get welcome message
@@ -2045,11 +2033,10 @@ impl OfflineProtocol {
     ) -> Result<()> {
         let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
         {
-            let trust = self.key_package_trust(peer_id);
             let manager = mls
                 .read()
                 .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-            manager.import_key_package(peer_id, key_package_data, trust)?;
+            manager.import_key_package(peer_id, key_package_data)?;
         }
         // A key package we accepted for this peer is proof they run MLS.
         self.mark_encryption_capable(peer_id);
@@ -2216,7 +2203,7 @@ impl OfflineProtocol {
         // signature verification). `Rejected` drops the message; `Proceed`
         // carries whether the frame was actually signed, for the one handler
         // that consumes a payload field as authenticated data.
-        let signed = match self.security_gate_control_message(message) {
+        let signed = match self.security_gate_control_message(message, arrival_transport) {
             ControlGateOutcome::Rejected(result) => return Some(result),
             ControlGateOutcome::Proceed { signed } => signed,
         };

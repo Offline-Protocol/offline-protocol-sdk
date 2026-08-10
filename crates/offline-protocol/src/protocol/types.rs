@@ -173,26 +173,16 @@ pub(crate) const CTRL_PK_META_KEY: &str = "__ctrl_pk";
 /// same MLS identity key but with a different domain separator.
 pub(crate) const CTRL_SIGN_DOMAIN: &[u8] = b"offline-ctrl-v1";
 
-/// Maximum number of TOFU-pinned peer public keys to retain.
-///
-/// Entries are persisted via `MlsStorage` (when available) so pinned keys
-/// survive process restarts and prevent key-substitution during re-pinning.
-///
-/// When a peer legitimately re-initializes MLS (e.g. app reinstall), the
-/// application should call `reset_tofu_for_peer()` to allow re-pinning
-/// with the new key. A signed key-rotation protocol may be added in a
-/// future version for automatic cross-device key updates.
-pub(crate) const MAX_TOFU_PEERS: usize = 1000;
-
 /// Maximum number of peers retained in the encryption-capability set that gates
 /// inbound plaintext.
 ///
-/// Sized to hold every legitimate source at once — [`MAX_TOFU_PEERS`] pins plus
-/// the MLS session list — with room to spare, so a real deployment never
-/// reaches it. The cap exists because several of the paths that mark a peer are
-/// reachable from unauthenticated frames keyed by a wire-claimed sender id, and
-/// because `tofu_check_or_pin` marks *before* its own store-full branch, so
-/// [`MAX_TOFU_PEERS`] does not transitively bound this set.
+/// Sized to hold every legitimate source at once — the durable capability
+/// records plus the MLS session list — with room to spare, so a real deployment
+/// never reaches it. The cap exists because several of the paths that mark a
+/// peer are reachable from unauthenticated frames keyed by a wire-claimed
+/// sender id, and nothing else bounds the set: the durable record this replaced
+/// the TOFU pin store with is written only *after* a signature verifies, but
+/// the Welcome path marks its sender without one.
 ///
 /// Unlike the other maps keyed by a wire-claimed id, this one **refuses** at
 /// capacity instead of resetting or evicting: forgetting a peer here is the
@@ -387,20 +377,22 @@ pub(crate) const MAX_REKEY_TRACKED_PEERS: usize = 1000;
 /// affects when we drop the *cached* copy, never crypto correctness.
 pub(crate) const MAX_KEY_PACKAGE_LIFETIME_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
-/// Minimum age (in milliseconds) a TOFU entry must have before it can be
-/// evicted by LRU. This prevents a cache-filling attack where an adversary
-/// rapidly registers many fake identities to evict legitimate pinned keys.
+/// Durable record that a peer has proved it runs MLS.
 ///
-/// Set to 1 hour.
-pub(crate) const TOFU_MIN_EVICTION_AGE_MS: i64 = 3_600_000;
-
-/// Entry in the TOFU key store, pairing the peer's public key with a
-/// last-seen timestamp used for LRU eviction.
+/// Written whenever a control message from that peer verifies — signature
+/// valid, and the signing key derives to the address the frame claims — and
+/// read back on `initialize_mls` to reseed
+/// [`OfflineProtocol::encryption_capable_peers`](crate::OfflineProtocol).
+///
+/// The timestamp is diagnostic, not a policy input. Its predecessor
+/// (`TofuEntry.last_seen_ms`) drove LRU eviction of a bounded pin store; there
+/// is no eviction here, because there is no longer any per-peer *secret* whose
+/// size needs bounding — only the fact, which the restore walk bounds on its
+/// own terms. Keeping the field costs nothing and makes a stale store readable
+/// by a human.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct TofuEntry {
-    pub(crate) public_key: Vec<u8>,
-    /// Milliseconds since epoch (UTC) when we last verified a signed message
-    /// from this peer.
+pub(crate) struct EncryptionCapableEntry {
+    /// Milliseconds since epoch (UTC) when this peer last proved it runs MLS.
     pub(crate) last_seen_ms: i64,
 }
 
@@ -1361,8 +1353,21 @@ pub(crate) mod storage_keys {
     pub const LAMPORT_CLOCK: &str = "lamport_clock";
     /// Key ID for the single Lamport clock entry.
     pub const LAMPORT_CLOCK_ID: &str = "current";
-    /// Key type for persisted TOFU (Trust-On-First-Use) peer public keys.
-    pub const TOFU_KEYS: &str = "tofu_keys";
+    /// Key type for the durable record that a peer has proved it runs MLS.
+    ///
+    /// Successor to the `tofu_keys` category, which stored a pinned public key
+    /// per peer. The pin is gone — an address *is* its key's hash, so nothing
+    /// needs storing to check one — but the store had a second job the
+    /// derivation does not do: it was the half of
+    /// `OfflineProtocol::encryption_capable_peers` that survived a restart, and
+    /// therefore what keeps the plaintext-downgrade gate shut for a peer whose
+    /// session was torn down. That job is all this category still does, so the
+    /// value is a timestamp and nothing else.
+    ///
+    /// A pre-migration `tofu_keys` record is left where it is: it is keyed by a
+    /// username, and no peer is named by one any more, so it can never be read
+    /// back under a live peer id.
+    pub const ENCRYPTION_CAPABLE_PEERS: &str = "encryption_capable_peers";
     /// Key type for persisted blocked user entries.
     pub const BLOCKED_USERS: &str = "blocked_users";
     /// Key type for the persistent per-install telemetry scrub secret.

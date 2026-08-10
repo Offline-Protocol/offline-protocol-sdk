@@ -64,12 +64,7 @@ fn setup_alice_bob_group(group_name: &str) -> (OfflineProtocol, OfflineProtocol,
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
-            .add_group_member(
-                &gid,
-                &id("bob"),
-                &bob_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("bob"), &bob_kp.key_package_data)
             .unwrap()
     };
     {
@@ -87,6 +82,28 @@ fn setup_alice_bob_group(group_name: &str) -> (OfflineProtocol, OfflineProtocol,
 
 /// Builds an internal message from sender→recipient with the given content.
 fn make_message(sender: &str, recipient: &str, content: &str) -> offline_protocol_core::Message {
+    let mut message = make_unsigned_message(sender, recipient, content);
+    // Security-gated control frames must be signed by the key their sender
+    // address derives from, so the default here signs — otherwise every
+    // fixture would be exercising the unsigned-rejection path instead of the
+    // behaviour it names. Data-plane frames (`__MLS_ENC__`, `__GRP_MLS_MSG__`)
+    // are not gated and are unaffected by the extra metadata.
+    if crate::OfflineProtocol::is_internal_prefix(content) {
+        // Tolerant on purpose: a sender that is not a seeded test identity
+        // cannot be signed for, which is exactly the shape of the forged and
+        // third-party-attributed frames several of these tests are about.
+        crate::test_identity::try_sign_as_sender(&mut message);
+    }
+    message
+}
+
+/// A frame with no signature metadata, for tests that are *about* the unsigned
+/// path or that deliberately misattribute a sender.
+fn make_unsigned_message(
+    sender: &str,
+    recipient: &str,
+    content: &str,
+) -> offline_protocol_core::Message {
     offline_protocol_core::Message::new(
         UserId::new(sender).unwrap(),
         UserId::new(recipient).unwrap(),
@@ -128,12 +145,7 @@ fn test_group_welcome_cannot_squat_session_slot() {
     let (welcome, _commit) = {
         let mallory_mls = mallory.mls_manager_for_testing().read().unwrap();
         mallory_mls
-            .add_group_member(
-                &gid,
-                &id("bob"),
-                &bob_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("bob"), &bob_kp.key_package_data)
             .unwrap()
     };
 
@@ -987,14 +999,14 @@ fn test_group_mls_leave_non_member_rejected() {
     // "eve" sends a leave notification for herself (sender matches, but not a member)
     let leave_payload = GroupMlsLeavePayload {
         group_id: "group:nonmember-test".to_string(),
-        leaving_member: "eve".to_string(),
+        leaving_member: id("eve"),
     };
     let content = format!(
         "{}{}",
         internal_prefixes::GROUP_MLS_LEAVE,
         serde_json::to_string(&leave_payload).unwrap()
     );
-    let message = make_message("eve", &id("user123"), &content);
+    let message = make_message(&id("eve"), &id("user123"), &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -1068,14 +1080,14 @@ fn test_group_mls_leave_we_are_elected() {
     // "zzz" sends a leave notification
     let leave_payload = GroupMlsLeavePayload {
         group_id: group_id.clone(),
-        leaving_member: "zzz".to_string(),
+        leaving_member: id("zzz"),
     };
     let content = format!(
         "{}{}",
         internal_prefixes::GROUP_MLS_LEAVE,
         serde_json::to_string(&leave_payload).unwrap()
     );
-    let message = make_message("zzz", &id("user123"), &content);
+    let message = make_message(&id("zzz"), &id("user123"), &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -2134,12 +2146,7 @@ fn test_group_mls_invite_sends_commit_to_existing_members() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
-            .add_group_member(
-                &gid,
-                &id("bob"),
-                &bob_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("bob"), &bob_kp.key_package_data)
             .unwrap();
     }
     alice.refresh_group_members(&group_id).unwrap();
@@ -2902,7 +2909,10 @@ fn test_group_relay_sync_changed_event_lifecycle() {
             group_id
         ),
     );
-    protocol.process_internal_message(&error);
+    // Dispatched the way the relay ingest actually delivers it: a
+    // relay-originated answer carries no peer signature, so the gate only
+    // admits it on the Internet path it really arrives on.
+    protocol.process_internal_message_via(&error, Some(TransportType::Internet));
     assert_eq!(
         sync_changed_events(&events).last().unwrap(),
         &(group_id.clone(), false, "error".to_string())
@@ -5332,12 +5342,7 @@ fn test_epoch_fork_resolution_includes_failed_members() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
-            .add_group_member(
-                &gid,
-                &id(&peer_label),
-                &bob_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id(&peer_label), &bob_kp.key_package_data)
             .unwrap();
     }
     alice.refresh_group_members(&group_id).unwrap();
@@ -7293,12 +7298,7 @@ fn test_fallback_admin_denies_non_creator() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
-            .add_group_member(
-                &gid,
-                &id("bob"),
-                &bob_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("bob"), &bob_kp.key_package_data)
             .unwrap()
     };
     {
@@ -7760,12 +7760,7 @@ fn test_welcome_payload_roles_stored_on_join() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
-            .add_group_member(
-                &gid,
-                &id("bob"),
-                &bob_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("bob"), &bob_kp.key_package_data)
             .unwrap()
     };
 
@@ -7826,14 +7821,14 @@ fn test_self_removal_commit_from_admin_emits_event_and_cleans_up() {
     let group_id = info.group_id.as_str().to_string();
 
     // Add "admin_alice" as a member and set her as admin
-    protocol.group_mesh.members.insert(
-        group_id.clone(),
-        vec![id("user123"), "admin_alice".to_string()],
-    );
+    protocol
+        .group_mesh
+        .members
+        .insert(group_id.clone(), vec![id("user123"), id("admin_alice")]);
     {
         let mls = protocol.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
-        mls.set_member_role(&gid, "admin_alice", GroupRole::Admin)
+        mls.set_member_role(&gid, &id("admin_alice"), GroupRole::Admin)
             .unwrap();
     }
 
@@ -7854,7 +7849,7 @@ fn test_self_removal_commit_from_admin_emits_event_and_cleans_up() {
         internal_prefixes::GROUP_MLS_COMMIT,
         serde_json::to_string(&commit_payload).unwrap()
     );
-    let message = make_message("admin_alice", &id("user123"), &content);
+    let message = make_message(&id("admin_alice"), &id("user123"), &content);
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -7904,7 +7899,7 @@ fn test_self_removal_commit_from_non_admin_is_rejected() {
         internal_prefixes::GROUP_MLS_COMMIT,
         serde_json::to_string(&commit_payload).unwrap()
     );
-    let message = make_message("eve", &id("user123"), &content);
+    let message = make_message(&id("eve"), &id("user123"), &content);
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -8085,7 +8080,7 @@ fn test_plaintext_removal_notification_from_nonmember_naming_admin_rejected() {
         internal_prefixes::GROUP_MEMBER_REMOVED,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = make_message("relay-server", &id("user123"), &content);
+    let message = make_message(&id("relay-server"), &id("user123"), &content);
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -8124,7 +8119,7 @@ fn test_plaintext_removal_notification_from_relay_unverifiable_rejected() {
         internal_prefixes::GROUP_MEMBER_REMOVED,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = make_message("attacker", &id("user123"), &content);
+    let message = make_message(&id("attacker"), &id("user123"), &content);
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -8157,12 +8152,12 @@ fn test_other_member_removal_from_non_admin_does_not_poison_send_cache() {
     {
         let mls = protocol.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
-        mls.set_member_role(&gid, "admin_alice", GroupRole::Admin)
+        mls.set_member_role(&gid, &id("admin_alice"), GroupRole::Admin)
             .unwrap();
     }
     protocol.group_mesh.members.insert(
         group_id.clone(),
-        vec![id("user123"), "admin_alice".to_string(), id("bob")],
+        vec![id("user123"), id("admin_alice"), id("bob")],
     );
 
     // Non-admin "eve" forges a removal of &id("bob"), naming the real admin in
@@ -8170,14 +8165,14 @@ fn test_other_member_removal_from_non_admin_does_not_poison_send_cache() {
     let payload = crate::protocol::GroupMemberRemovedPayload {
         group_id: group_id.clone(),
         user_id: id("bob"),
-        removed_by: "admin_alice".to_string(),
+        removed_by: id("admin_alice"),
     };
     let content = format!(
         "{}{}",
         internal_prefixes::GROUP_MEMBER_REMOVED,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = make_message("eve", &id("user123"), &content);
+    let message = make_message(&id("eve"), &id("user123"), &content);
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -8198,7 +8193,7 @@ fn test_other_member_removal_from_non_admin_does_not_poison_send_cache() {
     }
 
     // The same removal from the authenticated admin IS honored.
-    let message = make_message("admin_alice", &id("user123"), &content);
+    let message = make_message(&id("admin_alice"), &id("user123"), &content);
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
     let members = protocol.group_mesh.members.get(&group_id).unwrap();
@@ -8246,7 +8241,7 @@ fn test_group_member_added_from_mesh_is_dropped_not_cache_poisoned() {
 
     // (1) Mesh arrival (non-Internet) must be dropped: no cache mutation, no
     // roster event.
-    let message = make_message("eve", &id("user123"), &content);
+    let message = make_message(&id("eve"), &id("user123"), &content);
     let result = protocol.process_internal_message_via(&message, Some(TransportType::BLE));
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
     {
@@ -8685,12 +8680,7 @@ fn setup_race_alice_bob() -> (
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (welcome, _commit) = alice_mls
-            .add_group_member(
-                &gid,
-                &id("bob"),
-                &bob_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("bob"), &bob_kp.key_package_data)
             .unwrap();
         welcome
     };
@@ -9122,12 +9112,7 @@ fn test_group_message_at_future_epoch_buffered_then_delivered_after_commit() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (_welcome, commit) = alice_mls
-            .add_group_member(
-                &gid,
-                &id("charlie"),
-                &charlie_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("charlie"), &charlie_kp.key_package_data)
             .unwrap();
         commit
     };
@@ -9236,12 +9221,7 @@ fn test_commit_riding_message_channel_drains_buffered_messages() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (_welcome, commit) = alice_mls
-            .add_group_member(
-                &gid,
-                &id("charlie"),
-                &charlie_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("charlie"), &charlie_kp.key_package_data)
             .unwrap();
         commit
     };
@@ -9300,12 +9280,7 @@ fn test_buffered_commit_riding_message_channel_unblocks_earlier_entries() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (_welcome, commit) = alice_mls
-            .add_group_member(
-                &gid,
-                &id("charlie"),
-                &charlie_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("charlie"), &charlie_kp.key_package_data)
             .unwrap();
         commit
     };
@@ -9483,12 +9458,7 @@ fn test_commit_and_message_both_outrun_welcome() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (_welcome, commit) = alice_mls
-            .add_group_member(
-                &gid,
-                &id("charlie"),
-                &charlie_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("charlie"), &charlie_kp.key_package_data)
             .unwrap();
         commit
     };
@@ -10219,7 +10189,7 @@ fn test_relay_group_message_before_welcome_buffered_via_dispatch() {
         "message_id": "relay-dispatch-race-1",
     });
     let content = format!("{}{}", internal_prefixes::GROUP_MSG, payload);
-    let message = make_message("relay", &id("bob"), &content);
+    let message = make_message(&id("relay"), &id("bob"), &content);
     let result = bob.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -10262,7 +10232,7 @@ fn test_relay_group_message_legacy_base64_plaintext_emitted_raw_via_dispatch() {
         "message_id": "legacy-b64-1",
     });
     let content = format!("{}{}", internal_prefixes::GROUP_MSG, payload);
-    let message = make_message("relay", &id("user123"), &content);
+    let message = make_message(&id("relay"), &id("user123"), &content);
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -10300,7 +10270,7 @@ fn test_relay_group_message_without_mls_emitted_raw_via_dispatch() {
         "message_id": "relay-only-1",
     });
     let content = format!("{}{}", internal_prefixes::GROUP_MSG, payload);
-    let message = make_message("relay", "user123", &content);
+    let message = make_message(&id("relay"), "user123", &content);
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -11804,12 +11774,7 @@ fn setup_alice_bob_charlie_group(group_name: &str) -> (OfflineProtocol, OfflineP
     let commit = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let (_welcome, commit) = alice_mls
-            .add_group_member(
-                &gid,
-                &id("charlie"),
-                &charlie_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("charlie"), &charlie_kp.key_package_data)
             .unwrap();
         commit
     };
@@ -11934,12 +11899,7 @@ fn test_unauthorized_add_commit_emits_security_event_and_marks_unauthorized() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (_welcome, commit) = bob_mls
-            .add_group_member(
-                &gid,
-                &id("dave"),
-                &dave_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("dave"), &dave_kp.key_package_data)
             .unwrap();
         commit
     };
@@ -12159,12 +12119,7 @@ fn test_unauthorized_report_is_rate_limited_per_group_and_committer() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (_welcome, commit) = bob_mls
-            .add_group_member(
-                &gid,
-                &id("dave"),
-                &dave_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("dave"), &dave_kp.key_package_data)
             .unwrap();
         commit
     };
@@ -12321,12 +12276,7 @@ fn test_failed_roster_read_skips_delta_and_judgment_but_merges_commit() {
     let (welcome, _commit) = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         alice_mls
-            .add_group_member(
-                &gid,
-                &id("bob"),
-                &bob_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("bob"), &bob_kp.key_package_data)
             .unwrap()
     };
     {
@@ -12345,12 +12295,7 @@ fn test_failed_roster_read_skips_delta_and_judgment_but_merges_commit() {
     let add_commit = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let (_welcome, commit) = alice_mls
-            .add_group_member(
-                &gid,
-                &id("charlie"),
-                &charlie_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("charlie"), &charlie_kp.key_package_data)
             .unwrap();
         commit
     };
@@ -12457,12 +12402,7 @@ fn stage_welcome_for_bob(
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (welcome, _commit) = alice_mls
-            .add_group_member(
-                &gid,
-                &id("bob"),
-                &bob_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("bob"), &bob_kp.key_package_data)
             .unwrap();
         welcome
     };
@@ -12636,12 +12576,7 @@ fn setup_enforcing_group(
     let welcome = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let (welcome, _commit) = alice_mls
-            .add_group_member(
-                &gid,
-                &id("bob"),
-                &bob_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("bob"), &bob_kp.key_package_data)
             .unwrap();
         welcome
     };
@@ -12660,12 +12595,7 @@ fn setup_enforcing_group(
     let commit = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let (_welcome, commit) = alice_mls
-            .add_group_member(
-                &gid,
-                &id("charlie"),
-                &charlie_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("charlie"), &charlie_kp.key_package_data)
             .unwrap();
         commit
     };
@@ -12813,12 +12743,7 @@ fn test_enforced_non_admin_add_commit_is_rejected_without_merge() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (_welcome, commit) = bob_mls
-            .add_group_member(
-                &gid,
-                &id("dave"),
-                &dave_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("dave"), &dave_kp.key_package_data)
             .unwrap();
         commit
     };
@@ -13021,11 +12946,7 @@ fn test_session_paths_unaffected_by_enforcement() {
     let welcome = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         bob_mls
-            .import_key_package(
-                &id("alice"),
-                &alice_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .import_key_package(&id("alice"), &alice_kp.key_package_data)
             .unwrap();
         bob_mls.create_session(&id("alice")).unwrap()
     };
@@ -13108,12 +13029,7 @@ fn test_enforced_alarm_is_not_suppressed_by_an_earlier_applied_report() {
     let add_commit = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let (_welcome, commit) = bob_mls
-            .add_group_member(
-                &gid,
-                &id("dave"),
-                &dave_kp.key_package_data,
-                offline_protocol_mls::KeyPackageTrust::FirstUse,
-            )
+            .add_group_member(&gid, &id("dave"), &dave_kp.key_package_data)
             .unwrap();
         commit
     };

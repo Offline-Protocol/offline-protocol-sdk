@@ -178,7 +178,7 @@ for the native path.
 
 | | `MlsStorageProvider` | `ProtocolStateStorageProvider` |
 |---|---|---|
-| Holds | MLS identity, sessions, groups, TOFU pins, install secrets, the record-sealing key | Outbox, pending messages, session/Welcome lifecycles, peer snapshots, media descriptors, block list, Lamport clock |
+| Holds | MLS identity, sessions, groups, peer trust records, install secrets, the record-sealing key | Outbox, pending messages, session/Welcome lifecycles, peer snapshots, media descriptors, block list, Lamport clock |
 | Back it with | `EncryptedSharedPreferences` (Keystore-backed) | `noBackupFilesDir` — **must** be removed when the app is uninstalled |
 | Value type | `List<UByte>` (`sequence<u8>`) | `ByteArray` (`bytes`) |
 
@@ -300,17 +300,20 @@ override fun onEvent(eventJson: String) {
 - The last admin cannot be demoted, removed, or leave (prevents orphaned groups)
 - If the last admin disconnects unexpectedly, a deterministic election promotes the next admin
 
-## TOFU Trust Management
+## Peer Identity
 
-Reset a peer's TOFU-pinned public key when you need to re-establish trust (e.g., the peer reinstalled the app):
+There is no trust pin to manage. A peer's address **is** the hash of their
+identity key, so every control message they send is checked by re-deriving the
+address from the key that signed it — on first contact as much as on the
+thousandth. An impersonator has to find a 160-bit second preimage, not win a
+race to a name.
 
-```kotlin
-// Reset trust pin for a peer
-val removed = protocol.resetTofuForPeer("bob")
-// removed == true if an entry was cleared, false if none existed
-```
-
-After reset, the next message from that peer will establish a new trust pin.
+That also removes the reinstall problem the old `resetTofuForPeer` existed for:
+a peer who reinstalls generates a new identity key and therefore has a **new
+address**. They reach you as a new contact, not as the old one behaving oddly,
+and there is nothing to reset. If you see
+`SENDER_ADDRESS_MISMATCH`, treat it as an impersonation attempt — it has no
+benign reading.
 
 ## Architecture
 

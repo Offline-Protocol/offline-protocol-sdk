@@ -86,27 +86,30 @@ impl WelcomeReasonCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SecurityWarningCode {
-    /// A pinned peer presented a different public key — legitimate reinstall /
-    /// new device, or a key-substitution / impersonation attempt. If the change
-    /// is legitimate, the remedy is [`crate::OfflineProtocol::reset_tofu_for_peer`].
-    TofuKeyMismatch,
-    /// The TOFU store is full and no entry was old enough to evict, so a new
-    /// peer's key could not be pinned (it is re-verified on each contact).
-    TofuStoreFull,
+    /// A control message's signature verified, but the key that signed it does
+    /// not derive to the address the frame claims to come from.
+    ///
+    /// There is no benign reading. An address *is* the hash of its identity
+    /// key, so a legitimate peer's frames always re-derive to their own
+    /// address: a rotated key is a *different address*, i.e. a different peer,
+    /// not the same peer with new bytes. This is either an impersonation
+    /// attempt or a peer running a build with a broken derivation.
+    ///
+    /// Replaces `TOFU_KEY_MISMATCH`, whose remedy (`resetTofuForPeer`) no longer
+    /// exists because there is no pin to reset.
+    SenderAddressMismatch,
     /// A control message's signed sender did not match its transport peer
     /// identity.
     TransportIdentityMismatch,
-    /// An unsigned control message arrived from a peer that already has a pinned
-    /// key — a suspicious signature downgrade.
-    SignatureDowngrade,
-    /// A control message's signature failed verification (invalid signature,
-    /// TOFU violation, or malformed metadata).
+    /// A control message's signature failed verification (invalid signature or
+    /// malformed metadata).
     ControlSignatureInvalid,
-    /// An unsigned control message was rejected because
-    /// `require_transport_identity` demands signed control traffic: frames
-    /// claiming mesh relay (`hop_count > 0`) skip the strict identity match,
-    /// so accepting unsigned frames there would let a forged-hop spoofer
-    /// impersonate any not-yet-pinned peer without committing a key.
+    /// An unsigned control message was rejected.
+    ///
+    /// All security-gated control traffic must be signed by the key its sender
+    /// address derives from. This is unconditional: it does not depend on
+    /// `require_transport_identity`, nor on whether the sender was seen before.
+    /// A peer that will not sign is making a claim that cannot be checked.
     UnsignedControlRejected,
     /// An encrypted media chunk's MLS group did not match the 1:1 session
     /// group of the claimed wire sender — a valid ciphertext (from some
@@ -170,10 +173,8 @@ impl SecurityWarningCode {
     /// Returns the stable machine-readable reason code.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::TofuKeyMismatch => "TOFU_KEY_MISMATCH",
-            Self::TofuStoreFull => "TOFU_STORE_FULL",
+            Self::SenderAddressMismatch => "SENDER_ADDRESS_MISMATCH",
             Self::TransportIdentityMismatch => "TRANSPORT_IDENTITY_MISMATCH",
-            Self::SignatureDowngrade => "SIGNATURE_DOWNGRADE",
             Self::ControlSignatureInvalid => "CONTROL_SIGNATURE_INVALID",
             Self::UnsignedControlRejected => "UNSIGNED_CONTROL_REJECTED",
             Self::MediaSenderGroupMismatch => "MEDIA_SENDER_GROUP_MISMATCH",
@@ -1354,8 +1355,9 @@ pub enum Event {
         reason_detail: Option<String>,
     },
 
-    /// A security-relevant anomaly was detected (e.g. sender spoofing, TOFU
-    /// key mismatch, unsigned control message when signatures are required).
+    /// A security-relevant anomaly was detected (e.g. sender spoofing, a
+    /// signing key that does not derive to its claimed address, an unsigned
+    /// control message).
     SecurityWarning {
         /// Peer ID involved in the warning.
         peer_id: String,
@@ -1390,12 +1392,6 @@ pub enum Event {
     UserUnblocked {
         /// User ID that was unblocked.
         user_id: String,
-    },
-
-    /// A peer's TOFU-pinned public key was manually reset.
-    TofuReset {
-        /// ID of the peer whose trust was reset.
-        peer_id: String,
     },
 }
 
@@ -2298,11 +2294,6 @@ impl Event {
         Self::UserUnblocked { user_id }
     }
 
-    /// Creates a TofuReset event.
-    pub fn tofu_reset(peer_id: String) -> Self {
-        Self::TofuReset { peer_id }
-    }
-
     /// Converts the event to JSON.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
@@ -2390,7 +2381,6 @@ impl Event {
             Self::MessageRelayed { .. } => "protocol.message.relayed",
             Self::UserBlocked { .. } => "protocol.user.blocked",
             Self::UserUnblocked { .. } => "protocol.user.unblocked",
-            Self::TofuReset { .. } => "protocol.tofu.reset",
         }
     }
 }
@@ -3165,10 +3155,6 @@ impl fmt::Debug for Event {
                 .debug_struct("UserUnblocked")
                 .field("user_id", &"[REDACTED]")
                 .finish(),
-            Self::TofuReset { peer_id: _ } => f
-                .debug_struct("TofuReset")
-                .field("peer_id", &"[REDACTED]")
-                .finish(),
             Self::GroupRoleChanged {
                 group_id,
                 user_id: _,
@@ -3525,14 +3511,12 @@ mod tests {
         // `SecurityWarningCode::as_str()` is hand-written, while the JSON wire
         // form is derived from `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]`.
         // JS consumers branch on the wire string (e.g. keying reinstall handling
-        // off `TOFU_KEY_MISMATCH`), so the two must never drift. Pin every variant
-        // to its serialized form — a single-variant test would let the other four
-        // rot.
+        // off `SENDER_ADDRESS_MISMATCH`), so the two must never drift. Pin every
+        // variant to its serialized form — a single-variant test would let the
+        // others rot.
         let all = [
-            SecurityWarningCode::TofuKeyMismatch,
-            SecurityWarningCode::TofuStoreFull,
+            SecurityWarningCode::SenderAddressMismatch,
             SecurityWarningCode::TransportIdentityMismatch,
-            SecurityWarningCode::SignatureDowngrade,
             SecurityWarningCode::ControlSignatureInvalid,
             SecurityWarningCode::UnsignedControlRejected,
             SecurityWarningCode::MediaSenderGroupMismatch,
@@ -3555,10 +3539,8 @@ mod tests {
             // match fail to compile until it is also added to `all` above and
             // pinned to its wire form.
             match code {
-                SecurityWarningCode::TofuKeyMismatch
-                | SecurityWarningCode::TofuStoreFull
+                SecurityWarningCode::SenderAddressMismatch
                 | SecurityWarningCode::TransportIdentityMismatch
-                | SecurityWarningCode::SignatureDowngrade
                 | SecurityWarningCode::ControlSignatureInvalid
                 | SecurityWarningCode::UnsignedControlRejected
                 | SecurityWarningCode::MediaSenderGroupMismatch
@@ -3723,9 +3705,12 @@ mod tests {
             .collect();
 
         // Negative control: a scan that silently matched nothing would make
-        // every assertion below vacuously true.
+        // every assertion below vacuously true. The floor tracks the variant
+        // count loosely — it exists to catch a broken scan, not to freeze the
+        // taxonomy, so it moves when variants are deliberately added or (as
+        // when the TOFU codes were deleted) removed.
         assert!(
-            rust_codes.len() >= 12,
+            rust_codes.len() >= 11,
             "as_str scan looks broken: only {} codes found",
             rust_codes.len()
         );

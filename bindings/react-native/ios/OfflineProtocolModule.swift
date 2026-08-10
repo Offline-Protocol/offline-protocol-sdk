@@ -1594,22 +1594,6 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
-    /// Reset the TOFU-pinned public key for a peer.
-    @objc func resetTofuForPeer(_ peerId: String,
-                                 resolver: @escaping RCTPromiseResolveBlock,
-                                 rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let proto = protocolInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
-            }
-            let removed = try proto.resetTofuForPeer(peerId: peerId)
-            resolver(removed)
-        } catch {
-            rejecter("ERROR_TOFU", "Failed to reset TOFU for peer: \(error.localizedDescription)", error)
-        }
-    }
-
     // ─── Presence, Typing, Read Receipts ───────────────────────
 
     @objc func sendPresenceUpdate(_ recipient: String,

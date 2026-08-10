@@ -757,8 +757,6 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle() != 43697:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reset_tofu_for_peer() != 23421:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 16439:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent() != 25841:
@@ -2062,12 +2060,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prek
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle.restype = _UniffiRustBuffer
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reset_tofu_for_peer.argtypes = (
-    ctypes.c_uint64,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reset_tofu_for_peer.restype = ctypes.c_int8
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2746,9 +2738,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reques
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reset_tofu_for_peer.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reset_tofu_for_peer.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume.restype = ctypes.c_uint16
@@ -9261,8 +9250,6 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def request_prekey_bundle(self, username: str) -> str:
         raise NotImplementedError
-    def reset_tofu_for_peer(self, peer_id: str) -> bool:
-        raise NotImplementedError
     def resume(self, ) -> None:
         raise NotImplementedError
     def reticulum_confirm_sent(self, message_id: str) -> None:
@@ -11110,21 +11097,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
-    def reset_tofu_for_peer(self, peer_id: str) -> bool:
-        
-        _UniffiFfiConverterString.check_lower(peer_id)
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-            _UniffiFfiConverterString.lower(peer_id),
-        )
-        _uniffi_lift_return = _UniffiFfiConverterBoolean.lift
-        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reset_tofu_for_peer,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)

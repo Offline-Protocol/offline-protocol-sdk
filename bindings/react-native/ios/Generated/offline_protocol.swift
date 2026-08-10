@@ -1026,8 +1026,6 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func requestPrekeyBundle(username: String) throws  -> String
     
-    func resetTofuForPeer(peerId: String) throws  -> Bool
-    
     func resume() throws 
     
     func reticulumConfirmSent(messageId: String) 
@@ -2165,15 +2163,6 @@ open func requestPrekeyBundle(username: String)throws  -> String  {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(username),$0
-    )
-})
-}
-    
-open func resetTofuForPeer(peerId: String)throws  -> Bool  {
-    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reset_tofu_for_peer(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(peerId),$0
     )
 })
 }
@@ -10060,9 +10049,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle() != 50933) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reset_tofu_for_peer() != 11300) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596) {

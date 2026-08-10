@@ -174,7 +174,6 @@ mod tests {
         "protocol.message.relayed",
         "protocol.user.blocked",
         "protocol.user.unblocked",
-        "protocol.tofu.reset",
         // MlsLifecycleEvent::*
         "mls.initialized",
         "mls.encryption_used",
@@ -352,8 +351,7 @@ mod tests {
             | Event::SecurityWarning { .. }
             | Event::MessageRelayed { .. }
             | Event::UserBlocked { .. }
-            | Event::UserUnblocked { .. }
-            | Event::TofuReset { .. } => (),
+            | Event::UserUnblocked { .. } => (),
         }
     }
 
@@ -745,7 +743,7 @@ mod tests {
             },
             Event::SecurityWarning {
                 peer_id: String::new(),
-                reason_code: SecurityWarningCode::TofuKeyMismatch,
+                reason_code: SecurityWarningCode::SenderAddressMismatch,
                 reason: String::new(),
             },
             Event::MessageRelayed {
@@ -760,9 +758,6 @@ mod tests {
             },
             Event::UserUnblocked {
                 user_id: String::new(),
-            },
-            Event::TofuReset {
-                peer_id: String::new(),
             },
         ]
     }

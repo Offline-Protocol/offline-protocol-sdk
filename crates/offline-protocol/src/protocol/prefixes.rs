@@ -148,3 +148,50 @@ define_internal_prefixes! {
 /// require signature verification + TOFU enforcement.
 pub(crate) const DATA_PLANE_PREFIXES: &[&str] =
     &[internal_prefixes::ENCRYPTED, internal_prefixes::GROUP_MSG];
+
+/// Prefixes the **relay server** originates, which therefore cannot carry a
+/// peer signature.
+///
+/// These are not messages any peer transmitted. The relay answers over its
+/// WebSocket and the bridge *synthesizes* a frame from that answer
+/// (`injectGroupInternalMessage` in `InternetManager.{swift,kt}`), with a
+/// placeholder `sender` when the answer names no actor. There is no private key
+/// anywhere in that path, so requiring a signature would drop every one of them
+/// — taking group registration (and with it the `relay_synced` gate that group
+/// broadcast depends on), relay member add/remove, group info, the user's group
+/// list, and relay error reporting with it.
+///
+/// This is the same situation `GROUP_MSG` is in, and it is listed separately
+/// rather than added to [`DATA_PLANE_PREFIXES`] because the reason differs and
+/// the two must not be conflated: a data-plane frame is authenticated *later*
+/// by MLS, whereas these are not authenticated by this SDK at all.
+///
+/// # What actually protects them, and what does not
+///
+/// Two things, neither of them a signature:
+///
+/// 1. The bridge restricts these prefixes to the relay socket
+///    (`RelayControlOpTranslator`), so a mesh peer cannot deliver a crafted
+///    `__GROUP_CREATED__` through the ordinary message path.
+/// 2. The exemption here is narrower than the prefix: it applies only to a
+///    frame that arrived on [`TransportType::Internet`] carrying no transport
+///    peer identity — the shape a locally synthesized relay answer has. A peer
+///    frame on a mesh transport, or one carrying a carrier identity, is still
+///    required to be signed, so nothing on the peer-to-peer path is weakened by
+///    this list.
+///
+/// **Residual, stated plainly:** anything able to inject on the relay ingest
+/// path can forge these frames. That is the pre-existing relay-trust surface,
+/// unchanged by this work — it is exactly what these frames were exposed to
+/// before control traffic became signature-gated. Closing it means moving relay
+/// answers off the message plane and onto dedicated FFI entry points, the way
+/// `internet_group_report_received` already handles the group delivery report;
+/// that is deliberately out of scope here and left as the follow-up.
+pub(crate) const RELAY_ANSWER_PREFIXES: &[&str] = &[
+    internal_prefixes::GROUP_CREATED,
+    internal_prefixes::GROUP_MEMBER_ADDED,
+    internal_prefixes::GROUP_MEMBER_REMOVED,
+    internal_prefixes::GROUP_INFO,
+    internal_prefixes::USER_GROUPS,
+    internal_prefixes::GROUP_ERROR,
+];

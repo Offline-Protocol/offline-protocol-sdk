@@ -521,7 +521,7 @@ attacker-chosen sender.
 is the intuitive move: a seal authenticates bytes that are *present*, and this
 attack removes them. The fix was to stop deriving the answer from a deletable
 record. The gate now asks whether the peer is known to run MLS at all, sourced
-from the MLS session list and the TOFU pin store — both in the credential store,
+from the MLS session list and the durable encryption-capability records — both in the credential store,
 which a container write cannot reach.
 
 This also means **container write access can no longer be used to forge message

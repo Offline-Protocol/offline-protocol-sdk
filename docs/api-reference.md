@@ -516,7 +516,8 @@ plaintext text and legacy media from the mesh are rejected instead of being
 surfaced (plaintext carries no sender authentication), emitting a
 `SecurityWarning` with the `PLAINTEXT_RECEIVE_REJECTED` reason code (once per
 peer). Even under the opt-out, inbound plaintext from a peer known to run MLS —
-an MLS session exists with them, or their signing key is TOFU-pinned — is
+an MLS session exists with them, or they have signed a control message this
+install verified — is
 rejected as a downgrade/forgery attempt; a confirmed session is not required,
 because an honest peer queues rather than downgrading while one is pending.
 Peers that have shown no MLS signal remain readable. The `message_received`
@@ -906,18 +907,6 @@ pub fn rename_group(
 ```
 
 Renames a group and broadcasts the change to all members. Only admins can rename groups.
-
-### TOFU Trust Management
-
-```rust
-/// Reset the TOFU-pinned public key for a peer.
-/// After reset, the next message from this peer will establish a new trust pin.
-/// Returns true if an entry was removed, false if no entry existed.
-pub fn reset_tofu_for_peer(
-    &mut self,
-    peer_id: &str,
-) -> bool
-```
 
 ### Input Validation
 
