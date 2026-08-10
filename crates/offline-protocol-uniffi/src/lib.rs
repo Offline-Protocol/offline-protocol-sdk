@@ -10326,18 +10326,24 @@ mod tests {
             .unwrap();
 
         let address = protocol.local_address().expect("address after init");
-        let address_tag = offline_protocol_transport::routing_tag_for_address(&address).unwrap();
-        let profile_tag = offline_protocol_transport::routing_tag_for_address(&profile).unwrap();
+        let address_tag = offline_protocol_transport::routing_tag_for_address(
+            &address.parse().expect("local_address is an address"),
+        )
+        .unwrap();
 
         assert_eq!(
             protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
             Some(address_tag),
             "the Nostr transport must listen on the tag derived from this device's address"
         );
-        assert_ne!(
-            protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
-            Some(profile_tag),
-            "a tag still derived from the profile is the silent-delivery failure this rebuild exists to prevent"
+        // This used to also assert the tag was *not* the profile-derived one.
+        // That assertion is gone because it can no longer be written:
+        // `routing_tag_for_address` takes an `Address`, and the profile
+        // ("nostr-profile" here) does not parse as one. The invariant moved
+        // from a runtime comparison to the signature.
+        assert!(
+            profile.parse::<offline_protocol_core::Address>().is_err(),
+            "this test is only meaningful while the profile is not itself an address"
         );
     }
 
@@ -10387,7 +10393,10 @@ mod tests {
             .nostr_get_subscription_filter("sub".to_string())
             .expect("the rebuild installs the transport");
         let address = protocol.local_address().expect("address after init");
-        let address_tag = offline_protocol_transport::routing_tag_for_address(&address).unwrap();
+        let address_tag = offline_protocol_transport::routing_tag_for_address(
+            &address.parse().expect("local_address is an address"),
+        )
+        .unwrap();
         assert!(
             filter.contains(&address_tag),
             "the filter must carry the address-derived tag: {filter}"

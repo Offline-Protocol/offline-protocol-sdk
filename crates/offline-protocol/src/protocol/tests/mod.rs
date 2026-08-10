@@ -2616,7 +2616,11 @@ fn outgoing_key_package_advertises_our_nostr_pubkey_only_when_nostr_is_on() {
     // an upgrade.
     assert_ne!(
         advertised.as_deref(),
-        Some(routing_tag_for_address(&id("alice")).unwrap().as_str())
+        Some(
+            routing_tag_for_address(&id("alice").parse().expect("test identity is an address"))
+                .unwrap()
+                .as_str()
+        )
     );
 }
 
