@@ -178,18 +178,20 @@ pub(crate) const CTRL_SIGN_DOMAIN: &[u8] = b"offline-ctrl-v1";
 ///
 /// Sized to hold every legitimate source at once — the durable capability
 /// records plus the MLS session list — with room to spare, so a real deployment
-/// never reaches it. The cap exists because several of the paths that mark a
-/// peer are reachable from unauthenticated frames keyed by a wire-claimed
-/// sender id, and nothing else bounds the set: the durable record this replaced
-/// the TOFU pin store with is written only *after* a signature verifies, but
-/// the Welcome path marks its sender without one.
+/// never reaches it. The cap exists because the set is keyed by a wire-claimed
+/// sender id and nothing else bounds it.
+///
+/// Note what does *not* bound it: requiring a signature. The control gate does
+/// now reject unsigned control frames before dispatch, so every marking path
+/// runs on a verified frame — and that changes nothing here. A signature proves
+/// the signer owns the address it claims; it does not prove the address belongs
+/// to anyone real, and minting one costs a keygen. An attacker spending keygens
+/// produces unlimited distinct well-signed peers, so "written only after a
+/// signature verifies" is not by itself a bound on anything.
 ///
 /// It bounds the durable `encryption_capable_peers` storage category as well,
 /// because `OfflineProtocol::record_encryption_capable` persists only for a
-/// peer this cap admitted. A signature proves the signer owns the address it
-/// claims — it does not prove the address belongs to anyone real, and minting
-/// one costs a keygen — so "written only after a signature verifies" is not by
-/// itself a bound on anything.
+/// peer this cap admitted.
 ///
 /// Unlike the other maps keyed by a wire-claimed id, this one **refuses** at
 /// capacity instead of resetting or evicting: forgetting a peer here is the
@@ -811,7 +813,8 @@ pub(crate) struct PresencePayload {
 /// Payload for a typing indicator message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TypingIndicatorPayload {
-    /// Conversation identifier (recipient username for DMs, group_id for groups).
+    /// Opaque conversation identifier chosen by the sender (conventionally a
+    /// peer address for DMs, the group id for groups). Never parsed here.
     pub(crate) conversation_id: String,
     /// Whether the user is currently typing.
     pub(crate) is_typing: bool,
@@ -1385,9 +1388,17 @@ pub(crate) mod storage_keys {
     /// session was torn down. That job is all this category still does, so the
     /// value is a timestamp and nothing else.
     ///
-    /// A pre-migration `tofu_keys` record is left where it is: it is keyed by a
-    /// username, and no peer is named by one any more, so it can never be read
-    /// back under a live peer id.
+    /// A leftover `tofu_keys` record is left where it is, and no migration is
+    /// written for it. Records from before the identity change are keyed by a
+    /// username, so no live peer id can ever read them back — they are simply
+    /// unreachable. Records written in the window *between* the identity
+    /// change and the pin store's deletion are keyed by an address and would
+    /// still resolve, so a peer marked capable there with no live session
+    /// loses that durable mark across the upgrade: it falls back to the
+    /// `is_session_confirmed` check until the next key-package exchange
+    /// re-marks it. That is the fail-closed direction and it costs one
+    /// exchange, which is why migrating them is not worth the code while no
+    /// fleet is deployed.
     pub const ENCRYPTION_CAPABLE_PEERS: &str = "encryption_capable_peers";
     /// Key type for persisted blocked user entries.
     pub const BLOCKED_USERS: &str = "blocked_users";

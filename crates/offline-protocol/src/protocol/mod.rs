@@ -1088,11 +1088,19 @@ impl OfflineProtocol {
     ///
     /// # Bounded by refusal, never by eviction
     ///
-    /// Some marking paths are reachable without authentication: an unsigned
-    /// `__MLS_WELCOME__` from a never-verified sender marks it (deliberately —
-    /// see `handle_welcome_message` — so a failing handshake does not leave the
-    /// gate open). The keys are therefore wire-claimed ids and need their own
-    /// cap, like every other map keyed that way.
+    /// The keys are wire-claimed ids and need their own cap, like every other
+    /// map keyed that way — but not for the reason this comment used to give.
+    /// It cited an unsigned `__MLS_WELCOME__` reaching the marking path; the
+    /// control gate now rejects unsigned control frames before dispatch, and
+    /// `__MLS_WELCOME__` is in neither exemption list, so `handle_welcome_message`
+    /// only ever runs on a verified frame.
+    ///
+    /// The cap survives that because a signature was never the bound. A
+    /// signature proves the signer holds the key its address derives from; it
+    /// does not prove the address belongs to anyone real, and minting a fresh
+    /// one costs a keygen. So an attacker willing to spend keygens can still
+    /// present an unbounded supply of distinct, perfectly well-signed peers —
+    /// which is precisely what a cap on a wire-keyed map is for.
     ///
     /// It has to be a refusal. Evicting would un-mark a peer that really is
     /// encryption-capable — the fail-open direction this field exists to
@@ -2078,7 +2086,8 @@ impl OfflineProtocol {
     ///
     /// The entry point for bindings that expose low-level MLS APIs. It exists
     /// because the FFI wrapper used to reach straight for the `MlsManager` and
-    /// pass `KeyPackageTrust::FirstUse` — so an app could import a key package
+    /// pass the since-deleted `KeyPackageTrust::FirstUse` — so an app could
+    /// import a key package
     /// under any peer id with no correlation to that peer, bypassing the check
     /// `establish_secure_session` performs. The identity claim no longer needs
     /// the detour: `import_key_package` re-derives the address from the leaf
