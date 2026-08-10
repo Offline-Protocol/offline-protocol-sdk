@@ -608,8 +608,11 @@ class OfflineProtocolModule: RCTEventEmitter {
                 manager.delegate = self
                 bleManager = manager
                 
-                // Register event-driven transport callback — replaces timer-based polling.
-                // When Rust enqueues a fragment, this callback fires and Swift sends immediately.
+                // Register the event-driven transport callback. This ACCELERATES
+                // the manager's polling loop; it does not replace it. Registration
+                // happens here, at create time, which is before the identity
+                // rebuild replaces this transport object — Rust retains the
+                // callback and re-applies it there. Polling stays the floor.
                 proto.setBleTransportCallback(callback: BleTransportCallbackImpl(bleManager: manager))
                 
                 print("[OfflineProtocolModule] BLE Manager initialized for user: \(config.profile)")
@@ -661,7 +664,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                 retManager.delegate = self
                 reticulumManager = retManager
 
-                // Register event-driven transport callback — replaces timer-based polling.
+                // Register the event-driven transport callback — an accelerant
+                // for the polling loop, not a replacement (see the BLE note above).
                 proto.setReticulumTransportCallback(callback: ReticulumTransportCallbackImpl(reticulumManager: retManager))
 
                 print("[OfflineProtocolModule] Reticulum Manager initialized for user: \(config.profile)")
@@ -690,7 +694,10 @@ class OfflineProtocolModule: RCTEventEmitter {
                 nostrMgr.delegate = self
                 nostrManager = nostrMgr
 
-                // Register event-driven transport callback
+                // Register the event-driven transport callback. For Nostr this
+                // ALWAYS lands before the transport exists (it is built during
+                // the identity rebuild), so Rust stores it and installs it
+                // there. Polling remains the floor.
                 proto.setNostrTransportCallback(callback: NostrTransportCallbackImpl(nostrManager: nostrMgr))
 
                 print("[OfflineProtocolModule] Nostr Manager initialized for user: \(config.profile)")
@@ -4190,9 +4197,16 @@ class OfflineProtocolModule: RCTEventEmitter {
             "network_diameter": NSNull()
         ]
 
+        // The address, never the profile. `local_user_id` is the one field in
+        // this payload that names *this device to other devices*, and the
+        // profile is a local storage-namespace selector that is not supposed
+        // to leave the device at all — handing it to JS under an id-shaped key
+        // invites an app to store or display it as its identity. Empty until
+        // `initializeMlsWithSecureStorage` derives the address; empty is the
+        // honest answer, because before that there is no identity to report.
         let payload: [String: Any] = [
             "timestamp": Int(Date().timeIntervalSince1970),
-            "local_user_id": currentConfig?.profile ?? "",
+            "local_user_id": protocolInstance?.localAddress() ?? "",
             "nodes": nodesArray,
             "links": linksArray,
             "stats": stats
