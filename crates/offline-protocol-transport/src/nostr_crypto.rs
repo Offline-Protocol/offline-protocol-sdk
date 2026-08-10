@@ -47,6 +47,7 @@ use crate::nip44::{self, ConversationKey};
 use crate::{Error, Result};
 use hkdf::Hkdf;
 use k256::schnorr::SigningKey;
+use offline_protocol_core::Address;
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -192,7 +193,13 @@ impl NostrKeypair {
 /// Domain-separated so this is *not* the routing tag's scalar. Nothing breaks
 /// if they coincide, but a routing label that doubles as a public key whose
 /// private half is computable is a trap for whoever next touches this file.
-pub fn record_seal_keypair_for_address(address: &str) -> Result<NostrKeypair> {
+///
+/// Takes an [`Address`] rather than a string for the reason given on
+/// [`routing_tag_for_address`]: the whole point of this key is that its
+/// preimage cannot be guessed, which is a property of addresses and not of
+/// strings.
+pub fn record_seal_keypair_for_address(address: &Address) -> Result<NostrKeypair> {
+    let address = address.to_string();
     let hkdf = Hkdf::<Sha256>::new(None, address.as_bytes());
     let mut info = Vec::with_capacity(RECORD_SEAL_HKDF_INFO.len() + 1);
     for counter in 0..MAX_DERIVE_ATTEMPTS {
@@ -255,7 +262,22 @@ pub(crate) fn now_unix_secs() -> i64 {
 /// a relay cannot turn its subscriber list back into an address book. That
 /// property is the reason the published record stays sealed — publishing it in
 /// the clear would hand the address back at the tag it sits on.
-pub fn routing_tag_for_address(address: &str) -> Result<String> {
+///
+/// # Why the parameter is an [`Address`] and not a string
+///
+/// Every sentence above depends on the preimage being an address. Feed this a
+/// username and it computes a perfectly valid tag over a guessable string,
+/// which is precisely the leak the addressing migration removed: anyone with a
+/// dictionary recovers the label and watches that inbox. That made the
+/// invariant real but unrepresentable — enforced by three separate `parse`
+/// gates at the call sites, each of which had to be remembered.
+///
+/// Taking the parsed type instead moves the check to the boundary where the
+/// value enters the transport, and makes "derive a tag for `bob`" fail to
+/// compile rather than fail in review. The gates stay: they are now the parse
+/// points that *produce* this type.
+pub fn routing_tag_for_address(address: &Address) -> Result<String> {
+    let address = address.to_string();
     let tag_scalar = Sha256::digest(address.as_bytes());
     let tag_key = SigningKey::from_bytes(tag_scalar.as_slice())
         .map_err(|e| Error::CryptoError(format!("Invalid routing tag for address: {}", e)))?;
@@ -690,11 +712,11 @@ mod tests {
     /// Both derivations here take an address, and an address is not a name —
     /// writing `routing_tag_for_address("bob")` would still compute *a* tag,
     /// and would quietly teach the next reader that usernames are valid input.
-    fn addr(label: &str) -> String {
+    fn addr(label: &str) -> Address {
         let digest = Sha256::digest(label.as_bytes());
-        let mut hash = [0u8; offline_protocol_core::Address::HASH_LEN];
-        hash.copy_from_slice(&digest[..offline_protocol_core::Address::HASH_LEN]);
-        offline_protocol_core::Address::from_hash_bytes(hash).to_string()
+        let mut hash = [0u8; Address::HASH_LEN];
+        hash.copy_from_slice(&digest[..Address::HASH_LEN]);
+        Address::from_hash_bytes(hash)
     }
 
     #[test]
@@ -728,7 +750,7 @@ mod tests {
         // identity. Feeding the address straight into the install-secret
         // derivation must not land on either public value.
         let address = addr("alice");
-        let secret = Sha256::digest(address.as_bytes());
+        let secret = Sha256::digest(address.to_string().as_bytes());
         let kp = NostrKeypair::from_install_secret(secret.as_slice()).unwrap();
 
         assert_ne!(
@@ -776,18 +798,46 @@ mod tests {
         // Written out as literal addresses rather than through `addr()`: a
         // golden vector that derives its own input can only ever agree with
         // itself.
+        //
+        // Each literal is parsed via `vector_address`, which is what makes a
+        // typo'd vector a failure instead of a silent re-pinning. While these
+        // took `&str` a corrupted literal still hashed to *something*, so the
+        // test kept passing against a preimage no runtime path could ever
+        // produce — the vectors agreed with themselves about a value nobody
+        // would compute.
         assert_eq!(
-            routing_tag_for_address("off1qy4aspkf0u8qptc6rlpn9ra8vw5jd9ereq4cwpfs").unwrap(),
+            routing_tag_for_address(&vector_address(
+                "off1qy4aspkf0u8qptc6rlpn9ra8vw5jd9ereq4cwpfs"
+            ))
+            .unwrap(),
             "2ba510b01e5a0f1a76ed8e66beb430642960e740aedf7d8f1c8b21cb11028fc2"
         );
         assert_eq!(
-            routing_tag_for_address("off1qxqmvd7clnfvdknrt8nfvvgn5ytsmeu4us5lrr0g").unwrap(),
+            routing_tag_for_address(&vector_address(
+                "off1qxqmvd7clnfvdknrt8nfvvgn5ytsmeu4us5lrr0g"
+            ))
+            .unwrap(),
             "32d26c7b8fbbb9268aba57a45d84a5554cc23e880aef5a7b2ce06e490a1ba35c"
         );
         assert_eq!(
-            routing_tag_for_address("off1qyv04gxa02f8jpkt8cu06nlk3x0mu35wdqyxt6jq").unwrap(),
+            routing_tag_for_address(&vector_address(
+                "off1qyv04gxa02f8jpkt8cu06nlk3x0mu35wdqyxt6jq"
+            ))
+            .unwrap(),
             "e7505f56a2de5a5d3946949ab58bde530b452f46f4c11f85130c18e48b7bbd51"
         );
+    }
+
+    /// Parses a golden-vector literal, failing loudly if it is not a valid
+    /// address.
+    ///
+    /// The vectors pin a derivation whose *input* is the thing that has to be
+    /// right. A literal that is not a real address pins a tag no peer can
+    /// produce, which is worse than no vector at all — it reads as coverage.
+    fn vector_address(literal: &str) -> Address {
+        literal
+            .parse::<Address>()
+            .unwrap_or_else(|e| panic!("golden vector '{literal}' is not a valid address: {e}"))
     }
 
     /// The record-seal key is a wire contract in the same way the tag is: a
@@ -797,15 +847,19 @@ mod tests {
     #[test]
     fn test_record_seal_key_golden_values() {
         assert_eq!(
-            record_seal_keypair_for_address("off1qy4aspkf0u8qptc6rlpn9ra8vw5jd9ereq4cwpfs")
-                .unwrap()
-                .public_key_hex(),
+            record_seal_keypair_for_address(&vector_address(
+                "off1qy4aspkf0u8qptc6rlpn9ra8vw5jd9ereq4cwpfs"
+            ))
+            .unwrap()
+            .public_key_hex(),
             "62f2835dc8788282d7ce92864fd1819b12b472e209b0116c17a1d06a5f9eebb0"
         );
         assert_eq!(
-            record_seal_keypair_for_address("off1qxqmvd7clnfvdknrt8nfvvgn5ytsmeu4us5lrr0g")
-                .unwrap()
-                .public_key_hex(),
+            record_seal_keypair_for_address(&vector_address(
+                "off1qxqmvd7clnfvdknrt8nfvvgn5ytsmeu4us5lrr0g"
+            ))
+            .unwrap()
+            .public_key_hex(),
             "c6c428f62e777b97c29a8e1a8d7fb2aaaa14bf55e5adf3ced4ed30a5c3c27755"
         );
     }

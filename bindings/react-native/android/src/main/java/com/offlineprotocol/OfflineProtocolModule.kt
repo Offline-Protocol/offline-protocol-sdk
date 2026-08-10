@@ -2601,6 +2601,30 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         val count = protocol?.bleGetPeerCount()?.toInt() ?: 0
         promise.resolve(count)
     }
+
+    /**
+     * BLE diagnostic counters — the address-migration rollout alarm.
+     *
+     * Exposed as one call because they are one signal: each counts a frame
+     * that went out under a degraded path rather than failing, so they are
+     * invisible in delivery metrics and only meaningful read together.
+     * Sustained growth after a release means peers disagree about identity.
+     * All three read zero when BLE is not registered.
+     */
+    @ReactMethod
+    fun bleGetDiagnostics(promise: Promise) {
+        val map = Arguments.createMap()
+        map.putDouble("fragmentFallbacks", (protocol?.bleFragmentFallbackCount() ?: 0uL).toDouble())
+        map.putDouble(
+            "recipientNotAmongPeers",
+            (protocol?.bleRecipientNotAmongPeersCount() ?: 0uL).toDouble()
+        )
+        map.putDouble(
+            "undersizedMtuReports",
+            (protocol?.bleUndersizedMtuReports() ?: 0uL).toDouble()
+        )
+        promise.resolve(map)
+    }
     
     @ReactMethod
     fun getActiveTransports(promise: Promise) {
@@ -4174,8 +4198,21 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     /**
      * Wire event-driven transport callbacks using direct typed UniFFI calls.
-     * Each callback fires when Rust enqueues outgoing data, replacing timer-based polling.
-     * Falls back to polling if bindings are stale (logged as warning).
+     * Each callback fires when Rust enqueues outgoing data, accelerating the
+     * manager's polling loop.
+     *
+     * These do NOT replace the polling loops, and the logs below deliberately
+     * no longer say they do. Registration happens here, at create time, which
+     * is before `initializeMlsWithSecureStorage` derives this device's address
+     * and rebuilds the transports against it — so a successful call proves the
+     * callback was *accepted*, never that it is live. Rust now retains each
+     * callback and re-applies it after that rebuild, which is what makes them
+     * actually fire; before that fix every one of these was dropped, and Nostr
+     * (which has no transport until the rebuild) never landed at all.
+     *
+     * The polling loops stay regardless: they are the correctness floor, and
+     * these callbacks are latency optimisation on top. Do not delete a polling
+     * loop on the strength of one of these log lines.
      */
     private fun wireTransportCallbacks(proto: OfflineProtocol) {
         // BLE callback
@@ -4186,7 +4223,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         manager.onFragmentsAvailable()
                     }
                 })
-                android.util.Log.i(NAME, "BLE transport callback wired (event-driven sending active)")
+                android.util.Log.i(NAME, "BLE transport callback registered (re-applied after identity rebuild; polling remains the floor)")
                 emitDiagnostic("info", "BLE transport callback wired")
             } catch (e: Throwable) {
                 android.util.Log.w(NAME, "BLE transport callback not available; using fallback polling", e)
@@ -4202,8 +4239,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         manager.onMessagesAvailable()
                     }
                 })
-                android.util.Log.i(NAME, "WiFi Direct transport callback wired (event-driven sending active)")
-                emitDiagnostic("info", "WiFi Direct transport callback wired")
+                android.util.Log.w(NAME, "WiFi Direct transport callback registered, but no Wi-Fi Direct transport is registered in Rust — it will not fire; polling is doing all the work")
+                emitDiagnostic("warning", "WiFi Direct transport callback is inert (no Wi-Fi Direct transport registered)")
             } catch (e: Throwable) {
                 android.util.Log.w(NAME, "WiFi Direct transport callback not available; using fallback polling", e)
                 emitDiagnostic("warning", "WiFi Direct callback wiring skipped (regenerate UniFFI bindings)")
@@ -4218,7 +4255,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         manager.onMessagesAvailable()
                     }
                 })
-                android.util.Log.i(NAME, "Reticulum transport callback wired (event-driven sending active)")
+                android.util.Log.i(NAME, "Reticulum transport callback registered (re-applied after identity rebuild; polling remains the floor)")
                 emitDiagnostic("info", "Reticulum transport callback wired")
             } catch (e: Throwable) {
                 android.util.Log.w(NAME, "Reticulum transport callback not available; using fallback polling", e)
@@ -4234,7 +4271,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         manager.onMessagesAvailable()
                     }
                 })
-                android.util.Log.i(NAME, "Nostr transport callback wired (event-driven sending active)")
+                android.util.Log.i(NAME, "Nostr transport callback registered (installed at the identity rebuild; polling remains the floor)")
                 emitDiagnostic("info", "Nostr transport callback wired")
             } catch (e: Throwable) {
                 android.util.Log.w(NAME, "Nostr transport callback not available; using fallback polling", e)
@@ -4472,9 +4509,16 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             put("network_diameter", JSONObject.NULL)
         }
 
+        // The address, never the profile. `local_user_id` is the one field in
+        // this payload that names *this device to other devices*, and the
+        // profile is a local storage-namespace selector that is not supposed
+        // to leave the device at all — handing it to JS under an id-shaped key
+        // invites an app to store or display it as its identity. Empty until
+        // `initializeMlsWithSecureStorage` derives the address; empty is the
+        // honest answer, because before that there is no identity to report.
         val root = JSONObject().apply {
             put("timestamp", System.currentTimeMillis() / Constants.MILLISECONDS_PER_SECOND)
-            put("local_user_id", currentConfig?.profile ?: "")
+            put("local_user_id", protocol?.localAddress() ?: "")
             put("nodes", nodesArray)
             put("links", linksArray)
             put("stats", statsObj)

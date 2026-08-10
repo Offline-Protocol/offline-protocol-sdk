@@ -99,7 +99,7 @@ final class MeshController {
         // docs/configuration.md for what each one controls.
         let config = ProtocolConfig(
             appId: "my-ios-app",
-            userId: "user123",
+            profile: "user123",
             bleEnabled: true,
             wifiDirectEnabled: false,   // iOS does not support Wi-Fi Direct
             internetEnabled: true,

@@ -16,6 +16,21 @@
 //!   [`ForwardInfoEvent::original_sender`], [`GroupInfoMember::user_id`],
 //!   [`UserGroupSummary::group_id`].
 //!
+//!   **Petnames are actor identifiers too**, and this is not obvious:
+//!   `sender_name` and `accepted_by_name` used to sit next to a `sender`
+//!   that *was* a chosen username, which made them decoration — the same
+//!   information, less precisely. Deriving the identity from the key
+//!   inverted that. `sender` is now an `off1…` address: pseudonymous,
+//!   uncorrelatable with anything off-device, and meaningless to a human.
+//!   The petname beside it is the only field left in the event that names a
+//!   *person*, which makes it the most identifying value the sink receives,
+//!   not the least. A field's category follows what it carries relative to
+//!   its siblings, and this one changed category without changing type.
+//!
+//!   They are hashed rather than dropped so a sink keeps the property the
+//!   scrubber exists to provide — "these two records concern the same
+//!   party" — without learning who that party is.
+//!
 //! - **Message-scoped IDs are left raw**: `message_id`, `file_id`,
 //!   `query_id`, `request_id`, `service_id`, `ForwardInfoEvent::
 //!   original_message_id`. These are per-event UUIDs playing the same role
@@ -25,12 +40,17 @@
 //!   single-use anyway.
 //!
 //! - **Content and display fields are left raw**: `content`, `file_data`,
-//!   `name`, `new_name`/`old_name`, `group_name`, `sender_name`,
-//!   `accepted_by_name`, `file_name`, `initial_message`,
-//!   `reason`/`reason_detail`, `method`, `body`, `version`. Scrubbing
-//!   payload is out of scope for `scrub_ids`; if that ever needs to change
-//!   it belongs behind a separate `emit_content` knob so the two concerns
-//!   don't get conflated.
+//!   `name`, `new_name`/`old_name`, `group_name`, `file_name`,
+//!   `initial_message`, `reason`/`reason_detail`, `method`, `body`,
+//!   `version`. Scrubbing payload is out of scope for `scrub_ids`; if that
+//!   ever needs to change it belongs behind a separate `emit_content` knob
+//!   so the two concerns don't get conflated.
+//!
+//!   Group and file names stay here on purpose even though petnames moved
+//!   out. A group name is a label several parties share and agree on, and a
+//!   file name describes an artifact; neither designates the individual the
+//!   way `sender_name` does. The line is "does this name a person", not
+//!   "is this human-readable".
 //!
 //! - **Secret material is redacted unconditionally** (independent of the
 //!   `scrub_ids` setting): `media_metadata.encryption_key`/`iv` grant
@@ -415,12 +435,13 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
         }
         Event::ConnectionRequestReceived {
             sender,
-            sender_name: _,
+            sender_name,
             timestamp: _,
             key_package: _,
             initial_message: _,
         } => {
             hash_string(sender, scrubber);
+            hash_string(sender_name, scrubber);
         }
         Event::ConnectionRequestUndeliverable {
             recipient,
@@ -431,11 +452,12 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
         }
         Event::ConnectionAccepted {
             accepted_by,
-            accepted_by_name: _,
+            accepted_by_name,
             timestamp: _,
             key_package: _,
         } => {
             hash_string(accepted_by, scrubber);
+            hash_string(accepted_by_name, scrubber);
         }
         Event::ConnectionRejected { rejected_by } => {
             hash_string(rejected_by, scrubber);
@@ -641,8 +663,9 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             timestamp: _,
         } => {
             hash_string(sender, scrubber);
-            // `conversation_id` is a recipient username for DMs or a group_id
-            // for groups — both are actor-class identifiers, hash either way.
+            // `conversation_id` is app-chosen and opaque here, but whatever it
+            // is keyed by — a peer address for DMs, a group id for groups — it
+            // designates a party. Hash it: the one thing it is never is random.
             hash_string(conversation_id, scrubber);
         }
         Event::ReadReceiptReceived {
@@ -1232,7 +1255,9 @@ mod tests {
         let cancel = Event::ConnectionRequestCancelled {
             cancelled_by: "dan".into(),
         };
-        for (event, expected_raw, expected_hashed) in [
+        // The petname is hashed, not left raw: with `sender` reduced to a
+        // pseudonymous address it is the only field here that names a person.
+        for (event, expected_petname, expected_hashed) in [
             (req, "Alice A.", "alice"),
             (accept, "Bob B.", "bob"),
             (reject, "", "carol"),
@@ -1246,7 +1271,11 @@ mod tests {
                     ..
                 } => {
                     assert_eq!(sender, hashed(expected_hashed));
-                    assert_eq!(sender_name, expected_raw);
+                    assert_eq!(sender_name, hashed(expected_petname));
+                    assert_ne!(
+                        sender_name, expected_petname,
+                        "petname reached the sink unscrubbed",
+                    );
                 }
                 Event::ConnectionAccepted {
                     accepted_by,
@@ -1254,7 +1283,11 @@ mod tests {
                     ..
                 } => {
                     assert_eq!(accepted_by, hashed(expected_hashed));
-                    assert_eq!(accepted_by_name, expected_raw);
+                    assert_eq!(accepted_by_name, hashed(expected_petname));
+                    assert_ne!(
+                        accepted_by_name, expected_petname,
+                        "petname reached the sink unscrubbed",
+                    );
                 }
                 Event::ConnectionRejected { rejected_by } => {
                     assert_eq!(rejected_by, hashed(expected_hashed));
@@ -1264,6 +1297,33 @@ mod tests {
                 }
                 _ => panic!("unexpected variant"),
             }
+        }
+    }
+
+    #[test]
+    fn petnames_are_passed_through_when_scrubbing_is_disabled() {
+        // Petnames moved into the hashed set, but they moved into the set
+        // `scrub_ids` governs — not out from under it. An operator who opted
+        // out to correlate against their own server logs still gets the raw
+        // value, exactly as they do for `sender`.
+        let req = Event::ConnectionRequestReceived {
+            sender: "alice".into(),
+            sender_name: "Alice A.".into(),
+            timestamp: 0,
+            key_package: None,
+            initial_message: None,
+        };
+        let scrubbed = scrub_event(&req, &scrubber_disabled()).into_owned();
+        match scrubbed {
+            Event::ConnectionRequestReceived {
+                sender,
+                sender_name,
+                ..
+            } => {
+                assert_eq!(sender, "alice");
+                assert_eq!(sender_name, "Alice A.");
+            }
+            _ => panic!("unexpected variant"),
         }
     }
 

@@ -2322,6 +2322,33 @@ pub struct OfflineProtocol {
     /// Which transports this instance was configured with, so they can be
     /// rebuilt against the derived address once `initialize_mls` knows it.
     enabled_transports: EnabledTransports,
+    /// Transport callbacks held here rather than only on the transport
+    /// object, so `rebuild_transports_for_identity` can re-apply them.
+    ///
+    /// `set_*_transport_callback` installs onto whichever transport is
+    /// registered *now*, and the rebuild replaces every one of those objects
+    /// with a fresh instance carrying no callback. Both bridges register at
+    /// create time, which is always before the rebuild — so without a stored
+    /// copy every callback is dropped, and for Nostr (deliberately not built
+    /// until the rebuild) it never lands at all. Same shape as
+    /// `event_callback` above, and for the same reason: state that must
+    /// outlive anything owned by `inner` lives on this struct.
+    transport_callbacks: Arc<RwLock<TransportCallbacks>>,
+}
+
+/// The transport callbacks an app registered, kept so they can be re-applied
+/// to transports rebuilt against the derived address.
+///
+/// Internet is absent because it has no callback API — it does not override
+/// `set_on_messages_available`, so there is nothing to carry forward. Wi-Fi
+/// Direct is absent for a different reason: `WifiDirectTransport` is never
+/// registered, so its setter has nothing to install onto in the first place
+/// and storing the callback would imply a wiring that does not exist.
+#[derive(Default, Clone)]
+struct TransportCallbacks {
+    ble: Option<Arc<dyn BleTransportCallback>>,
+    reticulum: Option<Arc<dyn ReticulumTransportCallback>>,
+    nostr: Option<Arc<dyn NostrTransportCallback>>,
 }
 
 /// The transport set from the original config.
@@ -2466,6 +2493,7 @@ impl OfflineProtocol {
                 reticulum: reticulum_enabled,
                 nostr: nostr_enabled,
             },
+            transport_callbacks: Arc::new(RwLock::new(TransportCallbacks::default())),
         })
     }
 
@@ -2987,49 +3015,123 @@ impl OfflineProtocol {
     /// Registers a BLE transport callback that fires when outgoing fragments
     /// become available. This replaces timer-based polling — the platform
     /// should call `ble_get_next_fragment()` inside the callback.
+    ///
+    /// Safe to call before `initialize_mls`: the callback is retained and
+    /// re-applied to the transport rebuilt against the derived address.
     pub fn set_ble_transport_callback(&self, callback: Box<dyn BleTransportCallback>) {
         let callback: Arc<dyn BleTransportCallback> = Arc::from(callback);
-        self.with_transport(CoreTransportType::BLE, |transport| {
-            transport.set_on_messages_available(Arc::new(move || {
-                callback.on_fragments_available();
-            }));
-        });
+        recover_rwlock_write(&self.transport_callbacks, "transport_callbacks").ble =
+            Some(callback.clone());
+        self.install_ble_callback(&callback);
     }
 
     /// Registers a WiFi Direct transport callback that fires when outgoing
     /// messages become available. This replaces timer-based polling.
+    ///
+    /// **Currently inert.** `WifiDirectTransport` is not registered by this
+    /// crate (see `rebuild_transports_for_identity`), so there is no
+    /// transport to install onto and Wi-Fi Direct sending runs entirely from
+    /// the platform manager's own polling loop. Kept as the restoration hook
+    /// for when the transport is wired up; it warns rather than pretending.
     pub fn set_wifi_direct_transport_callback(
         &self,
         callback: Box<dyn WifiDirectTransportCallback>,
     ) {
         let callback: Arc<dyn WifiDirectTransportCallback> = Arc::from(callback);
-        self.with_transport(CoreTransportType::WiFiDirect, |transport| {
-            transport.set_on_messages_available(Arc::new(move || {
-                callback.on_messages_available();
-            }));
-        });
+        let installed = self
+            .with_transport(CoreTransportType::WiFiDirect, |transport| {
+                transport.set_on_messages_available(Arc::new(move || {
+                    callback.on_messages_available();
+                }));
+            })
+            .is_some();
+        if !installed {
+            tracing::warn!(
+                "Wi-Fi Direct transport callback registered but no Wi-Fi Direct \
+                 transport exists; event-driven sending is NOT active and the \
+                 platform polling loop is doing all the work"
+            );
+        }
     }
 
     /// Registers a Reticulum transport callback that fires when outgoing
     /// messages become available. This replaces timer-based polling.
+    ///
+    /// Safe to call before `initialize_mls`: the callback is retained and
+    /// re-applied to the transport rebuilt against the derived address.
     pub fn set_reticulum_transport_callback(&self, callback: Box<dyn ReticulumTransportCallback>) {
         let callback: Arc<dyn ReticulumTransportCallback> = Arc::from(callback);
-        self.with_transport(CoreTransportType::Reticulum, |transport| {
-            transport.set_on_messages_available(Arc::new(move || {
-                callback.on_messages_available();
-            }));
-        });
+        recover_rwlock_write(&self.transport_callbacks, "transport_callbacks").reticulum =
+            Some(callback.clone());
+        self.install_reticulum_callback(&callback);
     }
 
     /// Registers a Nostr transport callback that fires when outgoing
     /// messages become available. This replaces timer-based polling.
+    ///
+    /// Safe to call before `initialize_mls` — and for Nostr that is the only
+    /// way it is ever called. The Nostr transport does not exist until
+    /// `initialize_mls` derives the address, so this always stores now and
+    /// installs later.
     pub fn set_nostr_transport_callback(&self, callback: Box<dyn NostrTransportCallback>) {
         let callback: Arc<dyn NostrTransportCallback> = Arc::from(callback);
+        recover_rwlock_write(&self.transport_callbacks, "transport_callbacks").nostr =
+            Some(callback.clone());
+        self.install_nostr_callback(&callback);
+    }
+
+    /// Installs a stored BLE callback onto the live transport, if there is
+    /// one. Returns whether it landed.
+    fn install_ble_callback(&self, callback: &Arc<dyn BleTransportCallback>) -> bool {
+        let callback = callback.clone();
+        self.with_transport(CoreTransportType::BLE, |transport| {
+            transport.set_on_messages_available(Arc::new(move || {
+                callback.on_fragments_available();
+            }));
+        })
+        .is_some()
+    }
+
+    /// Installs a stored Reticulum callback onto the live transport, if there
+    /// is one. Returns whether it landed.
+    fn install_reticulum_callback(&self, callback: &Arc<dyn ReticulumTransportCallback>) -> bool {
+        let callback = callback.clone();
+        self.with_transport(CoreTransportType::Reticulum, |transport| {
+            transport.set_on_messages_available(Arc::new(move || {
+                callback.on_messages_available();
+            }));
+        })
+        .is_some()
+    }
+
+    /// Installs a stored Nostr callback onto the live transport, if there is
+    /// one. Returns whether it landed.
+    fn install_nostr_callback(&self, callback: &Arc<dyn NostrTransportCallback>) -> bool {
+        let callback = callback.clone();
         self.with_transport(CoreTransportType::Nostr, |transport| {
             transport.set_on_messages_available(Arc::new(move || {
                 callback.on_messages_available();
             }));
-        });
+        })
+        .is_some()
+    }
+
+    /// Re-applies every stored transport callback.
+    ///
+    /// Called after `rebuild_transports_for_identity` replaces the transport
+    /// objects, which is the point at which the originally-installed
+    /// callbacks were dropped with the objects that held them.
+    fn reapply_transport_callbacks(&self) {
+        let stored = recover_rwlock_read(&self.transport_callbacks, "transport_callbacks").clone();
+        if let Some(cb) = stored.ble.as_ref() {
+            self.install_ble_callback(cb);
+        }
+        if let Some(cb) = stored.reticulum.as_ref() {
+            self.install_reticulum_callback(cb);
+        }
+        if let Some(cb) = stored.nostr.as_ref() {
+            self.install_nostr_callback(cb);
+        }
     }
 
     // ========================================================================
@@ -5237,12 +5339,9 @@ impl OfflineProtocol {
 
         // The address exists only now, so this is the first point the
         // transports can carry it. See `rebuild_transports_for_identity`.
-        if let Some(address) = protocol.local_address().map(str::to_owned) {
-            Self::rebuild_transports_for_identity(
-                &mut protocol,
-                self.enabled_transports,
-                &address,
-            )?;
+        let derived_address = protocol.local_address().map(str::to_owned);
+        if let Some(address) = derived_address.as_deref() {
+            Self::rebuild_transports_for_identity(&mut protocol, self.enabled_transports, address)?;
             // The Nostr transport did not exist while `initialize_mls` ran its
             // restores — the line above is what installs it — so the persisted
             // signing secret and receive watermark have to be installed now.
@@ -5251,6 +5350,26 @@ impl OfflineProtocol {
             // launch and silently strands peers still sealing to the pubkey we
             // last advertised.
             protocol.restore_nostr_transport_state();
+        }
+
+        // Everything below re-acquires `inner`, so the rebuild's guard has to
+        // go first.
+        drop(protocol);
+
+        if let Some(address) = derived_address {
+            // The rebuild dropped the transport objects that were holding the
+            // registered callbacks, so re-apply them onto the replacements.
+            // Without this the bridges' create-time registrations are silently
+            // discarded and sending falls back to the platform polling loops.
+            self.reapply_transport_callbacks();
+
+            // The visualizer was seeded with the pre-identity placeholder and
+            // is not owned by `inner`, so the rebuild does not reach it. Left
+            // alone it reports the `profile` as this device's id for the
+            // lifetime of the instance — a value documented as never leaving
+            // the device, handed to whoever calls `get_topology()`.
+            let mut visualizer = recover_mutex(&self.visualizer, "visualizer");
+            visualizer.set_local_user_id(address);
         }
         Ok(())
     }
@@ -5605,7 +5724,10 @@ impl OfflineProtocol {
     }
 
     /// Send a typing indicator to a peer via the protocol (routed through DORS).
-    /// For direct messages, conversation_id should be the recipient's username.
+    /// `conversation_id` is opaque to the SDK: it is carried to the peer and
+    /// echoed back on the event, never parsed or routed on. Pick a stable key
+    /// — the peer's address is a reasonable default for a DM, the group id for
+    /// a group. Do not derive it from a display name: those change.
     /// For group chats, conversation_id should be the group_id.
     pub fn send_typing_indicator(
         &self,
@@ -5632,93 +5754,6 @@ impl OfflineProtocol {
             .send_read_receipt(&recipient, message_ids)
             .map_err(map_send_error)?;
         Ok(message_id.as_str())
-    }
-
-    // ========================================================================
-    // RELAY SERVER API (JSON payload formatters for WebSocket relay)
-    // ========================================================================
-
-    /// Check if a user is online via relay server.
-    /// Returns JSON string to send via WebSocket relay.
-    pub fn check_presence(&self, username: String) -> Result<String, ProtocolError> {
-        let payload = serde_json::json!({
-            "type": "CheckPresence",
-            "username": username
-        });
-        serde_json::to_string(&payload).map_err(|e| {
-            ProtocolError::SerializationError(format!("Failed to serialize CheckPresence: {}", e))
-        })
-    }
-
-    /// Request prekey bundle for a user to establish encrypted communication.
-    /// Returns JSON string to send via WebSocket relay.
-    pub fn request_prekey_bundle(&self, username: String) -> Result<String, ProtocolError> {
-        let payload = serde_json::json!({
-            "type": "RequestPreKeyBundle",
-            "username": username
-        });
-        serde_json::to_string(&payload).map_err(|e| {
-            ProtocolError::SerializationError(format!(
-                "Failed to serialize RequestPreKeyBundle: {}",
-                e
-            ))
-        })
-    }
-
-    /// Upload identity key and prekeys for Signal Protocol.
-    /// Returns JSON string to send via WebSocket relay.
-    pub fn upload_keys(
-        &self,
-        identity_key: String,
-        signed_prekey_json: String,
-        one_time_prekeys_json: String,
-    ) -> Result<String, ProtocolError> {
-        let signed_prekey: serde_json::Value =
-            serde_json::from_str(&signed_prekey_json).map_err(|e| {
-                ProtocolError::InvalidArgument(format!("Failed to parse signed_prekey JSON: {}", e))
-            })?;
-
-        let one_time_prekeys: Vec<serde_json::Value> = serde_json::from_str(&one_time_prekeys_json)
-            .map_err(|e| {
-                ProtocolError::InvalidArgument(format!(
-                    "Failed to parse one_time_prekeys JSON: {}",
-                    e
-                ))
-            })?;
-
-        let payload = serde_json::json!({
-            "type": "UploadKeys",
-            "identity_key": identity_key,
-            "signed_prekey": signed_prekey,
-            "one_time_prekeys": one_time_prekeys
-        });
-        serde_json::to_string(&payload).map_err(|e| {
-            ProtocolError::SerializationError(format!("Failed to serialize UploadKeys: {}", e))
-        })
-    }
-
-    /// Set typing indicator via relay server (JSON payload formatter).
-    /// Returns JSON string to send via WebSocket relay.
-    pub fn set_typing(&self, conversation_id: String) -> Result<String, ProtocolError> {
-        let payload = serde_json::json!({
-            "type": "SetTyping",
-            "conversation_id": conversation_id
-        });
-        serde_json::to_string(&payload).map_err(|e| {
-            ProtocolError::SerializationError(format!("Failed to serialize SetTyping: {}", e))
-        })
-    }
-
-    /// Clear typing indicator via relay server (JSON payload formatter).
-    /// Returns JSON string to send via WebSocket relay.
-    pub fn clear_typing(&self, conversation_id: String) -> Result<String, ProtocolError> {
-        let payload = serde_json::json!({
-            "type": "ClearTyping",
-            "conversation_id": conversation_id
-        });
-        serde_json::to_string(&payload).map_err(|e| {
-            ProtocolError::SerializationError(format!("Failed to serialize ClearTyping: {}", e))
-        })
     }
 
     // ========================================================================
@@ -10207,18 +10242,24 @@ mod tests {
             .unwrap();
 
         let address = protocol.local_address().expect("address after init");
-        let address_tag = offline_protocol_transport::routing_tag_for_address(&address).unwrap();
-        let profile_tag = offline_protocol_transport::routing_tag_for_address(&profile).unwrap();
+        let address_tag = offline_protocol_transport::routing_tag_for_address(
+            &address.parse().expect("local_address is an address"),
+        )
+        .unwrap();
 
         assert_eq!(
             protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
             Some(address_tag),
             "the Nostr transport must listen on the tag derived from this device's address"
         );
-        assert_ne!(
-            protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
-            Some(profile_tag),
-            "a tag still derived from the profile is the silent-delivery failure this rebuild exists to prevent"
+        // This used to also assert the tag was *not* the profile-derived one.
+        // That assertion is gone because it can no longer be written:
+        // `routing_tag_for_address` takes an `Address`, and the profile
+        // ("nostr-profile" here) does not parse as one. The invariant moved
+        // from a runtime comparison to the signature.
+        assert!(
+            profile.parse::<offline_protocol_core::Address>().is_err(),
+            "this test is only meaningful while the profile is not itself an address"
         );
     }
 
@@ -10268,7 +10309,10 @@ mod tests {
             .nostr_get_subscription_filter("sub".to_string())
             .expect("the rebuild installs the transport");
         let address = protocol.local_address().expect("address after init");
-        let address_tag = offline_protocol_transport::routing_tag_for_address(&address).unwrap();
+        let address_tag = offline_protocol_transport::routing_tag_for_address(
+            &address.parse().expect("local_address is an address"),
+        )
+        .unwrap();
         assert!(
             filter.contains(&address_tag),
             "the filter must carry the address-derived tag: {filter}"
@@ -10276,6 +10320,136 @@ mod tests {
         assert!(
             !filter.contains("leaky-profile"),
             "the profile must reach no relay in any form: {filter}"
+        );
+    }
+
+    /// A callback registered before the identity exists must survive the
+    /// rebuild that replaces the transport it was registered against.
+    ///
+    /// This is the shape both bridges actually use: they wire callbacks
+    /// inside `create()`, and `initializeMlsWithSecureStorage` is a separate
+    /// call the app makes afterwards. Registering *after* init is not the
+    /// path under test because nothing does it.
+    ///
+    /// Nostr is the sharpest case — it has no transport at registration time
+    /// at all, so before this fix the callback was discarded on the spot
+    /// rather than merely orphaned later. BLE covers the orphaned-by-rebuild
+    /// half.
+    #[test]
+    fn test_transport_callbacks_survive_the_identity_rebuild() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        struct CountingNostr(Arc<AtomicU64>);
+        impl NostrTransportCallback for CountingNostr {
+            fn on_messages_available(&self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct CountingBle(Arc<AtomicU64>);
+        impl BleTransportCallback for CountingBle {
+            fn on_fragments_available(&self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let protocol = OfflineProtocol::new(ProtocolConfig {
+            profile: "callback-profile".to_string(),
+            nostr_enabled: true,
+            ble_enabled: true,
+            ..create_test_config()
+        })
+        .unwrap();
+
+        let nostr_hits = Arc::new(AtomicU64::new(0));
+        let ble_hits = Arc::new(AtomicU64::new(0));
+        protocol.set_nostr_transport_callback(Box::new(CountingNostr(nostr_hits.clone())));
+        protocol.set_ble_transport_callback(Box::new(CountingBle(ble_hits.clone())));
+
+        protocol
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::default()),
+                Box::new(TestMlsStorageProvider::default()),
+            )
+            .unwrap();
+
+        let address = protocol.local_address().expect("address after init");
+
+        // Drive the real wake path rather than poking the callback slot:
+        // `Transport::send` is what fires it in production, so this fails if
+        // the callback merely *exists* somewhere without being installed on
+        // the object the protocol actually sends through.
+        let msg = offline_protocol_core::Message::new(
+            offline_protocol_core::UserId::new(&address).unwrap(),
+            offline_protocol_core::UserId::new(&address).unwrap(),
+            offline_protocol_core::AppId::new("test-app").unwrap(),
+            "wake up",
+        );
+        protocol.nostr_status_changed(true).unwrap();
+        protocol.with_transport(CoreTransportType::Nostr, |t| {
+            t.send(&msg).expect("queueing to Nostr");
+        });
+        assert_eq!(
+            nostr_hits.load(Ordering::SeqCst),
+            1,
+            "the Nostr callback must reach the transport the rebuild installed — \
+             before this fix it was discarded at registration, because Nostr has \
+             no transport until the rebuild"
+        );
+
+        // BLE is the orphaned-by-rebuild half: a transport *did* exist at
+        // registration, and the rebuild replaced it. Asserting the re-install
+        // lands (rather than driving BLE's fragment path, which needs a
+        // connected peer) is enough to separate "callback was carried
+        // forward" from "callback died with the old object".
+        let stored = recover_rwlock_read(&protocol.transport_callbacks, "transport_callbacks")
+            .ble
+            .clone()
+            .expect("BLE callback retained across the rebuild");
+        assert!(
+            protocol.install_ble_callback(&stored),
+            "the rebuilt BLE transport must be there to receive the callback"
+        );
+        stored.on_fragments_available();
+        assert_eq!(
+            ble_hits.load(Ordering::SeqCst),
+            1,
+            "the retained BLE callback must be the one the app registered"
+        );
+    }
+
+    /// The topology's local id must be this device's address, not its profile.
+    ///
+    /// Asserted on the core visualizer because that is where the value lives:
+    /// the UniFFI `NetworkTopology` does not carry it, and the platform
+    /// bridges synthesize the JSON field themselves (both now read
+    /// `localAddress()`; they used to read `config.profile`, which is the
+    /// leak this pins shut on the Rust side).
+    #[test]
+    fn test_topology_local_id_is_the_derived_address() {
+        let protocol = OfflineProtocol::new(ProtocolConfig {
+            profile: "topology-profile".to_string(),
+            ..create_test_config()
+        })
+        .unwrap();
+
+        protocol
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::default()),
+                Box::new(TestMlsStorageProvider::default()),
+            )
+            .unwrap();
+
+        let address = protocol.local_address().expect("address after init");
+        let local_id = recover_mutex(&protocol.visualizer, "visualizer")
+            .get_topology()
+            .local_user_id;
+        assert_eq!(
+            local_id, address,
+            "the topology must report the address peers actually see"
+        );
+        assert_ne!(
+            local_id, "topology-profile",
+            "the profile is a local storage selector and must not be handed out"
         );
     }
 

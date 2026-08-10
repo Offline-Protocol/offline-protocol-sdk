@@ -81,7 +81,7 @@ Main configuration structure.
 ```rust
 pub struct ProtocolConfig {
     pub app_id: String,             // Application ID (required)
-    pub user_id: String,            // User ID (required)
+    pub profile: String,            // Local storage-namespace selector (required)
     pub transport: TransportConfig, // Transport settings
     pub dors: DorsConfig,          // DORS settings
     pub relay: RelayConfig,        // Relay settings
@@ -94,10 +94,21 @@ pub struct ProtocolConfig {
 }
 ```
 
-`user_id` is the device's canonical identity on every surface: it is
-stamped as the sender on outbound messages, it is what peers see as
-`NeighborDiscovered.peer_id` when they discover this device (on any
-transport), and it is the `recipient` string others use to reach it.
+The device's **address** — not `profile` — is its canonical identity on every
+surface: it is stamped as the sender on outbound messages, it is what peers see
+as `NeighborDiscovered.peer_id` when they discover this device (on any
+transport), and it is the `recipient` string others use to reach it. The
+address is `off1…` bech32m, derived from an Ed25519 identity key the SDK
+generates for itself, and read back with `local_address()` (or the
+`identity_ready` event).
+
+`profile` chooses *which stored identity this instance runs as* — it selects
+the storage namespace and nothing else. It never leaves the device and no peer
+can see it. On a device with one account, a constant like `"default"` is fine.
+
+See [UPGRADING §14](./UPGRADING.md#14-your-identity-is-derived-not-chosen-unreleased)
+for the migration, including the two ways an app can lose data by re-keying its
+own storage to the address.
 
 **Builder API**:
 ```rust

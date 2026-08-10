@@ -395,7 +395,7 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 |--------|-----------|-------------|
 | **sendMessage** | `sendMessage(params: SendMessageParams): Promise<string>` | Sends a message; returns message ID. `params`: `recipient`, `content`, `priority?`, `replyToMsg?`, plus rich params `contentType?`, `replyContext?`, `mediaMetadata?`, `forwardInfo?`. |
 | **receiveMessage** | `receiveMessage(): Promise<MessageReceivedEvent \| null>` | Polls for the next received message. |
-| **sendConnectionRequest** | `sendConnectionRequest(params: SendConnectionRequestParams): Promise<string>` | Sends a connection request; returns the message ID that correlates all outcome events. `params`: `recipient` (the target's canonical user id), `senderName`, `keyPackage?`, `initialMessage?`. |
+| **sendConnectionRequest** | `sendConnectionRequest(params: SendConnectionRequestParams): Promise<string>` | Sends a connection request; returns the message ID that correlates all outcome events. `params`: `recipient` (the target's `off1…` address), `senderName`, `keyPackage?`, `initialMessage?`. |
 | **acceptConnectionRequest** | `acceptConnectionRequest(params): Promise<string>` | Accepts a received request. `params`: `recipient`, `accepterName`, `keyPackage?`. |
 | **rejectConnectionRequest** | `rejectConnectionRequest(params): Promise<string>` | Rejects a received request. `params`: `recipient`. |
 | **cancelConnectionRequest** | `cancelConnectionRequest(params): Promise<string>` | Cancels a request you sent. `params`: `recipient`. |

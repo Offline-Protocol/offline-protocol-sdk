@@ -709,7 +709,7 @@ from offline_protocol_sdk.offline_protocol import ProtocolConfig, OverflowPolicy
 
 config = ProtocolConfig(
     app_id="desktop-app",
-    user_id="alice",
+    profile="alice",
     ble_enabled=True,
     wifi_direct_enabled=False,
     internet_enabled=True,

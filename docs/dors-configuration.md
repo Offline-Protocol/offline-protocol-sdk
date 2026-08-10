@@ -9,7 +9,7 @@ This guide covers configuring DORS parameters for different use cases. For an ex
 ```typescript
 const config = {
   appId: 'my-app',
-  userId: userId,
+  profile: userId,
   
   // Transport configuration
   transports: {

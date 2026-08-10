@@ -4277,7 +4277,10 @@ impl OfflineProtocol {
     /// # Arguments
     ///
     /// * `recipient` - The user ID of the peer to notify
-    /// * `conversation_id` - Conversation identifier (recipient's username for DMs, group_id for groups)
+    /// * `conversation_id` - Opaque conversation key, carried to the peer and
+    ///   echoed back on its event. Never parsed or routed on. Conventionally
+    ///   the peer's address for a DM and the group id for a group; any stable
+    ///   string works, but a display name does not (those change).
     /// * `is_typing` - Whether the user started or stopped typing
     pub fn send_typing_indicator(
         &mut self,

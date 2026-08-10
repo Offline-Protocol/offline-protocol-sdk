@@ -107,7 +107,10 @@ const MAX_QUERY_EVENTS: usize = 64;
 struct ActiveQuery {
     /// The peer being resolved. An inbound event is meaningless without it:
     /// this is whose derivable key opens the record.
-    user_id: String,
+    ///
+    /// Carried as a parsed [`Address`] so the record-seal derivation this
+    /// feeds cannot be handed a string that was never validated.
+    user_id: Address,
     /// Event ids already taken for this query. The query is broadcast, so the
     /// same record arrives once per relay, and opening it more than once
     /// re-runs the key-package handler's durable writes for no gain. Bounded
@@ -283,8 +286,14 @@ pub struct NostrTransport {
     /// Bounded by construction: the keys are our own slot ids, of which the
     /// engine keeps at most `NOSTR_KEY_PACKAGE_SLOTS`.
     failed_publications: Mutex<HashSet<String>>,
-    /// Peer user ids whose published key packages we want fetched.
-    resolve_queue: Mutex<VecDeque<String>>,
+    /// Peer addresses whose published key packages we want fetched.
+    ///
+    /// Holds parsed [`Address`]es rather than strings: an entry becomes the
+    /// `#p` tag of a relay query, so admitting one that is not an address
+    /// would publish a guessable label. `enqueue_resolution` is the only
+    /// writer and parses there, which is what lets `next_query` derive a tag
+    /// without re-validating or re-deciding what to do when it fails.
+    resolve_queue: Mutex<VecDeque<Address>>,
     /// Query id → the query's state. An inbound event is meaningless without
     /// this: the id tells us whose derivable key opens it, and carries the
     /// per-query dedup and delivery ceiling with it.
@@ -343,13 +352,13 @@ impl NostrTransport {
         let device_id = device_id.into();
         // The value is deliberately absent from the error: it is the rejected
         // id, which in the case this check exists for is the app's profile.
-        device_id.parse::<Address>().map_err(|e| {
+        let address = device_id.parse::<Address>().map_err(|e| {
             Error::ConfigurationError(format!(
                 "Nostr transport requires this device's derived address: {e}"
             ))
         })?;
-        let routing_tag = nostr_crypto::routing_tag_for_address(&device_id)?;
-        let record_seal_keypair = nostr_crypto::record_seal_keypair_for_address(&device_id)?;
+        let routing_tag = nostr_crypto::routing_tag_for_address(&address)?;
+        let record_seal_keypair = nostr_crypto::record_seal_keypair_for_address(&address)?;
         let keypair = RwLock::new(NostrKeypair::generate_ephemeral()?);
         Ok(Self {
             device_id,
@@ -612,9 +621,12 @@ impl NostrTransport {
         // at the queue's only gate, so `next_query` can never pop an id whose
         // tag derivation fails after the entry was already consumed. Subsumes
         // the emptiness check this replaces: an empty id is not an address.
-        if !self.cold_contact_enabled() || user_id.parse::<Address>().is_err() {
+        if !self.cold_contact_enabled() {
             return false;
         }
+        let Ok(address) = user_id.parse::<Address>() else {
+            return false;
+        };
 
         // Read the rate limit without stamping it. Stamping here would burn the
         // whole interval on a request the queue then refuses, so a peer dropped
@@ -632,13 +644,13 @@ impl NostrTransport {
 
         {
             let mut queue = self.resolve_queue.lock_or_recover();
-            if queue.iter().any(|q| q == user_id) {
+            if queue.iter().any(|q| *q == address) {
                 return false;
             }
             if queue.len() >= MAX_PENDING_RESOLUTIONS {
                 return false;
             }
-            queue.push_back(user_id.to_string());
+            queue.push_back(address);
         }
 
         // Only now is an attempt real. Bounded like the peer-key map, and for
@@ -765,7 +777,7 @@ impl NostrTransport {
                 return Ok(None);
             }
             query.delivered += 1;
-            query.user_id.clone()
+            query.user_id
         };
 
         let event: serde_json::Value = match serde_json::from_str(event_json) {
@@ -971,7 +983,19 @@ impl NostrTransport {
     /// key, and timestamp — not just in how `content` is encoded.
     fn build_event(&self, message: &Message) -> Result<nostr_crypto::NostrEvent> {
         let recipient_device_id = message.recipient.as_str();
-        let recipient_tag = nostr_crypto::routing_tag_for_address(recipient_device_id)?;
+        // `send` already refused a non-address recipient before queueing, so
+        // this parse is a restatement rather than a new gate — but it is the
+        // one that produces the typed value the derivations below require, and
+        // re-deriving it here means a future queue-filling path cannot skip
+        // the check by accident.
+        let recipient_address = recipient_device_id.parse::<Address>().map_err(|_| {
+            crate::Error::PeerNotReachable(
+                "Nostr addresses peers by their derived address, and the \
+                 recipient id is not one"
+                    .to_string(),
+            )
+        })?;
+        let recipient_tag = nostr_crypto::routing_tag_for_address(&recipient_address)?;
         let data = self.serialize_message(message)?;
 
         if !self.sealing_enabled() {
@@ -1005,7 +1029,7 @@ impl NostrTransport {
                 // Their record-seal key, reconstructed from their address —
                 // no longer the routing tag, which since the key split is a
                 // label with no private half anyone holds.
-                nostr_crypto::record_seal_keypair_for_address(recipient_device_id)?
+                nostr_crypto::record_seal_keypair_for_address(&recipient_address)?
                     .public_key_hex()
                     .to_string()
             }
@@ -1678,11 +1702,16 @@ mod tests {
     /// hashes it. The core crate's `test_identity::id` is the version that does
     /// come from a key, for fixtures that also have to satisfy MLS.
     fn addr(label: &str) -> String {
+        addr_typed(label).to_string()
+    }
+
+    /// `addr` as the parsed type, for the derivations that take an [`Address`].
+    fn addr_typed(label: &str) -> Address {
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest(label.as_bytes());
         let mut hash = [0u8; Address::HASH_LEN];
         hash.copy_from_slice(&digest[..Address::HASH_LEN]);
-        Address::from_hash_bytes(hash).to_string()
+        Address::from_hash_bytes(hash)
     }
 
     fn create_test_message() -> Message {
@@ -2156,7 +2185,7 @@ mod tests {
     #[test]
     fn test_subscription_filters_on_routing_tag_not_signing_key() {
         let transport = NostrTransport::new(addr("device1")).unwrap();
-        let expected_tag = nostr_crypto::routing_tag_for_address(&addr("device1")).unwrap();
+        let expected_tag = nostr_crypto::routing_tag_for_address(&addr_typed("device1")).unwrap();
 
         assert_eq!(transport.routing_tag(), expected_tag);
         // The signing key is random per install and must never leak into the
@@ -2186,7 +2215,7 @@ mod tests {
         // Addressing is untouched by the key swap.
         assert_eq!(
             transport_a.routing_tag(),
-            nostr_crypto::routing_tag_for_address(&addr("device1")).unwrap()
+            nostr_crypto::routing_tag_for_address(&addr_typed("device1")).unwrap()
         );
     }
 
@@ -2437,7 +2466,7 @@ mod tests {
         transport.send(&msg).unwrap();
 
         let signed = transport.get_next_signed_event().unwrap().unwrap();
-        let bob_tag = nostr_crypto::routing_tag_for_address(&addr("bob")).unwrap();
+        let bob_tag = nostr_crypto::routing_tag_for_address(&addr_typed("bob")).unwrap();
         assert!(
             signed.event_json.contains(&bob_tag),
             "event must be addressed to the recipient's routing tag"
@@ -2516,7 +2545,7 @@ mod tests {
         // The only thing a relay legitimately learns is the recipient's routing
         // tag — an opaque label it cannot invert without already knowing the
         // user id it is looking for.
-        let bob_tag = nostr_crypto::routing_tag_for_address(&addr("bob")).unwrap();
+        let bob_tag = nostr_crypto::routing_tag_for_address(&addr_typed("bob")).unwrap();
         assert!(wire.contains(&bob_tag));
     }
 
@@ -2640,7 +2669,7 @@ mod tests {
         // ordinary decoder reject it as one undecodable frame — the same
         // outcome as random junk, which is what it is to us.
         let bob = NostrTransport::new(addr("bob")).unwrap();
-        let carol_tag = nostr_crypto::routing_tag_for_address(&addr("carol")).unwrap();
+        let carol_tag = nostr_crypto::routing_tag_for_address(&addr_typed("carol")).unwrap();
 
         let event =
             nostr_crypto::NostrEvent::create_gift_wrap(&carol_tag, &carol_tag, b"not for bob")
@@ -2660,7 +2689,7 @@ mod tests {
         // pubkey. A bridge wired to it would otherwise enqueue ciphertext as if
         // it were a message.
         let bob = NostrTransport::new(addr("bob")).unwrap();
-        let bob_tag = nostr_crypto::routing_tag_for_address(&addr("bob")).unwrap();
+        let bob_tag = nostr_crypto::routing_tag_for_address(&addr_typed("bob")).unwrap();
         let event =
             nostr_crypto::NostrEvent::create_gift_wrap(&bob_tag, &bob_tag, b"sealed").unwrap();
         let sealed = base64::engine::general_purpose::STANDARD
@@ -2808,7 +2837,8 @@ mod tests {
         assert_eq!(tags[1][1].as_str(), Some(transport.routing_tag()));
 
         // A stranger who knows only the username can open it.
-        let stranger_view = nostr_crypto::record_seal_keypair_for_address(&addr("alice")).unwrap();
+        let stranger_view =
+            nostr_crypto::record_seal_keypair_for_address(&addr_typed("alice")).unwrap();
         let sealed = base64::engine::general_purpose::STANDARD
             .decode(event["content"].as_str().unwrap())
             .unwrap();
@@ -2860,7 +2890,7 @@ mod tests {
         let sealed = base64::engine::general_purpose::STANDARD
             .decode(event["content"].as_str().unwrap())
             .unwrap();
-        let key = nostr_crypto::record_seal_keypair_for_address(&addr("alice")).unwrap();
+        let key = nostr_crypto::record_seal_keypair_for_address(&addr_typed("alice")).unwrap();
         let opened = nostr_crypto::open_key_package_publication(
             &key,
             event["pubkey"].as_str().unwrap(),
@@ -2986,7 +3016,7 @@ mod tests {
         );
 
         let query = transport.next_query().unwrap().expect("resolution queued");
-        let expected_tag = nostr_crypto::routing_tag_for_address(&addr("bob")).unwrap();
+        let expected_tag = nostr_crypto::routing_tag_for_address(&addr_typed("bob")).unwrap();
         assert!(query.req_json.contains(&expected_tag));
         assert!(query
             .req_json

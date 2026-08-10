@@ -121,7 +121,7 @@ import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol({
   appId: 'my-app',
-  userId: 'user123',
+  profile: 'user123',
   // Encryption is enabled by default - MLS is auto-initialized on start()
 });
 
@@ -144,7 +144,7 @@ await protocol.destroy();
 ```
 
 Built-in secure and restartable-state stores are isolated by both `appId` and
-`userId`. Changing either value selects a fresh storage namespace.
+`profile`. Changing either value selects a fresh storage namespace.
 
 Upgrading an install that predates namespacing keeps both halves of its state,
 by two different mechanisms.
@@ -181,11 +181,11 @@ reinstall. To erase it:
 
 ```typescript
 await protocol.destroy();
-await protocol.wipePersistedState(appId, userId);
+await protocol.wipePersistedState(appId, profile);
 ```
 
 Wipe after destroy, never under a live instance (the native side rejects that),
-and pass the same `appId`/`userId` the protocol was created with — `destroy()`
+and pass the same `appId`/`profile` the protocol was created with — `destroy()`
 clears the config the namespace is derived from, which is why the identity is an
 argument. It is irreversible, it rotates the account's MLS and Nostr identities,
 and it leaves other accounts on the device untouched. Full semantics, including
@@ -199,7 +199,7 @@ The SDK provides automatic end-to-end encryption using MLS (RFC 9420):
 ```typescript
 const protocol = new OfflineProtocol({
   appId: 'my-app',
-  userId: 'alice',
+  profile: 'alice',
   encryption: {
     enabled: true,           // Auto-encrypt messages (default)
     autoKeyExchange: true,   // Exchange keys on peer discovery (default)
@@ -249,7 +249,7 @@ import {
 // 1. CREATE PROTOCOL INSTANCE
 const protocol = new OfflineProtocol({
   appId: 'my-chat-app',
-  userId: 'alice-device-001',
+  profile: 'alice-device-001',
 });
 
 // 2. REGISTER EVENT LISTENERS (before starting)
@@ -485,7 +485,7 @@ protocol.on('diagnostic', (event) => {
 ```typescript
 interface ProtocolConfig {
   appId: string;
-  userId: string;
+  profile: string;
   transports?: TransportsConfig;
   binaryWireEnabled?: boolean;  // binary wire-codec kill switch (default: true)
   encryption?: EncryptionConfig;
@@ -1088,6 +1088,7 @@ interface DiagnosticEvent {
 ```typescript
 interface NetworkTopology {
   timestamp: number;
+  /** This device's `off1…` address; empty string before `initializeMls`. */
   local_user_id: string;
   nodes: NetworkNode[];
   links: NetworkLink[];

@@ -63,7 +63,7 @@ class MainActivity : AppCompatActivity() {
         // docs/configuration.md for what each one controls.
         val config = ProtocolConfig(
             appId = "my-android-app",
-            userId = "user123",
+            profile = "user123",
             bleEnabled = true,
             wifiDirectEnabled = true,
             internetEnabled = true,

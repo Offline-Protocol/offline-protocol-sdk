@@ -128,6 +128,18 @@ impl NetworkVisualizer {
         }
     }
 
+    /// Replaces the local user id reported in the topology.
+    ///
+    /// Exists because the visualizer is constructed before this device has an
+    /// identity: the address is derived during `initialize_mls`, so the
+    /// visualizer starts on the pre-identity placeholder and has to be told
+    /// the real value once it exists. Without this the topology reports the
+    /// local `profile` — a storage-namespace selector that is never supposed
+    /// to leave the device — as though it were this device's peer id.
+    pub fn set_local_user_id(&mut self, local_user_id: impl Into<String>) {
+        self.local_user_id = local_user_id.into();
+    }
+
     /// Registers or updates a node in the topology.
     pub fn update_node(&mut self, node: NetworkNode) {
         self.nodes.insert(node.user_id.clone(), node);

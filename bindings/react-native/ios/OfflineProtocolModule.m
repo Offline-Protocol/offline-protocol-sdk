@@ -190,6 +190,9 @@ RCT_EXTERN_METHOD(bleReturnFragment:(RCTPromiseResolveBlock)resolve
 RCT_EXTERN_METHOD(bleGetPeerCount:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(bleGetDiagnostics:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 // Battery management
 RCT_EXTERN_METHOD(setBatteryLevel:(nonnull NSNumber *)level
                   resolver:(RCTPromiseResolveBlock)resolve

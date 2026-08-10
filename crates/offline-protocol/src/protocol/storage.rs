@@ -115,13 +115,15 @@ impl StateCategory {
     ///   **integrity** rather than confidentiality. The bytes are public wire
     ///   material and hiding them buys nothing; what matters is that a seal is
     ///   an AEAD, so a record that has been edited or moved between peers no
-    ///   longer opens. Substituting a cached key package is otherwise enough to
-    ///   make this node build its session around the attacker's leaf — the
-    ///   embedded credential is a *basic* credential, i.e. a self-asserted
-    ///   identity string that anyone can write. `KeyPackageTrust` is the real
-    ///   fix and covers the paths storage cannot see; this shortens the reach of
-    ///   a container write as well. Failing closed is cheap here: an unsealable
-    ///   key package costs one re-exchange.
+    ///   longer opens. Substituting a cached key package would otherwise be
+    ///   enough to make this node build its session around the attacker's leaf.
+    ///   `MlsManager::verify_address_binding` is the real fix and covers the
+    ///   paths storage cannot see — it re-derives the address from the key
+    ///   package's own signature key and refuses any package whose credential
+    ///   does not match the peer id it arrived under, so a substituted package
+    ///   fails wherever it is read from. This shortens the reach of a container
+    ///   write as well. Failing closed is cheap here: an unsealable key package
+    ///   costs one re-exchange.
     /// - [`storage_keys::NOSTR_KEY_PACKAGE_SLOTS`]: the second integrity case,
     ///   for the same reason and not for confidentiality — slot ids and package
     ///   ids are already public in the published record itself. What sealing

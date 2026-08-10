@@ -2,6 +2,14 @@
 
 This guide explains how to integrate MLS (Message Layer Security) end-to-end encryption into your app using the Offline Protocol SDK.
 
+> **Peer ids in these examples are shortened for readability.** Wherever an
+> example passes `"bob"` as a `userId` / `otherUserId` / `recipient`, the real
+> value is that peer's 44-character `off1…` address. Those parameters keep the
+> `userId` name, but the value they take is an address — a username reaches
+> nobody. Get one from an invite/QR exchange or the `neighbor_discovered`
+> event, and read your own with `localAddress()`. See
+> [UPGRADING §14](./UPGRADING.md#14-your-identity-is-derived-not-chosen-unreleased).
+
 ## Overview
 
 The SDK provides end-to-end encryption via the MLS protocol (RFC 9420). MLS provides:
@@ -49,7 +57,7 @@ import { OfflineProtocol } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol({
   appId: 'my-app',
-  userId: 'alice',
+  profile: 'alice',
   // Encryption is enabled by default!
   // To disable: encryption: { enabled: false }
 });
@@ -78,7 +86,7 @@ protocol.on('message_received', (event) => {
 ```typescript
 const protocol = new OfflineProtocol({
   appId: 'my-app',
-  userId: 'alice',
+  profile: 'alice',
   encryption: {
     // Enable automatic encryption (default: true)
     enabled: true,

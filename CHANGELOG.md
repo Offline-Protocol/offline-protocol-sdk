@@ -33,8 +33,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   a storage namespace and is never sent; it is not an identity.
 - **BREAKING**: the wire identity is now the address derived from this profile's
   identity key. `Message.sender`, `recipient`, and `NeighborDiscovered.peer_id`
-  all carry `off1…` addresses. Anything an app keyed by username — conversation
-  rows, contacts, group membership — must be re-keyed.
+  all carry `off1…` addresses. Anything an app keyed by a *peer's* username —
+  conversation rows, contacts, group membership — must be re-keyed. Anything
+  keyed by the app's *own* id — per-user database filenames, MMKV namespaces,
+  cache directories — must **not** be: keep passing that string as `profile`.
+  Re-keying self-scoped storage to the address silently opens an empty store,
+  which reads as a first launch rather than an error. Both traps are spelled
+  out in UPGRADING §14.
 - **BREAKING**: the MLS credential is the address, so peers on an older build
   fail cleanly at credential verification instead of interoperating.
 - 1:1 session slots and the both-create tiebreaker order addresses by their hash
@@ -44,6 +49,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `hex(json(GroupId))` now that ids are 44 characters.
 - `wipePersistedState(appId, profile)` — same shape; pass a legacy user id to
   reach a pre-migration container.
+- **BREAKING**: the five relay JSON payload formatters — `check_presence`,
+  `request_prekey_bundle`, `upload_keys`, `set_typing`, `clear_typing` — are
+  removed from UniFFI, React Native, and Python. They built JSON strings for a
+  relay protocol the SDK does not speak: nothing in this repo called them, both
+  bridges implement presence natively, and the last two of them were the only
+  public parameters still literally named `username`. Apps talking to a relay
+  directly should build these frames themselves; the SDK-mediated equivalent
+  for typing is `sendTypingIndicator`.
+- `conversation_id` documentation no longer tells apps to use "the recipient's
+  username". The field is opaque to the SDK — carried to the peer and echoed
+  back, never parsed — and the old guidance pointed at a value that has both
+  changed and become unstable. Behaviour is unchanged; existing keys keep
+  working.
 - **BREAKING**: trust-on-first-use is deleted. Deriving an identity from its key
   makes a pin store redundant — a control message is now accepted only if its
   Ed25519 signature verifies *and* the signing key re-derives to the address in
@@ -135,6 +153,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Security
 
+- **Telemetry sinks received display names in the clear.** `sender_name` and
+  `accepted_by_name` were passed through raw by the `scrub_ids` scrubber, on
+  the reasoning that a display name was decoration beside a `sender` that was
+  itself the username. Deriving identity from a key inverted that: `sender` is
+  now a pseudonymous `off1…` address, which leaves the petname as the only
+  field in the event that names a *person* — the most identifying value the
+  sink receives rather than the least. Both are now hashed like every other
+  actor field, so a sink still correlates records without learning who they
+  are. Third-party sinks parsing these fields as human-readable will see opaque
+  hex; set `scrub_ids: false` to opt out, as for every other identifier. Group
+  and file names are unchanged, and stay raw: they label a shared thing, not an
+  individual.
+- **`SecurityWarning.peer_id` printed in the clear via `Debug`.** Every other
+  peer-bearing event redacts it, and the telemetry scrubber hashed this one
+  correctly — only `{:?}` disagreed, which is the formatting an operator
+  reaches for while investigating precisely this event. The peer named is also
+  frequently attacker-controlled, since an injected frame carries whatever
+  sender it likes. Now redacted, with a test covering all thirteen
+  peer-bearing variants rather than the one that broke.
 - **A username-derived routing tag could reach public relays, and did.** The
   tag is `SHA-256(id)` and both bridges send the subscription filter carrying
   it to every relay the moment a socket opens, unconditionally. Since the
@@ -152,6 +189,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `getBleDiagnostics()` (React Native) returns the three BLE degraded-path
+  counters — `fragmentFallbacks`, `recipientNotAmongPeers`,
+  `undersizedMtuReports` — which previously stopped at the UniFFI layer and
+  were unreadable from an app. They are the rollout alarm for this release:
+  each counts a frame that was still *sent*, so a fleet whose peers disagree
+  about identity falls back on every send while its delivery metrics stay
+  clean. Watch the trend across a release, not the absolute value.
 - `localAddress()` (Rust, UniFFI, React Native, Python) returns this device's
   address, or null before startup opens the storage that holds the key.
 - `identity_ready` event, carrying the address at the moment it is known.
@@ -171,6 +215,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Transport callbacks registered before `initialize_mls` were silently
+  dropped.** `set_*_transport_callback` installed onto whichever transport was
+  registered at the time, and the identity rebuild replaces those objects — so
+  the BLE and Reticulum callbacks both bridges wire during `create()` died with
+  the objects that held them, and the Nostr one never landed at all, because
+  Nostr has no transport until the rebuild builds it. Callbacks are now
+  retained and re-applied after the rebuild. This was masked by the platform
+  polling loops and cost latency rather than messages (≤100 ms for Nostr, up to
+  5 s for Reticulum), but the Android log claimed "event-driven sending active"
+  in every case, including for Wi-Fi Direct, whose transport is not registered
+  at all. Those logs now say what is true, and the Wi-Fi Direct setter warns
+  that it is inert. **The polling loops remain load-bearing — do not remove one
+  on the strength of a callback being registered.**
+- `getTopology().local_user_id` reported the `profile` rather than this
+  device's address, for the lifetime of the instance. Both bridges synthesized
+  the field from config instead of reading `localAddress()`, which handed an
+  app a local storage selector under an identity-shaped key. It is now the
+  address, and empty before `initialize_mls` derives one.
 - `listSessions` no longer reports a peer for a session slot that names two
   other parties; it requires one half of the slot to be this device.
 - React Native: `localAddress()` no longer serves a destroyed instance's

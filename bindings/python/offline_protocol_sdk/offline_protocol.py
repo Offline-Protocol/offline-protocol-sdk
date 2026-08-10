@@ -557,11 +557,7 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 40871:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_check_presence() != 58712:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cleanup_expired_routes() != 23680:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_clear_typing() != 16771:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 15087:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -757,8 +753,6 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration() != 6912:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle() != 43697:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 16439:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent() != 25841:
@@ -807,8 +801,6 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback() != 31048:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_typing() != 14500:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback() != 31962:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi() != 7907:
@@ -836,8 +828,6 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_routing_config() != 13854:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics() != 794:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_upload_keys() != 58243:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature() != 30260:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1467,23 +1457,11 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer.restype = None
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_check_presence.argtypes = (
-    ctypes.c_uint64,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_check_presence.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cleanup_expired_routes.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cleanup_expired_routes.restype = None
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_clear_typing.argtypes = (
-    ctypes.c_uint64,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_clear_typing.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2061,12 +2039,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_grou
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration.restype = ctypes.c_int8
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle.argtypes = (
-    ctypes.c_uint64,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2238,12 +2210,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_reticulu
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_reticulum_transport_callback.restype = None
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_typing.argtypes = (
-    ctypes.c_uint64,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_typing.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_wifi_direct_transport_callback.argtypes = (
     ctypes.c_uint64,
     ctypes.c_uint64,
@@ -2324,14 +2290,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_trans
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_transport_metrics.restype = None
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_upload_keys.argtypes = (
-    ctypes.c_uint64,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_upload_keys.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2445,15 +2403,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_check_presence.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_check_presence.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cleanup_expired_routes.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cleanup_expired_routes.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_clear_typing.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_clear_typing.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group.restype = ctypes.c_uint16
@@ -2745,9 +2697,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume.restype = ctypes.c_uint16
@@ -2820,9 +2769,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_re
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_typing.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_typing.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback.restype = ctypes.c_uint16
@@ -2865,9 +2811,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_upload_keys.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_upload_keys.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature.restype = ctypes.c_uint16
@@ -9060,11 +9003,7 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def cancel_file_transfer(self, file_id: str) -> None:
         raise NotImplementedError
-    def check_presence(self, username: str) -> str:
-        raise NotImplementedError
     def cleanup_expired_routes(self, ) -> None:
-        raise NotImplementedError
-    def clear_typing(self, conversation_id: str) -> str:
         raise NotImplementedError
     def create_group(self, group_name: str) -> MlsGroupInfo:
         raise NotImplementedError
@@ -9260,8 +9199,6 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def request_group_relay_registration(self, group_id: str) -> bool:
         raise NotImplementedError
-    def request_prekey_bundle(self, username: str) -> str:
-        raise NotImplementedError
     def resume(self, ) -> None:
         raise NotImplementedError
     def reticulum_confirm_sent(self, message_id: str) -> None:
@@ -9310,8 +9247,6 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def set_reticulum_transport_callback(self, callback: ReticulumTransportCallback) -> None:
         raise NotImplementedError
-    def set_typing(self, conversation_id: str) -> str:
-        raise NotImplementedError
     def set_wifi_direct_transport_callback(self, callback: WifiDirectTransportCallback) -> None:
         raise NotImplementedError
     def should_escalate_to_wifi(self, ) -> bool:
@@ -9339,8 +9274,6 @@ class OfflineProtocolProtocol(typing.Protocol):
     def update_routing_config(self, config: GradientRoutingConfig) -> None:
         raise NotImplementedError
     def update_transport_metrics(self, transport_type: TransportType,metrics: TransportMetrics) -> None:
-        raise NotImplementedError
-    def upload_keys(self, identity_key: str,signed_prekey_json: str,one_time_prekeys_json: str) -> str:
         raise NotImplementedError
     def verify_signature(self, public_key: typing.List[int],data: typing.List[int],signature: typing.List[int]) -> bool:
         raise NotImplementedError
@@ -9627,21 +9560,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
-    def check_presence(self, username: str) -> str:
-        
-        _UniffiFfiConverterString.check_lower(username)
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-            _UniffiFfiConverterString.lower(username),
-        )
-        _uniffi_lift_return = _UniffiFfiConverterString.lift
-        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_check_presence,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
     def cleanup_expired_routes(self, ) -> None:
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -9651,21 +9569,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cleanup_expired_routes,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
-    def clear_typing(self, conversation_id: str) -> str:
-        
-        _UniffiFfiConverterString.check_lower(conversation_id)
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-            _UniffiFfiConverterString.lower(conversation_id),
-        )
-        _uniffi_lift_return = _UniffiFfiConverterString.lift
-        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_clear_typing,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -11109,21 +11012,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
-    def request_prekey_bundle(self, username: str) -> str:
-        
-        _UniffiFfiConverterString.check_lower(username)
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-            _UniffiFfiConverterString.lower(username),
-        )
-        _uniffi_lift_return = _UniffiFfiConverterString.lift
-        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
     def resume(self, ) -> None:
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -11565,21 +11453,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
-    def set_typing(self, conversation_id: str) -> str:
-        
-        _UniffiFfiConverterString.check_lower(conversation_id)
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-            _UniffiFfiConverterString.lower(conversation_id),
-        )
-        _uniffi_lift_return = _UniffiFfiConverterString.lift
-        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_typing,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
     def set_wifi_direct_transport_callback(self, callback: WifiDirectTransportCallback) -> None:
         
         _UniffiFfiConverterTypeWifiDirectTransportCallback.check_lower(callback)
@@ -11775,27 +11648,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_transport_metrics,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
-    def upload_keys(self, identity_key: str,signed_prekey_json: str,one_time_prekeys_json: str) -> str:
-        
-        _UniffiFfiConverterString.check_lower(identity_key)
-        
-        _UniffiFfiConverterString.check_lower(signed_prekey_json)
-        
-        _UniffiFfiConverterString.check_lower(one_time_prekeys_json)
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-            _UniffiFfiConverterString.lower(identity_key),
-            _UniffiFfiConverterString.lower(signed_prekey_json),
-            _UniffiFfiConverterString.lower(one_time_prekeys_json),
-        )
-        _uniffi_lift_return = _UniffiFfiConverterString.lift
-        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_upload_keys,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)

@@ -1002,9 +1002,22 @@ interface OfflineProtocol {
     void set_wifi_direct_transport_callback(WifiDirectTransportCallback callback);
     
     // BLE transport operations
+    //
+    // IDENTITY CONTRACT for every `peer_id` / `sender_id` below: it must be an
+    // `off1…` address the peer *proved*, by presenting the signed IDENTITY
+    // characteristic that the DEVICE_ID is cross-checked against. It is not a
+    // label the caller may choose. The core treats these values as the peer's
+    // established transport identity: they are entered into routing state, are
+    // matched against `Message.sender`, and start automatic key exchange. A
+    // value the peer did not prove is either rejected — costing a working
+    // link — or, worse, accepted under a name anyone could claim.
+    //
+    // The bundled BLE managers satisfy this; they announce the address derived
+    // from the proof rather than any advertised string. An application driving
+    // these directly takes on the same obligation.
     [Throws=ProtocolError]
     void ble_peer_discovered(string peer_id, i16 rssi);
-    
+
     [Throws=ProtocolError]
     void ble_peer_lost(string peer_id);
     
@@ -1108,6 +1121,19 @@ interface OfflineProtocol {
     void internet_group_report_received(string report_json);
 
     // WiFi Direct transport operations
+    //
+    // DEPRECATED and currently inert: `WifiDirectTransport` is not registered,
+    // so frames passed here go nowhere. The bundled managers no longer call
+    // the three peer/message entry points.
+    //
+    // They are kept as the restoration hook, not deleted, because Wi-Fi Direct
+    // returns once it has a handshake that yields a proven id. That is exactly
+    // what it lacks today: the same identity contract as the BLE block above
+    // applies to `sender_id`/`peer_id` here, and Wi-Fi Direct has no
+    // equivalent of BLE's signed IDENTITY characteristic to satisfy it. The
+    // only identity on that wire is the `Message.sender` inside the frame —
+    // which is the very value these parameters exist to cross-check, so it
+    // cannot serve as its own proof.
     [Throws=ProtocolError]
     void wifi_direct_status_changed(boolean is_connected);
     
@@ -1427,7 +1453,10 @@ interface OfflineProtocol {
     string send_presence_update(string recipient, PresenceStatus status);
 
     // Send a typing indicator to a peer via the protocol (routed through DORS).
-    // For direct messages, conversation_id should be the recipient's username.
+    // `conversation_id` is opaque to the SDK: it is carried to the peer and
+    // echoed back on the event, never parsed or routed on. Pick a stable key
+    // — the peer's address is a reasonable default for a DM, the group id for
+    // a group. Do not derive it from a display name: those change.
     // For group chats, conversation_id should be the group_id.
     // Returns the message ID.
     [Throws=ProtocolError]
@@ -1439,36 +1468,6 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     string send_read_receipt(string recipient, sequence<string> message_ids);
 
-    // ========================================================================
-    // RELAY SERVER API (JSON payload formatters for WebSocket relay)
-    // ========================================================================
-
-    // Check if a user is online via relay server.
-    // Returns JSON string to send via WebSocket relay.
-    [Throws=ProtocolError]
-    string check_presence(string username);
-
-    // Request prekey bundle for a user to establish encrypted communication.
-    // Returns JSON string to send via WebSocket relay.
-    [Throws=ProtocolError]
-    string request_prekey_bundle(string username);
-
-    // Upload identity key and prekeys for Signal Protocol.
-    // Returns JSON string to send via WebSocket relay.
-    // Parameters are JSON strings that will be parsed and included in the payload.
-    [Throws=ProtocolError]
-    string upload_keys(string identity_key, string signed_prekey_json, string one_time_prekeys_json);
-
-    // Set typing indicator via relay server (JSON payload formatter).
-    // Returns JSON string to send via WebSocket relay.
-    [Throws=ProtocolError]
-    string set_typing(string conversation_id);
-
-    // Clear typing indicator via relay server (JSON payload formatter).
-    // Returns JSON string to send via WebSocket relay.
-    [Throws=ProtocolError]
-    string clear_typing(string conversation_id);
-    
     // ========================================================================
     // GROUP MESSAGING (MLS-encrypted, transport-agnostic)
     // ========================================================================

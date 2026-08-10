@@ -2616,7 +2616,11 @@ fn outgoing_key_package_advertises_our_nostr_pubkey_only_when_nostr_is_on() {
     // an upgrade.
     assert_ne!(
         advertised.as_deref(),
-        Some(routing_tag_for_address(&id("alice")).unwrap().as_str())
+        Some(
+            routing_tag_for_address(&id("alice").parse().expect("test identity is an address"))
+                .unwrap()
+                .as_str()
+        )
     );
 }
 
@@ -31246,7 +31250,8 @@ fn test_encryption_capability_set_is_bounded_without_evicting() {
 #[test]
 fn test_ffi_key_package_import_is_checked_against_the_derivation() {
     // `mls_import_key_package` used to reach straight for the MlsManager and
-    // pass `KeyPackageTrust::FirstUse` — so an app (or anything holding the FFI
+    // pass the since-deleted `KeyPackageTrust::FirstUse` — so an app (or
+    // anything holding the FFI
     // handle) could import a key package under any peer id with no correlation
     // to that peer. The package now proves its own address inside
     // `import_key_package`; this still routes through the protocol object so

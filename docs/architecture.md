@@ -18,7 +18,13 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Key Types**:
 - `Message`, `MessageId`, `MessagePriority`
-- `UserId`, `AppId`, `TTL`, `HopCount`, `Timestamp`
+- `Address`, `AddressError` — the self-certifying `off1…` identity (bech32m
+  over a 20-byte hash of the Ed25519 identity key). A peer's address is
+  verified by re-deriving it from the key its owner presents, which is what
+  makes identity unforgeable without a trust store.
+- `UserId`, `AppId`, `TTL`, `HopCount`, `Timestamp` — note `UserId` is the
+  transport-level wrapper that *carries* an address on the wire; it validates
+  charset and length only, so it is not itself proof of identity.
 - `Error` type with `thiserror`
 
 **Safety**: `#![deny(unsafe_code)]` - 100% safe Rust
