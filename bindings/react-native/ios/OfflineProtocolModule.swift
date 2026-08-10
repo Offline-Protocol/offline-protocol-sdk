@@ -686,7 +686,7 @@ class OfflineProtocolModule: RCTEventEmitter {
 
             // Initialize Nostr manager if nostr is enabled
             if config.nostrEnabled {
-                let nostrMgr = NostrManager(protocol: proto, deviceId: config.profile)
+                let nostrMgr = NostrManager(protocol: proto)
                 nostrMgr.delegate = self
                 nostrManager = nostrMgr
 
@@ -1858,7 +1858,7 @@ class OfflineProtocolModule: RCTEventEmitter {
 
             case "nostr":
                 if nostrManager == nil {
-                    let newManager = NostrManager(protocol: proto, deviceId: currentConfig?.profile ?? "unknown")
+                    let newManager = NostrManager(protocol: proto)
                     newManager.delegate = self
                     nostrManager = newManager
                     proto.setNostrTransportCallback(callback: NostrTransportCallbackImpl(nostrManager: newManager))

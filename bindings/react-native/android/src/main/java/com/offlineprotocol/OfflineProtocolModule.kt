@@ -560,7 +560,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
             // Initialize Nostr manager if nostr is enabled
             if (config.nostrEnabled) {
-                nostrManager = createNostrManager(proto, config.profile)
+                nostrManager = createNostrManager(proto)
                 android.util.Log.i(NAME, "Nostr Manager initialized for user: ${config.profile}")
                 emitDiagnostic("info", "Nostr manager initialized", mapOf(
                     "userId" to config.profile
@@ -2026,7 +2026,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 }
                 "nostr" -> {
                     if (nostrManager == null) {
-                        nostrManager = createNostrManager(proto, currentConfig?.profile ?: "unknown")
+                        nostrManager = createNostrManager(proto)
                         emitDiagnostic("info", "Nostr manager created on demand")
                     }
 
@@ -2164,8 +2164,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         ))
     }
 
-    private fun createNostrManager(proto: OfflineProtocol, userId: String): NostrManager {
-        return NostrManager(reactApplicationContext, proto, userId) { level, message, context ->
+    private fun createNostrManager(proto: OfflineProtocol): NostrManager {
+        return NostrManager(reactApplicationContext, proto) { level, message, context ->
             emitDiagnostic(level, message, context)
         }.also { manager ->
             manager.listener = object : TransportManagerListener {
