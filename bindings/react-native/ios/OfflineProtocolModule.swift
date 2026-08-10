@@ -2348,6 +2348,26 @@ class OfflineProtocolModule: RCTEventEmitter {
         let count = proto.bleGetPeerCount()
         resolver(NSNumber(value: count))
     }
+
+    /// BLE diagnostic counters — the address-migration rollout alarm.
+    ///
+    /// Exposed as one call because they are one signal: each counts a frame
+    /// that went out under a degraded path rather than failing, so they are
+    /// invisible in delivery metrics and only meaningful read together.
+    /// Sustained growth after a release means peers disagree about identity.
+    /// All three read zero when BLE is not registered.
+    @objc func bleGetDiagnostics(_ resolver: @escaping RCTPromiseResolveBlock,
+                                 rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_BLE", "Protocol not initialized", nil)
+            return
+        }
+        resolver([
+            "fragmentFallbacks": NSNumber(value: proto.bleFragmentFallbackCount()),
+            "recipientNotAmongPeers": NSNumber(value: proto.bleRecipientNotAmongPeersCount()),
+            "undersizedMtuReports": NSNumber(value: proto.bleUndersizedMtuReports())
+        ])
+    }
     
     @objc func getActiveTransports(_ resolver: @escaping RCTPromiseResolveBlock,
                                    rejecter: @escaping RCTPromiseRejectBlock) {

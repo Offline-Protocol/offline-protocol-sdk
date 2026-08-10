@@ -2601,6 +2601,30 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         val count = protocol?.bleGetPeerCount()?.toInt() ?: 0
         promise.resolve(count)
     }
+
+    /**
+     * BLE diagnostic counters — the address-migration rollout alarm.
+     *
+     * Exposed as one call because they are one signal: each counts a frame
+     * that went out under a degraded path rather than failing, so they are
+     * invisible in delivery metrics and only meaningful read together.
+     * Sustained growth after a release means peers disagree about identity.
+     * All three read zero when BLE is not registered.
+     */
+    @ReactMethod
+    fun bleGetDiagnostics(promise: Promise) {
+        val map = Arguments.createMap()
+        map.putDouble("fragmentFallbacks", (protocol?.bleFragmentFallbackCount() ?: 0uL).toDouble())
+        map.putDouble(
+            "recipientNotAmongPeers",
+            (protocol?.bleRecipientNotAmongPeersCount() ?: 0uL).toDouble()
+        )
+        map.putDouble(
+            "undersizedMtuReports",
+            (protocol?.bleUndersizedMtuReports() ?: 0uL).toDouble()
+        )
+        promise.resolve(map)
+    }
     
     @ReactMethod
     fun getActiveTransports(promise: Promise) {

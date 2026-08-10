@@ -2539,6 +2539,23 @@ export interface TelemetryConfig {
 }
 
 /**
+ * BLE diagnostic counters, from `getBleDiagnostics()`.
+ *
+ * Degraded-path counters, not error counters: every frame they count was
+ * still sent. That is what makes them worth watching — the failure they
+ * detect does not appear in delivery metrics. Monotonic for the lifetime of
+ * the protocol instance, so sample the delta rather than the value.
+ */
+export interface BleDiagnostics {
+  /** Frames broadcast to all peers because the intended peer was not matched. */
+  fragmentFallbacks: number;
+  /** Sends naming a peer that is BLE-connected under a different id. */
+  recipientNotAmongPeers: number;
+  /** Peers reporting an MTU too small for a fragment header. */
+  undersizedMtuReports: number;
+}
+
+/**
  * Per-transport metrics — same shape flows through getTransportMetrics (pull)
  * and MetricsFrame.transports (push). The six legacy counters are always
  * present; the remaining fields populate whenever a transport reports them.

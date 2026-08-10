@@ -28,6 +28,7 @@ import type {
   EventListener,
   EventType,
   NetworkTopology,
+  BleDiagnostics,
   MessageDeliveryStats,
   TransportType,
   InternetTransportConfig,
@@ -1711,6 +1712,35 @@ export class OfflineProtocol {
    */
   async getBLePeerCount(): Promise<number> {
     return await OfflineProtocolNativeModule.bleGetPeerCount();
+  }
+
+  /**
+   * Gets the BLE diagnostic counters.
+   *
+   * These are the rollout alarm for the self-certifying-address migration.
+   * Each counter records a frame that took a *degraded* path rather than
+   * failing outright, so none of them show up as a delivery error — a fleet
+   * can be quietly falling back on every send while its success metrics look
+   * healthy. Read them together and watch the trend, not the absolute value:
+   * small counts are normal, sustained growth after a release means peers
+   * disagree about identity or MTU.
+   *
+   * - `fragmentFallbacks` — a frame for a directly-connected peer had to be
+   *   broadcast to every peer instead of addressed to one. Rising means
+   *   recipients are not being recognised as the connected peer they are.
+   * - `recipientNotAmongPeers` — a send named a peer that is connected over
+   *   BLE but not under that id. This is the sharpest identity-mismatch
+   *   signal: it is what a peer announcing one id while framing another
+   *   looks like from the sender's side.
+   * - `undersizedMtuReports` — a peer reported an MTU too small to carry a
+   *   fragment header, so a conservative default was used.
+   *
+   * All three read zero when BLE is not enabled or not yet started.
+   *
+   * @returns The three counters as of now
+   */
+  async getBleDiagnostics(): Promise<BleDiagnostics> {
+    return await OfflineProtocolNativeModule.bleGetDiagnostics();
   }
 
   /**
