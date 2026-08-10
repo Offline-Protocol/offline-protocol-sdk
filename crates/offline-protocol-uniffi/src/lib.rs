@@ -2377,19 +2377,26 @@ impl OfflineProtocol {
                 .add_transport(CoreTransportType::Reticulum, Box::new(reticulum_transport));
         }
 
-        // Add Nostr transport if enabled
-        // The platform bridges to Nostr relay WebSocket connections
-        if nostr_enabled {
-            let nostr_transport = NostrTransport::new(user_id.clone()).map_err(|e| {
-                ProtocolError::InvalidConfiguration(format!(
-                    "Failed to create Nostr keypair: {}",
-                    e
-                ))
-            })?;
-            protocol
-                .transport_manager_mut()
-                .add_transport(CoreTransportType::Nostr, Box::new(nostr_transport));
-        }
+        // Nostr is deliberately NOT built here, unlike the three above.
+        //
+        // Those carry the placeholder id as local bookkeeping until the
+        // rebuild; Nostr *publishes* its id's derivative. The routing tag is
+        // `SHA-256(id)`, it goes to third-party relays in the subscription
+        // filter the moment a socket opens, and both bridges send that filter
+        // unconditionally from their socket-open callback — so a transport
+        // built on the profile here puts a label anyone can recompute from the
+        // username onto a public relay, permanently and with nothing to
+        // retract it.
+        //
+        // That is not hypothetical: `initialize_mls` is skipped outright when
+        // encryption is disabled, and a thrown one is caught and warned past by
+        // the RN layer, so the rebuild cannot be relied on to arrive before the
+        // relays do. Leaving the slot empty makes the transport's absence the
+        // failure instead — loud at `enable_transport`, and nothing published.
+        //
+        // `enabled_transports.nostr` carries the intent forward;
+        // `rebuild_transports_for_identity` installs the only Nostr transport
+        // this instance ever has, against the real address.
 
         // Create the event queue and callback that will be shared with the event handler
         let event_queue = Arc::new(Mutex::new(VecDeque::new()));
@@ -7630,6 +7637,7 @@ mod tests {
             ..create_test_config()
         })
         .unwrap();
+        install_test_identity(&receiver);
         receiver.start().unwrap();
 
         receiver
@@ -7673,6 +7681,22 @@ mod tests {
         );
     }
 
+    /// Runs the identity bootstrap these fixtures need before `start()`.
+    ///
+    /// The Nostr transport is installed by the identity rebuild, not by
+    /// `new()` — nothing publishes a routing tag derived from a profile — so a
+    /// Nostr fixture that skips this has no Nostr transport at all. Pinned from
+    /// the other side by
+    /// `test_nostr_is_absent_until_the_identity_rebuild_installs_it`.
+    fn install_test_identity(protocol: &OfflineProtocol) {
+        protocol
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::default()),
+                Box::new(TestMlsStorageProvider::default()),
+            )
+            .expect("test identity bootstrap");
+    }
+
     /// Reads the `since` the transport would put on its next REQ filter.
     fn nostr_subscription_since(protocol: &OfflineProtocol) -> i64 {
         let filter = protocol
@@ -7699,6 +7723,7 @@ mod tests {
             ..create_test_config()
         })
         .unwrap();
+        install_test_identity(&receiver);
         receiver.start().unwrap();
 
         let first_run_since = nostr_subscription_since(&receiver);
@@ -7731,6 +7756,7 @@ mod tests {
             ..create_test_config()
         })
         .unwrap();
+        install_test_identity(&receiver);
         receiver.start().unwrap();
 
         let before = nostr_subscription_since(&receiver);
@@ -7761,6 +7787,7 @@ mod tests {
             ..create_test_config()
         })
         .unwrap();
+        install_test_identity(&receiver);
         receiver.start().unwrap();
 
         let before = nostr_subscription_since(&receiver);
@@ -10135,11 +10162,11 @@ mod tests {
     /// The one transport for which the post-identity rebuild is load-bearing.
     ///
     /// `NostrTransport` computes its routing tag from the id it is constructed
-    /// with, and that tag is the address peers publish to. Built in `new()` the
-    /// id is still the profile, so without the rebuild this device subscribes
-    /// to a tag nobody writes to and every Nostr-carried frame is simply never
-    /// seen — no error anywhere. The assertion that matters is the second one:
-    /// the tag actually *moved* off the profile.
+    /// with, and that tag is what goes to third-party relays. So the rebuild is
+    /// not merely where the tag improves — it is the only place a Nostr
+    /// transport is allowed to come from at all, which is what
+    /// [`test_nostr_is_absent_until_the_identity_rebuild_installs_it`] holds
+    /// down from the other side.
     #[test]
     fn test_nostr_routing_tag_follows_the_derived_address_after_mls_init() {
         let config = ProtocolConfig {
@@ -10150,13 +10177,6 @@ mod tests {
         let profile = config.profile.clone();
         let protocol = OfflineProtocol::new(config).unwrap();
 
-        let profile_tag = offline_protocol_transport::routing_tag_for_device_id(&profile).unwrap();
-        assert_eq!(
-            protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
-            Some(profile_tag.clone()),
-            "before init the transport can only know the profile"
-        );
-
         protocol
             .initialize_mls(
                 Box::new(TestMlsStorageProvider::default()),
@@ -10166,6 +10186,7 @@ mod tests {
 
         let address = protocol.local_address().expect("address after init");
         let address_tag = offline_protocol_transport::routing_tag_for_device_id(&address).unwrap();
+        let profile_tag = offline_protocol_transport::routing_tag_for_device_id(&profile).unwrap();
 
         assert_eq!(
             protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
@@ -10176,6 +10197,96 @@ mod tests {
             protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
             Some(profile_tag),
             "a tag still derived from the profile is the silent-delivery failure this rebuild exists to prevent"
+        );
+    }
+
+    /// No identity, no Nostr — the leak this ordering exists to prevent.
+    ///
+    /// The routing tag is `SHA-256(id)` and the bridges hand it to relays in
+    /// the subscription filter the moment a socket opens, unconditionally, from
+    /// their socket-open callback. A transport built on the profile therefore
+    /// publishes a label anyone can recompute from the username, to third
+    /// parties, with nothing to retract it — and the rebuild that would have
+    /// fixed it cannot be relied on to arrive first: `initialize_mls` is
+    /// skipped outright when encryption is disabled, and a thrown one is caught
+    /// and warned past by the RN layer.
+    ///
+    /// So the absence is the contract. Asserting on `nostr_get_subscription_filter`
+    /// rather than on the transport handle is deliberate: that function is the
+    /// only thing standing between this state and a relay, so it is the one
+    /// that has to come back empty.
+    #[test]
+    fn test_nostr_is_absent_until_the_identity_rebuild_installs_it() {
+        let protocol = OfflineProtocol::new(ProtocolConfig {
+            profile: "leaky-profile".to_string(),
+            nostr_enabled: true,
+            ..create_test_config()
+        })
+        .unwrap();
+
+        assert_eq!(
+            protocol.nostr_get_subscription_filter("sub".to_string()),
+            None,
+            "a filter before identity is a profile-derived tag on a public relay"
+        );
+        assert_eq!(
+            protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
+            None,
+            "no Nostr transport may exist before the address does"
+        );
+
+        protocol
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::default()),
+                Box::new(TestMlsStorageProvider::default()),
+            )
+            .unwrap();
+
+        let filter = protocol
+            .nostr_get_subscription_filter("sub".to_string())
+            .expect("the rebuild installs the transport");
+        let address = protocol.local_address().expect("address after init");
+        let address_tag = offline_protocol_transport::routing_tag_for_device_id(&address).unwrap();
+        assert!(
+            filter.contains(&address_tag),
+            "the filter must carry the address-derived tag: {filter}"
+        );
+        assert!(
+            !filter.contains("leaky-profile"),
+            "the profile must reach no relay in any form: {filter}"
+        );
+    }
+
+    /// The transport refuses an id that is not an address, rather than hashing
+    /// it into a tag.
+    ///
+    /// Both ways of getting the id wrong are silent at runtime — a guessable
+    /// preimage is a disclosure nothing reports, and a merely-different one
+    /// addresses the device where nobody writes — so the refusal is the only
+    /// place either can surface.
+    #[test]
+    fn test_nostr_transport_refuses_an_id_that_is_not_an_address() {
+        assert!(
+            offline_protocol_transport::NostrTransport::new("nostr-profile").is_err(),
+            "a profile-shaped id must not produce a routing tag"
+        );
+
+        let protocol = OfflineProtocol::new(ProtocolConfig {
+            profile: "nostr-profile".to_string(),
+            nostr_enabled: true,
+            ..create_test_config()
+        })
+        .unwrap();
+        protocol
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::default()),
+                Box::new(TestMlsStorageProvider::default()),
+            )
+            .unwrap();
+        let address = protocol.local_address().expect("address after init");
+        assert!(
+            offline_protocol_transport::NostrTransport::new(address).is_ok(),
+            "the derived address is exactly what the transport accepts"
         );
     }
 
@@ -10194,7 +10305,11 @@ mod tests {
         })
         .unwrap();
 
+        // Absent, not merely unchanged: nothing installs a Nostr transport
+        // before the address exists, so a refused init must leave the slot
+        // empty rather than fill it on the way out.
         let tag_before = protocol.with_nostr_transport(|nt| nt.routing_tag().to_string());
+        assert_eq!(tag_before, None, "no Nostr transport before identity");
         protocol.start().unwrap();
 
         let err = protocol

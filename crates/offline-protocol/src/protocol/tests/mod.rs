@@ -2425,7 +2425,7 @@ fn peer_nostr_pubkey_persists_across_restart() {
 fn peer_nostr_pubkey_reaches_the_nostr_transport() {
     // The record is only useful if it lands where sealing reads it.
     let mut protocol = protocol_with_nostr("user123");
-    let bob = NostrTransport::new("bob").unwrap();
+    let bob = NostrTransport::new(id("bob")).unwrap();
     bob.install_signing_secret(&[64u8; 32]).unwrap();
     let bob_pubkey = bob.public_key_hex();
 
@@ -2452,7 +2452,7 @@ fn peer_nostr_pubkey_reaches_the_nostr_transport() {
 
     // And a *different* install of Bob's user id cannot: that is the whole
     // difference between the steady state and the bootstrap leg.
-    let impostor = NostrTransport::new("bob").unwrap();
+    let impostor = NostrTransport::new(id("bob")).unwrap();
     impostor.install_signing_secret(&[65u8; 32]).unwrap();
     assert_eq!(
         impostor
@@ -2469,7 +2469,7 @@ fn unblock_clears_the_cached_peer_nostr_key() {
     // capability sets, so it needs its own clear — otherwise the durable
     // record is deleted while sends keep sealing to the forgotten key.
     let mut protocol = protocol_with_nostr("user123");
-    let bob = NostrTransport::new("bob").unwrap();
+    let bob = NostrTransport::new(id("bob")).unwrap();
     bob.install_signing_secret(&[70u8; 32]).unwrap();
     feed_key_package_with_nostr_pubkey(&mut protocol, "bob", Some(&bob.public_key_hex()));
 
@@ -2616,7 +2616,7 @@ fn outgoing_key_package_advertises_our_nostr_pubkey_only_when_nostr_is_on() {
     // an upgrade.
     assert_ne!(
         advertised.as_deref(),
-        Some(routing_tag_for_device_id("alice").unwrap().as_str())
+        Some(routing_tag_for_device_id(&id("alice")).unwrap().as_str())
     );
 }
 
@@ -23531,7 +23531,7 @@ fn scrub_secret_without_storage_keeps_random_per_instance_fallback() {
 
 fn protocol_with_nostr_transport() -> OfflineProtocol {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    let nostr = offline_protocol_transport::NostrTransport::new("test_user").unwrap();
+    let nostr = offline_protocol_transport::NostrTransport::new(id("test_user")).unwrap();
     protocol
         .transport_manager
         .add_transport(TransportType::Nostr, Box::new(nostr));
@@ -31781,7 +31781,7 @@ fn nostr_kill_switches_reach_the_transport_on_start() {
         config.transport.nostr_cold_contact_enabled = cold_contact;
 
         let mut protocol = OfflineProtocol::new(config).unwrap();
-        let nostr = NostrTransport::new("alice").unwrap();
+        let nostr = NostrTransport::new(id("alice")).unwrap();
         nostr.on_status_changed(TransportStatus::Available);
         protocol
             .transport_manager_mut()
