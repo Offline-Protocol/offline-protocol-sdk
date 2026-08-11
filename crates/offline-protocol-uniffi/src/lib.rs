@@ -10275,6 +10275,53 @@ mod tests {
         );
     }
 
+    /// Every hand-written iOS source is listed in the podspec.
+    ///
+    /// `MeshSdk.podspec` enumerates its Swift sources one by one (only `ble/`
+    /// and `mesh/` are globbed), and the pod — not `Package.swift` — is what
+    /// ships. A new file that nothing lists compiles in both CI checks anyway:
+    /// the SwiftPM harness has its own `sources:` list, and the `swiftc
+    /// -typecheck` probe takes an explicit file list on the command line. So
+    /// the omission surfaces only when an app builds the pod, as an undefined
+    /// symbol for a type that is right there in the directory.
+    ///
+    /// Directory-driven rather than list-driven on purpose: a guard that
+    /// compared two hand-maintained lists would need editing by the same person
+    /// who forgot the podspec.
+    #[test]
+    fn react_native_podspec_ships_every_hand_written_ios_source() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let podspec_path = root.join("MeshSdk.podspec");
+        let podspec = std::fs::read_to_string(&podspec_path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", podspec_path.display()));
+
+        let ios = root.join("ios");
+        let mut missing: Vec<String> = std::fs::read_dir(&ios)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", ios.display()))
+            .map(|entry| entry.expect("directory entry").file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            // Package.swift is the SwiftPM test harness's manifest, not a
+            // source the pod could compile.
+            .filter(|name| name.ends_with(".swift") && name != "Package.swift")
+            .filter(|name| {
+                let stem = name.trim_end_matches(".swift");
+                !podspec.contains(&format!("\"ios/{name}\""))
+                    // OfflineProtocolModule rides the `{m,swift}` brace form,
+                    // which pairs it with its ObjC bridging file.
+                    && !podspec.contains(&format!("\"ios/{stem}.{{m,swift}}\""))
+            })
+            .collect();
+        missing.sort();
+
+        assert!(
+            missing.is_empty(),
+            "MeshSdk.podspec does not list {missing:?} — the pod is what ships, so an unlisted \
+             source is absent from every app build while both CI checks (the SwiftPM harness and \
+             the swiftc typecheck probe) keep passing on their own file lists"
+        );
+    }
+
     /// Wi-Fi Direct announces nothing, because it can name nobody.
     ///
     /// Both managers used to pass a transport-level string — a TCP endpoint on
