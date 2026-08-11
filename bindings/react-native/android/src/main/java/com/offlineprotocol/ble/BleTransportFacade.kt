@@ -193,6 +193,24 @@ class BleTransportFacade(
          */
         private const val MAX_DRAIN_ITERATIONS_PER_CALL = 32
         private const val BACKPRESSURE_RETRY_MS = 50L
+        /**
+         * Ceiling of the backpressure retry ladder ([BackpressureRetryPolicy]).
+         * Matched to [FRAGMENT_POLL_INTERVAL_MS] deliberately: past this rung
+         * the fast retry is no longer buying anything the unconditional 2s
+         * poller does not already provide, so there is no reason to keep
+         * taking the protocol mutex more often than it does.
+         */
+        private const val BACKPRESSURE_RETRY_MAX_MS = 2_000L
+        /**
+         * Consecutive backpressure retries before the drain stops re-arming and
+         * leaves the outbound queue to the polling floor. With the 50ms → 2s
+         * ladder this sums to roughly 15 seconds of fast retrying, which clears
+         * any transient stall many times over; a peer still stalled after it is
+         * not going to be rescued by a sixteenth attempt, and continuing to
+         * repost is what turns one half-open link into a 20Hz main-thread loop
+         * contending the core mutex (OFF-2123).
+         */
+        private const val MAX_BACKPRESSURE_RETRY_ATTEMPTS = 12
         /** Max time the per-peer write gate ([writeInFlight]) stays closed
          *  before the next send is allowed regardless of completion callback.
          *
@@ -675,6 +693,22 @@ class BleTransportFacade(
     
     // Fragment polling
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * Capped backoff for the outbound drain's self-rearm. See
+     * [BackpressureRetryPolicy] for why a flat repost was unsafe.
+     */
+    private val backpressureRetry = BackpressureRetryPolicy(
+        handler = mainHandler,
+        task = Runnable {
+            if (state == TransportState.RUNNING) {
+                drainAndSendFragments()
+            }
+        },
+        minDelayMs = BACKPRESSURE_RETRY_MS,
+        maxDelayMs = BACKPRESSURE_RETRY_MAX_MS,
+        maxConsecutiveAttempts = MAX_BACKPRESSURE_RETRY_ATTEMPTS,
+    )
 
     private fun <T> runOnMainSync(action: () -> T): T {
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -1203,6 +1237,12 @@ class BleTransportFacade(
 
         // Stop fragment polling — must happen before clearing queues
         mainHandler.removeCallbacks(fragmentPollingRunnable)
+
+        // Drop any pending backpressure re-drain and reset the ladder. This
+        // instance is reused across a disable/enable cycle, so a stale rung
+        // would otherwise make the next session's first stall retry slowly —
+        // or, at the ceiling, not at all.
+        backpressureRetry.cancel()
 
         // Stop routing cleanup
         mainHandler.removeCallbacks(routingCleanupRunnable)
@@ -2813,8 +2853,17 @@ class BleTransportFacade(
 
         var hitIterationCap = false
         var hitBackpressure = false
+        // Whether anything actually reached the BLE stack this pass. Drives
+        // [backpressureRetry].reset() — a peer that is moving fragments again
+        // must get the fast ladder back, or one bad stretch would leave it on
+        // the polling floor for the rest of the session.
+        var sentAny = false
         try {
+            val queuedBeforeFlush = outboundQueue.totalCount()
             val stalledAfterFlush = outboundQueue.flush(::sendFragmentData)
+            if (outboundQueue.totalCount() < queuedBeforeFlush) {
+                sentAny = true
+            }
             if (stalledAfterFlush) {
                 hitBackpressure = true
                 if (logThrottler.shouldLog("drain_flush_stalled", intervalMs = 5000)) {
@@ -2908,6 +2957,7 @@ class BleTransportFacade(
                     hitBackpressure = true
                     break
                 }
+                sentAny = true
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in drainAndSendFragments", e)
@@ -2915,10 +2965,39 @@ class BleTransportFacade(
 
         if (state != TransportState.RUNNING) return
 
+        // Anything that actually went out means the link is alive, so the next
+        // stall deserves the fast ladder again. Reset before the re-arm below
+        // so a pass that both sent and stalled starts from the floor.
+        if (sentAny) {
+            backpressureRetry.reset()
+        }
+
         if (hitIterationCap) {
+            // Not backpressure — we simply had more than one tick's worth of
+            // work. Yield the thread and resume immediately; no ladder.
             mainHandler.post { drainAndSendFragments() }
         } else if (hitBackpressure && outboundQueue.totalCount() > 0) {
-            mainHandler.postDelayed({ drainAndSendFragments() }, BACKPRESSURE_RETRY_MS)
+            if (!backpressureRetry.schedule() &&
+                logThrottler.shouldLog("backpressure_ceiling", intervalMs = 5000)
+            ) {
+                val recipients = outboundQueue.recipientIds()
+                Log.w(
+                    TAG,
+                    "drainAndSendFragments: backpressure retry ceiling reached " +
+                        "(${MAX_BACKPRESSURE_RETRY_ATTEMPTS} attempts), leaving " +
+                        "${outboundQueue.totalCount()} fragment(s) to the polling " +
+                        "floor for $recipients",
+                )
+                emitDiagnostic(
+                    "warning",
+                    "Backpressure retry ceiling reached",
+                    mapOf(
+                        "attempts" to MAX_BACKPRESSURE_RETRY_ATTEMPTS,
+                        "pending" to outboundQueue.totalCount(),
+                        "recipients" to recipients,
+                    ),
+                )
+            }
         }
     }
 
@@ -2964,7 +3043,15 @@ class BleTransportFacade(
         try {
             // The old logic would return early if there were unsent fragments, preventing new fragments
             // from being polled. This caused messages to get stuck when connections weren't ready.
+            val queuedBeforeFlush = outboundQueue.totalCount()
             val hasUnsentFragments = outboundQueue.flush(::sendFragmentData)
+            // The polling floor is where a peer that burned the whole
+            // backpressure ladder recovers. Clearing the ladder here is what
+            // lets it get the fast retry back for its next stall; without it
+            // the ceiling would be permanent for the rest of the session.
+            if (outboundQueue.totalCount() < queuedBeforeFlush) {
+                backpressureRetry.reset()
+            }
 
             // Still poll for new fragments even if there are unsent pending ones
             // This prevents deadlock where old fragments block new ones
@@ -3020,6 +3107,7 @@ class BleTransportFacade(
             } else {
                 Log.d(TAG, "Fragment sent successfully to $recipientId")
                 emitDiagnostic("debug", "Fragment sent successfully", mapOf("recipientId" to recipientId))
+                backpressureRetry.reset()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error polling/sending fragments", e)
