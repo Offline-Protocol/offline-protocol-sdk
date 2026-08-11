@@ -154,7 +154,20 @@ class InternetManager(
 
     // Translates core-tagged server-plane control frames (control_op on
     // InternetMessage) into relay-native ops.
-    private val controlOpTranslator = RelayControlOpTranslator(deviceId)
+    //
+    // Two identities, deliberately: `deviceId` is the profile (the relay
+    // username by convention) and matches relay-fed answers, while the lambda
+    // resolves the derived address that core-fed roster payloads are named in.
+    // Resolved per call, never captured: MLS identity may not exist yet at
+    // construction and an identity rebuild replaces the address. See
+    // RelayControlOpTranslator's namespace note.
+    private val controlOpTranslator = RelayControlOpTranslator(deviceId) {
+        try {
+            protocol.localAddress()
+        } catch (e: Exception) {
+            null
+        }
+    }
 
     // Client-side mirror of the relay's token bucket: every relay-bound
     // frame takes a token before the socket write (a server-side drop after
@@ -1629,9 +1642,15 @@ class InternetManager(
             "GroupRoleChanged" -> {
                 // A promotion of this device to admin re-enables member
                 // deltas an earlier denial suppressed.
+                // The relay names the promoted account in `username` (its
+                // group path is username-keyed). `user_id` is kept only as a
+                // fallback for a future relay that renames the field —
+                // reading it FIRST was the defect: the relay never emits it,
+                // so the self-check compared against an empty string and no
+                // promotion ever landed.
                 controlOpTranslator.onRoleChanged(
                     json.safeOptString("group_id"),
-                    json.safeOptString("user_id"),
+                    json.safeOptString("username", json.safeOptString("user_id")),
                     json.safeOptString("new_role", json.safeOptString("role"))
                 )
                 serverMessageEmitter?.invoke(rawText)
@@ -2168,7 +2187,7 @@ class InternetManager(
         // occupy a rotation slot until the idle TTL and could surface a
         // presence_updated(self, offline) to the app. (The core drops self
         // presence too — this just keeps the bridge honest at the source.)
-        if (recipient != deviceId) {
+        if (!isSelfPeer(recipient)) {
             presenceWatch.watch(recipient, now)
             try {
                 protocol.internetPeerPresence(recipient, false, null)
@@ -2182,6 +2201,22 @@ class InternetManager(
             "source" to source,
             "failedInFlight" to failedIds.size
         ))
+    }
+
+    /**
+     * True when [peerId] names this device in either namespace — the profile
+     * (relay username by convention) or the derived address the core stamps
+     * on its own frames. Peer ids reaching the presence plane come from both
+     * sides, and a profile-only test lets self through on every core-fed one.
+     */
+    private fun isSelfPeer(peerId: String): Boolean {
+        if (peerId.isEmpty()) return false
+        if (peerId == deviceId) return true
+        return try {
+            peerId == protocol.localAddress()
+        } catch (e: Exception) {
+            false
+        }
     }
 
     private fun startPresenceWatch() {
@@ -2206,7 +2241,20 @@ class InternetManager(
             val now = monotonicNowMs()
             // Self is filtered BEFORE the merge so it can never enter the
             // watch set and pin a rotation slot until the idle TTL.
-            val peers = presenceWatch.peersToQuery(coreWatchlist.filter { it != deviceId }, now)
+            // Resolved once per tick rather than per entry: the watchlist
+            // comes from the core in address space, so a profile-only filter
+            // lets self into the watch set.
+            // Empty folds to null so an absent address never matches an
+            // empty watchlist entry.
+            val selfAddress = try {
+                protocol.localAddress()?.takeIf { it.isNotEmpty() }
+            } catch (e: Exception) {
+                null
+            }
+            val peers = presenceWatch.peersToQuery(
+                coreWatchlist.filter { it != deviceId && it != selfAddress },
+                now
+            )
             var queried = 0
             for (peer in peers) {
                 // Presence queries yield to data traffic under rate

@@ -10373,6 +10373,149 @@ mod tests {
         }
     }
 
+    /// The relay group control plane knows itself in BOTH namespaces.
+    ///
+    /// `RelayControlOpTranslator` compares an id against "self" at three
+    /// sites, and the frames carrying those ids come from two different sides
+    /// that name this device differently:
+    ///
+    /// * core-fed control payloads (`members` in the relay registration,
+    ///   `leaving_member` in the leave notification) carry the MLS roster,
+    ///   which is `off1…` ADDRESS space — `members` is `refresh_group_members`
+    ///   and `leaving_member` is `local_id`;
+    /// * the relay's own `GroupRoleChanged` answer names the promoted account
+    ///   in USERNAME space, in a field literally called `username` (the
+    ///   relay's group path stays username-keyed by design).
+    ///
+    /// The bridges construct the translator with `deviceId` — the app-chosen
+    /// profile — which since the addressing change matches neither the roster
+    /// payloads nor, on its own, anything the relay sends under a different
+    /// account name. All three self-checks were therefore dead: the SDK sent
+    /// an `AddGroupMember` naming its OWN address, never sent a relay-native
+    /// `LeaveGroup` when this device left, and ignored its own admin
+    /// promotion. Passing the address *instead* would have been equally
+    /// one-sided — it fixes the two core-fed sites and breaks the relay-fed
+    /// one — which is why the fix is a pair, not a swap.
+    ///
+    /// Pinned as source text for the same reason as the two guards above:
+    /// `InternetManager.swift` is on `Package.swift`'s `exclude:` list and
+    /// `InternetManager.kt` needs a live OkHttp socket, so CI typechecks one
+    /// and executes neither. The translator's own matching logic IS unit-tested
+    /// on both platforms (`registerStripsSelfByAddressNotJustProfile`,
+    /// `leaveFiresWhenLeavingMemberIsOurAddress`,
+    /// `rolePromotionMatchesSelfInEitherNamespace` and their Swift mirrors);
+    /// what no test there can reach is that the bridges *wire* the address in
+    /// and read the field the relay actually sends.
+    #[test]
+    fn react_native_relay_control_translator_knows_self_in_both_namespaces() {
+        let swift = rn_source_code_only("ios/InternetManager.swift");
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/InternetManager.kt");
+
+        // --- 1. The translator is built with a live address provider --------
+        //
+        // Resolved per call rather than captured: the translator is
+        // constructed before `initialize_mls` may have run, and an identity
+        // rebuild replaces the address underneath it. A snapshot taken here
+        // would be empty on every connection that predates MLS init.
+        assert!(
+            swift.contains(
+                "RelayControlOpTranslator( selfId: deviceId, selfAddress: { [weak \
+                 protocolInstance] in protocolInstance?.localAddress() } )"
+            ),
+            "InternetManager.swift must build the control-op translator with BOTH identities: \
+             deviceId (the profile, which matches the relay's own answers) and a lazily \
+             resolved local_address() (which matches the MLS roster the core sends). With only \
+             the profile, the member-delta filter never strips self and the SDK sends an \
+             AddGroupMember naming its own address"
+        );
+        assert!(
+            kotlin.contains(
+                "private val controlOpTranslator = RelayControlOpTranslator(deviceId) { try { \
+                 protocol.localAddress() } catch (e: Exception) { null } }"
+            ),
+            "InternetManager.kt must build the control-op translator with BOTH identities — \
+             same reason as the Swift half above"
+        );
+
+        // A one-argument construction is exactly the pre-fix shape: it
+        // compiles the moment someone gives `selfAddress` a default, and
+        // silently restores profile-only matching.
+        assert!(
+            !swift.contains("RelayControlOpTranslator(selfId: deviceId)"),
+            "InternetManager.swift must not construct the translator with the profile alone — \
+             that is the shape whose three dead self-checks this guard exists to prevent"
+        );
+        // Kotlin passes the provider as a trailing lambda, so the profile-only
+        // call is a textual PREFIX of the correct one: assert instead that
+        // every construction is followed by the lambda that supplies the
+        // address.
+        assert!(
+            kotlin
+                .match_indices("RelayControlOpTranslator(deviceId)")
+                .all(|(at, m)| kotlin[at + m.len()..].starts_with(" {")),
+            "InternetManager.kt must not construct the translator with the profile alone — every \
+             RelayControlOpTranslator(deviceId) must be followed by the trailing lambda that \
+             resolves local_address(); same reason as the Swift half above"
+        );
+
+        // --- 2. The role-change arm reads the field the relay SENDS ---------
+        //
+        // `ServerMessage::GroupRoleChanged` (relay `message.rs`) carries
+        // `username`, pinned there by `group_role_changed_serializes_correctly`.
+        // Both bridges used to read `user_id`, which the relay never emits —
+        // so the self-check compared against an empty string and no promotion
+        // ever re-enabled member deltas. `user_id` survives only as a
+        // second-choice fallback.
+        assert!(
+            swift.contains(
+                "member: json[\"username\"] as? String ?? json[\"user_id\"] as? String ?? \"\""
+            ),
+            "InternetManager.swift must read the promoted account from `username` FIRST — that \
+             is the field the relay's GroupRoleChanged actually carries; reading `user_id` \
+             alone yields an empty string and the promotion is silently ignored"
+        );
+        assert!(
+            kotlin.contains("json.safeOptString(\"username\", json.safeOptString(\"user_id\")),"),
+            "InternetManager.kt must read the promoted account from `username` FIRST — same \
+             reason as the Swift half above"
+        );
+
+        // --- 3. Presence self-filters span both namespaces too --------------
+        //
+        // Same defect, same file: the core's presence watchlist and the
+        // unreachable-recipient path are both address-space, and a
+        // profile-only test lets self into the watch set — where it pins a
+        // rotation slot until the idle TTL and can surface a
+        // presence_updated(self, offline) to the app.
+        for (label, code) in [("ios", &swift), ("android", &kotlin)] {
+            assert!(
+                code.contains("isSelfPeer(recipient)"),
+                "{label} InternetManager must filter the unreachable recipient through a \
+                 two-namespace self test: the core names peers by address, so `!= deviceId` \
+                 never recognizes self on a core-fed id"
+            );
+        }
+        assert!(
+            !swift.contains("if recipient != deviceId {"),
+            "InternetManager.swift must not self-test the recipient against the profile alone"
+        );
+        assert!(
+            !kotlin.contains("if (recipient != deviceId) {"),
+            "InternetManager.kt must not self-test the recipient against the profile alone"
+        );
+        assert!(
+            swift.contains("peer != deviceId && !(peer == selfAddress && !peer.isEmpty)"),
+            "InternetManager.swift must filter the core's presence watchlist by address as well \
+             as profile — the watchlist is core-fed, so it names this device by address"
+        );
+        assert!(
+            kotlin.contains("coreWatchlist.filter { it != deviceId && it != selfAddress }"),
+            "InternetManager.kt must filter the core's presence watchlist by address as well as \
+             profile — same reason as the Swift half above"
+        );
+    }
+
     /// Every hand-written iOS source is listed in the podspec.
     ///
     /// `MeshSdk.podspec` enumerates its Swift sources one by one (only `ble/`

@@ -45,15 +45,41 @@ import org.json.JSONObject
  * RateLimited) cannot write a phantom snapshot into the next connection's
  * diff base.
  *
+ * SELF-IDENTITY SPANS TWO NAMESPACES — that is why [isSelf] matches a pair
+ * rather than one string. The frames this translator reads come from two
+ * different sides, and they name this device differently:
+ *
+ * - core-fed control payloads (`members`, `leaving_member`) carry the MLS
+ *   roster, which since the self-certifying addressing change is `off1…`
+ *   ADDRESS space;
+ * - relay-fed answers (`GroupRoleChanged`) name members by the relay's
+ *   account key, which is USERNAME space (the relay stays username-keyed on
+ *   the group path by design).
+ *
+ * [selfId] is the app-chosen profile, conventionally the relay username;
+ * [selfAddress] resolves the derived address lazily, because MLS identity is
+ * not necessarily initialized when this translator is constructed and the
+ * address can change across an identity rebuild. A comparison against only
+ * one of the two silently never matches on the other side's frames, which is
+ * what made all three self-checks dead: the SDK named its own address in
+ * `AddGroupMember`, never sent a relay-native `LeaveGroup`, and ignored its
+ * own admin promotion.
+ *
  * Known v1 limitation: a group rename re-registers, but the relay's
  * idempotent sync never updates the stored name (`ON CONFLICT DO NOTHING`).
  *
  * State is per-connection: call [reset] on disconnect.
  * Thread-safe: relay answers (`onGroupError`) arrive on OkHttp's reader
  * thread while `translate` runs on the main handler's poll loop, so all
- * state is guarded by an internal lock.
+ * state is guarded by an internal lock. [selfAddress] is always invoked
+ * OUTSIDE that lock: it reaches into the protocol's own mutex, and the core
+ * never calls back into the translator, so keeping the ordering
+ * one-directional is what makes that safe.
  */
-class RelayControlOpTranslator(private val selfId: String) {
+class RelayControlOpTranslator(
+    private val selfId: String,
+    private val selfAddress: () -> String?
+) {
 
     companion object {
         /**
@@ -154,14 +180,35 @@ class RelayControlOpTranslator(private val selfId: String) {
     /** Groups for which a relay-native LeaveGroup was already committed. */
     private val leaveSent = HashSet<String>()
 
+    /**
+     * True when [id] names this device in either namespace.
+     * [resolvedAddress] is the value of [selfAddress] sampled once by the
+     * caller before it took the lock — a null (or empty) address degrades to
+     * profile-only matching, which is exactly the behavior that predates
+     * addressing.
+     */
+    private fun isSelf(id: String, resolvedAddress: String?): Boolean =
+        id == selfId || (!resolvedAddress.isNullOrEmpty() && id == resolvedAddress)
+
     fun translate(
         controlOp: String,
         controlPayload: String,
         recipientId: String
+    ): Translation {
+        // Sampled before the lock: resolving the address takes the protocol's
+        // mutex, and this translator must never hold its own lock across that.
+        val resolvedAddress = selfAddress()
+        return translateLocked(controlOp, controlPayload, resolvedAddress)
+    }
+
+    private fun translateLocked(
+        controlOp: String,
+        controlPayload: String,
+        resolvedAddress: String?
     ): Translation = synchronized(lock) {
         try {
             when (controlOp) {
-                "group_relay_register" -> translateRegister(controlPayload)
+                "group_relay_register" -> translateRegister(controlPayload, resolvedAddress)
 
                 "group_relay_broadcast" -> {
                     val payload = JSONObject(controlPayload)
@@ -204,8 +251,15 @@ class RelayControlOpTranslator(private val selfId: String) {
                 "group_mls_leave" -> {
                     val payload = JSONObject(controlPayload)
                     val groupId = payload.optString("group_id")
+                    // `leaving_member` is the core's `local_id` — address
+                    // space. A profile-only comparison here never fires,
+                    // which left the relay holding us in the group registry
+                    // after we left.
                     val leavingMember = payload.optString("leaving_member")
-                    if (groupId.isEmpty() || leavingMember != selfId || leaveSent.contains(groupId)) {
+                    if (groupId.isEmpty() ||
+                        !isSelf(leavingMember, resolvedAddress) ||
+                        leaveSent.contains(groupId)
+                    ) {
                         Translation.Tap(emptyList())
                     } else {
                         val gen = generation
@@ -228,7 +282,10 @@ class RelayControlOpTranslator(private val selfId: String) {
         }
     }
 
-    private fun translateRegister(controlPayload: String): Translation {
+    private fun translateRegister(
+        controlPayload: String,
+        resolvedAddress: String?
+    ): Translation {
         val payload = JSONObject(controlPayload)
         val groupId = payload.optString("group_id")
         if (groupId.isEmpty()) return Translation.PassThrough
@@ -264,9 +321,13 @@ class RelayControlOpTranslator(private val selfId: String) {
         // Member deltas: the relay adds the creator itself, and self-adds are
         // redundant, so the self id never appears in a delta. Sorted for a
         // deterministic wire order across platforms.
+        //
+        // `members` is the MLS roster — address space. Filtering it against
+        // the profile alone strips nothing, which is how the SDK ended up
+        // sending an AddGroupMember naming its own address.
         var commit: (() -> Unit)? = null
         if (!notAdmin && !memberDeltasDenied.contains(groupId)) {
-            val desired = members.filter { it != selfId }.toSet()
+            val desired = members.filter { !isSelf(it, resolvedAddress) }.toSet()
             val known = registeredMembers[groupId] ?: emptySet()
             for (added in (desired - known).sorted()) {
                 frames.add(JSONObject().apply {
@@ -367,10 +428,22 @@ class RelayControlOpTranslator(private val selfId: String) {
      * the relay until the next reconnect. (The denial already dropped the
      * group's committed snapshot, so the next register recomputes the full
      * delta set.)
+     *
+     * [member] is the relay's own naming of the promoted account — username
+     * space today (the relay's group path stays username-keyed), which is
+     * why [selfId] is the load-bearing half of the match here. The address
+     * half costs nothing and keeps this correct if the relay's group naming
+     * later moves to address space.
+     *
+     * Residual, accepted: an app whose relay username differs from its
+     * `profile` still fails this match and falls back to re-learning the
+     * denial each connection — noisy but safe, the same degradation a
+     * reworded denial marker produces.
      */
-    fun onRoleChanged(groupId: String, userId: String, newRole: String) {
-        if (groupId.isEmpty() || userId != selfId) return
+    fun onRoleChanged(groupId: String, member: String, newRole: String) {
+        if (groupId.isEmpty()) return
         if (!newRole.equals("admin", ignoreCase = true)) return
+        if (!isSelf(member, selfAddress())) return
         synchronized(lock) {
             memberDeltasDenied.remove(groupId)
         }

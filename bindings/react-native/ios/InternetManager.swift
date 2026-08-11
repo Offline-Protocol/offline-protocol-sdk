@@ -418,7 +418,16 @@ public class InternetManager: NSObject, TransportManager {
     public init(protocol protocolInstance: OfflineProtocol, deviceId: String, serverUrl: String? = nil) {
         self.protocolInstance = protocolInstance
         self.deviceId = deviceId
-        self.controlOpTranslator = RelayControlOpTranslator(selfId: deviceId)
+        // Two identities, deliberately: `deviceId` is the profile (the relay
+        // username by convention) and matches relay-fed answers, while the
+        // closure resolves the derived address that core-fed roster payloads
+        // are named in. Resolved per call, never captured: MLS identity may
+        // not exist yet at construction and an identity rebuild replaces the
+        // address. See RelayControlOpTranslator's namespace note.
+        self.controlOpTranslator = RelayControlOpTranslator(
+            selfId: deviceId,
+            selfAddress: { [weak protocolInstance] in protocolInstance?.localAddress() }
+        )
         if let urlString = serverUrl, let url = URL(string: urlString) {
             // Stored var, not the guarded accessor: computed setters cannot
             // run before super.init(), and no other thread can see self yet.
@@ -1914,9 +1923,14 @@ public class InternetManager: NSObject, TransportManager {
         case "GroupRoleChanged":
             // A promotion of this device to admin re-enables member deltas
             // an earlier denial suppressed.
+            // The relay names the promoted account in `username` (its group
+            // path is username-keyed). `user_id` is kept only as a fallback
+            // for a future relay that renames the field — reading it FIRST
+            // was the defect: the relay never emits it, so the self-check
+            // compared against an empty string and no promotion ever landed.
             controlOpTranslator.onRoleChanged(
                 groupId: json["group_id"] as? String ?? "",
-                userId: json["user_id"] as? String ?? "",
+                member: json["username"] as? String ?? json["user_id"] as? String ?? "",
                 newRole: json["new_role"] as? String ?? json["role"] as? String ?? ""
             )
             emitServerMessage(rawText)
@@ -2695,7 +2709,7 @@ public class InternetManager: NSObject, TransportManager {
         // occupy a rotation slot until the idle TTL and could surface a
         // presence_updated(self, offline) to the app. (The core drops self
         // presence too — this just keeps the bridge honest at the source.)
-        if recipient != deviceId {
+        if !isSelfPeer(recipient) {
             presenceWatch.watch(recipient, nowMs: now)
             protocolInstance.internetPeerPresence(peerId: recipient, online: false, lastSeenMs: nil)
         }
@@ -2705,6 +2719,16 @@ public class InternetManager: NSObject, TransportManager {
             "source": source,
             "failedInFlight": failedIds.count
         ])
+    }
+
+    /// True when `peerId` names this device in either namespace — the profile
+    /// (relay username by convention) or the derived address the core stamps
+    /// on its own frames. Peer ids reaching the presence plane come from both
+    /// sides, and a profile-only test lets self through on every core-fed one.
+    private func isSelfPeer(_ peerId: String) -> Bool {
+        if peerId.isEmpty { return false }
+        if peerId == deviceId { return true }
+        return peerId == protocolInstance.localAddress()
     }
 
     private func startPresenceWatch() {
@@ -2742,8 +2766,14 @@ public class InternetManager: NSObject, TransportManager {
         let now = monotonicNowMs()
         // Self is filtered BEFORE the merge so it can never enter the watch
         // set and pin a rotation slot until the idle TTL.
+        // Resolved once per tick rather than per entry: the watchlist comes
+        // from the core in address space, so a profile-only filter lets self
+        // into the watch set.
+        let selfAddress = protocolInstance.localAddress()
         let peers = presenceWatch.peersToQuery(
-            coreWatchlist: coreWatchlist.filter { $0 != deviceId },
+            coreWatchlist: coreWatchlist.filter { peer in
+                peer != deviceId && !(peer == selfAddress && !peer.isEmpty)
+            },
             nowMs: now
         )
         var queried = 0
