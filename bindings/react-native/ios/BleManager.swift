@@ -2535,11 +2535,12 @@ extension BleManager: CBCentralManagerDelegate {
             // If both central and peripheral are ready, mark as running
             if peripheralReady && state == .starting {
                 updateState(.running)
-                print("[BleManager] ✅ BLE Manager ready - calling bleStatusChanged(true)")
-                emitDiagnostic("info", "About to call protocol.bleStatusChanged(true)")
+                print("[BleManager] ✅ BLE Manager ready - dispatching bleStatusChanged(true)")
+                // "dispatched", not "called": the FFI now runs on the protocol
+                // queue, so this returns before the core has been told. Reading
+                // these as a completion is how you mis-time a hang.
                 notifyBleStatus(true)
-                print("[BleManager] ✅ Called protocol.bleStatusChanged(true)")
-                emitDiagnostic("info", "Successfully called protocol.bleStatusChanged(true)")
+                emitDiagnostic("info", "Dispatched protocol.bleStatusChanged(true)")
             }
             
         case .poweredOff:
@@ -3441,11 +3442,10 @@ extension BleManager: CBPeripheralManagerDelegate {
             // If both central and peripheral are ready, mark as running
             if centralReady && state == .starting {
                 updateState(.running)
-                print("[BleManager] ✅ BLE Manager ready (peripheral) - calling bleStatusChanged(true)")
-                emitDiagnostic("info", "About to call protocol.bleStatusChanged(true) from peripheral")
+                print("[BleManager] ✅ BLE Manager ready (peripheral) - dispatching bleStatusChanged(true)")
+                // See the central-side note: dispatched, not completed.
                 notifyBleStatus(true)
-                print("[BleManager] ✅ Called protocol.bleStatusChanged(true) from peripheral")
-                emitDiagnostic("info", "Successfully called protocol.bleStatusChanged(true) from peripheral")
+                emitDiagnostic("info", "Dispatched protocol.bleStatusChanged(true) from peripheral")
             }
             
         case .poweredOff:
