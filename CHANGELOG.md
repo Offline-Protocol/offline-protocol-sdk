@@ -215,6 +215,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **No MLS session could be established over the relay, and `off1…` recipients
+  were unreachable through it.** The relay knows a connection by the account
+  name it authenticated, and stamps that name on every frame it forwards. Since
+  the identity change the core stamps `Message.sender` with the derived address,
+  so the receiver's transport-identity check compared an address against an
+  account name and rejected the frame — which took `__MLS_KEY_PKG__` and
+  `__MLS_WELCOME__` with it, while already-established sessions kept decrypting
+  (`__MLS_ENC__` is data-plane and ungated). Outbound was broken in the same
+  place from the other side: an `off1…` recipient did not exist in a registry
+  keyed by account name. Both bridges now prove their address to the relay
+  immediately after authenticating, by signing a per-connection challenge from
+  the relay's `Authenticated` frame under a dedicated domain, and the relay
+  routes and attributes that connection by address from there on. Requires a
+  relay advertising the `address_routing_v1` capability; against an older one
+  the bridges stay silent and the connection behaves exactly as before. No
+  configuration, and nothing for an app to call.
+
 - **Transport callbacks registered before `initialize_mls` were silently
   dropped.** `set_*_transport_callback` installed onto whichever transport was
   registered at the time, and the identity rebuild replaces those objects — so

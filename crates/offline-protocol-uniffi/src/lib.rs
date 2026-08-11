@@ -10174,6 +10174,154 @@ mod tests {
         );
     }
 
+    /// The relay connection proves its address before it sends anything else.
+    ///
+    /// The relay attributes each inbound frame by whatever the connection has
+    /// proved at the moment it reads that frame, and never re-stamps
+    /// retroactively. So a frame written before the `DeclareAddress` is
+    /// attributed by *account name* permanently — and since the core stamps
+    /// `Message.sender` with `local_address()`, the receiver's
+    /// [`validate_transport_sender`] strict-match then rejects it. The
+    /// outbound flush that `internet_status_changed(true)` performs is exactly
+    /// what produces those frames, which is what makes this an ordering
+    /// invariant rather than a preference.
+    ///
+    /// Neither platform can test this itself: `InternetManager.swift` is on
+    /// `Package.swift`'s `exclude:` list and `InternetManager.kt` needs a live
+    /// OkHttp socket, so CI typechecks one and executes neither. The *decision*
+    /// and the signed bytes are unit-tested on both sides
+    /// (`AddressDeclarationPolicyTests` / `AddressDeclarationPolicyTest`); what
+    /// no test there can reach is that the call sites run in this order.
+    ///
+    /// The capabilities-before-status half of the chain was comment-only on
+    /// every surface until this guard — see `internet_relay_capabilities`.
+    #[test]
+    fn react_native_relay_declares_its_address_before_it_flushes() {
+        let swift = rn_source_code_only("ios/InternetManager.swift");
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/InternetManager.kt");
+
+        // --- 1. Both bridges declare, and build the proof from the policy ----
+        //
+        // The payload layout is a cross-repo contract with the relay's
+        // `address_binding::address_proof_payload`, pinned to a hex vector on
+        // both sides. A hand-rolled payload at the call site would be a
+        // signature that simply fails to verify — no compile error, no parse
+        // error, just a connection that silently stays in account-name space.
+        for (label, code) in [("ios", &swift), ("android", &kotlin)] {
+            assert!(
+                code.contains("AddressDeclarationPolicy.proofPayload("),
+                "{label} InternetManager must build the address proof through \
+                 AddressDeclarationPolicy.proofPayload — the byte layout is pinned against the \
+                 relay's own vector, and a hand-rolled copy cannot be"
+            );
+            assert!(
+                code.contains("AddressDeclarationPolicy.declarationJson("),
+                "{label} InternetManager must build the DeclareAddress frame through the policy, \
+                 which owns the padded-standard base64 the relay's decoder requires"
+            );
+        }
+
+        // --- 2. The signed account name is the relay's, never a local one ----
+        //
+        // The relay verifies the proof against the account name *it* resolved.
+        // Both bridges used to read `username` with a `deviceId` fallback —
+        // the app-chosen profile — which would produce a signature that cannot
+        // verify and reads as an attack in the relay's logs.
+        assert!(
+            !swift.contains("let username = json[\"username\"] as? String ?? deviceId"),
+            "InternetManager.swift must read the Authenticated username RAW: the deviceId \
+             fallback is the local profile, and signing it produces an unverifiable proof"
+        );
+        assert!(
+            !kotlin.contains("val username = json.safeOptString(\"username\", deviceId)"),
+            "InternetManager.kt must read the Authenticated username RAW: the deviceId fallback \
+             is the local profile, and signing it produces an unverifiable proof"
+        );
+
+        // --- 3. ORDERING: declare → capabilities → status flip ---------------
+        let swift_declare = swift
+            .find("self.declareAddress(declaration, proto: proto, task: task)")
+            .expect("InternetManager.swift must declare its address on the authenticated path");
+        let swift_caps = swift
+            .find("proto.internetRelayCapabilities(capabilities: capabilities)")
+            .expect("InternetManager.swift must inject relay capabilities");
+        let swift_status = swift
+            .find("proto.internetStatusChanged(isConnected: true)")
+            .expect("InternetManager.swift must flip the internet status true");
+        assert!(
+            swift_declare < swift_caps && swift_caps < swift_status,
+            "ORDERING INVARIANT: InternetManager.swift must send DeclareAddress BEFORE \
+             internetRelayCapabilities, which must precede internetStatusChanged(true). The \
+             status flip flushes the outbox, and every frame it produces is attributed by \
+             whatever this connection proved first — declare late and those sends are stamped \
+             with the account name, failing the receiver's validate_transport_sender"
+        );
+
+        let kotlin_declare = kotlin
+            .find("declareAddress(ws, capabilities, addressChallenge, username)")
+            .expect("InternetManager.kt must declare its address on the authenticated path");
+        let kotlin_caps = kotlin
+            .find("protocol.internetRelayCapabilities(capabilities)")
+            .expect("InternetManager.kt must inject relay capabilities");
+        let kotlin_status = kotlin
+            .find("protocol.internetStatusChanged(true)")
+            .expect("InternetManager.kt must flip the internet status true");
+        assert!(
+            kotlin_declare < kotlin_caps && kotlin_caps < kotlin_status,
+            "ORDERING INVARIANT: InternetManager.kt must send DeclareAddress BEFORE \
+             internetRelayCapabilities, which must precede internetStatusChanged(true) — same \
+             reason as the Swift half above"
+        );
+    }
+
+    /// Every hand-written iOS source is listed in the podspec.
+    ///
+    /// `MeshSdk.podspec` enumerates its Swift sources one by one (only `ble/`
+    /// and `mesh/` are globbed), and the pod — not `Package.swift` — is what
+    /// ships. A new file that nothing lists compiles in both CI checks anyway:
+    /// the SwiftPM harness has its own `sources:` list, and the `swiftc
+    /// -typecheck` probe takes an explicit file list on the command line. So
+    /// the omission surfaces only when an app builds the pod, as an undefined
+    /// symbol for a type that is right there in the directory.
+    ///
+    /// Directory-driven rather than list-driven on purpose: a guard that
+    /// compared two hand-maintained lists would need editing by the same person
+    /// who forgot the podspec.
+    #[test]
+    fn react_native_podspec_ships_every_hand_written_ios_source() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let podspec_path = root.join("MeshSdk.podspec");
+        let podspec = std::fs::read_to_string(&podspec_path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", podspec_path.display()));
+
+        let ios = root.join("ios");
+        let mut missing: Vec<String> = std::fs::read_dir(&ios)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", ios.display()))
+            .map(|entry| entry.expect("directory entry").file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            // Package.swift is the SwiftPM test harness's manifest, not a
+            // source the pod could compile.
+            .filter(|name| name.ends_with(".swift") && name != "Package.swift")
+            .filter(|name| {
+                let stem = name.trim_end_matches(".swift");
+                !podspec.contains(&format!("\"ios/{name}\""))
+                    // OfflineProtocolModule rides the `{m,swift}` brace form,
+                    // which pairs it with its ObjC bridging file.
+                    && !podspec.contains(&format!("\"ios/{stem}.{{m,swift}}\""))
+            })
+            .collect();
+        missing.sort();
+
+        assert!(
+            missing.is_empty(),
+            "MeshSdk.podspec does not list {missing:?} — the pod is what ships, so an unlisted \
+             source is absent from every app build while both CI checks (the SwiftPM harness and \
+             the swiftc typecheck probe) keep passing on their own file lists"
+        );
+    }
+
     /// Wi-Fi Direct announces nothing, because it can name nobody.
     ///
     /// Both managers used to pass a transport-level string — a TCP endpoint on

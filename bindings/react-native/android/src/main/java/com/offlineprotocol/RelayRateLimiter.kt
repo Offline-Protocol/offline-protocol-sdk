@@ -9,10 +9,15 @@ package com.offlineprotocol
  * "succeeded", which would let the bridge confirm (and the translator
  * commit) state the relay never recorded.
  *
- * Capacity/refill sit slightly under the relay's documented budget so a
- * frame this limiter doesn't meter (authentication) never tips the server
- * bucket. A `false` from [tryAcquire] always means "defer the frame to a
- * later tick", never "drop it".
+ * Capacity/refill sit slightly under the relay's documented budget so the
+ * frames this limiter doesn't meter never tip the server bucket. There are
+ * exactly two, both one-per-connection handshake frames sent back to back
+ * before anything else: `Authenticate`, and the `DeclareAddress` that proves
+ * this connection's address. 2 unmetered + a 28 burst is the relay's 30, and
+ * 9/s stays under its 10/s from there. Neither may be metered: a full bucket
+ * would defer the frame the whole connection's identity depends on. A `false`
+ * from [tryAcquire] always means "defer the frame to a later tick", never
+ * "drop it".
  *
  * Callers pass `nowMs` explicitly (testability). Thread-safe. Mirrors
  * ios/RelayRateLimiter.swift — keep in sync.

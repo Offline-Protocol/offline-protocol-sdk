@@ -722,8 +722,9 @@ class InternetManager(
     private fun handleAuthenticated(
         ws: WebSocket,
         userId: String,
-        username: String,
-        capabilities: List<String>
+        username: String?,
+        capabilities: List<String>,
+        addressChallenge: String?
     ) {
         // The whole reaction is ONE main-posted block gated on the socket
         // still being current and the transport not stopping: reacting on
@@ -744,6 +745,23 @@ class InternetManager(
             cancelAuthTimeout()
 
             updateState(TransportState.RUNNING)
+
+            // The address declaration MUST precede both calls below: the relay
+            // attributes each inbound frame by whatever this connection has
+            // proved at the moment it reads that frame, and never re-stamps
+            // retroactively — so a send that leaves before the declaration is
+            // attributed by account name for good, and its `Message.sender`
+            // (an address) then fails the receiver's
+            // `validate_transport_sender`. The status flip below flushes the
+            // outbox, which is exactly what produces those sends.
+            //
+            // Unlike iOS, this whole block runs on main rather than hopping to
+            // a serial queue, so the ordering is simply sequential here — and
+            // the declaration's two FFI calls land on the main looper next to
+            // the far heavier flush that already does. If that flush ever
+            // moves off main (the iOS messageQueue shape), this must move with
+            // it, ahead of it. Mirrors InternetManager.swift — keep in sync.
+            declareAddress(ws, capabilities, addressChallenge, username)
 
             // Capabilities MUST reach the SDK before the status flip: the
             // false→true transition flushes queued sends, and the group
@@ -784,11 +802,96 @@ class InternetManager(
 
             emitDiagnostic("info", "Authenticated with relay server", mapOf(
                 "userId" to userId,
-                "username" to username
+                "username" to (username ?: deviceId)
             ))
         }
     }
-    
+
+    /**
+     * Proves this connection's `off1…` address to the relay, so it is
+     * attributed by address rather than by account name.
+     *
+     * Called from [handleAuthenticated]'s main-posted block and deliberately
+     * the first thing it does: everything the relay attributes downstream —
+     * the outbox flush's sends, and anything the poll loop drains after it —
+     * is stamped with whatever this connection has proved by the time the relay
+     * reads the frame, with no retroactive re-stamping.
+     *
+     * Nothing waits on the answer. The relay binds the address before it reads
+     * the next frame off the socket, so ordering is established by the write
+     * alone; `AddressDeclared` and `AddressError` are reported when they arrive
+     * but gate nothing.
+     *
+     * Every failure path is a diagnostic and a return, never a throw: this runs
+     * immediately before the capability injection and the status flip, and an
+     * undeclared connection is a working connection — the relay simply
+     * attributes it the legacy way. Failing the connection over a refused
+     * declaration would turn a degraded path into no path.
+     */
+    private fun declareAddress(
+        ws: WebSocket,
+        capabilities: List<String>,
+        addressChallenge: String?,
+        username: String?
+    ) {
+        val outcome = AddressDeclarationPolicy.decide(capabilities, addressChallenge, username)
+        val declaration = when (outcome) {
+            is AddressDeclarationPolicy.Outcome.Declare -> outcome
+            is AddressDeclarationPolicy.Outcome.Skip -> {
+                emitDiagnostic("debug", "Not declaring an address to the relay", mapOf(
+                    "reason" to outcome.reason
+                ))
+                return
+            }
+        }
+
+        val frame = try {
+            val address = protocol.localAddress()
+            if (address.isNullOrEmpty()) {
+                emitDiagnostic("debug", "Not declaring an address to the relay", mapOf(
+                    "reason" to AddressDeclarationPolicy.Reason.ADDRESS_UNAVAILABLE
+                ))
+                return
+            }
+            // UniFFI carries `sequence<u8>` as List<UByte> in Kotlin; the
+            // policy speaks ByteArray on both platforms.
+            val publicKey = protocol.getIdentityPublicKey()
+            val signature = protocol.signData(
+                AddressDeclarationPolicy.proofPayload(
+                    declaration.account,
+                    declaration.challenge
+                ).map { it.toUByte() }
+            )
+            AddressDeclarationPolicy.declarationJson(
+                address,
+                publicKey.map { it.toByte() }.toByteArray(),
+                signature.map { it.toByte() }.toByteArray()
+            )
+        } catch (e: Exception) {
+            emitDiagnostic("error", "Could not sign the address declaration", mapOf(
+                "reason" to AddressDeclarationPolicy.Reason.SIGNING_FAILED,
+                "error" to (e.message ?: e.toString())
+            ))
+            return
+        }
+
+        if (frame == null) {
+            emitDiagnostic("error", "Could not build the address declaration", mapOf(
+                "reason" to AddressDeclarationPolicy.Reason.FRAME_UNSERIALIZABLE
+            ))
+            return
+        }
+
+        // Unmetered, like the authentication frame this follows: both are
+        // one-per-connection handshake frames, and the client limiter's
+        // headroom under the relay's own bucket is sized for exactly the two
+        // (see RelayRateLimiter). Metering it would let a full bucket defer the
+        // one frame every later send's attribution depends on.
+        if (!ws.send(frame)) {
+            emitDiagnostic("warning", "Address declaration write failed", emptyMap())
+        }
+    }
+
     /**
      * The transport's reaction to a dead socket. Only reachable through
      * [terminateSocket]'s detach-first funnel, so it runs on main and at
@@ -1090,15 +1193,54 @@ class InternetManager(
             "Authenticated" -> {
                 // Handle authentication success
                 val userId = json.safeOptString("user_id", deviceId)
-                val username = json.safeOptString("username", deviceId)
+                // Kept RAW — no deviceId fallback. This is the account name the
+                // relay resolved for the connection, and it is signed into the
+                // address proof: the relay verifies against its own copy, so a
+                // local substitute would produce a signature that cannot
+                // verify. Its only other use is the diagnostic in
+                // handleAuthenticated, which falls back there instead.
+                val username = json.optNullableString("username")
                 // Capability tokens this relay deployment supports (e.g.
                 // "group_delivery_v2"). Older relays omit the field → empty.
                 val capabilities = json.optJSONArray("capabilities")?.let { arr ->
                     (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotEmpty() } }
                 } ?: emptyList()
-                handleAuthenticated(ws, userId, username, capabilities)
+                // Base64 challenge for the optional address declaration,
+                // present only on relays advertising `address_routing_v1`.
+                val addressChallenge = json.optNullableString("address_challenge")
+                handleAuthenticated(ws, userId, username, capabilities, addressChallenge)
             }
-            
+
+            "AddressDeclared" -> {
+                // The relay bound this connection to the address we proved.
+                // From its next inbound frame on, it attributes us by address
+                // instead of account name. Informational: the binding took
+                // effect before the relay answered (its frame loop is
+                // sequential), so nothing waits on this, and the frame is
+                // forwarded like any other.
+                emitDiagnostic("info", "Relay accepted the address declaration", mapOf(
+                    "address" to json.safeOptString("address", "")
+                ))
+                serverMessageEmitter?.invoke(rawText)
+            }
+
+            "AddressError" -> {
+                // The declaration was refused. Non-fatal by contract: the
+                // connection stays authenticated and keeps working in
+                // account-name space, which is exactly how it behaved before
+                // addresses existed. No retry here — a refusal is either
+                // permanent for this connection (bad material, or a different
+                // address already declared) or means this socket was displaced
+                // by a newer login, in which case the successor declares for
+                // itself. The next reconnect re-declares from scratch.
+                emitDiagnostic(
+                    "error",
+                    "Relay refused the address declaration; staying in account-name space",
+                    mapOf("reason" to json.safeOptString("reason", "Unknown error"))
+                )
+                serverMessageEmitter?.invoke(rawText)
+            }
+
             "AuthError" -> {
                 // Handle authentication error
                 val reason = json.safeOptString("reason", "Unknown error")
