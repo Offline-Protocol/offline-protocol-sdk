@@ -81,6 +81,71 @@ Map Swift types to Objective-C types:
 
 **Fix**: Check the type mapping table above
 
+## Threading contract for the transport managers
+
+`BleManager` (and the same reasoning applies to the other transport managers)
+must never call into `protocolInstance` from the main thread.
+
+The UniFFI layer serialises the entire protocol behind a single
+`Mutex<CoreProtocol>`, and the BLE inbound path holds it across MLS decrypt,
+secure-storage callbacks — on iOS a Keychain round trip per key, executed
+synchronously on whichever thread called in — delivery ACKs, and any
+key-package push a message triggers. `CBCentralManager` and
+`CBPeripheralManager` are both initialised with `queue: nil`, so **every
+CoreBluetooth delegate callback is a main-queue callback**. An FFI call made
+directly from one parks the main thread on that mutex for as long as the
+holder needs it, which is what produced ~1,300 iOS App Hang events across 13
+Sentry clusters in mesh-sdk 0.20.1 (OFF-2123).
+
+The rules, in order of how easily each is broken:
+
+1. **Every `protocolInstance.*` call goes through `onProtocolQueue`, or is
+   already running on `fragmentQueue`.** The one deliberate exception is
+   `verifySignature`, which takes no lock in the core (a static Ed25519
+   check) and whose result gates a decision at the call site. Audit with:
+
+   ```bash
+   grep -n "protocolInstance\." BleManager.swift
+   ```
+
+2. **Never `dispatch_sync` onto `fragmentQueue`.** That queue performs FFI, so
+   a `sync` from main inherits the full lock wait. Anything the main queue
+   needs to read is exposed as a lock-guarded snapshot instead — see
+   `InboundFragmentBuffer` / `OutboundFragmentQueue`.
+
+3. **Fragment-store mutations stay on `fragmentQueue`**, which is what keeps a
+   peer's stream FIFO-ordered. `removeAll`/`clear` are exempt and safe from
+   any thread. Debug builds assert this via `assertOnFragmentQueue()`.
+
+4. **Main-affine state stays on main.** `peripheralRSSI` and
+   `discoveredPeripherals` are plain dictionaries the delegates mutate on the
+   main queue; reading them from `fragmentQueue` is a data race. UIKit
+   (`UIDevice.batteryLevel` in `refreshSelfMetrics`) is main-thread-only too.
+
+5. **Values the main queue needs synchronously get cached, not fetched.**
+   `setupGattServer` needs the local address and signed identity before
+   `peripheral.add(service:)`; both are computed off-main and cached, and a
+   cache miss defers through the existing `scheduleAdvertisingRestart` path
+   rather than blocking.
+
+6. **Clearing a fragment store from main needs a chaser on the owning queue.**
+   `clear`/`removeAll` are immediate, but a fragment block dispatched just
+   before the clear still runs *after* it and repopulates the store — the
+   `fragmentQueue.sync` these calls replaced used to barrier behind exactly
+   that backlog. `stopUnsafe` and `evictPeer` therefore clear twice: once
+   inline (so the metrics refresh beside them sees the removal) and once via
+   `fragmentQueue.async`. Because that queue is serial and FIFO, the chaser
+   drops precisely the in-flight backlog and never touches work enqueued
+   afterwards, so a genuine reconnect is unaffected. The chaser binds the
+   stores to **locals** rather than capturing `self`: `stop()` is reachable
+   from `deinit`, where a `[weak self]` capture list is a SIGABRT (see the
+   `deinit` invariant below).
+
+None of this is covered by `swift test` — `BleManager.swift` is on
+`Package.swift`'s `exclude:` list and only gets a CI `-typecheck`. The
+extracted stores are Foundation-only precisely so they *can* be unit-tested;
+keep new policy in that shape where possible.
+
 ## Validation Checklist
 
 Before committing changes:

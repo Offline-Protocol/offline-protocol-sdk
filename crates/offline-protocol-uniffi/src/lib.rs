@@ -3605,26 +3605,63 @@ impl OfflineProtocol {
     /// recorded on the reassembled message so the protocol layer can tell the
     /// peer that handed us a frame from the peer that wrote it — the same at
     /// the first hop, different for anything forwarded.
+    /// # Lock discipline
+    ///
+    /// The ingest and the drain take `inner` **separately**, and this is
+    /// load-bearing rather than stylistic. Holding one guard across the whole
+    /// drain pinned the global protocol mutex for the entire cost of every
+    /// queued message — MLS decrypt, secure-storage callbacks (on iOS a
+    /// Keychain round trip per key, executed synchronously on whatever thread
+    /// called in), delivery ACKs and any key-package push the message
+    /// triggers. Every other FFI caller blocked for that whole span, which on
+    /// iOS meant multi-second main-thread App Hangs (OFF-2123).
+    ///
+    /// Releasing between messages is safe because nothing here is atomic
+    /// across iterations: `receive_message` pops one message from a shared
+    /// FIFO under its own lock, and interleaving with another caller's drain
+    /// or send is already the norm — every other FFI method locks
+    /// independently.
+    ///
+    /// Note what does and does not protect this. Wrapping `drain_one_received`
+    /// in an outer guard deadlocks immediately — `std::sync::Mutex` is not
+    /// reentrant — but reverting to the original shape (holding the ingest
+    /// guard and calling `protocol.receive_message()` on it directly) compiles
+    /// and runs fine while silently restoring the stall. There is no
+    /// type-level guard against that; it is why the drain lives behind a
+    /// helper that takes `&self` rather than a guard.
     pub fn ble_fragment_received(
         &self,
         sender_id: String,
         fragment: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        let mut protocol = self.lock_inner()?;
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::BLE)
         {
-            transport_arc
-                .on_fragment_received_from(fragment, sender_id)
-                .map_err(|e| {
-                    ProtocolError::TransportError(format!("Fragment processing failed: {}", e))
-                })?;
+            let protocol = self.lock_inner()?;
+            if let Some(transport_arc) = protocol
+                .transport_manager()
+                .get_transport(CoreTransportType::BLE)
+            {
+                transport_arc
+                    .on_fragment_received_from(fragment, sender_id)
+                    .map_err(|e| {
+                        ProtocolError::TransportError(format!("Fragment processing failed: {}", e))
+                    })?;
+            }
         }
 
-        while protocol.receive_message().is_some() {}
+        while self.drain_one_received()? {}
 
         Ok(())
+    }
+
+    /// Processes at most one queued inbound message, acquiring `inner` for the
+    /// call and releasing it on return. Returns whether a message was drained.
+    ///
+    /// The return value is discarded on purpose: app delivery happens through
+    /// the `MessageReceived` event emitted inside `receive_message`, not
+    /// through this path.
+    fn drain_one_received(&self) -> Result<bool, ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        Ok(protocol.receive_message().is_some())
     }
 
     /// BLE: Get next fragment to send
@@ -6473,6 +6510,84 @@ mod tests {
             let ptr = handle.join().unwrap();
             assert_eq!(ptr, first_ptr);
         }
+    }
+
+    /// Regression cover for the OFF-2123 lock discipline: the inbound BLE path
+    /// must not pin the global protocol mutex across its whole drain.
+    ///
+    /// LIMITATION, stated plainly so nobody reads more into a green run than
+    /// is there: this catches a *permanent* hold — a deadlock or a re-entrancy
+    /// mistake — and nothing finer. There is no hook to make the drain slow
+    /// deterministically from here, so it would NOT fail if someone reverted
+    /// `ble_fragment_received` to holding one guard across the whole drain,
+    /// which is the exact regression that matters. Review is the guard against
+    /// that; this test only pins that the two locks never deadlock each other.
+    ///
+    /// The contender is started through a latch rather than by spawning it and
+    /// trusting it to run. `thread::spawn` returns before the thread is
+    /// scheduled, and the drains below are cheap enough — three garbage bytes
+    /// are rejected without decrypting anything — that a loaded runner can
+    /// finish all 64 and set `stop` first, leaving the contender to exit on its
+    /// very first flag read with nothing recorded. That is a scheduling
+    /// outcome, but it failed under a message that reads like a locking one.
+    /// Waiting for the first acquisition also buys what the test is named for:
+    /// the drains and the contention genuinely overlap, rather than merely
+    /// being asked to.
+    #[test]
+    fn test_ble_fragment_received_does_not_pin_the_protocol_lock() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::time::Instant;
+
+        let protocol = Arc::new(OfflineProtocol::new(create_test_config()).unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let acquisitions = Arc::new(AtomicU32::new(0));
+
+        // Contends for `inner` for as long as the drains run, through a method
+        // that takes exactly the lock under test.
+        let contender = {
+            let protocol = Arc::clone(&protocol);
+            let stop = Arc::clone(&stop);
+            let acquisitions = Arc::clone(&acquisitions);
+            thread::spawn(move || {
+                // Do-while, not while: one acquisition must be recorded before
+                // the stop flag is ever consulted, so the latch below cannot be
+                // beaten by a `stop` that was set while this thread waited for
+                // a core.
+                loop {
+                    let _ = protocol.is_mls_initialized();
+                    acquisitions.fetch_add(1, Ordering::Release);
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
+            })
+        };
+
+        // Wait until the contender has actually taken and released the lock
+        // once. Bounded, so that a genuine deadlock fails here with a readable
+        // message instead of hanging the suite: the bound is orders of
+        // magnitude above any scheduling delay, and a real deadlock is
+        // permanent, so no amount of load reaches it honestly.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while acquisitions.load(Ordering::Acquire) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the contending thread never acquired the protocol lock"
+            );
+            thread::yield_now();
+        }
+
+        // The return value is deliberately ignored: whether these bytes form a
+        // valid fragment is irrelevant here, and asserting on it would couple
+        // this test to the reassembler. What is under test is that the call
+        // returns at all while another thread is contending for the lock — so
+        // the pass condition is reaching the join below, not a final assert.
+        for i in 0..64 {
+            let _ = protocol.ble_fragment_received(format!("peer{i}"), vec![0xAA, 0xBB, 0xCC]);
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        contender.join().unwrap();
     }
 
     #[test]
@@ -10100,7 +10215,13 @@ mod tests {
     ///    let any peer claim any name, and, because the core stamps
     ///    `local_address()` as `Message.sender`, it also made every control
     ///    frame fail the receiver's [`validate_transport_sender`] — so BLE
-    ///    could not establish an MLS session at all.
+    ///    could not establish an MLS session at all. Both platforms now reach
+    ///    it through a *cache* rather than calling in directly: Android because
+    ///    `provideDeviceIdBytes` runs on a binder thread, iOS because
+    ///    `setupGattServer` runs on the main queue, and on either the protocol
+    ///    mutex is the wrong lock to take there. So the guard pins two things,
+    ///    not one — that the serve path reads the cache, and that the cache is
+    ///    filled from `localAddress()`.
     /// 2. **The announce is downstream of the cross-check.** `blePeerDiscovered`
     ///    must be reached only through the verified path, never from the
     ///    DEVICE_ID read handler.
@@ -10120,11 +10241,17 @@ mod tests {
 
         // --- 1. The peripheral advertises the derived address ----------------
         assert!(
-            swift.contains("guard let advertisedAddress = protocolInstance.localAddress(),")
+            swift.contains("guard let advertisedAddress = currentLocalAddress(),")
+                && swift.contains("let address = protocolInstance.localAddress()")
+                && swift.contains("cachedLocalAddress = address")
                 && swift.contains("value: deviceIdData,"),
-            "BleManager.swift must serve DEVICE_ID from localAddress(), and must refuse to \
-             publish the GATT service without one — advertising the profile is the \
-             unauthenticated-advertisement hole, and it also breaks our own control frames"
+            "BleManager.swift must serve DEVICE_ID from a cached localAddress(), and must \
+             refuse to publish the GATT service without one — advertising the profile is the \
+             unauthenticated-advertisement hole, and it also breaks our own control frames. \
+             The cache is the iOS mirror of BleTransportFacade.kt's, for the same reason: \
+             setupGattServer runs on the main queue, where taking the protocol mutex is an \
+             App Hang (OFF-2123). Both halves are pinned — the read must come from the cache, \
+             and the cache must be filled from localAddress()"
         );
         assert!(
             !swift.contains("let deviceIdData = deviceId.data(using: .utf8)"),

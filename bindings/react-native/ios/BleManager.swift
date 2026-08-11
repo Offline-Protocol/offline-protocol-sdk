@@ -102,9 +102,39 @@ public class BleManager: NSObject, TransportManager {
     private var deviceIdCharacteristic: CBMutableCharacteristic?
     private var identityCharacteristic: CBMutableCharacteristic?
     
-    /// Cached signed identity data for serving via GATT
+    /// Cached signed identity and local address for serving via GATT.
+    ///
+    /// Both are produced by UniFFI calls that take the core protocol mutex, so
+    /// they are computed on `fragmentQueue` and cached here rather than being
+    /// fetched inline from `setupGattServer` — which runs on the main queue,
+    /// where that mutex wait is an App Hang (OFF-2123).
+    ///
+    /// Caching the address is safe for the same reason the identity refresh is:
+    /// `initialize_mls` is idempotent and refuses to run once the protocol has
+    /// started, so an instance's address is fixed for its lifetime. See the
+    /// long-form rationale on `updateSignedIdentity`.
+    private let identityLock = NSLock()
     private var cachedSignedIdentity: SignedIdentityData?
-    
+    private var cachedLocalAddress: String?
+    /// Guards against piling up refreshes while one is already in flight.
+    private var identityRefreshInFlight = false
+    /// Set when a refresh is requested while one is in flight, so the request
+    /// is coalesced into one more pass instead of being dropped — see
+    /// `updateSignedIdentity`.
+    private var identityRefreshRequested = false
+
+    private func currentSignedIdentity() -> SignedIdentityData? {
+        identityLock.lock()
+        defer { identityLock.unlock() }
+        return cachedSignedIdentity
+    }
+
+    private func currentLocalAddress() -> String? {
+        identityLock.lock()
+        defer { identityLock.unlock() }
+        return cachedLocalAddress
+    }
+
     /// Verified peer identities (peripheral UUID -> SignedIdentityData)
     private var verifiedPeerIdentities: [UUID: SignedIdentityData] = [:]
 
@@ -130,14 +160,36 @@ public class BleManager: NSObject, TransportManager {
     private let fragmentQueue = DispatchQueue(label: "com.offlineprotocol.ble.fragments")
     
     // Gradient routing cleanup
-    private var routingCleanupTimer: Timer?
+    private var routingCleanupTimer: DispatchSourceTimer?
     private let ROUTING_CLEANUP_INTERVAL: TimeInterval = 30.0
     
     // Pending fragments waiting for device ID.
-    // Thread-safety contract: both pendingFragments and pendingOutboundFragments are
-    // owned by fragmentQueue. ALL reads and writes MUST occur inside fragmentQueue.async.
-    // evictPeer() dispatches removals to fragmentQueue to honour this contract.
-    private var pendingFragments: [UUID: [(Data, Date)]] = [:]
+    //
+    // Thread-safety contract: MUTATIONS are owned by fragmentQueue and must
+    // occur inside fragmentQueue.async — that serial queue is what preserves
+    // the FIFO ordering #59 established. evictPeer() dispatches removals to
+    // fragmentQueue to honour this contract, and the stores assert it in debug
+    // builds via their `queueCheck`.
+    //
+    // READS are safe from any thread: both stores guard their state with an
+    // NSLock held only across a dictionary operation, never across a UniFFI
+    // call or a BLE write. This is the load-bearing half of the OFF-2123 fix —
+    // main-queue readers (the connection monitor, the metrics refresher) used
+    // to `fragmentQueue.sync` for these snapshots, which parked the main thread
+    // behind whatever multi-second core-protocol lock wait that queue happened
+    // to be inside.
+    private lazy var inboundFragments = InboundFragmentBuffer(
+        queueCheck: { [weak self] in self?.assertOnFragmentQueue() },
+        maxPerPeer: MAX_PENDING_FRAGMENTS_PER_PEER,
+        timeout: PENDING_FRAGMENT_TIMEOUT,
+        onDropped: { [weak self] id, reason, count in
+            self?.emitDiagnostic("warning", "Inbound BLE fragments dropped", context: [
+                "central": id.uuidString,
+                "reason": reason == .expired ? "expired" : "capped",
+                "dropped": count
+            ])
+        }
+    )
     // Idle window for incoming fragments waiting for the sender's device-id to
     // resolve (a GATT connect+read, throttled to ~5s and prone to retries). 5s was
     // too short: a first-contact multi-fragment MLS Welcome arriving in a burst
@@ -146,8 +198,27 @@ public class BleManager: NSObject, TransportManager {
     private let PENDING_FRAGMENT_TIMEOUT: TimeInterval = 15.0
     private let PENDING_OUTBOUND_FRAGMENT_TIMEOUT: TimeInterval = 30.0 // For outbound fragments that failed to send
     private let MAX_PENDING_FRAGMENTS_PER_PEER = 100
-    // Track outbound fragments with timestamps for timeout handling (owned by fragmentQueue)
-    private var pendingOutboundFragments: [String: [(data: Data, timestamp: Date)]] = [:]
+    // Outbound fragments that could not be sent immediately — same contract as
+    // `inboundFragments` above.
+    private lazy var outboundFragments = OutboundFragmentQueue(
+        queueCheck: { [weak self] in self?.assertOnFragmentQueue() },
+        maxPerPeer: MAX_PENDING_FRAGMENTS_PER_PEER,
+        timeout: PENDING_OUTBOUND_FRAGMENT_TIMEOUT,
+        onDropped: { [weak self] recipientId, reason, count in
+            guard let self = self else { return }
+            if reason == .expired {
+                if self.logThrottler.shouldLog(key: "fragments_expired_\(recipientId)", interval: 10) {
+                    print("[BleManager] ⚠️ Removed \(count) expired outbound fragments for \(recipientId)")
+                    self.emitDiagnostic("warning", "Outbound fragments expired",
+                                        context: ["recipientId": recipientId, "dropped": count])
+                }
+            } else {
+                self.emitDiagnostic("warning", "Pending outbound fragment queue capped, dropping oldest",
+                                    context: ["recipientId": recipientId, "dropped": count,
+                                              "max": self.MAX_PENDING_FRAGMENTS_PER_PEER])
+            }
+        }
+    )
     private struct MeshObservation {
         let advertisement: MeshAdvertisementData
         let rssi: Int?
@@ -250,6 +321,49 @@ public class BleManager: NSObject, TransportManager {
             return try work()
         }
         return try DispatchQueue.main.sync(execute: work)
+    }
+
+    /// Asserts the caller owns `fragmentQueue`, the mutation contract for the
+    /// two fragment stores.
+    ///
+    /// DEBUG-only on purpose. `dispatchPrecondition` traps, and this fix exists
+    /// to remove hangs — shipping a brand-new crash vector to production to
+    /// police an internal invariant trades one incident class for a worse one.
+    /// Android's mirror (`mainThreadCheck`) fails fast in release because a
+    /// Kotlin `check()` throws where a trap does not.
+    @inline(__always)
+    private func assertOnFragmentQueue() {
+        #if DEBUG
+        dispatchPrecondition(condition: .onQueue(fragmentQueue))
+        #endif
+    }
+
+    /// Runs `work` off the main thread, on the queue that owns this transport's
+    /// protocol calls.
+    ///
+    /// EVERY call into `protocolInstance` must go through here or already be
+    /// running on `fragmentQueue`. The one exception is `verifySignature`,
+    /// which takes no lock in the core (it is a static Ed25519 check).
+    ///
+    /// The reason is the whole of OFF-2123: the UniFFI layer serialises the
+    /// entire protocol behind one `Mutex<CoreProtocol>`, and the BLE inbound
+    /// path holds it across MLS decrypt, secure-storage callbacks (Keychain,
+    /// on whichever thread called in) and ACK sends. A CoreBluetooth delegate
+    /// is a main-queue callback — `CBCentralManager`/`CBPeripheralManager` are
+    /// both initialised with `queue: nil` — so any FFI call made directly from
+    /// one parks the main thread on that mutex for as long as the holder needs.
+    ///
+    /// Reusing `fragmentQueue` rather than adding a second queue is deliberate:
+    /// one serial queue gives these calls a total order, so a status change
+    /// cannot overtake the fragment traffic it relates to.
+    @inline(__always)
+    private func onProtocolQueue(_ work: @escaping () -> Void) {
+        fragmentQueue.async {
+            #if DEBUG
+            dispatchPrecondition(condition: .notOnQueue(.main))
+            #endif
+            work()
+        }
     }
 
     // MARK: - Diagnostics
@@ -471,9 +585,24 @@ public class BleManager: NSObject, TransportManager {
         connections.reset()
         discoveredPeripherals.removeAll()
         peripheralRSSI.removeAll()
-        fragmentQueue.sync {
-            self.pendingFragments.removeAll()
-            self.pendingOutboundFragments.removeAll()
+        inboundFragments.clear()
+        outboundFragments.clear()
+        // Then chase the clear on the owning queue. The clears above are
+        // immediate (nothing here waits on `fragmentQueue`), but a fragment
+        // block dispatched just before this point still runs AFTER them and
+        // would repopulate a store that nothing sweeps once we are stopped.
+        // `fragmentQueue` is serial and FIFO, so this drops exactly the
+        // in-flight backlog and nothing enqueued later.
+        //
+        // Binds the stores to locals instead of capturing `self`: `stop()` is
+        // reachable from `deinit`, and a `[weak self]` capture list is
+        // evaluated when the closure is CREATED — forming a weak reference to
+        // a deallocating object is a hard abort (see BRIDGE_MAINTENANCE.md).
+        let inbound = inboundFragments
+        let outbound = outboundFragments
+        fragmentQueue.async {
+            inbound.clear()
+            outbound.clear()
         }
         lastSeenMeshAdvertisements.removeAll()
         unknownBootstrapAttempts.removeAll()
@@ -778,7 +907,7 @@ public class BleManager: NSObject, TransportManager {
                     self.attemptConnection(to: peripheral, reason: "monitor")
                 }
             }
-            let pendingKeys: [UUID] = self.fragmentQueue.sync { Array(self.pendingFragments.keys) }
+            let pendingKeys: [UUID] = self.inboundFragments.pendingIds()
             for centralId in pendingKeys {
                 if self.connections.centralDeviceId(for: centralId) == nil && self.connections.peripheralDeviceId(for: centralId) == nil {
                     // Ensure we periodically try to resolve device IDs for pending fragments
@@ -1054,12 +1183,33 @@ public class BleManager: NSObject, TransportManager {
         // cross-check on the central side would refuse it anyway; failing
         // closed here keeps the two ends agreeing about why. `startAdvertising`
         // reschedules, so this self-heals as soon as `initialize_mls` runs.
-        guard let advertisedAddress = protocolInstance.localAddress(),
+        // Read from the cache rather than calling into the core: this runs on
+        // the main queue, and `localAddress()` takes the core protocol mutex.
+        // A miss means the identity refresh has not completed yet, which is the
+        // same "not ready" state the address guard already handles — kick the
+        // refresh and let the existing reschedule re-enter.
+        guard let advertisedAddress = currentLocalAddress(),
               !advertisedAddress.isEmpty else {
+            updateSignedIdentity()
             if logThrottler.shouldLog(key: "gatt_no_local_address", interval: 10) {
                 print("[BleManager] No local address yet; deferring GATT service registration")
                 emitDiagnostic("info", "Deferring GATT registration until the local address exists", context: [
                     "reason": "mls_not_initialized"
+                ])
+            }
+            return false
+        }
+
+        // The identity must exist BEFORE `peripheral.add(service)` — see the
+        // caching contract below. Publishing without it permanently serves a
+        // nil identity, so defer exactly as the address guard does rather than
+        // blocking the main thread to compute one.
+        guard let signedIdentity = currentSignedIdentity() else {
+            updateSignedIdentity()
+            if logThrottler.shouldLog(key: "gatt_no_signed_identity", interval: 10) {
+                print("[BleManager] No signed identity yet; deferring GATT service registration")
+                emitDiagnostic("info", "Deferring GATT registration until the signed identity exists", context: [
+                    "reason": "identity_not_ready"
                 ])
             }
             return false
@@ -1112,8 +1262,10 @@ public class BleManager: NSObject, TransportManager {
             permissions: [.readable]
         )
 
-        // Fills in identityCharacteristic.value — see the caching contract above.
-        updateSignedIdentity()
+        // Fills in identityCharacteristic.value — see the caching contract
+        // above. Assigned straight from the cache the guard above proved
+        // present, so publication is never racing an async refresh.
+        identityCharacteristic?.value = signedIdentity.encode()
 
         // Create service
         let service = CBMutableService(type: SERVICE_UUID, primary: true)
@@ -1126,32 +1278,102 @@ public class BleManager: NSObject, TransportManager {
         return true
     }
     
-    /// Updates the signed identity data for GATT serving.
-    /// Signs the current advertisement data with the identity private key.
+    /// Recomputes the cached local address and signed identity, then
+    /// republishes the identity characteristic.
+    ///
+    /// Runs entirely off the main thread. It makes three UniFFI calls —
+    /// `isMlsInitialized`, `getIdentityPublicKey`, `signData` — each of which
+    /// takes the core protocol mutex, and it used to be called inline from
+    /// `refreshAdvertising` and `setupGattServer`, both main-queue paths. That
+    /// is the second-largest App Hang cluster in OFF-2123: the scan-monitor
+    /// timer and the CoreBluetooth state delegates all reach it.
+    ///
+    /// Callers that need the values *now* (`setupGattServer`) read the cache
+    /// and defer via their existing "not ready, reschedule" path instead of
+    /// waiting here.
+    ///
+    /// A request arriving while a pass is already running is **coalesced**, not
+    /// dropped. The body spans three FFI calls that can take seconds under the
+    /// very contention this fix exists to remove, and a request landing inside
+    /// that window carries newer advertisement data — dropping it would leave
+    /// the cache signed over a stale revision until some unrelated trigger
+    /// happened to fire. One extra pass settles any burst, because each pass
+    /// consumes the flag exactly once.
     private func updateSignedIdentity() {
+        identityLock.lock()
+        if identityRefreshInFlight {
+            identityRefreshRequested = true
+            identityLock.unlock()
+            return
+        }
+        identityRefreshInFlight = true
+        identityLock.unlock()
+
+        runIdentityRefresh()
+    }
+
+    /// One refresh pass, re-dispatching itself if a request arrived while it
+    /// ran. The re-dispatch is `async` onto the serial queue, so this appends
+    /// to the tail rather than recursing on the stack.
+    private func runIdentityRefresh() {
+        onProtocolQueue { [weak self] in
+            guard let self = self else { return }
+            self.computeSignedIdentity()
+
+            self.identityLock.lock()
+            let repeatPass = self.identityRefreshRequested
+            self.identityRefreshRequested = false
+            // Stay marked in-flight while a repeat is pending, so a caller
+            // arriving now coalesces into that pass rather than starting a
+            // second one alongside it.
+            self.identityRefreshInFlight = repeatPass
+            self.identityLock.unlock()
+
+            if repeatPass {
+                self.runIdentityRefresh()
+            }
+        }
+    }
+
+    /// The three-UniFFI-call body of `updateSignedIdentity`. Split out only so
+    /// the refresh-in-flight bookkeeping stays readable; it must never be
+    /// called directly from the main queue.
+    private func computeSignedIdentity() {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(.main))
+        #endif
         do {
             guard protocolInstance.isMlsInitialized() else {
                 print("[BleManager] MLS not initialized, cannot create signed identity")
                 return
             }
-            
+
             // Get the public key
             let publicKey = try protocolInstance.getIdentityPublicKey()
-            
-            // Get current advertisement data
+
+            // Get current advertisement data. `MeshController` guards its own
+            // state and performs no protocol calls, so this is safe off-main.
             let meshData = meshController.advertisement()
             let advertisementData = meshData.encode()
-            
+
             // Sign the advertisement data
             let signature = try protocolInstance.signData(data: [UInt8](advertisementData))
-            
+
+            let address = protocolInstance.localAddress()
+
             // Create the signed identity
-            cachedSignedIdentity = SignedIdentityData(
+            let identity = SignedIdentityData(
                 publicKey: Data(publicKey),
                 signature: Data(signature),
                 advertisementData: advertisementData
             )
-            
+            identityLock.lock()
+            cachedSignedIdentity = identity
+            if let address = address, !address.isEmpty {
+                cachedLocalAddress = address
+            }
+            identityLock.unlock()
+
             // Update the GATT characteristic value.
             //
             // This only reaches remote readers when it runs BEFORE
@@ -1173,8 +1395,13 @@ public class BleManager: NSObject, TransportManager {
             // If a future change ever makes the address mutable in-process,
             // this is the line that will silently serve the old one, and the
             // service must be torn down and rebuilt instead.
-            if let identity = cachedSignedIdentity {
-                identityCharacteristic?.value = identity.encode()
+            //
+            // Assigned on main: `identityCharacteristic` is a CoreBluetooth
+            // object belonging to a peripheral manager whose delegate queue is
+            // the main queue, and this method now runs off it.
+            let encoded = identity.encode()
+            DispatchQueue.main.async { [weak self] in
+                self?.identityCharacteristic?.value = encoded
                 print("[BleManager] Updated signed identity for GATT serving")
             }
         } catch {
@@ -1247,7 +1474,7 @@ public class BleManager: NSObject, TransportManager {
                 
                 // Maintain FIFO ordering: if this recipient has pending fragments,
                 // enqueue instead of sending directly.
-                if let pending = self.pendingOutboundFragments[recipientId], !pending.isEmpty {
+                if self.outboundFragments.hasPending(recipientId) {
                     self.enqueuePendingOutboundFragment(recipientId: recipientId, data: data)
                     continue
                 }
@@ -1266,23 +1493,29 @@ public class BleManager: NSObject, TransportManager {
     
     // MARK: - Gradient Routing
     
+    /// Periodically expires stale gradient-routing entries.
+    ///
+    /// This was a `Timer.scheduledTimer` added to `RunLoop.current`. Its only
+    /// caller is `centralManagerDidUpdateState`, a main-queue delegate, so
+    /// "current" was always the main RunLoop and the tick called into the core
+    /// on the main thread. A `DispatchSource` timer on `fragmentQueue` fires
+    /// off-main and — unlike a RunLoop timer — is not starved while the main
+    /// RunLoop is in a tracking mode.
     private func startRoutingCleanup() {
         stopRoutingCleanup()
-        
-        routingCleanupTimer = Timer.scheduledTimer(
-            withTimeInterval: ROUTING_CLEANUP_INTERVAL,
-            repeats: true
-        ) { [weak self] _ in
+
+        let timer = DispatchSource.makeTimerSource(queue: fragmentQueue)
+        timer.schedule(deadline: .now() + ROUTING_CLEANUP_INTERVAL,
+                       repeating: ROUTING_CLEANUP_INTERVAL)
+        timer.setEventHandler { [weak self] in
             self?.protocolInstance.cleanupExpiredRoutes()
         }
-        
-        if let timer = routingCleanupTimer {
-            RunLoop.current.add(timer, forMode: .common)
-        }
+        timer.resume()
+        routingCleanupTimer = timer
     }
-    
+
     private func stopRoutingCleanup() {
-        routingCleanupTimer?.invalidate()
+        routingCleanupTimer?.cancel()
         routingCleanupTimer = nil
     }
     
@@ -1305,88 +1538,43 @@ public class BleManager: NSObject, TransportManager {
         
         // Don't learn route to ourselves
         if sender == deviceId { return }
-        
-        // Compute quality from RSSI
-        let rssi = neighborUUID.flatMap { peripheralRSSI[$0] }.map { Int($0) }
-        let quality = computeRouteQuality(rssi: rssi)
-        
+
         // Learn the route: sender can be reached through neighborId (sequence_number from message or 0). Clamp to avoid negative wrapping to uint32.
         let seqRaw = (json["sequence_number"] as? NSNumber)?.intValue ?? 0
         let seqNum = UInt32(max(0, seqRaw))
-        protocolInstance.learnRoute(
-            destination: sender,
-            nextHop: neighborId,
-            hopCount: UInt8(min(255, hopCount + 1)),
-            quality: quality,
-            sequenceNumber: seqNum
-        )
+
+        // `peripheralRSSI` is main-affine — the CoreBluetooth delegates mutate
+        // it there — while every caller of this method runs on `fragmentQueue`.
+        // Read it on main, then hand the protocol call back off the main thread.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            let rssi = neighborUUID.flatMap { self.peripheralRSSI[$0] }.map { Int($0) }
+            let quality = self.computeRouteQuality(rssi: rssi)
+            self.onProtocolQueue {
+                self.protocolInstance.learnRoute(
+                    destination: sender,
+                    nextHop: neighborId,
+                    hopCount: UInt8(min(255, hopCount + 1)),
+                    quality: quality,
+                    sequenceNumber: seqNum
+                )
+            }
+        }
     }
     
     // pollAndSendFragments and sendFragment removed — replaced by
     // event-driven drainAndSendFragments() triggered via onFragmentsAvailable().
 
     private func flushPendingOutboundFragments() -> Bool {
-        var hasUnsentFragments = false
-        let now = Date()
-        let recipients = Array(pendingOutboundFragments.keys)
-        
-        for recipientId in recipients {
-            guard var queue = pendingOutboundFragments[recipientId] else { continue }
-            
-            //  Remove expired fragments to prevent indefinite queuing
-            queue = queue.filter { now.timeIntervalSince($0.timestamp) < PENDING_OUTBOUND_FRAGMENT_TIMEOUT }
-            
-            if queue.isEmpty {
-                pendingOutboundFragments.removeValue(forKey: recipientId)
-                if logThrottler.shouldLog(key: "fragments_expired_\(recipientId)", interval: 10) {
-                    print("[BleManager] ⚠️ Removed expired outbound fragments for \(recipientId)")
-                    emitDiagnostic("warning", "Outbound fragments expired", context: ["recipientId": recipientId])
-                }
-                continue
-            }
-            
-            var sentAllForRecipient = true
-            
-            while !queue.isEmpty {
-                let (data, timestamp) = queue.first!
-                // Skip if fragment is too old
-                if now.timeIntervalSince(timestamp) >= PENDING_OUTBOUND_FRAGMENT_TIMEOUT {
-                    queue.removeFirst()
-                    continue
-                }
-                
-                if sendFragmentData(recipientId: recipientId, data: data) {
-                    queue.removeFirst()
-                } else {
-                    sentAllForRecipient = false
-                    break
-                }
-            }
-            
-            if queue.isEmpty {
-                pendingOutboundFragments.removeValue(forKey: recipientId)
-            } else {
-                pendingOutboundFragments[recipientId] = queue
-                if !sentAllForRecipient {
-                    hasUnsentFragments = true
-                }
-            }
+        // `flush` takes a non-escaping closure, so this cannot outlive the call
+        // and needs no weak capture.
+        outboundFragments.flush { recipientId, data in
+            self.sendFragmentData(recipientId: recipientId, data: data)
         }
-        
-        return hasUnsentFragments
     }
-    
+
     private func enqueuePendingOutboundFragment(recipientId: String, data: Data) {
-        var queue = pendingOutboundFragments[recipientId] ?? []
-        queue.append((data: data, timestamp: Date()))
-        // Drop oldest fragments if the queue exceeds the per-peer cap
-        if queue.count > MAX_PENDING_FRAGMENTS_PER_PEER {
-            let overflow = queue.count - MAX_PENDING_FRAGMENTS_PER_PEER
-            queue.removeFirst(overflow)
-            emitDiagnostic("warning", "Pending outbound fragment queue capped, dropping oldest",
-                           context: ["recipientId": recipientId, "dropped": overflow, "max": MAX_PENDING_FRAGMENTS_PER_PEER])
-        }
-        pendingOutboundFragments[recipientId] = queue
+        outboundFragments.enqueue(recipientId, data)
     }
 
     private func currentConnectionCount() -> Int {
@@ -1499,11 +1687,25 @@ public class BleManager: NSObject, TransportManager {
             candidates.append(central.maximumUpdateValueLength)
         }
         guard let smallest = candidates.min(), smallest > 0 else { return }
-        do {
-            try protocolInstance.bleSetPeerMtu(peerId: deviceId, maxPayload: UInt32(smallest))
-        } catch {
-            emitDiagnostic("warning", "reflectEgressMtu bleSetPeerMtu failed",
-                           context: ["deviceId": deviceId, "error": error.localizedDescription])
+        // The MTU is read from CoreBluetooth on the caller's (main) queue; only
+        // the handoff to the core is deferred.
+        onProtocolQueue { [weak self] in
+            guard let self = self else { return }
+            do {
+                try self.protocolInstance.bleSetPeerMtu(peerId: deviceId, maxPayload: UInt32(smallest))
+            } catch {
+                self.emitDiagnostic("warning", "reflectEgressMtu bleSetPeerMtu failed",
+                                    context: ["deviceId": deviceId, "error": error.localizedDescription])
+            }
+        }
+    }
+
+    /// Reports BLE availability to the core. Fire-and-forget, and deferred off
+    /// the main thread: every caller is a CoreBluetooth state-change delegate.
+    /// `fragmentQueue` is serial, so a false→true→false sequence keeps its order.
+    private func notifyBleStatus(_ isAvailable: Bool) {
+        onProtocolQueue { [weak self] in
+            try? self?.protocolInstance.bleStatusChanged(isAvailable: isAvailable)
         }
     }
 
@@ -1520,21 +1722,30 @@ public class BleManager: NSObject, TransportManager {
     /// For mid-link renegotiation paths that need to drop the MTU
     /// without declaring the peer lost, call `bleClearPeerMtu` directly.
     private func notifyBlePeerLost(deviceId: String) {
-        protocolInstance.removeNeighborRoutes(neighborId: deviceId)
-        do {
-            try protocolInstance.blePeerLost(peerId: deviceId)
-        } catch {
-            emitDiagnostic("warning", "blePeerLost failed", context: [
-                "deviceId": deviceId,
-                "error": error.localizedDescription,
-            ])
+        // Every caller is a main-queue disconnect/eviction path, and
+        // `blePeerLost` takes the core protocol mutex.
+        onProtocolQueue { [weak self] in
+            guard let self = self else { return }
+            self.protocolInstance.removeNeighborRoutes(neighborId: deviceId)
+            do {
+                try self.protocolInstance.blePeerLost(peerId: deviceId)
+            } catch {
+                self.emitDiagnostic("warning", "blePeerLost failed", context: [
+                    "deviceId": deviceId,
+                    "error": error.localizedDescription,
+                ])
+            }
         }
     }
 
-    /// Refresh self metrics. When called from `fragmentQueue`, pass the counts directly
-    /// to avoid a deadlock on the serial queue. Off-queue callers omit the parameters
-    /// and the counts are read via `fragmentQueue.sync`.
-    private func refreshSelfMetrics(pendingCount: Int? = nil, outboundCount: Int? = nil) {
+    /// Refresh self metrics.
+    ///
+    /// The fragment counts used to require either a `fragmentQueue.sync` (from
+    /// off-queue callers, which parked the main thread behind whatever the
+    /// queue was doing) or hand-threaded parameters (from on-queue callers, to
+    /// avoid deadlocking that serial queue). Both stores answer their own
+    /// counts from any thread now, so the split is gone.
+    private func refreshSelfMetrics() {
         let rssiValues = peripheralRSSI.values.map { Int($0) }
         let averageRssi = rssiValues.isEmpty ? nil : Int(Double(rssiValues.reduce(0, +)) / Double(rssiValues.count))
         let signalQuality = averageRssi.map { rssi -> Int in
@@ -1543,21 +1754,8 @@ public class BleManager: NSObject, TransportManager {
             let scaled = Int((normalized * 100.0).rounded())
             return min(100, max(0, scaled))
         }
-        let pc: Int
-        let oc: Int
-        if let p = pendingCount, let o = outboundCount {
-            pc = p
-            oc = o
-        } else {
-            // Read from fragmentQueue synchronously — safe from main thread only
-            var tmpP = 0, tmpO = 0
-            fragmentQueue.sync {
-                tmpP = self.pendingFragments.values.reduce(0) { $0 + $1.count }
-                tmpO = self.pendingOutboundFragments.values.reduce(0) { $0 + $1.count }
-            }
-            pc = tmpP
-            oc = tmpO
-        }
+        let pc = inboundFragments.totalCount()
+        let oc = outboundFragments.totalCount()
         let totalPending = pc + oc
         let stability = max(0.0, 1.0 - min(1.0, Double(pc) / 10.0))
         let loadPercent = min(100, (totalPending * 100) / LOAD_SATURATION_COUNT)
@@ -1603,11 +1801,22 @@ public class BleManager: NSObject, TransportManager {
         connections.removeCentralDeviceId(for: identifier)
         connections.removeConnectionRole(for: deviceId)
         peripheralRSSI.removeValue(forKey: identifier)
-        // Remove fragment state on fragmentQueue, then refresh metrics in the same
-        // dispatch so the counts reflect the removal (avoids stale reads).
-        fragmentQueue.sync { [weak self] in
-            self?.pendingFragments.removeValue(forKey: identifier)
-            self?.pendingOutboundFragments.removeValue(forKey: deviceId)
+        // Removals are synchronous and thread-safe, so `refreshSelfMetrics()`
+        // below still sees the post-removal counts — without the
+        // `fragmentQueue.sync` that used to park the main thread here.
+        inboundFragments.removeAll(identifier)
+        outboundFragments.removeAll(deviceId)
+        // A fragment block dispatched before this point runs after the removals
+        // above and would resurrect the evicted peer's buffer. Chase it on the
+        // owning queue: serial and FIFO, so this drops exactly the backlog that
+        // was already in flight, while anything for a genuine later reconnect
+        // is enqueued behind this block and survives. Locals, not `[weak self]`
+        // — same deinit rule as `stopUnsafe`.
+        let inbound = inboundFragments
+        let outbound = outboundFragments
+        fragmentQueue.async {
+            inbound.removeAll(identifier)
+            outbound.removeAll(deviceId)
         }
         connectionAttemptTimestamps.removeValue(forKey: identifier)
         connectionRetryCount.removeValue(forKey: identifier)
@@ -1632,9 +1841,18 @@ public class BleManager: NSObject, TransportManager {
             
             // Try to find the peripheral and connect
             if let identifier = connections.peripheralIdentifier(for: recipientId) {
-                // We know the UUID but don't have a connection - try to reconnect
-                if let peripheral = discoveredPeripherals[identifier] {
-                    attemptConnection(to: peripheral, reason: "fragment_send")
+                // We know the UUID but don't have a connection - try to reconnect.
+                //
+                // Read `discoveredPeripherals` on main: it is a plain
+                // Dictionary the CoreBluetooth delegates mutate there, and both
+                // callers of this method run on `fragmentQueue`. The identical
+                // reconnect in `drainAndSendFragments` already hops for exactly
+                // this reason; this site was missed. Async is fine — the
+                // reconnect is advisory and this path returns false either way.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self,
+                          let peripheral = self.discoveredPeripherals[identifier] else { return }
+                    self.performConnectionAttempt(to: peripheral, reason: "fragment_send")
                 }
             } else {
                 // We don't even know the UUID - this is a more serious issue
@@ -1714,19 +1932,10 @@ public class BleManager: NSObject, TransportManager {
                         "length": data.count
                     ])
                 }
-                // Queue fragment to process later when device ID is available
-                if self.pendingFragments[centralId] == nil {
-                    self.pendingFragments[centralId] = []
-                }
-                // Whole-buffer overflow drop (matches Android InboundFragmentBuffer):
-                // fragments are slices of one message, so dropping just the oldest
-                // leaves orphan slices that the reassembler stitches into garbage.
-                // Drop the whole peer buffer at message-boundary granularity instead.
-                if (self.pendingFragments[centralId]?.count ?? 0) >= self.MAX_PENDING_FRAGMENTS_PER_PEER {
-                    self.pendingFragments[centralId]?.removeAll()
-                }
-                self.pendingFragments[centralId]?.append((data, Date()))
-                
+                // Queue fragment to process later when device ID is available.
+                // Overflow policy (whole-buffer drop) lives in the store.
+                self.inboundFragments.enqueue(centralId, data)
+
                 // Clean up old pending fragments
                 self.cleanupPendingFragments()
                 
@@ -1751,15 +1960,7 @@ public class BleManager: NSObject, TransportManager {
             // If there are pending fragments for this sender, append to maintain ordering.
             // processPendingFragments() will handle them all in FIFO order.
             if let centralId = centralId,
-               self.pendingFragments[centralId]?.isEmpty == false {
-                // Whole-buffer overflow drop (matches Android InboundFragmentBuffer):
-                // fragments are slices of one message, so dropping just the oldest
-                // leaves orphan slices that the reassembler stitches into garbage.
-                // Drop the whole peer buffer at message-boundary granularity instead.
-                if (self.pendingFragments[centralId]?.count ?? 0) >= self.MAX_PENDING_FRAGMENTS_PER_PEER {
-                    self.pendingFragments[centralId]?.removeAll()
-                }
-                self.pendingFragments[centralId, default: []].append((data, Date()))
+               self.inboundFragments.enqueueIfPending(centralId, data) {
                 return
             }
 
@@ -1822,11 +2023,12 @@ public class BleManager: NSObject, TransportManager {
         pumpNotifyOutbound()
         fragmentQueue.async { [weak self] in
             guard let self = self else { return }
-            guard let fragments = self.pendingFragments.removeValue(forKey: centralId) else {
+            let fragments = self.inboundFragments.drain(centralId)
+            if fragments.isEmpty {
                 // No fragments for this central ID - this is normal
                 return
             }
-            
+
             print("[BleManager] 🔄 Processing \(fragments.count) pending fragments for device \(deviceId) (central: \(centralId))")
             self.emitDiagnostic("info", "Processing pending fragments", context: [
                 "deviceId": deviceId,
@@ -1839,20 +2041,23 @@ public class BleManager: NSObject, TransportManager {
             self.connections.setConnectionRole(role, for: deviceId)
             self.meshController.markPeerActive(deviceId)
             self.meshController.markPeerActive(self.deviceId)
-            // Already on fragmentQueue — pass counts directly to avoid deadlock on serial queue
-            let pc = self.pendingFragments.values.reduce(0) { $0 + $1.count }
-            let oc = self.pendingOutboundFragments.values.reduce(0) { $0 + $1.count }
-            self.refreshSelfMetrics(pendingCount: pc, outboundCount: oc)
-            if let rssi = self.peripheralRSSI[centralId] {
-                self.meshController.updatePeerMetrics(peerId: deviceId, metrics: MeshController.PeerMetrics(rssi: Int(rssi)))
-            }
+            // `refreshSelfMetrics` reads `peripheralRSSI` — a plain Dictionary
+            // that the CoreBluetooth delegates mutate on main — and samples
+            // `UIDevice.batteryLevel`, which is UIKit. Both were being touched
+            // from this queue: an unsynchronised cross-thread read and a UIKit
+            // call off the main thread. Hop for both, along with the RSSI read
+            // just below it. Fire-and-forget telemetry, so async costs nothing.
             DispatchQueue.main.async {
+                self.refreshSelfMetrics()
+                if let rssi = self.peripheralRSSI[centralId] {
+                    self.meshController.updatePeerMetrics(peerId: deviceId, metrics: MeshController.PeerMetrics(rssi: Int(rssi)))
+                }
                 self.refreshAdvertising(reason: "membership_change")
             }
             
             //  Process all queued fragments and check for completed messages
             // This is essential for Android → iOS messages that were queued
-            for (data, _) in fragments {
+            for data in fragments {
                 let bytes = [UInt8](data)
                 do {
                     print("[BleManager] 📥 Processing queued fragment from \(deviceId), size: \(data.count)")
@@ -1891,28 +2096,11 @@ public class BleManager: NSObject, TransportManager {
     }
     
     private func cleanupPendingFragments() {
-        let now = Date()
-        // Idle-window eviction at WHOLE-BUFFER granularity. A buffer is stale
-        // only if NOTHING has arrived for it within PENDING_FRAGMENT_TIMEOUT —
-        // i.e. its newest fragment is older than the window. The previous
-        // per-fragment filter tore a still-arriving multi-fragment message:
-        // while device-id resolution was pending the sender keeps streaming
-        // fragments, but the filter dropped fragment 0 once it aged past the
-        // window while later fragments were still in flight, handing the
-        // reassembler a permanent hole. Key on the newest fragment so a buffer
-        // survives as long as bytes keep arriving, and drop it wholesale only
-        // once the peer goes silent (matching the whole-buffer overflow policy).
-        // Snapshot the keys so we never mutate the dictionary mid-iteration.
-        for centralId in Array(pendingFragments.keys) {
-            guard let fragments = pendingFragments[centralId] else { continue }
-            guard let newest = fragments.map({ $0.1 }).max() else {
-                pendingFragments.removeValue(forKey: centralId)
-                continue
-            }
-            if now.timeIntervalSince(newest) >= PENDING_FRAGMENT_TIMEOUT {
-                pendingFragments.removeValue(forKey: centralId)
-            }
-        }
+        // Idle-window eviction at WHOLE-BUFFER granularity, keyed on each
+        // buffer's newest fragment — the rationale now lives on
+        // `InboundFragmentBuffer.evictExpired()`, along with a test that pins
+        // it (a still-arriving multi-fragment message must survive).
+        inboundFragments.evictExpired()
     }
 
     private func pruneMeshObservations(now: Date = Date()) {
@@ -2372,7 +2560,7 @@ extension BleManager: CBCentralManagerDelegate {
                     emitDiagnostic("error", "Bluetooth permission denied", context: ["authorization": authStatus])
                     centralReady = false
                     updateState(.unavailable)
-                    try? self.protocolInstance.bleStatusChanged(isAvailable: false)
+                    notifyBleStatus(false)
                     return
                     
                 case .notDetermined:
@@ -2403,11 +2591,12 @@ extension BleManager: CBCentralManagerDelegate {
             // If both central and peripheral are ready, mark as running
             if peripheralReady && state == .starting {
                 updateState(.running)
-                print("[BleManager] ✅ BLE Manager ready - calling bleStatusChanged(true)")
-                emitDiagnostic("info", "About to call protocol.bleStatusChanged(true)")
-                try? self.protocolInstance.bleStatusChanged(isAvailable: true)
-                print("[BleManager] ✅ Called protocol.bleStatusChanged(true)")
-                emitDiagnostic("info", "Successfully called protocol.bleStatusChanged(true)")
+                print("[BleManager] ✅ BLE Manager ready - dispatching bleStatusChanged(true)")
+                // "dispatched", not "called": the FFI now runs on the protocol
+                // queue, so this returns before the core has been told. Reading
+                // these as a completion is how you mis-time a hang.
+                notifyBleStatus(true)
+                emitDiagnostic("info", "Dispatched protocol.bleStatusChanged(true)")
             }
             
         case .poweredOff:
@@ -2415,7 +2604,7 @@ extension BleManager: CBCentralManagerDelegate {
             centralReady = false
             stopScanning(reason: "central_powered_off")
             updateState(.unavailable)
-            try? self.protocolInstance.bleStatusChanged(isAvailable: false)
+            notifyBleStatus(false)
             emitDiagnostic("warning", "Bluetooth is powered off", context: ["state": stateString])
             
         case .unauthorized:
@@ -2423,7 +2612,7 @@ extension BleManager: CBCentralManagerDelegate {
             centralReady = false
             stopScanning(reason: "central_unauthorized")
             updateState(.unavailable)
-            try? self.protocolInstance.bleStatusChanged(isAvailable: false)
+            notifyBleStatus(false)
             emitDiagnostic("error", "Bluetooth is unauthorized", context: ["state": stateString, "authorization": authStatus])
             
         case .unsupported:
@@ -2431,7 +2620,7 @@ extension BleManager: CBCentralManagerDelegate {
             centralReady = false
             stopScanning(reason: "central_unsupported")
             updateState(.unavailable)
-            try? self.protocolInstance.bleStatusChanged(isAvailable: false)
+            notifyBleStatus(false)
             emitDiagnostic("error", "Bluetooth is not supported", context: ["state": stateString])
             
         case .resetting:
@@ -2982,37 +3171,62 @@ extension BleManager: CBPeripheralDelegate {
         // max-write length as a stable property — we just
         // read it once, here, at the moment the peer becomes real to us.
         let maxPayload = peripheral.maximumWriteValueLength(for: .withoutResponse)
-        do {
-            try self.protocolInstance.bleSetPeerMtu(peerId: peerId, maxPayload: UInt32(maxPayload))
-            emitDiagnostic("info", "BLE per-peer MTU flushed to Rust", context: [
-                "deviceId": peerId,
-                "peripheral": peripheral.identifier.uuidString,
-                "maxPayload": maxPayload,
-            ])
-        } catch {
-            // A UniFFI throw here (lock poisoning is the only
-            // expected cause) is categorically different from
-            // the ordering-invariant regression that
-            // `ble_fragment_fallback_count` is designed to
-            // surface: the peer will still be announced below
-            // and, absent an MTU entry, the first fragmenting
-            // send will tick the fallback counter. Tag the
-            // diagnostic with `cause: "uniffi_throw"` and emit
-            // at error level so dashboards can filter these
-            // out of the ordering-invariant alarm.
-            emitDiagnostic("error", "bleSetPeerMtu failed", context: [
-                "deviceId": peerId,
-                "error": error.localizedDescription,
-                "cause": "uniffi_throw",
-            ])
+        let rssi = peripheralRSSI[peripheral.identifier] ?? -60
+        // Seeds the route below with the same verified address. This used to
+        // live in the identity handler, which ran after the announce and could
+        // learn a route to a peer the protocol layer had never been told about.
+        let quality = Float(min(1.0, max(0.0, (Double(rssi) + 100.0) / 80.0)))
+
+        // All three protocol calls in ONE serial block, off the main thread.
+        // Every caller of this method is a CoreBluetooth delegate, so making
+        // these inline meant taking the core protocol mutex on the main thread.
+        // Keeping them in a single block also makes the ordering invariant
+        // below structural rather than a matter of statement order in a method
+        // that does plenty of unrelated local bookkeeping.
+        onProtocolQueue { [weak self] in
+            guard let self = self else { return }
+            do {
+                try self.protocolInstance.bleSetPeerMtu(peerId: peerId, maxPayload: UInt32(maxPayload))
+                self.emitDiagnostic("info", "BLE per-peer MTU flushed to Rust", context: [
+                    "deviceId": peerId,
+                    "peripheral": peripheral.identifier.uuidString,
+                    "maxPayload": maxPayload,
+                ])
+            } catch {
+                // A UniFFI throw here (lock poisoning is the only
+                // expected cause) is categorically different from
+                // the ordering-invariant regression that
+                // `ble_fragment_fallback_count` is designed to
+                // surface: the peer will still be announced below
+                // and, absent an MTU entry, the first fragmenting
+                // send will tick the fallback counter. Tag the
+                // diagnostic with `cause: "uniffi_throw"` and emit
+                // at error level so dashboards can filter these
+                // out of the ordering-invariant alarm.
+                self.emitDiagnostic("error", "bleSetPeerMtu failed", context: [
+                    "deviceId": peerId,
+                    "error": error.localizedDescription,
+                    "cause": "uniffi_throw",
+                ])
+            }
+
+            // ORDERING INVARIANT: this line MUST come AFTER
+            // `bleSetPeerMtu` above. See comment block preceding
+            // the MTU flush. If you are tempted to move this
+            // earlier "for clarity", don't.
+            try? self.protocolInstance.blePeerDiscovered(peerId: peerId, rssi: rssi)
+
+            // ORDERING INVARIANT: after the announce, for the reason given
+            // where `quality` is computed.
+            self.protocolInstance.learnRoute(
+                destination: peerId,
+                nextHop: peerId,
+                hopCount: 1,
+                quality: quality,
+                sequenceNumber: 0
+            )
         }
 
-        // ORDERING INVARIANT: this line MUST come AFTER
-        // `bleSetPeerMtu` above. See comment block preceding
-        // the MTU flush. If you are tempted to move this
-        // earlier "for clarity", don't.
-        let rssi = peripheralRSSI[peripheral.identifier] ?? -60
-        try? self.protocolInstance.blePeerDiscovered(peerId: peerId, rssi: rssi)
         let role = connections.consumePendingRole(for: peripheral.identifier) ?? connections.connectionRole(for: peerId) ?? .member
         meshController.registerConnection(peerId: peerId, role: role)
         connections.setConnectionRole(role, for: peerId)
@@ -3023,18 +3237,6 @@ extension BleManager: CBPeripheralDelegate {
         DispatchQueue.main.async {
             self.refreshAdvertising(reason: "membership_change")
         }
-
-        // Seed the route with the same verified address. This used to live in
-        // the identity handler, which ran after the announce and could learn a
-        // route to a peer the protocol layer had never been told about.
-        let quality = Float(min(1.0, max(0.0, (Double(rssi) + 100.0) / 80.0)))
-        protocolInstance.learnRoute(
-            destination: peerId,
-            nextHop: peerId,
-            hopCount: 1,
-            quality: quality,
-            sequenceNumber: 0
-        )
 
         //  Process any pending fragments for this device immediately
         // This is essential for Android → iOS messages that were queued while waiting for device ID
@@ -3047,7 +3249,7 @@ extension BleManager: CBPeripheralDelegate {
         //  Also check all pending fragments and process any that match this device ID
         // This handles the case where Android wrote to iOS before iOS connected to Android
         // The central UUID (from write) might be the same as peripheral UUID, but we check all
-        let pendingCentralIds: [UUID] = self.fragmentQueue.sync { Array(self.pendingFragments.keys) }
+        let pendingCentralIds: [UUID] = self.inboundFragments.pendingIds()
         for centralId in pendingCentralIds {
             // Check if this central ID now maps to the device ID we just resolved
             let centralDeviceId = self.connections.centralDeviceId(for: centralId)
@@ -3269,7 +3471,7 @@ extension BleManager: CBPeripheralManagerDelegate {
                     emitDiagnostic("error", "Bluetooth peripheral permission denied", context: ["authorization": authStatus])
                     peripheralReady = false
                     updateState(.unavailable)
-                    try? self.protocolInstance.bleStatusChanged(isAvailable: false)
+                    notifyBleStatus(false)
                     return
                     
                 case .notDetermined:
@@ -3296,11 +3498,10 @@ extension BleManager: CBPeripheralManagerDelegate {
             // If both central and peripheral are ready, mark as running
             if centralReady && state == .starting {
                 updateState(.running)
-                print("[BleManager] ✅ BLE Manager ready (peripheral) - calling bleStatusChanged(true)")
-                emitDiagnostic("info", "About to call protocol.bleStatusChanged(true) from peripheral")
-                try? self.protocolInstance.bleStatusChanged(isAvailable: true)
-                print("[BleManager] ✅ Called protocol.bleStatusChanged(true) from peripheral")
-                emitDiagnostic("info", "Successfully called protocol.bleStatusChanged(true) from peripheral")
+                print("[BleManager] ✅ BLE Manager ready (peripheral) - dispatching bleStatusChanged(true)")
+                // See the central-side note: dispatched, not completed.
+                notifyBleStatus(true)
+                emitDiagnostic("info", "Dispatched protocol.bleStatusChanged(true) from peripheral")
             }
             
         case .poweredOff:
@@ -3308,7 +3509,7 @@ extension BleManager: CBPeripheralManagerDelegate {
             peripheralReady = false
             stopAdvertising()
             updateState(.unavailable)
-            try? self.protocolInstance.bleStatusChanged(isAvailable: false)
+            notifyBleStatus(false)
             emitDiagnostic("warning", "Bluetooth peripheral is powered off", context: ["state": stateString])
             
         case .unauthorized:
@@ -3316,7 +3517,7 @@ extension BleManager: CBPeripheralManagerDelegate {
             peripheralReady = false
             stopAdvertising()
             updateState(.unavailable)
-            try? self.protocolInstance.bleStatusChanged(isAvailable: false)
+            notifyBleStatus(false)
             emitDiagnostic("error", "Bluetooth peripheral is unauthorized", context: ["state": stateString, "authorization": authStatus])
             
         case .unsupported:
@@ -3324,7 +3525,7 @@ extension BleManager: CBPeripheralManagerDelegate {
             peripheralReady = false
             stopAdvertising()
             updateState(.unavailable)
-            try? self.protocolInstance.bleStatusChanged(isAvailable: false)
+            notifyBleStatus(false)
             emitDiagnostic("error", "Bluetooth peripheral is not supported", context: ["state": stateString])
             
         case .resetting:
