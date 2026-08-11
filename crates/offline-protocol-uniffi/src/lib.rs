@@ -6522,9 +6522,21 @@ mod tests {
     /// `ble_fragment_received` to holding one guard across the whole drain,
     /// which is the exact regression that matters. Review is the guard against
     /// that; this test only pins that the two locks never deadlock each other.
+    ///
+    /// The contender is started through a latch rather than by spawning it and
+    /// trusting it to run. `thread::spawn` returns before the thread is
+    /// scheduled, and the drains below are cheap enough — three garbage bytes
+    /// are rejected without decrypting anything — that a loaded runner can
+    /// finish all 64 and set `stop` first, leaving the contender to exit on its
+    /// very first flag read with nothing recorded. That is a scheduling
+    /// outcome, but it failed under a message that reads like a locking one.
+    /// Waiting for the first acquisition also buys what the test is named for:
+    /// the drains and the contention genuinely overlap, rather than merely
+    /// being asked to.
     #[test]
     fn test_ble_fragment_received_does_not_pin_the_protocol_lock() {
         use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::time::Instant;
 
         let protocol = Arc::new(OfflineProtocol::new(create_test_config()).unwrap());
         let stop = Arc::new(AtomicBool::new(false));
@@ -6537,27 +6549,45 @@ mod tests {
             let stop = Arc::clone(&stop);
             let acquisitions = Arc::clone(&acquisitions);
             thread::spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
+                // Do-while, not while: one acquisition must be recorded before
+                // the stop flag is ever consulted, so the latch below cannot be
+                // beaten by a `stop` that was set while this thread waited for
+                // a core.
+                loop {
                     let _ = protocol.is_mls_initialized();
-                    acquisitions.fetch_add(1, Ordering::Relaxed);
+                    acquisitions.fetch_add(1, Ordering::Release);
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
                 }
             })
         };
 
+        // Wait until the contender has actually taken and released the lock
+        // once. Bounded, so that a genuine deadlock fails here with a readable
+        // message instead of hanging the suite: the bound is orders of
+        // magnitude above any scheduling delay, and a real deadlock is
+        // permanent, so no amount of load reaches it honestly.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while acquisitions.load(Ordering::Acquire) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the contending thread never acquired the protocol lock"
+            );
+            thread::yield_now();
+        }
+
         // The return value is deliberately ignored: whether these bytes form a
         // valid fragment is irrelevant here, and asserting on it would couple
         // this test to the reassembler. What is under test is that the call
-        // returns at all while another thread is contending for the lock.
+        // returns at all while another thread is contending for the lock — so
+        // the pass condition is reaching the join below, not a final assert.
         for i in 0..64 {
             let _ = protocol.ble_fragment_received(format!("peer{i}"), vec![0xAA, 0xBB, 0xCC]);
         }
 
         stop.store(true, Ordering::Relaxed);
         contender.join().unwrap();
-        assert!(
-            acquisitions.load(Ordering::Relaxed) > 0,
-            "the contending thread never acquired the protocol lock"
-        );
     }
 
     #[test]
