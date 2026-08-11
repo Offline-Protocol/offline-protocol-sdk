@@ -128,6 +128,19 @@ The rules, in order of how easily each is broken:
    cache miss defers through the existing `scheduleAdvertisingRestart` path
    rather than blocking.
 
+6. **Clearing a fragment store from main needs a chaser on the owning queue.**
+   `clear`/`removeAll` are immediate, but a fragment block dispatched just
+   before the clear still runs *after* it and repopulates the store — the
+   `fragmentQueue.sync` these calls replaced used to barrier behind exactly
+   that backlog. `stopUnsafe` and `evictPeer` therefore clear twice: once
+   inline (so the metrics refresh beside them sees the removal) and once via
+   `fragmentQueue.async`. Because that queue is serial and FIFO, the chaser
+   drops precisely the in-flight backlog and never touches work enqueued
+   afterwards, so a genuine reconnect is unaffected. The chaser binds the
+   stores to **locals** rather than capturing `self`: `stop()` is reachable
+   from `deinit`, where a `[weak self]` capture list is a SIGABRT (see the
+   `deinit` invariant below).
+
 None of this is covered by `swift test` — `BleManager.swift` is on
 `Package.swift`'s `exclude:` list and only gets a CI `-typecheck`. The
 extracted stores are Foundation-only precisely so they *can* be unit-tested;

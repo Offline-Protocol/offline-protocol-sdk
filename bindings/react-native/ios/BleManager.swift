@@ -584,6 +584,23 @@ public class BleManager: NSObject, TransportManager {
         peripheralRSSI.removeAll()
         inboundFragments.clear()
         outboundFragments.clear()
+        // Then chase the clear on the owning queue. The clears above are
+        // immediate (nothing here waits on `fragmentQueue`), but a fragment
+        // block dispatched just before this point still runs AFTER them and
+        // would repopulate a store that nothing sweeps once we are stopped.
+        // `fragmentQueue` is serial and FIFO, so this drops exactly the
+        // in-flight backlog and nothing enqueued later.
+        //
+        // Binds the stores to locals instead of capturing `self`: `stop()` is
+        // reachable from `deinit`, and a `[weak self]` capture list is
+        // evaluated when the closure is CREATED — forming a weak reference to
+        // a deallocating object is a hard abort (see BRIDGE_MAINTENANCE.md).
+        let inbound = inboundFragments
+        let outbound = outboundFragments
+        fragmentQueue.async {
+            inbound.clear()
+            outbound.clear()
+        }
         lastSeenMeshAdvertisements.removeAll()
         unknownBootstrapAttempts.removeAll()
         verifiedNonMeshDevices.removeAll()
@@ -1762,6 +1779,18 @@ public class BleManager: NSObject, TransportManager {
         // `fragmentQueue.sync` that used to park the main thread here.
         inboundFragments.removeAll(identifier)
         outboundFragments.removeAll(deviceId)
+        // A fragment block dispatched before this point runs after the removals
+        // above and would resurrect the evicted peer's buffer. Chase it on the
+        // owning queue: serial and FIFO, so this drops exactly the backlog that
+        // was already in flight, while anything for a genuine later reconnect
+        // is enqueued behind this block and survives. Locals, not `[weak self]`
+        // — same deinit rule as `stopUnsafe`.
+        let inbound = inboundFragments
+        let outbound = outboundFragments
+        fragmentQueue.async {
+            inbound.removeAll(identifier)
+            outbound.removeAll(deviceId)
+        }
         connectionAttemptTimestamps.removeValue(forKey: identifier)
         connectionRetryCount.removeValue(forKey: identifier)
         meshController.registerDisconnection(peerId: deviceId)
