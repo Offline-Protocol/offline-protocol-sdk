@@ -4327,14 +4327,27 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     /**
      * Start background process scheduler.
-     * Uses a 500ms interval as a fallback tick; latency-sensitive work is driven
-     * by transport callbacks (event-driven), not by this timer.
+     * Uses [Constants.PROCESS_INTERVAL_MS] as a fallback tick; latency-sensitive
+     * work is driven by transport callbacks (event-driven), not by this timer.
+     *
+     * Fixed *delay*, not fixed rate. `scheduleAtFixedRate` targets a constant
+     * frequency, so when a tick overruns the period the executor makes up the
+     * lost ground by running the next ones back-to-back with no gap. Every tick
+     * takes the core protocol mutex for its whole body — `process()` plus a
+     * `receiveMessage()` drain, both of which re-enter the JVM through
+     * `MlsSecureStorage` and so through AndroidKeyStore — so an overrunning tick
+     * on a slow device holds that mutex essentially continuously and starves
+     * every other FFI caller, the BLE fragment drain included (OFF-2123).
+     * Fixed delay guarantees a full [Constants.PROCESS_INTERVAL_MS] of slack
+     * between ticks no matter how long one takes, which is the property this
+     * scheduler actually needs: it is a fallback, and nothing reads its cadence
+     * as a timing guarantee.
      */
     private fun startProcessScheduler() {
         stopProcessScheduler()
-        
+
         processScheduler = Executors.newSingleThreadScheduledExecutor().apply {
-            scheduleAtFixedRate({
+            scheduleWithFixedDelay({
                 processProtocol()
             }, 0, Constants.PROCESS_INTERVAL_MS, TimeUnit.MILLISECONDS)
         }
