@@ -239,6 +239,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **The relay group control plane no longer recognized this device, so it added
+  itself to its own groups and never left them.** The React Native bridges tell
+  their relay adapter who "self" is with the `profile`, and compare that against
+  ids that arrive from two different places: group rosters and leave
+  notifications come from the core and name members by `off1…` address, while
+  the relay's own role-change answer names accounts by their relay username.
+  Since the identity change the profile matched neither reliably, so all three
+  self-checks were dead. The SDK sent the relay an `AddGroupMember` naming its
+  own address; leaving a group never sent the relay-native `LeaveGroup`, so the
+  relay kept fanning that group out to a device that had left; and being
+  promoted to admin mid-connection never re-enabled the membership sync an
+  earlier denial had suppressed. The adapter now recognizes itself by profile
+  *or* address, resolved fresh on each use so it works across MLS
+  initialization and identity rebuilds, and the role-change answer is read from
+  the field the relay actually sends. The same two-namespace fix is applied to
+  the presence self-filters, which could otherwise put this device in its own
+  presence watch set. No configuration, and nothing for an app to call.
+
 - **No MLS session could be established over the relay, and `off1…` recipients
   were unreachable through it.** The relay knows a connection by the account
   name it authenticated, and stamps that name on every frame it forwards. Since

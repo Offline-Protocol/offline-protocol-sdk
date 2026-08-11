@@ -31,7 +31,7 @@ class RelayControlOpTranslatorTest {
      */
     @Test
     fun connectionOpsPassThroughVerbatim() {
-        val translator = RelayControlOpTranslator("alice")
+        val translator = RelayControlOpTranslator("alice") { null }
         val cases = listOf(
             "conn_req" to """{"sender_name":"Alice","timestamp_ms":1,"key_package":[1,2,3]}""",
             "conn_acc" to """{"accepted_by_name":"Alice","timestamp_ms":1}""",
@@ -49,7 +49,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun registerTranslatesToCreateGroupPlusMemberDeltas() {
-        val translator = RelayControlOpTranslator("alice")
+        val translator = RelayControlOpTranslator("alice") { null }
 
         val firstTranslation = translator.translate(
             "group_relay_register",
@@ -89,7 +89,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun uncommittedRegistrationResendsDeltas() {
-        val translator = RelayControlOpTranslator("alice")
+        val translator = RelayControlOpTranslator("alice") { null }
 
         // The frames were produced but never fully written (a best-effort
         // delta dropped): the commit must not run, so the next registration
@@ -116,7 +116,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun adminDeniedGroupsStopProducingMemberDeltas() {
-        val translator = RelayControlOpTranslator("bob")
+        val translator = RelayControlOpTranslator("bob") { null }
 
         commit(
             translator.translate(
@@ -142,7 +142,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun notAdminHintSkipsMemberDeltasUpFront() {
-        val translator = RelayControlOpTranslator("bob")
+        val translator = RelayControlOpTranslator("bob") { null }
 
         // The core's is_admin=false hint: no deltas are ever attempted, so
         // the relay never answers the group-scoped denials that would revoke
@@ -172,7 +172,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun numericAndStringIsAdminHintsMatchSwiftSemantics() {
-        val translator = RelayControlOpTranslator("bob")
+        val translator = RelayControlOpTranslator("bob") { null }
 
         // Numeric 0 is honored as not-admin (NSNumber.boolValue parity with
         // the Swift translator) even though serde emits real booleans.
@@ -210,7 +210,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun leaveAfterRejoinSendsLeaveGroupAgain() {
-        val translator = RelayControlOpTranslator("alice")
+        val translator = RelayControlOpTranslator("alice") { null }
 
         commit(
             translator.translate(
@@ -243,7 +243,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun adminDenialDuringFlightWinsOverCommit() {
-        val translator = RelayControlOpTranslator("bob")
+        val translator = RelayControlOpTranslator("bob") { null }
 
         // Frames produced, but the relay's denial lands before the caller
         // commits (reader thread races the send loop): the commit must not
@@ -270,7 +270,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun broadcastTranslatesToSendGroupMessage() {
-        val translator = RelayControlOpTranslator("alice")
+        val translator = RelayControlOpTranslator("alice") { null }
         val bcast = frames(
             translator.translate(
                 "group_relay_broadcast",
@@ -289,7 +289,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun broadcastStampsLogicalMessageId() {
-        val translator = RelayControlOpTranslator("alice")
+        val translator = RelayControlOpTranslator("alice") { null }
         val bcast = frames(
             translator.translate(
                 "group_relay_broadcast",
@@ -309,7 +309,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun broadcastOmitsMessageIdWhenAbsent() {
-        val translator = RelayControlOpTranslator("alice")
+        val translator = RelayControlOpTranslator("alice") { null }
         val bcast = frames(
             translator.translate(
                 "group_relay_broadcast",
@@ -322,7 +322,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun broadcastForwardsForwardInfo() {
-        val translator = RelayControlOpTranslator("alice")
+        val translator = RelayControlOpTranslator("alice") { null }
         val bcast = frames(
             translator.translate(
                 "group_relay_broadcast",
@@ -338,7 +338,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun broadcastOmitsForwardInfoWhenAbsent() {
-        val translator = RelayControlOpTranslator("alice")
+        val translator = RelayControlOpTranslator("alice") { null }
         val bcast = frames(
             translator.translate(
                 "group_relay_broadcast",
@@ -351,7 +351,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun leaveIsATapSentOncePerGroupForSelfOnly() {
-        val translator = RelayControlOpTranslator("alice")
+        val translator = RelayControlOpTranslator("alice") { null }
 
         val tap = translator.translate(
             "group_mls_leave",
@@ -393,7 +393,7 @@ class RelayControlOpTranslatorTest {
      */
     @Test
     fun everyCoreControlOpTranslatesToRelayNative() {
-        val translator = RelayControlOpTranslator("alice")
+        val translator = RelayControlOpTranslator("alice") { null }
 
         // Ordered: g1 is registered before the ops that reference it.
         val cases = listOf(
@@ -422,7 +422,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun malformedPayloadAndUnknownOpFallBackToPassThrough() {
-        val translator = RelayControlOpTranslator("alice")
+        val translator = RelayControlOpTranslator("alice") { null }
         assertTrue(
             translator.translate("group_relay_broadcast", "not-json", "alice")
                 is RelayControlOpTranslator.Translation.PassThrough
@@ -439,7 +439,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun resetForgetsRegistrationDiffState() {
-        val translator = RelayControlOpTranslator("alice")
+        val translator = RelayControlOpTranslator("alice") { null }
         commit(
             translator.translate(
                 "group_relay_register",
@@ -464,7 +464,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun registerCommitAfterResetIsANoOp() {
-        val translator = RelayControlOpTranslator("alice")
+        val translator = RelayControlOpTranslator("alice") { null }
 
         // A chain that settles after a disconnect reset must not commit a
         // phantom snapshot into the NEXT connection's diff base — the relay
@@ -492,7 +492,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun leaveCommitAfterResetIsANoOp() {
-        val translator = RelayControlOpTranslator("alice")
+        val translator = RelayControlOpTranslator("alice") { null }
 
         val staleTranslation = translator.translate(
             "group_mls_leave",
@@ -517,7 +517,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun nonAdminReasonGroupErrorDoesNotSuppressDeltas() {
-        val translator = RelayControlOpTranslator("alice")
+        val translator = RelayControlOpTranslator("alice") { null }
 
         // Only the relay's admin-denial wording flips the suppression, even
         // when the error correlates to outstanding deltas; an unrelated
@@ -546,7 +546,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun rolePromotionReenablesMemberDeltas() {
-        val translator = RelayControlOpTranslator("bob")
+        val translator = RelayControlOpTranslator("bob") { null }
         // The denial answers an outstanding member delta (the correlation
         // window — see onGroupError).
         translator.translate(
@@ -596,7 +596,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun uncorrelatedAdminDenialDoesNotSuppressDeltas() {
-        val translator = RelayControlOpTranslator("bob")
+        val translator = RelayControlOpTranslator("bob") { null }
 
         // An admin-denial GroupError with NO member deltas outstanding from
         // this translator answers someone else's operation (an app
@@ -619,7 +619,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun requestIdCarryingDenialIsNeverOurs() {
-        val translator = RelayControlOpTranslator("bob")
+        val translator = RelayControlOpTranslator("bob") { null }
 
         // The translator never tags request_id, so a request_id-echoing
         // GroupError answers an app raw-channel frame — even mid-window it
@@ -659,7 +659,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun deltaWindowClosesOnFirstGroupScopedAnswer() {
-        val translator = RelayControlOpTranslator("bob")
+        val translator = RelayControlOpTranslator("bob") { null }
 
         // One answer per window: the first group-scoped GroupError closes
         // it, so a later admin-denial with nothing outstanding is
@@ -689,7 +689,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun successAnswerClosesTheDenialWindow() {
-        val translator = RelayControlOpTranslator("bob")
+        val translator = RelayControlOpTranslator("bob") { null }
 
         // The register succeeded (GroupCreated answered it): the success
         // answer must close the delta window too, or it stays armed for the
@@ -720,7 +720,7 @@ class RelayControlOpTranslatorTest {
 
     @Test
     fun resetClosesTheDenialWindow() {
-        val translator = RelayControlOpTranslator("bob")
+        val translator = RelayControlOpTranslator("bob") { null }
 
         translator.translate(
             "group_relay_register",
@@ -742,6 +742,240 @@ class RelayControlOpTranslatorTest {
         )
         assertEquals(2, after.size)
         assertEquals("AddGroupMember", after[1].getString("type"))
+    }
+
+    // ---- Self-identity across both namespaces -------------------------
+    //
+    // Core-fed payloads (members, leaving_member) name this device by its
+    // derived `off1…` address; relay-fed answers (GroupRoleChanged) name it
+    // by account name. Every test above pins the profile half with a null
+    // address; these pin the address half and the interaction.
+    // Mirrors ios/tests/RelayControlOpTranslatorTests.swift.
+
+    private val selfAddr = "off1qqqqself0000000000000000000000000000000000000000000000000"
+    private val peerAddr = "off1qqqqpeer00000000000000000000000000000000000000000000000000"
+
+    /**
+     * The registration roster is the MLS roster — addresses. Filtering it
+     * against the profile alone strips nothing, so the SDK emitted an
+     * AddGroupMember naming its own address: self-add, wrong under every
+     * namespace the relay might settle on.
+     */
+    @Test
+    fun registerStripsSelfByAddressNotJustProfile() {
+        val translator = RelayControlOpTranslator("alice") { selfAddr }
+
+        val sent = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["$selfAddr","$peerAddr"]}""",
+                selfAddr
+            )
+        )
+        val delta = sent.drop(1).map { it.getString("username") }
+        assertEquals(
+            "self must be stripped from the roster by address; only the peer is a real delta",
+            listOf(peerAddr),
+            delta
+        )
+        assertFalse(
+            "the SDK must never send an AddGroupMember naming its own address",
+            delta.contains(selfAddr)
+        )
+    }
+
+    /**
+     * The profile half must survive the address half: a roster still naming
+     * this device by profile (a relay-shaped roster) strips too.
+     */
+    @Test
+    fun registerStillStripsSelfByProfileWhenAddressIsKnown() {
+        val translator = RelayControlOpTranslator("alice") { selfAddr }
+        val sent = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob"]}""",
+                "alice"
+            )
+        )
+        assertEquals(listOf("bob"), sent.drop(1).map { it.getString("username") })
+    }
+
+    /**
+     * `leaving_member` is the core's local_id — an address. Without the
+     * address half this never fired, so the relay kept us in the group
+     * registry after we left and went on fanning the group out to us.
+     */
+    @Test
+    fun leaveFiresWhenLeavingMemberIsOurAddress() {
+        val translator = RelayControlOpTranslator("alice") { selfAddr }
+
+        val tap = translator.translate(
+            "group_mls_leave",
+            """{"group_id":"g1","leaving_member":"$selfAddr"}""",
+            peerAddr
+        )
+        val leaveFrames = frames(tap)
+        assertEquals(
+            "our own leave must produce a relay-native LeaveGroup",
+            1,
+            leaveFrames.size
+        )
+        assertEquals("LeaveGroup", leaveFrames[0].getString("type"))
+        commit(tap)
+
+        // Another member's leave — named by address — is still not ours to
+        // send. Widening the match must not have widened it to everyone.
+        val other = translator.translate(
+            "group_mls_leave",
+            """{"group_id":"g2","leaving_member":"$peerAddr"}""",
+            peerAddr
+        )
+        assertTrue(
+            "third-party leave must stay a tap",
+            other is RelayControlOpTranslator.Translation.Tap
+        )
+        assertTrue(
+            "a peer's address must never be read as self — that would deregister us " +
+                "from a group we are still in",
+            frames(other).isEmpty()
+        )
+    }
+
+    /**
+     * The relay names the promoted account by username, so the profile half
+     * carries this site; the address half is forward-compatibility for a
+     * relay whose group path later moves to address space.
+     */
+    @Test
+    fun rolePromotionMatchesSelfInEitherNamespace() {
+        for ((label, promoted) in listOf("profile" to "bob", "address" to selfAddr)) {
+            val translator = RelayControlOpTranslator("bob") { selfAddr }
+            commit(
+                translator.translate(
+                    "group_relay_register",
+                    """{"group_id":"g1","members":["alice","bob"]}""",
+                    "bob"
+                )
+            )
+            translator.onGroupError("g1", "Only admins can add members")
+            assertEquals(
+                "$label: denial must suppress deltas first",
+                1,
+                frames(
+                    translator.translate(
+                        "group_relay_register",
+                        """{"group_id":"g1","members":["alice","bob"]}""",
+                        "bob"
+                    )
+                ).size
+            )
+
+            translator.onRoleChanged("g1", promoted, "admin")
+            assertEquals(
+                "$label: our own promotion must re-enable member deltas",
+                2,
+                frames(
+                    translator.translate(
+                        "group_relay_register",
+                        """{"group_id":"g1","members":["alice","bob"]}""",
+                        "bob"
+                    )
+                ).size
+            )
+        }
+    }
+
+    /**
+     * An unrelated account's promotion must not re-enable our deltas, in
+     * either namespace.
+     */
+    @Test
+    fun rolePromotionOfAnotherAddressIsIgnored() {
+        val translator = RelayControlOpTranslator("bob") { selfAddr }
+        commit(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob"]}""",
+                "bob"
+            )
+        )
+        translator.onGroupError("g1", "Only admins can add members")
+
+        translator.onRoleChanged("g1", peerAddr, "admin")
+        assertEquals(
+            "another member's promotion must leave our denial in place",
+            1,
+            frames(
+                translator.translate(
+                    "group_relay_register",
+                    """{"group_id":"g1","members":["alice","bob"]}""",
+                    "bob"
+                )
+            ).size
+        )
+    }
+
+    /**
+     * Before MLS identity exists (encryption disabled, or pre-init) the
+     * provider returns null and the translator must behave exactly as it did
+     * when it only knew the profile — no crash, no accidental self-match.
+     */
+    @Test
+    fun absentAddressDegradesToProfileOnlyMatching() {
+        for (provider in listOf<() -> String?>({ null }, { "" })) {
+            val translator = RelayControlOpTranslator("alice", provider)
+            val sent = frames(
+                translator.translate(
+                    "group_relay_register",
+                    """{"group_id":"g1","members":["alice","bob"]}""",
+                    "alice"
+                )
+            )
+            assertEquals(listOf("bob"), sent.drop(1).map { it.getString("username") })
+
+            // An empty roster id must not match an empty address. (Empty
+            // members are dropped upstream too — this pins both guards.)
+            val withEmpty = frames(
+                translator.translate(
+                    "group_relay_register",
+                    """{"group_id":"g2","members":["alice","","bob"]}""",
+                    "alice"
+                )
+            )
+            assertEquals(listOf("bob"), withEmpty.drop(1).map { it.getString("username") })
+        }
+    }
+
+    /**
+     * The address is resolved per call, never captured at construction: the
+     * translator outlives MLS init and identity rebuilds.
+     */
+    @Test
+    fun addressIsResolvedPerCallNotCachedAtConstruction() {
+        var current: String? = null
+        val translator = RelayControlOpTranslator("alice") { current }
+
+        // Pre-identity: the address is unknown, so it cannot be stripped.
+        val before = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["$selfAddr","$peerAddr"]}""",
+                "alice"
+            )
+        )
+        assertEquals("unknown address cannot be filtered out", 3, before.size)
+
+        // MLS init lands: the very next translation must see it.
+        current = selfAddr
+        val after = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g2","members":["$selfAddr","$peerAddr"]}""",
+                "alice"
+            )
+        )
+        assertEquals(listOf(peerAddr), after.drop(1).map { it.getString("username") })
     }
 
     @Test

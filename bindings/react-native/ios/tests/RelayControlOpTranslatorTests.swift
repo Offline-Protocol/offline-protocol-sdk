@@ -34,7 +34,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     /// signed SendMessage frames, so the translator must pass them through
     /// untouched (they should never even be tagged by the core).
     func testConnectionOpsPassThroughVerbatim() {
-        let translator = RelayControlOpTranslator(selfId: "alice")
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { nil })
         for (op, payload) in [
             ("conn_req", #"{"sender_name":"Alice","timestamp_ms":1,"key_package":[1,2,3]}"#),
             ("conn_acc", #"{"accepted_by_name":"Alice","timestamp_ms":1}"#),
@@ -54,7 +54,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testRegisterTranslatesToCreateGroupPlusMemberDeltas() {
-        let translator = RelayControlOpTranslator(selfId: "alice")
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { nil })
 
         let firstTranslation = translator.translate(
             controlOp: "group_relay_register",
@@ -89,7 +89,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testAdminDeniedGroupsStopProducingMemberDeltas() {
-        let translator = RelayControlOpTranslator(selfId: "bob")
+        let translator = RelayControlOpTranslator(selfId: "bob", selfAddress: { nil })
 
         commit(translator.translate(
             controlOp: "group_relay_register",
@@ -110,7 +110,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testBroadcastTranslatesToSendGroupMessage() {
-        let translator = RelayControlOpTranslator(selfId: "alice")
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { nil })
         let bcast = frames(translator.translate(
             controlOp: "group_relay_broadcast",
             controlPayload: #"{"group_id":"g1","ciphertext":"AAECAw==","epoch":4,"reply_to":"m-9"}"#,
@@ -127,7 +127,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testBroadcastStampsLogicalMessageId() {
-        let translator = RelayControlOpTranslator(selfId: "alice")
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { nil })
         let bcast = frames(translator.translate(
             controlOp: "group_relay_broadcast",
             controlPayload: #"{"group_id":"g1","ciphertext":"AAECAw==","epoch":4,"message_id":"11111111-2222-3333-4444-555555555555"}"#,
@@ -144,7 +144,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testBroadcastOmitsMessageIdWhenAbsent() {
-        let translator = RelayControlOpTranslator(selfId: "alice")
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { nil })
         let bcast = frames(translator.translate(
             controlOp: "group_relay_broadcast",
             controlPayload: #"{"group_id":"g1","ciphertext":"AAECAw==","epoch":4}"#,
@@ -155,7 +155,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testBroadcastForwardsForwardInfo() {
-        let translator = RelayControlOpTranslator(selfId: "alice")
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { nil })
         let bcast = frames(translator.translate(
             controlOp: "group_relay_broadcast",
             controlPayload: #"{"group_id":"g1","ciphertext":"AAECAw==","epoch":4,"forward_info":{"original_sender":"dave","forwarded_at":123}}"#,
@@ -168,7 +168,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testBroadcastOmitsForwardInfoWhenAbsent() {
-        let translator = RelayControlOpTranslator(selfId: "alice")
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { nil })
         let bcast = frames(translator.translate(
             controlOp: "group_relay_broadcast",
             controlPayload: #"{"group_id":"g1","ciphertext":"AAECAw==","epoch":4}"#,
@@ -179,7 +179,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testLeaveIsATapSentOncePerGroupForSelfOnly() {
-        let translator = RelayControlOpTranslator(selfId: "alice")
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { nil })
 
         let tap = translator.translate(
             controlOp: "group_mls_leave",
@@ -219,7 +219,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testNotAdminHintSkipsMemberDeltasUpFront() {
-        let translator = RelayControlOpTranslator(selfId: "bob")
+        let translator = RelayControlOpTranslator(selfId: "bob", selfAddress: { nil })
 
         // The core's is_admin=false hint: no deltas are ever attempted, so
         // the relay never answers the group-scoped denials that would revoke
@@ -248,7 +248,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testLeaveAfterRejoinSendsLeaveGroupAgain() {
-        let translator = RelayControlOpTranslator(selfId: "alice")
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { nil })
 
         commit(translator.translate(
             controlOp: "group_mls_leave",
@@ -278,7 +278,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testAdminDenialDuringFlightWinsOverCommit() {
-        let translator = RelayControlOpTranslator(selfId: "bob")
+        let translator = RelayControlOpTranslator(selfId: "bob", selfAddress: { nil })
 
         // Frames produced, but the relay's denial lands before the caller
         // commits (delegate queue races the send chain): the commit must not
@@ -309,7 +309,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     /// Kotlin translator AND the spec table before it ships — an unhandled
     /// op degrades to an opaque SendMessage the relay merely echoes/forwards.
     func testEveryCoreControlOpTranslatesToRelayNative() {
-        let translator = RelayControlOpTranslator(selfId: "alice")
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { nil })
 
         // Ordered: g1 is registered before the ops that reference it.
         let cases: [(op: String, payload: String, recipient: String)] = [
@@ -333,7 +333,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testMalformedPayloadAndUnknownOpFallBackToPassThrough() {
-        let translator = RelayControlOpTranslator(selfId: "alice")
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { nil })
         XCTAssertTrue(isPassThrough(
             translator.translate(controlOp: "group_relay_broadcast", controlPayload: "not-json", recipientId: "alice")
         ))
@@ -346,7 +346,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testUncommittedRegistrationResendsDeltas() {
-        let translator = RelayControlOpTranslator(selfId: "alice")
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { nil })
 
         // The frames were produced but never fully written (a best-effort
         // delta dropped): the commit must not run, so the next registration
@@ -368,7 +368,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testResetForgetsRegistrationDiffState() {
-        let translator = RelayControlOpTranslator(selfId: "alice")
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { nil })
         commit(translator.translate(
             controlOp: "group_relay_register",
             controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
@@ -388,7 +388,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testRegisterCommitAfterResetIsANoOp() {
-        let translator = RelayControlOpTranslator(selfId: "alice")
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { nil })
 
         // A chain that settles after a disconnect reset must not commit a
         // phantom snapshot into the NEXT connection's diff base — the relay
@@ -413,7 +413,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testLeaveCommitAfterResetIsANoOp() {
-        let translator = RelayControlOpTranslator(selfId: "alice")
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { nil })
 
         let staleTranslation = translator.translate(
             controlOp: "group_mls_leave",
@@ -435,7 +435,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testNonAdminReasonGroupErrorDoesNotSuppressDeltas() {
-        let translator = RelayControlOpTranslator(selfId: "alice")
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { nil })
 
         // Only the relay's admin-denial wording flips the suppression, even
         // when the error correlates to outstanding deltas; an unrelated group
@@ -459,7 +459,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testUncorrelatedAdminDenialDoesNotSuppressDeltas() {
-        let translator = RelayControlOpTranslator(selfId: "bob")
+        let translator = RelayControlOpTranslator(selfId: "bob", selfAddress: { nil })
 
         // An admin-denial GroupError with NO member deltas outstanding from
         // this translator answers someone else's operation (an app
@@ -478,7 +478,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testRequestIdCarryingDenialIsNeverOurs() {
-        let translator = RelayControlOpTranslator(selfId: "bob")
+        let translator = RelayControlOpTranslator(selfId: "bob", selfAddress: { nil })
 
         // The translator never tags request_id, so a request_id-echoing
         // GroupError answers an app raw-channel frame — even mid-window it
@@ -517,7 +517,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testDeltaWindowClosesOnFirstGroupScopedAnswer() {
-        let translator = RelayControlOpTranslator(selfId: "bob")
+        let translator = RelayControlOpTranslator(selfId: "bob", selfAddress: { nil })
 
         // One answer per window: the first group-scoped GroupError closes it,
         // so a later admin-denial with nothing outstanding is uncorrelated
@@ -542,7 +542,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testSuccessAnswerClosesTheDenialWindow() {
-        let translator = RelayControlOpTranslator(selfId: "bob")
+        let translator = RelayControlOpTranslator(selfId: "bob", selfAddress: { nil })
 
         // The register succeeded (GroupCreated answered it): the success
         // answer must close the delta window too, or it stays armed for the
@@ -568,7 +568,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testResetClosesTheDenialWindow() {
-        let translator = RelayControlOpTranslator(selfId: "bob")
+        let translator = RelayControlOpTranslator(selfId: "bob", selfAddress: { nil })
 
         _ = translator.translate(
             controlOp: "group_relay_register",
@@ -591,7 +591,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testStringIsAdminHintTreatedAsAbsent() {
-        let translator = RelayControlOpTranslator(selfId: "bob")
+        let translator = RelayControlOpTranslator(selfId: "bob", selfAddress: { nil })
 
         // A string encoding is not boolean-like on either platform: treated
         // as an absent hint (send-and-learn), not as a denial — mirrors the
@@ -605,7 +605,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testIsAdminHintAcceptsNumericEncoding() {
-        let translator = RelayControlOpTranslator(selfId: "bob")
+        let translator = RelayControlOpTranslator(selfId: "bob", selfAddress: { nil })
 
         // JSON 0/1 arrive as NSNumber integers; the hint must behave like
         // the boolean encoding on both platforms (NSNumber boolValue).
@@ -627,7 +627,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     }
 
     func testRolePromotionReenablesMemberDeltas() {
-        let translator = RelayControlOpTranslator(selfId: "bob")
+        let translator = RelayControlOpTranslator(selfId: "bob", selfAddress: { nil })
         // The denial must correlate to deltas this translator sent.
         commit(translator.translate(
             controlOp: "group_relay_register",
@@ -645,8 +645,8 @@ final class RelayControlOpTranslatorTests: XCTestCase {
         XCTAssertEqual(denied.count, 1)
 
         // Someone else's promotion — or a demotion — changes nothing.
-        translator.onRoleChanged(groupId: "g1", userId: "carol", newRole: "admin")
-        translator.onRoleChanged(groupId: "g1", userId: "bob", newRole: "member")
+        translator.onRoleChanged(groupId: "g1", member: "carol", newRole: "admin")
+        translator.onRoleChanged(groupId: "g1", member: "bob", newRole: "member")
         XCTAssertEqual(
             frames(translator.translate(
                 controlOp: "group_relay_register",
@@ -657,7 +657,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
         )
 
         // This device's promotion to admin re-enables the deltas.
-        translator.onRoleChanged(groupId: "g1", userId: "bob", newRole: "admin")
+        translator.onRoleChanged(groupId: "g1", member: "bob", newRole: "admin")
         let promoted = frames(translator.translate(
             controlOp: "group_relay_register",
             controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
@@ -666,6 +666,207 @@ final class RelayControlOpTranslatorTests: XCTestCase {
         XCTAssertEqual(promoted.count, 2)
         XCTAssertEqual(promoted[1]["type"] as? String, "AddGroupMember")
         XCTAssertEqual(promoted[1]["username"] as? String, "alice")
+    }
+
+    // MARK: - Self-identity across both namespaces
+    //
+    // Core-fed payloads (members, leaving_member) name this device by its
+    // derived `off1…` address; relay-fed answers (GroupRoleChanged) name it
+    // by account name. Every test above pins the profile half with a nil
+    // address; these pin the address half and the interaction.
+
+    private static let selfAddr = "off1qqqqself0000000000000000000000000000000000000000000000000"
+    private static let peerAddr = "off1qqqqpeer00000000000000000000000000000000000000000000000000"
+
+    /// The registration roster is the MLS roster — addresses. Filtering it
+    /// against the profile alone strips nothing, so the SDK emitted an
+    /// AddGroupMember naming its own address: self-add, wrong under every
+    /// namespace the relay might settle on.
+    func testRegisterStripsSelfByAddressNotJustProfile() {
+        let translator = RelayControlOpTranslator(
+            selfId: "alice",
+            selfAddress: { Self.selfAddr }
+        )
+
+        let registration = translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["\#(Self.selfAddr)","\#(Self.peerAddr)"]}"#,
+            recipientId: Self.selfAddr
+        )
+        let sent = frames(registration)
+        let delta = sent.dropFirst().map { $0["username"] as? String ?? "" }
+        XCTAssertEqual(
+            delta, [Self.peerAddr],
+            "self must be stripped from the roster by address; only the peer is a real delta"
+        )
+        XCTAssertFalse(
+            delta.contains(Self.selfAddr),
+            "the SDK must never send an AddGroupMember naming its own address"
+        )
+    }
+
+    /// The profile half must survive the address half: a roster still naming
+    /// this device by profile (a relay-shaped roster) strips too.
+    func testRegisterStillStripsSelfByProfileWhenAddressIsKnown() {
+        let translator = RelayControlOpTranslator(
+            selfId: "alice",
+            selfAddress: { Self.selfAddr }
+        )
+        let sent = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "alice"
+        ))
+        XCTAssertEqual(sent.dropFirst().map { $0["username"] as? String ?? "" }, ["bob"])
+    }
+
+    /// `leaving_member` is the core's local_id — an address. Without the
+    /// address half this never fired, so the relay kept us in the group
+    /// registry after we left and went on fanning the group out to us.
+    func testLeaveFiresWhenLeavingMemberIsOurAddress() {
+        let translator = RelayControlOpTranslator(
+            selfId: "alice",
+            selfAddress: { Self.selfAddr }
+        )
+
+        let tap = translator.translate(
+            controlOp: "group_mls_leave",
+            controlPayload: #"{"group_id":"g1","leaving_member":"\#(Self.selfAddr)"}"#,
+            recipientId: Self.peerAddr
+        )
+        guard case .tap(let leaveFrames, _) = tap else {
+            return XCTFail("leave must be a tap")
+        }
+        XCTAssertEqual(leaveFrames.count, 1, "our own leave must produce a relay-native LeaveGroup")
+        XCTAssertEqual(leaveFrames[0]["type"] as? String, "LeaveGroup")
+        commit(tap)
+
+        // Another member's leave — named by address — is still not ours to
+        // send. Widening the match must not have widened it to everyone.
+        let other = translator.translate(
+            controlOp: "group_mls_leave",
+            controlPayload: #"{"group_id":"g2","leaving_member":"\#(Self.peerAddr)"}"#,
+            recipientId: Self.peerAddr
+        )
+        guard case .tap(let otherFrames, _) = other else {
+            return XCTFail("third-party leave must stay a tap")
+        }
+        XCTAssertTrue(
+            otherFrames.isEmpty,
+            "a peer's address must never be read as self — that would deregister us from a group we are still in"
+        )
+    }
+
+    /// The relay names the promoted account by username, so the profile half
+    /// carries this site; the address half is forward-compatibility for a
+    /// relay whose group path later moves to address space.
+    func testRolePromotionMatchesSelfInEitherNamespace() {
+        for (label, promoted) in [("profile", "bob"), ("address", Self.selfAddr)] {
+            let translator = RelayControlOpTranslator(
+                selfId: "bob",
+                selfAddress: { Self.selfAddr }
+            )
+            commit(translator.translate(
+                controlOp: "group_relay_register",
+                controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+                recipientId: "bob"
+            ))
+            translator.onGroupError(groupId: "g1", reason: "Only admins can add members")
+            XCTAssertEqual(
+                frames(translator.translate(
+                    controlOp: "group_relay_register",
+                    controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+                    recipientId: "bob"
+                )).count,
+                1,
+                "\(label): denial must suppress deltas first"
+            )
+
+            translator.onRoleChanged(groupId: "g1", member: promoted, newRole: "admin")
+            XCTAssertEqual(
+                frames(translator.translate(
+                    controlOp: "group_relay_register",
+                    controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+                    recipientId: "bob"
+                )).count,
+                2,
+                "\(label): our own promotion must re-enable member deltas"
+            )
+        }
+    }
+
+    /// An unrelated account's promotion must not re-enable our deltas, in
+    /// either namespace.
+    func testRolePromotionOfAnotherAddressIsIgnored() {
+        let translator = RelayControlOpTranslator(
+            selfId: "bob",
+            selfAddress: { Self.selfAddr }
+        )
+        commit(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "bob"
+        ))
+        translator.onGroupError(groupId: "g1", reason: "Only admins can add members")
+
+        translator.onRoleChanged(groupId: "g1", member: Self.peerAddr, newRole: "admin")
+        XCTAssertEqual(
+            frames(translator.translate(
+                controlOp: "group_relay_register",
+                controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+                recipientId: "bob"
+            )).count,
+            1,
+            "another member's promotion must leave our denial in place"
+        )
+    }
+
+    /// Before MLS identity exists (encryption disabled, or pre-init) the
+    /// provider returns nil and the translator must behave exactly as it did
+    /// when it only knew the profile — no crash, no accidental self-match.
+    func testAbsentAddressDegradesToProfileOnlyMatching() {
+        for provider in [{ nil as String? }, { "" as String? }] {
+            let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: provider)
+            let sent = frames(translator.translate(
+                controlOp: "group_relay_register",
+                controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+                recipientId: "alice"
+            ))
+            XCTAssertEqual(sent.dropFirst().map { $0["username"] as? String ?? "" }, ["bob"])
+
+            // An empty roster id must not match an empty address. (Empty
+            // members are dropped upstream too — this pins both guards.)
+            let withEmpty = frames(translator.translate(
+                controlOp: "group_relay_register",
+                controlPayload: #"{"group_id":"g2","members":["alice","","bob"]}"#,
+                recipientId: "alice"
+            ))
+            XCTAssertEqual(withEmpty.dropFirst().map { $0["username"] as? String ?? "" }, ["bob"])
+        }
+    }
+
+    /// The address is resolved per call, never captured at construction:
+    /// the translator outlives MLS init and identity rebuilds.
+    func testAddressIsResolvedPerCallNotCachedAtConstruction() {
+        var current: String? = nil
+        let translator = RelayControlOpTranslator(selfId: "alice", selfAddress: { current })
+
+        // Pre-identity: the address is unknown, so it cannot be stripped.
+        let before = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["\#(Self.selfAddr)","\#(Self.peerAddr)"]}"#,
+            recipientId: "alice"
+        ))
+        XCTAssertEqual(before.count, 3, "unknown address cannot be filtered out")
+
+        // MLS init lands: the very next translation must see it.
+        current = Self.selfAddr
+        let after = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g2","members":["\#(Self.selfAddr)","\#(Self.peerAddr)"]}"#,
+            recipientId: "alice"
+        ))
+        XCTAssertEqual(after.dropFirst().map { $0["username"] as? String ?? "" }, [Self.peerAddr])
     }
 
     func testServerPlaneFirewallBlocksRelayAnswerPrefixesOnly() {
