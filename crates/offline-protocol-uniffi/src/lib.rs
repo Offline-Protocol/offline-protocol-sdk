@@ -3605,26 +3605,63 @@ impl OfflineProtocol {
     /// recorded on the reassembled message so the protocol layer can tell the
     /// peer that handed us a frame from the peer that wrote it — the same at
     /// the first hop, different for anything forwarded.
+    /// # Lock discipline
+    ///
+    /// The ingest and the drain take `inner` **separately**, and this is
+    /// load-bearing rather than stylistic. Holding one guard across the whole
+    /// drain pinned the global protocol mutex for the entire cost of every
+    /// queued message — MLS decrypt, secure-storage callbacks (on iOS a
+    /// Keychain round trip per key, executed synchronously on whatever thread
+    /// called in), delivery ACKs and any key-package push the message
+    /// triggers. Every other FFI caller blocked for that whole span, which on
+    /// iOS meant multi-second main-thread App Hangs (OFF-2123).
+    ///
+    /// Releasing between messages is safe because nothing here is atomic
+    /// across iterations: `receive_message` pops one message from a shared
+    /// FIFO under its own lock, and interleaving with another caller's drain
+    /// or send is already the norm — every other FFI method locks
+    /// independently.
+    ///
+    /// Note what does and does not protect this. Wrapping `drain_one_received`
+    /// in an outer guard deadlocks immediately — `std::sync::Mutex` is not
+    /// reentrant — but reverting to the original shape (holding the ingest
+    /// guard and calling `protocol.receive_message()` on it directly) compiles
+    /// and runs fine while silently restoring the stall. There is no
+    /// type-level guard against that; it is why the drain lives behind a
+    /// helper that takes `&self` rather than a guard.
     pub fn ble_fragment_received(
         &self,
         sender_id: String,
         fragment: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        let mut protocol = self.lock_inner()?;
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::BLE)
         {
-            transport_arc
-                .on_fragment_received_from(fragment, sender_id)
-                .map_err(|e| {
-                    ProtocolError::TransportError(format!("Fragment processing failed: {}", e))
-                })?;
+            let protocol = self.lock_inner()?;
+            if let Some(transport_arc) = protocol
+                .transport_manager()
+                .get_transport(CoreTransportType::BLE)
+            {
+                transport_arc
+                    .on_fragment_received_from(fragment, sender_id)
+                    .map_err(|e| {
+                        ProtocolError::TransportError(format!("Fragment processing failed: {}", e))
+                    })?;
+            }
         }
 
-        while protocol.receive_message().is_some() {}
+        while self.drain_one_received()? {}
 
         Ok(())
+    }
+
+    /// Processes at most one queued inbound message, acquiring `inner` for the
+    /// call and releasing it on return. Returns whether a message was drained.
+    ///
+    /// The return value is discarded on purpose: app delivery happens through
+    /// the `MessageReceived` event emitted inside `receive_message`, not
+    /// through this path.
+    fn drain_one_received(&self) -> Result<bool, ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        Ok(protocol.receive_message().is_some())
     }
 
     /// BLE: Get next fragment to send
@@ -6473,6 +6510,54 @@ mod tests {
             let ptr = handle.join().unwrap();
             assert_eq!(ptr, first_ptr);
         }
+    }
+
+    /// Regression cover for the OFF-2123 lock discipline: the inbound BLE path
+    /// must not pin the global protocol mutex across its whole drain.
+    ///
+    /// LIMITATION, stated plainly so nobody reads more into a green run than
+    /// is there: this catches a *permanent* hold — a deadlock or a re-entrancy
+    /// mistake — and nothing finer. There is no hook to make the drain slow
+    /// deterministically from here, so it would NOT fail if someone reverted
+    /// `ble_fragment_received` to holding one guard across the whole drain,
+    /// which is the exact regression that matters. Review is the guard against
+    /// that; this test only pins that the two locks never deadlock each other.
+    #[test]
+    fn test_ble_fragment_received_does_not_pin_the_protocol_lock() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+        let protocol = Arc::new(OfflineProtocol::new(create_test_config()).unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let acquisitions = Arc::new(AtomicU32::new(0));
+
+        // Contends for `inner` for as long as the drains run, through a method
+        // that takes exactly the lock under test.
+        let contender = {
+            let protocol = Arc::clone(&protocol);
+            let stop = Arc::clone(&stop);
+            let acquisitions = Arc::clone(&acquisitions);
+            thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = protocol.is_mls_initialized();
+                    acquisitions.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+
+        // The return value is deliberately ignored: whether these bytes form a
+        // valid fragment is irrelevant here, and asserting on it would couple
+        // this test to the reassembler. What is under test is that the call
+        // returns at all while another thread is contending for the lock.
+        for i in 0..64 {
+            let _ = protocol.ble_fragment_received(format!("peer{i}"), vec![0xAA, 0xBB, 0xCC]);
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        contender.join().unwrap();
+        assert!(
+            acquisitions.load(Ordering::Relaxed) > 0,
+            "the contending thread never acquired the protocol lock"
+        );
     }
 
     #[test]

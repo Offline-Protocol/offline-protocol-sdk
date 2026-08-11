@@ -1291,7 +1291,13 @@ public class BleManager: NSObject, TransportManager {
         }
     }
 
+    /// The three-UniFFI-call body of `updateSignedIdentity`. Split out only so
+    /// the refresh-in-flight bookkeeping stays readable; it must never be
+    /// called directly from the main queue.
     private func computeSignedIdentity() {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(.main))
+        #endif
         do {
             guard protocolInstance.isMlsInitialized() else {
                 print("[BleManager] MLS not initialized, cannot create signed identity")
