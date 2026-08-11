@@ -208,9 +208,9 @@ public class BleManager: NSObject, TransportManager {
             guard let self = self else { return }
             if reason == .expired {
                 if self.logThrottler.shouldLog(key: "fragments_expired_\(recipientId)", interval: 10) {
-                    print("[BleManager] ⚠️ Removed expired outbound fragments for \(recipientId)")
+                    print("[BleManager] ⚠️ Removed \(count) expired outbound fragments for \(recipientId)")
                     self.emitDiagnostic("warning", "Outbound fragments expired",
-                                        context: ["recipientId": recipientId])
+                                        context: ["recipientId": recipientId, "dropped": count])
                 }
             } else {
                 self.emitDiagnostic("warning", "Pending outbound fragment queue capped, dropping oldest",

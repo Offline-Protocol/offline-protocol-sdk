@@ -150,7 +150,8 @@ final class OutboundFragmentQueue: @unchecked Sendable {
     /// retries it) and iteration for that recipient stops — but other
     /// recipients continue to drain.
     ///
-    /// Expiry is per-fragment, not per-message: these are opaque fragment
+    /// Expiry is per-fragment, not per-message, and is reported through
+    /// `onDropped` whenever anything expires — these are opaque fragment
     /// bytes from the Rust fragmenter with no message grouping at this layer,
     /// so on a stall longer than `timeout` the early fragments of a
     /// multi-fragment message can be dropped while later ones survive, tearing
@@ -178,7 +179,10 @@ final class OutboundFragmentQueue: @unchecked Sendable {
 
             let beforeExpiry = queue.count
             queue.removeAll { now.timeIntervalSince($0.timestamp) >= timeout }
-            let wholeQueueExpired = queue.isEmpty && beforeExpiry > 0
+            // Reported whenever anything expired, not only when the whole queue
+            // did. A partial expiry is the case that actually tears a message
+            // (see the note above), so it is the one worth seeing in telemetry.
+            let expired = beforeExpiry - queue.count
 
             var sentAll = true
             while let first = queue.first {
@@ -201,8 +205,8 @@ final class OutboundFragmentQueue: @unchecked Sendable {
                 }
             }
 
-            if wholeQueueExpired {
-                onDropped(recipientId, .expired, beforeExpiry)
+            if expired > 0 {
+                onDropped(recipientId, .expired, expired)
             }
         }
 

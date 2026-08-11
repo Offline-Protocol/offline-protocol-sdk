@@ -120,9 +120,18 @@ final class OutboundFragmentQueueTests: XCTestCase {
         }
     }
 
+    /// A partial expiry is the case that actually tears a message — the early
+    /// fragments go, the later ones ship — so it must be reported, not just the
+    /// whole-queue case. Reporting only the latter is what made this class of
+    /// drop invisible in telemetry.
     func testFlushSendsSurvivorsWhenOnlySomeFragmentsExpired() {
         var now = Date(timeIntervalSince1970: 0)
-        let queue = OutboundFragmentQueue(timeout: 30, clock: { now })
+        var dropped: [(String, OutboundFragmentQueue.DropReason, Int)] = []
+        let queue = OutboundFragmentQueue(
+            timeout: 30,
+            clock: { now },
+            onDropped: { dropped.append(($0, $1, $2)) }
+        )
         queue.enqueue("bob", bytes(1))
         now = now.addingTimeInterval(20)
         queue.enqueue("bob", bytes(2))
@@ -131,6 +140,23 @@ final class OutboundFragmentQueueTests: XCTestCase {
         let sender = Sender()
         XCTAssertFalse(queue.flush(send: sender.send))
         XCTAssertEqual(sender.sent.map(\.1), [bytes(2)])
+
+        // The expired count is what was dropped, not the queue depth.
+        XCTAssertEqual(dropped.count, 1)
+        XCTAssertEqual(dropped.first?.2, 1)
+        if case .expired = dropped.first?.1 {} else {
+            XCTFail("expected .expired, got \(String(describing: dropped.first?.1))")
+        }
+    }
+
+    func testFlushReportsNothingWhenNothingExpired() {
+        var dropped: [(String, OutboundFragmentQueue.DropReason, Int)] = []
+        let queue = OutboundFragmentQueue(onDropped: { dropped.append(($0, $1, $2)) })
+        queue.enqueue("bob", bytes(1))
+
+        let sender = Sender()
+        XCTAssertFalse(queue.flush(send: sender.send))
+        XCTAssertTrue(dropped.isEmpty)
     }
 
     // MARK: - Overflow
