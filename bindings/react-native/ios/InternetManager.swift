@@ -1533,7 +1533,7 @@ public class InternetManager: NSObject, TransportManager {
             // there instead.
             let username = json["username"] as? String
             // Capability tokens this relay deployment supports (e.g.
-            // "group_delivery_v2"). Older relays omit the field → empty.
+            // "group_delivery_v3"). Older relays omit the field → empty.
             let capabilities = json["capabilities"] as? [String] ?? []
             // Base64 challenge for the optional address declaration, present
             // only on relays advertising `address_routing_v1`.

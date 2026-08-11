@@ -424,10 +424,13 @@ pub struct GroupConfig {
     /// **Default `true`, and additionally gated on the relay's advertised
     /// capabilities.** The flag alone does not select the broadcast: the
     /// path is taken only when the connected relay also advertised the
-    /// `group_delivery_v2` capability in its `Authenticated` answer. Against
+    /// `group_delivery_v3` capability in its `Authenticated` answer (v3 =
+    /// the v2 settled-report contract plus an address-aware group path —
+    /// members named in the identifier space the roster was registered in,
+    /// so the report is comparable against the MLS roster). Against
     /// such a relay the broadcast keeps a delivery contract — the relay
     /// answers every broadcast with a *settled* per-recipient delivery
-    /// report (`GroupMessageSent` v2) naming who took the message over a
+    /// report (`GroupMessageSent`) naming who took the message over a
     /// socket and who took a device push, and the SDK re-sends a per-member
     /// copy through the ordinary outbox/ACK/park ladder to every MLS roster
     /// member the report does not account for. A lost report re-sends the
@@ -975,9 +978,9 @@ impl ProtocolConfigBuilder {
     /// Sets whether relay-synced groups may send via a single relay broadcast
     /// instead of per-member fan-out. See
     /// [`GroupConfig::relay_broadcast_enabled`] — on by default, but only
-    /// ever taken against a relay that advertised the `group_delivery_v2`
-    /// capability, whose settled delivery report gives the broadcast a
-    /// per-recipient delivery contract.
+    /// ever taken against a relay that advertised the `group_delivery_v3`
+    /// capability, whose settled, address-space delivery report gives the
+    /// broadcast a per-recipient delivery contract.
     pub fn group_relay_broadcast_enabled(mut self, enabled: bool) -> Self {
         self.config.group.relay_broadcast_enabled = enabled;
         self
@@ -1279,8 +1282,9 @@ mod tests {
         // on because invite links resolve against the relay group registry.
         // The broadcast default is safe because the flag alone never selects
         // the path: it is additionally gated on the relay advertising the
-        // `group_delivery_v2` capability, whose settled delivery report is
-        // what gives the broadcast a per-recipient delivery contract.
+        // `group_delivery_v3` capability, whose settled, address-space
+        // delivery report is what gives the broadcast a per-recipient
+        // delivery contract.
         assert!(group.relay_enabled);
         assert!(group.relay_broadcast_enabled);
         // Commit enforcement must stay OFF by default. On, a member whose

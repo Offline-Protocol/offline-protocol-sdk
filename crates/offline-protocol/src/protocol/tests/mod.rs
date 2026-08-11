@@ -27695,7 +27695,7 @@ fn test_group_send_takes_broadcast_path_only_when_relay_synced() {
     config.encryption.enabled = true;
     // `relay_synced` is necessary but not sufficient — the broadcast also
     // requires the config flag (on by default) and the relay's
-    // `group_delivery_v2` capability. This test pins the sync half of the
+    // `group_delivery_v3` capability. This test pins the sync half of the
     // gate, so it satisfies the other two explicitly.
     config.group.relay_broadcast_enabled = true;
 
@@ -27714,7 +27714,7 @@ fn test_group_send_takes_broadcast_path_only_when_relay_synced() {
     let group_info = protocol.create_group("relay-bcast-group").unwrap();
     let group_id = group_info.group_id.as_str().to_string();
     protocol.set_relay_capabilities(vec![
-        crate::group_mesh::RELAY_CAP_GROUP_DELIVERY_V2.to_string()
+        crate::group_mesh::RELAY_CAP_GROUP_DELIVERY_V3.to_string()
     ]);
 
     // Unsynced: the broadcast frame must not be emitted (a prefix-unaware

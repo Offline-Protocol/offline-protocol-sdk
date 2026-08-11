@@ -2041,7 +2041,7 @@ pub struct ProtocolConfig {
     pub group_relay_enabled: bool,
     /// Whether a relay-synced group may send one O(1) relay broadcast instead
     /// of per-member fan-out (default on, additionally gated on the relay's
-    /// `group_delivery_v2` capability). See the UDL dictionary and
+    /// `group_delivery_v3` capability). See the UDL dictionary and
     /// `GroupConfig::relay_broadcast_enabled` for why the default is safe.
     pub group_relay_broadcast_enabled: bool,
     /// Whether an unauthorized MLS membership commit is refused rather than
@@ -3944,7 +3944,7 @@ impl OfflineProtocol {
     }
 
     /// Internet: capability tokens from the relay's `Authenticated` answer
-    /// (e.g. `group_delivery_v2`).
+    /// (e.g. `group_delivery_v3`).
     ///
     /// The bridge MUST call this before `internet_status_changed(true)` on
     /// each (re)connect — the false→true flush has to see the capabilities,
