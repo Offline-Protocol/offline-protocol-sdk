@@ -72,7 +72,7 @@ class LeAdvertiserTest {
     private val seen = mutableListOf<String>()
     private val host = FakeHost(gattReady = true)
     private val advertiser = LeAdvertiser(
-        mainHandler = Handler(Looper.getMainLooper()),
+        bleHandler = Handler(Looper.getMainLooper()),
         host = host,
         diagnosticEmitter = { _, message, _ -> seen.add(message) },
     )

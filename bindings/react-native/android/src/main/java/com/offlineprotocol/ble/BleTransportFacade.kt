@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.BatteryManager
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
@@ -28,6 +29,7 @@ import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ThreadLocalRandom
+import java.util.concurrent.TimeUnit
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -186,10 +188,14 @@ class BleTransportFacade(
         private const val MAX_FRAGMENT_SIZE = 185
         /**
          * Hard cap on the number of fragments [drainAndSendFragments] will
-         * pull from the Rust side in one main-thread tick. Above this we
-         * yield via `mainHandler.post` and resume on the next loop iteration
-         * so a backlog burst cannot starve other main-thread work and
-         * trigger an ANR.
+         * pull from the Rust side in one tick. Above this we yield via
+         * `bleHandler.post` and resume on the next loop iteration so a backlog
+         * burst cannot monopolise the BLE looper.
+         *
+         * This used to be an ANR guard, back when the drain ran on the app's
+         * main thread. It is not any more — see [bleLooper] — but the yield is
+         * still what keeps a burst from starving the scan, advertising and
+         * connection-monitor work that shares this looper.
          */
         private const val MAX_DRAIN_ITERATIONS_PER_CALL = 32
         private const val BACKPRESSURE_RETRY_MS = 50L
@@ -333,6 +339,51 @@ class BleTransportFacade(
          */
         private const val MAX_IDENTITY_REFRESH_ATTEMPTS = 30
 
+        /**
+         * The single looper every BLE operation runs on.
+         *
+         * This used to be the app's main looper, and nothing here ever needed
+         * it to be: the whole `ble/` package touches no UI — no View, no
+         * Toast, no Activity — and used main purely as a "one thread, ordered
+         * posts" primitive. What that cost is the reason OFF-2123 exists.
+         * Every fragment drain calls into UniFFI, which serialises on one
+         * global protocol mutex held across MLS work and AndroidKeyStore-backed
+         * storage callbacks; on main, waiting for that mutex is charged to the
+         * thread Android watches for ANRs. Moving to a private looper keeps the
+         * serialization the design depends on and takes the app's
+         * responsiveness out of its blast radius.
+         *
+         * This is also what the platform actually recommends: Android's BLE
+         * APIs do not require the main thread, and the canonical guidance is a
+         * dedicated handler plus a command queue — which is precisely the shape
+         * this facade already had, aimed at the wrong thread.
+         *
+         * Process-wide and never quit, deliberately. The main looper it
+         * replaces was never quit either, so this preserves the old contract
+         * exactly: no teardown path can strand a pending post on a dead looper,
+         * and a facade rebuilt after `stop()` inherits the same ordered queue
+         * rather than racing a fresh one. One idle thread is the entire cost.
+         */
+        private val bleThread: HandlerThread by lazy {
+            HandlerThread("offline-ble").apply { start() }
+        }
+
+        /**
+         * How long a main-thread caller will wait for the BLE thread before
+         * giving up on it. Far below the 5s input-dispatch ANR budget, and far
+         * above a healthy queue turnaround — see [runOnBleThreadSync].
+         */
+        private const val MAIN_THREAD_SYNC_TIMEOUT_MS = 1_000L
+
+        internal val bleLooper: Looper get() = bleThread.looper
+
+        /** Runtime guard for the collaborators that share [bleLooper]. */
+        internal fun assertOnBleLooper(reason: String) {
+            check(Looper.myLooper() == bleLooper) {
+                "$reason must run on the BLE thread (was ${Thread.currentThread().name})"
+            }
+        }
+
         private fun uuidToLittleEndianBytes(uuid: UUID): ByteArray {
             val hexUuid = uuid.toString().uppercase().replace("-", "")
             val bigEndianBytes = hexUuid.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
@@ -349,7 +400,7 @@ class BleTransportFacade(
     // Scanner components
     private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var scanCallback: ScanCallback? = null
-    // Main-thread only today: every reader and writer runs on mainHandler,
+    // Main-thread only today: every reader and writer runs on bleHandler,
     // onScanFailed included — it reposts before touching this. @Volatile is
     // kept deliberately rather than as a live requirement; this flag has been
     // written from a binder thread before, and a volatile read on a field
@@ -367,11 +418,11 @@ class BleTransportFacade(
     private var reportedBleAvailable: Boolean? = null
     
     // Advertiser component (delegates to LeAdvertiser).
-    // Lazy so its construction sees mainHandler / logThrottler / peripheralGattServer
+    // Lazy so its construction sees bleHandler / logThrottler / peripheralGattServer
     // which are declared later in this file.
     private val leAdvertiser: LeAdvertiser by lazy(LazyThreadSafetyMode.NONE) {
         LeAdvertiser(
-            mainHandler = mainHandler,
+            bleHandler = bleHandler,
             host = object : LeAdvertiser.Host {
                 override fun isGattServerReady(): Boolean = peripheralGattServer?.isReady == true
                 override fun buildAdvertiseData() = this@BleTransportFacade.buildAdvertiseData()
@@ -385,13 +436,13 @@ class BleTransportFacade(
     }
 
     // Central-role GATT client callback + per-address handshake state.
-    // Lazy so construction sees mainHandler / connections / pendingInbound /
+    // Lazy so construction sees bleHandler / connections / pendingInbound /
     // meshController, all declared lower in this file. The Host
     // implementation below is the narrow, explicit re-entry surface the
     // client uses to call back into the facade.
     private val centralClient: CentralGattClient by lazy(LazyThreadSafetyMode.NONE) {
         CentralGattClient(
-            mainHandler = mainHandler,
+            bleHandler = bleHandler,
             serviceUuid = SERVICE_UUID,
             messageCharUuid = MESSAGE_CHAR_UUID,
             deviceIdCharUuid = DEVICE_ID_CHAR_UUID,
@@ -436,13 +487,13 @@ class BleTransportFacade(
 
                 override fun onPeerMtuNegotiated(address: String, maxPayload: Int) {
                     // Called from the binder GATT callback thread. Repost
-                    // to main so we can touch [peerMaxPayloads] and the
+                    // to the BLE thread so we can touch [peerMaxPayloads] and the
                     // connection registry without racing the handshake
                     // state machine, and so any UniFFI call made from the
-                    // already-resolved branch below lands on main.
-                    mainHandler.post {
+                    // already-resolved branch below lands on the BLE thread.
+                    bleHandler.post {
                         if (shuttingDown) return@post
-                        assertMainThread("onPeerMtuNegotiated.stage")
+                        assertOnBleThread("onPeerMtuNegotiated.stage")
                         // Re-check after the main-hop: by the time we
                         // run, teardown may have completed (disconnect,
                         // give-up, stop) and removed the gatt client
@@ -471,14 +522,14 @@ class BleTransportFacade(
                 }
 
                 override fun onDeviceIdResolved(address: String, deviceId: String) {
-                    // Already on main — handleDeviceIdRead runs on the
-                    // main thread, so no hop is needed.
+                    // Already on the BLE thread — handleDeviceIdRead runs on the
+                    // BLE thread, so no hop is needed.
                     if (shuttingDown) return
                     flushPeerMtu(address, deviceId)
                 }
 
                 override fun onPeerGivenUp(address: String, peerId: String) {
-                    // Called on main from finalizeGivenUpPeer, which has
+                    // Called on the BLE thread from finalizeGivenUpPeer, which has
                     // already invoked `protocol.blePeerLost(peerId)` —
                     // that drops the Rust-side per-peer MTU entry inside
                     // `on_peer_lost`. All that remains is the facade-side
@@ -509,7 +560,7 @@ class BleTransportFacade(
     
     // Cached signed identity data for serving via GATT
     // Read by provideIdentityBytes() on the binder thread; written by
-    // updateSignedIdentity() on main / binder. @Volatile so the latest
+    // updateSignedIdentity() on the BLE thread / binder. @Volatile so the latest
     // reference is visible to binder-thread readers.
     @Volatile
     private var cachedSignedIdentity: com.offlineprotocol.mesh.SignedIdentityData? = null
@@ -517,7 +568,7 @@ class BleTransportFacade(
     // This device's derived address (`off1…`) — what DEVICE_ID serves.
     // Same threading contract as [cachedSignedIdentity]: read by
     // provideDeviceIdBytes() on the binder thread, written by
-    // updateSignedIdentity() on main. @Volatile so binder-thread readers see
+    // updateSignedIdentity() on the BLE thread. @Volatile so binder-thread readers see
     // the latest value. Null until MLS is initialized, which is what makes
     // the peripheral fail closed rather than advertise an unprovable id.
     @Volatile
@@ -548,7 +599,7 @@ class BleTransportFacade(
     // is min(this, the peripheral-link payload below) — see [flushPeerMtu].
     // Entries persist until link teardown (they are inputs to the min, not
     // one-shot), and are cleared in [dropStagedPeerMtu] / on stop. Main-thread
-    // only — every access is guarded by [assertMainThread], and the type is a
+    // only — every access is guarded by [assertOnBleThread], and the type is a
     // plain `HashMap` to make the discipline visible.
     private val peerMaxPayloads = HashMap<String, Int>()
     // Per-address negotiated ATT payload for the PERIPHERAL/NOTIFY link — the
@@ -577,7 +628,7 @@ class BleTransportFacade(
     @Volatile private var lastDiscoveryAt: Long = 0L
 
     // Barrier that gates binder-thread GATT callbacks from mutating shared
-    // state during teardown. Raised synchronously on the main thread at the
+    // state during teardown. Raised synchronously on the BLE thread at the
     // top of [stopUnsafe] before any `clear()` call, and left raised until
     // a subsequent [startUnsafe] explicitly lowers it. Callbacks on other
     // threads read this via [CentralGattClient.Host.isShuttingDown] before
@@ -599,13 +650,13 @@ class BleTransportFacade(
     // connection on both sides, even if the peer's advertised MAC rotates
     // outside of it.
     //
-    // All mutating access is main-thread only; the contract is enforced at
+    // All mutating access is BLE-thread only; the contract is enforced at
     // runtime inside [InboundFragmentBuffer] via the same pattern used by
     // [OutboundFragmentQueue]. Earlier revisions of this branch held an
     // explicit `synchronized(pendingFragmentsLock)` block around HashMap
-    // mutations, but every call site now runs on the main thread (binder
-    // callbacks post here via mainHandler), so a single-threaded dispatcher
-    // makes the lock unnecessary — the runtime main-thread check replaces it.
+    // mutations, but every call site now runs on the BLE thread (binder
+    // callbacks post here via bleHandler), so a single-threaded dispatcher
+    // makes the lock unnecessary — the runtime BLE-thread check replaces it.
     private val pendingInbound = InboundFragmentBuffer(
         onDropped = { address, reason, count ->
             when (reason) {
@@ -691,15 +742,16 @@ class BleTransportFacade(
     /** Connection monitor runnable for periodic reconnection attempts */
     private var connectionMonitorRunnable: Runnable? = null
     
-    // Fragment polling
-    private val mainHandler = Handler(Looper.getMainLooper())
+    // Fragment polling. Runs on the private BLE looper, not the app's main
+    // thread — see [bleLooper] for why.
+    private val bleHandler = Handler(bleLooper)
 
     /**
      * Capped backoff for the outbound drain's self-rearm. See
      * [BackpressureRetryPolicy] for why a flat repost was unsafe.
      */
     private val backpressureRetry = BackpressureRetryPolicy(
-        handler = mainHandler,
+        handler = bleHandler,
         task = Runnable {
             if (state == TransportState.RUNNING) {
                 drainAndSendFragments()
@@ -710,14 +762,43 @@ class BleTransportFacade(
         maxConsecutiveAttempts = MAX_BACKPRESSURE_RETRY_ATTEMPTS,
     )
 
-    private fun <T> runOnMainSync(action: () -> T): T {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
+    /**
+     * Run [action] on the BLE thread and wait for it.
+     *
+     * The wait is unbounded for every caller except the app's main thread, and
+     * that exception is load-bearing rather than defensive. The BLE thread can
+     * legitimately sit for seconds inside a UniFFI call waiting on the core
+     * protocol mutex; blocking main on it would rebuild the exact ANR this
+     * facade was moved off main to escape (OFF-2123), just through the
+     * lifecycle door instead of the fragment drain.
+     *
+     * No current caller reaches here on main — `start`/`stop`/`pause`/`resume`
+     * arrive on React Native's native-modules thread, and none of the
+     * `LifecycleEventListener` callbacks touch this transport — but which
+     * thread RN invokes `invalidate()` on is a framework detail that has
+     * already changed once. So the guarantee is enforced here rather than
+     * assumed at every call site.
+     *
+     * On expiry the work is not cancelled: it still runs on the BLE thread, we
+     * simply stop waiting for it. Every action routed through here
+     * (`startUnsafe`, `stopUnsafe`, `pauseUnsafe`, `resumeUnsafe`) is
+     * self-contained and idempotent, so completing late is safe; returning a
+     * default is what the caller must tolerate, and it is strictly better than
+     * an ANR.
+     */
+    /** The BLE thread did not answer a main-thread caller in time. */
+    internal class MainThreadSyncTimeout :
+        RuntimeException("BLE thread did not respond within ${MAIN_THREAD_SYNC_TIMEOUT_MS}ms")
+
+    private fun <T> runOnBleThreadSync(action: () -> T): T {
+        if (Looper.myLooper() == bleLooper) {
             return action()
         }
 
+        val onMainThread = Looper.myLooper() == Looper.getMainLooper()
         val latch = CountDownLatch(1)
         var outcome: Result<T>? = null
-        mainHandler.post {
+        bleHandler.post {
             outcome = try {
                 Result.success(action())
             } catch (t: Throwable) {
@@ -727,42 +808,54 @@ class BleTransportFacade(
         }
 
         try {
-            latch.await()
+            if (onMainThread) {
+                if (!latch.await(MAIN_THREAD_SYNC_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                    Log.w(
+                        TAG,
+                        "BLE thread did not answer a main-thread caller within " +
+                            "${MAIN_THREAD_SYNC_TIMEOUT_MS}ms; continuing without it",
+                    )
+                    emitDiagnostic(
+                        "warning",
+                        "BLE thread sync timed out on main",
+                        mapOf("timeoutMs" to MAIN_THREAD_SYNC_TIMEOUT_MS),
+                    )
+                    throw MainThreadSyncTimeout()
+                }
+            } else {
+                latch.await()
+            }
         } catch (ie: InterruptedException) {
             Thread.currentThread().interrupt()
-            throw RuntimeException("Interrupted while executing on main thread", ie)
+            throw RuntimeException("Interrupted while executing on BLE thread", ie)
         }
 
         return outcome!!.getOrThrow()
     }
 
-    // Async variant: runs inline when already on the main thread, otherwise
-    // posts. Used by BLE callbacks that must mutate main-thread-only state.
-    private fun runOnMain(action: () -> Unit) {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
+    // Async variant: runs inline when already on the BLE thread, otherwise
+    // posts. Used by BLE callbacks that must mutate BLE-thread-only state.
+    private fun runOnBleThread(action: () -> Unit) {
+        if (Looper.myLooper() == bleLooper) {
             action()
         } else {
-            mainHandler.post(action)
+            bleHandler.post(action)
         }
     }
 
     // Runtime contract check. Used at the top of every function that reads
-    // or mutates state with a documented "main thread only" invariant. The
+    // or mutates state with a documented "BLE thread only" invariant. The
     // invariants used to live only in comments and leaked multiple times on
     // this branch; promoting them to runtime checks makes the next drift
     // fail loud instead of silent. [reason] is included in the message so
     // crash reports can identify the offending call site.
-    private fun assertMainThread(reason: String) {
-        check(Looper.myLooper() == Looper.getMainLooper()) {
-            "$reason must run on the main thread (was ${Thread.currentThread().name})"
-        }
-    }
+    private fun assertOnBleThread(reason: String) = assertOnBleLooper(reason)
 
     private val fragmentPollingRunnable = object : Runnable {
         override fun run() {
             pollAndSendFragments()
             if (state == TransportState.RUNNING) {
-                mainHandler.postDelayed(this, FRAGMENT_POLL_INTERVAL_MS)
+                bleHandler.postDelayed(this, FRAGMENT_POLL_INTERVAL_MS)
             }
         }
     }
@@ -779,13 +872,13 @@ class BleTransportFacade(
             // sweep inside handleReceivedData.
             pendingInbound.evictExpired()
             if (state == TransportState.RUNNING) {
-                mainHandler.postDelayed(this, ROUTING_CLEANUP_INTERVAL_MS)
+                bleHandler.postDelayed(this, ROUTING_CLEANUP_INTERVAL_MS)
             }
         }
     }
     
     // Outbound fragment backpressure queue. All mutating calls must run on
-    // the main thread; the queue enforces this at runtime so the invariant
+    // the BLE thread; the queue enforces this at runtime so the invariant
     // cannot silently drift. `totalCount` / `recipientIds` / `recipientCount`
     // are safe from any thread and are used by off-thread diagnostic paths.
     private val outboundQueue = OutboundFragmentQueue(
@@ -834,7 +927,7 @@ class BleTransportFacade(
                 evaluateBleHealthAfterRestart()
                 return
             }
-            mainHandler.postDelayed(this, SCAN_WATCHDOG_HEARTBEAT_MS)
+            bleHandler.postDelayed(this, SCAN_WATCHDOG_HEARTBEAT_MS)
         }
     }
 
@@ -985,7 +1078,7 @@ class BleTransportFacade(
 
     private val bleRecoveryScheduler by lazy(LazyThreadSafetyMode.NONE) {
         BleRecoveryScheduler(
-            handler = mainHandler,
+            handler = bleHandler,
             task = bleRecoveryRunnable,
             minDelayMs = BLE_RECOVERY_RETRY_MIN_MS,
             maxDelayMs = BLE_RECOVERY_RETRY_MAX_MS,
@@ -1015,7 +1108,7 @@ class BleTransportFacade(
         scanRestartCount = 0
         
         // Force stop and restart everything
-        mainHandler.post {
+        bleHandler.post {
             if (state == TransportState.RUNNING) {
                 stopScanning("ble_reset")
                 stopAdvertising()
@@ -1025,7 +1118,7 @@ class BleTransportFacade(
                 leAdvertiser.attachAdvertiser(bluetoothAdapter?.bluetoothLeAdvertiser)
                 
                 // Restart after a brief delay
-                mainHandler.postDelayed({
+                bleHandler.postDelayed({
                     if (state == TransportState.RUNNING) {
                         startScanning("ble_reset")
                         startAdvertising("ble_reset")
@@ -1044,7 +1137,7 @@ class BleTransportFacade(
     // address and release it from [onWriteCompleted] (the onCharacteristicWrite
     // callback). The value is the elapsedRealtime() the write was issued, used
     // as a watchdog so a lost completion callback cannot wedge a peer forever.
-    // Main-thread only (every accessor runs under assertMainThread).
+    // Main-thread only (every accessor runs under assertOnBleThread).
     private val writeInFlight = HashMap<String, Long>()
 
     // MARK: - TransportManager Implementation
@@ -1094,7 +1187,7 @@ class BleTransportFacade(
     }
     
     override fun start() {
-        runOnMainSync {
+        runOnBleThreadSync {
             startUnsafe()
         }
     }
@@ -1176,10 +1269,10 @@ class BleTransportFacade(
             startScanning("start")
             
             // Start fragment polling
-            mainHandler.post(fragmentPollingRunnable)
+            bleHandler.post(fragmentPollingRunnable)
             
             // Start routing cleanup
-            mainHandler.postDelayed(routingCleanupRunnable, ROUTING_CLEANUP_INTERVAL_MS)
+            bleHandler.postDelayed(routingCleanupRunnable, ROUTING_CLEANUP_INTERVAL_MS)
             
             updateState(TransportState.RUNNING)
             if (isScanning) {
@@ -1212,12 +1305,12 @@ class BleTransportFacade(
     }
     
     override fun stop() {
-        runOnMainSync {
+        runOnBleThreadSync {
             stopUnsafe()
         }
     }
 
-    // Called via runOnMainSync from stop(), so this always executes on the main thread.
+    // Called via runOnBleThreadSync from stop(), so this always executes on the BLE thread.
     // removeCallbacks below guarantees no further polling/drain runnables will fire,
     // making the subsequent .clear() calls safe against concurrent access.
     private fun stopUnsafe() {
@@ -1232,11 +1325,11 @@ class BleTransportFacade(
         // state changes, CCCD writes) check this flag and early-return, so
         // anything arriving after this point cannot observe half-cleared
         // maps. The flag is @Volatile, which is sufficient because every
-        // reader is a callback that races with a single main-thread writer.
+        // reader is a callback that races with a single BLE-thread writer.
         shuttingDown = true
 
         // Stop fragment polling — must happen before clearing queues
-        mainHandler.removeCallbacks(fragmentPollingRunnable)
+        bleHandler.removeCallbacks(fragmentPollingRunnable)
 
         // Drop any pending backpressure re-drain and reset the ladder. This
         // instance is reused across a disable/enable cycle, so a stale rung
@@ -1245,7 +1338,7 @@ class BleTransportFacade(
         backpressureRetry.cancel()
 
         // Stop routing cleanup
-        mainHandler.removeCallbacks(routingCleanupRunnable)
+        bleHandler.removeCallbacks(routingCleanupRunnable)
 
         // Stop scanning
         stopScanning("stop")
@@ -1331,7 +1424,7 @@ class BleTransportFacade(
     }
     
     override fun pause() {
-        runOnMainSync {
+        runOnBleThreadSync {
             pauseUnsafe()
         }
     }
@@ -1339,12 +1432,12 @@ class BleTransportFacade(
     private fun pauseUnsafe() {
         // For Android background mode
         stopScanning("pause")
-        mainHandler.removeCallbacks(fragmentPollingRunnable)
-        mainHandler.removeCallbacks(routingCleanupRunnable)
+        bleHandler.removeCallbacks(fragmentPollingRunnable)
+        bleHandler.removeCallbacks(routingCleanupRunnable)
     }
     
     override fun resume() {
-        runOnMainSync {
+        runOnBleThreadSync {
             resumeUnsafe()
         }
     }
@@ -1353,8 +1446,8 @@ class BleTransportFacade(
         // Resume from background
         if (state == TransportState.RUNNING) {
             startScanning("resume")
-            mainHandler.post(fragmentPollingRunnable)
-            mainHandler.postDelayed(routingCleanupRunnable, ROUTING_CLEANUP_INTERVAL_MS)
+            bleHandler.post(fragmentPollingRunnable)
+            bleHandler.postDelayed(routingCleanupRunnable, ROUTING_CLEANUP_INTERVAL_MS)
         }
     }
     
@@ -1412,7 +1505,7 @@ class BleTransportFacade(
 
             val server = PeripheralGattServer(
                 context = context,
-                mainHandler = mainHandler,
+                bleHandler = bleHandler,
                 listener = gattServerListener,
                 diagnosticEmitter = { level, message, ctx ->
                     emitDiagnostic(level, message, ctx)
@@ -1456,7 +1549,7 @@ class BleTransportFacade(
     /**
      * Refresh [cachedSignedIdentity] by signing the current advertisement
      * data with the identity private key. Must only be called from threads
-     * that are allowed to block on UniFFI (main thread and advertisement
+     * that are allowed to block on UniFFI (BLE thread and advertisement
      * refresh callers); it must **never** be called from the GATT server's
      * binder callback thread, because each call potentially blocks on the
      * protocol mutex and stalls every pending GATT operation for the
@@ -1511,7 +1604,7 @@ class BleTransportFacade(
     /**
      * Ensure the identity cache is eventually primed even when the first
      * attempt failed (typically because MLS init hasn't landed yet).
-     * Schedules a single bounded-backoff retry on the main thread. Idempotent
+     * Schedules a single bounded-backoff retry on the BLE thread. Idempotent
      * — calling while a retry is already queued is a no-op.
      *
      * Bounded by [MAX_IDENTITY_REFRESH_ATTEMPTS]: once the budget is exhausted
@@ -1521,17 +1614,17 @@ class BleTransportFacade(
      * broken (e.g. corrupted keychain) and the GATT-server binder thread is
      * posting refresh requests on every central read.
      *
-     * Must be called from the main thread.
+     * Must be called from the BLE thread.
      */
     private fun ensureIdentityRefreshScheduled() {
-        assertMainThread("ensureIdentityRefreshScheduled")
+        assertOnBleThread("ensureIdentityRefreshScheduled")
         if (identityRefreshGivenUp) return
         if (identityRefreshRetryScheduled) return
         if (cachedSignedIdentity != null) return
         if (state != TransportState.RUNNING && state != TransportState.STARTING) return
         identityRefreshRetryScheduled = true
         val delay = identityRefreshRetryDelayMs
-        mainHandler.postDelayed({
+        bleHandler.postDelayed({
             identityRefreshRetryScheduled = false
             if (state != TransportState.RUNNING && state != TransportState.STARTING) return@postDelayed
             if (cachedSignedIdentity != null) return@postDelayed
@@ -1616,18 +1709,18 @@ class BleTransportFacade(
             
             scanCallback = object : ScanCallback() {
                 // Scan callbacks arrive on a private Binder thread. Repost
-                // every result to the main handler so handleScanResult —
+                // every result to the BLE handler so handleScanResult —
                 // which can synchronously reach updateSignedIdentity() via
                 // evictPeer → refreshAdvertising and which mutates
-                // LeAdvertiser state that is otherwise main-thread only —
+                // LeAdvertiser state that is otherwise BLE-thread only —
                 // never runs off-main. Matches the threading model used by
                 // the GATT server listener callbacks.
                 override fun onScanResult(callbackType: Int, result: ScanResult) {
-                    mainHandler.post { handleScanResult(result) }
+                    bleHandler.post { handleScanResult(result) }
                 }
 
                 override fun onBatchScanResults(results: List<ScanResult>) {
-                    mainHandler.post { results.forEach { handleScanResult(it) } }
+                    bleHandler.post { results.forEach { handleScanResult(it) } }
                 }
 
                 override fun onScanFailed(errorCode: Int) {
@@ -1641,10 +1734,10 @@ class BleTransportFacade(
                         SCAN_FAILED_FEATURE_UNSUPPORTED -> "Feature unsupported"
                         else -> "Unknown error $errorCode"
                     }
-                    // Repost to main so the state mutation and the runnable
+                    // Repost to the BLE thread so the state mutation and the runnable
                     // teardown match the threading contract the rest of the
                     // facade follows.
-                    mainHandler.post {
+                    bleHandler.post {
                         // Ignore a failure belonging to a callback we have
                         // already replaced or torn down — the scan we would
                         // stop is a newer, possibly healthy one, and a
@@ -1713,7 +1806,7 @@ class BleTransportFacade(
                 // [bleRecoveryRunnable] — none of the scan-health timers survive
                 // a failed start. Scoped to this one call so an
                 // IllegalStateException raised anywhere else in this function —
-                // a main-thread `check`, a throwing diagnostic emitter — still
+                // a BLE-thread `check`, a throwing diagnostic emitter — still
                 // fails loud instead of being reported as an adapter-off.
                 scanCallback = null
                 adapterWasOff = true
@@ -1860,11 +1953,11 @@ class BleTransportFacade(
     
     private fun scheduleScanWatchdog() {
         cancelScanWatchdog()
-        mainHandler.postDelayed(scanWatchdogRunnable, SCAN_WATCHDOG_HEARTBEAT_MS)
+        bleHandler.postDelayed(scanWatchdogRunnable, SCAN_WATCHDOG_HEARTBEAT_MS)
     }
     
     private fun cancelScanWatchdog() {
-        mainHandler.removeCallbacks(scanWatchdogRunnable)
+        bleHandler.removeCallbacks(scanWatchdogRunnable)
     }
 
     private fun scheduleBleRecovery() {
@@ -1952,15 +2045,15 @@ class BleTransportFacade(
                     }
                 }
                 
-                mainHandler.postDelayed(this, CONNECTION_MONITOR_INTERVAL_MS)
+                bleHandler.postDelayed(this, CONNECTION_MONITOR_INTERVAL_MS)
             }
         }
         
-        mainHandler.postDelayed(connectionMonitorRunnable!!, CONNECTION_MONITOR_INTERVAL_MS)
+        bleHandler.postDelayed(connectionMonitorRunnable!!, CONNECTION_MONITOR_INTERVAL_MS)
     }
     
     private fun cancelConnectionMonitor() {
-        connectionMonitorRunnable?.let { mainHandler.removeCallbacks(it) }
+        connectionMonitorRunnable?.let { bleHandler.removeCallbacks(it) }
         connectionMonitorRunnable = null
     }
     
@@ -2421,7 +2514,7 @@ class BleTransportFacade(
             // Stop and restart both scanning and advertising
             stopScanning("forced_refresh")
             refreshAdvertising("forced_refresh")
-            mainHandler.postDelayed({
+            bleHandler.postDelayed({
                 if (state == TransportState.RUNNING) {
                     startScanning("forced_refresh")
                 }
@@ -2572,12 +2665,12 @@ class BleTransportFacade(
      * the 185-byte fragment cap (via [computeEffectivePayload]) so a notify-
      * egressed message (an MLS Welcome) is never sized for the central link when
      * the notify link's own MTU was never observed. Idempotent and
-     * main-thread only. The per-address staged values are NOT removed on flush
+     * BLE-thread only. The per-address staged values are NOT removed on flush
      * (they are inputs to the min); link-teardown paths clear the dropped
      * direction's per-device slot explicitly.
      */
     private fun flushPeerMtu(address: String, deviceId: String) {
-        assertMainThread("flushPeerMtu")
+        assertOnBleThread("flushPeerMtu")
         // Promote this link's staged (per-address) payload into the per-DEVICE
         // direction slot. On asymmetric-address peers each flush sees only its own
         // link's address, so both directions accumulate across the two links'
@@ -2705,7 +2798,7 @@ class BleTransportFacade(
      * Main-thread only.
      */
     private fun dropStagedPeerMtu(address: String?, deviceId: String?) {
-        assertMainThread("dropStagedPeerMtu")
+        assertOnBleThread("dropStagedPeerMtu")
         if (address != null) {
             peerMaxPayloads.remove(address)
             peripheralMaxPayloads.remove(address)
@@ -2728,7 +2821,7 @@ class BleTransportFacade(
         }
         // Both total-count reads are AtomicInteger snapshots and therefore
         // safe from any thread even though the underlying per-peer buffers
-        // are main-thread only. refreshSelfMetrics is itself called from
+        // are BLE-thread only. refreshSelfMetrics is itself called from
         // main so this is belt-and-suspenders, but the AtomicInteger is what
         // lets the diagnostic assembly path stay lock-free.
         val pendingCount = pendingInbound.totalCount()
@@ -2764,28 +2857,28 @@ class BleTransportFacade(
     }
 
     private fun evictPeer(peerId: String, reason: String) {
-        // Run the entire eviction body on the main thread as one atomic step.
-        // The previous shape posted only `outboundQueue.removeAll` to main and
+        // Run the entire eviction body on the BLE thread as one atomic step.
+        // The previous shape posted only `outboundQueue.removeAll` to the BLE thread and
         // ran the connection bookkeeping inline; that left a window where
-        // `drainAndSendFragments` (which runs on main) could observe the
+        // `drainAndSendFragments` (which runs on the BLE thread) could observe the
         // already-removed GATT entry, fall through the `hasConnection == false`
         // branch, and enqueue fresh fragments to a peer that was about to have
         // its outbound queue cleared. Those fragments would orphan in the
         // queue until the per-peer cap or 30s expiry pruned them.
         //
         // Since the queue + linkReady + outboundQueue contracts are all
-        // main-thread-only anyway, doing the whole sequence on main is the
+        // BLE-thread-only anyway, doing the whole sequence on the BLE thread is the
         // simplest way to make eviction atomic against the drain pump. If
-        // we're already on main this runs inline; otherwise we block the
+        // we're already on the BLE thread this runs inline; otherwise we block the
         // caller's thread until main has processed the eviction. Eviction is
         // not on the hot path so the latch hop is acceptable.
-        runOnMainSync {
+        runOnBleThreadSync {
             val address = connections.addressForDevice(peerId)
             if (address == null) {
                 if (logThrottler.shouldLog("mesh_evict_missing_$peerId")) {
                     Log.w(TAG, "Cannot evict $peerId: no known address")
                 }
-                return@runOnMainSync
+                return@runOnBleThreadSync
             }
 
             if (logThrottler.shouldLog("mesh_evict_$peerId", intervalMs = 5000)) {
@@ -2831,24 +2924,24 @@ class BleTransportFacade(
     /**
      * Called by the Rust transport callback when new outgoing fragments are available.
      * This is the primary send path, replacing the 100ms polling loop.
-     * Posts to mainHandler to ensure all BLE operations run on the main thread.
+     * Posts to bleHandler to ensure all BLE operations run on the BLE thread.
      */
     fun onFragmentsAvailable() {
-        mainHandler.post { drainAndSendFragments() }
+        bleHandler.post { drainAndSendFragments() }
     }
 
     /**
      * Drains the Rust fragment queue and sends each fragment over BLE.
      * Stops when the queue is empty, all target peers are flow-controlled,
      * or [MAX_DRAIN_ITERATIONS_PER_CALL] is hit. In the cap-hit case the
-     * remaining work is rescheduled via [mainHandler] so we yield the main
+     * remaining work is rescheduled via [bleHandler] so we yield the main
      * thread between batches; without that, a Rust-side fragment burst can
-     * hold the main thread long enough to trigger ANR.
+     * hold the BLE thread long enough to trigger ANR.
      *
      * Called from onFragmentsAvailable() and from the fallback polling timer.
      */
     private fun drainAndSendFragments() {
-        assertMainThread("drainAndSendFragments")
+        assertOnBleThread("drainAndSendFragments")
         if (state != TransportState.RUNNING) return
 
         var hitIterationCap = false
@@ -2975,7 +3068,7 @@ class BleTransportFacade(
         if (hitIterationCap) {
             // Not backpressure — we simply had more than one tick's worth of
             // work. Yield the thread and resume immediately; no ladder.
-            mainHandler.post { drainAndSendFragments() }
+            bleHandler.post { drainAndSendFragments() }
         } else if (hitBackpressure && outboundQueue.totalCount() > 0) {
             if (!backpressureRetry.schedule() &&
                 logThrottler.shouldLog("backpressure_ceiling", intervalMs = 5000)
@@ -3012,7 +3105,7 @@ class BleTransportFacade(
      * ERROR_GATT_WRITE_REQUEST_BUSY (201), silently dropping fragments.
      */
     fun onWriteCompleted(address: String) {
-        assertMainThread("onWriteCompleted")
+        assertOnBleThread("onWriteCompleted")
         // Address-keyed, not per-write: a stale onCharacteristicWrite for an
         // earlier write that fires after the watchdog/stale-check already advanced
         // the gate to a newer write on the same address will clear the NEWER
@@ -3030,7 +3123,7 @@ class BleTransportFacade(
             // mid-burst, so a large multi-fragment Welcome never reassembles.
             // The brief spacing lets the peer keep up; small messages are
             // unaffected in practice.
-            mainHandler.postDelayed({
+            bleHandler.postDelayed({
                 if (state == TransportState.RUNNING) {
                     drainAndSendFragments()
                 }
@@ -3039,7 +3132,7 @@ class BleTransportFacade(
     }
 
     private fun pollAndSendFragments() {
-        assertMainThread("pollAndSendFragments")
+        assertOnBleThread("pollAndSendFragments")
         try {
             // The old logic would return early if there were unsent fragments, preventing new fragments
             // from being polled. This caused messages to get stuck when connections weren't ready.
@@ -3140,7 +3233,7 @@ class BleTransportFacade(
      * Main-thread only.
      */
     private fun sendViaNotify(recipientId: String, address: String, data: ByteArray): Boolean {
-        assertMainThread("sendViaNotify")
+        assertOnBleThread("sendViaNotify")
         val server = peripheralGattServer ?: return false
 
         // Serialise to one outstanding indication per peer (same gate as the
@@ -3188,7 +3281,7 @@ class BleTransportFacade(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val stamp = android.os.SystemClock.elapsedRealtime()
             writeInFlight[address] = stamp
-            mainHandler.postDelayed({
+            bleHandler.postDelayed({
                 if (writeInFlight[address] == stamp) {
                     writeInFlight.remove(address)
                     if (state == TransportState.RUNNING) {
@@ -3202,13 +3295,13 @@ class BleTransportFacade(
 
     private fun sendFragmentData(recipientId: String, data: ByteArray): Boolean {
         // Every call site (drainAndSendFragments, pollAndSendFragments, the
-        // OutboundFragmentQueue.flush callback) runs on main already, but
+        // OutboundFragmentQueue.flush callback) runs on the BLE thread already, but
         // the function calls into MeshController and issues
         // gatt.writeCharacteristic — which the Android BLE stack serialises
         // one op at a time per client. A future caller that forgets this
         // contract would interleave writes, so pin it to the runtime check
-        // that the rest of the facade's main-thread invariants already use.
-        assertMainThread("sendFragmentData")
+        // that the rest of the facade's BLE-thread invariants already use.
+        assertOnBleThread("sendFragmentData")
         // Find GATT client for recipient
         val address = resolveTargetAddress(recipientId)
         val gatt = address?.let { connections.getGatt(it) }
@@ -3405,7 +3498,7 @@ class BleTransportFacade(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val stamp = android.os.SystemClock.elapsedRealtime()
             writeInFlight[address] = stamp
-            mainHandler.postDelayed({
+            bleHandler.postDelayed({
                 // Only act if THIS write is still the outstanding one.
                 // onCharacteristicWrite or a newer write may have already moved
                 // the gate on; clearing it then would let the next write race an
@@ -3424,13 +3517,13 @@ class BleTransportFacade(
     private fun handleReceivedData(data: ByteArray, address: String) {
         try {
             if (shuttingDown) return
-            assertMainThread("handleReceivedData")
+            assertOnBleThread("handleReceivedData")
             // Decide queue-vs-direct: if the device ID isn't resolved yet, or
             // if earlier fragments for this address are still buffered waiting
             // on that resolution, we must buffer this fragment too to keep
             // FIFO order per peer. Both this helper and the
-            // [CentralGattClient] drain path run on the main thread (the
-            // binder callbacks above post here via mainHandler), so a
+            // [CentralGattClient] drain path run on the BLE thread (the
+            // binder callbacks above post here via bleHandler), so a
             // single-threaded decision is race-free — no lock is required.
             val resolvedSender = connections.deviceIdForAddress(address)
             val hasPendingForAddress = pendingInbound.hasPending(address)
@@ -3453,7 +3546,7 @@ class BleTransportFacade(
                     // Proactively attempt to resolve the device ID by initiating a client connection.
                     // We're already on a caller-controlled thread (usually a binder GATT callback);
                     // [connectToDevice] is safe to invoke from any thread, so there is no reason to
-                    // pay an extra main-handler hop here — the old `mainHandler.post` widened the
+                    // pay an extra main-handler hop here — the old `bleHandler.post` widened the
                     // queue-vs-drain race window above.
                     bluetoothAdapter?.let { adapter ->
                         try {
@@ -3489,7 +3582,7 @@ class BleTransportFacade(
                 }
 
                 // Clean up stale pending fragments across all peers while
-                // we're on the main thread; this is the same eviction sweep
+                // we're on the BLE thread; this is the same eviction sweep
                 // the routing cleanup ticker runs on its own cadence.
                 pendingInbound.evictExpired()
                 return
@@ -3776,7 +3869,7 @@ class BleTransportFacade(
     //
     // Bridges PeripheralGattServer callbacks into facade state. Callbacks
     // fire on the platform's binder thread; every handler that touches
-    // mutable transport state is reposted on [mainHandler] before running,
+    // mutable transport state is reposted on [bleHandler] before running,
     // matching the threading model used by start/stop/pause/resume.
     //
     // The `provide*` hooks stay on the binder thread by necessity — they
@@ -3785,7 +3878,7 @@ class BleTransportFacade(
     // that can block on the protocol mutex, because stalling a GATT binder
     // callback delays every pending operation for that central and risks
     // the system ANR watchdog. Producers (MLS init, advertisement rebuild)
-    // call [updateSignedIdentity] on the main thread to refresh the cache
+    // call [updateSignedIdentity] on the BLE thread to refresh the cache
     // *before* the read lands.
 
     private val gattServerListener = object : PeripheralGattServer.Listener {
@@ -3809,7 +3902,7 @@ class BleTransportFacade(
             // state. Without this the facade stays in RUNNING while the GATT
             // server is gone, scans keep firing, and every fragment write
             // fails silently.
-            mainHandler.post {
+            bleHandler.post {
                 if (state == TransportState.RUNNING || state == TransportState.STARTING) {
                     try {
                         stopUnsafe()
@@ -3822,7 +3915,7 @@ class BleTransportFacade(
 
         override fun onCentralConnected(device: BluetoothDevice) {
             if (shuttingDown) return
-            mainHandler.post {
+            bleHandler.post {
                 if (shuttingDown) return@post
                 handleCentralConnectedOnMain(device)
             }
@@ -3830,7 +3923,7 @@ class BleTransportFacade(
 
         override fun onCentralDisconnected(device: BluetoothDevice, status: Int) {
             if (shuttingDown) return
-            mainHandler.post {
+            bleHandler.post {
                 if (shuttingDown) return@post
                 handleCentralDisconnectedOnMain(device, status)
             }
@@ -3838,13 +3931,13 @@ class BleTransportFacade(
 
         override fun onPeripheralMtuNegotiated(device: BluetoothDevice, maxPayload: Int) {
             // Fired on the GATT-server binder thread when a central renegotiates
-            // the MTU on the link it opened to us. Repost to main to touch the
+            // the MTU on the link it opened to us. Repost to the BLE thread to touch the
             // staging maps and the connection registry without racing the
             // handshake state machine, mirroring onPeerMtuNegotiated.
             if (shuttingDown) return
-            mainHandler.post {
+            bleHandler.post {
                 if (shuttingDown) return@post
-                assertMainThread("onPeripheralMtuNegotiated.stage")
+                assertOnBleThread("onPeripheralMtuNegotiated.stage")
                 val address = device.address
                 peripheralMaxPayloads[address] = maxPayload
                 // Flush now if the peer's device id is already resolved (via our
@@ -3869,9 +3962,9 @@ class BleTransportFacade(
             // onDeviceIdResolved -> flushPeerMtu path applies the floor later (it
             // will see the subscription).
             if (shuttingDown) return
-            mainHandler.post {
+            bleHandler.post {
                 if (shuttingDown) return@post
-                assertMainThread("onCentralSubscribed.reflush")
+                assertOnBleThread("onCentralSubscribed.reflush")
                 val address = device.address
                 val deviceId = connections.deviceIdForAddress(address) ?: return@post
                 flushPeerMtu(address, deviceId)
@@ -3889,9 +3982,9 @@ class BleTransportFacade(
             // egress, until some later unrelated flush. Symmetric with
             // onCentralSubscribed.
             if (shuttingDown) return
-            mainHandler.post {
+            bleHandler.post {
                 if (shuttingDown) return@post
-                assertMainThread("onCentralUnsubscribed.reflush")
+                assertOnBleThread("onCentralUnsubscribed.reflush")
                 val address = device.address
                 val deviceId = connections.deviceIdForAddress(address) ?: return@post
                 flushPeerMtu(address, deviceId)
@@ -3910,7 +4003,7 @@ class BleTransportFacade(
                 ),
             )
             val address = device.address
-            mainHandler.post {
+            bleHandler.post {
                 if (shuttingDown) return@post
                 handleReceivedData(bytes, address)
             }
@@ -3928,7 +4021,7 @@ class BleTransportFacade(
             // (status 0 = GATT_SUCCESS). If "Replying via notify" appears but this
             // never does, the notify is stuck in the stack queue / not going OTA.
             Log.i(TAG, "Notification flushed to $address status=$status")
-            mainHandler.post {
+            bleHandler.post {
                 if (shuttingDown) return@post
                 onWriteCompleted(address)
             }
@@ -3948,7 +4041,7 @@ class BleTransportFacade(
             // retries on its next connection.
             val address = cachedLocalAddress
             if (address == null) {
-                mainHandler.post { ensureIdentityRefreshScheduled() }
+                bleHandler.post { ensureIdentityRefreshScheduled() }
                 return null
             }
             Log.d(TAG, "Sent device ID to ${device.address}")
@@ -3964,9 +4057,9 @@ class BleTransportFacade(
             val identity = cachedSignedIdentity?.encode()
             if (identity == null) {
                 // Cache isn't primed yet — arrange a bounded-backoff refresh
-                // on the main thread so the next central read eventually
+                // on the BLE thread so the next central read eventually
                 // succeeds instead of spinning forever on a permanent null.
-                mainHandler.post { ensureIdentityRefreshScheduled() }
+                bleHandler.post { ensureIdentityRefreshScheduled() }
                 return null
             }
             Log.d(TAG, "Sent signed identity to ${device.address}")

@@ -49,9 +49,9 @@ class OutboundFragmentQueueTest {
     ) {
         val clock = FakeClock()
         val drops = mutableListOf<DropEvent>()
-        val mainThreadInvocations = java.util.concurrent.atomic.AtomicInteger(0)
+        val bleThreadInvocations = java.util.concurrent.atomic.AtomicInteger(0)
         val queue = OutboundFragmentQueue(
-            mainThreadCheck = { mainThreadInvocations.incrementAndGet() },
+            bleThreadCheck = { bleThreadInvocations.incrementAndGet() },
             maxPerPeer = maxPerPeer,
             timeoutMs = timeoutMs,
             clock = clock,
@@ -274,7 +274,7 @@ class OutboundFragmentQueueTest {
         val h = Harness()
         h.queue.enqueue("alice", byteArrayOf(1))
         h.queue.enqueue("bob", byteArrayOf(2))
-        val mainCallsBefore = h.mainThreadInvocations.get()
+        val mainCallsBefore = h.bleThreadInvocations.get()
 
         assertEquals(2, h.queue.totalCount())
         assertEquals(2, h.queue.recipientCount())
@@ -284,17 +284,17 @@ class OutboundFragmentQueueTest {
         assertEquals(
             "off-thread reads must not call the main-thread guard",
             mainCallsBefore,
-            h.mainThreadInvocations.get(),
+            h.bleThreadInvocations.get(),
         )
     }
 
     @Test
     fun `main-thread guard is invoked on every mutating entry point`() {
-        // If a future refactor forgets to mainThreadCheck() in a mutating
+        // If a future refactor forgets to bleThreadCheck() in a mutating
         // method, this test fails. Cheap insurance for a load-bearing
         // invariant.
         val h = Harness()
-        val before = h.mainThreadInvocations.get()
+        val before = h.bleThreadInvocations.get()
 
         h.queue.enqueue("alice", byteArrayOf(1))
         h.queue.enqueueIfBlocked("alice", byteArrayOf(2))
@@ -304,7 +304,7 @@ class OutboundFragmentQueueTest {
         h.queue.removeAll("bob")
         h.queue.clear()
 
-        val delta = h.mainThreadInvocations.get() - before
+        val delta = h.bleThreadInvocations.get() - before
         // 7 direct calls above. enqueueIfBlocked internally calls hasPending
         // and enqueue, which trip the guard again (the invariant is that
         // *every* entry point asserts, so nested calls double-count and

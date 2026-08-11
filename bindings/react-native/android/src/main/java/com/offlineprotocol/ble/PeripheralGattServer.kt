@@ -96,7 +96,7 @@ internal fun classifyCccdWrite(value: ByteArray): CccdAction =
  */
 class PeripheralGattServer(
     private val context: Context,
-    private val mainHandler: Handler,
+    private val bleHandler: Handler,
     private val listener: Listener,
     private val diagnosticEmitter: (level: String, message: String, context: Map<String, Any?>) -> Unit =
         { _, _, _ -> }
@@ -173,7 +173,7 @@ class PeripheralGattServer(
     private val bluetoothManager: BluetoothManager =
         context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
 
-    // @Volatile because these references are mutated on the main thread
+    // @Volatile because these references are mutated on the BLE thread
     // (attemptSetup / handleSetupFailed / stop) but read on the GATT server's
     // binder thread in every callback. Without the visibility barrier a
     // binder callback can observe a stale non-null server during teardown and
@@ -218,7 +218,7 @@ class PeripheralGattServer(
      * rather than a reverse central write — and (b) apply the per-peer MTU floor
      * for a notify-subscribed peer whose notify-link MTU was never observed. A
      * [ConcurrentHashMap]-backed set: mutated here on the GATT-server binder thread
-     * (CCCD writes) and read on the main thread, so the cross-thread access is safe.
+     * (CCCD writes) and read on the BLE thread, so the cross-thread access is safe.
      * Keyed by address (not [BluetoothDevice]) so the contract matches
      * [MeshConnectionRegistry]'s stated "stable for the lifetime of a single LL
      * connection" guarantee instead of relying on [BluetoothDevice.equals]
@@ -242,9 +242,9 @@ class PeripheralGattServer(
     /**
      * Open the GATT server and register the mesh service. Idempotent: a
      * second call while already started tears down and re-attempts setup.
-     * Must be called from the main thread — the facade posts start/stop
-     * through its `runOnMainSync` helper and every callback we fire runs
-     * on the main handler, so the internal state machine assumes no
+     * Must be called from the BLE thread — the facade posts start/stop
+     * through its `runOnBleThreadSync` helper and every callback we fire runs
+     * on the BLE handler, so the internal state machine assumes no
      * concurrent entry.
      */
     fun start(
@@ -253,8 +253,8 @@ class PeripheralGattServer(
         deviceIdUuid: UUID,
         identityUuid: UUID,
     ) {
-        check(Looper.myLooper() == Looper.getMainLooper()) {
-            "PeripheralGattServer.start must be called on the main thread"
+        check(Looper.myLooper() == bleHandler.looper) {
+            "PeripheralGattServer.start must be called on the BLE thread"
         }
         stop()
         setupAttempts = 0
@@ -264,12 +264,12 @@ class PeripheralGattServer(
 
     /** Close the server and drop all cached state. Safe to call repeatedly. */
     fun stop() {
-        check(Looper.myLooper() == Looper.getMainLooper()) {
-            "PeripheralGattServer.stop must be called on the main thread"
+        check(Looper.myLooper() == bleHandler.looper) {
+            "PeripheralGattServer.stop must be called on the BLE thread"
         }
-        serviceReadyTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+        serviceReadyTimeoutRunnable?.let { bleHandler.removeCallbacks(it) }
         serviceReadyTimeoutRunnable = null
-        setupRetryRunnable?.let { mainHandler.removeCallbacks(it) }
+        setupRetryRunnable?.let { bleHandler.removeCallbacks(it) }
         setupRetryRunnable = null
         try {
             gattServer?.close()
@@ -293,7 +293,7 @@ class PeripheralGattServer(
     /** True if [address] is a central currently subscribed to the message
      *  characteristic via CCCD — i.e. we can push notifications to it over the
      *  connection it opened to our GATT server. [subscribedCentralAddresses] is
-     *  a concurrent set so this is safe to read from the main thread. */
+     *  a concurrent set so this is safe to read from the BLE thread. */
     fun isSubscribed(address: String): Boolean =
         subscribedCentralAddresses.contains(address)
 
@@ -430,7 +430,7 @@ class PeripheralGattServer(
     }
 
     private fun armServiceReadyTimeout() {
-        serviceReadyTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+        serviceReadyTimeoutRunnable?.let { bleHandler.removeCallbacks(it) }
         val runnable = Runnable {
             if (!isReady) {
                 Log.w(TAG, "GATT service ready timeout (attempt=$setupAttempts)")
@@ -443,13 +443,13 @@ class PeripheralGattServer(
             }
         }
         serviceReadyTimeoutRunnable = runnable
-        mainHandler.postDelayed(runnable, SERVICE_READY_TIMEOUT_MS)
+        bleHandler.postDelayed(runnable, SERVICE_READY_TIMEOUT_MS)
     }
 
     private fun handleSetupFailed(reason: String) {
-        serviceReadyTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+        serviceReadyTimeoutRunnable?.let { bleHandler.removeCallbacks(it) }
         serviceReadyTimeoutRunnable = null
-        setupRetryRunnable?.let { mainHandler.removeCallbacks(it) }
+        setupRetryRunnable?.let { bleHandler.removeCallbacks(it) }
         setupRetryRunnable = null
         try {
             gattServer?.close()
@@ -484,7 +484,7 @@ class PeripheralGattServer(
             }
         }
         setupRetryRunnable = retry
-        mainHandler.postDelayed(retry, RETRY_DELAY_MS)
+        bleHandler.postDelayed(retry, RETRY_DELAY_MS)
     }
 
     /**
@@ -529,7 +529,7 @@ class PeripheralGattServer(
                     mapOf("serviceUUID" to (service?.uuid?.toString() ?: "unknown")),
                 )
                 isReady = true
-                serviceReadyTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+                serviceReadyTimeoutRunnable?.let { bleHandler.removeCallbacks(it) }
                 serviceReadyTimeoutRunnable = null
                 setupAttempts = 0
                 listener.onReady()
@@ -588,7 +588,7 @@ class PeripheralGattServer(
         ) {
             val server = gattServer ?: return
             // Snapshot the nullable fields into locals so a concurrent
-            // teardown on the main thread can't flip them between the match
+            // teardown on the BLE thread can't flip them between the match
             // and the listener call. Comparing against the stored
             // characteristic's UUID (rather than `nullable?.uuid`) also
             // removes the footgun where a `null == null` branch could match
@@ -786,7 +786,7 @@ class PeripheralGattServer(
                             // central-link MTU flush, so signal the transport to
                             // re-flush and apply the notify floor for this peer. Fired
                             // synchronously on the binder thread (the listener reposts
-                            // to main), mirroring onPeripheralMtuNegotiated; it runs
+                            // to the BLE thread), mirroring onPeripheralMtuNegotiated; it runs
                             // before sendResponse below but only enqueues work, so it
                             // does not delay the CCCD ack.
                             listener.onCentralSubscribed(device)

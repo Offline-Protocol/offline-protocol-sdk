@@ -1,6 +1,5 @@
 package com.offlineprotocol.ble
 
-import android.os.Looper
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -12,11 +11,11 @@ import java.util.concurrent.atomic.AtomicInteger
  * Thread-safety contract: every mutating operation must run on the main
  * thread. The per-recipient [ArrayDeque] values are not thread-safe, and
  * even a `size` read computes `tail - head` over a backing array that the
- * main-thread writer may be resizing. The outer [ConcurrentHashMap] exists
+ * BLE-thread writer may be resizing. The outer [ConcurrentHashMap] exists
  * purely so off-thread callers can cheaply read [totalCount] and
  * [recipientIds] without blocking.
  *
- * The main-thread contract is enforced at runtime via [mainThreadCheck] —
+ * The BLE-thread contract is enforced at runtime via [bleThreadCheck] —
  * the invariant used to live in a comment block; it now fails fast on any
  * drift. Tests inject a no-op guard so the class can be exercised in plain
  * JVM unit tests.
@@ -33,7 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * lose messages that hadn't started delivery yet, but we never split one.
  */
 internal class OutboundFragmentQueue(
-    private val mainThreadCheck: () -> Unit = DEFAULT_MAIN_THREAD_CHECK,
+    private val bleThreadCheck: () -> Unit = DEFAULT_BLE_THREAD_CHECK,
     private val maxPerPeer: Int = DEFAULT_MAX_PER_PEER,
     private val timeoutMs: Long = DEFAULT_TIMEOUT_MS,
     private val clock: () -> Long = System::currentTimeMillis,
@@ -59,7 +58,7 @@ internal class OutboundFragmentQueue(
 
     /** True if [recipientId] has at least one fragment already waiting. */
     fun hasPending(recipientId: String): Boolean {
-        mainThreadCheck()
+        bleThreadCheck()
         return queues[recipientId]?.isNotEmpty() == true
     }
 
@@ -76,7 +75,7 @@ internal class OutboundFragmentQueue(
      * [flush] has drained the queue back below the mark.
      */
     fun isBackedUp(recipientId: String): Boolean {
-        mainThreadCheck()
+        bleThreadCheck()
         val size = queues[recipientId]?.size ?: 0
         return size >= maxPerPeer * 3 / 4
     }
@@ -89,7 +88,7 @@ internal class OutboundFragmentQueue(
      * appended to a fresh empty queue.
      */
     fun enqueue(recipientId: String, data: ByteArray) {
-        mainThreadCheck()
+        bleThreadCheck()
         val queue = queues.getOrPut(recipientId) { ArrayDeque() }
         if (queue.size >= maxPerPeer) {
             val dropped = queue.size
@@ -108,7 +107,7 @@ internal class OutboundFragmentQueue(
      * Otherwise return false so the caller can try the direct path.
      */
     fun enqueueIfBlocked(recipientId: String, data: ByteArray): Boolean {
-        mainThreadCheck()
+        bleThreadCheck()
         if (!hasPending(recipientId)) return false
         enqueue(recipientId, data)
         return true
@@ -120,7 +119,7 @@ internal class OutboundFragmentQueue(
      * dropped so callers can surface a diagnostic.
      */
     fun removeAll(recipientId: String): Int {
-        mainThreadCheck()
+        bleThreadCheck()
         val removed = queues.remove(recipientId) ?: return 0
         val count = removed.size
         if (count > 0) total.addAndGet(-count)
@@ -129,7 +128,7 @@ internal class OutboundFragmentQueue(
 
     /** Drop every queue. Used by transport stop. */
     fun clear() {
-        mainThreadCheck()
+        bleThreadCheck()
         queues.clear()
         total.set(0)
     }
@@ -146,7 +145,7 @@ internal class OutboundFragmentQueue(
      *   for diagnostics.
      */
     fun flush(send: (recipientId: String, data: ByteArray) -> Boolean): Boolean {
-        mainThreadCheck()
+        bleThreadCheck()
         var hasUnsent = false
         val now = clock()
 
@@ -204,10 +203,8 @@ internal class OutboundFragmentQueue(
         const val DEFAULT_MAX_PER_PEER: Int = 100
         const val DEFAULT_TIMEOUT_MS: Long = 30_000L
 
-        val DEFAULT_MAIN_THREAD_CHECK: () -> Unit = {
-            check(Looper.myLooper() == Looper.getMainLooper()) {
-                "OutboundFragmentQueue must only be touched on the main thread"
-            }
+        val DEFAULT_BLE_THREAD_CHECK: () -> Unit = {
+            BleTransportFacade.assertOnBleLooper("OutboundFragmentQueue")
         }
     }
 }

@@ -1,6 +1,5 @@
 package com.offlineprotocol.ble
 
-import android.os.Looper
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -13,10 +12,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * Thread-safety contract: every mutating operation must run on the main
  * thread. The per-address [ArrayDeque] values are not thread-safe, and the
- * invariant is enforced at runtime via [mainThreadCheck] — tests inject a
+ * invariant is enforced at runtime via [bleThreadCheck] — tests inject a
  * no-op guard so the class can be exercised in plain JVM unit tests. The
  * `totalCount` snapshot is an [AtomicInteger] so off-thread diagnostic paths
- * (e.g., `refreshSelfMetrics` running on the main thread but reading during
+ * (e.g., `refreshSelfMetrics` running on the BLE thread but reading during
  * a binder-thread callback's post-hop) remain safe.
  *
  * ### Overflow policy
@@ -39,7 +38,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * cannot evict its own buffer mid-enqueue.
  */
 internal class InboundFragmentBuffer(
-    private val mainThreadCheck: () -> Unit = DEFAULT_MAIN_THREAD_CHECK,
+    private val bleThreadCheck: () -> Unit = DEFAULT_BLE_THREAD_CHECK,
     private val maxPerPeer: Int = DEFAULT_MAX_PER_PEER,
     private val maxPeers: Int = DEFAULT_MAX_PEERS,
     private val timeoutMs: Long = DEFAULT_TIMEOUT_MS,
@@ -58,25 +57,25 @@ internal class InboundFragmentBuffer(
     /** Aggregate fragment count across all peers. Safe from any thread. */
     fun totalCount(): Int = total.get()
 
-    /** Number of peers with outstanding buffers. Main-thread only. */
+    /** Number of peers with outstanding buffers. BLE-thread only. */
     fun peerCount(): Int {
-        mainThreadCheck()
+        bleThreadCheck()
         return buffers.size
     }
 
     /**
-     * Snapshot of peer addresses with outstanding buffers. Main-thread only.
+     * Snapshot of peer addresses with outstanding buffers. BLE-thread only.
      * Used by the connection monitor to re-kick device-id resolution for
      * peers whose reverse read stalled.
      */
     fun pendingAddresses(): List<String> {
-        mainThreadCheck()
+        bleThreadCheck()
         return buffers.keys.toList()
     }
 
-    /** True if [address] has at least one buffered fragment. Main-thread only. */
+    /** True if [address] has at least one buffered fragment. BLE-thread only. */
     fun hasPending(address: String): Boolean {
-        mainThreadCheck()
+        bleThreadCheck()
         return buffers[address]?.isNotEmpty() == true
     }
 
@@ -89,7 +88,7 @@ internal class InboundFragmentBuffer(
      * the oldest-head peer (excluding [address]) is evicted.
      */
     fun enqueue(address: String, data: ByteArray) {
-        mainThreadCheck()
+        bleThreadCheck()
         val queue = buffers.getOrPut(address) { ArrayDeque() }
         if (queue.size >= maxPerPeer) {
             val dropped = queue.size
@@ -109,7 +108,7 @@ internal class InboundFragmentBuffer(
      * protocol.
      */
     fun drain(address: String): List<ByteArray> {
-        mainThreadCheck()
+        bleThreadCheck()
         val removed = buffers.remove(address) ?: return emptyList()
         val count = removed.size
         if (count > 0) total.addAndGet(-count)
@@ -122,7 +121,7 @@ internal class InboundFragmentBuffer(
      * Returns the count dropped so callers can surface a diagnostic.
      */
     fun removeAll(address: String): Int {
-        mainThreadCheck()
+        bleThreadCheck()
         val removed = buffers.remove(address) ?: return 0
         val count = removed.size
         if (count > 0) total.addAndGet(-count)
@@ -131,7 +130,7 @@ internal class InboundFragmentBuffer(
 
     /** Drop every buffer. Used by transport stop. */
     fun clear() {
-        mainThreadCheck()
+        bleThreadCheck()
         buffers.clear()
         total.set(0)
     }
@@ -156,7 +155,7 @@ internal class InboundFragmentBuffer(
      * documents.
      */
     fun evictExpired(): Int {
-        mainThreadCheck()
+        bleThreadCheck()
         val now = clock()
         var totalEvicted = 0
         val iter = buffers.entries.iterator()
@@ -220,10 +219,8 @@ internal class InboundFragmentBuffer(
         // per-peer / peer caps above.
         const val DEFAULT_TIMEOUT_MS: Long = 15_000L
 
-        val DEFAULT_MAIN_THREAD_CHECK: () -> Unit = {
-            check(Looper.myLooper() == Looper.getMainLooper()) {
-                "InboundFragmentBuffer must only be touched on the main thread"
-            }
+        val DEFAULT_BLE_THREAD_CHECK: () -> Unit = {
+            BleTransportFacade.assertOnBleLooper("InboundFragmentBuffer")
         }
     }
 }

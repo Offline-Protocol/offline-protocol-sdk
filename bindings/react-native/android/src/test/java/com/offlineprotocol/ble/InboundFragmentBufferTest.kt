@@ -51,9 +51,9 @@ class InboundFragmentBufferTest {
     ) {
         val clock = FakeClock()
         val drops = mutableListOf<DropEvent>()
-        val mainThreadInvocations = java.util.concurrent.atomic.AtomicInteger(0)
+        val bleThreadInvocations = java.util.concurrent.atomic.AtomicInteger(0)
         val buffer = InboundFragmentBuffer(
-            mainThreadCheck = { mainThreadInvocations.incrementAndGet() },
+            bleThreadCheck = { bleThreadInvocations.incrementAndGet() },
             maxPerPeer = maxPerPeer,
             maxPeers = maxPeers,
             timeoutMs = timeoutMs,
@@ -281,12 +281,12 @@ class InboundFragmentBufferTest {
     fun `totalCount is readable without invoking the main-thread guard`() {
         val h = Harness()
         h.buffer.enqueue("aa:00", byteArrayOf(1))
-        val enqueueInvocations = h.mainThreadInvocations.get()
+        val enqueueInvocations = h.bleThreadInvocations.get()
         // totalCount is an AtomicInteger snapshot — safe from any thread.
         // It must not call the guard or off-thread diagnostic paths would
         // crash under the default Looper check.
         h.buffer.totalCount()
-        assertEquals(enqueueInvocations, h.mainThreadInvocations.get())
+        assertEquals(enqueueInvocations, h.bleThreadInvocations.get())
     }
 
     @Test
@@ -294,16 +294,16 @@ class InboundFragmentBufferTest {
         val h = Harness()
         h.buffer.enqueue("aa:00", byteArrayOf(1))
         h.buffer.enqueue("bb:11", byteArrayOf(2))
-        val before = h.mainThreadInvocations.get()
+        val before = h.bleThreadInvocations.get()
         val snapshot = h.buffer.pendingAddresses()
         assertEquals(setOf("aa:00", "bb:11"), snapshot.toSet())
-        assertTrue(h.mainThreadInvocations.get() > before)
+        assertTrue(h.bleThreadInvocations.get() > before)
     }
 
     @Test
     fun `main-thread guard fires for every mutating method`() {
         val h = Harness()
-        val baseline = h.mainThreadInvocations.get()
+        val baseline = h.bleThreadInvocations.get()
         h.buffer.enqueue("aa:00", byteArrayOf(1))
         h.buffer.hasPending("aa:00")
         h.buffer.drain("aa:00")
@@ -312,6 +312,6 @@ class InboundFragmentBufferTest {
         h.buffer.evictExpired()
         h.buffer.clear()
         // Lower bound: every call above touches the guard at least once.
-        assertTrue(h.mainThreadInvocations.get() - baseline >= 7)
+        assertTrue(h.bleThreadInvocations.get() - baseline >= 7)
     }
 }
