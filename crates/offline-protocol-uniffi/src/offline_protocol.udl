@@ -1029,6 +1029,9 @@ interface OfflineProtocol {
 
     BleFragment? ble_get_next_fragment();
 
+    // Diagnostics only: never take a decision on this, it is a racy snapshot.
+    ProtocolLockDiagnostics protocol_lock_diagnostics();
+
     void ble_return_fragment();
 
     u32 ble_get_peer_count();
@@ -1603,6 +1606,18 @@ interface MeshServices {
 dictionary BleFragment {
     string recipient_id;
     sequence<u8> data;
+};
+
+// Who currently holds the global protocol mutex, and for how long. Readable
+// while the lock is held — that is the only time it is useful — because it
+// takes a separate leaf mutex. Bridges use it to attribute a slow FFI call to
+// its actual holder, which platform hang reports cannot do: an Android ANR dump
+// carries only JVM threads.
+dictionary ProtocolLockDiagnostics {
+    boolean held;
+    string holder_location;
+    string holder_thread;
+    u64 held_for_ms;
 };
 
 // Internet message for outgoing data. control_op tags server-plane control

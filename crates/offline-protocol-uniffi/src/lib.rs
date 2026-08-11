@@ -89,6 +89,112 @@ fn recover_mutex<'a, T>(lock: &'a Mutex<T>, name: &str) -> std::sync::MutexGuard
     })
 }
 
+// ---------------------------------------------------------------------------
+// Protocol-lock attribution
+//
+// Every FFI method serialises on the one `inner` mutex, so a slow holder shows
+// up as an unexplained block in *every* caller. That is diagnosable from a Rust
+// backtrace and invisible from a JVM one: an Android ANR dump carries only JVM
+// threads, so a main thread parked in `ble_get_next_fragment` reports the
+// waiter and says nothing at all about who is holding the lock or for how long
+// (OFF-2123). iOS has the same gap in an App Hang report.
+//
+// So the holder records itself. `#[track_caller]` gives us the acquiring FFI
+// method's file:line for free — no signature change at the 100+ call sites, and
+// no per-acquisition allocation, since a `&'static Location` is a pointer copy
+// and the thread label is interned once per thread.
+//
+// The telemetry mutex is a leaf: it is taken only to swap a small struct, never
+// while acquiring `inner` and never across any callback. Reading it therefore
+// cannot block on the thing it is reporting on, which is the entire point —
+// `protocol_lock_diagnostics()` MUST stay callable while `inner` is held.
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Interned name of the current thread, so recording a holder costs a
+    /// refcount bump rather than a `String` allocation per lock acquisition.
+    static THREAD_LABEL: Arc<str> = {
+        let current = std::thread::current();
+        match current.name() {
+            Some(name) => Arc::from(name),
+            None => Arc::from(format!("unnamed-{:?}", current.id()).as_str()),
+        }
+    };
+}
+
+#[derive(Clone)]
+struct LockHolder {
+    location: &'static std::panic::Location<'static>,
+    thread: Arc<str>,
+    acquired_at: std::time::Instant,
+}
+
+/// Current holder of the `inner` mutex, or `None` when it is free.
+#[derive(Default)]
+struct LockTelemetry {
+    holder: Mutex<Option<LockHolder>>,
+}
+
+impl LockTelemetry {
+    fn acquired(&self, location: &'static std::panic::Location<'static>) {
+        let holder = LockHolder {
+            location,
+            thread: THREAD_LABEL.with(Arc::clone),
+            acquired_at: std::time::Instant::now(),
+        };
+        *recover_mutex(&self.holder, "lock_telemetry") = Some(holder);
+    }
+
+    fn released(&self) {
+        *recover_mutex(&self.holder, "lock_telemetry") = None;
+    }
+
+    fn snapshot(&self) -> ProtocolLockDiagnostics {
+        match recover_mutex(&self.holder, "lock_telemetry").as_ref() {
+            Some(holder) => ProtocolLockDiagnostics {
+                held: true,
+                holder_location: format!("{}:{}", holder.location.file(), holder.location.line()),
+                holder_thread: holder.thread.to_string(),
+                held_for_ms: holder.acquired_at.elapsed().as_millis() as u64,
+            },
+            None => ProtocolLockDiagnostics {
+                held: false,
+                holder_location: String::new(),
+                holder_thread: String::new(),
+                held_for_ms: 0,
+            },
+        }
+    }
+}
+
+/// A `MutexGuard` that clears its holder record on drop.
+///
+/// Deliberately not `Clone`/`Send`-forwarding beyond what `MutexGuard` already
+/// gives: the release must happen exactly once, on the thread that acquired.
+struct TrackedGuard<'a, T> {
+    guard: std::sync::MutexGuard<'a, T>,
+    telemetry: &'a LockTelemetry,
+}
+
+impl<T> std::ops::Deref for TrackedGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T> std::ops::DerefMut for TrackedGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
+
+impl<T> Drop for TrackedGuard<'_, T> {
+    fn drop(&mut self) {
+        self.telemetry.released();
+    }
+}
+
 fn recover_rwlock_read<'a, T>(
     lock: &'a RwLock<T>,
     name: &str,
@@ -2194,6 +2300,30 @@ pub struct BleFragment {
     pub data: Vec<u8>,
 }
 
+/// Who currently holds the global protocol mutex, and for how long.
+///
+/// Exists because platform hang reports cannot answer that question: an Android
+/// ANR dump carries only JVM threads and an iOS App Hang report will not name
+/// the Rust frame holding the lock. A bridge that observes a slow FFI call can
+/// read this and put the holder in its diagnostic stream, which is the
+/// difference between "blocked in `ble_get_next_fragment`" (the waiter, which
+/// tells you nothing) and "held 3.2s by the process tick" (the cause).
+///
+/// Safe to call while the lock is held — that is the only time it is useful —
+/// because it takes a separate leaf mutex, never `inner`.
+#[derive(Debug, Clone)]
+pub struct ProtocolLockDiagnostics {
+    /// False when the lock is free; every other field is then meaningless.
+    pub held: bool,
+    /// `file:line` of the FFI method that acquired the lock.
+    pub holder_location: String,
+    /// Name of the thread holding it, e.g. the RN native-modules thread or the
+    /// process-tick executor.
+    pub holder_thread: String,
+    /// Milliseconds since acquisition. This is a *hold* duration, not a wait.
+    pub held_for_ms: u64,
+}
+
 /// Internet message for outgoing data
 #[derive(Debug, Clone)]
 pub struct InternetMessage {
@@ -2304,6 +2434,9 @@ struct NostrState {
 /// Main protocol wrapper for UniFFI - COMPLETE IMPLEMENTATION
 pub struct OfflineProtocol {
     inner: Mutex<CoreProtocol>,
+    /// Attribution for whoever currently holds [`Self::inner`]. Written by the
+    /// acquiring thread, read by anyone — see [`LockTelemetry`].
+    lock_telemetry: LockTelemetry,
     state: RwLock<ProtocolState>,
     event_callback: Arc<RwLock<Option<Arc<dyn EventCallback>>>>,
     event_queue: Arc<Mutex<VecDeque<String>>>,
@@ -2459,6 +2592,7 @@ impl OfflineProtocol {
 
         Ok(Self {
             inner: Mutex::new(protocol),
+            lock_telemetry: LockTelemetry::default(),
             state: RwLock::new(ProtocolState::Stopped),
             event_callback,
             event_queue,
@@ -2567,10 +2701,42 @@ impl OfflineProtocol {
     // ========================================================================
 
     /// Lock the core protocol mutex, converting poison errors.
-    fn lock_inner(&self) -> Result<std::sync::MutexGuard<'_, CoreProtocol>, ProtocolError> {
-        self.inner
+    #[track_caller]
+    fn lock_inner(&self) -> Result<TrackedGuard<'_, CoreProtocol>, ProtocolError> {
+        let location = std::panic::Location::caller();
+        let guard = self
+            .inner
             .lock()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("inner: {}", e)))
+            .map_err(|e| ProtocolError::LockPoisoned(format!("inner: {}", e)))?;
+        // Record only after the lock is ours; recording before would name a
+        // waiter as the holder, which is exactly backwards for diagnosis.
+        self.lock_telemetry.acquired(location);
+        Ok(TrackedGuard {
+            guard,
+            telemetry: &self.lock_telemetry,
+        })
+    }
+
+    /// `self.lock_inner_recovering()` with holder attribution.
+    ///
+    /// The non-`Result` FFI methods cannot propagate a poison error, so they
+    /// recover into the inner value exactly as before; this only adds the
+    /// bookkeeping. Every `inner` acquisition must go through this or
+    /// [`Self::lock_inner`], or the holder record silently goes stale.
+    #[track_caller]
+    fn lock_inner_recovering(&self) -> TrackedGuard<'_, CoreProtocol> {
+        let location = std::panic::Location::caller();
+        let guard = recover_mutex(&self.inner, "inner");
+        self.lock_telemetry.acquired(location);
+        TrackedGuard {
+            guard,
+            telemetry: &self.lock_telemetry,
+        }
+    }
+
+    /// Who holds the protocol mutex right now. See [`ProtocolLockDiagnostics`].
+    pub fn protocol_lock_diagnostics(&self) -> ProtocolLockDiagnostics {
+        self.lock_telemetry.snapshot()
     }
 
     /// Lock the BLE state mutex, converting poison errors.
@@ -2618,7 +2784,7 @@ impl OfflineProtocol {
     where
         F: FnOnce(&dyn Transport) -> R,
     {
-        let protocol = recover_mutex(&self.inner, "inner");
+        let protocol = self.lock_inner_recovering();
         let transport_arc = protocol.transport_manager().get_transport(transport_type)?;
         Some(f(&*transport_arc))
     }
@@ -2650,7 +2816,7 @@ impl OfflineProtocol {
     where
         F: FnOnce(&BleTransport) -> R,
     {
-        let protocol = recover_mutex(&self.inner, "inner");
+        let protocol = self.lock_inner_recovering();
         let transport_arc = protocol
             .transport_manager()
             .get_transport(CoreTransportType::BLE)?;
@@ -2711,7 +2877,7 @@ impl OfflineProtocol {
     where
         F: FnOnce(&offline_protocol_transport::nostr::NostrTransport) -> R,
     {
-        let protocol = recover_mutex(&self.inner, "inner");
+        let protocol = self.lock_inner_recovering();
         let transport_arc = protocol
             .transport_manager()
             .get_transport(CoreTransportType::Nostr)?;
@@ -3005,7 +3171,7 @@ impl OfflineProtocol {
     /// secret failed this session. Unaffected by installing a telemetry sink
     /// or by an app-supplied scrub secret.
     pub fn telemetry_install_id(&self) -> Option<String> {
-        recover_mutex(&self.inner, "inner").telemetry_install_id()
+        self.lock_inner_recovering().telemetry_install_id()
     }
 
     // ========================================================================
@@ -3264,7 +3430,7 @@ impl OfflineProtocol {
 
     /// Receives the next message (returns JSON string or None)
     pub fn receive_message(&self) -> Option<String> {
-        let mut protocol = recover_mutex(&self.inner, "inner");
+        let mut protocol = self.lock_inner_recovering();
         protocol
             .receive_message()
             .and_then(|msg| received_message_to_json(&msg))
@@ -3845,7 +4011,7 @@ impl OfflineProtocol {
             }
         }
 
-        let mut protocol = recover_mutex(&self.inner, "inner");
+        let mut protocol = self.lock_inner_recovering();
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::Internet)
@@ -3905,7 +4071,7 @@ impl OfflineProtocol {
     /// This feeds real delivery data into transport metrics so DORS can make
     /// accurate routing decisions.
     pub fn internet_confirm_sent(&self, message_id: String) {
-        let mut protocol = recover_mutex(&self.inner, "inner");
+        let mut protocol = self.lock_inner_recovering();
         if let Err(err) = protocol.on_transport_send_confirmed(&message_id) {
             tracing::warn!(
                 message_id = %message_id,
@@ -3936,7 +4102,7 @@ impl OfflineProtocol {
     /// `reason` should carry platform-specific error context so reliability
     /// telemetry can classify root causes more accurately.
     pub fn internet_send_failed_with_reason(&self, message_id: String, reason: Option<String>) {
-        let mut protocol = recover_mutex(&self.inner, "inner");
+        let mut protocol = self.lock_inner_recovering();
         if let Err(err) = protocol.on_transport_send_failed(&message_id, reason) {
             tracing::warn!(
                 message_id = %message_id,
@@ -3964,7 +4130,7 @@ impl OfflineProtocol {
         if peer_id.is_empty() {
             return;
         }
-        let mut protocol = recover_mutex(&self.inner, "inner");
+        let mut protocol = self.lock_inner_recovering();
         protocol.on_peer_presence(&peer_id, online, last_seen_ms);
     }
 
@@ -3976,7 +4142,7 @@ impl OfflineProtocol {
     /// recipients" duty, so the platform no longer needs to union in its
     /// own list (the presence-online answer is what re-drives parked DMs).
     pub fn internet_presence_watchlist(&self) -> Vec<String> {
-        let protocol = recover_mutex(&self.inner, "inner");
+        let protocol = self.lock_inner_recovering();
         protocol.presence_watch_peers()
     }
 
@@ -4036,7 +4202,7 @@ impl OfflineProtocol {
     /// Infallible: an echo this node cannot match is the reported finding, not
     /// a caller error.
     pub fn internet_address_declared(&self, address: String) {
-        let protocol = recover_mutex(&self.inner, "inner");
+        let protocol = self.lock_inner_recovering();
         protocol.on_relay_address_declared(&address);
     }
 
@@ -4050,7 +4216,7 @@ impl OfflineProtocol {
     /// `RELAY_ADDRESS_DECLARATION_REFUSED` carrying `reason` — the relay's own
     /// text, treated as opaque. No retry: the next reconnect declares afresh.
     pub fn internet_address_declaration_refused(&self, reason: String) {
-        let protocol = recover_mutex(&self.inner, "inner");
+        let protocol = self.lock_inner_recovering();
         protocol.on_relay_address_declaration_refused(&reason);
     }
 
@@ -4332,7 +4498,7 @@ impl OfflineProtocol {
     /// Called by the platform after successfully sending a Reticulum message.
     pub fn reticulum_confirm_sent(&self, message_id: String) {
         {
-            let mut protocol = recover_mutex(&self.inner, "inner");
+            let mut protocol = self.lock_inner_recovering();
             if let Err(err) = protocol.on_transport_send_confirmed(&message_id) {
                 tracing::warn!(
                     message_id = %message_id,
@@ -4358,7 +4524,7 @@ impl OfflineProtocol {
     /// optional reason for diagnostics.
     pub fn reticulum_send_failed_with_reason(&self, message_id: String, reason: Option<String>) {
         {
-            let mut protocol = recover_mutex(&self.inner, "inner");
+            let mut protocol = self.lock_inner_recovering();
             if let Err(err) = protocol.on_transport_send_failed(&message_id, reason) {
                 tracing::warn!(
                     message_id = %message_id,
@@ -4582,7 +4748,7 @@ impl OfflineProtocol {
     /// Called by the platform after successfully publishing a Nostr event.
     pub fn nostr_confirm_sent(&self, message_id: String) {
         {
-            let mut protocol = recover_mutex(&self.inner, "inner");
+            let mut protocol = self.lock_inner_recovering();
             if let Err(err) = protocol.on_transport_send_confirmed(&message_id) {
                 tracing::warn!(
                     message_id = %message_id,
@@ -4662,7 +4828,7 @@ impl OfflineProtocol {
     /// optional reason for diagnostics.
     pub fn nostr_send_failed_with_reason(&self, message_id: String, reason: Option<String>) {
         {
-            let mut protocol = recover_mutex(&self.inner, "inner");
+            let mut protocol = self.lock_inner_recovering();
             if let Err(err) = protocol.on_transport_send_failed(&message_id, reason) {
                 tracing::warn!(
                     message_id = %message_id,
@@ -4731,7 +4897,7 @@ impl OfflineProtocol {
 
     /// Gets list of active transports
     pub fn get_active_transports(&self) -> Vec<String> {
-        let protocol = recover_mutex(&self.inner, "inner");
+        let protocol = self.lock_inner_recovering();
         let transports = protocol.transport_manager().get_active_transports();
         transports.iter().map(|t| format!("{:?}", t)).collect()
     }
@@ -4774,7 +4940,7 @@ impl OfflineProtocol {
 
     /// Checks if should escalate to WiFi
     pub fn should_escalate_to_wifi(&self) -> bool {
-        let protocol = recover_mutex(&self.inner, "inner");
+        let protocol = self.lock_inner_recovering();
         protocol.transport_manager().should_escalate_to_wifi()
     }
 
@@ -4910,7 +5076,7 @@ impl OfflineProtocol {
 
     /// Gets file transfer progress.
     pub fn get_file_progress(&self, file_id: String) -> Option<FileProgress> {
-        let protocol = recover_mutex(&self.inner, "inner");
+        let protocol = self.lock_inner_recovering();
         let core_progress = protocol.file_transfer_manager().get_progress(&file_id)?;
 
         Some(FileProgress {
@@ -5304,7 +5470,7 @@ impl OfflineProtocol {
             default_timeout_ms: config.default_timeout_ms,
             max_pending_acks: config.max_pending_acks as usize,
         };
-        let mut protocol = recover_mutex(&self.inner, "inner");
+        let mut protocol = self.lock_inner_recovering();
         protocol
             .update_ack_config(core_config)
             .map_err(ProtocolError::from)
@@ -5320,7 +5486,7 @@ impl OfflineProtocol {
             outbox_max_lifetime_ms: config.outbox_max_lifetime_ms,
             pending_message_max_lifetime_ms: config.pending_message_max_lifetime_ms,
         };
-        let mut protocol = recover_mutex(&self.inner, "inner");
+        let mut protocol = self.lock_inner_recovering();
         protocol
             .update_retry_config(core_config)
             .map_err(ProtocolError::from)
@@ -5333,7 +5499,7 @@ impl OfflineProtocol {
             retention_time_secs: config.retention_time_secs,
             ..Default::default()
         };
-        let mut protocol = recover_mutex(&self.inner, "inner");
+        let mut protocol = self.lock_inner_recovering();
         protocol
             .update_dedup_config(core_config)
             .map_err(ProtocolError::from)
@@ -5341,7 +5507,7 @@ impl OfflineProtocol {
 
     /// Gets deduplicator statistics for monitoring.
     pub fn get_dedup_stats(&self) -> DedupStats {
-        let protocol = recover_mutex(&self.inner, "inner");
+        let protocol = self.lock_inner_recovering();
         let stats = protocol.deduplicator_stats();
         DedupStats {
             total_tracked: stats.total_tracked as u64,
@@ -5353,13 +5519,13 @@ impl OfflineProtocol {
 
     /// Gets the number of pending ACKs.
     pub fn get_pending_ack_count(&self) -> u64 {
-        let protocol = recover_mutex(&self.inner, "inner");
+        let protocol = self.lock_inner_recovering();
         protocol.pending_ack_count() as u64
     }
 
     /// Gets the retry queue size.
     pub fn get_retry_queue_size(&self) -> u64 {
-        let protocol = recover_mutex(&self.inner, "inner");
+        let protocol = self.lock_inner_recovering();
         protocol.retry_queue_size() as u64
     }
 
@@ -5452,13 +5618,13 @@ impl OfflineProtocol {
 
     /// This device's self-certifying address, or null before `initialize_mls`.
     pub fn local_address(&self) -> Option<String> {
-        let protocol = recover_mutex(&self.inner, "inner");
+        let protocol = self.lock_inner_recovering();
         protocol.local_address().map(str::to_owned)
     }
 
     /// Check if MLS is initialized
     pub fn is_mls_initialized(&self) -> bool {
-        let protocol = recover_mutex(&self.inner, "inner");
+        let protocol = self.lock_inner_recovering();
         protocol.is_mls_initialized()
     }
 
@@ -11156,6 +11322,66 @@ mod tests {
             protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
             tag_before,
             "the running transports must be left exactly as they were"
+        );
+    }
+
+    /// The whole point of the holder record is to be readable *while* the lock
+    /// is held — that is the only moment it answers anything. If reading it
+    /// ever took `inner`, it would block behind the holder it is meant to name
+    /// and this test would hang rather than fail.
+    #[test]
+    fn test_lock_diagnostics_name_the_holder_while_it_holds() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let protocol = Arc::new(OfflineProtocol::new(create_test_config()).unwrap());
+
+        assert!(
+            !protocol.protocol_lock_diagnostics().held,
+            "an idle protocol must report its lock free"
+        );
+
+        let holding = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+
+        let holder = {
+            let protocol = Arc::clone(&protocol);
+            let holding = Arc::clone(&holding);
+            let release = Arc::clone(&release);
+            thread::Builder::new()
+                .name("test-lock-holder".to_string())
+                .spawn(move || {
+                    let _guard = protocol.lock_inner().unwrap();
+                    holding.store(true, Ordering::Release);
+                    while !release.load(Ordering::Relaxed) {
+                        thread::yield_now();
+                    }
+                })
+                .unwrap()
+        };
+
+        while !holding.load(Ordering::Acquire) {
+            thread::yield_now();
+        }
+
+        // Reading from this thread must not block behind the holder.
+        let report = protocol.protocol_lock_diagnostics();
+        release.store(true, Ordering::Release);
+        holder.join().unwrap();
+
+        assert!(report.held, "the lock was held when the snapshot was taken");
+        assert_eq!(
+            report.holder_thread, "test-lock-holder",
+            "the report must name the holding thread, not the reader"
+        );
+        assert!(
+            report.holder_location.contains("lib.rs:"),
+            "the report must carry the acquiring call site, got {:?}",
+            report.holder_location
+        );
+
+        assert!(
+            !protocol.protocol_lock_diagnostics().held,
+            "dropping the guard must clear the holder record"
         );
     }
 }

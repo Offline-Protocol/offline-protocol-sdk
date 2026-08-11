@@ -1010,6 +1010,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func processFileChunk(fileId: String, chunkIndex: UInt32, totalChunks: UInt32, fileSize: UInt64, fileName: String, fileChecksum: String, data: [UInt8]) throws 
     
+    func protocolLockDiagnostics()  -> ProtocolLockDiagnostics
+    
     func receiveMessage()  -> String?
     
     func rejectConnectionRequest(recipient: String) throws  -> String
@@ -2091,6 +2093,14 @@ open func processFileChunk(fileId: String, chunkIndex: UInt32, totalChunks: UInt
         FfiConverterSequenceUInt8.lower(data),$0
     )
 }
+}
+    
+open func protocolLockDiagnostics() -> ProtocolLockDiagnostics  {
+    return try!  FfiConverterTypeProtocolLockDiagnostics_lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_protocol_lock_diagnostics(
+            self.uniffiCloneHandle(),$0
+    )
+})
 }
     
 open func receiveMessage() -> String?  {
@@ -4730,6 +4740,66 @@ public func FfiConverterTypeProtocolConfigExtended_lift(_ buf: RustBuffer) throw
 #endif
 public func FfiConverterTypeProtocolConfigExtended_lower(_ value: ProtocolConfigExtended) -> RustBuffer {
     return FfiConverterTypeProtocolConfigExtended.lower(value)
+}
+
+
+public struct ProtocolLockDiagnostics: Equatable, Hashable {
+    public var held: Bool
+    public var holderLocation: String
+    public var holderThread: String
+    public var heldForMs: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(held: Bool, holderLocation: String, holderThread: String, heldForMs: UInt64) {
+        self.held = held
+        self.holderLocation = holderLocation
+        self.holderThread = holderThread
+        self.heldForMs = heldForMs
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension ProtocolLockDiagnostics: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProtocolLockDiagnostics: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProtocolLockDiagnostics {
+        return
+            try ProtocolLockDiagnostics(
+                held: FfiConverterBool.read(from: &buf), 
+                holderLocation: FfiConverterString.read(from: &buf), 
+                holderThread: FfiConverterString.read(from: &buf), 
+                heldForMs: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ProtocolLockDiagnostics, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.held, into: &buf)
+        FfiConverterString.write(value.holderLocation, into: &buf)
+        FfiConverterString.write(value.holderThread, into: &buf)
+        FfiConverterUInt64.write(value.heldForMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProtocolLockDiagnostics_lift(_ buf: RustBuffer) throws -> ProtocolLockDiagnostics {
+    return try FfiConverterTypeProtocolLockDiagnostics.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProtocolLockDiagnostics_lower(_ value: ProtocolLockDiagnostics) -> RustBuffer {
+    return FfiConverterTypeProtocolLockDiagnostics.lower(value)
 }
 
 
@@ -9998,6 +10068,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk() != 46065) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics() != 26003) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() != 33217) {
