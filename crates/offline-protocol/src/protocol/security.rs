@@ -678,6 +678,100 @@ impl OfflineProtocol {
         );
     }
 
+    /// Verifies the relay's `AddressDeclared` acknowledgement against the
+    /// address this node actually holds.
+    ///
+    /// This is the lockstep assertion for the relay leg of addressing. The
+    /// bridge declares [`Self::local_address`] and signs a proof over a
+    /// per-connection challenge; the relay verifies that the declared address
+    /// derives from the signing key and echoes back what it bound. Agreement
+    /// means every frame the relay forwards from here on is attributed to the
+    /// same identity the core stamps into `Message.sender`, which is what
+    /// `validate_transport_sender` strict-matches on the receiving side.
+    ///
+    /// A disagreement is reported, never acted on: see
+    /// [`SecurityWarningCode::RelayAddressBindingMismatch`] for why tearing the
+    /// connection down would buy nothing. Callers pass the echoed address
+    /// verbatim — an empty or malformed one simply cannot match and is reported
+    /// like any other mismatch.
+    ///
+    /// Reached only through the FFI's dedicated entry point, not through
+    /// message-plane injection, so a notification payload cannot synthesize it.
+    pub fn on_relay_address_declared(&self, declared: &str) {
+        match self.local_address() {
+            Some(local) if local == declared => {
+                info!(
+                    address = %declared,
+                    "Relay bound this connection to our address; frames are attributed by address"
+                );
+            }
+            Some(local) => {
+                warn!(
+                    declared = %declared,
+                    local = %local,
+                    "Relay acknowledged an address that is not ours"
+                );
+                self.emit_security_warning(
+                    declared,
+                    SecurityWarningCode::RelayAddressBindingMismatch,
+                    format!(
+                        "relay bound this connection to {}, which is not this device's \
+                         address: its frames are attributed to an identity we cannot \
+                         prove, so receivers will reject our security-gated control traffic",
+                        declared
+                    ),
+                );
+            }
+            None => {
+                // The bridge does not declare before an identity exists, so an
+                // acknowledgement here answers a declaration this node never
+                // made. Same disposition, distinct text: nothing local can be
+                // compared, which is itself the finding.
+                warn!(
+                    declared = %declared,
+                    "Relay acknowledged an address declaration this node never made"
+                );
+                self.emit_security_warning(
+                    declared,
+                    SecurityWarningCode::RelayAddressBindingMismatch,
+                    format!(
+                        "relay bound this connection to {} while this device has no \
+                         established identity to declare: no declaration was sent from here",
+                        declared
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Records the relay refusing this connection's address declaration.
+    ///
+    /// Non-fatal by contract on both sides — the connection stays authenticated
+    /// and keeps working in account-name space. What degrades is *new* MLS
+    /// session establishment over the relay; see
+    /// [`SecurityWarningCode::RelayAddressDeclarationRefused`]. `reason` is the
+    /// relay's own text and is treated as opaque.
+    ///
+    /// Attributed to this node rather than to a peer (the failure is ours, and
+    /// no peer is involved), following the same convention as the Nostr
+    /// slot-exhaustion warning.
+    pub fn on_relay_address_declaration_refused(&self, reason: &str) {
+        warn!(
+            reason = %reason,
+            "Relay refused our address declaration; staying in account-name space"
+        );
+        self.emit_security_warning(
+            &self.local_id,
+            SecurityWarningCode::RelayAddressDeclarationRefused,
+            format!(
+                "relay refused this connection's address declaration ({}): frames stay \
+                 attributed by account name, so new encrypted sessions cannot be \
+                 established over the relay until a later connection declares successfully",
+                reason
+            ),
+        );
+    }
+
     /// Returns `true` if the message content starts with any internal prefix.
     /// Used for injection prevention on the public send APIs.
     pub(crate) fn is_internal_prefix(content: &str) -> bool {

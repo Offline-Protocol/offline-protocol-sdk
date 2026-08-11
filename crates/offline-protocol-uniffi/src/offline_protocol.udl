@@ -1120,6 +1120,28 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     void internet_group_report_received(string report_json);
 
+    // Internet: the relay's AddressDeclared answer — the address it says it
+    // bound to this connection, verbatim. Checked against local_address():
+    // agreement means the relay attributes our frames the same way the core
+    // stamps them, which is what the receiver's transport-identity check
+    // strict-matches. A disagreement emits a RELAY_ADDRESS_BINDING_MISMATCH
+    // security warning and nothing else — a relay that controls the socket
+    // already controls what tearing it down would protect.
+    //
+    // A dedicated entry point (not message-plane injection) so a notification
+    // payload cannot synthesize an acknowledgement.
+    void internet_address_declared(string address);
+
+    // Internet: the relay's AddressError answer — it refused this connection's
+    // address declaration, so the connection stays attributed by account name.
+    // Non-fatal by contract on both sides: existing sessions keep working and
+    // only *new* MLS session establishment over the relay is lost, since the
+    // key-package and welcome frames are identity-checked. Emits a
+    // RELAY_ADDRESS_DECLARATION_REFUSED security warning carrying the relay's
+    // own reason text, which is opaque. No retry — the next reconnect declares
+    // from scratch.
+    void internet_address_declaration_refused(string reason);
+
     // WiFi Direct transport operations
     //
     // DEPRECATED and currently inert: `WifiDirectTransport` is not registered,

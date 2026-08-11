@@ -1218,8 +1218,22 @@ class InternetManager(
                 // effect before the relay answered (its frame loop is
                 // sequential), so nothing waits on this, and the frame is
                 // forwarded like any other.
+                //
+                // The echo goes to the SDK, which is where the lockstep check
+                // lives: it compares the bound address against local_address()
+                // and reports a disagreement as
+                // RELAY_ADDRESS_BINDING_MISMATCH. A dedicated entry point, not
+                // message-plane injection, so an acknowledgement cannot be
+                // synthesized through the notification ciphertext injector.
+                //
+                // No staleness guard here: the listener's onMessage already
+                // drops a stale socket's frames before they reach this
+                // dispatch, so an answer arriving here belongs to the current
+                // connection by construction.
+                val declaredAddress = json.safeOptString("address", "")
+                protocol.internetAddressDeclared(declaredAddress)
                 emitDiagnostic("info", "Relay accepted the address declaration", mapOf(
-                    "address" to json.safeOptString("address", "")
+                    "address" to declaredAddress
                 ))
                 serverMessageEmitter?.invoke(rawText)
             }
@@ -1233,10 +1247,23 @@ class InternetManager(
                 // address already declared) or means this socket was displaced
                 // by a newer login, in which case the successor declares for
                 // itself. The next reconnect re-declares from scratch.
+                //
+                // Reported to the SDK as RELAY_ADDRESS_DECLARATION_REFUSED so
+                // the degradation is visible to the app: this connection keeps
+                // delivering on established sessions but cannot establish new
+                // ones, because key-package and welcome frames are identity-
+                // checked and ours will not match the account name the relay
+                // stamps.
+                //
+                // Same as above: onMessage's staleness guard means a refusal
+                // reaching here is this connection's, not a displaced
+                // predecessor's — that socket's frames never get this far.
+                val addressErrorReason = json.safeOptString("reason", "Unknown error")
+                protocol.internetAddressDeclarationRefused(addressErrorReason)
                 emitDiagnostic(
                     "error",
                     "Relay refused the address declaration; staying in account-name space",
-                    mapOf("reason" to json.safeOptString("reason", "Unknown error"))
+                    mapOf("reason" to addressErrorReason)
                 )
                 serverMessageEmitter?.invoke(rawText)
             }

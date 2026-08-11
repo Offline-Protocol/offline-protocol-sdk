@@ -904,6 +904,10 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func installTelemetrySink(sink: TelemetrySink, config: TelemetryConfig) throws 
     
+    func internetAddressDeclarationRefused(reason: String) 
+    
+    func internetAddressDeclared(address: String) 
+    
     func internetConfirmSent(messageId: String) 
     
     func internetGetNextMessage()  -> InternetMessage?
@@ -1631,6 +1635,22 @@ open func installTelemetrySink(sink: TelemetrySink, config: TelemetryConfig)thro
             self.uniffiCloneHandle(),
         FfiConverterCallbackInterfaceTelemetrySink_lower(sink),
         FfiConverterTypeTelemetryConfig_lower(config),$0
+    )
+}
+}
+    
+open func internetAddressDeclarationRefused(reason: String)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declaration_refused(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(reason),$0
+    )
+}
+}
+    
+open func internetAddressDeclared(address: String)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declared(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(address),$0
     )
 }
 }
@@ -9819,6 +9839,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_install_telemetry_sink() != 18166) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused() != 30965) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declared() != 11812) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent() != 10435) {
