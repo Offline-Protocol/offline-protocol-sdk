@@ -1214,7 +1214,7 @@ class InternetManager(
                 // handleAuthenticated, which falls back there instead.
                 val username = json.optNullableString("username")
                 // Capability tokens this relay deployment supports (e.g.
-                // "group_delivery_v2"). Older relays omit the field → empty.
+                // "group_delivery_v3"). Older relays omit the field → empty.
                 val capabilities = json.optJSONArray("capabilities")?.let { arr ->
                     (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotEmpty() } }
                 } ?: emptyList()

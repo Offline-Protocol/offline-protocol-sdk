@@ -248,12 +248,15 @@ The outbox lifetime bounds the entry itself, with one caveat worth knowing: each
 A group send takes one of two paths, and which one is not a config flag alone —
 it is negotiated with the relay.
 
-**Relay broadcast with a delivery report (the default against a v2 relay).**
+**Relay broadcast with a delivery report (the default against a v3 relay).**
 When the group is relay-registered, `group.relayBroadcastEnabled` is on (the
-default), and the connected relay advertised the `group_delivery_v2` capability
-in its `Authenticated` answer, the send is **one** frame the relay fans out,
-and the send returns a single logical message id. The relay then answers with
-a *settled* per-recipient delivery report (its `GroupMessageSent` v2) naming
+default), and the connected relay advertised the `group_delivery_v3` capability
+in its `Authenticated` answer — the v2 settled-report contract *plus* an
+address-aware group path, i.e. members named by the identifiers the roster was
+registered under (`off1…` addresses), which is what makes the report
+comparable against the MLS roster at all — the send is **one** frame the relay
+fans out, and the send returns a single logical message id. The relay then
+answers with a *settled* per-recipient delivery report (its `GroupMessageSent`) naming
 which members took the message over a live socket and which took a device push
 carrying the ciphertext. The SDK consumes that report: every MLS roster member
 the report does **not** account for — the ones the relay names as missed *and*
@@ -288,7 +291,7 @@ mid-flight kill should set `relayBroadcastEnabled: false` and pay the O(N)
 uplink. Persisting the tracker is planned; it is not in this release.
 
 **Per-member fan-out (the fallback, and the opt-out).** Against a relay that
-did not advertise `group_delivery_v2` — or with `relayBroadcastEnabled: false`
+did not advertise `group_delivery_v3` — or with `relayBroadcastEnabled: false`
 — a group send returns a `Vec<MessageId>` with **one id per recipient**: each
 is a real `SendMessage` frame carrying the same MLS group ciphertext,
 addressed to one member, with the full DM delivery ladder independently. The

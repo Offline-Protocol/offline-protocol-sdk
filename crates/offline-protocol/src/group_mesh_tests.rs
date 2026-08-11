@@ -3159,21 +3159,21 @@ fn test_relay_sync_disabled_config() {
 
 /// Config with the O(1) relay broadcast enabled explicitly. The flag now
 /// defaults on, so this is documentation more than configuration — but the
-/// broadcast path additionally requires the relay's `group_delivery_v2`
-/// capability (see [`grant_group_delivery_v2`]) and `relay_synced`.
+/// broadcast path additionally requires the relay's `group_delivery_v3`
+/// capability (see [`grant_group_delivery_v3`]) and `relay_synced`.
 fn broadcast_enabled_config() -> crate::ProtocolConfig {
     let mut config = create_test_config();
     config.group.relay_broadcast_enabled = true;
     config
 }
 
-/// Grants the connected-relay `group_delivery_v2` capability, as the
+/// Grants the connected-relay `group_delivery_v3` capability, as the
 /// platform bridge does from the relay's `Authenticated` answer before
 /// reporting the transport up. Without it the broadcast gate fails closed
 /// and every group send takes per-member fan-out.
-fn grant_group_delivery_v2(protocol: &mut OfflineProtocol) {
+fn grant_group_delivery_v3(protocol: &mut OfflineProtocol) {
     protocol.set_relay_capabilities(vec![
-        crate::group_mesh::RELAY_CAP_GROUP_DELIVERY_V2.to_string()
+        crate::group_mesh::RELAY_CAP_GROUP_DELIVERY_V3.to_string()
     ]);
 }
 
@@ -3203,7 +3203,7 @@ fn test_relay_broadcast_used_when_synced() {
 
     // Mark group as relay-synced and the relay as v2-capable
     protocol.group_mesh.relay_synced.insert(group_id.clone());
-    grant_group_delivery_v2(&mut protocol);
+    grant_group_delivery_v3(&mut protocol);
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
     let events_clone = events.clone();
@@ -3246,7 +3246,7 @@ fn test_relay_broadcast_used_when_synced() {
 
 /// The broadcast is capability-gated: with the default config (flag on) a
 /// relay-synced group still fans out per member unless the connected relay
-/// advertised `group_delivery_v2` — so against a v1 relay every copy rides
+/// advertised `group_delivery_v3` — so against a v1 relay every copy rides
 /// the DM ladder (retry, offline push with ciphertext, park/flush,
 /// deferred ACK) and the contract-less fire-and-forget broadcast is never
 /// taken.
@@ -3302,6 +3302,59 @@ fn test_relay_broadcast_without_capability_uses_per_member_fanout() {
     assert_eq!(broadcasts, 0, "No broadcast frame should be emitted");
 }
 
+/// The gate requires `group_delivery_v3` specifically — a relay advertising
+/// only the v2 contract keeps every send on per-member fan-out. A v2 relay's
+/// group path is username-keyed: it cannot resolve the address-registered
+/// roster to connections, its settled report names members in a namespace
+/// the MLS roster never intersects, and the copies it does deliver arrive
+/// attributed by username and fail the SEC-M1 credential match. Requiring
+/// the v3 token turns all of that into a plain downgrade to the
+/// always-correct per-member path.
+#[test]
+fn test_v2_only_capability_keeps_per_member_fanout() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(broadcast_enabled_config()).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let info = protocol.create_group("V2 Only Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+    protocol.group_mesh.members.insert(
+        group_id.clone(),
+        vec![id("user123"), id("bob"), id("carol"), id("dave")],
+    );
+    protocol.group_mesh.relay_synced.insert(group_id.clone());
+    protocol.set_relay_capabilities(vec!["group_delivery_v2".to_string()]);
+
+    let msg_ids = protocol
+        .send_group_message(&group_id, "hello fanout", None, None)
+        .unwrap();
+
+    assert_eq!(
+        msg_ids.len(),
+        3,
+        "A v2-only relay must get one message per member, not a broadcast"
+    );
+    let broadcasts = internet_handle
+        .sent_messages()
+        .into_iter()
+        .filter(|m| {
+            m.content
+                .starts_with(internal_prefixes::GROUP_RELAY_BROADCAST)
+        })
+        .count();
+    assert_eq!(broadcasts, 0, "No broadcast frame should be emitted");
+}
+
 /// The broadcast frame can never be ACKed — the bridge replaces it with a
 /// relay-native `SendGroupMessage`, so nothing addressed to its id ever comes
 /// back. It must therefore stay off the ACK ladder entirely: no pending ACK
@@ -3331,7 +3384,7 @@ fn test_relay_broadcast_frame_is_unacked_and_not_retried() {
         vec![id("user123"), id("bob"), id("carol")],
     );
     protocol.group_mesh.relay_synced.insert(group_id.clone());
-    grant_group_delivery_v2(&mut protocol);
+    grant_group_delivery_v3(&mut protocol);
 
     let msg_ids = protocol
         .send_group_message(&group_id, "hello relay", None, None)
@@ -3463,7 +3516,7 @@ fn test_relay_hint_frames_pin_to_internet_not_mesh() {
         vec![id("user123"), id("bob"), id("carol")],
     );
     protocol.group_mesh.relay_synced.insert(group_id.clone());
-    grant_group_delivery_v2(&mut protocol);
+    grant_group_delivery_v3(&mut protocol);
 
     protocol
         .send_group_message(&group_id, "hello relay", None, None)
@@ -3524,7 +3577,7 @@ fn test_relay_broadcast_falls_back_when_internet_unavailable() {
     );
     // Stale sync state and capabilities from a previous connection.
     protocol.group_mesh.relay_synced.insert(group_id.clone());
-    grant_group_delivery_v2(&mut protocol);
+    grant_group_delivery_v3(&mut protocol);
 
     let msg_ids = protocol
         .send_group_message(&group_id, "hello fallback", None, None)
@@ -3634,7 +3687,7 @@ fn test_relay_broadcast_tracker_is_bounded_by_downgrading_oldest() {
         .members
         .insert(group_id.clone(), vec![id("user123"), id("bob")]);
     protocol.group_mesh.relay_synced.insert(group_id.clone());
-    grant_group_delivery_v2(&mut protocol);
+    grant_group_delivery_v3(&mut protocol);
 
     // Fill the tracker to the cap with broadcasts awaiting reports that never
     // came, then make one unambiguously the oldest.
@@ -3700,7 +3753,7 @@ fn test_broadcast_report_all_reached_settles_without_reissue() {
         .transport_manager_mut()
         .add_transport(TransportType::Internet, Box::new(internet));
     protocol.start().unwrap();
-    grant_group_delivery_v2(&mut protocol);
+    grant_group_delivery_v3(&mut protocol);
 
     let logical = "0b0b0b0b-1111-2222-3333-444444444444";
     arm_fake_broadcast(
@@ -3785,7 +3838,7 @@ fn test_broadcast_report_reissues_missed_and_unnamed_members() {
         .transport_manager_mut()
         .add_transport(TransportType::Internet, Box::new(internet));
     protocol.start().unwrap();
-    grant_group_delivery_v2(&mut protocol);
+    grant_group_delivery_v3(&mut protocol);
 
     let logical = "0c0c0c0c-1111-2222-3333-444444444444";
     // dave is in the MLS roster but the relay never mentions him — a
@@ -3859,6 +3912,66 @@ fn test_broadcast_report_reissues_missed_and_unnamed_members() {
     assert_eq!(reissued_sorted, vec![id("carol"), id("dave")]);
 }
 
+/// A report in the wrong namespace degrades to the fail-safe, never to a
+/// silent settle: a v2 relay names `delivered`/`pushed` by relay-account
+/// username, which never intersects the address-keyed MLS roster, so the
+/// set difference removes nothing and every non-self member gets a
+/// per-member copy. This degradation is what makes a username-keyed report
+/// wasteful instead of lossy — and the reason the broadcast gate requires
+/// `group_delivery_v3`, so reports in the wrong namespace only arrive from
+/// relays this SDK no longer broadcasts through.
+#[test]
+fn test_username_space_report_reissues_full_roster() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(broadcast_enabled_config()).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+    grant_group_delivery_v3(&mut protocol);
+
+    let logical = "0d0d0d0d-1111-2222-3333-444444444444";
+    arm_fake_broadcast(
+        &mut protocol,
+        "grp-username-report",
+        logical,
+        &[&id("user123"), &id("bob"), &id("carol"), &id("dave")],
+    );
+
+    // The relay claims it reached "bob" and "carol" — by account username,
+    // the namespace a v2 relay reports in. Neither matches a roster address.
+    let report = serde_json::json!({
+        "type": "GroupMessageSent",
+        "group_id": "grp-username-report",
+        "message_id": logical,
+        "timestamp": "2026-08-11T00:00:00Z",
+        "delivered": ["bob"],
+        "pushed": ["carol"],
+        "missed": [],
+    })
+    .to_string();
+    protocol
+        .handle_relay_group_delivery_report(&report)
+        .unwrap();
+
+    let frames = grp_mls_frames(&internet_handle);
+    let mut recipients: Vec<String> = frames.iter().map(|(r, _)| r.clone()).collect();
+    recipients.sort_unstable();
+    let mut expected = vec![id("bob"), id("carol"), id("dave")];
+    expected.sort_unstable();
+    assert_eq!(
+        recipients, expected,
+        "Username-space claims must not subtract from the address roster — \
+         every non-self member gets a per-member copy"
+    );
+}
+
 /// Reports that correlate with nothing (settled already, or forged) are
 /// ignored; a report naming the wrong group leaves the tracker armed so the
 /// timeout path recovers.
@@ -3876,7 +3989,7 @@ fn test_broadcast_report_unknown_or_mismatched_is_ignored() {
         .transport_manager_mut()
         .add_transport(TransportType::Internet, Box::new(internet));
     protocol.start().unwrap();
-    grant_group_delivery_v2(&mut protocol);
+    grant_group_delivery_v3(&mut protocol);
 
     let logical = "0d0d0d0d-1111-2222-3333-444444444444";
     arm_fake_broadcast(
@@ -3938,7 +4051,7 @@ fn test_lost_report_rebroadcasts_bounded_then_downgrades_per_member() {
         .transport_manager_mut()
         .add_transport(TransportType::Internet, Box::new(internet));
     protocol.start().unwrap();
-    grant_group_delivery_v2(&mut protocol);
+    grant_group_delivery_v3(&mut protocol);
 
     let logical = "0e0e0e0e-1111-2222-3333-444444444444";
     arm_fake_broadcast(
@@ -4072,7 +4185,7 @@ fn test_internet_drop_downgrades_pending_broadcasts_and_clears_capabilities() {
         .transport_manager_mut()
         .add_transport(TransportType::Internet, Box::new(internet));
     protocol.start().unwrap();
-    grant_group_delivery_v2(&mut protocol);
+    grant_group_delivery_v3(&mut protocol);
 
     let logical = "0f0f0f0f-1111-2222-3333-444444444444";
     arm_fake_broadcast(
@@ -4129,7 +4242,7 @@ fn test_relay_broadcast_opt_out_forces_per_member_fanout() {
         vec![id("user123"), id("bob"), id("carol")],
     );
     protocol.group_mesh.relay_synced.insert(group_id.clone());
-    grant_group_delivery_v2(&mut protocol);
+    grant_group_delivery_v3(&mut protocol);
 
     let msg_ids = protocol
         .send_group_message(&group_id, "hello opt-out", None, None)
@@ -4158,7 +4271,7 @@ fn test_relay_capabilities_are_bounded() {
         .any(|c| c.len() > 128));
 
     // Wholesale replace, not merge.
-    protocol.set_relay_capabilities(vec!["group_delivery_v2".to_string()]);
+    protocol.set_relay_capabilities(vec!["group_delivery_v3".to_string()]);
     assert_eq!(protocol.group_mesh.relay_capabilities.len(), 1);
 }
 
@@ -4318,6 +4431,178 @@ fn test_grp_mls_msg_failed_decrypt_does_not_poison_logical_id() {
                 if message_id == logical && content == "the real message"
         )),
         "Genuine copy must deliver despite the poison attempt"
+    );
+}
+
+/// The relay path's own copy of the poison hazard. Its handler marks the
+/// relay-supplied id (the logical id) pre-decrypt as replay defense — but a
+/// copy whose wire `sender` is not the MLS credential (a v2 relay
+/// attributes group frames by relay username; the credential is the
+/// sender's `off1…` address) is SecurityRejected *after* that mark. Left
+/// marked, the rejected copy reads as delivered, and the per-member
+/// re-issue of the same logical message — its own delivery safety net — is
+/// absorbed as a cross-path duplicate and re-ACKed without ever being
+/// surfaced: silent loss with a false delivery ACK.
+///
+/// Pin the unmark, and pin exactly what it can and cannot recover: the
+/// rejected copy's decrypt already consumed the ciphertext's ratchet
+/// generation (OpenMLS persists message secrets through the storage
+/// provider before the identity check runs), so the re-issued copy of the
+/// same ciphertext cannot decrypt — it must buffer un-ACKed (`Deferred`),
+/// leaving custody with the sender and the failure visible, instead of
+/// being falsely absorbed as delivered. Preventing the loss outright is the
+/// v3 capability gate's job: it keeps a mis-attributed relay copy from
+/// existing (and burning the generation) in the first place.
+#[test]
+fn test_relay_copy_sender_mismatch_rejected_without_poisoning_logical_id() {
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Relay Mismatch Group");
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    let logical = "beefbeef-1111-2222-3333-444444444444";
+    let encrypted = {
+        let mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        mls.encrypt_for_group(&gid, b"broadcast body").unwrap()
+    };
+    let ciphertext_b64 = base64_encode(&encrypted.ciphertext);
+
+    // Relay copy, attributed by username ("alice") instead of the MLS
+    // credential (`id("alice")`) — what a username-keyed relay stamps.
+    bob.handle_relay_group_message_with_mls(
+        &group_id,
+        "alice",
+        &ciphertext_b64,
+        "2026-08-11T00:00:00Z",
+        logical,
+        None,
+        None,
+    );
+    {
+        let events = events.lock().unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::GroupMessageReceived { .. })),
+            "A mis-attributed relay copy must not deliver"
+        );
+    }
+    assert!(
+        !bob.group_mesh.message_dedup.contains_key(logical),
+        "A SecurityRejected relay copy must not leave the logical id marked"
+    );
+
+    // The per-member re-issue of the same logical message must now be
+    // processed on its own merits instead of being absorbed as a duplicate
+    // of the rejected copy. Its ciphertext's ratchet generation was spent
+    // by the rejected copy's decrypt, so the honest outcome is Deferred —
+    // buffered, un-ACKed, sender keeps custody — never Consumed, which
+    // would re-ACK a message that was delivered nowhere.
+    let payload = serde_json::json!({
+        "group_id": group_id,
+        "ciphertext": ciphertext_b64,
+        "epoch": encrypted.epoch,
+        "message_id": logical,
+    })
+    .to_string();
+    let reissue = make_message(
+        &id("alice"),
+        &id("bob"),
+        &format!("{}{}", internal_prefixes::GROUP_MLS_MSG, payload),
+    );
+    let res = bob.handle_group_mls_msg(&reissue, &id("alice"), &payload);
+    assert!(
+        matches!(res, InternalMessageResult::Deferred),
+        "The re-issue must be buffered un-ACKed (Deferred), not absorbed as \
+         an already-delivered duplicate (Consumed): got {:?}",
+        res
+    );
+    let events = events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::GroupMessageReceived { .. })),
+        "Nothing was deliverable — the generation was spent on the rejected copy"
+    );
+}
+
+/// Pre-decrypt sibling on the relay path: non-base64 "plaintext" naming an
+/// MLS-secured group is dropped as spoofing — but its `message_id` is
+/// attacker-chosen wire input, and the drop arm runs after the pre-decrypt
+/// dedup mark. Left marked, anyone the relay carries could suppress a
+/// genuine logical message by naming its id first. Pin the unmark.
+#[test]
+fn test_relay_plaintext_spoof_drop_does_not_poison_logical_id() {
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Relay Spoof Group");
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    let logical = "cafecafe-1111-2222-3333-444444444444";
+    // Not valid base64, so it takes the plaintext-spoofing drop arm.
+    bob.handle_relay_group_message_with_mls(
+        &group_id,
+        "mallory",
+        "not base64 !!!",
+        "2026-08-11T00:00:00Z",
+        logical,
+        None,
+        None,
+    );
+    {
+        let events = events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::SecurityWarning { reason_code, .. }
+                    if *reason_code == crate::events::SecurityWarningCode::PlaintextReceiveRejected
+            )),
+            "The spoofed plaintext must be rejected with a security warning"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::GroupMessageReceived { .. })),
+            "The spoofed plaintext must not deliver"
+        );
+    }
+    assert!(
+        !bob.group_mesh.message_dedup.contains_key(logical),
+        "The spoof drop must not leave the attacker-chosen id marked"
+    );
+
+    // The genuine logical message still delivers.
+    let encrypted = {
+        let mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        mls.encrypt_for_group(&gid, b"the real broadcast").unwrap()
+    };
+    let payload = serde_json::json!({
+        "group_id": group_id,
+        "ciphertext": base64_encode(&encrypted.ciphertext),
+        "epoch": encrypted.epoch,
+        "message_id": logical,
+    })
+    .to_string();
+    let genuine = make_message(
+        &id("alice"),
+        &id("bob"),
+        &format!("{}{}", internal_prefixes::GROUP_MLS_MSG, payload),
+    );
+    bob.handle_group_mls_msg(&genuine, &id("alice"), &payload);
+    let events = events.lock().unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::GroupMessageReceived { message_id, content, .. }
+                if message_id == logical && content == "the real broadcast"
+        )),
+        "Genuine copy must deliver despite the spoofed frame naming its id"
     );
 }
 

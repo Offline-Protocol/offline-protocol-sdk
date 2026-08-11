@@ -522,7 +522,7 @@ deployment is still your call.
 |-----------|------|---------|-------------|
 | `maxGroupMembers` | number | 256 | Maximum members in a single group (must be > 0) |
 | `relayEnabled` | boolean | `true` | Register groups with the relay server |
-| `relayBroadcastEnabled` | boolean | `true` | Allow a relay-synced group to send via one O(1) relay broadcast instead of per-member fan-out — taken only against a relay that advertised the `group_delivery_v2` capability |
+| `relayBroadcastEnabled` | boolean | `true` | Allow a relay-synced group to send via one O(1) relay broadcast instead of per-member fan-out — taken only against a relay that advertised the `group_delivery_v3` capability |
 | `enforceAdminCommits` | boolean | `false` | Refuse an incoming MLS membership commit whose committer the local admin overlay does not authorize, instead of applying and reporting it |
 
 **These two relay flags are not the same switch.**
@@ -532,7 +532,11 @@ links resolve against, so turning it off breaks invite links. Leave it on.
 
 `relayBroadcastEnabled` gates the *send path*, and the flag alone never selects
 it: the broadcast is additionally gated on the connected relay having advertised
-the `group_delivery_v2` capability in its `Authenticated` answer. Such a relay
+the `group_delivery_v3` capability in its `Authenticated` answer — the settled
+delivery-report contract *plus* an address-aware group path (members named by
+the registered `off1…` identifiers, so the report is comparable against the
+MLS roster; a `group_delivery_v2` relay's username-keyed path deliberately
+fails this gate). Such a relay
 answers every broadcast with a *settled* per-recipient delivery report, and the
 SDK re-sends a per-member copy — through the ordinary outbox/ACK/park ladder —
 to every MLS roster member the report does not account for, surfacing the

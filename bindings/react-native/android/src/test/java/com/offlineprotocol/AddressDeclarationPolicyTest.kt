@@ -45,7 +45,7 @@ class AddressDeclarationPolicyTest {
     private fun b64(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP)
 
     private fun capabilities(vararg extra: String): List<String> =
-        listOf("group_delivery_v2") + extra
+        listOf("group_delivery_v3") + extra
 
     // ---- The signed bytes ----
 

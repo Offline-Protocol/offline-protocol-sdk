@@ -107,7 +107,7 @@ final class AddressDeclarationPolicyTests: XCTestCase {
     // MARK: - The decision
 
     private func capabilities(_ extra: String...) -> [String] {
-        ["group_delivery_v2"] + extra
+        ["group_delivery_v3"] + extra
     }
 
     /// The happy path: capability, a well-formed challenge, and an account

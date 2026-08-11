@@ -491,7 +491,7 @@ export interface ProtocolConfig {
      * Whether a relay-synced group may send one O(1) relay broadcast
      * instead of per-member fan-out (default: true). The flag alone never
      * selects the broadcast: the path additionally requires the connected
-     * relay to advertise the `group_delivery_v2` capability, whose settled
+     * relay to advertise the `group_delivery_v3` capability, whose settled
      * per-recipient delivery report is what gives the broadcast a delivery
      * contract (members the relay did not reach are re-sent per-member
      * automatically — see the `group_message_delivery_report` event). Set

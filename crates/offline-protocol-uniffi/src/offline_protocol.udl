@@ -540,7 +540,7 @@ dictionary ProtocolConfig {
     // Whether a relay-synced group may send one O(1) relay broadcast instead
     // of per-member fan-out. Default ON, but the flag alone never selects the
     // broadcast: the path additionally requires the connected relay to have
-    // advertised the group_delivery_v2 capability (injected by the bridge via
+    // advertised the group_delivery_v3 capability (injected by the bridge via
     // internet_relay_capabilities). Such a relay answers every broadcast with
     // a settled per-recipient delivery report, and the SDK re-sends a
     // per-member copy to every MLS roster member the report does not account
@@ -1100,7 +1100,7 @@ interface OfflineProtocol {
     sequence<string> internet_presence_watchlist();
 
     // Internet: capability tokens from the relay's Authenticated answer
-    // (e.g. "group_delivery_v2"). MUST be called BEFORE
+    // (e.g. "group_delivery_v3"). MUST be called BEFORE
     // internet_status_changed(true) on each (re)connect — the false→true
     // flush has to see the capabilities, or the first sends after reconnect
     // take the capability-less path. Wholesale replace; the SDK clears the

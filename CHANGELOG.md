@@ -186,6 +186,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   relays. Nostr now refuses to run without an identity, and the transport
   refuses an id that is not a derived address rather than hashing it into a
   tag.
+- **The relay broadcast path now requires the `group_delivery_v3` capability**
+  (previously `group_delivery_v2`). v3 is the same settled delivery-report
+  contract with an address-aware relay group path: members are named by the
+  identifiers the roster was registered under — for this SDK the MLS roster's
+  `off1…` addresses — fan-out and push resolve those names relay-side, and
+  group sender attribution carries the sender's declared address. Against a
+  v2 relay the group path and the address identity cannot compose: the relay
+  cannot route to address-registered members, its report names members in a
+  namespace that never intersects the MLS roster (so the backstop re-sent to
+  the entire roster after every broadcast), and the copies it did deliver
+  arrived mis-attributed and were rejected after spending their one
+  decryption (see Fixed). The gate now fails closed against such a relay and
+  every group send takes the always-correct per-member fan-out until the
+  relay upgrades. No configuration change; `group.relayBroadcastEnabled`
+  keeps its meaning.
 
 ### Added
 
@@ -238,6 +253,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   clear error instead of dead transports.
 
 ### Fixed
+
+- **A relay-delivered group message could be lost silently while the sender saw
+  it delivered.** The relay's group path names senders by relay-account
+  username, while the MLS credential inside the ciphertext is the sender's
+  `off1…` address — so under the new identity every group frame the relay
+  fanned out failed the wire-sender/credential match after decryption and was
+  rejected. The rejection alone would have been recoverable (the delivery
+  report's per-member backstop re-sends a copy), but the relay-path handler had
+  already marked the message's logical id as seen before decrypting, so the
+  backstop copy was absorbed as an already-delivered duplicate and ACKed —
+  delivered exactly nowhere, with the sender told otherwise. The handler now
+  unmarks the id on every arm that neither delivered, nor buffered, nor
+  consumed MLS state (identity rejection, decrypt refusal, and the
+  plaintext-spoof drop, whose id is attacker-chosen wire input), so the
+  backstop copy is processed honestly: it buffers un-ACKed and the sender
+  keeps custody instead of receiving a false delivery ACK. Preventing the loss
+  outright is the job of the `group_delivery_v3` capability gate below, which
+  keeps a mis-attributed relay copy from existing (and spending the
+  ciphertext's one decryption) in the first place.
 
 - **The relay group control plane no longer recognized this device, so it added
   itself to its own groups and never left them.** The React Native bridges tell

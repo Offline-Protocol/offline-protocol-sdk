@@ -65,13 +65,29 @@ pub(super) const RELAY_BROADCAST_MAX_ATTEMPTS: u32 = 3;
 /// oldest entry is downgraded to per-member fan-out, which needs no report
 /// to be correct — the bound costs uplink, never delivery.
 pub(super) const MAX_RELAY_BROADCAST_PENDING: usize = 64;
-/// Relay capability token gating the whole v2 group-delivery contract:
-/// client `message_id` accept/echo, group push fallback, the settled
-/// `GroupMessageSent` delivery report, and `forward_info` passthrough. The
-/// relay advertises it (with the granular `group_*` tokens it aggregates) in
-/// its `Authenticated` answer; the bridge injects the list via
+/// Relay capability token gating the group broadcast path: the v2 settled
+/// delivery contract (client `message_id` accept/echo, group push fallback,
+/// the settled `GroupMessageSent` delivery report, `forward_info`
+/// passthrough) plus — what v3 adds — an address-aware relay group path:
+/// members are named in the identifier space the roster was registered in
+/// (this SDK registers the MLS roster, i.e. `off1…` addresses), fan-out and
+/// push resolve those names to accounts relay-side, and group sender
+/// attribution carries the sender's declared address. The relay advertises
+/// it (with the granular `group_*` tokens it aggregates) in its
+/// `Authenticated` answer; the bridge injects the list via
 /// `set_relay_capabilities` before reporting the transport up.
-pub(crate) const RELAY_CAP_GROUP_DELIVERY_V2: &str = "group_delivery_v2";
+///
+/// A `group_delivery_v2` relay deliberately fails this gate. Against its
+/// username-keyed group path, a post-addressing broadcast is worse than
+/// useless: the relay cannot resolve address-registered members to
+/// connections (the broadcast reaches nobody it was registered for), its
+/// report names members in username space (the roster set-difference
+/// re-issues to the whole roster), and any copy it does deliver arrives
+/// attributed by username — failing the SEC-M1 wire-sender/credential match
+/// and burning the ciphertext on a copy that is then rejected. Failing the
+/// gate keeps every group send on the per-member fan-out path, which post-#27
+/// relays route and attribute correctly by address.
+pub(crate) const RELAY_CAP_GROUP_DELIVERY_V3: &str = "group_delivery_v3";
 /// Upper bound on stored relay capability tokens, and on the byte length of
 /// each token. The list is wire-supplied by the relay — bounded so a hostile
 /// or broken relay cannot grow resident memory with it.
@@ -633,6 +649,17 @@ pub(crate) struct RelayGroupBroadcastPayload {
 /// three member lists default to empty so a v1 relay's bare receipt (no
 /// lists) still parses — it settles the entry with everyone unreached,
 /// which per-member re-issue then covers.
+///
+/// Member-name namespace: a `group_delivery_v3` relay names members by the
+/// identifiers the roster was registered under — for this SDK, the MLS
+/// roster's `off1…` addresses — which is what makes the set difference in
+/// `handle_relay_group_delivery_report` meaningful. A v2 relay names
+/// members by relay-account *username*, a namespace that never intersects
+/// the address roster; the subtraction then removes nothing and the whole
+/// roster is re-issued per-member. That degradation is the fail-safe, not
+/// the contract — the broadcast gate requires v3 precisely so reports in
+/// the wrong namespace only ever arrive from relays this SDK no longer
+/// broadcasts through (e.g. a capability set that changed mid-flight).
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RelayGroupDeliveryReport {
     /// Group the report is for.
@@ -654,8 +681,11 @@ pub(crate) struct RelayGroupDeliveryReport {
 /// One recipient a relay group fan-out could not reach.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RelayGroupDeliveryMiss {
-    /// The member's relay username (same identifier space as the member ids
-    /// this SDK registers).
+    /// The member's identifier as the relay knows it. Wire field name is
+    /// `username` for relay-contract stability, but under `group_delivery_v3`
+    /// the value is the registered member id (an `off1…` address for this
+    /// SDK); only v2 relays put an account username here (see the namespace
+    /// note on [`RelayGroupDeliveryReport`]).
     pub(crate) username: String,
     /// Stable machine-readable code (`offline_no_push`,
     /// `connection_lost_no_push`, `undeliverable`, `already_pushed`,
@@ -3532,17 +3562,20 @@ impl OfflineProtocol {
 
         // --- Attempt relay broadcast first ---
         // If the group is registered, the app opted in, and the relay
-        // advertised the v2 group-delivery contract, a single relay
+        // advertised the v3 group-delivery contract, a single relay
         // broadcast is O(1) instead of O(N) individual sends.
         //
         // The capability gate is what makes the broadcast safe to take by
-        // default: a `group_delivery_v2` relay answers every broadcast with
+        // default: a `group_delivery_v3` relay answers every broadcast with
         // a settled per-recipient delivery report, which the sender consumes
         // (`handle_relay_group_delivery_report`) to re-send per-member
         // copies to anyone the relay did not reach — so the broadcast keeps
-        // a delivery contract instead of being fire-and-forget. Against an
-        // older relay the gate simply fails and sends take the
-        // always-correct per-member fan-out.
+        // a delivery contract instead of being fire-and-forget — and names
+        // members in the same address space this SDK registered, so that
+        // report is comparable against the MLS roster at all (see
+        // [`RELAY_CAP_GROUP_DELIVERY_V3`] for why a v2 relay must fail this
+        // gate). Against an older relay the gate simply fails and sends take
+        // the always-correct per-member fan-out.
         //
         // `is_internet_available()` is re-checked here and not inferred from
         // `relay_synced`: sync state is cleared by the `process()` tick, so
@@ -3553,7 +3586,7 @@ impl OfflineProtocol {
             && self
                 .group_mesh
                 .relay_capabilities
-                .contains(RELAY_CAP_GROUP_DELIVERY_V2)
+                .contains(RELAY_CAP_GROUP_DELIVERY_V3)
             && self.is_internet_available()
         {
             if let Ok(mid) = self.try_relay_broadcast(
@@ -4296,7 +4329,7 @@ impl OfflineProtocol {
     /// Callers must only take this path when all four of
     /// `GroupConfig::relay_broadcast_enabled`, `relay_synced` (the relay
     /// acknowledged the group; otherwise a prefix-unaware relay swallows the
-    /// frame), the relay's [`RELAY_CAP_GROUP_DELIVERY_V2`] capability, and
+    /// frame), the relay's [`RELAY_CAP_GROUP_DELIVERY_V3`] capability, and
     /// `is_internet_available()` hold.
     ///
     /// Mints the logical message id the whole group will know this message
@@ -5112,7 +5145,7 @@ impl OfflineProtocol {
                 && self
                     .group_mesh
                     .relay_capabilities
-                    .contains(RELAY_CAP_GROUP_DELIVERY_V2)
+                    .contains(RELAY_CAP_GROUP_DELIVERY_V3)
                 && self.is_internet_available();
             if entry.attempts < RELAY_BROADCAST_MAX_ATTEMPTS && gate_holds {
                 let payload = RelayGroupBroadcastPayload {
@@ -5263,7 +5296,19 @@ impl OfflineProtocol {
         reply_to_msg: Option<String>,
         forward_info: Option<offline_protocol_core::ForwardInfo>,
     ) {
-        // Dedup check — same pattern as handle_group_mls_msg
+        // Dedup check — same pattern as handle_group_mls_msg, with one
+        // deliberate difference. The relay-supplied id IS the logical id on
+        // this path, and it is marked here, pre-decrypt, as the replay-
+        // amplification defense (one MLS crypto op per id). But the mesh
+        // handler's marking discipline exists for a reason this path is not
+        // exempt from: a marked id suppresses every later copy of the same
+        // logical message, including the per-member re-issue that is this
+        // message's own delivery safety net. So every arm below that ends
+        // with the frame neither delivered, nor buffered, nor consumed by
+        // MLS must unmark before returning — otherwise a copy that was
+        // *rejected* (e.g. mis-attributed by the relay) reads as *delivered*
+        // to the duplicate check, and the genuine copy that follows is
+        // absorbed and re-ACKed without ever being surfaced: silent loss.
         let dedup_key = message_id.to_string();
         if self.group_mesh.message_dedup.contains_key(&dedup_key) {
             debug!(group_id = %group_id, msg_id = %dedup_key, "Duplicate relay group message, skipping");
@@ -5271,7 +5316,7 @@ impl OfflineProtocol {
         }
         self.group_mesh
             .message_dedup
-            .insert(dedup_key, Instant::now());
+            .insert(dedup_key.clone(), Instant::now());
         if self.group_mesh.message_dedup.len() > MAX_GROUP_MESSAGE_DEDUP_ENTRIES {
             self.cleanup_group_message_dedup();
         }
@@ -5304,6 +5349,12 @@ impl OfflineProtocol {
                          so unauthenticated plaintext cannot be attributed to the claimed sender"
                             .to_string(),
                     ));
+                    // Nothing was delivered and no MLS state was touched: the
+                    // id on this frame is attacker-chosen wire input, and
+                    // leaving it marked would let a spoofed frame suppress the
+                    // genuine logical message it names (see the marking note
+                    // at the top of this function).
+                    self.group_mesh.message_dedup.remove(&dedup_key);
                     return;
                 }
                 // Not ciphertext and no MLS state — legacy relay-only group.
@@ -5412,6 +5463,19 @@ impl OfflineProtocol {
                     group_id = %group_id,
                     "Failed to decrypt relay group message via MLS, dropping"
                 );
+                // Rejected, not delivered — unmark so a later copy of the
+                // same logical message is processed instead of absorbed.
+                // `SecurityRejected` is the load-bearing case: a v2 relay
+                // attributes group frames by username, which fails the
+                // SEC-M1 wire-sender/credential match after the decrypt —
+                // leaving the id marked would then swallow the per-member
+                // re-issue of the very same message (delivered exactly
+                // nowhere, ACKed as a duplicate). `Failed` covers pre-decrypt
+                // refusals (MLS unavailable, invalid group id) that a later
+                // copy may outlive. The cost of unmarking is one MLS crypto
+                // op per replayed copy — bounded by the same reasoning as
+                // the mesh handler's post-decrypt-only logical-id marking.
+                self.group_mesh.message_dedup.remove(&dedup_key);
             }
         }
     }

@@ -82,7 +82,7 @@ class MainActivity : AppCompatActivity() {
             // maxGroupMembers (256u), groupRelayEnabled (true),
             // groupRelayBroadcastEnabled (true — capability-gated, and it
             // falls back to per-member fan-out against any relay that did not
-            // advertise group_delivery_v2; see
+            // advertise group_delivery_v3; see
             // docs/configuration.md#group-configuration),
             // requireTransportIdentity (false), binaryWireEnabled (true),
             // compactEnvelopeEnabled (true), richPayloadEnabled (true),
