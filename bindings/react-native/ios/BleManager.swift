@@ -118,6 +118,10 @@ public class BleManager: NSObject, TransportManager {
     private var cachedLocalAddress: String?
     /// Guards against piling up refreshes while one is already in flight.
     private var identityRefreshInFlight = false
+    /// Set when a refresh is requested while one is in flight, so the request
+    /// is coalesced into one more pass instead of being dropped — see
+    /// `updateSignedIdentity`.
+    private var identityRefreshRequested = false
 
     private func currentSignedIdentity() -> SignedIdentityData? {
         identityLock.lock()
@@ -130,7 +134,6 @@ public class BleManager: NSObject, TransportManager {
         defer { identityLock.unlock() }
         return cachedLocalAddress
     }
-
 
     /// Verified peer identities (peripheral UUID -> SignedIdentityData)
     private var verifiedPeerIdentities: [UUID: SignedIdentityData] = [:]
@@ -1288,23 +1291,47 @@ public class BleManager: NSObject, TransportManager {
     /// Callers that need the values *now* (`setupGattServer`) read the cache
     /// and defer via their existing "not ready, reschedule" path instead of
     /// waiting here.
+    ///
+    /// A request arriving while a pass is already running is **coalesced**, not
+    /// dropped. The body spans three FFI calls that can take seconds under the
+    /// very contention this fix exists to remove, and a request landing inside
+    /// that window carries newer advertisement data — dropping it would leave
+    /// the cache signed over a stale revision until some unrelated trigger
+    /// happened to fire. One extra pass settles any burst, because each pass
+    /// consumes the flag exactly once.
     private func updateSignedIdentity() {
         identityLock.lock()
         if identityRefreshInFlight {
+            identityRefreshRequested = true
             identityLock.unlock()
             return
         }
         identityRefreshInFlight = true
         identityLock.unlock()
 
+        runIdentityRefresh()
+    }
+
+    /// One refresh pass, re-dispatching itself if a request arrived while it
+    /// ran. The re-dispatch is `async` onto the serial queue, so this appends
+    /// to the tail rather than recursing on the stack.
+    private func runIdentityRefresh() {
         onProtocolQueue { [weak self] in
             guard let self = self else { return }
-            defer {
-                self.identityLock.lock()
-                self.identityRefreshInFlight = false
-                self.identityLock.unlock()
-            }
             self.computeSignedIdentity()
+
+            self.identityLock.lock()
+            let repeatPass = self.identityRefreshRequested
+            self.identityRefreshRequested = false
+            // Stay marked in-flight while a repeat is pending, so a caller
+            // arriving now coalesces into that pass rather than starting a
+            // second one alongside it.
+            self.identityRefreshInFlight = repeatPass
+            self.identityLock.unlock()
+
+            if repeatPass {
+                self.runIdentityRefresh()
+            }
         }
     }
 
