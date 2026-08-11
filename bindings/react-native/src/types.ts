@@ -1907,7 +1907,9 @@ export type SecurityWarningCode =
   | 'SESSION_SENDER_GROUP_MISMATCH'
   | 'SESSION_REKEY_TRIGGERED'
   | 'NOSTR_KEY_PACKAGE_SLOT_EXHAUSTED'
-  | 'PUSH_KEY_PACKAGE_POOL_EXHAUSTED';
+  | 'PUSH_KEY_PACKAGE_POOL_EXHAUSTED'
+  | 'RELAY_ADDRESS_BINDING_MISMATCH'
+  | 'RELAY_ADDRESS_DECLARATION_REFUSED';
 
 /**
  * A security-relevant anomaly was detected for a peer.
@@ -1933,6 +1935,19 @@ export type SecurityWarningCode =
  * it clears as packages are consumed or expire — but a sustained rate means
  * the device is accumulating advertisements to peers that never establish a
  * session.
+ *
+ * `RELAY_ADDRESS_BINDING_MISMATCH` has no benign reading either: the relay
+ * acknowledged binding an address that is not this device's, which only a
+ * broken or hostile relay can produce. `peer_id` is the foreign address it
+ * echoed. The connection is not torn down — a relay that controls the socket
+ * already controls what a local refusal would protect.
+ *
+ * `RELAY_ADDRESS_DECLARATION_REFUSED` is operational, not adversarial: the
+ * relay declined the declaration, so this connection stays attributed by
+ * account name. Existing conversations keep working; what breaks is
+ * establishing *new* encrypted sessions over the relay, since the key-package
+ * and welcome frames are identity-checked. `peer_id` is this device's own id
+ * and `reason` is the relay's text, verbatim and opaque.
  */
 export interface SecurityWarningEvent extends BaseEvent {
   type: 'security_warning';

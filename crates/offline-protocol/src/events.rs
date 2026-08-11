@@ -167,6 +167,39 @@ pub enum SecurityWarningCode {
     /// the signal that the ceiling, not peer churn, is now the binding
     /// constraint.
     PushKeyPackagePoolExhausted,
+    /// The relay acknowledged an address declaration naming an address that is
+    /// not this node's.
+    ///
+    /// There is no benign reading. The bridge declares `local_address()` and
+    /// signs a proof over a per-connection challenge; the relay verifies that
+    /// the declared address derives from the key that signed it, and echoes
+    /// back what it bound. So the echo can only differ if the relay bound
+    /// something other than what it verified — a broken or hostile relay, or a
+    /// frame injected into the socket.
+    ///
+    /// Nothing is torn down: a relay that controls the socket already controls
+    /// everything a local refusal could protect, so the mitigation is that the
+    /// signal is loud rather than that the connection dies. What it means in
+    /// practice is that this connection's frames are attributed to an identity
+    /// this node cannot prove, so receivers strict-matching the sender against
+    /// the transport identity will reject its security-gated control traffic.
+    RelayAddressBindingMismatch,
+    /// The relay refused this connection's address declaration, so it stays
+    /// attributed by account name.
+    ///
+    /// Operational degradation, not an attack signal: the refusal path is
+    /// deliberately non-fatal on both sides, and the connection keeps working
+    /// exactly as it did before addresses existed. What is lost is *new* MLS
+    /// session establishment over the relay — `__MLS_KEY_PKG__` and
+    /// `__MLS_WELCOME__` are security-gated, so a receiver that strict-matches
+    /// the account name against the `off1…` sender rejects them, while already
+    /// established sessions keep working because `__MLS_ENC__` is data-plane.
+    ///
+    /// The `reason` carries the relay's own text verbatim and is opaque: the
+    /// causes range from unusable key material to this socket having been
+    /// displaced by a newer login. No retry is attempted — the next reconnect
+    /// declares from scratch.
+    RelayAddressDeclarationRefused,
 }
 
 impl SecurityWarningCode {
@@ -184,6 +217,8 @@ impl SecurityWarningCode {
             Self::SessionRekeyTriggered => "SESSION_REKEY_TRIGGERED",
             Self::NostrKeyPackageSlotExhausted => "NOSTR_KEY_PACKAGE_SLOT_EXHAUSTED",
             Self::PushKeyPackagePoolExhausted => "PUSH_KEY_PACKAGE_POOL_EXHAUSTED",
+            Self::RelayAddressBindingMismatch => "RELAY_ADDRESS_BINDING_MISMATCH",
+            Self::RelayAddressDeclarationRefused => "RELAY_ADDRESS_DECLARATION_REFUSED",
         }
     }
 }
@@ -3537,6 +3572,8 @@ mod tests {
             SecurityWarningCode::SessionRekeyTriggered,
             SecurityWarningCode::NostrKeyPackageSlotExhausted,
             SecurityWarningCode::PushKeyPackagePoolExhausted,
+            SecurityWarningCode::RelayAddressBindingMismatch,
+            SecurityWarningCode::RelayAddressDeclarationRefused,
         ];
         for code in all {
             // serde renders a unit enum variant as a quoted JSON string.
@@ -3560,7 +3597,9 @@ mod tests {
                 | SecurityWarningCode::SessionSenderGroupMismatch
                 | SecurityWarningCode::SessionRekeyTriggered
                 | SecurityWarningCode::NostrKeyPackageSlotExhausted
-                | SecurityWarningCode::PushKeyPackagePoolExhausted => {}
+                | SecurityWarningCode::PushKeyPackagePoolExhausted
+                | SecurityWarningCode::RelayAddressBindingMismatch
+                | SecurityWarningCode::RelayAddressDeclarationRefused => {}
             }
         }
     }

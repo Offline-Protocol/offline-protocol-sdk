@@ -13513,6 +13513,153 @@ fn test_rekey_emits_security_warning() {
     );
 }
 
+/// The lockstep assertion's happy path must be silent.
+///
+/// The relay echoing the address we declared is the *expected* outcome on every
+/// connection to a relay that supports address routing, so emitting a warning
+/// for it would bury the disagreement it exists to surface under one event per
+/// reconnect.
+#[test]
+fn test_relay_address_echo_matching_local_address_is_silent() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    let warnings = capture_security_warnings(&mut alice);
+    alice.start().unwrap();
+    let local = alice
+        .local_address()
+        .expect("an MLS-initialized instance has an address")
+        .to_string();
+
+    alice.on_relay_address_declared(&local);
+
+    assert!(
+        warnings.lock().unwrap().is_empty(),
+        "the relay echoing our own address is the expected outcome and must not \
+         warn (got {:?})",
+        warnings.lock().unwrap()
+    );
+}
+
+/// The relay acknowledging an address that is not ours must be reported.
+///
+/// This is the whole point of the item: the relay verifies that the declared
+/// address derives from the key that signed the proof, so an echo naming
+/// anything else means the binding it applied is not the one it verified. The
+/// consequence is concrete — this connection's frames get attributed to an
+/// identity we cannot prove, so a receiver strict-matching `Message.sender`
+/// against the transport identity rejects our security-gated control traffic
+/// and no new MLS session can be established over the relay.
+///
+/// `peer_id` carries the *foreign* address, since that is the finding.
+#[test]
+fn test_relay_address_echo_naming_another_address_warns() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    let warnings = capture_security_warnings(&mut alice);
+    alice.start().unwrap();
+    let someone_else = id("bob");
+
+    alice.on_relay_address_declared(&someone_else);
+
+    let seen = warnings.lock().unwrap();
+    assert_eq!(
+        seen.as_slice(),
+        &[(
+            someone_else.clone(),
+            SecurityWarningCode::RelayAddressBindingMismatch
+        )],
+        "an echo naming another address must warn once, attributed to the address \
+         the relay bound"
+    );
+}
+
+/// An acknowledgement that arrives with no local identity is the same finding.
+///
+/// The bridge never declares before `local_address()` exists, so this answers a
+/// declaration this node did not make. There is nothing to compare against,
+/// which is itself the report — silently ignoring it would make a relay that
+/// invents bindings for undeclared connections invisible.
+#[test]
+fn test_relay_address_echo_before_identity_warns() {
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    let warnings = capture_security_warnings(&mut alice);
+    assert!(
+        alice.local_address().is_none(),
+        "fixture precondition: no MLS init means no derived address"
+    );
+
+    alice.on_relay_address_declared(&id("bob"));
+
+    let seen = warnings.lock().unwrap();
+    assert_eq!(
+        seen.len(),
+        1,
+        "an acknowledgement we never asked for must warn (got {:?})",
+        seen
+    );
+    assert_eq!(seen[0].1, SecurityWarningCode::RelayAddressBindingMismatch);
+}
+
+/// A refused declaration must surface, and must not be an attack signal.
+///
+/// The relay's refusal path is deliberately non-fatal on both sides — the
+/// connection keeps working in account-name space — so this is reported as its
+/// own operational code rather than as the mismatch above. It is attributed to
+/// this node, because the degraded connection is ours and no peer is involved.
+///
+/// That the connection survives is structural rather than asserted: the handler
+/// takes `&self` and can only emit.
+#[test]
+fn test_relay_declaration_refusal_warns_against_self() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    let warnings = capture_security_warnings(&mut alice);
+    alice.start().unwrap();
+    let local = alice.local_address().expect("address").to_string();
+
+    alice.on_relay_address_declaration_refused("connection is no longer registered");
+
+    let seen = warnings.lock().unwrap();
+    assert_eq!(
+        seen.as_slice(),
+        &[(
+            local.clone(),
+            SecurityWarningCode::RelayAddressDeclarationRefused
+        )],
+        "a refusal must warn once against our own id, not a peer's"
+    );
+}
+
+/// The relay's refusal text reaches the app.
+///
+/// The reasons are opaque strings owned by the relay and range from unusable
+/// key material to this socket having been displaced by a newer login — the
+/// operator needs the text to tell those apart, so it must survive into the
+/// event rather than being collapsed into the code.
+#[test]
+fn test_relay_declaration_refusal_carries_the_relay_reason() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    let reasons: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let h = Arc::clone(&reasons);
+        alice.on_event(move |e| {
+            if let Event::SecurityWarning { reason, .. } = e {
+                h.lock().unwrap().push(reason);
+            }
+        });
+    }
+    alice.start().unwrap();
+
+    alice.on_relay_address_declaration_refused("identity key is not valid base64");
+
+    assert!(
+        reasons
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.contains("identity key is not valid base64")),
+        "the relay's own reason must reach the app (got {:?})",
+        reasons.lock().unwrap()
+    );
+}
+
 /// Every path that drops a pending queue must settle the ids it destroys. The
 /// app was handed those ids by `send_message*` at queue time, so an unsettled
 /// drop leaves it waiting on messages that can never resolve either way — the

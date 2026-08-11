@@ -3978,6 +3978,45 @@ impl OfflineProtocol {
             .map_err(ProtocolError::from)
     }
 
+    /// Internet: the relay's `AddressDeclared` answer — the address it says it
+    /// bound to this connection, verbatim.
+    ///
+    /// This is the lockstep check for the relay leg of addressing. The bridge
+    /// declares `local_address()` and signs a proof over a per-connection
+    /// challenge; the relay verifies the address derives from the signing key
+    /// and echoes what it bound. Agreement means the relay attributes our
+    /// frames with the identity the core stamps into `Message.sender`, which
+    /// the receiver's `validate_transport_sender` strict-matches. Disagreement
+    /// emits `RELAY_ADDRESS_BINDING_MISMATCH` and nothing else — see
+    /// [`SecurityWarningCode::RelayAddressBindingMismatch`] for why acting on
+    /// it would buy nothing.
+    ///
+    /// A dedicated entry point rather than message-plane injection, on the
+    /// `internet_group_report_received` precedent: an acknowledgement that
+    /// could be synthesized from a notification payload would assert the
+    /// opposite of what this check exists to establish.
+    ///
+    /// Infallible: an echo this node cannot match is the reported finding, not
+    /// a caller error.
+    pub fn internet_address_declared(&self, address: String) {
+        let protocol = recover_mutex(&self.inner, "inner");
+        protocol.on_relay_address_declared(&address);
+    }
+
+    /// Internet: the relay's `AddressError` answer — it refused this
+    /// connection's address declaration.
+    ///
+    /// Non-fatal by contract on both sides: the connection stays authenticated
+    /// and keeps working in account-name space. What degrades is *new* MLS
+    /// session establishment over the relay, since `__MLS_KEY_PKG__` and
+    /// `__MLS_WELCOME__` are security-gated while `__MLS_ENC__` is not. Emits
+    /// `RELAY_ADDRESS_DECLARATION_REFUSED` carrying `reason` — the relay's own
+    /// text, treated as opaque. No retry: the next reconnect declares afresh.
+    pub fn internet_address_declaration_refused(&self, reason: String) {
+        let protocol = recover_mutex(&self.inner, "inner");
+        protocol.on_relay_address_declaration_refused(&reason);
+    }
+
     // ========================================================================
     // WIFI DIRECT TRANSPORT OPERATIONS
     // ========================================================================
@@ -10273,6 +10312,65 @@ mod tests {
              internetRelayCapabilities, which must precede internetStatusChanged(true) — same \
              reason as the Swift half above"
         );
+    }
+
+    /// Both bridges hand the relay's declaration answer to the SDK.
+    ///
+    /// The declaration is only half a handshake: sending it establishes what we
+    /// *claim*, and the relay's `AddressDeclared` echo is the only evidence of
+    /// what it actually *bound*. Left in the bridge as a log line — which is
+    /// where it started — a relay that binds something else is invisible
+    /// everywhere except a device console, and the failure it produces is the
+    /// one this whole chain exists to remove: frames attributed to an identity
+    /// the receiver's `validate_transport_sender` will not match, so no MLS
+    /// session can be established over the relay.
+    ///
+    /// `AddressError` is the same seam from the other side. It is non-fatal by
+    /// contract and stays that way, but "the connection works" and "the
+    /// connection can start new conversations" are different claims, and only
+    /// the SDK can tell the app which one it has.
+    ///
+    /// Pinned as source text for the same reason as the ordering guard above:
+    /// `InternetManager.swift` is on `Package.swift`'s `exclude:` list and
+    /// `InternetManager.kt` needs a live OkHttp socket, so neither arm is
+    /// reachable from an executing test on either platform. What the *check*
+    /// does once called is covered in the core crate
+    /// (`test_relay_address_echo_*`, `test_relay_declaration_refusal_*`).
+    #[test]
+    fn react_native_relay_reports_the_declaration_answer_to_the_sdk() {
+        let swift = rn_source_code_only("ios/InternetManager.swift");
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/InternetManager.kt");
+
+        for (label, code, declared, refused) in [
+            (
+                "ios",
+                &swift,
+                "protocolInstance.internetAddressDeclared(address:",
+                "protocolInstance.internetAddressDeclarationRefused(reason:",
+            ),
+            (
+                "android",
+                &kotlin,
+                "protocol.internetAddressDeclared(",
+                "protocol.internetAddressDeclarationRefused(",
+            ),
+        ] {
+            assert!(
+                code.contains(declared),
+                "{label} InternetManager must forward the relay's AddressDeclared echo to the \
+                 SDK, which is the only place the address it bound is checked against \
+                 local_address() — a bridge-local log leaves a mis-bound connection visible \
+                 nowhere but a device console"
+            );
+            assert!(
+                code.contains(refused),
+                "{label} InternetManager must report an AddressError to the SDK: the refusal is \
+                 non-fatal but not harmless — the connection keeps delivering on established \
+                 sessions while being unable to start new ones, and only the SDK can tell the \
+                 app that"
+            );
+        }
     }
 
     /// Every hand-written iOS source is listed in the podspec.

@@ -164,6 +164,38 @@ space, and the next reconnect declares again from scratch. Both the acceptance
 and the refusal also reach the app verbatim as `internet_server_message`
 events, and the bridge diagnostics name the reason it skipped.
 
+#### Checking the answer
+
+Sending the declaration establishes what this device *claims*. The relay's
+`AddressDeclared` echo is the only evidence of what it actually **bound**, so
+the bridges hand both answers to the SDK, which checks them and reports through
+`security_warning`:
+
+| Answer | Check | Event |
+|---|---|---|
+| `AddressDeclared` | echoed address == `local_address()` | none — this is the expected outcome |
+| `AddressDeclared` | echoed address is anything else | `RELAY_ADDRESS_BINDING_MISMATCH`, `peer_id` = the address the relay bound |
+| `AddressError` | — | `RELAY_ADDRESS_DECLARATION_REFUSED`, `peer_id` = this device, `reason` = the relay's text |
+
+Both are reported and neither is acted on. A mismatch has no benign reading —
+the relay verifies that the declared address derives from the key that signed
+the proof, so an echo naming something else means it bound what it did not
+verify — but a relay that controls the socket already controls everything a
+local teardown would protect, so the mitigation is that the signal is loud. A
+refusal is genuinely non-fatal by contract on both sides.
+
+What a refusal costs is worth stating plainly, because "the connection works"
+and "the connection can start new conversations" are different claims: an
+undeclared connection keeps delivering on **established** sessions, and cannot
+establish **new** ones. Apps that surface relay health should treat
+`RELAY_ADDRESS_DECLARATION_REFUSED` as degraded rather than down.
+
+Both answers arrive through dedicated FFI entry points
+(`internet_address_declared`, `internet_address_declaration_refused`) rather
+than through message-plane injection — an acknowledgement that could be
+synthesized from a notification payload would assert exactly what the check
+exists to establish.
+
 ## Outbox
 
 The outbox persists messages that require acknowledgment. It serves as the source of truth for "what messages are in flight."

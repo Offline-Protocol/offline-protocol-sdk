@@ -1004,6 +1004,10 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_init
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_install_telemetry_sink(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declared(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message(
@@ -1411,6 +1415,10 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_route(
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(`ptr`: Long,`secureStorage`: Long,`protocolStateStorage`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_install_telemetry_sink(`ptr`: Long,`sink`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declaration_refused(`ptr`: Long,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declared(`ptr`: Long,`address`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_confirm_sent(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1936,6 +1944,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_install_telemetry_sink() != 18166.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused() != 30965.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declared() != 11812.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent() != 10435.toShort()) {
@@ -3293,6 +3307,10 @@ public interface OfflineProtocolInterface {
     
     fun `installTelemetrySink`(`sink`: TelemetrySink, `config`: TelemetryConfig)
     
+    fun `internetAddressDeclarationRefused`(`reason`: kotlin.String)
+    
+    fun `internetAddressDeclared`(`address`: kotlin.String)
+    
     fun `internetConfirmSent`(`messageId`: kotlin.String)
     
     fun `internetGetNextMessage`(): InternetMessage?
@@ -4328,6 +4346,30 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_install_telemetry_sink(
         it,
         FfiConverterTypeTelemetrySink.lower(`sink`),FfiConverterTypeTelemetryConfig.lower(`config`),_status)
+}
+    }
+    
+    
+
+    override fun `internetAddressDeclarationRefused`(`reason`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declaration_refused(
+        it,
+        FfiConverterString.lower(`reason`),_status)
+}
+    }
+    
+    
+
+    override fun `internetAddressDeclared`(`address`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declared(
+        it,
+        FfiConverterString.lower(`address`),_status)
 }
     }
     

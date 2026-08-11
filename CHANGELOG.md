@@ -203,6 +203,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   not derive to the address it is being used under — the wrong namespace for a
   profile, or a replaced key — instead of building a credential the device
   cannot prove it owns.
+- **The relay's answer to the address declaration is now checked, not just
+  logged.** Declaring proves what this device *claims*; the relay's
+  `AddressDeclared` echo is the only evidence of what it actually **bound**, and
+  that echo used to terminate in a bridge diagnostic — inside `InternetManager`,
+  the one class of code neither platform can execute in CI. So a relay that
+  bound something else produced exactly the failure this whole chain exists to
+  remove (frames attributed to an identity the receiver will not match, and no
+  MLS session establishable over the relay) while being visible nowhere but a
+  device console. Both answers now reach the SDK through dedicated FFI entry
+  points — `internet_address_declared`, `internet_address_declaration_refused`,
+  on the `internet_group_report_received` precedent, so an acknowledgement
+  cannot be synthesized through the notification ciphertext injector — where the
+  echo is compared against `local_address()` and two new `security_warning`
+  codes report the outcome. `RELAY_ADDRESS_BINDING_MISMATCH` has no benign
+  reading: the relay verifies that the declared address derives from the key
+  that signed the proof, so an echo naming anything else means it bound what it
+  did not verify. `RELAY_ADDRESS_DECLARATION_REFUSED` is operational rather than
+  adversarial and carries the relay's own reason text verbatim. Neither is acted
+  on — the refusal path is deliberately non-fatal on both sides, and against a
+  hostile relay a local teardown protects nothing it does not already control —
+  so the whole value is that the signal is loud and typed. Worth surfacing in
+  app-side relay health, because "the connection works" and "the connection can
+  start new conversations" are different claims: an undeclared connection keeps
+  delivering on **established** sessions and cannot establish new ones.
 
 - `initialize_mls` must now be called **before** `start()` and returns
   `InvalidState` otherwise. Deriving the address is what lets the transports be

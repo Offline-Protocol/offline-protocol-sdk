@@ -1542,8 +1542,21 @@ public class InternetManager: NSObject, TransportManager {
             // of account name. Informational: the binding took effect before
             // the relay answered (its frame loop is sequential), so nothing
             // waits on this, and the frame is forwarded like any other.
+            //
+            // The echo goes to the SDK, which is where the lockstep check
+            // lives: it compares the bound address against local_address() and
+            // reports a disagreement as RELAY_ADDRESS_BINDING_MISMATCH. A
+            // dedicated entry point, not message-plane injection, so an
+            // acknowledgement cannot be synthesized through the notification
+            // ciphertext injector.
+            //
+            // No staleness guard here: receiveLoop already drops a stale
+            // task's frames before they reach this dispatch, so an answer
+            // arriving here belongs to the current connection by construction.
+            let declaredAddress = json["address"] as? String ?? ""
+            protocolInstance.internetAddressDeclared(address: declaredAddress)
             emitDiagnostic("info", "Relay accepted the address declaration", context: [
-                "address": json["address"] as? String ?? ""
+                "address": declaredAddress
             ])
             emitServerMessage(rawText)
 
@@ -1556,7 +1569,19 @@ public class InternetManager: NSObject, TransportManager {
             // address already declared) or means this socket was displaced by
             // a newer login, in which case the successor declares for itself.
             // The next reconnect re-declares from scratch.
+            //
+            // Reported to the SDK as RELAY_ADDRESS_DECLARATION_REFUSED so the
+            // degradation is visible to the app: this connection keeps
+            // delivering on established sessions but cannot establish new
+            // ones, because key-package and welcome frames are identity-
+            // checked and ours will not match the account name the relay
+            // stamps.
+            //
+            // Same as above: receiveLoop's staleness guard means a refusal
+            // reaching here is this connection's, not a displaced
+            // predecessor's — that socket's frames never get this far.
             let addressErrorReason = json["reason"] as? String ?? "Unknown error"
+            protocolInstance.internetAddressDeclarationRefused(reason: addressErrorReason)
             emitDiagnostic("error", "Relay refused the address declaration; staying in account-name space", context: [
                 "reason": addressErrorReason
             ])
