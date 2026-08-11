@@ -57,6 +57,7 @@ let package = Package(
                 "tests"
             ],
             sources: [
+                "AddressDeclarationPolicy.swift",
                 "EncryptionConfigReader.swift",
                 "ForcedPresenceCheckQueue.swift",
                 "ForegroundReconnectPolicy.swift",
@@ -92,6 +93,7 @@ let package = Package(
                 "ProtocolErrorBridgeTests.swift"
             ],
             sources: [
+                "AddressDeclarationPolicyTests.swift",
                 "EncryptionConfigReaderTests.swift",
                 "ForcedPresenceCheckQueueTests.swift",
                 "ForegroundReconnectPolicyTests.swift",

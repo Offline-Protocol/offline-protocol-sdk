@@ -1040,18 +1040,29 @@ public class InternetManager: NSObject, TransportManager {
     /// connection that no longer exists.
     private func handleAuthenticated(
         userId: String,
-        username: String,
+        username: String?,
         capabilities: [String],
+        addressChallenge: String?,
         task: URLSessionWebSocketTask
     ) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self, !self.isStale(task) else { return }
             self.handleAuthenticatedOnMain(
-                userId: userId, username: username, capabilities: capabilities)
+                userId: userId,
+                username: username,
+                capabilities: capabilities,
+                addressChallenge: addressChallenge,
+                task: task)
         }
     }
 
-    private func handleAuthenticatedOnMain(userId: String, username: String, capabilities: [String]) {
+    private func handleAuthenticatedOnMain(
+        userId: String,
+        username: String?,
+        capabilities: [String],
+        addressChallenge: String?,
+        task: URLSessionWebSocketTask
+    ) {
         isAuthenticated = true
         emitConnectionStatus()
         cancelAuthTimeout()
@@ -1078,14 +1089,32 @@ public class InternetManager: NSObject, TransportManager {
         // component, never `self`): a teardown racing this hop must not
         // swallow the status change while the Rust instance lives on.
         //
-        // In-block order is load-bearing twice over. Capabilities MUST reach
-        // the SDK before the status flip: the flush reads the group
-        // broadcast gate's capability set (an older relay omits the field;
-        // the empty list is still injected so a stale set from a previous
-        // relay can never leak across connections). And the immediate poll
-        // MUST follow the flip on the same queue: the flush is what fills
-        // the internet send queue that poll drains — messages queued during
-        // disconnection go out promptly, not on the next timer tick.
+        // In-block order is load-bearing three times over. The address
+        // declaration MUST precede both: the relay attributes each inbound
+        // frame by whatever this connection has proved at the moment it
+        // reads that frame, and never re-stamps retroactively — so a send
+        // that leaves before the declaration is attributed by account name
+        // for good, and its `Message.sender` (an address) then fails the
+        // receiver's `validate_transport_sender`. The flush the status flip
+        // performs is exactly what produces those sends, so the declaration
+        // goes out first, on the same serial queue that orders them.
+        // Capabilities MUST reach the SDK before the status flip: the flush
+        // reads the group broadcast gate's capability set (an older relay
+        // omits the field; the empty list is still injected so a stale set
+        // from a previous relay can never leak across connections). And the
+        // immediate poll MUST follow the flip on the same queue: the flush is
+        // what fills the internet send queue that poll drains — messages
+        // queued during disconnection go out promptly, not on the next timer
+        // tick.
+        //
+        // The decision itself is made here on main because it is pure and
+        // cheap; only the signing and the write happen on messageQueue, since
+        // `signData` and `getIdentityPublicKey` take the protocol mutex.
+        let declaration = AddressDeclarationPolicy.decide(
+            capabilities: capabilities,
+            addressChallenge: addressChallenge,
+            username: username
+        )
         let pausedNow = isPaused
         messageQueue.async { [weak self, proto = self.protocolInstance] in
             // The `true` is asymmetric to the `false` blocks on purpose: those
@@ -1107,6 +1136,7 @@ public class InternetManager: NSObject, TransportManager {
             // survive to the next auth, and parked forced checks stay parked
             // (serviced by that auth, or drained by stop()).
             guard let self = self, self.isAuthenticated else { return }
+            self.declareAddress(declaration, proto: proto, task: task)
             try? proto.internetRelayCapabilities(capabilities: capabilities)
             try? proto.internetStatusChanged(isConnected: true)
             if !pausedNow {
@@ -1145,10 +1175,99 @@ public class InternetManager: NSObject, TransportManager {
 
         emitDiagnostic("info", "Authenticated with relay server", context: [
             "userId": userId,
-            "username": username
+            "username": username ?? deviceId
         ])
     }
     
+    /// Proves this connection's `off1…` address to the relay, so it is
+    /// attributed by address rather than by account name.
+    ///
+    /// messageQueue only, and deliberately the first thing that queue does for
+    /// a new connection: everything the relay attributes downstream — the
+    /// outbox flush's sends, and anything the poll loop drains after it — is
+    /// stamped with whatever this connection has proved by the time the relay
+    /// reads the frame, with no retroactive re-stamping.
+    ///
+    /// Nothing waits on the answer. The relay binds the address before it
+    /// reads the next frame off the socket, so ordering is established by the
+    /// write alone; `AddressDeclared` and `AddressError` are reported when
+    /// they arrive but gate nothing.
+    ///
+    /// Every failure path is a diagnostic and a return, never a throw or a
+    /// teardown: this runs immediately before the capability injection and the
+    /// status flip, and an undeclared connection is a working connection —
+    /// the relay simply attributes it the legacy way. Failing the connection
+    /// over a refused declaration would turn a degraded path into no path.
+    private func declareAddress(
+        _ outcome: AddressDeclarationPolicy.Outcome,
+        proto: OfflineProtocol,
+        task: URLSessionWebSocketTask
+    ) {
+        let account: String
+        let challenge: Data
+        switch outcome {
+        case let .declare(declaredAccount, declaredChallenge):
+            account = declaredAccount
+            challenge = declaredChallenge
+        case let .skip(reason):
+            emitDiagnostic("debug", "Not declaring an address to the relay", context: [
+                "reason": reason
+            ])
+            return
+        }
+
+        // The declaration belongs to the connection that was handed the
+        // challenge. A socket replaced between the main hop and this queue has
+        // its own `Authenticated` (and its own challenge) coming.
+        guard task === webSocketTask else { return }
+
+        guard let address = proto.localAddress(), !address.isEmpty else {
+            emitDiagnostic("debug", "Not declaring an address to the relay", context: [
+                "reason": AddressDeclarationPolicy.Reason.addressUnavailable
+            ])
+            return
+        }
+
+        let frame: String
+        do {
+            let publicKey = try proto.getIdentityPublicKey()
+            let signature = try proto.signData(
+                data: [UInt8](
+                    AddressDeclarationPolicy.proofPayload(account: account, challenge: challenge)
+                )
+            )
+            guard let json = AddressDeclarationPolicy.declarationJson(
+                address: address,
+                publicKey: Data(publicKey),
+                signature: Data(signature)
+            ) else {
+                emitDiagnostic("error", "Could not build the address declaration", context: [
+                    "reason": AddressDeclarationPolicy.Reason.frameUnserializable
+                ])
+                return
+            }
+            frame = json
+        } catch {
+            emitDiagnostic("error", "Could not sign the address declaration", context: [
+                "reason": AddressDeclarationPolicy.Reason.signingFailed,
+                "error": error.localizedDescription
+            ])
+            return
+        }
+
+        // Unmetered, like the authentication frame this follows: both are
+        // one-per-connection handshake frames, and the client limiter's
+        // headroom under the relay's own bucket is sized for exactly the two
+        // (see RelayRateLimiter). Metering it would let a full bucket defer
+        // the one frame every later send's attribution depends on.
+        task.send(.string(frame)) { [weak self] error in
+            guard let error = error else { return }
+            self?.emitDiagnostic("warning", "Address declaration write failed", context: [
+                "error": error.localizedDescription
+            ])
+        }
+    }
+
     /// Marks the connection displaced by the relay and latches it stopped:
     /// cancels any pending reconnect, latches `supersedeLatch` so auto- and
     /// force-reconnect refuse until the next start(), and fires the one-shot
@@ -1397,12 +1516,51 @@ public class InternetManager: NSObject, TransportManager {
         case "Authenticated":
             // Handle authentication success
             let userId = json["user_id"] as? String ?? deviceId
-            let username = json["username"] as? String ?? deviceId
+            // Kept RAW — no deviceId fallback. This is the account name the
+            // relay resolved for the connection, and it is signed into the
+            // address proof: the relay verifies against its own copy, so a
+            // local substitute would produce a signature that cannot verify.
+            // Its only other use is the diagnostic below, which falls back
+            // there instead.
+            let username = json["username"] as? String
             // Capability tokens this relay deployment supports (e.g.
             // "group_delivery_v2"). Older relays omit the field → empty.
             let capabilities = json["capabilities"] as? [String] ?? []
+            // Base64 challenge for the optional address declaration, present
+            // only on relays advertising `address_routing_v1`.
+            let addressChallenge = json["address_challenge"] as? String
             handleAuthenticated(
-                userId: userId, username: username, capabilities: capabilities, task: task)
+                userId: userId,
+                username: username,
+                capabilities: capabilities,
+                addressChallenge: addressChallenge,
+                task: task)
+
+        case "AddressDeclared":
+            // The relay bound this connection to the address we proved. From
+            // its next inbound frame on, it attributes us by address instead
+            // of account name. Informational: the binding took effect before
+            // the relay answered (its frame loop is sequential), so nothing
+            // waits on this, and the frame is forwarded like any other.
+            emitDiagnostic("info", "Relay accepted the address declaration", context: [
+                "address": json["address"] as? String ?? ""
+            ])
+            emitServerMessage(rawText)
+
+        case "AddressError":
+            // The declaration was refused. Non-fatal by contract: the
+            // connection stays authenticated and keeps working in
+            // account-name space, which is exactly how it behaved before
+            // addresses existed. No retry here — a refusal is either
+            // permanent for this connection (bad material, or a different
+            // address already declared) or means this socket was displaced by
+            // a newer login, in which case the successor declares for itself.
+            // The next reconnect re-declares from scratch.
+            let addressErrorReason = json["reason"] as? String ?? "Unknown error"
+            emitDiagnostic("error", "Relay refused the address declaration; staying in account-name space", context: [
+                "reason": addressErrorReason
+            ])
+            emitServerMessage(rawText)
             
         case "AuthError":
             // Handle authentication error

@@ -128,6 +128,42 @@ When `internet_status_changed(true)` is called after a disconnection:
 
 Both flush methods cap at 20 messages per invocation to prevent blocking. If more messages are pending, the remainder stays in the retry queue and will be picked up on the next `process()` tick or the next flush.
 
+### Relay identity: the address declaration
+
+The relay authenticates a JWT and knows the connection by the **account name**
+behind it. The SDK, meanwhile, stamps every frame's sender with this device's
+`off1…` address, and the receiver strict-matches the two — so a relay that
+attributes a frame by account name hands the receiver a mismatch and the frame
+is rejected. That rejection applies to the security-gated control prefixes
+(`__MLS_KEY_PKG__`, `__MLS_WELCOME__`), which is what establishes a session; an
+already-established session keeps working, because `__MLS_ENC__` is data-plane
+and ungated.
+
+So, on every connection, immediately after the relay's `Authenticated` answer
+and **before** any queued message is flushed, each bridge proves its address:
+it signs the per-connection `address_challenge` from that frame — bound to a
+dedicated domain and to the relay-resolved account name — with the same
+identity key the address derives from, and sends a `DeclareAddress`. The relay
+verifies the signature, re-derives the address from the presented key, and from
+its next inbound frame onward attributes *and* routes that connection by
+address. This also makes an `off1…` recipient resolvable: the relay's registry
+is keyed by account name, and the declaration is what maps one to the other.
+
+The ordering is load-bearing. A frame written before the declaration is
+attributed by account name permanently — the relay does not re-stamp
+retroactively — so the declaration precedes the reconnect flush described
+above, not merely the first send an app makes.
+
+This is automatic and unconfigurable. It happens only against a relay
+advertising the `address_routing_v1` capability; against an older relay, or
+before MLS holds an identity (an app running with `encryption.enabled: false`
+never has one), the bridges send nothing and the connection behaves exactly as
+it did before addresses existed. A refusal is non-fatal for the same reason:
+the relay answers `AddressError`, the connection stays up in account-name
+space, and the next reconnect declares again from scratch. Both the acceptance
+and the refusal also reach the app verbatim as `internet_server_message`
+events, and the bridge diagnostics name the reason it skipped.
+
 ## Outbox
 
 The outbox persists messages that require acknowledgment. It serves as the source of truth for "what messages are in flight."
