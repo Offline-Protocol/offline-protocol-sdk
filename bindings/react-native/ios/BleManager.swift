@@ -1785,9 +1785,18 @@ public class BleManager: NSObject, TransportManager {
             
             // Try to find the peripheral and connect
             if let identifier = connections.peripheralIdentifier(for: recipientId) {
-                // We know the UUID but don't have a connection - try to reconnect
-                if let peripheral = discoveredPeripherals[identifier] {
-                    attemptConnection(to: peripheral, reason: "fragment_send")
+                // We know the UUID but don't have a connection - try to reconnect.
+                //
+                // Read `discoveredPeripherals` on main: it is a plain
+                // Dictionary the CoreBluetooth delegates mutate there, and both
+                // callers of this method run on `fragmentQueue`. The identical
+                // reconnect in `drainAndSendFragments` already hops for exactly
+                // this reason; this site was missed. Async is fine — the
+                // reconnect is advisory and this path returns false either way.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self,
+                          let peripheral = self.discoveredPeripherals[identifier] else { return }
+                    self.performConnectionAttempt(to: peripheral, reason: "fragment_send")
                 }
             } else {
                 // We don't even know the UUID - this is a more serious issue

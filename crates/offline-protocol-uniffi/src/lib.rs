@@ -10185,7 +10185,13 @@ mod tests {
     ///    let any peer claim any name, and, because the core stamps
     ///    `local_address()` as `Message.sender`, it also made every control
     ///    frame fail the receiver's [`validate_transport_sender`] — so BLE
-    ///    could not establish an MLS session at all.
+    ///    could not establish an MLS session at all. Both platforms now reach
+    ///    it through a *cache* rather than calling in directly: Android because
+    ///    `provideDeviceIdBytes` runs on a binder thread, iOS because
+    ///    `setupGattServer` runs on the main queue, and on either the protocol
+    ///    mutex is the wrong lock to take there. So the guard pins two things,
+    ///    not one — that the serve path reads the cache, and that the cache is
+    ///    filled from `localAddress()`.
     /// 2. **The announce is downstream of the cross-check.** `blePeerDiscovered`
     ///    must be reached only through the verified path, never from the
     ///    DEVICE_ID read handler.
@@ -10205,11 +10211,17 @@ mod tests {
 
         // --- 1. The peripheral advertises the derived address ----------------
         assert!(
-            swift.contains("guard let advertisedAddress = protocolInstance.localAddress(),")
+            swift.contains("guard let advertisedAddress = currentLocalAddress(),")
+                && swift.contains("let address = protocolInstance.localAddress()")
+                && swift.contains("cachedLocalAddress = address")
                 && swift.contains("value: deviceIdData,"),
-            "BleManager.swift must serve DEVICE_ID from localAddress(), and must refuse to \
-             publish the GATT service without one — advertising the profile is the \
-             unauthenticated-advertisement hole, and it also breaks our own control frames"
+            "BleManager.swift must serve DEVICE_ID from a cached localAddress(), and must \
+             refuse to publish the GATT service without one — advertising the profile is the \
+             unauthenticated-advertisement hole, and it also breaks our own control frames. \
+             The cache is the iOS mirror of BleTransportFacade.kt's, for the same reason: \
+             setupGattServer runs on the main queue, where taking the protocol mutex is an \
+             App Hang (OFF-2123). Both halves are pinned — the read must come from the cache, \
+             and the cache must be filled from localAddress()"
         );
         assert!(
             !swift.contains("let deviceIdData = deviceId.data(using: .utf8)"),
