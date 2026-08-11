@@ -2433,7 +2433,26 @@ impl OfflineProtocol {
                     }
                     GroupDecryptOutcome::SecurityRejected
                     | GroupDecryptOutcome::NotMlsCiphertext
-                    | GroupDecryptOutcome::Failed => {}
+                    | GroupDecryptOutcome::Failed => {
+                        // Dropped unprocessed — release replay protection, for
+                        // the same reason the arrival path unmarks a rejected
+                        // relay copy (see the marking note atop
+                        // `handle_relay_group_message_with_mls`) and the TTL
+                        // arm above releases an expired one. A relay copy can
+                        // outrun its Welcome, so a mis-attributed one is judged
+                        // *here* rather than at arrival — and a hostile relay
+                        // picks that ordering for free. Left marked, the id
+                        // reads as delivered while no longer being pending, so
+                        // the per-member re-issue that is this message's own
+                        // delivery safety net is absorbed as an
+                        // already-delivered duplicate and re-ACKed: delivered
+                        // nowhere, sender told otherwise.
+                        //
+                        // `PolicyRejected` above deliberately does not release:
+                        // that refusal is permanent, so a later copy could only
+                        // waste work.
+                        self.release_replay_protection(&entry.message_id);
+                    }
                 }
             }
 

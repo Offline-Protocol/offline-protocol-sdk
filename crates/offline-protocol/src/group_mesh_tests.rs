@@ -4529,6 +4529,94 @@ fn test_relay_copy_sender_mismatch_rejected_without_poisoning_logical_id() {
     );
 }
 
+/// The drain's copy of the same hazard, and the reason the arrival-path
+/// unmark alone does not close it. A relay copy can outrun its Welcome, and
+/// the handler buffers it *before* any decrypt — so the SEC-M1
+/// mis-attribution is judged not at arrival but on the drain, and a relay
+/// that wants the poisoned outcome only has to deliver the copy one frame
+/// early. The drain's rejection arm must therefore release replay protection
+/// exactly as the arrival arm unmarks (and as the TTL arm beside it already
+/// does), or the per-member re-issue is absorbed as an already-delivered
+/// duplicate and re-ACKed: delivered nowhere, sender told otherwise.
+#[test]
+fn test_relay_copy_rejected_on_drain_does_not_poison_logical_id() {
+    let (alice, mut bob, events, group_id, welcome_json) = setup_race_alice_bob();
+
+    let logical = "d00dd00d-1111-2222-3333-444444444444";
+    let encrypted = {
+        let mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        mls.encrypt_for_group(&gid, b"broadcast body").unwrap()
+    };
+    let ciphertext_b64 = base64_encode(&encrypted.ciphertext);
+
+    // Arrives before the Welcome, attributed by username ("alice") instead of
+    // the MLS credential (`id("alice")`). With no local group state there is
+    // nothing to decrypt against yet, so it buffers with its logical id
+    // marked — the mis-attribution is still undetected at this point.
+    bob.handle_relay_group_message_with_mls(
+        &group_id,
+        "alice",
+        &ciphertext_b64,
+        "2026-08-11T00:00:00Z",
+        logical,
+        None,
+        None,
+    );
+    assert_eq!(
+        bob.group_mesh
+            .pending_group_messages
+            .get(&group_id)
+            .map(|b| b.len()),
+        Some(1),
+        "A relay copy that outran its Welcome must buffer"
+    );
+    assert!(
+        bob.group_mesh.message_dedup.contains_key(logical),
+        "A buffered entry keeps its mark for the pending lifetime"
+    );
+
+    // The Welcome lands and drains: only now does the decrypt run, spend the
+    // ciphertext's ratchet generation, and reject the mis-attributed copy.
+    bob.handle_group_mls_welcome("welcome-drain-reject", &id("alice"), &welcome_json);
+    assert!(
+        group_messages_received(&events).is_empty(),
+        "A mis-attributed relay copy must not deliver on the drain"
+    );
+    assert!(
+        !bob.group_mesh.message_dedup.contains_key(logical),
+        "A copy rejected on the drain must not leave the logical id marked"
+    );
+
+    // Same contract as the arrival-path sibling: the re-issue is judged on
+    // its own merits. Its generation was spent by the rejected copy, so the
+    // honest outcome is Deferred — buffered, un-ACKed, custody left with the
+    // sender — never Consumed, which would re-ACK a message delivered nowhere.
+    let payload = serde_json::json!({
+        "group_id": group_id,
+        "ciphertext": ciphertext_b64,
+        "epoch": encrypted.epoch,
+        "message_id": logical,
+    })
+    .to_string();
+    let reissue = make_message(
+        &id("alice"),
+        &id("bob"),
+        &format!("{}{}", internal_prefixes::GROUP_MLS_MSG, payload),
+    );
+    let res = bob.handle_group_mls_msg(&reissue, &id("alice"), &payload);
+    assert!(
+        matches!(res, InternalMessageResult::Deferred),
+        "The re-issue must be judged on its own merits (Deferred), not absorbed \
+         as an already-delivered duplicate (Consumed): got {:?}",
+        res
+    );
+    assert!(
+        group_messages_received(&events).is_empty(),
+        "Nothing was deliverable — the generation was spent on the rejected copy"
+    );
+}
+
 /// Pre-decrypt sibling on the relay path: non-base64 "plaintext" naming an
 /// MLS-secured group is dropped as spoofing — but its `message_id` is
 /// attacker-chosen wire input, and the drop arm runs after the pre-decrypt

@@ -263,12 +263,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   report's per-member backstop re-sends a copy), but the relay-path handler had
   already marked the message's logical id as seen before decrypting, so the
   backstop copy was absorbed as an already-delivered duplicate and ACKed —
-  delivered exactly nowhere, with the sender told otherwise. The handler now
-  unmarks the id on every arm that neither delivered, nor buffered, nor
-  consumed MLS state (identity rejection, decrypt refusal, and the
-  plaintext-spoof drop, whose id is attacker-chosen wire input), so the
-  backstop copy is processed honestly: it buffers un-ACKed and the sender
-  keeps custody instead of receiving a false delivery ACK. Preventing the loss
+  delivered exactly nowhere, with the sender told otherwise. Both the arrival
+  handler and the deferred-decrypt drain now unmark the id on every arm that
+  neither delivered, nor buffered, nor consumed MLS state (identity rejection,
+  decrypt refusal, and the plaintext-spoof drop, whose id is attacker-chosen
+  wire input), so the backstop copy is processed honestly: it buffers un-ACKed
+  and the sender keeps custody instead of receiving a false delivery ACK. The
+  drain half matters as much as the arrival half — a relay copy can outrun its
+  Welcome, in which case it is buffered before any decrypt and its
+  mis-attribution is judged on the drain instead, an ordering a misbehaving
+  relay can simply choose. Preventing the loss
   outright is the job of the `group_delivery_v3` capability gate below, which
   keeps a mis-attributed relay copy from existing (and spending the
   ciphertext's one decryption) in the first place.
