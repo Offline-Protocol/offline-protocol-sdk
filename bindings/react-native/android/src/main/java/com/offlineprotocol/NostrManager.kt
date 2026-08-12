@@ -451,11 +451,28 @@ class NostrManager(
     }
 
     private fun updateConnectionStatus() {
-        val anyConnected = synchronized(relayLock) {
-            relayConnected.values.any { it }
+        // Sampled and published as one step under the lock that owns the map.
+        //
+        // Read and swapped separately — as these were — two relays
+        // transitioning at once can interleave so that the *later* swap
+        // publishes the *earlier* reader's answer. A relay connects and this
+        // reads `anyConnected = true`, then is descheduled; the same relay
+        // drops, and that call reads false, swaps false→false and sees
+        // `wasConnected = false`, so neither edge fires; the first thread
+        // resumes and swaps false→true with `wasConnected = false`, firing the
+        // connected edge against a relay set that is empty. The core is told
+        // the transport is up, polling starts, and every message it drains hits
+        // the no-connected-relays branch of [publishMessage] and comes back as
+        // nostrSendFailed until a relay genuinely reconnects.
+        //
+        // Under one lock the second caller always samples the final map, and
+        // the two edges are enqueued in the order they were swapped.
+        val anyConnected: Boolean
+        val wasConnected: Boolean
+        synchronized(relayLock) {
+            anyConnected = relayConnected.values.any { it }
+            wasConnected = isConnected.getAndSet(anyConnected)
         }
-
-        val wasConnected = isConnected.getAndSet(anyConnected)
 
         if (anyConnected && !wasConnected) {
             // Became connected

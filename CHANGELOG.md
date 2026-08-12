@@ -415,6 +415,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   fixed while there: `stop()` never shut down the OkHttp dispatcher (the relay
   manager already did), so its threads outlived every stop/start cycle.
 
+- **Nostr could report itself connected with no relay connected, on both
+  platforms.** Deciding whether the relay set had just come up sampled "is any
+  relay connected" and published the answer as two separate steps, so two
+  relays transitioning at once could interleave and let the later writer
+  publish the earlier reader's stale answer. The core was then told the
+  transport was up against an empty relay set, and every message the send loop
+  drained came straight back as a send failure until a relay genuinely
+  reconnected. Both halves now happen under one lock, so the last writer always
+  reflects the final state. Pre-existing on both platforms.
+
 - **A relay-delivered group message could be lost silently while the sender saw
   it delivered.** The relay's group path names senders by relay-account
   username, while the MLS credential inside the ciphertext is the sender's

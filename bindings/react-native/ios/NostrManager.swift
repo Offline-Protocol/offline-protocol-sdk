@@ -422,12 +422,29 @@ public class NostrManager: NSObject, TransportManager {
     }
 
     private func updateConnectionStatus() {
-        let anyConnected: Bool = connectionQueue.sync {
-            relayConnected.values.contains(true)
+        // Sampled and published as one step, inside the queue that owns the
+        // map. Read and swapped separately — as these were, across three
+        // separate critical sections — two relays transitioning at once can
+        // interleave so that the *later* swap publishes the *earlier* reader's
+        // answer. A relay connects and this reads `anyConnected = true`, then
+        // is descheduled; the same relay drops, and that call reads false,
+        // swaps false→false and sees `wasConnected = false`, so neither edge
+        // fires; the first resumes and swaps false→true with `wasConnected =
+        // false`, firing the connected edge against a relay set that is empty.
+        //
+        // `stateLock` nests inside `connectionQueue` here and only here. That
+        // is safe because the ordering is one-directional: every `stateLock`
+        // holder in this file releases it across a single field access and
+        // never hops a queue, so nothing ever waits on `connectionQueue` while
+        // holding it.
+        let (anyConnected, wasConnected): (Bool, Bool) = connectionQueue.sync {
+            let any = relayConnected.values.contains(true)
+            stateLock.lock()
+            let was = _isConnected
+            _isConnected = any
+            stateLock.unlock()
+            return (any, was)
         }
-
-        let wasConnected = isConnected
-        isConnected = anyConnected
 
         if anyConnected && !wasConnected {
             messageQueue.async { [weak self] in
@@ -453,17 +470,20 @@ public class NostrManager: NSObject, TransportManager {
 
                 // `isConnected` alongside the state, mirroring
                 // `ReticulumManager` — see the long note there for why a state
-                // check alone is the wrong question. It is defence in depth
-                // here rather than a fix: both of this manager's flips reach
-                // `messageQueue` through a single hop from
-                // [updateConnectionStatus], so they are already ordered by the
-                // relay events that produced them. What it does close is the
-                // check-then-act above it — `wasConnected` is read and
-                // `isConnected` written under two separate [stateLock]
-                // acquisitions, so two relays transitioning at once can enqueue
-                // this block with no relay left connected. Announcing a relay
-                // set that is empty by the time anyone looks is the same lie
-                // the Reticulum window tells, reached from a different side.
+                // check alone is the wrong question.
+                //
+                // It answers a narrower question here than it does there, and
+                // it is worth being exact about which. It does *not* rescue the
+                // check-then-act in [updateConnectionStatus]: this reads the
+                // very value that call published, so a torn swap would be read
+                // back as true and announced anyway. That hole is closed at the
+                // swap itself, which is now one step under `connectionQueue`.
+                // What this term covers is the interval *after* a sound swap —
+                // the last relay dropping between the edge being enqueued and
+                // this block reaching the front of `messageQueue`. Suppressing
+                // the stale true costs nothing: the disconnect that cleared the
+                // flag enqueues its own false behind this, and a reconnect
+                // announces itself.
                 self.statusFlipLock.lock()
                 if self.isConnected && self.state != .stopping && self.state != .stopped {
                     try? self.protocolInstance.nostrStatusChanged(isConnected: true)
