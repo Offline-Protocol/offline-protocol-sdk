@@ -139,10 +139,20 @@ npm run build:uniffi:all
 # Or build individually
 npm run build:uniffi:ios      # iOS only
 npm run build:uniffi:android  # Android only
-
-# Regenerate bindings after UDL changes
-npm run generate:bindings
 ```
+
+### Regenerate Bindings After a UDL Change
+
+```bash
+./scripts/generate-bindings.sh
+```
+
+One script generates all three languages — Swift, Kotlin and Python — because
+they are one artifact set produced from one UDL and carry the FFI checksums of
+the library they were generated against. Regenerating a subset leaves the rest
+describing a different ABI, which no build catches; the app fails at the first
+call instead. `npm run generate:bindings` and the platform build scripts
+delegate here, so every path produces the whole set. Commit all three together.
 
 ### Build Python Desktop Bindings
 
@@ -152,7 +162,8 @@ bash scripts/build-desktop.sh
 ```
 
 The desktop build produces the native `.dylib`, `.so`, or `.dll` for the host
-platform and regenerates the Python UniFFI module.
+platform and regenerates the bindings (all three languages, via the shared
+script above).
 
 
 ## Architecture

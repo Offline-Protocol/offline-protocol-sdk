@@ -1,11 +1,11 @@
 #!/bin/bash
 #
-# Shared iOS XCFramework packaging. Sourced by build-ios.sh and
-# build-uniffi-ios.sh, which differ only in how they locate the per-arch Rust
-# staticlibs; everything downstream of that is identical and lives here so the
-# two paths cannot drift. build-uniffi-ios.sh is the one the release workflow
-# runs, so a change here reaches production — keep it dependency-free and
-# exercise both callers.
+# Shared iOS XCFramework packaging. Sourced by build-uniffi-ios.sh, now the
+# only caller: build-ios.sh used to source this too and duplicate the rest of
+# the build, and is a thin wrapper over build-uniffi-ios.sh since that copy
+# turned out to pair fresh native artifacts with stale committed bindings.
+# build-uniffi-ios.sh is what the release workflow runs, so a change here
+# reaches production — keep it dependency-free.
 #
 # WHY AN XCFRAMEWORK AND NOT LOOSE ARCHIVES
 #

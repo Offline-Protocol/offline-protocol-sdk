@@ -14,7 +14,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-UNIFFI_DIR="$PROJECT_ROOT/crates/offline-protocol-uniffi"
 PKG_DIR="$SCRIPT_DIR/../offline_protocol_sdk"
 
 # Defaults
@@ -74,6 +73,19 @@ if [[ -z "$TARGET" ]]; then
     esac
 
     echo "Auto-detected platform: $TARGET"
+fi
+
+# Pre-flight. The authoritative check (bindgen present *and* matching the crate
+# pin) lives in scripts/generate-bindings.sh, which this script calls at the
+# end — but that is after a full cdylib build, so without this a contributor on
+# the wrong bindgen waits out a release compile to be told. Presence only; the
+# version comparison stays in the one place that owns it.
+if ! command -v uniffi-bindgen &>/dev/null; then
+    echo "Error: uniffi-bindgen not found — the build would compile the library" >&2
+    echo "and then fail at binding generation. Install it first:" >&2
+    echo "" >&2
+    echo "  cargo install uniffi --version 0.30.0 --features cli --locked" >&2
+    exit 1
 fi
 
 # Determine library filename by platform
@@ -158,27 +170,11 @@ case "$TARGET" in
         ;;
 esac
 
-# Generate Python bindings
+# Generate the bindings. This regenerates Swift and Kotlin alongside Python:
+# the three are one artifact set off one UDL, and the whole point of the shared
+# script is that no entry point can refresh a subset. See its header.
 echo ""
-echo "Generating Python bindings..."
-
-if command -v uniffi-bindgen &>/dev/null; then
-    cd "$UNIFFI_DIR"
-    uniffi-bindgen generate \
-        src/offline_protocol.udl \
-        --language python \
-        --out-dir "$PKG_DIR"
-
-    echo "Python bindings generated in $PKG_DIR/"
-else
-    echo "uniffi-bindgen not found!"
-    echo "Install it with: cargo install uniffi --version 0.30.0 --features cli"
-    echo ""
-    echo "Native library is built. Generate bindings manually when uniffi-bindgen is available:"
-    echo "  cd $UNIFFI_DIR"
-    echo "  uniffi-bindgen generate src/offline_protocol.udl --language python --out-dir $PKG_DIR"
-    exit 1
-fi
+bash "$PROJECT_ROOT/scripts/generate-bindings.sh"
 
 echo ""
 echo "Build complete!"

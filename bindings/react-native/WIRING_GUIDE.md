@@ -56,9 +56,11 @@ interface OfflineProtocol {
 ### 3. Regenerate Bindings
 
 ```bash
-cd bindings/react-native
-npm run generate:bindings
+./scripts/generate-bindings.sh          # or: npm run generate:bindings
 ```
+
+This regenerates Swift, Kotlin **and** Python in one pass — they are one
+artifact set off one UDL, so they are never refreshed apart. Commit all three.
 
 This auto-generates:
 - `ios/Generated/offline_protocol.swift` — Swift wrapper classes
@@ -160,7 +162,7 @@ Use this checklist every time you add or modify a bridged method:
 ```
 [ ] Rust implementation in uniffi crate (lib.rs)
 [ ] UDL declaration (offline_protocol.udl)
-[ ] Regenerated bindings (npm run generate:bindings)
+[ ] Regenerated bindings (./scripts/generate-bindings.sh) and committed all three
 [ ] iOS: @objc func in OfflineProtocolModule.swift
 [ ] iOS: RCT_EXTERN_METHOD in OfflineProtocolModule.m  ← EASY TO FORGET
 [ ] iOS: Parameter types in .m match the Swift signature exactly

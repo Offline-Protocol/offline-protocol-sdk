@@ -25,6 +25,12 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Keep in sync with the `uniffi` pin in crates/offline-protocol-uniffi/Cargo.toml.
+  # scripts/generate-bindings.sh compares the two and fails the build on a
+  # minor-version disagreement, so drift here is loud rather than silent — but
+  # a uniffi bump still means editing several files that name the version
+  # prescriptively (this, ci.yml, README, CLAUDE.md, CONTRIBUTING.md and the
+  # install hints the scripts print).
   UNIFFI_VERSION: "0.30.0"
 
 jobs:
@@ -163,10 +169,23 @@ jobs:
         if: steps.cache-uniffi.outputs.cache-hit != 'true'
         run: cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked
 
+      # The Kotlin this job uploads is downloaded *over* the committed Android
+      # bindings in the publish job, so it — not the committed file — is what
+      # ships to npm. It therefore has to be produced the same way CI's drift
+      # gate verified: same bindgen, same --no-format, generated alongside the
+      # Swift and Python it shares FFI checksums with. Generating it directly
+      # here would also skip the script's check that the installed bindgen
+      # agrees with the crate's uniffi pin to the minor version, which is what
+      # stands between UNIFFI_VERSION drifting from Cargo.toml and a released
+      # package whose Kotlin checksums fail at the app's first FFI call.
+      #
+      # Staged into android-bindings/ so the uploaded artifact keeps the
+      # uniffi/... root the publish job's download path expects.
       - name: Generate Kotlin bindings
         run: |
-          cd crates/offline-protocol-uniffi
-          uniffi-bindgen generate src/offline_protocol.udl --language kotlin --out-dir ../../android-bindings
+          bash scripts/generate-bindings.sh
+          mkdir -p android-bindings
+          cp -R bindings/react-native/android/src/main/java/uniffi android-bindings/
 
       - name: Upload Android Bindings
         uses: actions/upload-artifact@v7
@@ -344,10 +363,16 @@ jobs:
         if: steps.cache-uniffi.outputs.cache-hit != 'true'
         run: cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked
 
+      # Generates all three languages; only the Python file is uploaded here.
+      # Going through the shared script keeps the released wheel's bindings
+      # produced exactly the way CI's drift gate verified them, and picks up its
+      # check that uniffi-bindgen agrees with the crate's uniffi pin to the
+      # minor version — enough to catch UNIFFI_VERSION drifting from Cargo.toml,
+      # which would otherwise ship bindings whose checksums fail at the app's
+      # first call. Patch drift is deliberately tolerated: uniffi's FFI contract
+      # version is not patch-scoped.
       - name: Generate Python bindings
-        run: |
-          cd crates/offline-protocol-uniffi
-          uniffi-bindgen generate src/offline_protocol.udl --language python --out-dir ../../bindings/python/offline_protocol_sdk/
+        run: bash scripts/generate-bindings.sh
 
       - uses: actions/upload-artifact@v7
         with:

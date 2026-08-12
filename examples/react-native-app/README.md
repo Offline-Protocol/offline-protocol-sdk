@@ -69,6 +69,10 @@ A modern, user-friendly messaging application built with the Offline Protocol SD
 > full first-time setup.
 
 1. **Build Native Libraries** (required before first run)
+
+   Needs `uniffi-bindgen` at the crate's pinned version — the build regenerates
+   the UniFFI bindings alongside the native libraries and refuses to run on a
+   mismatch: `cargo install uniffi --version 0.30.0 --features cli --locked`.
    ```bash
    cd ../../bindings/react-native
    npm run build:all

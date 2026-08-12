@@ -100,9 +100,14 @@ test(dors): add tests for transport switching
 1. **Core Logic**: Implement in appropriate Rust crate (100% safe)
 2. **Tests**: Add comprehensive unit tests
 3. **UniFFI**: Expose via UDL if needed for mobile platforms
-4. **Bindings**: Update platform bindings (React Native, etc.)
-5. **Docs**: Update README and relevant docs
-6. **Commit**: Use conventional commits format
+4. **Regenerate**: After any UDL change run `./scripts/generate-bindings.sh` and commit
+   **all three** generated files (Swift, Kotlin, Python). They are one artifact set off one
+   UDL and carry the FFI checksums of the library they were generated against — committing a
+   subset leaves the rest describing a different ABI, which no build catches; the app fails
+   at its first FFI call instead.
+5. **Bindings**: Update platform bindings (React Native, etc.)
+6. **Docs**: Update README and relevant docs
+7. **Commit**: Use conventional commits format
 
 ### File Structure
 

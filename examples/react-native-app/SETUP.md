@@ -13,9 +13,14 @@
 
 ### 1. Build Native Libraries
 
-Navigate to the React Native bindings directory and build native libraries for all platforms:
+Navigate to the React Native bindings directory and build native libraries for all platforms.
+This also regenerates the UniFFI bindings (Swift, Kotlin and Python are one artifact set off one
+UDL), so it needs `uniffi-bindgen` at the crate's pinned version first — it refuses to run on a
+mismatch rather than emit bindings whose checksums fail at the app's first call:
 
 ```bash
+cargo install uniffi --version 0.30.0 --features cli --locked
+
 cd ../../bindings/react-native
 npm run build:all
 cd ../../examples/react-native-app

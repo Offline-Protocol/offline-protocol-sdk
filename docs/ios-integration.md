@@ -35,7 +35,9 @@ Each build produces `liboffline_protocol_uniffi.a` under `target/<triple>/releas
 ### 3. Package the Library and Generate Bindings
 
 The recommended path is the helper script, which builds the device/simulator slices **and**
-regenerates the UniFFI Swift bindings:
+regenerates the UniFFI bindings — all three languages, not just Swift. They are one artifact
+set off one UDL, so the script also rewrites the Kotlin and Python bindings; commit all three
+together (see `scripts/generate-bindings.sh`):
 
 ```bash
 # From bindings/react-native
@@ -57,8 +59,11 @@ this is an XCFramework rather than a single fat `.a`.
 To do it by hand instead: `lipo`-combine the two simulator per-arch
 `liboffline_protocol_uniffi.a` outputs, leave the device one alone, give both
 files the *same* basename in separate staging directories, and pass each with
-`-library` to `xcodebuild -create-xcframework`. Then run
-`uniffi-bindgen generate --language swift` for the Swift bindings.
+`-library` to `xcodebuild -create-xcframework`. For the Swift bindings run
+`./scripts/generate-bindings.sh` — never `uniffi-bindgen` directly. It emits
+Swift, Kotlin and Python together because they are one artifact set off one
+UDL, and a subset leaves the rest describing a different ABI, which fails at
+the app's first FFI call rather than at build time.
 
 ### 4. Use in Swift
 
