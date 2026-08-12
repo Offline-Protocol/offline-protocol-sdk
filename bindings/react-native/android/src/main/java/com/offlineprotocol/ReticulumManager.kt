@@ -174,8 +174,9 @@ class ReticulumManager(
     // batch of ten — each one a UniFFI call plus a TCP write — straight
     // through a paused transport.
     //
-    // Volatile because it is read on the IO thread ([pollAndSendMessages]) and
-    // on whichever thread the core calls [onMessagesAvailable] from, while
+    // Volatile because it is read on the IO thread — [messagePollingRunnable]'s
+    // tick and the block [onMessagesAvailable] posts — and on whichever thread
+    // the core calls [onMessagesAvailable] from (its pre-post check), while
     // pause/resume write on the transport thread.
     @Volatile private var isPaused = false
     private var reconnectAttempts = AtomicInteger(0)

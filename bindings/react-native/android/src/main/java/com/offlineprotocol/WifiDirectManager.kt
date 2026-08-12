@@ -148,8 +148,12 @@ class WifiDirectManager(
     // lambda, which `removeCallbacks` cannot target: nothing but this flag can
     // stop a continuation already in flight.
     //
-    // Volatile because [onMessagesAvailable] arrives on whichever thread the
-    // core calls it from, while pause/resume write on the transport thread.
+    // Volatile although every current access is confined to the transport
+    // thread: writes come from `runSync` blocks and reads from posted blocks
+    // — this manager's [onMessagesAvailable] posts unconditionally and never
+    // reads the flag itself. Kept volatile because this is exactly the kind
+    // of flag a future callback will read from the core's thread, as Nostr's
+    // and Reticulum's already do.
     @Volatile private var isPaused = false
 
     // True while a budget-spent drain pass has queued its own continuation.

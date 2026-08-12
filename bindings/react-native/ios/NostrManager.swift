@@ -337,7 +337,6 @@ public class NostrManager: NSObject, TransportManager {
 
     // MARK: - Event-Driven Sending
 
-    /// Called by the Rust transport callback when new outgoing messages are available.
     /// Called by the Rust transport callback when new outgoing messages are
     /// available.
     ///

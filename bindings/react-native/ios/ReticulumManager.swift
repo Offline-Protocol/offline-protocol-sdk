@@ -573,8 +573,6 @@ public class ReticulumManager: NSObject, TransportManager {
 
     // MARK: - Event-Driven Sending
 
-    /// Called by the Rust transport callback when new outgoing messages are available.
-    /// This is the primary send path, replacing timer-based polling.
     /// Called by the Rust transport callback when new outgoing messages are
     /// available.
     ///
