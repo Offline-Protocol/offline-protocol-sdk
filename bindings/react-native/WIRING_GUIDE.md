@@ -162,7 +162,7 @@ Use this checklist every time you add or modify a bridged method:
 ```
 [ ] Rust implementation in uniffi crate (lib.rs)
 [ ] UDL declaration (offline_protocol.udl)
-[ ] Regenerated bindings (npm run generate:bindings)
+[ ] Regenerated bindings (./scripts/generate-bindings.sh) and committed all three
 [ ] iOS: @objc func in OfflineProtocolModule.swift
 [ ] iOS: RCT_EXTERN_METHOD in OfflineProtocolModule.m  ← EASY TO FORGET
 [ ] iOS: Parameter types in .m match the Swift signature exactly

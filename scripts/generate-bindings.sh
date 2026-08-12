@@ -37,7 +37,10 @@ set -euo pipefail
 # that flag does not exist instead of watching all three regenerate anyway and
 # concluding the flag worked.
 if [[ $# -gt 0 ]]; then
-  echo "Error: $(basename "$0") takes no arguments (got: $*)." >&2
+  # Repo-relative rather than the basename: two tracked files are named
+  # generate-bindings.sh, and the RN one execs this, so a basename cannot say
+  # which of them rejected the flag.
+  echo "Error: scripts/generate-bindings.sh takes no arguments (got: $*)." >&2
   echo "It generates Swift, Kotlin and Python together on purpose — they are one" >&2
   echo "artifact set off one UDL, and a partial set fails at runtime, not build time." >&2
   exit 2

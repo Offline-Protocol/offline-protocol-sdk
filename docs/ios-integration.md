@@ -35,7 +35,9 @@ Each build produces `liboffline_protocol_uniffi.a` under `target/<triple>/releas
 ### 3. Package the Library and Generate Bindings
 
 The recommended path is the helper script, which builds the device/simulator slices **and**
-regenerates the UniFFI Swift bindings:
+regenerates the UniFFI bindings — all three languages, not just Swift. They are one artifact
+set off one UDL, so the script also rewrites the Kotlin and Python bindings; commit all three
+together (see `scripts/generate-bindings.sh`):
 
 ```bash
 # From bindings/react-native

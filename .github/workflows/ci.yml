@@ -204,8 +204,27 @@ jobs:
           cache: "pip"
           cache-dependency-path: bindings/python/pyproject.toml
 
+      # Keep in sync with the `uniffi` pin in crates/offline-protocol-uniffi/Cargo.toml;
+      # scripts/generate-bindings.sh fails the build if the two disagree.
       - name: Install uniffi-bindgen
         run: cargo install uniffi --version 0.30.0 --features cli --locked
+
+      # Delete the generated files first, so the drift gate below proves they
+      # were *written* and not merely unchanged. `git diff --exit-code` on a
+      # path nothing wrote to reports no diff, which makes "up to date" and
+      # "never regenerated" indistinguishable — so a mistyped output path in
+      # the generator would sail through this job green while every UDL change
+      # afterwards shipped stale bindings. Deleting turns that into a diff.
+      #
+      # Only the generated members: `java/` also holds hand-written
+      # com/offlineprotocol/**, and the Python package dir is mostly
+      # hand-written too. `git diff` restores nothing, so if a later step fails
+      # the checkout is discarded with the runner.
+      - name: Remove generated bindings so regeneration must replace them
+        run: |
+          rm -rf bindings/react-native/ios/Generated \
+                 bindings/react-native/android/src/main/java/uniffi
+          rm -f bindings/python/offline_protocol_sdk/offline_protocol.py
 
       # Regenerate before building anything. Bindgen reads the UDL and nothing
       # else, so putting this ahead of the cdylib compile means drift surfaces

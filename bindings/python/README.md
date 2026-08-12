@@ -22,7 +22,7 @@ regenerates Swift and Kotlin alongside Python by delegating to the repo-root
 `scripts/generate-bindings.sh` — the three are one artifact set off one UDL, so
 they are never refreshed apart.
 
-**Prerequisites:** Rust toolchain, `uniffi-bindgen` (`cargo install uniffi --version 0.30.0 --features cli`).
+**Prerequisites:** Rust toolchain, `uniffi-bindgen` (`cargo install uniffi --version 0.30.0 --features cli --locked`).
 
 ### 2. Install the package
 

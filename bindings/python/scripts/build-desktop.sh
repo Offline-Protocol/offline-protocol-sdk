@@ -75,6 +75,19 @@ if [[ -z "$TARGET" ]]; then
     echo "Auto-detected platform: $TARGET"
 fi
 
+# Pre-flight. The authoritative check (bindgen present *and* matching the crate
+# pin) lives in scripts/generate-bindings.sh, which this script calls at the
+# end — but that is after a full cdylib build, so without this a contributor on
+# the wrong bindgen waits out a release compile to be told. Presence only; the
+# version comparison stays in the one place that owns it.
+if ! command -v uniffi-bindgen &>/dev/null; then
+    echo "Error: uniffi-bindgen not found — the build would compile the library" >&2
+    echo "and then fail at binding generation. Install it first:" >&2
+    echo "" >&2
+    echo "  cargo install uniffi --version 0.30.0 --features cli --locked" >&2
+    exit 1
+fi
+
 # Determine library filename by platform
 case "$TARGET" in
     *-apple-darwin)
