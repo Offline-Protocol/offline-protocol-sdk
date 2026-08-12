@@ -264,7 +264,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   every authenticate; Wi-Fi Direct added an unbounded drain and its
   framework callbacks; Nostr and Reticulum polled off main already but kept
   their lifecycle and connect/disconnect status calls on it. Each manager now
-  confines itself to a private looper. On iOS only Reticulum was still
+  confines itself to a private looper, and Wi-Fi Direct's drain sends in
+  batches rather than in one pass — that looper now also carries the P2P
+  framework callbacks, and a broadcast that waits out its dispatch budget is
+  an ANR wherever its receiver runs. On iOS only Reticulum was still
   affected, and its connected-edge status call is the expensive one — it
   flushes the entire outbox under the mutex — so both edges move to the
   queue the rest of that file already uses.

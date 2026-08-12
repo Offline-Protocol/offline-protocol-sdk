@@ -526,13 +526,35 @@ class ReticulumManager(
         }
     }
 
+    /**
+     * Both halves hop onto the IO thread before touching its queue, rather
+     * than reaching across from the lifecycle thread.
+     *
+     * Every caller of these runs on [confinement]; [messagePollingRunnable]
+     * runs — and reposts itself — on [ioHandler]. A cross-thread
+     * `removeCallbacks` removes nothing while the runnable is mid-flight, so
+     * it loses the race to the repost and polling survives the call. Two of
+     * the three callers happen to be covered anyway: `stopUnsafe` and
+     * `handleConnectionClosed` both clear `isConnected` first, and the
+     * repost gate reads it. [pause] clears nothing, so it was the one that
+     * could leave a paused transport polling — calling the FFI and writing to
+     * the daemon for the whole background stay — and a [resume] landing on the
+     * same race would stack a second runnable and double the rate.
+     *
+     * Posting instead queues the removal *behind* an in-flight runnable's
+     * repost, so it always wins. Ordering across the two loopers is safe for
+     * free: the callers are serialised on the lifecycle thread, so the IO
+     * thread receives these in the order they were issued.
+     */
     private fun startMessagePolling() {
-        stopMessagePolling()
-        ioHandler.post(messagePollingRunnable)
+        ioHandler.post {
+            ioHandler.removeCallbacks(messagePollingRunnable)
+            messagePollingRunnable.run()
+        }
     }
 
     private fun stopMessagePolling() {
-        ioHandler.removeCallbacks(messagePollingRunnable)
+        ioHandler.post { ioHandler.removeCallbacks(messagePollingRunnable) }
     }
 
     private fun pollAndSendMessages() {

@@ -199,9 +199,8 @@ class InternetManager(
     // retry tick and its no-stacking flag — is here. Transport-thread
     // confined (like the rest of the timer state). Never bypasses the rate
     // limiter — the client bucket mirrors the relay's server bucket, and an
-    // over-budget frame is
-    // dropped server-side *after* the local write "succeeded", which is
-    // strictly worse than deferring.
+    // over-budget frame is dropped server-side *after* the local write
+    // "succeeded", which is strictly worse than deferring.
     private val forcedChecks = ForcedPresenceCheckQueue()
     private var forcedCheckRetryScheduled = false
     private val forcedCheckRetryRunnable = Runnable {

@@ -89,6 +89,11 @@ class WifiDirectManager(
         // process-wide under this key, so a manager rebuilt after stop()
         // inherits the same ordered queue.
         private const val CONFINEMENT_THREAD = "offline-wifidirect"
+        // Messages one drain pass sends before yielding the transport looper
+        // back to the framework callbacks that share it — see
+        // [drainAndSendMessages]. A fairness budget, not a limit: the pass
+        // reposts itself when it spends the budget with the queue non-empty.
+        private const val MAX_DRAIN_BATCH = 32
         private const val SOCKET_TIMEOUT_MS = 5000
     }
 
@@ -630,21 +635,35 @@ class WifiDirectManager(
      * Drains the Rust message queue and sends each message over WiFi Direct.
      * Called from onMessagesAvailable() and from the fallback polling timer.
      *
-     * The drain is deliberately unbounded: it takes the global protocol mutex
-     * once per queued message, so a backlog is many acquisitions in one
-     * runnable. That was worth bounding while this ran on main; on the
-     * transport thread the only cost of a long drain is delaying this
-     * transport's own next tick, which is exactly what a queue drain should
-     * do. Nothing else shares this looper.
+     * Bounded, and reposting rather than looping past the bound, because this
+     * looper is not this manager's alone. [startUnsafe] hands it to
+     * `WifiP2pManager.initialize` as the callback looper and to
+     * `registerReceiver` as the broadcast scheduler, so every P2P framework
+     * callback queues behind whatever the drain is doing — and a broadcast
+     * that does not reach `onReceive` inside Android's dispatch budget is an
+     * ANR wherever the receiver lives, main or not. `stop()` waits on this
+     * thread without a bound too ([TransportConfinement.runSync]), so an
+     * unbounded drain would put a teardown behind an arbitrary number of
+     * mutex acquisitions.
+     *
+     * Each iteration takes the global protocol mutex once, so the bound is a
+     * fairness budget rather than a correctness one: a queue deeper than
+     * [MAX_DRAIN_BATCH] finishes on the next posted pass, after everything
+     * else sharing this looper has had its turn.
      */
     private fun drainAndSendMessages() {
         if (state != TransportState.RUNNING || connectedPeers.isEmpty()) return
 
         try {
-            while (true) {
-                val message = protocol.wifiDirectGetNextMessage() ?: break
+            var sent = 0
+            while (sent < MAX_DRAIN_BATCH) {
+                val message = protocol.wifiDirectGetNextMessage() ?: return
                 sendMessage(message.recipientId, message.data.map { it.toByte() }.toByteArray())
+                sent++
             }
+            // Budget spent with the queue still non-empty: yield the looper and
+            // come back, rather than starving the callbacks that share it.
+            transportHandler.post { drainAndSendMessages() }
         } catch (e: Exception) {
             emitDiagnostic("error", "Error in drainAndSendMessages", mapOf(
                 "error" to (e.message ?: "unknown")

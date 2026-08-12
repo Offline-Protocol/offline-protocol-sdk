@@ -29,6 +29,27 @@ import java.util.concurrent.TimeUnit
  * `stop()` — and Internet bounded nobody at all, so an RN bridge call could
  * park forever behind a stalled main looper.
  *
+ * ## What may run here
+ *
+ * Anything whose worst case is the protocol mutex, and nothing whose worst
+ * case is the network. That rule is not a preference — it is what makes
+ * [runSync]'s unbounded background wait safe. The mutex is always being
+ * drained by some other thread, so a wait behind it ends; a blocking socket
+ * call is bounded by a peer that may never answer, and a `stop()` queued
+ * behind one waits exactly as long, taking the React Native bridge thread
+ * with it. `ReticulumManager` is the worked example: its `connect` blocks for
+ * up to 60s and its TCP writes have no timeout at all, so they get a second
+ * confinement of their own (`offline-reticulum-io`) and the lifecycle thread
+ * stays answerable.
+ *
+ * The same reasoning bounds long *non*-blocking work when the thread is
+ * shared with something that has its own deadline. A looper handed to
+ * `WifiP2pManager.initialize` or to `registerReceiver` as a scheduler is
+ * delivering framework callbacks, and a broadcast that misses Android's
+ * dispatch budget is an ANR wherever its receiver lives — see
+ * `WifiDirectManager.drainAndSendMessages`, which spends a batch budget and
+ * reposts rather than draining the queue in one pass.
+ *
  * ## Lifecycle
  *
  * Threads obtained through [shared] are process-wide and never quit. That is
@@ -122,7 +143,13 @@ internal class TransportConfinement(
             throw RuntimeException("Interrupted while executing on $name", ie)
         }
 
-        return outcome!!.getOrThrow()
+        // Non-null once the latch has been counted down, and the count-down is
+        // what the await above returned on — so this is a guarantee, not an
+        // assumption. Spelled out rather than `!!` because the guarantee lives
+        // in another block.
+        val completed = outcome
+            ?: error("$name signalled completion without recording an outcome")
+        return completed.getOrThrow()
     }
 
     /**

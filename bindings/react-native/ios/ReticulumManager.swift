@@ -373,6 +373,12 @@ public class ReticulumManager: NSObject, TransportManager {
         // The status flip is a UniFFI call, so it waits on the global protocol
         // mutex; the reconnect scheduling is timer and state work that the
         // rest of this manager already drives from main.
+        //
+        // The two now run concurrently, where one block ran them in order. The
+        // ordering that mattered survives anyway: `messageQueue` is serial, so
+        // this false always reaches the core ahead of the true a successful
+        // reconnect enqueues, and the reconnect cannot land inside this call
+        // regardless — its shortest delay is a full second.
         messageQueue.async { [weak self] in
             guard let self = self else { return }
             do {

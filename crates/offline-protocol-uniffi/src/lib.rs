@@ -10920,6 +10920,15 @@ mod tests {
     /// against a daemon that stops reading. Sharing one thread would let either
     /// park a `stop()` — and the RN bridge thread behind it — so the blocking
     /// half lives on its own looper.
+    ///
+    /// Splitting the loopers buys a second obligation, which is why the poll
+    /// lifecycle is pinned as *posts* rather than as direct calls. The
+    /// runnable reposts itself on the IO thread, so a `removeCallbacks` issued
+    /// from the lifecycle thread removes nothing while it is mid-flight and
+    /// loses to the repost. `stopUnsafe` and `handleConnectionClosed` survive
+    /// that by clearing `isConnected` first, but `pause()` clears nothing —
+    /// unposted, it leaves a paused transport polling the FFI and writing to
+    /// the daemon for the whole background stay.
     #[test]
     fn react_native_reticulum_socket_work_is_off_the_lifecycle_thread() {
         let code =
@@ -10930,15 +10939,20 @@ mod tests {
         // still opens its socket on the lifecycle thread and posts something
         // unrelated elsewhere, which is precisely the regression.
         for (what, pinned) in [
-            ("the blocking connect", "ioHandler.post { try { val sock = Socket()"),
+            (
+                "the blocking connect",
+                "ioHandler.post { try { val sock = Socket()",
+            ),
             (
                 "the send/poll loop",
-                "private fun startMessagePolling() { stopMessagePolling() \
-                 ioHandler.post(messagePollingRunnable) }",
+                "private fun startMessagePolling() { ioHandler.post { \
+                 ioHandler.removeCallbacks(messagePollingRunnable) \
+                 messagePollingRunnable.run() } }",
             ),
             (
                 "cancelling the poll",
-                "private fun stopMessagePolling() { ioHandler.removeCallbacks(messagePollingRunnable) }",
+                "private fun stopMessagePolling() { ioHandler.post { \
+                 ioHandler.removeCallbacks(messagePollingRunnable) } }",
             ),
         ] {
             assert!(

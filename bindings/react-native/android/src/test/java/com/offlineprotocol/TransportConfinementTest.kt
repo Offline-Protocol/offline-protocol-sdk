@@ -2,6 +2,7 @@ package com.offlineprotocol
 
 import android.os.HandlerThread
 import android.os.Looper
+import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import org.junit.After
@@ -14,6 +15,7 @@ import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 /**
@@ -192,6 +194,88 @@ class TransportConfinementTest {
             fail("expected the off-thread caller to be rejected")
         } catch (e: IllegalStateException) {
             assertTrue(e.message!!.contains("state mutation"))
+        }
+    }
+
+    /**
+     * The hazard `ReticulumManager`'s poll lifecycle posts around, and the
+     * reason it hops onto the IO thread instead of reaching across from the
+     * lifecycle one.
+     *
+     * A self-reposting runnable is not in the queue while it is running, so a
+     * `removeCallbacks` issued from another thread finds nothing to remove and
+     * the repost that follows it survives — a `pause()` that leaves the
+     * transport polling for the whole background stay. Posting the removal
+     * onto the runnable's own thread queues it behind that repost, which is
+     * what actually stops the loop.
+     *
+     * Both halves run against a runnable held mid-flight on purpose, so the
+     * window is the test's rather than the scheduler's. The repost is delayed
+     * because that is what the real one is (a 5s poll interval), and the delay
+     * is load-bearing: a cancel already sitting in the queue is due *now* and
+     * therefore runs first, which is the whole reason posting it works. It
+     * also means the clock has to be driven by hand — Robolectric freezes
+     * `SystemClock`, and under a frozen clock the repost never comes due and
+     * "did not run again" would pass without proving anything.
+     */
+    @Test
+    fun `cancelling a self-reposting runnable requires posting to its own thread`() {
+        val repostDelayMs = 50L
+
+        for (postTheCancel in listOf(false, true)) {
+            val io = confinement(name = "test-io-$postTheCancel")
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val reposted = CountDownLatch(1)
+            val ranAgain = CountDownLatch(1)
+            var first = true
+
+            val poll = object : Runnable {
+                override fun run() {
+                    if (!first) {
+                        ranAgain.countDown()
+                        return
+                    }
+                    first = false
+                    entered.countDown()
+                    release.await()
+                    // The repost is what a cancel has to beat.
+                    io.handler.postDelayed(this, repostDelayMs)
+                    reposted.countDown()
+                }
+            }
+
+            io.handler.post(poll)
+            assertTrue("poll never started", entered.await(2, TimeUnit.SECONDS))
+
+            if (postTheCancel) {
+                io.post { io.handler.removeCallbacks(poll) }
+            } else {
+                io.handler.removeCallbacks(poll)
+            }
+
+            // Let the runnable finish and re-arm before advancing time, so the
+            // repost is scheduled against the pre-advance clock rather than
+            // racing past it.
+            release.countDown()
+            assertTrue("poll never re-armed", reposted.await(2, TimeUnit.SECONDS))
+            shadowOf(io.looper).idleFor(Duration.ofMillis(repostDelayMs * 4))
+
+            if (postTheCancel) {
+                assertEquals(
+                    "a cancel posted to the runnable's own thread must land behind the " +
+                        "repost and remove it",
+                    1L,
+                    ranAgain.count,
+                )
+            } else {
+                assertEquals(
+                    "a cross-thread cancel cannot stop a runnable that is mid-flight — if " +
+                        "this ever stops holding, the posted form is no longer needed",
+                    0L,
+                    ranAgain.count,
+                )
+            }
         }
     }
 
