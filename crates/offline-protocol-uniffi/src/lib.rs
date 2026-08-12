@@ -5726,7 +5726,11 @@ impl OfflineProtocol {
 
     /// Check if a pending key package is available for a peer
     pub fn has_pending_key_package(&self, peer_id: String) -> bool {
-        let guard = match self.inner.lock() {
+        // Through the tracked helper, not `self.inner.lock()` directly: an
+        // untracked acquisition holds the mutex while
+        // [`Self::protocol_lock_diagnostics`] reports it free, which is a blind
+        // spot in the one tool built to never lie about the holder.
+        let guard = match self.lock_inner() {
             Ok(g) => g,
             Err(_) => {
                 return false;
