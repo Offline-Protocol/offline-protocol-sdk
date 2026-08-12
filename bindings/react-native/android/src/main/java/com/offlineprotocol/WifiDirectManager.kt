@@ -365,10 +365,19 @@ class WifiDirectManager(
                 // tick sends one message every 2s, and the core does not
                 // re-issue [onMessagesAvailable] for messages it already
                 // announced, so a backlog would trickle out at that rate.
-                // Safe inline — this already runs on the transport thread,
-                // which is where the drain belongs. Mirrors
-                // WifiDirectManager.swift's resume().
-                drainAndSendMessages()
+                //
+                // Posted, not inline. This block already runs on the
+                // transport thread, so an inline call would be correct — but
+                // the `runSync` wrapping it holds the caller until the whole
+                // block finishes, and the caller is the RN native-modules
+                // thread ([OfflineProtocolModule.resume]). Inline, that
+                // thread waits through up to [MAX_DRAIN_BATCH] global-mutex
+                // acquisitions; posted, it is released after the cheap
+                // lifecycle work and the drain runs on this same thread a
+                // moment later. Ordering is preserved: this post is enqueued
+                // ahead of the polling runnable below, so the backlog still
+                // goes out before the first fallback tick.
+                transportHandler.post { drainAndSendMessages() }
                 // Removed before posting, which is the idiom the other three
                 // managers keep in their startMessagePolling helpers. This
                 // runnable reposts itself, and [startUnsafe] already posted one

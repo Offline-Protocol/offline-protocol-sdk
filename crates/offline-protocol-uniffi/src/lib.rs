@@ -11942,10 +11942,15 @@ mod tests {
             // the backlog up. This one's fallback sends a single message every
             // two seconds, and the core does not re-announce what it already
             // announced, so without this the queue trickles out at that rate.
+            // Posted rather than inline on Android: resume() runs under
+            // `runSync`, so an inline drain keeps the RN native-modules
+            // caller waiting through up to MAX_DRAIN_BATCH global-mutex
+            // acquisitions. The post keeps the ordering (drain ahead of the
+            // polling runnable posted after it).
             (
                 "android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
                 "the resume drain",
-                "startPeerDiscovery() drainAndSendMessages()",
+                "startPeerDiscovery() transportHandler.post { drainAndSendMessages() }",
             ),
             (
                 "ios/WifiDirectManager.swift",
