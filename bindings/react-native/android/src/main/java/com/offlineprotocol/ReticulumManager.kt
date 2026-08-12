@@ -409,9 +409,21 @@ class ReticulumManager(
         synchronized(this) {
             receiveThread?.interrupt()
             receiveThread = null
+            // Socket first. Socket.close() is the one call that makes a
+            // blocked readLine()/println() throw; interrupt() above does not
+            // unblock a classic socket read. The wrapped streams share a lock
+            // with the I/O they wrap — BufferedReader.close() takes the lock
+            // readLine() holds for its whole blocking duration, and
+            // PrintWriter.close() the one println() holds — so closing them
+            // first waits on the very I/O this teardown exists to interrupt:
+            // with the receive thread parked in readLine() (soTimeout = 0,
+            // the steady state of a connected transport), it would park this
+            // thread — and stop()'s unbounded background wait behind it —
+            // until the daemon happened to send a line. Pinned by the
+            // Reticulum source guard in the UniFFI crate.
+            try { socket?.close() } catch (_: Exception) {}
             try { writer?.close() } catch (_: Exception) {}
             try { reader?.close() } catch (_: Exception) {}
-            try { socket?.close() } catch (_: Exception) {}
             writer = null
             reader = null
             socket = null

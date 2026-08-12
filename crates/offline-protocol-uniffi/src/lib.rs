@@ -10929,6 +10929,17 @@ mod tests {
     /// that by clearing `isConnected` first, but `pause()` clears nothing —
     /// unposted, it leaves a paused transport polling the FFI and writing to
     /// the daemon for the whole background stay.
+    ///
+    /// The split also constrains the teardown, which stays on the lifecycle
+    /// thread and therefore must not *wait* on the socket work it is tearing
+    /// down. `Socket.close()` is the one call that makes a blocked
+    /// `readLine()`/`println()` throw; the wrapped streams share a lock with
+    /// the I/O they wrap (`BufferedReader.close()` takes the lock `readLine()`
+    /// holds for its whole blocking duration, `PrintWriter.close()` likewise
+    /// against `println()`), so closing them *first* parks `disconnect()` —
+    /// and the unbounded background `stop()` wait behind it — until the daemon
+    /// happens to send a line, indefinitely if it has wedged. Hence the fourth
+    /// pin: the socket close must precede the stream closes.
     #[test]
     fn react_native_reticulum_socket_work_is_off_the_lifecycle_thread() {
         let code =
@@ -10962,6 +10973,25 @@ mod tests {
                  minute and a wedged one indefinitely. Expected to find:\n  {pinned}"
             );
         }
+
+        // Pinned as adjacency so the socket close cannot drift back below the
+        // stream closes, which is the shape this replaced: with the receive
+        // thread parked in readLine() (soTimeout = 0), reader?.close() blocks
+        // on the reader's own lock until the daemon sends a line, and the
+        // socket close that would unblock it sat one statement further down,
+        // never reached. interrupt() does not unblock a classic socket read.
+        assert!(
+            code.contains(
+                "try { socket?.close() } catch (_: Exception) {} \
+                 try { writer?.close() } catch (_: Exception) {} \
+                 try { reader?.close() } catch (_: Exception) {}"
+            ),
+            "disconnect() must close the socket before the wrapped streams: reader.close() and \
+             readLine() take the same lock (writer.close()/println() likewise), so closing the \
+             streams first waits on the very I/O the teardown exists to interrupt — parking the \
+             lifecycle thread, and the unbounded stop() wait behind it, until the daemon speaks. \
+             Only Socket.close() makes a blocked stream read/write throw"
+        );
     }
 
     /// A Reticulum connect attempt that outlives its session is retired, and a
