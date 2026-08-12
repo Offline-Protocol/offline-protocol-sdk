@@ -291,6 +291,24 @@ public class ReticulumManager: NSObject, TransportManager {
         // so that any protocol handler querying transport state sees the correct value.
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+
+            // A stop() that landed while this connection was still being
+            // established has already told the core we are down and moved to
+            // .stopped. Announcing the connection now would put the state back
+            // to .running and the core back to connected, against a transport
+            // nothing will ever tear down again — and the next start() would
+            // throw .alreadyRunning off it. The connection this opened is
+            // stray, so close it here. The Android manager gates the same edge
+            // the same way; both are pinned in the uniffi source guards.
+            //
+            // Deliberately ahead of the messageQueue hop below rather than
+            // inside it: the hop adds a second scheduling boundary, so a gate
+            // that ran after it would widen the window it exists to close.
+            guard self.state != .stopping, self.state != .stopped else {
+                self.disconnect()
+                return
+            }
+
             self.updateState(.running)
             self.startMessagePolling()
             // The status flip is a UniFFI call and does not belong on main:

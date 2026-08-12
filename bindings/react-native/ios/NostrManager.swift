@@ -412,6 +412,21 @@ public class NostrManager: NSObject, TransportManager {
         if anyConnected && !wasConnected {
             messageQueue.async { [weak self] in
                 guard let self = self else { return }
+
+                // A stop() that landed while this relay's handshake was still
+                // in flight has already told the core we are down and moved to
+                // .stopped. Announcing the connection now would put the state
+                // back to .running and the core back to connected, against a
+                // transport nothing will ever tear down again — and the next
+                // start() would throw .alreadyRunning off it. The relay socket
+                // is stray, so close it here. The Android manager gates the
+                // same edge the same way; both are pinned in the uniffi source
+                // guards.
+                guard self.state != .stopping, self.state != .stopped else {
+                    self.disconnectAll(fromDeinit: false)
+                    return
+                }
+
                 self.updateState(.running)
                 try? self.protocolInstance.nostrStatusChanged(isConnected: true)
                 self.consecutiveSendFailures = 0

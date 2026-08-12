@@ -133,6 +133,13 @@ class WifiDirectManager(
     private var groupOwnerAddress: String? = null
     private var transportStartAt: Long = 0L
 
+    // True while a budget-spent drain pass has queued its own continuation.
+    // Confined to the transport thread — [drainAndSendMessages] and the block
+    // in [onMessagesAvailable] are its only reader and writer, and both run
+    // there — so a plain Boolean is enough; @Volatile would advertise a
+    // cross-thread access that must not exist.
+    private var drainContinuationQueued = false
+
     // Message polling
     private val messagePollingRunnable = object : Runnable {
         override fun run() {
@@ -628,7 +635,17 @@ class WifiDirectManager(
      * This is the primary send path, replacing the 100ms polling loop.
      */
     fun onMessagesAvailable() {
-        transportHandler.post { drainAndSendMessages() }
+        transportHandler.post {
+            // A pass that spent its budget has already queued a continuation,
+            // and that continuation drains whatever this callback is
+            // announcing. Without the check, every callback arriving against a
+            // deep queue starts its own self-reposting chain of
+            // [MAX_DRAIN_BATCH] mutex acquisitions apiece — several budgets
+            // running concurrently, which is precisely the looper starvation
+            // the budget exists to prevent.
+            if (drainContinuationQueued) return@post
+            drainAndSendMessages()
+        }
     }
 
     /**
@@ -650,8 +667,21 @@ class WifiDirectManager(
      * fairness budget rather than a correctness one: a queue deeper than
      * [MAX_DRAIN_BATCH] finishes on the next posted pass, after everything
      * else sharing this looper has had its turn.
+     *
+     * There is at most one such chain at a time — [drainContinuationQueued] is
+     * what makes the budget mean anything, since N concurrent chains spend N
+     * budgets between the framework callbacks they were meant to make room for.
      */
     private fun drainAndSendMessages() {
+        // Reached the front of the queue, so whatever continuation was pending
+        // is this one. Cleared here rather than at each exit so that every way
+        // out leaves it false — the stopped-transport return, the drained
+        // return, a throwing send — and only the one path that actually queues
+        // a successor sets it again. A chain that ends because the transport
+        // stopped must not leave the flag suppressing the callbacks that the
+        // next start() delivers.
+        drainContinuationQueued = false
+
         if (state != TransportState.RUNNING || connectedPeers.isEmpty()) return
 
         try {
@@ -663,6 +693,7 @@ class WifiDirectManager(
             }
             // Budget spent with the queue still non-empty: yield the looper and
             // come back, rather than starving the callbacks that share it.
+            drainContinuationQueued = true
             transportHandler.post { drainAndSendMessages() }
         } catch (e: Exception) {
             emitDiagnostic("error", "Error in drainAndSendMessages", mapOf(

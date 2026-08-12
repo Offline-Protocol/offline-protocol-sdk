@@ -50,6 +50,19 @@ import java.util.concurrent.TimeUnit
  * `WifiDirectManager.drainAndSendMessages`, which spends a batch budget and
  * reposts rather than draining the queue in one pass.
  *
+ * ## What may never wait on this
+ *
+ * Anything the core calls *into*. The transport callbacks
+ * (`onMessagesAvailable`, `onFragmentsAvailable`) are invoked while the core
+ * holds the global protocol mutex, so a callback that waited on a confinement
+ * thread would be waiting on a thread whose next act is to ask for that same
+ * mutex — a permanent deadlock of the core rather than a slow path, and the
+ * only rule here whose violation nothing recovers from. Every such callback
+ * therefore hands its work to a handler and returns, which
+ * `react_native_transport_callbacks_never_wait_on_a_confinement` in the
+ * `offline-protocol-uniffi` crate pins. That rule is also what makes [runSync]
+ * safe to leave unbounded for background callers.
+ *
  * ## Lifecycle
  *
  * Threads obtained through [shared] are process-wide and never quit. That is
@@ -107,6 +120,14 @@ internal class TransportConfinement(
      * is safe, and the main-reachable lifecycle paths run their transport stops
      * through [TeardownSequence], which records a throwing step and carries on.
      * One late-completing action beats an ANR.
+     *
+     * What an expiry must not do is lose a *failure*. Nothing reads the result
+     * once the caller has given up, so an abandoned action that throws would
+     * vanish with no log and no rethrow — a `start()` refused for a real reason
+     * would look like a timeout and nothing else. The follow-up post below
+     * reports it, and it is a post rather than a flag read inside the action
+     * precisely so it cannot race: queued on this same thread, it runs strictly
+     * after the action that recorded the outcome it reads.
      */
     fun <T> runSync(action: () -> T): T {
         if (isCurrent()) {
@@ -116,7 +137,7 @@ internal class TransportConfinement(
         val onMainThread = Looper.myLooper() === Looper.getMainLooper()
         val latch = CountDownLatch(1)
         var outcome: Result<T>? = null
-        handler.post {
+        val accepted = handler.post {
             outcome = try {
                 Result.success(action())
             } catch (t: Throwable) {
@@ -124,6 +145,15 @@ internal class TransportConfinement(
             }
             latch.countDown()
         }
+
+        // A looper that has quit accepts nothing, and the background wait below
+        // has no bound to rescue it from that: the latch would never count down
+        // and the caller — React Native's native-modules thread, on the stop
+        // path — would park for the life of the process. Threads handed out by
+        // [shared] never quit, so this cannot trip in production; it is here
+        // because the constructor takes any [Looper], and a loud failure beats
+        // a silent hang.
+        check(accepted) { "$name is not accepting work: its looper has quit" }
 
         try {
             if (onMainThread) {
@@ -133,6 +163,11 @@ internal class TransportConfinement(
                         "$name did not answer a main-thread caller within " +
                             "${mainSyncTimeoutMs}ms; continuing without it",
                     )
+                    handler.post {
+                        outcome?.exceptionOrNull()?.let { failure ->
+                            Log.w(TAG, "$name failed an abandoned action", failure)
+                        }
+                    }
                     throw MainThreadSyncTimeout(name, mainSyncTimeoutMs)
                 }
             } else {
@@ -152,16 +187,18 @@ internal class TransportConfinement(
         return completed.getOrThrow()
     }
 
-    /**
-     * Runtime contract check for state documented as confined to this thread.
-     * These invariants used to live only in comments, and comments drift; a
-     * check fails loud instead of corrupting state silently.
-     */
-    fun assertConfined(reason: String) {
-        check(isCurrent()) {
-            "$reason must run on $name (was ${Thread.currentThread().name})"
-        }
-    }
+    // There is deliberately no `assertConfined(...)` helper here, and the
+    // omission is the considered answer rather than an oversight. A throwing
+    // contract check is only useful where the throw is caught, and almost every
+    // "transport-thread only" body in these managers is reachable from a posted
+    // block, where an uncaught IllegalStateException takes the process down —
+    // trading a state bug for a crash, which is exactly what the iOS
+    // `dispatchPrecondition` in `drainProcessQueue` had to be walled behind
+    // `#if DEBUG` to avoid. Kotlin has no equivalent compile-time gate here:
+    // narrowing the check to debuggable builds needs `ApplicationInfo`, and
+    // this class holds no Context on purpose (see [shared]). The invariants
+    // stay documented at each site, and the source guards in
+    // `offline-protocol-uniffi` pin the ones whose violation is not recoverable.
 
     /** This confinement's thread did not answer a main-thread caller in time. */
     class MainThreadSyncTimeout(threadName: String, timeoutMs: Long) :
@@ -176,7 +213,7 @@ internal class TransportConfinement(
          */
         const val MAIN_THREAD_SYNC_TIMEOUT_MS = 1_000L
 
-        private val shared = HashMap<String, TransportConfinement>()
+        private val instances = HashMap<String, TransportConfinement>()
 
         /**
          * The process-wide confinement named [name], started on first use and
@@ -195,7 +232,7 @@ internal class TransportConfinement(
          * reporting without a retained reference.
          */
         @Synchronized
-        fun shared(name: String): TransportConfinement = shared.getOrPut(name) {
+        fun shared(name: String): TransportConfinement = instances.getOrPut(name) {
             val thread = HandlerThread(name).apply { start() }
             TransportConfinement(name, thread.looper)
         }

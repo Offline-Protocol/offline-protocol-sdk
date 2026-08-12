@@ -10967,18 +10967,28 @@ mod tests {
     /// A connection that completes after `stop()` does not resurrect the
     /// transport.
     ///
-    /// Both managers announce a new connection from a *posted* block, so a
+    /// All four managers announce a new connection from a *posted* block, so a
     /// `stop()` can land between the socket opening and the announcement. With
     /// no gate the announcement then runs against a stopped transport: state
     /// goes back to `RUNNING` and the core is told the transport is up after
     /// being told it was down — with nothing left that will ever tear it down
     /// again, and the next `start()` throwing `AlreadyRunning` off the wedged
-    /// state. `InternetManager` has always gated its posted blocks this way;
-    /// these two did not.
+    /// state. `InternetManager` has always gated its posted blocks this way, on
+    /// both platforms; the Reticulum and Nostr managers did not, on either.
+    ///
+    /// **Both platforms, deliberately.** The first version of this covered only
+    /// the two Kotlin managers, which read as though the invariant held
+    /// everywhere it applies — while the identical unguarded block sat in the
+    /// two Swift ones. The iOS Reticulum window is if anything the wider of the
+    /// two: its announcement crosses `DispatchQueue.main` *and* then
+    /// `messageQueue`, so there are two scheduling boundaries for a `stop()` to
+    /// land in rather than one.
     ///
     /// Pinned as the *first* statement of the block, for the same reason the
-    /// iOS guard below is: a gate that has drifted below the state write is
-    /// not a gate.
+    /// iOS status-flip guard below is: a gate that has drifted below the state
+    /// write is not a gate. On iOS that means ahead of the `messageQueue` hop,
+    /// not inside it — a gate behind the hop is checking state the hop already
+    /// let go stale.
     #[test]
     fn react_native_transports_do_not_resurrect_a_stopped_connection() {
         for (manager, cleanup) in [
@@ -11000,6 +11010,125 @@ mod tests {
                  which also closes the socket it opened; otherwise a stop() racing the connect \
                  leaves the state RUNNING and the core told the transport is up, and no later \
                  signal corrects either. Expected to find:\n  {pinned}"
+            );
+        }
+
+        for (manager, cleanup) in [
+            ("ReticulumManager", "self.disconnect()"),
+            ("NostrManager", "self.disconnectAll(fromDeinit: false)"),
+        ] {
+            let code = rn_source_code_only(&format!("ios/{manager}.swift"));
+            let pinned = format!(
+                "guard let self = self else {{ return }} guard self.state != .stopping, \
+                 self.state != .stopped else {{ {cleanup} return }} self.updateState(.running)"
+            );
+
+            assert!(
+                code.contains(&pinned),
+                "ios/{manager}.swift's connected-edge block must open with the stopped-transport \
+                 gate, ahead of any queue hop, and close the connection it opened. Without it a \
+                 stop() racing the connect leaves the state .running and the core told the \
+                 transport is up, with nothing left that will tear it down and the next start() \
+                 throwing .alreadyRunning. Expected to find:\n  {pinned}"
+            );
+        }
+    }
+
+    /// The Wi-Fi Direct framework's own callbacks stay off the main thread too.
+    ///
+    /// This transport is the one where moving *our* posts off main is only half
+    /// the job. `WifiP2pManager.initialize` takes the looper every
+    /// `ActionListener` / `PeerListListener` / `ConnectionInfoListener` callback
+    /// is delivered on, and `registerReceiver` takes the scheduler `onReceive`
+    /// runs on. Left at their defaults both land on main — and `onReceive`
+    /// reaches `wifiDirectStatusChanged`, a UniFFI call, so the global protocol
+    /// mutex would still be waited on by the UI thread with every other trace of
+    /// the defect gone.
+    ///
+    /// Neither is caught by the `Looper.getMainLooper()` guard above: the
+    /// regression is a *default*, spelled `registerReceiver(p2pReceiver,
+    /// intentFilter)` with no scheduler and no mention of a looper anywhere.
+    /// Pinned as the full argument lists so dropping an argument fails here.
+    #[test]
+    fn react_native_wifi_direct_framework_callbacks_are_confined() {
+        let code =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+
+        for (what, pinned) in [
+            (
+                "the P2P channel's callback looper",
+                "channel = wifiP2pManager?.initialize(context, confinement.looper) {",
+            ),
+            (
+                "the broadcast receiver's scheduler on API 33+",
+                "context.registerReceiver( p2pReceiver, intentFilter, null, transportHandler, \
+                 Context.RECEIVER_NOT_EXPORTED, )",
+            ),
+            (
+                "the broadcast receiver's scheduler below API 33",
+                "context.registerReceiver(p2pReceiver, intentFilter, null, transportHandler)",
+            ),
+        ] {
+            assert!(
+                code.contains(pinned),
+                "{what} must be the transport confinement, not the default: a Wi-Fi P2P callback \
+                 or broadcast delivered on main calls wifiDirectStatusChanged, which waits on the \
+                 core's global protocol mutex — the ANR OFF-2123 tracked, reintroduced through the \
+                 framework's door rather than ours. Expected to find:\n  {pinned}"
+            );
+        }
+    }
+
+    /// No transport callback from Rust may wait on a confinement thread.
+    ///
+    /// This is the invariant that makes [`TransportConfinement.runSync`]'s
+    /// unbounded background wait safe, and it is the only one here whose
+    /// violation is unrecoverable at runtime. These callbacks are invoked by the
+    /// core *while it holds the global protocol mutex*. A callback that waited
+    /// on a confinement thread — directly, or through any lifecycle method,
+    /// since `start`/`stop`/`pause`/`resume` are all `runSync` — would be
+    /// waiting on a thread whose next act is to ask for that same mutex. Neither
+    /// side can yield: a hard, permanent deadlock of the core, not a slow path.
+    ///
+    /// So the body of each is pinned whole: a post and nothing else. There is no
+    /// weaker form of this worth checking, because "mostly posts" is the same
+    /// deadlock. Wi-Fi Direct's carries one branch — the drain-continuation
+    /// check — which is still inside the posted block, so it is pinned up to and
+    /// including the post that contains it.
+    #[test]
+    fn react_native_transport_callbacks_never_wait_on_a_confinement() {
+        for (manager, entry, pinned) in [
+            (
+                "ReticulumManager",
+                "onMessagesAvailable",
+                "fun onMessagesAvailable() { ioHandler.post { pollAndSendMessages() } }",
+            ),
+            (
+                "NostrManager",
+                "onMessagesAvailable",
+                "fun onMessagesAvailable() { transportHandler.post { pollAndSendMessages() } }",
+            ),
+            (
+                "WifiDirectManager",
+                "onMessagesAvailable",
+                "fun onMessagesAvailable() { transportHandler.post {",
+            ),
+            (
+                "ble/BleTransportFacade",
+                "onFragmentsAvailable",
+                "fun onFragmentsAvailable() { bleHandler.post { drainAndSendFragments() } }",
+            ),
+        ] {
+            let code = rn_source_code_only(&format!(
+                "android/src/main/java/com/offlineprotocol/{manager}.kt"
+            ));
+
+            assert!(
+                code.contains(pinned),
+                "{manager}.kt's {entry} must hand its work to a handler and return. The core calls \
+                 it holding the global protocol mutex, so anything that waits on a confinement \
+                 thread here deadlocks against the very mutex that thread is about to ask for. \
+                 Expected to find:\n  {pinned}"
             );
         }
     }

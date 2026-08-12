@@ -284,14 +284,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   were read and written from three threads without synchronisation.
 
 - **Stopping the Reticulum or Nostr transport while it was still connecting
-  could leave it permanently wedged.** Both announce a new connection from a
-  posted block, so a `stop()` could land in between. The announcement then ran
-  against a stopped transport: it put the state back to `RUNNING` and told the
-  core the transport was up moments after it had been told it was down — with
-  nothing left that would ever tear it down again, and the next `start()`
-  failing with `AlreadyRunning`. Both now check for the stop before announcing
-  and close the connection they opened instead. The relay transport already
-  guarded its posted blocks this way.
+  could leave it permanently wedged, on both platforms.** All four managers
+  announce a new connection from a posted block, so a `stop()` could land in
+  between. The announcement then ran against a stopped transport: it put the
+  state back to `RUNNING` and told the core the transport was up moments after
+  it had been told it was down — with nothing left that would ever tear it down
+  again, and the next `start()` failing with `AlreadyRunning`. All four now
+  check for the stop before announcing and close the connection they opened
+  instead; on iOS the check sits ahead of the queue hop, which is the boundary
+  the stop would otherwise slip through. The relay transport already guarded
+  its posted blocks this way on both platforms.
 
 - **A Reticulum daemon that was unreachable or had stopped reading could stall
   `stop()`.** Its connect (up to 60s) and its TCP writes (no timeout at all)

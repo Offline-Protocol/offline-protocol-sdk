@@ -400,10 +400,12 @@ class ReticulumManager(
         // Prevent duplicate disconnect handling
         if (!wasConnected && !wasConnecting) return
 
-        // Stop polling immediately on IO thread
-        transportHandler.post {
-            stopMessagePolling()
-        }
+        // Stop polling. Called directly rather than posted: every caller of
+        // this reaches it through `transportHandler.post`, so a post here only
+        // re-queues the cancel behind whatever else is waiting on this thread.
+        // The hop that matters is inside [stopMessagePolling], which puts the
+        // removal on the IO thread that owns the runnable.
+        stopMessagePolling()
 
         // Notify protocol
         try {

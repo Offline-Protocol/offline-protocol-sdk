@@ -17,6 +17,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowLog
 
 /**
  * Pins the properties the transport managers took from the main looper and now
@@ -39,10 +40,22 @@ class TransportConfinementTest {
 
     private val threads = mutableListOf<HandlerThread>()
 
+    /**
+     * Loopers taken from [TransportConfinement.shared], which are process-wide
+     * and never quit — that being the contract the reuse test verifies, so the
+     * test cannot avoid starting one. It can avoid leaving it running for the
+     * rest of the suite, which is all this list is for. Safe because the name
+     * used there belongs to this test alone, so nothing looks the stale entry
+     * up afterwards.
+     */
+    private val sharedLoopers = mutableListOf<Looper>()
+
     @After
     fun tearDown() {
         threads.forEach { it.quitSafely() }
         threads.clear()
+        sharedLoopers.forEach { it.quitSafely() }
+        sharedLoopers.clear()
     }
 
     private fun confinement(
@@ -154,6 +167,39 @@ class TransportConfinementTest {
         assertTrue("abandoned action never completed", ran.await(2, TimeUnit.SECONDS))
     }
 
+    /**
+     * An abandoned action still runs, and if it throws there is no longer
+     * anyone positioned to see that: nothing reads the outcome and the caller
+     * already has its [TransportConfinement.MainThreadSyncTimeout]. A `start()`
+     * refused for a real reason would otherwise be indistinguishable from a
+     * slow one, which is the diagnosis this thread exists to make possible.
+     */
+    @Test
+    fun `a failure the main caller stopped waiting for is still reported`() {
+        val confinement = confinement(mainSyncTimeoutMs = 80L)
+        val release = block(confinement)
+        ShadowLog.clear()
+
+        try {
+            confinement.runSync<Unit> { throw IllegalStateException("refused-after-timeout") }
+            fail("expected MainThreadSyncTimeout")
+        } catch (e: TransportConfinement.MainThreadSyncTimeout) {
+            // Expected: main stopped waiting.
+        }
+
+        // The report is posted behind the action on this same thread, so a
+        // marker behind both is enough to know it has run — no polling.
+        val reported = CountDownLatch(1)
+        confinement.post { reported.countDown() }
+        release.countDown()
+        assertTrue("the queue never drained", reported.await(2, TimeUnit.SECONDS))
+
+        assertTrue(
+            "the abandoned action's failure was dropped",
+            ShadowLog.getLogs().any { it.throwable?.message == "refused-after-timeout" },
+        )
+    }
+
     @Test
     fun `a background caller waits as long as it takes`() {
         val confinement = confinement(mainSyncTimeoutMs = 80L)
@@ -183,17 +229,26 @@ class TransportConfinementTest {
         assertEquals("delivered", outcome[0])
     }
 
+    /**
+     * A quit looper accepts nothing, and the background wait has no bound to
+     * rescue it: without the post check the caller — the React Native
+     * native-modules thread, on the stop path — parks for the life of the
+     * process. Threads from [TransportConfinement.shared] never quit, so this
+     * is unreachable through the shipped entry point; it is reachable through
+     * the constructor, which is what this drives.
+     */
     @Test
-    fun `assertConfined accepts the confinement thread and rejects every other`() {
-        val confinement = confinement()
-
-        confinement.runSync { confinement.assertConfined("state mutation") }
+    fun `runSync fails loudly rather than parking forever on a quit looper`() {
+        val thread = HandlerThread("test-quit").apply { start() }
+        val confinement = TransportConfinement("test-quit", thread.looper)
+        thread.quitSafely()
+        thread.join(2_000)
 
         try {
-            confinement.assertConfined("state mutation")
-            fail("expected the off-thread caller to be rejected")
+            confinement.runSync { "never reached" }
+            fail("expected a quit looper to be reported, not waited on")
         } catch (e: IllegalStateException) {
-            assertTrue(e.message!!.contains("state mutation"))
+            assertTrue(e.message!!.contains("test-quit"))
         }
     }
 
@@ -283,6 +338,7 @@ class TransportConfinementTest {
     fun `a shared confinement is reused by name so a rebuilt manager keeps one queue`() {
         val first = TransportConfinement.shared("offline-test-shared")
         val second = TransportConfinement.shared("offline-test-shared")
+        sharedLoopers += first.looper
 
         assertSame(first, second)
         assertNotEquals(Looper.getMainLooper(), first.looper)
