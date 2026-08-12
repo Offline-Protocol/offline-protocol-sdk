@@ -10925,6 +10925,39 @@ mod tests {
             );
         }
 
+        // The floor above proves the five *known* files were found; it
+        // structurally cannot notice a sixth being missed. The scan's
+        // discriminator is deliberately narrow (see
+        // [rn_android_transport_managers]), so a manager declared in a form
+        // it cannot see — no constructor parameters, a second supertype, a
+        // base class — would vanish from the invariant silently, which is
+        // the exact regression deriving the set was meant to kill. Close it
+        // with the wide form: every file that mentions the supertype at all
+        // is either a manager the narrow scan found, or is listed here with
+        // a reason.
+        //
+        // TransportManager.kt is the interface itself (its listener methods
+        // take `manager: TransportManager` parameters); OfflineProtocolModule.kt
+        // hosts the listener objects, whose overrides carry the same
+        // parameter.
+        const NOT_A_MANAGER: &[&str] = &["TransportManager.kt", "OfflineProtocolModule.kt"];
+        let expected_from_wide_scan: Vec<String> = rn_android_kotlin_sources()
+            .into_iter()
+            .filter(|(rel, code)| {
+                code.contains(": TransportManager") && !NOT_A_MANAGER.contains(&rel.as_str())
+            })
+            .map(|(rel, _)| rel)
+            .collect();
+        assert_eq!(
+            found, expected_from_wide_scan,
+            "a file names TransportManager but the narrow `) : TransportManager {{` scan \
+             disagrees with the wide one. If a new manager is declared in a form the narrow \
+             scan cannot see (no constructor parameters, a second supertype, a base class), \
+             it is outside the main-looper invariant without anyone having decided that — \
+             widen the discriminator. If the file is genuinely not a manager, add it to \
+             NOT_A_MANAGER with a reason"
+        );
+
         for (rel, code) in &managers {
             if MAIN_LOOPER_EXEMPT.contains(&rel.as_str()) {
                 assert!(
@@ -10969,8 +11002,24 @@ mod tests {
     /// {` — every implementation here takes constructor parameters, so the
     /// supertype lands on the line that closes them. It is deliberately
     /// narrower than a bare `: TransportManager`, which also matches the
-    /// interface's own method signatures and the module's listener object.
+    /// interface's own method signatures and the module's listener objects —
+    /// and that narrowness is a silent escape hatch on its own: a manager
+    /// declared in any other form (`class Foo : TransportManager {` with no
+    /// constructor parameters, a second supertype, a base class before the
+    /// interface) matches nothing and falls outside the invariant without
+    /// anyone deciding that. The caller closes it by cross-checking against
+    /// the wide form; keep the two in sync.
     fn rn_android_transport_managers() -> Vec<(String, String)> {
+        rn_android_kotlin_sources()
+            .into_iter()
+            .filter(|(_, code)| code.contains(") : TransportManager {"))
+            .collect()
+    }
+
+    /// Every `.kt` file under the React Native Android package, as
+    /// (path relative to the package, comment-stripped source), sorted by
+    /// path.
+    fn rn_android_kotlin_sources() -> Vec<(String, String)> {
         let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../bindings/react-native/android/src/main/java/com/offlineprotocol");
 
@@ -10992,9 +11041,7 @@ mod tests {
                     let code = rn_source_code_only(&format!(
                         "android/src/main/java/com/offlineprotocol/{rel}"
                     ));
-                    if code.contains(") : TransportManager {") {
-                        out.push((rel, code));
-                    }
+                    out.push((rel, code));
                 }
             }
         }
