@@ -280,6 +280,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   instance the caller had released; and that manager's session and peer map
   were read and written from three threads without synchronisation.
 
+- **Stopping the Reticulum or Nostr transport while it was still connecting
+  could leave it permanently wedged.** Both announce a new connection from a
+  posted block, so a `stop()` could land in between. The announcement then ran
+  against a stopped transport: it put the state back to `RUNNING` and told the
+  core the transport was up moments after it had been told it was down — with
+  nothing left that would ever tear it down again, and the next `start()`
+  failing with `AlreadyRunning`. Both now check for the stop before announcing
+  and close the connection they opened instead. The relay transport already
+  guarded its posted blocks this way.
+
 - **A Reticulum daemon that was unreachable or had stopped reading could stall
   `stop()`.** Its connect (up to 60s) and its TCP writes (no timeout at all)
   shared the thread that lifecycle calls wait on, so tearing the transport down

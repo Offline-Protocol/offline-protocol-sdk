@@ -426,6 +426,19 @@ class NostrManager(
             // Became connected
             consecutiveSendFailures.set(0)
             transportHandler.post {
+                // A stop() that landed while this relay's handshake was still
+                // in flight has already told the protocol we are down and
+                // moved to STOPPED. Announcing the connection now would put
+                // the state back to RUNNING and the protocol back to
+                // connected, against a transport nothing will ever tear down
+                // again — and the next start() would throw AlreadyRunning off
+                // it. The relay socket is stray, so close it here, on the
+                // thread that owns disconnectAll().
+                if (state == TransportState.STOPPING || state == TransportState.STOPPED) {
+                    disconnectAll()
+                    return@post
+                }
+
                 updateState(TransportState.RUNNING)
                 try {
                     protocol.nostrStatusChanged(true)

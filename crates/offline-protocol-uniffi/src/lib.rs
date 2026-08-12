@@ -10950,6 +10950,46 @@ mod tests {
         }
     }
 
+    /// A connection that completes after `stop()` does not resurrect the
+    /// transport.
+    ///
+    /// Both managers announce a new connection from a *posted* block, so a
+    /// `stop()` can land between the socket opening and the announcement. With
+    /// no gate the announcement then runs against a stopped transport: state
+    /// goes back to `RUNNING` and the core is told the transport is up after
+    /// being told it was down — with nothing left that will ever tear it down
+    /// again, and the next `start()` throwing `AlreadyRunning` off the wedged
+    /// state. `InternetManager` has always gated its posted blocks this way;
+    /// these two did not.
+    ///
+    /// Pinned as the *first* statement of the block, for the same reason the
+    /// iOS guard below is: a gate that has drifted below the state write is
+    /// not a gate.
+    #[test]
+    fn react_native_transports_do_not_resurrect_a_stopped_connection() {
+        for (manager, cleanup) in [
+            ("ReticulumManager", "disconnect()"),
+            ("NostrManager", "disconnectAll()"),
+        ] {
+            let code = rn_source_code_only(&format!(
+                "android/src/main/java/com/offlineprotocol/{manager}.kt"
+            ));
+            let pinned = format!(
+                "transportHandler.post {{ if (state == TransportState.STOPPING || \
+                 state == TransportState.STOPPED) {{ {cleanup} return@post }} \
+                 updateState(TransportState.RUNNING)"
+            );
+
+            assert!(
+                code.contains(&pinned),
+                "{manager}.kt's connected-edge post must open with the stopped-transport gate, \
+                 which also closes the socket it opened; otherwise a stop() racing the connect \
+                 leaves the state RUNNING and the core told the transport is up, and no later \
+                 signal corrects either. Expected to find:\n  {pinned}"
+            );
+        }
+    }
+
     /// The iOS Reticulum status flips stay off the main thread.
     ///
     /// `reticulum_status_changed` takes the global protocol mutex, and on the

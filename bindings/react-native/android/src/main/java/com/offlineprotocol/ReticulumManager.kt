@@ -342,6 +342,19 @@ class ReticulumManager(
         // Update state first, then notify protocol, so state is RUNNING before
         // protocol sees the connection event
         transportHandler.post {
+            // A stop() that landed while this connection was still being
+            // established has already told the protocol we are down and moved
+            // to STOPPED. Announcing the connection now would put the state
+            // back to RUNNING and the protocol back to connected, against a
+            // transport nothing will ever tear down again — and the next
+            // start() would throw AlreadyRunning off it. The socket this
+            // opened is stray, so close it here, on the thread that owns
+            // disconnect().
+            if (state == TransportState.STOPPING || state == TransportState.STOPPED) {
+                disconnect()
+                return@post
+            }
+
             updateState(TransportState.RUNNING)
 
             // Notify the protocol on the transport thread (consistent with
