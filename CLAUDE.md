@@ -38,11 +38,17 @@ cargo bench --package offline-protocol-bench
 ### UniFFI / Mobile Builds
 
 ```bash
+# Regenerate every binding after a UDL change — Swift, Kotlin and Python
+# together. The three are one artifact set off one UDL, so there is one
+# script; npm run generate:bindings and the python/RN build scripts all
+# delegate to it. A partial regeneration fails at runtime, not build time.
+./scripts/generate-bindings.sh
+
 cd bindings/react-native
 npm run build:uniffi:all          # all platforms
 npm run build:uniffi:ios          # iOS only
 npm run build:uniffi:android      # Android only
-npm run generate:bindings         # regenerate after UDL changes
+npm run generate:bindings         # wrapper for ../../scripts/generate-bindings.sh
 ```
 
 Prerequisites: `cargo install uniffi --version 0.30.0 --features cli --locked` (must match the workspace `uniffi = "0.30"` pin), Android NDK (`ANDROID_NDK_HOME`), Xcode.

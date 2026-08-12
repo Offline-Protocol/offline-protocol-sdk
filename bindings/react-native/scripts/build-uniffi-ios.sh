@@ -12,7 +12,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 # shellcheck source=shared/xcframework.sh
 source "$SCRIPT_DIR/shared/xcframework.sh"
-UNIFFI_DIR="$PROJECT_ROOT/crates/offline-protocol-uniffi"
 OUTPUT_DIR="$SCRIPT_DIR/../ios/libs"
 GENERATED_DIR="$SCRIPT_DIR/../ios/Generated"
 XCFRAMEWORK="$OUTPUT_DIR/offline_protocol_uniffi.xcframework"
@@ -64,29 +63,22 @@ package_xcframework \
   "$(static_lib_for aarch64-apple-ios-sim)" \
   "$(static_lib_for x86_64-apple-ios)"
 
-# Generate Swift bindings
+# Generate bindings — all languages, not just Swift: they are one artifact set
+# off one UDL (see scripts/generate-bindings.sh). Still tolerant of a missing
+# uniffi-bindgen, because the native libraries above are the point of this
+# script and they are already built by here.
 echo ""
-echo "Generating Swift bindings..."
+echo "Generating bindings..."
 
 if command -v uniffi-bindgen &> /dev/null; then
-  cd "$UNIFFI_DIR"
-  
-  uniffi-bindgen generate \
-    src/offline_protocol.udl \
-    --language swift \
-    --out-dir "$GENERATED_DIR"
-  
-  echo "✅ Swift bindings generated in $GENERATED_DIR"
+  bash "$PROJECT_ROOT/scripts/generate-bindings.sh"
 else
   echo "⚠️  uniffi-bindgen not found!"
   echo "Install it with: cargo install uniffi --version 0.30.0 --features cli"
   echo ""
   echo "For now, the native libraries are built, but you'll need to"
-  echo "generate Swift bindings manually when uniffi-bindgen is available."
-  echo ""
-  echo "To generate bindings later, run:"
-  echo "  cd $UNIFFI_DIR"
-  echo "  uniffi-bindgen generate src/offline_protocol.udl --language swift --out-dir $GENERATED_DIR"
+  echo "generate bindings manually when uniffi-bindgen is available:"
+  echo "  bash $PROJECT_ROOT/scripts/generate-bindings.sh"
 fi
 
 print_xcframework_slices "$XCFRAMEWORK"

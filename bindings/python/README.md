@@ -17,7 +17,10 @@ cd bindings/python
 bash scripts/build-desktop.sh
 ```
 
-This compiles the Rust core for your platform and generates the Python FFI bindings.
+This compiles the Rust core for your platform and generates the FFI bindings. It
+regenerates Swift and Kotlin alongside Python by delegating to the repo-root
+`scripts/generate-bindings.sh` — the three are one artifact set off one UDL, so
+they are never refreshed apart.
 
 **Prerequisites:** Rust toolchain, `uniffi-bindgen` (`cargo install uniffi --version 0.30.0 --features cli`).
 

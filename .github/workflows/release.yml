@@ -344,10 +344,13 @@ jobs:
         if: steps.cache-uniffi.outputs.cache-hit != 'true'
         run: cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked
 
+      # Generates all three languages; only the Python file is uploaded here.
+      # Going through the shared script keeps the released wheel's bindings
+      # produced exactly the way CI's drift gate verified them, and picks up its
+      # check that uniffi-bindgen matches the crate's uniffi pin — a mismatch
+      # would ship bindings whose checksums fail at the app's first call.
       - name: Generate Python bindings
-        run: |
-          cd crates/offline-protocol-uniffi
-          uniffi-bindgen generate src/offline_protocol.udl --language python --out-dir ../../bindings/python/offline_protocol_sdk/
+        run: bash scripts/generate-bindings.sh
 
       - uses: actions/upload-artifact@v7
         with:

@@ -15,9 +15,7 @@ echo "Building UniFFI Android libraries and generating Kotlin bindings..."
 # Navigate to the Rust project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-UNIFFI_DIR="$PROJECT_ROOT/crates/offline-protocol-uniffi"
 OUTPUT_DIR="$SCRIPT_DIR/../android/src/main/jniLibs"
-GENERATED_DIR="$SCRIPT_DIR/../android/src/main/java"
 
 cd "$PROJECT_ROOT"
 
@@ -181,30 +179,22 @@ for abi in "${ABIS[@]}"; do
   fi
 done
 
-# Generate Kotlin bindings
+# Generate bindings — all languages, not just Kotlin: they are one artifact set
+# off one UDL (see scripts/generate-bindings.sh). Still tolerant of a missing
+# uniffi-bindgen, because the native libraries above are the point of this
+# script and they are already built by here.
 echo ""
-echo "Generating Kotlin bindings..."
+echo "Generating bindings..."
 
 if command -v uniffi-bindgen &> /dev/null; then
-  mkdir -p "$GENERATED_DIR"
-  cd "$UNIFFI_DIR"
-  
-  uniffi-bindgen generate \
-    src/offline_protocol.udl \
-    --language kotlin \
-    --out-dir "$GENERATED_DIR"
-  
-  echo "✅ Kotlin bindings generated in $GENERATED_DIR"
+  bash "$PROJECT_ROOT/scripts/generate-bindings.sh"
 else
   echo "⚠️  uniffi-bindgen not found!"
   echo "Install it with: cargo install uniffi --version 0.30.0 --features cli"
   echo ""
   echo "For now, the native libraries are built, but you'll need to"
-  echo "generate Kotlin bindings manually when uniffi-bindgen is available."
-  echo ""
-  echo "To generate bindings later, run:"
-  echo "  cd $UNIFFI_DIR"
-  echo "  uniffi-bindgen generate src/offline_protocol.udl --language kotlin --out-dir $GENERATED_DIR"
+  echo "generate bindings manually when uniffi-bindgen is available:"
+  echo "  bash $PROJECT_ROOT/scripts/generate-bindings.sh"
 fi
 
 echo ""
