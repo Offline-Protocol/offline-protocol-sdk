@@ -533,15 +533,25 @@ public class NostrManager: NSObject, TransportManager {
                 self.statusFlipLock.unlock()
                 self.consecutiveSendFailures = 0
                 // The status flip above stands even while paused — the relay
-                // really is up, and DORS needs to know — but the timers do
-                // not. This is the durable half of what `isPaused` closes: a
+                // really is up, and DORS needs to know — and so does the
+                // ping: it is the socket's liveness keepalive, not the send
+                // path. A socket that reconnects while paused and is left
+                // unpinged is a zombie nothing here can detect —
+                // `InternetManager` gates its ping the same way but carries
+                // `WriteStallWatchdog` + `forceReconnect` as the recovery;
+                // this manager's only detector is `consecutiveSendFailures`,
+                // which needs the very sends the pause suppresses. One frame
+                // per 30s is noise next to the 100ms poll the guard below
+                // stops.
+                //
+                // The poll is the durable half of what `isPaused` closes: a
                 // relay that drops and reconnects during a background stay
-                // reaches here, and restarting the 100ms poll and 30s ping
-                // from it re-armed both for the rest of the stay. Mirrors
+                // reaches here, and restarting the poll from it re-armed the
+                // 100ms timer for the rest of the stay. Mirrors
                 // `InternetManager.handleAuthenticated`'s `if !isPaused`.
+                self.startPingTimer()
                 guard !self.isPaused else { return }
                 self.startMessagePolling()
-                self.startPingTimer()
                 self.pollAndSendMessages()
             }
         } else if !anyConnected && wasConnected {

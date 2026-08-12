@@ -11853,11 +11853,15 @@ mod tests {
                 "the reconnect edge",
                 "if (!isPaused) { startMessagePolling() ioHandler.post { pollAndSendMessages() } }",
             ),
+            // The ping sits *above* the guard on purpose: it is the socket's
+            // liveness keepalive, not the send path, and this manager has no
+            // watchdog to notice a reconnected-while-paused socket going
+            // zombie — see the comment at the call site.
             (
                 "ios/NostrManager.swift",
                 "the reconnect edge",
-                "guard !self.isPaused else { return } self.startMessagePolling() \
-                 self.startPingTimer() self.pollAndSendMessages()",
+                "self.startPingTimer() guard !self.isPaused else { return } \
+                 self.startMessagePolling() self.pollAndSendMessages()",
             ),
             (
                 "ios/ReticulumManager.swift",
