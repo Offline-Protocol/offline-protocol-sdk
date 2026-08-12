@@ -88,12 +88,22 @@ internal class TransportConfinement(
 
     /** Runs [action] inline when already confined, otherwise posts it. */
     fun run(action: () -> Unit) {
-        if (isCurrent()) action() else handler.post(action)
+        if (isCurrent()) action() else post(action)
     }
 
-    /** Posts [action] to the back of this thread's queue, always. */
+    /**
+     * Posts [action] to the back of this thread's queue, always.
+     *
+     * Checked for the same reason [runSync] checks: a looper that has quit
+     * accepts nothing and says so only in this return value. The failure is
+     * quieter here — dropped work rather than a permanent park — which is
+     * precisely why it needs saying out loud, since a silently discarded status
+     * flip or teardown step is diagnosed months later if at all. Threads handed
+     * out by [shared] never quit, so this cannot trip in production; it is here
+     * because the constructor takes any [Looper].
+     */
     fun post(action: () -> Unit) {
-        handler.post(action)
+        check(handler.post(action)) { "$name is not accepting work: its looper has quit" }
     }
 
     /**
@@ -247,6 +257,23 @@ internal class TransportConfinement(
         fun shared(name: String): TransportConfinement = instances.getOrPut(name) {
             val thread = HandlerThread(name).apply { start() }
             TransportConfinement(name, thread.looper)
+        }
+
+        /**
+         * Drops the confinement named [name] and quits its thread. Tests only.
+         *
+         * It exists so a test that takes a [shared] thread — the reuse contract
+         * cannot be verified without taking one — does not leave it running for
+         * the rest of the suite. Quitting the looper by hand instead is worse
+         * than leaving it: the entry survives, so the next lookup of that name
+         * returns a confinement that accepts nothing, and Robolectric reuses a
+         * sandbox (and therefore these statics) across test classes with the
+         * same config. Removing the entry and quitting the thread has to be one
+         * step, which is what this is.
+         */
+        @Synchronized
+        fun releaseForTests(name: String) {
+            instances.remove(name)?.looper?.quitSafely()
         }
     }
 }

@@ -41,21 +41,24 @@ class TransportConfinementTest {
     private val threads = mutableListOf<HandlerThread>()
 
     /**
-     * Loopers taken from [TransportConfinement.shared], which are process-wide
-     * and never quit — that being the contract the reuse test verifies, so the
-     * test cannot avoid starting one. It can avoid leaving it running for the
-     * rest of the suite, which is all this list is for. Safe because the name
-     * used there belongs to this test alone, so nothing looks the stale entry
-     * up afterwards.
+     * Names taken from [TransportConfinement.shared], which hands out
+     * process-wide threads that never quit — that being the contract the reuse
+     * test verifies, so the test cannot avoid taking one. It can avoid leaving
+     * it running for the rest of the suite, which is what
+     * [TransportConfinement.releaseForTests] is for: it drops the registry
+     * entry *and* quits the thread as one step. Quitting the looper alone would
+     * leave the entry behind, and Robolectric reuses a sandbox — and therefore
+     * those statics — across test classes with the same config, so the next
+     * lookup of that name would get a confinement that accepts nothing.
      */
-    private val sharedLoopers = mutableListOf<Looper>()
+    private val sharedNames = mutableListOf<String>()
 
     @After
     fun tearDown() {
         threads.forEach { it.quitSafely() }
         threads.clear()
-        sharedLoopers.forEach { it.quitSafely() }
-        sharedLoopers.clear()
+        sharedNames.forEach { TransportConfinement.releaseForTests(it) }
+        sharedNames.clear()
     }
 
     private fun confinement(
@@ -336,9 +339,9 @@ class TransportConfinementTest {
 
     @Test
     fun `a shared confinement is reused by name so a rebuilt manager keeps one queue`() {
+        sharedNames += "offline-test-shared"
         val first = TransportConfinement.shared("offline-test-shared")
         val second = TransportConfinement.shared("offline-test-shared")
-        sharedLoopers += first.looper
 
         assertSame(first, second)
         assertNotEquals(Looper.getMainLooper(), first.looper)
