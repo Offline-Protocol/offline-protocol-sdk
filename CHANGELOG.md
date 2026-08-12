@@ -280,8 +280,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
   Also fixed while in these files: iOS `stop()` and `destroy()` never stopped
   the Wi-Fi Direct manager, leaving a live send path holding a protocol
-  instance the caller had released; and that manager's session and peer map
-  were read and written from three threads without synchronisation.
+  instance the caller had released; that manager's session and peer map were
+  read and written from three threads without synchronisation; and its send
+  drain, which is deliberately unbounded, now re-reads the transport state each
+  time round rather than only before it starts — a `stop()` landing mid-drain
+  left the rest of the queue being fetched under the core's mutex and dropped
+  for want of a session.
 
 - **Stopping the Reticulum or Nostr transport while it was still connecting
   could leave it permanently wedged, on both platforms.** All four managers

@@ -272,13 +272,23 @@ public class WifiDirectManager: NSObject, TransportManager {
     /// and no lifecycle path waits on it, so a long drain delays nothing but
     /// the next drain. Add a budget here only if one of those three facts
     /// changes.
+    ///
+    /// Unbounded is not the same as unconditional, though, which is the one
+    /// thing the Android mirror gets for free and this does not. Re-entering
+    /// `drainAndSendMessages` after each batch re-runs its guard; a single
+    /// `while` does not, so the state has to be re-read *inside* the loop. The
+    /// guard below runs before the hop, and a `stop()` landing after it leaves
+    /// every remaining iteration taking the core's global mutex to fetch a
+    /// message that `sendMessage` then drops for want of a session — a warning
+    /// per message, against a transport that is already down.
     private func drainAndSendMessages() {
         guard state == .running, hasConnectedPeers else { return }
 
         messageQueue.async { [weak self] in
             guard let self = self else { return }
-            
-            while let message = self.protocolInstance.wifiDirectGetNextMessage() {
+
+            while self.state == .running,
+                  let message = self.protocolInstance.wifiDirectGetNextMessage() {
                 self.sendMessage(recipientId: message.recipientId, data: Data(message.data))
             }
         }
