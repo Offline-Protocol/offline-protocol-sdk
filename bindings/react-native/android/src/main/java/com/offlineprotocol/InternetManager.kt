@@ -89,9 +89,20 @@ class InternetManager(
     // compare-then-detach race-free.
     @Volatile private var webSocket: WebSocket? = null
     
-    // Handler for main thread operations
+    // Handler for main thread operations.
+    //
+    // NOTE (residual OFF-2123 surface, tracked separately): this manager is
+    // still main-affine, and [messagePollingRunnable] below re-enters UniFFI
+    // every MESSAGE_POLL_INTERVAL_MS (100ms) from it. Every one of those calls
+    // waits on the same global protocol mutex that made the BLE facade's
+    // main-looper residency an ANR source, so for a relay-connected session the
+    // mechanic OFF-2123 fixed for BLE is still live here at 10Hz. The BLE
+    // facade's remedy applies directly — see [com.offlineprotocol.ble.
+    // BleTransportFacade.bleLooper] for why a private looper preserves the
+    // ordering this design depends on — but the swap was deliberately left out
+    // of that change to keep its blast radius to one transport.
     private val mainHandler = Handler(Looper.getMainLooper())
-    
+
     // Message polling runnable
     private val messagePollingRunnable = object : Runnable {
         override fun run() {

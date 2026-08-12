@@ -1281,7 +1281,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * active mesh, or leave the core ticking its outbox against stopped
      * transports. A BLE stop reaches `stopScan` on an adapter the user may have
      * just switched off, which throws `IllegalStateException` back across
-     * `runOnMainSync` — and BLE is the first transport in the sequence. The
+     * `runOnBleThreadSync` — and BLE is the first transport in the sequence. The
      * first failure is rethrown once the rest are down, so [stop] still rejects
      * with the same cause it did before.
      */

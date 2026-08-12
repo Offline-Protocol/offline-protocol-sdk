@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * device ID, the transport layer calls [drain] to hand the buffered bytes to
  * the protocol in order.
  *
- * Thread-safety contract: every mutating operation must run on the main
+ * Thread-safety contract: every mutating operation must run on the BLE
  * thread. The per-address [ArrayDeque] values are not thread-safe, and the
  * invariant is enforced at runtime via [bleThreadCheck] — tests inject a
  * no-op guard so the class can be exercised in plain JVM unit tests. The

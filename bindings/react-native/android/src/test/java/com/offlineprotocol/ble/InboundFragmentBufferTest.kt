@@ -8,7 +8,7 @@ import org.junit.Test
 
 /**
  * Unit tests for [InboundFragmentBuffer]. Mirrors the style and injection
- * points of [OutboundFragmentQueueTest] — fake clock, no-op main-thread
+ * points of [OutboundFragmentQueueTest] — fake clock, no-op BLE-thread
  * guard, and a drop-event recorder — so the class can be exercised in plain
  * JVM unit tests without an Android looper.
  *
@@ -25,9 +25,9 @@ import org.junit.Test
  *     never tears a buffer whose fragments are still arriving — all while
  *     keeping the aggregate counter consistent.
  *   - `removeAll` / `clear` bring the total counter back to zero.
- *   - `totalCount` is readable without tripping the main-thread guard, so
+ *   - `totalCount` is readable without tripping the BLE-thread guard, so
  *     callback-thread diagnostic paths stay safe.
- *   - The main-thread guard is invoked exactly once per mutating call.
+ *   - The BLE-thread guard is invoked exactly once per mutating call.
  */
 class InboundFragmentBufferTest {
 
@@ -278,7 +278,7 @@ class InboundFragmentBufferTest {
     }
 
     @Test
-    fun `totalCount is readable without invoking the main-thread guard`() {
+    fun `totalCount is readable without invoking the BLE-thread guard`() {
         val h = Harness()
         h.buffer.enqueue("aa:00", byteArrayOf(1))
         val enqueueInvocations = h.bleThreadInvocations.get()
@@ -290,7 +290,7 @@ class InboundFragmentBufferTest {
     }
 
     @Test
-    fun `pendingAddresses returns a snapshot and touches the main-thread guard`() {
+    fun `pendingAddresses returns a snapshot and touches the BLE-thread guard`() {
         val h = Harness()
         h.buffer.enqueue("aa:00", byteArrayOf(1))
         h.buffer.enqueue("bb:11", byteArrayOf(2))
@@ -301,7 +301,7 @@ class InboundFragmentBufferTest {
     }
 
     @Test
-    fun `main-thread guard fires for every mutating method`() {
+    fun `BLE-thread guard fires for every mutating method`() {
         val h = Harness()
         val baseline = h.bleThreadInvocations.get()
         h.buffer.enqueue("aa:00", byteArrayOf(1))

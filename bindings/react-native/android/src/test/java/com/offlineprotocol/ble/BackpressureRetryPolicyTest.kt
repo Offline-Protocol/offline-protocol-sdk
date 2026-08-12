@@ -89,7 +89,7 @@ class BackpressureRetryPolicyTest {
         assertEquals(3, runs)
 
         // Fourth stall is refused: the drain must fall through to the 2s poller
-        // instead of holding the main thread at 20Hz forever.
+        // instead of holding the BLE thread at 20Hz forever.
         assertFalse(policy.schedule())
         assertEquals(3, policy.attempts)
 

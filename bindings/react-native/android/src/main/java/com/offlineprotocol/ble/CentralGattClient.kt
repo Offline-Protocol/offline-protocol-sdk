@@ -580,7 +580,7 @@ internal class CentralGattClient(
             val snapshot = characteristic.value?.copyOf()
             bleHandler.post {
                 if (host.isShuttingDown()) return@post
-                handleCharacteristicReadOnMain(gatt, charUuid, snapshot, status)
+                handleCharacteristicReadOnBleThread(gatt, charUuid, snapshot, status)
             }
         }
 
@@ -841,7 +841,7 @@ internal class CentralGattClient(
 
     // --- Read handlers (BLE-thread) ---
 
-    private fun handleCharacteristicReadOnMain(
+    private fun handleCharacteristicReadOnBleThread(
         gatt: BluetoothGatt,
         charUuid: UUID,
         value: ByteArray?,
