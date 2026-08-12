@@ -157,7 +157,7 @@ python:bindings/python/offline_protocol_sdk
 # purpose. That is the intended cost: the failure is loud, names the expected
 # and actual counts, and updating it is a deliberate one-line acknowledgement
 # that the guard's coverage changed.
-EXPECTED_ASSERTIONS=50
+EXPECTED_ASSERTIONS=54
 
 FAILURES=0
 ASSERTIONS=0
@@ -197,7 +197,32 @@ assert_list_size() {
 # displaced, which is the whole point (swapping python for a second swift kept
 # every count correct).
 normalize_set() {
-  printf '%s\n' "$1" | tr '[:space:]' '\n' | grep . | sort | tr '\n' ' '
+  # sed rather than `grep .`: grep exits 1 on no matches, which under
+  # `set -euo pipefail` kills the run at the caller's assignment — no FAIL
+  # line, no summary, and the assertion-count backstop never reached. Same
+  # defect as the one `|| true` fixes above, one function over.
+  printf '%s\n' "$1" | tr '[:space:]' '\n' | sed '/^$/d' | sort | tr '\n' ' '
+}
+
+# A duplicated entry keeps `assert_list_size` correct AND keeps the assertion
+# total correct, so both backstops report ok while the displaced entry's
+# coverage is simply gone — duplicating the release.yml entry and deleting both
+# of its real invocations left the run green at 50. That is the caller whose
+# Kotlin is downloaded over the committed Android bindings at publish time, and
+# §4's scan cannot backstop it: a caller that stops regenerating invokes no
+# bindgen and so produces no offender.
+#
+# This rather than a second assert_set_equals: comparing a list against itself
+# is the R1 self-comparison shape and catches nothing. EXPECTED_OUTPUTS can use
+# assert_set_equals only because its expected side is a hardcoded literal.
+assert_no_duplicates() {
+  local name="$1" dupes
+  dupes="$(printf '%s\n' "$2" | sed '/^$/d' | sort | uniq -d | tr '\n' ' ')"
+  if [[ -z "$dupes" ]]; then
+    pass "$name has no duplicated entries"
+  else
+    fail "$name repeats [${dupes% }] — a duplicated entry keeps the count while deleting the coverage of the entry it displaced"
+  fi
 }
 
 assert_set_equals() {
@@ -227,6 +252,10 @@ echo "Guarding the shared binding generator..."
 assert_list_size EXPECTED_OUTPUTS 3 "$EXPECTED_OUTPUTS"
 assert_list_size DELEGATING_CALLERS 6 "$DELEGATING_CALLERS"
 assert_list_size NATIVE_BUILD_ALIASES 3 "$NATIVE_BUILD_ALIASES"
+# EXPECTED_OUTPUTS is covered by assert_set_equals against a hardcoded literal;
+# these four have no such literal to compare against.
+assert_no_duplicates DELEGATING_CALLERS "$DELEGATING_CALLERS"
+assert_no_duplicates NATIVE_BUILD_ALIASES "$NATIVE_BUILD_ALIASES"
 
 # ---------------------------------------------------------------------------
 # 1. The generator exists and is executable.
@@ -504,7 +533,12 @@ while IFS= read -r spec; do
   counterpart="${spec#*:}"
   if [[ ! -f "$alias_script" ]]; then
     fail "$alias_script is missing — package.json still exposes it as an npm build script"
-  elif grep -Eq "^[[:space:]]*(exec[[:space:]]+)?((bash|sh)[[:space:]]+)?\"?[^[:space:]\"]*/$counterpart([[:space:]]|\"|\$)" "$alias_script"; then
+  # Mirrors DELEGATION's alternation: an interpreter, or an explicitly rooted
+  # path. Without it any line-initial token containing the counterpart's path
+  # counted as routing — `COUNTERPART=scripts/build-uniffi-ios.sh` in a script
+  # that then builds natively and generates nothing passed green. That is the
+  # R4 shellcheck-argument bug verbatim, left standing one regex over.
+  elif grep -Eq "^[[:space:]]*((exec[[:space:]]+)?(bash|sh)[[:space:]]+\"?([^[:space:]\"]*/)?|(exec[[:space:]]+)?\"?[.\$/][^[:space:]\"]*/)$counterpart([[:space:]]|\"|\$)" "$alias_script"; then
     pass "$(basename "$alias_script") routes through $counterpart"
   else
     fail "$alias_script no longer routes through $counterpart — it would build native artifacts without regenerating bindings"
@@ -542,6 +576,8 @@ printf 'the uniffi-bindgen generator produces code\n'                >"$fixtures
 # the purest form of the vacuous pass.
 assert_list_size HIT_FIXTURES 8 "$HIT_FIXTURES"
 assert_list_size MISS_FIXTURES 3 "$MISS_FIXTURES"
+assert_no_duplicates HIT_FIXTURES "$HIT_FIXTURES"
+assert_no_duplicates MISS_FIXTURES "$MISS_FIXTURES"
 
 while IFS= read -r name; do
   [[ -z "$name" ]] && continue
