@@ -273,6 +273,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Wi-Fi Direct explicitly, since its fallback would otherwise trickle a backlog
   out at one message every two seconds.
 
+  Two of the three are live today. `WifiDirectTransport` is not registered by
+  the bindings layer, so its managers cannot resolve a transport to drain and
+  the fix there is forward-looking; the behaviour this changes in a shipped app
+  is Nostr's and Reticulum's.
+
 - **The remaining transports no longer run protocol calls on the app's main
   thread.** Completing what the BLE fixes started: on Android all four
   non-BLE transport managers took their ordering from the app's main looper,

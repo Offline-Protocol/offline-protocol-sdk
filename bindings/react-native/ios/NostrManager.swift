@@ -543,6 +543,13 @@ public class NostrManager: NSObject, TransportManager {
                 // per 30s is noise next to the 100ms poll the guard below
                 // stops.
                 //
+                // Not a one-platform exception, though it reads like one:
+                // Android reaches the same end state by a different route —
+                // its ping is OkHttp's `.pingInterval(...)`, inside the client
+                // rather than a manager timer, so `pause()` never touched it
+                // there either. Gating this one to "restore symmetry" would
+                // be what creates the divergence.
+                //
                 // The poll is the durable half of what `isPaused` closes: a
                 // relay that drops and reconnects during a background stay
                 // reaches here, and restarting the poll from it re-armed the

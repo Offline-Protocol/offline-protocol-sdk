@@ -381,7 +381,21 @@ class WifiDirectManager(
                 // moment later. Ordering is preserved: this post is enqueued
                 // ahead of the polling runnable below, so the backlog still
                 // goes out before the first fallback tick.
-                transportHandler.post { drainAndSendMessages() }
+                //
+                // Carries [onMessagesAvailable]'s continuation check for the
+                // same reason it does, and skipping it here would not have
+                // been harmless: a continuation posted before the pause is
+                // still queued when this runs (it returns early once, on the
+                // pause, and clears the flag doing so), so continuation ->
+                // this lambda gives two self-reposting chains spending a
+                // [MAX_DRAIN_BATCH] budget each — the state
+                // [drainContinuationQueued] exists to make impossible. The
+                // continuation drains this backlog anyway, so returning here
+                // loses nothing.
+                transportHandler.post {
+                    if (drainContinuationQueued) return@post
+                    drainAndSendMessages()
+                }
                 // Removed before posting, which is the idiom the other three
                 // managers keep in their startMessagePolling helpers. This
                 // runnable reposts itself, and [startUnsafe] already posted one

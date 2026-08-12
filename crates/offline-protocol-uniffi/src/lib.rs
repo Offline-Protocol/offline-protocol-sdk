@@ -10932,9 +10932,22 @@ mod tests {
         // it cannot see — no constructor parameters, a second supertype, a
         // base class — would vanish from the invariant silently, which is
         // the exact regression deriving the set was meant to kill. Close it
-        // with the wide form: every file that mentions the supertype at all
-        // is either a manager the narrow scan found, or is listed here with
-        // a reason.
+        // with the wide form: every file that names the supertype in *any*
+        // supertype-list position is either a manager the narrow scan found,
+        // or is listed here with a reason.
+        //
+        // Both separators are needed, and the comma one is not decoration.
+        // A colon-only match sees `: TransportManager` and
+        // `: TransportManager, Other`, but not `: Base(), TransportManager`
+        // — the base-class form named above — so a manager whose `listener`
+        // property is inherited rather than declared in-file matched neither
+        // scan and passed this test green. (A colon-only match did catch the
+        // in-file spellings of that form, but only by accident: it also
+        // matches `: TransportManagerListener`, which every in-file
+        // implementation carries via `override var listener`. That prefix
+        // breadth is now load-bearing on purpose — narrowing either term to
+        // an exact `": TransportManager {"` or a word boundary reopens the
+        // hole for all three forms at once.)
         //
         // TransportManager.kt is the interface itself (its listener methods
         // take `manager: TransportManager` parameters); OfflineProtocolModule.kt
@@ -10944,7 +10957,8 @@ mod tests {
         let expected_from_wide_scan: Vec<String> = rn_android_kotlin_sources()
             .into_iter()
             .filter(|(rel, code)| {
-                code.contains(": TransportManager") && !NOT_A_MANAGER.contains(&rel.as_str())
+                (code.contains(": TransportManager") || code.contains(", TransportManager"))
+                    && !NOT_A_MANAGER.contains(&rel.as_str())
             })
             .map(|(rel, _)| rel)
             .collect();
@@ -11998,10 +12012,19 @@ mod tests {
             // caller waiting through up to MAX_DRAIN_BATCH global-mutex
             // acquisitions. The post keeps the ordering (drain ahead of the
             // polling runnable posted after it).
+            //
+            // The continuation check rides inside the pin because dropping it
+            // is invisible at runtime: a continuation posted before the pause
+            // is still queued when resume() runs, so without it this lambda
+            // starts a second self-reposting chain alongside that one and each
+            // spends its own MAX_DRAIN_BATCH — the state `drainContinuationQueued`
+            // exists to make impossible, reintroduced by the one path that does
+            // not go through `onMessagesAvailable`.
             (
                 "android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
                 "the resume drain",
-                "startPeerDiscovery() transportHandler.post { drainAndSendMessages() }",
+                "startPeerDiscovery() transportHandler.post { \
+                 if (drainContinuationQueued) return@post drainAndSendMessages() }",
             ),
             (
                 "ios/WifiDirectManager.swift",
