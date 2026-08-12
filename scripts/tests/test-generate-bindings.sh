@@ -78,7 +78,18 @@ INVOCATION="$INVOCATION|uniffi-bindgen[\"${SQ}]?[],[:space:]\"${SQ}[]*generate"
 # this regression actually happens, read as still delegating. Requiring a
 # single unbroken path token is what makes the sentence above true rather than
 # aspirational.
-DELEGATION='^[[:space:]]*(run:[[:space:]]+)?(exec[[:space:]]+)?((bash|sh)[[:space:]]+)?"?([^[:space:]"]*/)?generate-bindings\.sh([[:space:]]|"|$)'
+#
+# A bare relative path is *not* enough on its own: it must either carry an
+# interpreter (`bash x`, `sh x`) or be explicitly rooted (`./x`, `/x`, `"$VAR/x`).
+# Without that, ci.yml's own shellcheck argument list —
+#
+#     $ shellcheck --severity=warning \
+#         scripts/generate-bindings.sh \
+#
+# — satisfied the assertion for ci.yml, which made it unconditionally true: the
+# guard must lint the generator, so that line is permanent, and deleting the
+# actual regeneration step still reported "ok". Linting a file is not running it.
+DELEGATION='^[[:space:]]*(-[[:space:]]+)?(run:[[:space:]]+)?((exec[[:space:]]+)?(bash|sh)[[:space:]]+"?([^[:space:]"]*/)?|(exec[[:space:]]+)?"?[.$/][^[:space:]"]*/)generate-bindings\.sh([[:space:]]|"|$)'
 
 # Every caller the generator's header claims delegates to it. Listed here so
 # that deleting a delegation is a test failure rather than a silent return to
@@ -124,6 +135,21 @@ fail() {
   FAILURES=$((FAILURES + 1))
 }
 
+# Every list below drives a loop, and an emptied list silently deletes its
+# assertions while the run still reports success — emptying EXPECTED_OUTPUTS
+# alone removed fifteen checks and still printed "All binding-generator guards
+# passed." Pin each size, so deleting an entry is a failure rather than a
+# quieter test run.
+assert_list_size() {
+  local name="$1" expected="$2" actual
+  actual="$(printf '%s\n' "$3" | grep -c .)"
+  if [[ "$actual" -eq "$expected" ]]; then
+    pass "$name still has $expected entries"
+  else
+    fail "$name has $actual entries, expected $expected — an emptied or trimmed list silently deletes the assertions it drives"
+  fi
+}
+
 # Body of a named step in ci.yml, used to check that the workflow's own path
 # lists have not drifted from EXPECTED_OUTPUTS. Steps in that file are indented
 # six spaces.
@@ -136,6 +162,10 @@ ci_step_body() {
 }
 
 echo "Guarding the shared binding generator..."
+
+assert_list_size EXPECTED_OUTPUTS 3 "$EXPECTED_OUTPUTS"
+assert_list_size DELEGATING_CALLERS 6 "$DELEGATING_CALLERS"
+assert_list_size NATIVE_BUILD_ALIASES 3 "$NATIVE_BUILD_ALIASES"
 
 # ---------------------------------------------------------------------------
 # 1. The generator exists and is executable.
@@ -222,6 +252,21 @@ if [[ -n "$DRIFT_STEP" ]]; then
   pass "$CI_WORKFLOW has the drift gate step"
 else
   fail "$CI_WORKFLOW has no 'Fail on stale bindings' step — nothing checks the committed bindings, and the per-path checks below are vacuous"
+fi
+
+# Every path those two steps name must be tracked. `rm -f` and `git diff --
+# <pathspec>` both succeed silently on a path that does not exist, so a typo in
+# a leaf filename disables the delete and the diff for that file while both
+# steps still go green — the same "empty haystack reads as clean" shape, one
+# level below the directory the per-language checks pin.
+untracked_ci_paths=""
+for ci_path in $(printf '%s\n%s\n' "$RM_STEP" "$DRIFT_STEP" | grep -oE 'bindings/[^ \\]+' | sed 's/[;\\]*$//' | sort -u); do
+  git ls-files --error-unmatch "$ci_path" >/dev/null 2>&1 || untracked_ci_paths="$untracked_ci_paths $ci_path"
+done
+if [[ -z "$untracked_ci_paths" ]]; then
+  pass "every path $CI_WORKFLOW deletes and diffs is tracked"
+else
+  fail "$CI_WORKFLOW names untracked path(s) —$untracked_ci_paths — rm and git diff both succeed silently on those, so they are neither deleted nor checked"
 fi
 
 ok_bin="$STUB_ROOT/ok"
@@ -321,10 +366,23 @@ if [[ ! -x "$bad_bin/uniffi-bindgen" ]]; then
   # the generator exits 1 with "not found", which reads exactly like "mismatch
   # rejected" and reports ok.
   fail "the mismatched-bindgen stub was not created — this check would pass vacuously"
-elif PATH="$bad_bin:$PATH" STUB_LOG_DIR="$STUB_ROOT/bad-calls" bash "$GENERATOR" >/dev/null 2>&1; then
+elif mkdir -p "$STUB_ROOT/bad-calls" \
+  && PATH="$bad_bin:$PATH" STUB_LOG_DIR="$STUB_ROOT/bad-calls" bash "$GENERATOR" >/dev/null 2>&1; then
   fail "$GENERATOR generated with a bindgen whose minor version disagrees with the crate pin — those bindings' checksums fail at runtime, not at build time"
 else
-  pass "a bindgen disagreeing with the crate pin is rejected before anything is written"
+  # A non-zero exit alone does not mean nothing was generated, and this check
+  # is about *when* the refusal happens. Move the comparison below the three
+  # generate calls and the generator still exits non-zero — having already
+  # written all three binding sets with the wrong bindgen, which is precisely
+  # the outcome the pin exists to prevent. The stub logs every call it is
+  # asked to make, so assert it was asked for none. (Zero is right: the
+  # --version branch returns before logging.)
+  bad_calls="$(find "$STUB_ROOT/bad-calls" -type f | wc -l | tr -d ' ')"
+  if [[ "$bad_calls" -eq 0 ]]; then
+    pass "a bindgen disagreeing with the crate pin is rejected before anything is written"
+  else
+    fail "$GENERATOR refused the mismatched bindgen only after invoking it $bad_calls time(s) — the bindings were already written with the wrong bindgen"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -381,7 +439,7 @@ while IFS= read -r spec; do
   counterpart="${spec#*:}"
   if [[ ! -f "$alias_script" ]]; then
     fail "$alias_script is missing — package.json still exposes it as an npm build script"
-  elif grep -Eq "^[[:space:]]*(exec[[:space:]]+)?((bash|sh)[[:space:]]+)?\"?[^[:space:]\"]*/$counterpart" "$alias_script"; then
+  elif grep -Eq "^[[:space:]]*(exec[[:space:]]+)?((bash|sh)[[:space:]]+)?\"?[^[:space:]\"]*/$counterpart([[:space:]]|\"|\$)" "$alias_script"; then
     pass "$(basename "$alias_script") routes through $counterpart"
   else
     fail "$alias_script no longer routes through $counterpart — it would build native artifacts without regenerating bindings"
@@ -412,6 +470,10 @@ printf 'Run uniffi-bindgen to generate the Swift bindings.\n'        >"$fixtures
 printf 'the uniffi-bindgen generator produces code\n'                >"$fixtures/miss-prose-adjacent"
 
 for fixture in "$fixtures"/hit-*; do
+  if [[ ! -f "$fixture" ]]; then
+    fail "expected hit fixtures are missing — these negative controls are vacuous"
+    break
+  fi
   if grep -Eq "$INVOCATION" "$fixture"; then
     pass "the scan detects $(basename "$fixture" | sed 's/^hit-//') invocations"
   else
@@ -420,6 +482,14 @@ for fixture in "$fixtures"/hit-*; do
 done
 
 for fixture in "$fixtures"/miss-*; do
+  # The -f test is load-bearing here in a way it is not in the loop above: an
+  # unmatched glob leaves the literal pattern, grep fails on the nonexistent
+  # file, and "does not match" reads as "the scan correctly ignores it". The
+  # hit- loop fails safe in that situation; this one would not.
+  if [[ ! -f "$fixture" ]]; then
+    fail "expected miss fixtures are missing — these negative controls are vacuous"
+    break
+  fi
   if grep -Eq "$INVOCATION" "$fixture"; then
     fail "the scan falsely flags $(basename "$fixture" | sed 's/^miss-//')"
   else
