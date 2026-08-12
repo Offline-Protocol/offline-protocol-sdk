@@ -291,9 +291,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   it had been told it was down — with nothing left that would ever tear it down
   again, and the next `start()` failing with `AlreadyRunning`. All four now
   check for the stop before announcing and close the connection they opened
-  instead; on iOS the check sits ahead of the queue hop, which is the boundary
-  the stop would otherwise slip through. The relay transport already guarded
-  its posted blocks this way on both platforms.
+  instead. The relay transport already guarded its posted blocks this way on
+  both platforms.
+
+  The two platforms need different amounts of machinery for it. On Android the
+  gate, the state write, the status call and `stop()` all run on the one
+  transport thread, so a plain check is already atomic against a teardown. On
+  iOS they are spread over three queues, so a check followed by a write is two
+  steps with a `stop()` free to land between them: the announcement claims
+  `.running` in one operation instead, and the status call — which on Reticulum
+  is a further queue hop away, the wider of the two windows — is ordered
+  against `stop()`'s own call by a lock rather than by proximity to a check.
+  Without that a torn-down transport could still be reported to the core as
+  connected, and the core would route to a transport that never drains.
 
 - **A Reticulum daemon that was unreachable or had stopped reading could stall
   `stop()`.** Its connect (up to 60s) and its TCP writes (no timeout at all)

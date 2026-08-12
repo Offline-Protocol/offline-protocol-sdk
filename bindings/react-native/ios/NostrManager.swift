@@ -57,6 +57,20 @@ public class NostrManager: NSObject, TransportManager {
     // Lock protecting mutable state accessed from multiple queues
     private let stateLock = NSLock()
 
+    /// Orders the two `nostrStatusChanged` call sites that nothing else
+    /// orders: the connected edge, which runs on [messageQueue], and `stop()`,
+    /// which runs inline on whatever thread tore the transport down.
+    ///
+    /// Same reasoning as `ReticulumManager.statusFlipLock`, which carries the
+    /// full argument — these two managers are mirrors of each other and the
+    /// window is the same one. It is narrower here, because this edge's check
+    /// and its flip sit in one [messageQueue] block rather than a hop apart,
+    /// but "narrower" is not "closed": the check and the call are still two
+    /// steps, and `stop()` runs on another thread between them for free.
+    /// `stop()` publishes `.stopping` before contending for this lock, which
+    /// is what makes taking it sufficient.
+    private let statusFlipLock = NSLock()
+
     // Reconnection (guarded by stateLock)
     private var _reconnectAttempts: [String: Int] = [:]
     private var _currentReconnectDelay: [String: TimeInterval] = [:]
@@ -265,8 +279,14 @@ public class NostrManager: NSObject, TransportManager {
         // Close all relay connections
         disconnectAll(fromDeinit: fromDeinit)
 
-        // Notify protocol
+        // Notify protocol. Under [statusFlipLock], and after `.stopping` is
+        // already published above — see `ReticulumManager.stop()` for the
+        // ordering argument. Inline rather than hopped onto messageQueue:
+        // `deinit` reaches here, and a `sync` hop would self-deadlock when the
+        // last reference is released on that queue.
+        statusFlipLock.lock()
         try? protocolInstance.nostrStatusChanged(isConnected: false)
+        statusFlipLock.unlock()
 
         updateState(.stopped)
         emitDiagnostic("info", "Nostr transport stopped")
@@ -422,13 +442,20 @@ public class NostrManager: NSObject, TransportManager {
                 // is stray, so close it here. The Android manager gates the
                 // same edge the same way; both are pinned in the uniffi source
                 // guards.
-                guard self.state != .stopping, self.state != .stopped else {
+                //
+                // The claim covers the state write; the flip below carries its
+                // own check under [statusFlipLock], because `stop()` runs its
+                // own flip on another thread and nothing else orders the two.
+                guard self.markRunningIfLive() else {
                     self.disconnectAll(fromDeinit: false)
                     return
                 }
 
-                self.updateState(.running)
-                try? self.protocolInstance.nostrStatusChanged(isConnected: true)
+                self.statusFlipLock.lock()
+                if self.state != .stopping && self.state != .stopped {
+                    try? self.protocolInstance.nostrStatusChanged(isConnected: true)
+                }
+                self.statusFlipLock.unlock()
                 self.consecutiveSendFailures = 0
                 self.startMessagePolling()
                 self.startPingTimer()
@@ -989,6 +1016,27 @@ public class NostrManager: NSObject, TransportManager {
     private func updateState(_ newState: TransportState) {
         state = newState
         delegate?.transportManager(self, didChangeState: newState)
+    }
+
+    /// Claims `.running` for a relay that has just come up, but only if the
+    /// transport has not begun stopping. Returns false when it has, so the
+    /// caller can close the connection it opened instead of publishing a state
+    /// a concurrent `stop()` has already moved past.
+    ///
+    /// One operation rather than a `guard` followed by an `updateState`, for
+    /// the reason spelled out on `ReticulumManager.markRunningIfLive`: those
+    /// are two separate [stateLock] acquisitions, and a `stop()` landing
+    /// between them leaves a torn-down transport wedged at `.running`.
+    private func markRunningIfLive() -> Bool {
+        stateLock.lock()
+        guard _state != .stopping, _state != .stopped else {
+            stateLock.unlock()
+            return false
+        }
+        _state = .running
+        stateLock.unlock()
+        delegate?.transportManager(self, didChangeState: .running)
+        return true
     }
 
     // MARK: - Diagnostics

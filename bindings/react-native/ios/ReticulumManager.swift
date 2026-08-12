@@ -58,6 +58,35 @@ public class ReticulumManager: NSObject, TransportManager {
     // Lock protecting mutable state accessed from multiple queues
     private let stateLock = NSLock()
 
+    /// Orders the two `reticulumStatusChanged` call sites that nothing else
+    /// orders: the connected edge, which runs on [messageQueue], and `stop()`,
+    /// which runs inline on whatever thread tore the transport down.
+    ///
+    /// Without it the connected edge is a check-then-act across two threads.
+    /// It can read a live state, and a `stop()` can then run its whole body —
+    /// including its own `false` — before the `true` it just cleared reaches
+    /// the core. The core is left believing this transport is up moments after
+    /// being told it was down, against a `.stopped` transport with no polling,
+    /// and nothing corrects it: every correcting path is a teardown path that
+    /// already ran. DORS then routes to a transport that will never drain.
+    ///
+    /// What makes the lock sufficient is that `stop()` publishes `.stopping`
+    /// *before* contending for it. Either the announcement takes the lock
+    /// first, and `stop()`'s `false` lands after its `true` — the correct
+    /// final answer — or `stop()` takes it first and the announcement then
+    /// reads a state that refuses it.
+    ///
+    /// Held across a UniFFI call, which nothing else in this file does. That
+    /// is affordable here and only here: the sole contender is the one other
+    /// flip site, so the wait is bounded by a single status call that the
+    /// waiting thread was about to make anyway. It is taken *outside*
+    /// [stateLock] and never the other way round.
+    ///
+    /// Android needs no equivalent. Its gate, its flip and `stopUnsafe` all
+    /// run on the one confinement thread, so they are already atomic against
+    /// each other; this is what that costs on a platform with three queues.
+    private let statusFlipLock = NSLock()
+
     private var reconnectAttempts: Int {
         get { stateLock.lock(); defer { stateLock.unlock() }; return _reconnectAttempts }
         set { stateLock.lock(); defer { stateLock.unlock() }; _reconnectAttempts = newValue }
@@ -179,8 +208,18 @@ public class ReticulumManager: NSObject, TransportManager {
         // Close connection
         disconnect()
 
-        // Notify protocol
+        // Notify protocol. Under [statusFlipLock], and after `.stopping` is
+        // already published above, which is what orders this against a
+        // connected edge racing it from [messageQueue]: that edge either loses
+        // the lock and then reads the state this already moved past, or wins
+        // it and has its `true` overwritten by this `false`. Inline rather
+        // than hopped onto messageQueue — `deinit` calls this, and a `sync`
+        // hop would self-deadlock when the last reference is released on that
+        // queue, while an `async` hop would let `stop()` return before the
+        // core knows.
+        statusFlipLock.lock()
         try? protocolInstance.reticulumStatusChanged(isConnected: false)
+        statusFlipLock.unlock()
 
         updateState(.stopped)
         emitDiagnostic("info", "Reticulum transport stopped")
@@ -301,15 +340,16 @@ public class ReticulumManager: NSObject, TransportManager {
             // stray, so close it here. The Android manager gates the same edge
             // the same way; both are pinned in the uniffi source guards.
             //
-            // Deliberately ahead of the messageQueue hop below rather than
-            // inside it: the hop adds a second scheduling boundary, so a gate
-            // that ran after it would widen the window it exists to close.
-            guard self.state != .stopping, self.state != .stopped else {
+            // This gate covers the state write only. It cannot also cover the
+            // status flip below, which is a queue hop away — that hop is a
+            // second boundary a stop() can land in, and it carries its own
+            // check under [statusFlipLock]. A gate here alone would leave the
+            // wider of the two windows open.
+            guard self.markRunningIfLive() else {
                 self.disconnect()
                 return
             }
 
-            self.updateState(.running)
             self.startMessagePolling()
             // The status flip is a UniFFI call and does not belong on main:
             // it takes the global protocol mutex, and on the false→true edge
@@ -324,8 +364,26 @@ public class ReticulumManager: NSObject, TransportManager {
             // Enqueued from inside the main block on purpose: it puts the
             // status flip ahead of the flush below on the same serial queue,
             // preserving the ordering this block already had.
-            self.messageQueue.async {
-                try? self.protocolInstance.reticulumStatusChanged(isConnected: true)
+            //
+            // The state re-check is not redundant with the gate above. This
+            // block runs a hop later, and `stop()` flips `false` inline on
+            // whichever thread tore the transport down — so between the gate
+            // and here a whole stop can complete, and an unchecked flip would
+            // tell the core "up" after it was told "down". Check and call are
+            // one decision under [statusFlipLock]; see it for why that is
+            // enough. Unlocked explicitly rather than by `defer`, which would
+            // hold it across the flush below.
+            //
+            // [weak self] like every other closure here: a strong capture
+            // would let this flip fire against a manager the module already
+            // released through `destroy()`.
+            self.messageQueue.async { [weak self] in
+                guard let self = self else { return }
+                self.statusFlipLock.lock()
+                if self.state != .stopping && self.state != .stopped {
+                    try? self.protocolInstance.reticulumStatusChanged(isConnected: true)
+                }
+                self.statusFlipLock.unlock()
                 // Immediately flush queued messages
                 self.pollAndSendMessages()
             }
@@ -667,6 +725,32 @@ public class ReticulumManager: NSObject, TransportManager {
     private func updateState(_ newState: TransportState) {
         state = newState
         delegate?.transportManager(self, didChangeState: newState)
+    }
+
+    /// Claims `.running` for a connection that has just come up, but only if
+    /// the transport has not begun stopping. Returns false when it has, so the
+    /// caller can clean up the connection it opened instead of publishing a
+    /// state a concurrent `stop()` has already moved past.
+    ///
+    /// One operation rather than a `guard` followed by an `updateState`,
+    /// because those are two separate [stateLock] acquisitions: a `stop()`
+    /// landing between them writes `.stopped` and this then writes `.running`
+    /// back over it, wedging a torn-down transport at `.running` where the
+    /// next `start()` throws `.alreadyRunning` and nothing else ever tears it
+    /// down. The delegate notification stays outside the lock, matching
+    /// [updateState] — it reaches the bridge module, and calling into that
+    /// while holding this manager's lock would put arbitrary downstream work
+    /// inside the critical section.
+    private func markRunningIfLive() -> Bool {
+        stateLock.lock()
+        guard _state != .stopping, _state != .stopped else {
+            stateLock.unlock()
+            return false
+        }
+        _state = .running
+        stateLock.unlock()
+        delegate?.transportManager(self, didChangeState: .running)
+        return true
     }
 
     // MARK: - Diagnostics

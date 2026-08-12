@@ -10979,16 +10979,30 @@ mod tests {
     /// **Both platforms, deliberately.** The first version of this covered only
     /// the two Kotlin managers, which read as though the invariant held
     /// everywhere it applies — while the identical unguarded block sat in the
-    /// two Swift ones. The iOS Reticulum window is if anything the wider of the
-    /// two: its announcement crosses `DispatchQueue.main` *and* then
-    /// `messageQueue`, so there are two scheduling boundaries for a `stop()` to
-    /// land in rather than one.
+    /// two Swift ones. The iOS Reticulum window is the wider of the two: its
+    /// announcement crosses `DispatchQueue.main` *and* then `messageQueue`, so
+    /// there are two scheduling boundaries for a `stop()` to land in rather
+    /// than one, and a gate at the first boundary does nothing about the
+    /// second. Both are covered now — this test owns the state write at the
+    /// first, and
+    /// [`react_native_ios_status_flips_are_ordered_against_stop`] owns the
+    /// status flip at the second.
     ///
-    /// Pinned as the *first* statement of the block, for the same reason the
-    /// iOS status-flip guard below is: a gate that has drifted below the state
-    /// write is not a gate. On iOS that means ahead of the `messageQueue` hop,
-    /// not inside it — a gate behind the hop is checking state the hop already
-    /// let go stale.
+    /// Pinned as the *first* statement of the block: a gate that has drifted
+    /// below the state write is not a gate.
+    ///
+    /// The two platforms need different amounts of machinery for the same
+    /// invariant, and that difference is the point. On Android the gate, the
+    /// state write, the status flip and `stopUnsafe` all execute on the one
+    /// confinement thread, so a plain `if` is genuinely atomic against a
+    /// `stop()` — nothing more is needed or wanted. On iOS the lifecycle runs
+    /// on the bridge queue, the gate on `main` or `messageQueue`, and the flip
+    /// on `messageQueue`, so an `if` followed by a state write is a
+    /// check-then-act across threads: a `stop()` landing between them writes
+    /// `.stopped` and the write puts `.running` back over it. iOS therefore
+    /// pins a compare-and-set (`markRunningIfLive`) instead, and the flip
+    /// itself is ordered separately by
+    /// [`react_native_ios_status_flips_are_ordered_against_stop`].
     #[test]
     fn react_native_transports_do_not_resurrect_a_stopped_connection() {
         for (manager, cleanup) in [
@@ -11019,17 +11033,121 @@ mod tests {
         ] {
             let code = rn_source_code_only(&format!("ios/{manager}.swift"));
             let pinned = format!(
-                "guard let self = self else {{ return }} guard self.state != .stopping, \
-                 self.state != .stopped else {{ {cleanup} return }} self.updateState(.running)"
+                "guard let self = self else {{ return }} guard self.markRunningIfLive() \
+                 else {{ {cleanup} return }}"
             );
 
             assert!(
                 code.contains(&pinned),
-                "ios/{manager}.swift's connected-edge block must open with the stopped-transport \
-                 gate, ahead of any queue hop, and close the connection it opened. Without it a \
-                 stop() racing the connect leaves the state .running and the core told the \
-                 transport is up, with nothing left that will tear it down and the next start() \
-                 throwing .alreadyRunning. Expected to find:\n  {pinned}"
+                "ios/{manager}.swift's connected-edge block must open by *claiming* .running \
+                 rather than testing the state and then writing it, and must close the \
+                 connection it opened when the claim is refused. A separate test-then-write is \
+                 two lock acquisitions with a stop() free to land between them, which leaves a \
+                 torn-down transport wedged at .running where the next start() throws \
+                 .alreadyRunning. Expected to find:\n  {pinned}"
+            );
+
+            // The claim is only worth pinning if it is actually atomic, so the
+            // compare-and-set itself is pinned too — identical in both files.
+            // Without this, `markRunningIfLive` could be reduced back to the
+            // guard-then-`updateState` pair it replaced and the pin above
+            // would still pass.
+            let cas = "private func markRunningIfLive() -> Bool { stateLock.lock() \
+                       guard _state != .stopping, _state != .stopped else { stateLock.unlock() \
+                       return false } _state = .running stateLock.unlock() \
+                       delegate?.transportManager(self, didChangeState: .running) return true }";
+
+            assert!(
+                code.contains(cas),
+                "ios/{manager}.swift's markRunningIfLive must read and write the state under one \
+                 stateLock acquisition, and notify the delegate outside it. Expected to \
+                 find:\n  {cas}"
+            );
+        }
+    }
+
+    /// The iOS status flips are ordered against `stop()`, not merely near a
+    /// state check.
+    ///
+    /// Each of these managers flips `…StatusChanged` from two places that no
+    /// queue orders against each other: the connected edge, which runs on
+    /// `messageQueue`, and `stop()`, which runs inline on whichever thread
+    /// tore the transport down (the bridge queue, or `deinit`'s). A state
+    /// check on the connected edge is not enough on its own — it can read a
+    /// live state, and a whole `stop()`, including its own `false`, can then
+    /// complete before the `true` it cleared reaches the core. The core is
+    /// left believing the transport is up moments after being told it was
+    /// down, against a `.stopped` transport with no polling, and nothing
+    /// corrects it: every correcting path is a teardown path that already ran.
+    ///
+    /// So both sites take `statusFlipLock`, and `stop()` publishes `.stopping`
+    /// *before* contending for it — which is the whole ordering argument, and
+    /// why the byte-offset check below is not a stylistic preference. Either
+    /// the announcement wins the lock and `stop()`'s `false` lands after its
+    /// `true`, or `stop()` wins and the announcement reads a state that
+    /// refuses it.
+    ///
+    /// Android has no counterpart and must not grow one: its flips are already
+    /// atomic against each other by thread confinement, so a lock there would
+    /// be cargo-culted from a platform whose problem it does not have.
+    #[test]
+    fn react_native_ios_status_flips_are_ordered_against_stop() {
+        for (manager, flip) in [
+            ("ReticulumManager", "reticulumStatusChanged"),
+            ("NostrManager", "nostrStatusChanged"),
+        ] {
+            let code = rn_source_code_only(&format!("ios/{manager}.swift"));
+
+            let connected = format!(
+                "self.statusFlipLock.lock() if self.state != .stopping && \
+                 self.state != .stopped {{ try? self.protocolInstance.{flip}(isConnected: true) \
+                 }} self.statusFlipLock.unlock()"
+            );
+            assert!(
+                code.contains(&connected),
+                "ios/{manager}.swift's connected-edge flip must test the state and call {flip} \
+                 as one decision under statusFlipLock, unlocked explicitly rather than by defer \
+                 (which would hold it across the flush that follows). Expected to \
+                 find:\n  {connected}"
+            );
+
+            let stopping = format!(
+                "statusFlipLock.lock() try? protocolInstance.{flip}(isConnected: false) \
+                 statusFlipLock.unlock()"
+            );
+            assert!(
+                code.contains(&stopping),
+                "ios/{manager}.swift's stop() must take statusFlipLock around its {flip}, or the \
+                 lock on the connected edge orders it against nothing. Expected to \
+                 find:\n  {stopping}"
+            );
+
+            // `.stopping` must be published *before* stop() contends for the
+            // lock: that is what makes losing the race safe for the connected
+            // edge, which re-reads the state under the lock it then wins.
+            //
+            // A byte-offset check is only as good as the uniqueness of what it
+            // locates — a second `.stopping` write added anywhere above stop()
+            // would satisfy the comparison no matter how stop() is ordered. So
+            // the count is asserted first, and a legitimate second writer must
+            // come here and say which one it means.
+            let writes = code.matches("updateState(.stopping)").count();
+            assert_eq!(
+                writes, 1,
+                "ios/{manager}.swift: expected exactly one .stopping write (stop()'s); found \
+                 {writes}, which makes the ordering check below ambiguous"
+            );
+            let published = code.find("updateState(.stopping)").unwrap_or_else(|| {
+                panic!("ios/{manager}.swift: stop() no longer publishes .stopping")
+            });
+            let contends = code
+                .find(&stopping)
+                .unwrap_or_else(|| panic!("ios/{manager}.swift: stop()'s guarded flip not found"));
+            assert!(
+                published < contends,
+                "ios/{manager}.swift must publish .stopping before stop() takes statusFlipLock. \
+                 Reversed, a connected edge that loses the race re-reads a state that still says \
+                 running and flips the core back to connected after this false."
             );
         }
     }
@@ -11090,11 +11208,21 @@ mod tests {
     /// waiting on a thread whose next act is to ask for that same mutex. Neither
     /// side can yield: a hard, permanent deadlock of the core, not a slow path.
     ///
-    /// So the body of each is pinned whole: a post and nothing else. There is no
-    /// weaker form of this worth checking, because "mostly posts" is the same
-    /// deadlock. Wi-Fi Direct's carries one branch — the drain-continuation
-    /// check — which is still inside the posted block, so it is pinned up to and
-    /// including the post that contains it.
+    /// So the body of each is pinned whole, closing braces included: a post and
+    /// nothing else. There is no weaker form of this worth checking, because
+    /// "mostly posts" is the same deadlock — and a prefix pin is exactly that
+    /// weaker form, since it matches a body that posts and *then* blocks:
+    ///
+    /// ```text
+    /// fun onMessagesAvailable() {
+    ///     transportHandler.post { … }   // a prefix pin stops reading here
+    ///     confinement.runSync { … }     // permanent deadlock, guard green
+    /// }
+    /// ```
+    ///
+    /// Wi-Fi Direct's carries one branch — the drain-continuation check — which
+    /// is inside the posted block, so its pin spells that branch out rather
+    /// than stopping short of it.
     #[test]
     fn react_native_transport_callbacks_never_wait_on_a_confinement() {
         for (manager, entry, pinned) in [
@@ -11111,7 +11239,8 @@ mod tests {
             (
                 "WifiDirectManager",
                 "onMessagesAvailable",
-                "fun onMessagesAvailable() { transportHandler.post {",
+                "fun onMessagesAvailable() { transportHandler.post { \
+                 if (drainContinuationQueued) return@post drainAndSendMessages() } }",
             ),
             (
                 "ble/BleTransportFacade",
@@ -11145,6 +11274,16 @@ mod tests {
     /// The connect edge is pinned by *order*: the hop onto `messageQueue` must
     /// appear before the status call, which is what puts the flip ahead of the
     /// flush that follows it on the same serial queue.
+    ///
+    /// An earlier version of this pin required the status call to be the
+    /// literal first statement inside the hop, which is the wrong shape of
+    /// strictness: it rejected the state re-check that
+    /// [`react_native_ios_status_flips_are_ordered_against_stop`] requires
+    /// there, so the guard would have had to be edited to fix a bug it should
+    /// have caught. What it was really protecting against is a hop whose body
+    /// was emptied with the call left behind on main, and that is still caught
+    /// — the pin below spans the hop, the weak capture and the guarded call as
+    /// one string, so the call cannot leave it.
     #[test]
     fn react_native_reticulum_status_flips_run_off_the_main_thread() {
         let code = rn_source_code_only("ios/ReticulumManager.swift");
@@ -11152,12 +11291,15 @@ mod tests {
         // Pinned as *adjacency*, not as "a messageQueue.async appears somewhere
         // earlier". The looser check passes against a hop whose block was
         // emptied out with the status call left behind on main — which is
-        // exactly the regression this guards, so it has to see the call as the
-        // first statement of the block rather than merely after one.
+        // exactly the regression this guards, so the pin has to span the hop
+        // and the call as one string, with nothing between them but the weak
+        // capture and the state gate that orders this against stop().
         for (edge, pinned) in [
             (
                 "connect",
-                "self.messageQueue.async { try? self.protocolInstance\
+                "self.messageQueue.async { [weak self] in guard let self = self else { return } \
+                 self.statusFlipLock.lock() if self.state != .stopping && \
+                 self.state != .stopped { try? self.protocolInstance\
                  .reticulumStatusChanged(isConnected: true)",
             ),
             (
