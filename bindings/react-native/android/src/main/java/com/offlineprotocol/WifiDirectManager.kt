@@ -120,8 +120,12 @@ class WifiDirectManager(
     // Executor for socket operations
     private val socketExecutor = Executors.newCachedThreadPool()
     
-    // Server socket for receiving connections
-    private var serverSocket: ServerSocket? = null
+    // Server socket for receiving connections. Volatile because it crosses
+    // two threads with no lock: the socket executor binds and publishes it,
+    // and stopServerSocket() closes and nulls it from the transport thread —
+    // the close is what unblocks a parked accept(), so a stale read there
+    // skips the one call that ends the loop early.
+    @Volatile private var serverSocket: ServerSocket? = null
     private var serverRunning = AtomicBoolean(false)
     
     // Connected peers
@@ -131,7 +135,6 @@ class WifiDirectManager(
     // State tracking
     private var isGroupOwner = false
     private var groupOwnerAddress: String? = null
-    private var transportStartAt: Long = 0L
 
     // True while a budget-spent drain pass has queued its own continuation.
     // Confined to the transport thread — [drainAndSendMessages] and the block
@@ -210,7 +213,6 @@ class WifiDirectManager(
         ))
 
         updateState(TransportState.STARTING)
-        transportStartAt = System.currentTimeMillis()
 
         // Initialize the channel on the transport looper: `srcLooper` is the
         // thread every ActionListener / PeerListListener / ConnectionInfoListener
@@ -296,6 +298,15 @@ class WifiDirectManager(
         } catch (e: Exception) {
             // Ignore - might not be registered
         }
+
+        // Release the framework channel. start() creates a fresh one every
+        // time, so an unclosed channel leaks its binder connection once per
+        // start()/stop() cycle. close() exists since API 27; below that the
+        // framework offers no release and the leak is unavoidable.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            try { channel?.close() } catch (_: Exception) {}
+        }
+        channel = null
 
         // Notify protocol
         try {
@@ -472,18 +483,24 @@ class WifiDirectManager(
         serverRunning.set(true)
         
         socketExecutor.execute {
+            // Held locally as well as published, so the finally closes exactly
+            // the socket this task bound. A stop() can land before the bind
+            // publishes: it clears serverRunning, closes a still-null field
+            // and nulls it — then the bind completes, the loop guard reads
+            // false and exits immediately, and without the finally the
+            // freshly bound socket would leak with port 8988 still held,
+            // failing the next start() with BindException.
+            var server: ServerSocket? = null
             try {
-                serverSocket = ServerSocket(SERVER_PORT)
-                serverSocket?.soTimeout = SOCKET_TIMEOUT_MS
+                server = ServerSocket(SERVER_PORT)
+                server.soTimeout = SOCKET_TIMEOUT_MS
+                serverSocket = server
                 
                 emitDiagnostic("info", "Server socket started on port $SERVER_PORT")
                 
                 while (serverRunning.get()) {
                     try {
-                        val client = serverSocket?.accept()
-                        if (client != null) {
-                            handleClientConnection(client)
-                        }
+                        handleClientConnection(server.accept())
                     } catch (e: java.net.SocketTimeoutException) {
                         // Expected timeout, continue
                     } catch (e: Exception) {
@@ -498,6 +515,8 @@ class WifiDirectManager(
                 emitDiagnostic("error", "Failed to start server socket", mapOf(
                     "error" to (e.message ?: "unknown")
                 ))
+            } finally {
+                try { server?.close() } catch (_: Exception) {}
             }
         }
     }

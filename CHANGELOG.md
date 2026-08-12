@@ -336,6 +336,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   that had replaced it. Attempts are now versioned, so one that outlives its
   session closes what it opened instead of publishing it.
 
+- **Android: Wi-Fi Direct teardown could strand port 8988, and every session
+  leaked a framework channel.** A `stop()` racing the server socket's bind
+  closed a still-null field; the bind then completed, the accept loop saw the
+  stop and exited, and the freshly bound socket leaked with the port still
+  held — the next `start()` failed with `BindException`. The accept task now
+  closes the socket it bound on every exit, and the field is published safely
+  across the two threads that touch it. Separately, each `start()` created a
+  `WifiP2pManager` channel that nothing ever released; `stop()` now closes it
+  on API 27+. Both pre-existing, and low real-world impact while this
+  transport stays unregistered.
+
 - **A relay-delivered group message could be lost silently while the sender saw
   it delivered.** The relay's group path names senders by relay-account
   username, while the MLS credential inside the ciphertext is the sender's
