@@ -207,14 +207,16 @@ jobs:
       - name: Install uniffi-bindgen
         run: cargo install uniffi --version 0.30.0 --features cli --locked
 
-      # Builds the desktop cdylib pytest needs, and — via
-      # scripts/generate-bindings.sh — regenerates Swift, Kotlin and Python
-      # together. One regeneration, one gate: the three files are one artifact
-      # set off one UDL, so checking them separately would let a half-updated
-      # commit pass the half of the gate it happened to satisfy.
+      # Regenerate before building anything. Bindgen reads the UDL and nothing
+      # else, so putting this ahead of the cdylib compile means drift surfaces
+      # in seconds rather than after a full debug build — and a broken desktop
+      # build stops costing us Swift/Kotlin drift coverage it never needed.
       - name: Regenerate all UniFFI bindings
-        run: bash bindings/python/scripts/build-desktop.sh
+        run: bash scripts/generate-bindings.sh
 
+      # One regeneration, one gate: the three files are one artifact set off one
+      # UDL, so checking them separately would let a half-updated commit pass
+      # the half of the gate it happened to satisfy.
       - name: Fail on stale bindings
         run: |
           if ! git diff --exit-code -- \
@@ -225,6 +227,12 @@ jobs:
             echo "Run: bash scripts/generate-bindings.sh and commit all three."
             exit 1
           fi
+
+      # Builds the desktop cdylib pytest loads. It re-runs the generator on the
+      # way out, which is idempotent and is what keeps the one-entry-point rule
+      # true for the script developers actually invoke.
+      - name: Build the desktop library
+        run: bash bindings/python/scripts/build-desktop.sh
 
       - name: Install Python binding
         run: pip install -e 'bindings/python[dev]'

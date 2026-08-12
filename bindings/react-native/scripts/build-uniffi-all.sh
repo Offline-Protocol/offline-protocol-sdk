@@ -47,21 +47,25 @@ echo "  Android:        bindings/react-native/android/src/main/jniLibs/**/*.so"
 echo ""
 
 if command -v uniffi-bindgen &> /dev/null; then
-  echo "Generated bindings:"
+  # The iOS and Android scripts above each delegate to the shared generator, so
+  # the full set is written twice. That is deliberate: both are also run on
+  # their own, and idempotent regeneration is cheaper than either script being
+  # allowed to emit only its own language.
+  echo "Generated bindings (all three — one artifact set off one UDL):"
   echo "  Swift:   bindings/react-native/ios/Generated/"
-  echo "  Kotlin:  bindings/react-native/android/src/main/java/"
+  echo "  Kotlin:  bindings/react-native/android/src/main/java/uniffi/"
+  echo "  Python:  bindings/python/offline_protocol_sdk/"
   echo ""
   echo "Next steps:"
-  echo "  1. Update OfflineProtocolModule.swift to use generated Swift bindings"
-  echo "  2. Update OfflineProtocolModule.kt to use generated Kotlin bindings"
-  echo "  3. Test on iOS and Android"
-  echo "  4. Run 'npm publish' to distribute the package"
+  echo "  1. Commit all three together — a partial commit is drift"
+  echo "  2. Test on iOS and Android"
+  echo "  3. Run 'npm publish' to distribute the package"
 else
   echo "⚠️  Bindings were NOT generated (uniffi-bindgen not installed)"
   echo ""
   echo "To generate bindings, install uniffi-bindgen and run:"
-  echo "  cargo install uniffi --version 0.30.0 --features cli"
-  echo "  npm run generate:bindings"
+  echo "  cargo install uniffi --version 0.30.0 --features cli --locked"
+  echo "  ./scripts/generate-bindings.sh"
 fi
 
 echo ""

@@ -36,7 +36,7 @@ Closes #
 - [ ] Commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`<type>(<scope>): <subject>`)
 - [ ] Docs / `CHANGELOG.md` updated where relevant
 - [ ] No new `unsafe` in core crates (only the `offline-protocol-uniffi` FFI boundary may use it, with SAFETY comments)
-- [ ] If the UniFFI UDL changed, bindings were regenerated (`npm run generate:bindings` and/or the Python build) and committed
+- [ ] If the UniFFI UDL changed, bindings were regenerated (`./scripts/generate-bindings.sh`) and **all three** — Swift, Kotlin, Python — committed together; a partial set fails at runtime, not build time
 
 ## Breaking changes
 

@@ -56,9 +56,11 @@ interface OfflineProtocol {
 ### 3. Regenerate Bindings
 
 ```bash
-cd bindings/react-native
-npm run generate:bindings
+./scripts/generate-bindings.sh          # or: npm run generate:bindings
 ```
+
+This regenerates Swift, Kotlin **and** Python in one pass — they are one
+artifact set off one UDL, so they are never refreshed apart. Commit all three.
 
 This auto-generates:
 - `ios/Generated/offline_protocol.swift` — Swift wrapper classes
