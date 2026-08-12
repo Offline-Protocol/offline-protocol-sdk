@@ -1,16 +1,11 @@
 package com.offlineprotocol
 
-import android.os.Handler
-import android.os.HandlerThread
-import android.os.Looper
 import android.util.Log
 import uniffi.offline_protocol.OfflineProtocol
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.PrintWriter
 import java.net.Socket
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -45,6 +40,10 @@ class ReticulumManager(
         private const val RECONNECT_BACKOFF_MULTIPLIER = 2.0
         private const val CONNECTION_TIMEOUT_MS = 60000  // 60s — Reticulum paths can be high-latency
         private const val MAX_CONSECUTIVE_FAILURES = 3
+        // Name of the private looper this manager confines itself to. Shared
+        // process-wide under this key, so a manager rebuilt after stop()
+        // inherits the same ordered queue.
+        private const val CONFINEMENT_THREAD = "offline-reticulum"
     }
 
     // MARK: - Properties
@@ -54,19 +53,28 @@ class ReticulumManager(
     private var autoReconnect = true
     private var maxReconnectAttempts = 0 // 0 = infinite
 
-    // Handler for main thread operations (state updates, listener callbacks)
-    private val mainHandler = Handler(Looper.getMainLooper())
+    // The one thread this manager runs on.
+    //
+    // This used to be two: a per-session "ReticulumIO" HandlerThread for
+    // polling and TCP writes, and the app's main looper for state updates and
+    // the status flips. The split is what left OFF-2123 alive here — the poll
+    // was already off main, but `reticulumStatusChanged` is a UniFFI call and
+    // it ran on main at every connect and disconnect, which for a daemon that
+    // is down means once per rung of the 1s→30s backoff ladder.
+    //
+    // Collapsing both onto one confinement removes the FFI from main and the
+    // per-session thread lifecycle with it: nothing has to decide whether
+    // `ioHandler` is non-null before posting, and no reconnect can race a
+    // quitSafely() that already ran. See [TransportConfinement].
+    private val confinement = TransportConfinement.shared(CONFINEMENT_THREAD)
+    private val transportHandler = confinement.handler
 
-    // Background handler thread for message polling and TCP I/O
-    private var ioThread: HandlerThread? = null
-    private var ioHandler: Handler? = null
-
-    // Message polling runnable — runs on ioHandler (background thread)
+    // Message polling runnable — runs on the transport thread
     private val messagePollingRunnable = object : Runnable {
         override fun run() {
             pollAndSendMessages()
             if (state == TransportState.RUNNING && isConnected.get()) {
-                ioHandler?.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
+                transportHandler.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
             }
         }
     }
@@ -92,33 +100,19 @@ class ReticulumManager(
 
     // MARK: - Helper
 
-    private fun <T> runOnMainSync(action: () -> T): T {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            return action()
-        }
-
-        val latch = CountDownLatch(1)
-        var outcome: Result<T>? = null
-        mainHandler.post {
-            outcome = try {
-                Result.success(action())
-            } catch (t: Throwable) {
-                Result.failure(t)
-            }
-            latch.countDown()
-        }
-
-        try {
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                throw RuntimeException("Timed out waiting for main thread execution (5s)")
-            }
-        } catch (ie: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw RuntimeException("Interrupted while executing on main thread", ie)
-        }
-
-        return outcome!!.getOrThrow()
-    }
+    /**
+     * Runs [action] on the transport thread and waits for it.
+     *
+     * The flat 5s bound this replaces applied to every caller, which was the
+     * wrong shape twice over: it fired on the RN bridge thread — the one
+     * caller that genuinely needs `stop()` to have finished — precisely when
+     * the protocol mutex was most contended, leaving the transport half-down
+     * and rejecting the JS promise; and it did not protect main at all, since
+     * a main-thread caller took the inline fast path straight into the FFI.
+     * [TransportConfinement.runSync] inverts both: main is the only bounded
+     * caller, and it no longer runs the action itself.
+     */
+    private fun <T> runConfinedSync(action: () -> T): T = confinement.runSync(action)
 
     // MARK: - Configuration
 
@@ -166,7 +160,7 @@ class ReticulumManager(
     }
 
     override fun start() {
-        runOnMainSync {
+        runConfinedSync {
             startUnsafe()
         }
     }
@@ -182,17 +176,12 @@ class ReticulumManager(
             "daemonAddress" to "$daemonHost:$daemonPort"
         ))
 
-        // Start background IO thread for polling and TCP writes
-        val thread = HandlerThread("ReticulumIO").also { it.start() }
-        ioThread = thread
-        ioHandler = Handler(thread.looper)
-
         updateState(TransportState.STARTING)
         connect()
     }
 
     override fun stop() {
-        runOnMainSync {
+        runConfinedSync {
             stopUnsafe()
         }
     }
@@ -205,7 +194,7 @@ class ReticulumManager(
         updateState(TransportState.STOPPING)
 
         // Cancel reconnect attempts
-        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable?.let { transportHandler.removeCallbacks(it) }
         reconnectRunnable = null
 
         // Stop timers
@@ -214,10 +203,12 @@ class ReticulumManager(
         // Close TCP connection
         disconnect()
 
-        // Shut down IO thread
-        ioThread?.quitSafely()
-        ioThread = null
-        ioHandler = null
+        // The transport thread is process-wide and outlives this stop() — see
+        // [TransportConfinement]. Quitting it here is what the per-session
+        // thread used to do, and it is exactly what must not happen now: a
+        // stop() is followed by start() often enough (enableTransport, a
+        // foreground heal) that a dead looper would silently swallow every
+        // post the next session makes.
 
         // Notify protocol
         try {
@@ -231,11 +222,11 @@ class ReticulumManager(
     }
 
     override fun pause() {
-        ioHandler?.post { stopMessagePolling() }
+        transportHandler.post { stopMessagePolling() }
     }
 
     override fun resume() {
-        ioHandler?.post {
+        transportHandler.post {
             if (state == TransportState.RUNNING && isConnected.get()) {
                 startMessagePolling()
             }
@@ -247,7 +238,7 @@ class ReticulumManager(
      * This is the primary send path, replacing timer-based polling.
      */
     fun onMessagesAvailable() {
-        ioHandler?.post { pollAndSendMessages() }
+        transportHandler.post { pollAndSendMessages() }
     }
 
     // MARK: - Connection Management
@@ -263,7 +254,7 @@ class ReticulumManager(
         ))
 
         // Connect on the IO thread to avoid blocking and prevent unmanaged threads
-        ioHandler?.post {
+        transportHandler.post {
             try {
                 val sock = Socket()
                 sock.connect(
@@ -298,7 +289,7 @@ class ReticulumManager(
                     "host" to daemonHost,
                     "port" to daemonPort
                 ))
-                mainHandler.post { handleConnectionClosed(-1, e.message) }
+                transportHandler.post { handleConnectionClosed(-1, e.message) }
             }
         }
     }
@@ -333,19 +324,23 @@ class ReticulumManager(
 
         // Update state first, then notify protocol, so state is RUNNING before
         // protocol sees the connection event
-        mainHandler.post {
+        transportHandler.post {
             updateState(TransportState.RUNNING)
 
-            // Notify protocol on main thread (consistent with handleConnectionClosed)
+            // Notify the protocol on the transport thread (consistent with
+            // handleConnectionClosed). This is the heaviest FFI call this
+            // manager makes: the false→true edge flushes the whole outbox
+            // under the global protocol mutex, which is why it must not run
+            // on main.
             try {
                 protocol.reticulumStatusChanged(true)
             } catch (e: Exception) {
                 Log.e(TAG, "Error notifying protocol of connect", e)
             }
 
-            // Start polling + immediately flush queued messages on IO thread
+            // Start polling + immediately flush queued messages
             startMessagePolling()
-            ioHandler?.post { pollAndSendMessages() }
+            transportHandler.post { pollAndSendMessages() }
         }
     }
 
@@ -363,7 +358,7 @@ class ReticulumManager(
             }
             // Connection closed or errored
             if (isConnected.get()) {
-                mainHandler.post { handleConnectionClosed(-1, "Connection lost") }
+                transportHandler.post { handleConnectionClosed(-1, "Connection lost") }
             }
         }.also { it.start() }
     }
@@ -376,7 +371,7 @@ class ReticulumManager(
         if (!wasConnected && !wasConnecting) return
 
         // Stop polling immediately on IO thread
-        ioHandler?.post {
+        transportHandler.post {
             stopMessagePolling()
         }
 
@@ -398,9 +393,9 @@ class ReticulumManager(
 
         // Attempt reconnection if enabled
         if (autoReconnect && state != TransportState.STOPPING && state != TransportState.STOPPED) {
-            mainHandler.post { scheduleReconnect() }
+            transportHandler.post { scheduleReconnect() }
         } else {
-            mainHandler.post { updateState(TransportState.STOPPED) }
+            transportHandler.post { updateState(TransportState.STOPPED) }
         }
     }
 
@@ -428,10 +423,10 @@ class ReticulumManager(
             "delayMs" to delay
         ))
 
-        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable?.let { transportHandler.removeCallbacks(it) }
         val runnable = Runnable { connect() }
         reconnectRunnable = runnable
-        mainHandler.postDelayed(runnable, delay)
+        transportHandler.postDelayed(runnable, delay)
     }
 
     // MARK: - Message Handling
@@ -503,11 +498,11 @@ class ReticulumManager(
 
     private fun startMessagePolling() {
         stopMessagePolling()
-        ioHandler?.post(messagePollingRunnable)
+        transportHandler.post(messagePollingRunnable)
     }
 
     private fun stopMessagePolling() {
-        ioHandler?.removeCallbacks(messagePollingRunnable)
+        transportHandler.removeCallbacks(messagePollingRunnable)
     }
 
     private fun pollAndSendMessages() {
@@ -615,7 +610,7 @@ class ReticulumManager(
                 emitDiagnostic("warning", "Too many consecutive send failures, triggering reconnect", mapOf(
                     "failures" to failures
                 ))
-                mainHandler.post { handleConnectionClosed(-1, "Send failures exceeded threshold") }
+                transportHandler.post { handleConnectionClosed(-1, "Send failures exceeded threshold") }
             }
         }
     }

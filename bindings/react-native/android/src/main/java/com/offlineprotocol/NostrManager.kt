@@ -1,8 +1,5 @@
 package com.offlineprotocol
 
-import android.os.Handler
-import android.os.HandlerThread
-import android.os.Looper
 import android.util.Base64
 import android.util.Log
 import okhttp3.OkHttpClient
@@ -14,7 +11,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import uniffi.offline_protocol.OfflineProtocol
 import java.util.UUID
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -59,6 +55,10 @@ class NostrManager(
         private const val CONNECTION_TIMEOUT_SECONDS = 30L
         private const val PING_INTERVAL_MS = 30000L  // OkHttp WebSocket ping interval
         private const val MAX_CONSECUTIVE_FAILURES = 2
+        // Name of the private looper this manager confines itself to. Shared
+        // process-wide under this key, so a manager rebuilt after stop()
+        // inherits the same ordered queue.
+        private const val CONFINEMENT_THREAD = "offline-nostr"
     }
 
     // MARK: - Properties
@@ -67,12 +67,16 @@ class NostrManager(
     private var autoReconnect = true
     private var maxReconnectAttempts = 0 // 0 = infinite
 
-    // Handler for main thread operations
-    private val mainHandler = Handler(Looper.getMainLooper())
-
-    // Background handler thread for message polling
-    private var ioThread: HandlerThread? = null
-    private var ioHandler: Handler? = null
+    // The one thread this manager runs on.
+    //
+    // This used to be two: a per-session "NostrIO" HandlerThread for polling,
+    // and the app's main looper for lifecycle and the connect/disconnect
+    // status flips. The poll was already off main, but `nostrStatusChanged`
+    // and the `nostrQueryCompleted` release loop are UniFFI calls and they ran
+    // on main at every relay transition — which, for a flapping relay set, is
+    // the reconnect backoff cadence. See [TransportConfinement].
+    private val confinement = TransportConfinement.shared(CONFINEMENT_THREAD)
+    private val transportHandler = confinement.handler
 
     // Message polling runnable
     private val messagePollingRunnable = object : Runnable {
@@ -80,7 +84,7 @@ class NostrManager(
             pollAndSendMessages()
             pollAndSendQueries()
             if (state == TransportState.RUNNING && isConnected.get()) {
-                ioHandler?.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
+                transportHandler.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
             }
         }
     }
@@ -122,33 +126,19 @@ class NostrManager(
 
     // MARK: - Helper
 
-    private fun <T> runOnMainSync(action: () -> T): T {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            return action()
-        }
-
-        val latch = CountDownLatch(1)
-        var outcome: Result<T>? = null
-        mainHandler.post {
-            outcome = try {
-                Result.success(action())
-            } catch (t: Throwable) {
-                Result.failure(t)
-            }
-            latch.countDown()
-        }
-
-        try {
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                throw RuntimeException("Timed out waiting for main thread execution (5s)")
-            }
-        } catch (ie: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw RuntimeException("Interrupted while executing on main thread", ie)
-        }
-
-        return outcome!!.getOrThrow()
-    }
+    /**
+     * Runs [action] on the transport thread and waits for it.
+     *
+     * The flat 5s bound this replaces applied to every caller, which was the
+     * wrong shape twice over: it fired on the RN bridge thread — the one
+     * caller that genuinely needs `stop()` to have finished — precisely when
+     * the protocol mutex was most contended, leaving the transport half-down
+     * and rejecting the JS promise; and it did not protect main at all, since
+     * a main-thread caller took the inline fast path straight into the FFI.
+     * [TransportConfinement.runSync] inverts both: main is the only bounded
+     * caller, and it no longer runs the action itself.
+     */
+    private fun <T> runConfinedSync(action: () -> T): T = confinement.runSync(action)
 
     // MARK: - Configuration
 
@@ -191,7 +181,7 @@ class NostrManager(
     }
 
     override fun start() {
-        runOnMainSync {
+        runConfinedSync {
             startUnsafe()
         }
     }
@@ -245,11 +235,6 @@ class NostrManager(
             "publicKey" to publicKeyHex
         ))
 
-        // Start background IO thread
-        val thread = HandlerThread("NostrIO").also { it.start() }
-        ioThread = thread
-        ioHandler = Handler(thread.looper)
-
         // Create OkHttp client
         okHttpClient = OkHttpClient.Builder()
             .connectTimeout(CONNECTION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -267,7 +252,7 @@ class NostrManager(
     }
 
     override fun stop() {
-        runOnMainSync {
+        runConfinedSync {
             stopUnsafe()
         }
     }
@@ -281,7 +266,7 @@ class NostrManager(
 
         // Cancel all reconnect attempts
         for ((_, runnable) in reconnectRunnables) {
-            mainHandler.removeCallbacks(runnable)
+            transportHandler.removeCallbacks(runnable)
         }
         reconnectRunnables.clear()
 
@@ -291,10 +276,12 @@ class NostrManager(
         // Close all WebSocket connections
         disconnectAll()
 
-        // Shut down IO thread
-        ioThread?.quitSafely()
-        ioThread = null
-        ioHandler = null
+        // The transport thread is process-wide and outlives this stop() — see
+        // [TransportConfinement]. Quitting it here is what the per-session
+        // thread used to do, and it is exactly what must not happen now: a
+        // stop() is followed by start() often enough (enableTransport, a
+        // foreground heal) that a dead looper would silently swallow every
+        // post the next session makes.
 
         // Notify protocol
         try {
@@ -308,13 +295,13 @@ class NostrManager(
     }
 
     override fun pause() {
-        ioHandler?.post {
+        transportHandler.post {
             stopMessagePolling()
         }
     }
 
     override fun resume() {
-        ioHandler?.post {
+        transportHandler.post {
             if (state == TransportState.RUNNING && isConnected.get()) {
                 startMessagePolling()
             }
@@ -325,7 +312,7 @@ class NostrManager(
      * Called by the Rust transport callback when new outgoing messages are available.
      */
     fun onMessagesAvailable() {
-        ioHandler?.post { pollAndSendMessages() }
+        transportHandler.post { pollAndSendMessages() }
     }
 
     // MARK: - Relay Connection Management
@@ -424,7 +411,7 @@ class NostrManager(
 
         // Attempt reconnection if enabled
         if (autoReconnect && state != TransportState.STOPPING && state != TransportState.STOPPED) {
-            mainHandler.post { scheduleReconnect(relayUrl) }
+            transportHandler.post { scheduleReconnect(relayUrl) }
         }
     }
 
@@ -438,7 +425,7 @@ class NostrManager(
         if (anyConnected && !wasConnected) {
             // Became connected
             consecutiveSendFailures.set(0)
-            mainHandler.post {
+            transportHandler.post {
                 updateState(TransportState.RUNNING)
                 try {
                     protocol.nostrStatusChanged(true)
@@ -446,11 +433,11 @@ class NostrManager(
                     Log.e(TAG, "Error notifying protocol of connect", e)
                 }
                 startMessagePolling()
-                ioHandler?.post { pollAndSendMessages() }
+                transportHandler.post { pollAndSendMessages() }
             }
         } else if (!anyConnected && wasConnected) {
             // Lost all connections
-            mainHandler.post {
+            transportHandler.post {
                 stopMessagePolling()
                 releaseActiveQueries()
                 try {
@@ -490,10 +477,10 @@ class NostrManager(
             "delayMs" to delay
         ))
 
-        reconnectRunnables[relayUrl]?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnables[relayUrl]?.let { transportHandler.removeCallbacks(it) }
         val runnable = Runnable { connectToRelay(relayUrl) }
         reconnectRunnables[relayUrl] = runnable
-        mainHandler.postDelayed(runnable, delay)
+        transportHandler.postDelayed(runnable, delay)
     }
 
     // MARK: - Nostr Protocol (NIP-01 / NIP-04)
@@ -673,11 +660,11 @@ class NostrManager(
 
     private fun startMessagePolling() {
         stopMessagePolling()
-        ioHandler?.post(messagePollingRunnable)
+        transportHandler.post(messagePollingRunnable)
     }
 
     private fun stopMessagePolling() {
-        ioHandler?.removeCallbacks(messagePollingRunnable)
+        transportHandler.removeCallbacks(messagePollingRunnable)
     }
 
 
