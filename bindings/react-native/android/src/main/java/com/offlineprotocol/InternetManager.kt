@@ -1,11 +1,8 @@
 package com.offlineprotocol
 
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import okhttp3.*
 import uniffi.offline_protocol.OfflineProtocol
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -25,7 +22,7 @@ class InternetManager(
     
     override val transportId = "internet"
     override val transportName = "Internet (WebSocket)"
-    // Volatile: written on main (updateState) but read from RN threads.
+    // Volatile: written on the transport thread (updateState) but read from RN threads.
     @Volatile override var state: TransportState = TransportState.UNAVAILABLE
         private set
     override var listener: TransportManagerListener? = null
@@ -65,16 +62,20 @@ class InternetManager(
         // to the FFI as a senderId. See injectGroupInternalMessage. Mirrors
         // InternetManager.swift — keep in sync.
         private const val RELAY_PLACEHOLDER_SENDER = "relay"
+        // Name of the private looper this manager confines itself to. Shared
+        // process-wide under this key, so a manager rebuilt after stop()
+        // inherits the same ordered queue.
+        private const val CONFINEMENT_THREAD = "offline-internet"
     }
     
     // MARK: - Properties
     
     // Written by configure()/setAuthToken() on the RN bridge thread; read on
-    // main (connect/scheduleReconnect) and on the OkHttp reader thread
-    // (sendAuthentication after a reconnect's onOpen). First-start flows get
-    // happens-before from the start() main-sync, but a mid-session token
-    // rotation or reconfigure has no such edge — volatile so a reconnect
-    // can't re-authenticate with a stale token.
+    // the transport thread (connect/scheduleReconnect) and on the OkHttp reader
+    // thread (sendAuthentication after a reconnect's onOpen). First-start
+    // flows get happens-before from the start() transport-sync, but a
+    // mid-session token rotation or reconfigure has no such edge — volatile so
+    // a reconnect can't re-authenticate with a stale token.
     @Volatile private var serverUrl: String? = null
     @Volatile private var autoReconnect = true
     @Volatile private var maxReconnectAttempts = 0 // 0 = infinite
@@ -82,33 +83,37 @@ class InternetManager(
     
     // OkHttp components
     private var okHttpClient: OkHttpClient? = null
-    // Written ONLY on main (connect/disconnect/terminateSocket — every
-    // terminal signal posts to main); read from the OkHttp reader thread and
+    // Written ONLY on the transport thread (connect/disconnect/terminateSocket —
+    // every terminal signal posts to it); read from the OkHttp reader thread and
     // RN bridge threads (sendRawCommand, checkPresence). Volatile for those
     // reads; the single-writer rule is what makes terminateSocket's
     // compare-then-detach race-free.
     @Volatile private var webSocket: WebSocket? = null
     
-    // Handler for main thread operations.
+    // The one thread this manager runs on.
     //
-    // NOTE (residual OFF-2123 surface, tracked separately): this manager is
-    // still main-affine, and [messagePollingRunnable] below re-enters UniFFI
-    // every MESSAGE_POLL_INTERVAL_MS (100ms) from it. Every one of those calls
-    // waits on the same global protocol mutex that made the BLE facade's
-    // main-looper residency an ANR source, so for a relay-connected session the
-    // mechanic OFF-2123 fixed for BLE is still live here at 10Hz. The BLE
-    // facade's remedy applies directly — see [com.offlineprotocol.ble.
-    // BleTransportFacade.bleLooper] for why a private looper preserves the
-    // ordering this design depends on — but the swap was deliberately left out
-    // of that change to keep its blast radius to one transport.
-    private val mainHandler = Handler(Looper.getMainLooper())
+    // This used to be the app's main looper, and that was the largest
+    // remaining OFF-2123 surface: [messagePollingRunnable] below re-enters
+    // UniFFI every MESSAGE_POLL_INTERVAL_MS (100ms), and every one of those
+    // calls waits on the same global protocol mutex that made the BLE facade's
+    // main-looper residency an ANR source — so a relay-connected session drove
+    // the mechanic at 10Hz, next to a keystore-backed signing burst on every
+    // authenticate. Nothing here touches the UI; main was only ever the
+    // ordering primitive, and [TransportConfinement] is that primitive without
+    // the app's responsiveness behind it.
+    //
+    // "Transport-thread only" below means this thread, and it is the same
+    // confinement iOS gets from its messageQueue. The single-writer rules the
+    // comments describe are unchanged — only which thread is the writer.
+    private val confinement = TransportConfinement.shared(CONFINEMENT_THREAD)
+    private val transportHandler = confinement.handler
 
     // Message polling runnable
     private val messagePollingRunnable = object : Runnable {
         override fun run() {
             pollAndSendMessages()
             if (state == TransportState.RUNNING && isConnected.get()) {
-                mainHandler.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
+                transportHandler.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
             }
         }
     }
@@ -121,7 +126,7 @@ class InternetManager(
         override fun run() {
             presenceWatchTick()
             if (state == TransportState.RUNNING && isConnected.get()) {
-                mainHandler.postDelayed(this, PresenceWatchPolicy.DEFAULT_TICK_INTERVAL_MS)
+                transportHandler.postDelayed(this, PresenceWatchPolicy.DEFAULT_TICK_INTERVAL_MS)
             }
         }
     }
@@ -137,19 +142,20 @@ class InternetManager(
     // on the current socket). While latched, auto- AND force-reconnect refuse
     // until an explicit start() — a blind reconnect just re-displaces the peer
     // socket in a tight loop. Owns the boolean + decision; this manager owns
-    // the threading (every call on main, the single writer). Mirrors
-    // InternetManager.swift's supersedeLatch.
+    // the threading (every call on the transport thread, the single writer).
+    // Mirrors InternetManager.swift's supersedeLatch.
     private val supersedeLatch = SupersededLatchPolicy()
     private var reconnectAttempts = AtomicInteger(0)
-    // Atomic for cross-thread reads; written only on main (scheduleReconnect
-    // grows it, handleAuthenticated's posted reaction resets it).
+    // Atomic for cross-thread reads; written only on the transport thread
+    // (scheduleReconnect grows it, handleAuthenticated's posted reaction
+    // resets it).
     private val currentReconnectDelay =
         java.util.concurrent.atomic.AtomicLong(RECONNECT_INITIAL_DELAY_MS)
     private var reconnectRunnable: Runnable? = null
     // Watchdog for a relay that opens the socket but never answers
     // Authenticate: with isConnected already true, connect() short-circuits
     // and no timer ever starts — a permanently wedged transport without
-    // this. Main-thread only.
+    // this. Transport-thread only.
     private var authTimeoutRunnable: Runnable? = null
     private var transportStartAt: Long = 0L
     
@@ -190,9 +196,10 @@ class InternetManager(
     // the socket is still resuming or the token bucket is momentarily
     // empty. The park/expire/fail-fast/drain policy lives in the Looper-free
     // ForcedPresenceCheckQueue (JVM-tested); only the Handler shell — the
-    // retry tick and its no-stacking flag — is here. Main-confined (like the
-    // rest of the timer state). Never bypasses the rate limiter — the client
-    // bucket mirrors the relay's server bucket, and an over-budget frame is
+    // retry tick and its no-stacking flag — is here. Transport-thread
+    // confined (like the rest of the timer state). Never bypasses the rate
+    // limiter — the client bucket mirrors the relay's server bucket, and an
+    // over-budget frame is
     // dropped server-side *after* the local write "succeeded", which is
     // strictly worse than deferring.
     private val forcedChecks = ForcedPresenceCheckQueue()
@@ -217,7 +224,7 @@ class InternetManager(
     /**
      * Control-op frames deferred by the rate limiter, drained (oldest first)
      * at the start of each poll tick. A translation's commit closure runs
-     * only after its LAST frame is written. Main-thread only; cleared on
+     * only after its LAST frame is written. Transport-thread only; cleared on
      * disconnect/stop/RateLimited — the frames are per-connection and their
      * commits are generation-guarded anyway.
      */
@@ -259,7 +266,7 @@ class InternetManager(
 
     /**
      * Last (connected, authenticated) pair published, or null before the
-     * first. All mutation funnels run on the main handler (or, for
+     * first. All mutation funnels run on the transport handler (or, for
      * [disconnect], are serialized against it by the stop path), matching
      * the single-writer rule the state flags already follow.
      */
@@ -299,31 +306,18 @@ class InternetManager(
 
     // MARK: - Helper
     
-    private fun <T> runOnMainSync(action: () -> T): T {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            return action()
-        }
-        
-        val latch = CountDownLatch(1)
-        var outcome: Result<T>? = null
-        mainHandler.post {
-            outcome = try {
-                Result.success(action())
-            } catch (t: Throwable) {
-                Result.failure(t)
-            }
-            latch.countDown()
-        }
-        
-        try {
-            latch.await()
-        } catch (ie: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw RuntimeException("Interrupted while executing on main thread", ie)
-        }
-        
-        return outcome!!.getOrThrow()
-    }
+    /**
+     * Runs [action] on the transport thread and waits for it — the lifecycle
+     * entry points' way onto the single writer.
+     *
+     * The wait used to be unbounded for every caller, which was safe only
+     * because the target was main. Against a thread that can sit inside a
+     * UniFFI call it is not: a main-thread caller would park behind the
+     * protocol mutex, rebuilding OFF-2123 through the lifecycle door. The
+     * bound now applies to main alone — see [TransportConfinement.runSync] for
+     * why background callers keep waiting indefinitely.
+     */
+    private fun <T> runConfinedSync(action: () -> T): T = confinement.runSync(action)
     
     // MARK: - Configuration
     
@@ -373,7 +367,7 @@ class InternetManager(
     }
     
     override fun start() {
-        runOnMainSync {
+        runConfinedSync {
             startUnsafe()
         }
     }
@@ -430,7 +424,7 @@ class InternetManager(
     }
     
     override fun stop() {
-        runOnMainSync {
+        runConfinedSync {
             stopUnsafe()
         }
     }
@@ -448,7 +442,7 @@ class InternetManager(
         }
 
         // Cancel reconnect attempts
-        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable?.let { transportHandler.removeCallbacks(it) }
         reconnectRunnable = null
 
         cancelAuthTimeout()
@@ -476,7 +470,7 @@ class InternetManager(
         // explicit stop() ends the session, and dangling their RN promises
         // until the deadline helps nobody. (A mere disconnect keeps them —
         // the deadline gives the reconnect its chance.)
-        mainHandler.removeCallbacks(forcedCheckRetryRunnable)
+        transportHandler.removeCallbacks(forcedCheckRetryRunnable)
         forcedCheckRetryScheduled = false
         forcedChecks.drainAll()
 
@@ -500,7 +494,7 @@ class InternetManager(
     }
     
     override fun pause() {
-        runOnMainSync {
+        runConfinedSync {
             // The flag makes the pause durable: a background network blip
             // reconnects and re-authenticates, and handleAuthenticated must
             // not restart the timers the app paused.
@@ -515,8 +509,8 @@ class InternetManager(
             // stranded until resume(). The module pauses the core right
             // after the transports, so the remaining window — a send racing
             // pause() itself — is bounded to sends already in flight.
-            // (Safe to run inline here: polling and pause share the main
-            // handler, unlike the iOS bridge's messageQueue confinement.)
+            // (Safe to run inline here: polling and pause share the transport
+            // handler, the same confinement iOS gets from its messageQueue.)
             if (state == TransportState.RUNNING && isConnected.get()) {
                 pollAndSendMessages()
             }
@@ -524,7 +518,7 @@ class InternetManager(
     }
 
     override fun resume() {
-        runOnMainSync {
+        runConfinedSync {
             isPaused = false
             if (state == TransportState.RUNNING && isConnected.get()) {
                 startMessagePolling()
@@ -547,16 +541,26 @@ class InternetManager(
      * enable/disable lifecycle). The actual reconnect honors [autoReconnect];
      * with it disabled this tears the socket down without rebuilding it.
      * Emits a transient `internet_status_changed` down→up.
+     *
+     * Posted, not awaited, and that matters for the caller that motivated this
+     * method: `onHostResume` runs on main, and main is the one thread the
+     * transport thread will not let block on it. Waiting here would either
+     * park the foreground behind the protocol mutex — the defect this whole
+     * confinement exists to remove — or, with the bound, throw
+     * [TransportConfinement.MainThreadSyncTimeout] into a lifecycle callback
+     * that has no [TeardownSequence] around it to absorb it. Nothing reads a
+     * return value: the RN entry point already resolves "accepted", never
+     * "reconnected", and the outcome arrives as `internet_status_changed`.
      */
     fun forceReconnect() {
-        runOnMainSync {
-            if (state != TransportState.RUNNING && state != TransportState.STARTING) return@runOnMainSync
+        confinement.run {
+            if (state != TransportState.RUNNING && state != TransportState.STARTING) return@run
 
             // A forced reconnect is a fresh attempt: cancel any pending
             // backoff-scheduled reconnect and reset the backoff so this
             // reconnect (and any that follow it) starts from the initial delay
             // instead of a stale 30s ceiling.
-            reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+            reconnectRunnable?.let { transportHandler.removeCallbacks(it) }
             reconnectRunnable = null
             currentReconnectDelay.set(RECONNECT_INITIAL_DELAY_MS)
             reconnectAttempts.set(0)
@@ -646,14 +650,14 @@ class InternetManager(
     }
     
     private fun handleConnectionOpened(ws: WebSocket) {
-        // ONE main-posted block gated on the socket still being current,
+        // ONE posted block gated on the socket still being current,
         // like handleAuthenticated and terminateSocket: mutating the flags
         // on the reader thread races stopUnsafe() — an onOpen that passed
         // the listener's staleness pre-check, was preempted by disconnect()
         // (webSocket=null, flags cleared), and then resumed would latch
         // isConnected=true with no socket alive to ever clear it, and every
         // future connect() would early-return — a wedged transport.
-        mainHandler.post {
+        transportHandler.post {
             if (ws !== webSocket) return@post
             if (state == TransportState.STOPPING || state == TransportState.STOPPED) return@post
 
@@ -688,7 +692,7 @@ class InternetManager(
      * funnel itself cancels it).
      */
     private fun scheduleAuthTimeout(ws: WebSocket) {
-        mainHandler.post {
+        transportHandler.post {
             if (ws !== webSocket) return@post
             cancelAuthTimeout()
             val runnable = object : Runnable {
@@ -702,13 +706,13 @@ class InternetManager(
                 }
             }
             authTimeoutRunnable = runnable
-            mainHandler.postDelayed(runnable, AUTH_RESPONSE_TIMEOUT_MS)
+            transportHandler.postDelayed(runnable, AUTH_RESPONSE_TIMEOUT_MS)
         }
     }
 
-    /** Main-thread only. */
+    /** Transport-thread only. */
     private fun cancelAuthTimeout() {
-        authTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+        authTimeoutRunnable?.let { transportHandler.removeCallbacks(it) }
         authTimeoutRunnable = null
     }
     
@@ -750,13 +754,13 @@ class InternetManager(
         capabilities: List<String>,
         addressChallenge: String?
     ) {
-        // The whole reaction is ONE main-posted block gated on the socket
+        // The whole reaction is ONE posted block gated on the socket
         // still being current and the transport not stopping: reacting on
         // the reader thread would race stopUnsafe() — the core would be told
         // internet is up and route to a transport whose poll loop never
         // starts, and the unguarded RUNNING write would wedge state so the
         // next start() throws AlreadyRunning.
-        mainHandler.post {
+        transportHandler.post {
             if (ws !== webSocket) return@post
             if (state == TransportState.STOPPING || state == TransportState.STOPPED) return@post
 
@@ -779,12 +783,14 @@ class InternetManager(
             // `validate_transport_sender`. The status flip below flushes the
             // outbox, which is exactly what produces those sends.
             //
-            // Unlike iOS, this whole block runs on main rather than hopping to
-            // a serial queue, so the ordering is simply sequential here — and
-            // the declaration's two FFI calls land on the main looper next to
-            // the far heavier flush that already does. If that flush ever
-            // moves off main (the iOS messageQueue shape), this must move with
-            // it, ahead of it. Mirrors InternetManager.swift — keep in sync.
+            // This whole block runs on the transport thread, so the ordering
+            // is simply sequential here: the declaration's two FFI calls and
+            // the far heavier flush below are posted work on one serial
+            // looper, exactly like iOS's messageQueue confinement. That is
+            // what the previous note here asked for — the flush moved off
+            // main, and the declaration moved with it, ahead of it, in the
+            // same block rather than in a second post that could interleave.
+            // Mirrors InternetManager.swift — keep in sync.
             declareAddress(ws, capabilities, addressChallenge, username)
 
             // Capabilities MUST reach the SDK before the status flip: the
@@ -835,7 +841,7 @@ class InternetManager(
      * Proves this connection's `off1…` address to the relay, so it is
      * attributed by address rather than by account name.
      *
-     * Called from [handleAuthenticated]'s main-posted block and deliberately
+     * Called from [handleAuthenticated]'s posted block and deliberately
      * the first thing it does: everything the relay attributes downstream —
      * the outbox flush's sends, and anything the poll loop drains after it —
      * is stamped with whatever this connection has proved by the time the relay
@@ -918,9 +924,9 @@ class InternetManager(
 
     /**
      * The transport's reaction to a dead socket. Only reachable through
-     * [terminateSocket]'s detach-first funnel, so it runs on main and at
-     * most once per socket — a queued send-failure teardown racing an
-     * organic onFailure used to run it twice, double-incrementing the
+     * [terminateSocket]'s detach-first funnel, so it runs on the transport
+     * thread and at most once per socket — a queued send-failure teardown
+     * racing an organic onFailure used to run it twice, double-incrementing the
      * reconnect attempt and double-doubling the backoff.
      */
     private fun handleConnectionClosed(code: Int, reason: String?) {
@@ -1011,7 +1017,7 @@ class InternetManager(
      * force-reconnect refuse until the next start(), and fires the one-shot
      * superseded event. Idempotent (via [SupersededLatchPolicy.mark]) — the
      * relay emits both a SessionSuperseded notice and close 4000, so several
-     * paths reach here for one displacement. Main-thread only.
+     * paths reach here for one displacement. Transport-thread only.
      */
     private fun markSuperseded(reason: String?) {
         // The reason goes to the latch, not just the emitter: it has to outlive
@@ -1019,7 +1025,7 @@ class InternetManager(
         // SupersededLatchPolicy.restatementEventJson) rather than existing only
         // as an argument to an emit that may not land.
         if (!supersedeLatch.mark(reason)) return
-        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable?.let { transportHandler.removeCallbacks(it) }
         reconnectRunnable = null
         emitDiagnostic("warning", "Relay superseded this session; not auto-reconnecting", mapOf(
             "reason" to (reason ?: "none")
@@ -1060,7 +1066,7 @@ class InternetManager(
             "delayMs" to delay
         ))
         
-        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable?.let { transportHandler.removeCallbacks(it) }
         // connect() throws on a malformed server URL (reachable if configure()
         // changed it mid-session); a throw out of a posted runnable would
         // crash the app, so a reconnect that cannot even build its request
@@ -1076,7 +1082,7 @@ class InternetManager(
             }
         }
         reconnectRunnable = runnable
-        mainHandler.postDelayed(runnable, delay)
+        transportHandler.postDelayed(runnable, delay)
     }
     
     // MARK: - WebSocket Listener
@@ -1128,7 +1134,7 @@ class InternetManager(
     /**
      * The single terminal funnel: onClosed, onFailure, and every local
      * teardown ([teardownSocket]) end a socket's life here. Detaching [ws]
-     * BEFORE the closed handler — on main, the only thread that writes
+     * BEFORE the closed handler — on the transport thread, the only one that writes
      * [webSocket] — makes [handleConnectionClosed] unreachable twice for
      * the same socket: whichever signal wins the post detaches it and every
      * later signal fails the identity check. The identity scope also closes
@@ -1136,7 +1142,7 @@ class InternetManager(
      * teardown) can never cancel a newer, healthy socket.
      */
     private fun terminateSocket(ws: WebSocket, code: Int, reason: String?, cancel: Boolean = false) {
-        mainHandler.post {
+        transportHandler.post {
             if (ws !== webSocket) return@post
             webSocket = null
             cancelAuthTimeout()
@@ -1310,10 +1316,10 @@ class InternetManager(
                 // registration for the same identity took the slot. It also
                 // closes with code 4000, but honor the notice too so we never
                 // blind-reconnect even if the close code is lost. Run the mark
-                // + teardown on main like the other lifecycle funnels; the
+                // + teardown on the transport thread like the other lifecycle funnels; the
                 // ws-identity re-check there scopes it to the current socket.
                 val supersedeReason = json.optNullableString("reason")
-                mainHandler.post {
+                transportHandler.post {
                     if (ws !== webSocket) return@post
                     markSuperseded(supersedeReason)
                     // Close the live socket through the shared funnel;
@@ -1634,14 +1640,14 @@ class InternetManager(
                 // worst case is an idempotent re-registration. Drain the
                 // local bucket too: it was clearly too optimistic.
                 //
-                // The whole reaction runs as ONE main post so it serializes
+                // The whole reaction runs as ONE post so it serializes
                 // with poll ticks: resetting the translator here on the
                 // reader thread while the clear is still queued would let an
                 // interleaved tick translate a post-reset register whose
                 // delta frames the clear then wipes (their commits never
                 // run, and the group's relay membership stays stale until
                 // the next register trigger).
-                mainHandler.post {
+                transportHandler.post {
                     controlOpTranslator.reset()
                     rateLimiter.drain(monotonicNowMs())
                     pendingControlFrames.clear()
@@ -1843,11 +1849,11 @@ class InternetManager(
     
     private fun startMessagePolling() {
         stopMessagePolling()
-        mainHandler.post(messagePollingRunnable)
+        transportHandler.post(messagePollingRunnable)
     }
     
     private fun stopMessagePolling() {
-        mainHandler.removeCallbacks(messagePollingRunnable)
+        transportHandler.removeCallbacks(messagePollingRunnable)
     }
     
     private fun pollAndSendMessages() {
@@ -2103,7 +2109,7 @@ class InternetManager(
      * Queues a translation's extra frames for token-gated delivery and
      * drains immediately (the common small case goes out in the same tick).
      * The commit runs only after the translation's last frame is written.
-     * Main-thread only.
+     * Transport-thread only.
      */
     private fun enqueueControlFrames(
         controlOp: String,
@@ -2125,7 +2131,7 @@ class InternetManager(
      * write failure drops everything pending: the frames are per-connection,
      * their commits stay uninvoked (and are generation-dead after the
      * disconnect reset), and the reconnect's re-register re-derives them.
-     * Main-thread only.
+     * Transport-thread only.
      */
     private fun drainPendingControlFrames() {
         if (pendingControlFrames.isEmpty()) return
@@ -2232,11 +2238,11 @@ class InternetManager(
 
     private fun startPresenceWatch() {
         stopPresenceWatch()
-        mainHandler.postDelayed(presenceWatchRunnable, PresenceWatchPolicy.DEFAULT_TICK_INTERVAL_MS)
+        transportHandler.postDelayed(presenceWatchRunnable, PresenceWatchPolicy.DEFAULT_TICK_INTERVAL_MS)
     }
 
     private fun stopPresenceWatch() {
-        mainHandler.removeCallbacks(presenceWatchRunnable)
+        transportHandler.removeCallbacks(presenceWatchRunnable)
     }
 
     private fun presenceWatchTick() {
@@ -2316,7 +2322,7 @@ class InternetManager(
             return
         }
         val deadlineMs = monotonicNowMs() + FORCED_CHECK_DEADLINE_MS
-        mainHandler.post {
+        transportHandler.post {
             attemptForcedCheck(ForcedPresenceCheckQueue.Entry(userId, deadlineMs, callback))
         }
     }
@@ -2339,7 +2345,7 @@ class InternetManager(
     }
 
     /**
-     * Main-confined. Sends the forced check if currently admissible;
+     * Transport-thread confined. Sends the forced check if currently admissible;
      * otherwise the queue policy parks it, expires it, fails it fast on a
      * stopping/stopped transport (no reconnect coming), or rejects it at
      * capacity.
@@ -2356,17 +2362,17 @@ class InternetManager(
     }
 
     /**
-     * Main-confined. One retry tick services the whole queue; the scheduled
+     * Transport-thread confined. One retry tick services the whole queue; the scheduled
      * flag keeps ticks from stacking.
      */
     private fun scheduleForcedCheckRetry() {
         if (forcedChecks.isEmpty || forcedCheckRetryScheduled) return
         forcedCheckRetryScheduled = true
-        mainHandler.postDelayed(forcedCheckRetryRunnable, FORCED_CHECK_RETRY_INTERVAL_MS)
+        transportHandler.postDelayed(forcedCheckRetryRunnable, FORCED_CHECK_RETRY_INTERVAL_MS)
     }
 
     /**
-     * Main-confined. Re-attempts every parked forced check;
+     * Transport-thread confined. Re-attempts every parked forced check;
      * attemptForcedCheck re-parks the still-unsendable ones.
      */
     private fun serviceForcedChecks() {
