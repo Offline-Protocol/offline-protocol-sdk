@@ -700,6 +700,16 @@ public class ReticulumManager: NSObject, TransportManager {
     /// and the `resume()` below is still required — releasing a suspended
     /// `DispatchSource` is a hard crash, so the paused branch must return
     /// *before* a source exists rather than cancel one it never resumed.
+    ///
+    /// The same crash is why the gap is safe against a *second* arming, which
+    /// is less obvious. Two callers can overlap so that the second one reads
+    /// the first's source as its `previous` and cancels it while the first has
+    /// not resumed it yet. Cancelling a suspended source is fine; *releasing*
+    /// one is not, and the release cannot happen there — the first caller
+    /// still holds its own strong reference and drops it only after
+    /// `timer.resume()` returns. Anything that moves the `resume()` off this
+    /// straight-line path, or hands the source somewhere it can outlive this
+    /// frame while suspended, reintroduces the crash.
     private func startMessagePolling() {
         stateLock.lock()
         guard !_isPaused else {
