@@ -11170,9 +11170,35 @@ mod tests {
     /// `true`, or `stop()` wins and the announcement reads a state that
     /// refuses it.
     ///
+    /// **The pinned condition tests two things, and `stop()` is only one of
+    /// them** — the name of this test is the dominant half, not the whole
+    /// claim. `stop()` is not the only writer that can overtake the connected
+    /// edge: on Reticulum, `handleConnectionClosed` reaches `messageQueue` in
+    /// one hop from `connectionQueue` while the connected edge takes two
+    /// (`connectionQueue` → main → `messageQueue`), so a link that opens and
+    /// dies immediately enqueues its `false` *ahead* of the `true` announcing
+    /// it. No state check can see that: with `autoReconnect` on — the default
+    /// — that path leaves `.running` untouched, so the core is told "up" about
+    /// a dead connection and routes to a transport that never drains until the
+    /// next attempt resolves the flags. `isConnected` is the term that answers
+    /// it, and it is pinned in the same string as the state check because they
+    /// are one decision. Nostr carries it for symmetry and for its own
+    /// narrower reason (the check-then-act in `updateConnectionStatus`); its
+    /// two flips already share a single hop, so it was never exposed to the
+    /// Reticulum window.
+    ///
+    /// A text pin cannot express cross-queue ordering, which is why this class
+    /// of bug reached review rather than CI. What it *can* do is make the
+    /// condition that answers it un-droppable, which is what the string below
+    /// is for.
+    ///
     /// Android has no counterpart and must not grow one: its flips are already
     /// atomic against each other by thread confinement, so a lock there would
-    /// be cargo-culted from a platform whose problem it does not have.
+    /// be cargo-culted from a platform whose problem it does not have. Nor
+    /// does it need the liveness term — both its flips post to the one
+    /// transport handler, and `startReceiveLoop` runs only after
+    /// `handleConnectionOpened` has already enqueued its block, so enqueue
+    /// order there is causal.
     #[test]
     fn react_native_ios_status_flips_are_ordered_against_stop() {
         for (manager, flip) in [
@@ -11182,16 +11208,18 @@ mod tests {
             let code = rn_source_code_only(&format!("ios/{manager}.swift"));
 
             let connected = format!(
-                "self.statusFlipLock.lock() if self.state != .stopping && \
+                "self.statusFlipLock.lock() if self.isConnected && self.state != .stopping && \
                  self.state != .stopped {{ try? self.protocolInstance.{flip}(isConnected: true) \
                  }} self.statusFlipLock.unlock()"
             );
             assert!(
                 code.contains(&connected),
-                "ios/{manager}.swift's connected-edge flip must test the state and call {flip} \
-                 as one decision under statusFlipLock, unlocked explicitly rather than by defer \
-                 (which would hold it across the flush that follows). Expected to \
-                 find:\n  {connected}"
+                "ios/{manager}.swift's connected-edge flip must test that the connection is still \
+                 live AND that the transport is not stopping, and call {flip}, as one decision \
+                 under statusFlipLock, unlocked explicitly rather than by defer (which would hold \
+                 it across the flush that follows). Dropping the isConnected term leaves the \
+                 disconnect race open — a link that dies during the hop enqueues its false ahead \
+                 of this true, and no state check can tell. Expected to find:\n  {connected}"
             );
 
             let stopping = format!(
@@ -11472,6 +11500,15 @@ mod tests {
     /// was emptied with the call left behind on main, and that is still caught
     /// — the pin below spans the hop, the weak capture and the guarded call as
     /// one string, so the call cannot leave it.
+    ///
+    /// That shape earned itself again: the guarded call has since grown an
+    /// `isConnected` term, because the same hop this test exists to require is
+    /// what let a `false` from `handleConnectionClosed` — one hop from
+    /// `connectionQueue`, against this edge's two — overtake the `true` it
+    /// answers. Spanning the condition rather than fixing the call's position
+    /// meant the pin absorbed that without being pointed anywhere new. See
+    /// [`react_native_ios_status_flips_are_ordered_against_stop`], which owns
+    /// the condition itself.
     #[test]
     fn react_native_reticulum_status_flips_run_off_the_main_thread() {
         let code = rn_source_code_only("ios/ReticulumManager.swift");
@@ -11486,7 +11523,7 @@ mod tests {
             (
                 "connect",
                 "self.messageQueue.async { [weak self] in guard let self = self else { return } \
-                 self.statusFlipLock.lock() if self.state != .stopping && \
+                 self.statusFlipLock.lock() if self.isConnected && self.state != .stopping && \
                  self.state != .stopped { try? self.protocolInstance\
                  .reticulumStatusChanged(isConnected: true)",
             ),

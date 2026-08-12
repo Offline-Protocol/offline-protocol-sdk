@@ -451,8 +451,21 @@ public class NostrManager: NSObject, TransportManager {
                     return
                 }
 
+                // `isConnected` alongside the state, mirroring
+                // `ReticulumManager` — see the long note there for why a state
+                // check alone is the wrong question. It is defence in depth
+                // here rather than a fix: both of this manager's flips reach
+                // `messageQueue` through a single hop from
+                // [updateConnectionStatus], so they are already ordered by the
+                // relay events that produced them. What it does close is the
+                // check-then-act above it — `wasConnected` is read and
+                // `isConnected` written under two separate [stateLock]
+                // acquisitions, so two relays transitioning at once can enqueue
+                // this block with no relay left connected. Announcing a relay
+                // set that is empty by the time anyone looks is the same lie
+                // the Reticulum window tells, reached from a different side.
                 self.statusFlipLock.lock()
-                if self.state != .stopping && self.state != .stopped {
+                if self.isConnected && self.state != .stopping && self.state != .stopped {
                     try? self.protocolInstance.nostrStatusChanged(isConnected: true)
                 }
                 self.statusFlipLock.unlock()

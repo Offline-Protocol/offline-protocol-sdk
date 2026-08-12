@@ -303,7 +303,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   is a further queue hop away, the wider of the two windows — is ordered
   against `stop()`'s own call by a lock rather than by proximity to a check.
   Without that a torn-down transport could still be reported to the core as
-  connected, and the core would route to a transport that never drains.
+  connected, and the core would route to a transport that never drains. The
+  announcement also refuses once the connection it was announcing has died,
+  which no teardown check can see: a link that opens and immediately fails
+  reports itself down over a shorter path than the announcement travels, so
+  the two would otherwise reach the core in the wrong order.
 
 - **A Reticulum daemon that was unreachable or had stopped reading could stall
   `stop()`.** Its connect (up to 60s) and its TCP writes (no timeout at all)

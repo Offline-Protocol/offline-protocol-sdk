@@ -374,13 +374,32 @@ public class ReticulumManager: NSObject, TransportManager {
             // enough. Unlocked explicitly rather than by `defer`, which would
             // hold it across the flush below.
             //
+            // `isConnected` is the other half of that decision, and it answers
+            // what the state cannot: `stop()` is not the only thing that can
+            // overtake this block. [handleConnectionClosed] reaches
+            // `messageQueue` in ONE hop from `connectionQueue`, while this
+            // `true` takes two — `connectionQueue`, then main, then here — so
+            // a link that opens and dies immediately enqueues its `false`
+            // *ahead* of this `true`. The state says nothing about it: with
+            // `autoReconnect` on, that path leaves `.running` untouched, so
+            // the core would be told "up" about a dead connection and route to
+            // a transport that never drains until the next attempt resolves
+            // the flags. (Before the hop below existed, both flips ran on
+            // main — one queue, so enqueue order was causal. The hop is what
+            // made this reachable, so it is what has to answer for it.)
+            // `isConnected` is cleared before that `false` is enqueued and set
+            // again only by a successful open, so it reads exactly "is there
+            // still a connection to announce". Suppressing a flip can never
+            // lose one: every path that clears it either reconnects, which
+            // announces itself, or stops.
+            //
             // [weak self] like every other closure here: a strong capture
             // would let this flip fire against a manager the module already
             // released through `destroy()`.
             self.messageQueue.async { [weak self] in
                 guard let self = self else { return }
                 self.statusFlipLock.lock()
-                if self.state != .stopping && self.state != .stopped {
+                if self.isConnected && self.state != .stopping && self.state != .stopped {
                     try? self.protocolInstance.reticulumStatusChanged(isConnected: true)
                 }
                 self.statusFlipLock.unlock()
