@@ -254,6 +254,177 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **The remaining transports no longer run protocol calls on the app's main
+  thread.** Completing what the BLE fixes started: on Android all four
+  non-BLE transport managers took their ordering from the app's main looper,
+  so every call into the core — which serialises on one global mutex held
+  across MLS work and AndroidKeyStore access — was charged to the thread
+  Android watches for ANRs. The relay transport was the worst of them, at
+  10Hz for any connected session plus a keystore-backed signing burst on
+  every authenticate; Wi-Fi Direct added an unbounded drain and its
+  framework callbacks; Nostr and Reticulum polled off main already but kept
+  their lifecycle and connect/disconnect status calls on it. Each manager now
+  confines itself to a private looper, and Wi-Fi Direct's drain sends in
+  batches rather than in one pass — that looper now also carries the P2P
+  framework callbacks, and a broadcast that waits out its dispatch budget is
+  an ANR wherever its receiver runs. On iOS only Reticulum was still
+  affected, and its connected-edge status call is the expensive one — it
+  flushes the entire outbox under the mutex — so both edges move to the
+  queue the rest of that file already uses.
+
+  Two lifecycle waits changed shape as part of this. A background caller of
+  `stop()` is no longer cut off by a timeout (it is the caller that needs the
+  stop to have finished), while a main-thread caller now gives up rather than
+  parking behind the mutex. `internetForceReconnect` no longer waits at all;
+  it already resolved "accepted", not "reconnected". `pause()` and `resume()`
+  went the other way — on Nostr and Reticulum they used to hand the work to a
+  handler and return, which paused nothing, so the core could pause underneath
+  a transport still calling into it. Both now wait, and the module's pause and
+  resume run their fan-out the way the stop paths already do: every transport
+  is still paused (or resumed) even if one of them throws, and the first
+  failure is reported once the rest are done rather than skipping them.
+
+  Also fixed while in these files: iOS `stop()` and `destroy()` never stopped
+  the Wi-Fi Direct manager, leaving a live send path holding a protocol
+  instance the caller had released; that manager's session and peer map were
+  read and written from three threads without synchronisation; and its send
+  drain, which is deliberately unbounded, now re-reads the transport state each
+  time round rather than only before it starts — a `stop()` landing mid-drain
+  left the rest of the queue being fetched under the core's mutex and dropped
+  for want of a session.
+
+- **Stopping the Reticulum or Nostr transport while it was still connecting
+  could leave it permanently wedged, on both platforms.** All four managers
+  announce a new connection from a posted block, so a `stop()` could land in
+  between. The announcement then ran against a stopped transport: it put the
+  state back to `RUNNING` and told the core the transport was up moments after
+  it had been told it was down — with nothing left that would ever tear it down
+  again, and the next `start()` failing with `AlreadyRunning`. All four now
+  check for the stop before announcing and close the connection they opened
+  instead. The relay transport already guarded its posted blocks this way on
+  both platforms.
+
+  The two platforms need different amounts of machinery for it. On Android the
+  gate, the state write, the status call and `stop()` all run on the one
+  transport thread, so a plain check is already atomic against a teardown. On
+  iOS they are spread over three queues, so a check followed by a write is two
+  steps with a `stop()` free to land between them: the announcement claims
+  `.running` in one operation instead, and the status call — which on Reticulum
+  is a further queue hop away, the wider of the two windows — is ordered
+  against `stop()`'s own call by a lock rather than by proximity to a check.
+  Without that a torn-down transport could still be reported to the core as
+  connected, and the core would route to a transport that never drains. The
+  announcement also refuses once the connection it was announcing has died,
+  which no teardown check can see: a link that opens and immediately fails
+  reports itself down over a shorter path than the announcement travels, so
+  the two would otherwise reach the core in the wrong order.
+
+- **A Reticulum daemon that was unreachable or had stopped reading could stall
+  `stop()`.** Its connect (up to 60s) and its TCP writes (no timeout at all)
+  shared the thread that lifecycle calls wait on, so tearing the transport down
+  queued behind them — and with it the React Native bridge thread. The blocking
+  socket work now has its own thread, and `stop()` closes the socket rather
+  than waiting for whatever is on it.
+
+- **Android: a Reticulum connect that failed never retried.** The failure path
+  cleared its own in-flight flag before handing off, and the handler that
+  receives the failure decides whether to react by reading exactly that flag —
+  so it saw nothing to do and returned before scheduling anything. The 1s→30s
+  reconnect ladder was therefore dead for the case it exists for: a daemon
+  that is not running. The transport sat in `STARTING`, where `start()` throws
+  `AlreadyRunning`, until the app stopped and started it by hand. iOS was
+  unaffected. Configuration set by `configure()` is also now published safely
+  to the threads that read it, so a mid-session reconfigure cannot leave a
+  reconnect dialling the previous host or relay set.
+
+- **Android: stopping and restarting Reticulum while it was connecting could
+  leave a second connection live and unowned.** Tearing down clears the
+  in-flight flag while the connect is still blocked inside the socket call, so
+  the restart opened a second connection without the first being closed.
+  Whichever lost the race was left with a live reader that still believed it
+  was connected — and when it eventually failed it tore down the connection
+  that had replaced it. Attempts are now versioned, so one that outlives its
+  session closes what it opened instead of publishing it.
+
+  The version is checked everywhere a retired attempt could still act, not
+  only before it publishes. Publishing the connection, claiming the connected
+  flags and announcing the connection are three steps with a scheduling gap
+  after each, and the stopped-transport check that guards the announcement is
+  blind to precisely this case — after a stop *and* a restart the transport is
+  legitimately starting again, so the check passes and the announcement
+  reports a connection the teardown had already closed. The core would route
+  to a transport with no socket, and the send loop that announcement starts
+  drained the outbox straight into send failures until the next attempt
+  resolved. Recoverable, since the following attempt corrects the status and
+  the core retries the sends, but self-inflicted.
+
+  Two of those checks sit inside the lock that owns what they guard, rather
+  than beside it, because a check next to the write it protects is still a
+  check followed by an act on another thread. The consequential one was the
+  connected flags: a teardown landing between the check and the write was
+  simply overwritten, leaving the transport marked connected against a socket
+  that teardown had already closed — and since a connect refuses to start while
+  that flag is set, the next `start()` returned having done nothing until the
+  orphaned reader errored and the reconnect ladder picked it up.
+
+  Tearing down now also ends a connect that has nothing to publish yet. Only
+  closing the socket ends a blocked connect — it ignores interruption — and the
+  thread it runs on is shared and outlives the session, so an attempt left
+  running against an unreachable daemon held the *next* session's connect
+  behind it for the rest of the 60s timeout. The per-session thread this
+  replaced never had that coupling: it was abandoned mid-call and the restart
+  got a fresh one.
+
+  The version guards the teardown as well as the connect, which is the half
+  with a permanent consequence. Every way a disconnect gets *observed* — a
+  failed connect, a dead receive loop, a send budget exhausted — is noticed on
+  one thread and handled on another, so each can arrive after the session it
+  describes is over. The handler's own duplicate check could not tell: it asks
+  whether *a* connection is live, never whether it is *that* one, so after a
+  stop and a restart it read the new session's flags and passed. The stale
+  report then marked a healthy connection down, told the core so, and started
+  a reconnect ladder against it — while the connection that was actually live
+  was left open with its reader parked on a socket nothing would ever close,
+  leaking a thread and a descriptor for the life of the process.
+
+- **Android: Wi-Fi Direct teardown could strand port 8988, and every session
+  leaked a framework channel.** A `stop()` racing the server socket's bind
+  closed a still-null field; the bind then completed, the accept loop saw the
+  stop and exited, and the freshly bound socket leaked with the port still
+  held — the next `start()` failed with `BindException`. The accept task now
+  closes the socket it bound on every exit, and the field is published safely
+  across the two threads that touch it. The accept loop also stops when *its
+  own* socket closes rather than only when the transport flag clears: a
+  restart that set the flag back while the old task was still waking from the
+  close left it spinning at full tilt on a dead socket, emitting a diagnostic
+  per turn. Separately, each `start()` created a `WifiP2pManager` channel that
+  nothing ever released; `stop()` now closes it on API 27+. All pre-existing,
+  and low real-world impact while this transport stays unregistered.
+
+  Two smaller ones in the same file: the P2P state-change broadcast no longer
+  makes its protocol call inside the receiver's dispatch window (it hands it to
+  the same queue and returns, which is what the send drain's batch budget is
+  for), and `resume()` clears the previous poll before posting one, so a resume
+  that does not follow a pause no longer leaves two polling loops running.
+
+- **Android: Nostr's reconnect bookkeeping was three plain maps crossed by two
+  threads.** OkHttp's reader thread reset a relay's attempt counter and delay
+  on every successful connect while the transport thread structurally modified
+  the same maps scheduling reconnects — a plain `HashMap` read racing a resize
+  is the classic corruption case. All three are `ConcurrentHashMap` now. Also
+  fixed while there: `stop()` never shut down the OkHttp dispatcher (the relay
+  manager already did), so its threads outlived every stop/start cycle.
+
+- **Nostr could report itself connected with no relay connected, on both
+  platforms.** Deciding whether the relay set had just come up sampled "is any
+  relay connected" and published the answer as two separate steps, so two
+  relays transitioning at once could interleave and let the later writer
+  publish the earlier reader's stale answer. The core was then told the
+  transport was up against an empty relay set, and every message the send loop
+  drained came straight back as a send failure until a relay genuinely
+  reconnected. Both halves now happen under one lock, so the last writer always
+  reflects the final state. Pre-existing on both platforms.
+
 - **A relay-delivered group message could be lost silently while the sender saw
   it delivered.** The relay's group path names senders by relay-account
   username, while the MLS credential inside the ciphertext is the sender's

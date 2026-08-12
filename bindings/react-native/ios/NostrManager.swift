@@ -57,6 +57,20 @@ public class NostrManager: NSObject, TransportManager {
     // Lock protecting mutable state accessed from multiple queues
     private let stateLock = NSLock()
 
+    /// Orders the two `nostrStatusChanged` call sites that nothing else
+    /// orders: the connected edge, which runs on [messageQueue], and `stop()`,
+    /// which runs inline on whatever thread tore the transport down.
+    ///
+    /// Same reasoning as `ReticulumManager.statusFlipLock`, which carries the
+    /// full argument — these two managers are mirrors of each other and the
+    /// window is the same one. It is narrower here, because this edge's check
+    /// and its flip sit in one [messageQueue] block rather than a hop apart,
+    /// but "narrower" is not "closed": the check and the call are still two
+    /// steps, and `stop()` runs on another thread between them for free.
+    /// `stop()` publishes `.stopping` before contending for this lock, which
+    /// is what makes taking it sufficient.
+    private let statusFlipLock = NSLock()
+
     // Reconnection (guarded by stateLock)
     private var _reconnectAttempts: [String: Int] = [:]
     private var _currentReconnectDelay: [String: TimeInterval] = [:]
@@ -265,8 +279,14 @@ public class NostrManager: NSObject, TransportManager {
         // Close all relay connections
         disconnectAll(fromDeinit: fromDeinit)
 
-        // Notify protocol
+        // Notify protocol. Under [statusFlipLock], and after `.stopping` is
+        // already published above — see `ReticulumManager.stop()` for the
+        // ordering argument. Inline rather than hopped onto messageQueue:
+        // `deinit` reaches here, and a `sync` hop would self-deadlock when the
+        // last reference is released on that queue.
+        statusFlipLock.lock()
         try? protocolInstance.nostrStatusChanged(isConnected: false)
+        statusFlipLock.unlock()
 
         updateState(.stopped)
         emitDiagnostic("info", "Nostr transport stopped")
@@ -402,18 +422,73 @@ public class NostrManager: NSObject, TransportManager {
     }
 
     private func updateConnectionStatus() {
-        let anyConnected: Bool = connectionQueue.sync {
-            relayConnected.values.contains(true)
+        // Sampled and published as one step, inside the queue that owns the
+        // map. Read and swapped separately — as these were, across three
+        // separate critical sections — two relays transitioning at once can
+        // interleave so that the *later* swap publishes the *earlier* reader's
+        // answer. A relay connects and this reads `anyConnected = true`, then
+        // is descheduled; the same relay drops, and that call reads false,
+        // swaps false→false and sees `wasConnected = false`, so neither edge
+        // fires; the first resumes and swaps false→true with `wasConnected =
+        // false`, firing the connected edge against a relay set that is empty.
+        //
+        // `stateLock` nests inside `connectionQueue` here and only here. That
+        // is safe because the ordering is one-directional: every `stateLock`
+        // holder in this file releases it across a single field access and
+        // never hops a queue, so nothing ever waits on `connectionQueue` while
+        // holding it.
+        let (anyConnected, wasConnected): (Bool, Bool) = connectionQueue.sync {
+            let any = relayConnected.values.contains(true)
+            stateLock.lock()
+            let was = _isConnected
+            _isConnected = any
+            stateLock.unlock()
+            return (any, was)
         }
-
-        let wasConnected = isConnected
-        isConnected = anyConnected
 
         if anyConnected && !wasConnected {
             messageQueue.async { [weak self] in
                 guard let self = self else { return }
-                self.updateState(.running)
-                try? self.protocolInstance.nostrStatusChanged(isConnected: true)
+
+                // A stop() that landed while this relay's handshake was still
+                // in flight has already told the core we are down and moved to
+                // .stopped. Announcing the connection now would put the state
+                // back to .running and the core back to connected, against a
+                // transport nothing will ever tear down again — and the next
+                // start() would throw .alreadyRunning off it. The relay socket
+                // is stray, so close it here. The Android manager gates the
+                // same edge the same way; both are pinned in the uniffi source
+                // guards.
+                //
+                // The claim covers the state write; the flip below carries its
+                // own check under [statusFlipLock], because `stop()` runs its
+                // own flip on another thread and nothing else orders the two.
+                guard self.markRunningIfLive() else {
+                    self.disconnectAll(fromDeinit: false)
+                    return
+                }
+
+                // `isConnected` alongside the state, mirroring
+                // `ReticulumManager` — see the long note there for why a state
+                // check alone is the wrong question.
+                //
+                // It answers a narrower question here than it does there, and
+                // it is worth being exact about which. It does *not* rescue the
+                // check-then-act in [updateConnectionStatus]: this reads the
+                // very value that call published, so a torn swap would be read
+                // back as true and announced anyway. That hole is closed at the
+                // swap itself, which is now one step under `connectionQueue`.
+                // What this term covers is the interval *after* a sound swap —
+                // the last relay dropping between the edge being enqueued and
+                // this block reaching the front of `messageQueue`. Suppressing
+                // the stale true costs nothing: the disconnect that cleared the
+                // flag enqueues its own false behind this, and a reconnect
+                // announces itself.
+                self.statusFlipLock.lock()
+                if self.isConnected && self.state != .stopping && self.state != .stopped {
+                    try? self.protocolInstance.nostrStatusChanged(isConnected: true)
+                }
+                self.statusFlipLock.unlock()
                 self.consecutiveSendFailures = 0
                 self.startMessagePolling()
                 self.startPingTimer()
@@ -974,6 +1049,27 @@ public class NostrManager: NSObject, TransportManager {
     private func updateState(_ newState: TransportState) {
         state = newState
         delegate?.transportManager(self, didChangeState: newState)
+    }
+
+    /// Claims `.running` for a relay that has just come up, but only if the
+    /// transport has not begun stopping. Returns false when it has, so the
+    /// caller can close the connection it opened instead of publishing a state
+    /// a concurrent `stop()` has already moved past.
+    ///
+    /// One operation rather than a `guard` followed by an `updateState`, for
+    /// the reason spelled out on `ReticulumManager.markRunningIfLive`: those
+    /// are two separate [stateLock] acquisitions, and a `stop()` landing
+    /// between them leaves a torn-down transport wedged at `.running`.
+    private func markRunningIfLive() -> Bool {
+        stateLock.lock()
+        guard _state != .stopping, _state != .stopped else {
+            stateLock.unlock()
+            return false
+        }
+        _state = .running
+        stateLock.unlock()
+        delegate?.transportManager(self, didChangeState: .running)
+        return true
     }
 
     // MARK: - Diagnostics

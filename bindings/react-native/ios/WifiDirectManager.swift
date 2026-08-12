@@ -39,7 +39,17 @@ public class WifiDirectManager: NSObject, TransportManager {
     
     public let transportId = "wifi_direct"
     public let transportName = "WiFi Direct (MultipeerConnectivity)"
-    public private(set) var state: TransportState = .unavailable
+    /// Read through [stateLock] like the session and peer map below, because
+    /// it is touched by the same three threads: the lifecycle writes it from
+    /// the bridge queue, and the send path reads it from whichever thread the
+    /// Rust callback arrives on. This is the iOS half of the `@Volatile` the
+    /// Android manager's `state` carries, and it is what makes the claim on
+    /// [onMessagesAvailable] — that the drain's reads are safe from anywhere —
+    /// actually true.
+    public var state: TransportState {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return _state
+    }
     public weak var delegate: TransportManagerDelegate?
     
     // MARK: - Constants
@@ -65,15 +75,73 @@ public class WifiDirectManager: NSObject, TransportManager {
     private let peerId: MCPeerID
     
     // MultipeerConnectivity components
-    private var session: MCSession?
     private var advertiser: MCNearbyServiceAdvertiser?
     private var browser: MCNearbyServiceBrowser?
-    
+
     // Message sending (event-driven, no polling)
     private let messageQueue = DispatchQueue(label: "com.offlineprotocol.wifidirect.messages")
-    
-    // State tracking
-    private var connectedPeers: [MCPeerID: String] = [:] // MCPeerID -> deviceId
+
+    /// Guards [_state], [_session] and [_connectedPeers], which three different
+    /// threads touch: the lifecycle writes them from the bridge queue, the
+    /// MCSession / browser / advertiser delegates from MultipeerConnectivity's
+    /// own queues, and the send path reads them from [messageQueue]. They were
+    /// plain properties, which is the same unsynchronised cross-thread access
+    /// #338 removed from BleManager's `peripheralRSSI`.
+    ///
+    /// Held across one field read or write and nothing else — never across a
+    /// UniFFI call, an `MCSession.send`, or a delegate callback. Every accessor
+    /// below returns a snapshot so callers work on values, not on shared
+    /// storage. That is also why it can be a plain [NSLock]: no accessor calls
+    /// out, so nothing can re-enter and need recursion.
+    private let stateLock = NSLock()
+    private var _state: TransportState = .unavailable
+    private var _session: MCSession?
+    private var _connectedPeers: [MCPeerID: String] = [:] // MCPeerID -> deviceId
+
+    private func setState(_ newState: TransportState) {
+        stateLock.lock(); defer { stateLock.unlock() }
+        _state = newState
+    }
+
+    private var session: MCSession? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _session }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _session = newValue }
+    }
+
+    private var hasConnectedPeers: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return !_connectedPeers.isEmpty
+    }
+
+    private func deviceId(forPeer peerID: MCPeerID) -> String? {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return _connectedPeers[peerID]
+    }
+
+    private func peers(matching recipientId: String) -> [MCPeerID] {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return _connectedPeers.filter { $0.value == recipientId }.map { $0.key }
+    }
+
+    private func setPeer(_ peerID: MCPeerID, deviceId: String) {
+        stateLock.lock(); defer { stateLock.unlock() }
+        _connectedPeers[peerID] = deviceId
+    }
+
+    /// Removes [peerID] and returns the device id it was bound to, so the
+    /// caller can branch on "was it there" without a second lock acquisition
+    /// that another thread could interleave.
+    @discardableResult
+    private func removePeer(_ peerID: MCPeerID) -> String? {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return _connectedPeers.removeValue(forKey: peerID)
+    }
+
+    private func removeAllPeers() {
+        stateLock.lock(); defer { stateLock.unlock() }
+        _connectedPeers.removeAll()
+    }
+
     private var transportStartAt: Date?
 
     // MARK: - Initialization
@@ -156,7 +224,7 @@ public class WifiDirectManager: NSObject, TransportManager {
         // Disconnect session
         session?.disconnect()
         session = nil
-        connectedPeers.removeAll()
+        removeAllPeers()
         
         // Notify protocol
         try? protocolInstance.wifiDirectStatusChanged(isConnected: false)
@@ -181,20 +249,46 @@ public class WifiDirectManager: NSObject, TransportManager {
     
     /// Called by the Rust transport callback when new outgoing messages are available.
     /// Replaces timer-based `startMessagePolling`.
+    ///
+    /// Goes straight to the drain rather than hopping through main first, as
+    /// the Reticulum and Nostr managers already do. The hop bought nothing:
+    /// the only work it did on main was read `state` and the peer map, both of
+    /// which are now synchronised and readable from anywhere, and it put a
+    /// scheduling dependency on the UI thread into the send path of a
+    /// transport that never touches the UI.
     public func onMessagesAvailable() {
-        DispatchQueue.main.async { [weak self] in
-            self?.drainAndSendMessages()
-        }
+        drainAndSendMessages()
     }
-    
+
     /// Drains the Rust message queue and sends each message over MultipeerConnectivity.
+    ///
+    /// Unbounded, where the Android manager's mirror of this spends a batch
+    /// budget and reposts. The asymmetry is deliberate: the budget there exists
+    /// because that looper is shared — it also delivers the Wi-Fi P2P framework
+    /// callbacks and the broadcast receiver, and a broadcast that misses its
+    /// dispatch budget is an ANR wherever the receiver runs — and because a
+    /// `stop()` waits on that same thread without a bound. Neither holds here.
+    /// `messageQueue` is this manager's alone, carries no framework callbacks,
+    /// and no lifecycle path waits on it, so a long drain delays nothing but
+    /// the next drain. Add a budget here only if one of those three facts
+    /// changes.
+    ///
+    /// Unbounded is not the same as unconditional, though, which is the one
+    /// thing the Android mirror gets for free and this does not. Re-entering
+    /// `drainAndSendMessages` after each batch re-runs its guard; a single
+    /// `while` does not, so the state has to be re-read *inside* the loop. The
+    /// guard below runs before the hop, and a `stop()` landing after it leaves
+    /// every remaining iteration taking the core's global mutex to fetch a
+    /// message that `sendMessage` then drops for want of a session — a warning
+    /// per message, against a transport that is already down.
     private func drainAndSendMessages() {
-        guard state == .running, !connectedPeers.isEmpty else { return }
-        
+        guard state == .running, hasConnectedPeers else { return }
+
         messageQueue.async { [weak self] in
             guard let self = self else { return }
-            
-            while let message = self.protocolInstance.wifiDirectGetNextMessage() {
+
+            while self.state == .running,
+                  let message = self.protocolInstance.wifiDirectGetNextMessage() {
                 self.sendMessage(recipientId: message.recipientId, data: Data(message.data))
             }
         }
@@ -207,7 +301,7 @@ public class WifiDirectManager: NSObject, TransportManager {
         }
         
         // Find the peer with matching device ID
-        let targetPeers = connectedPeers.filter { $0.value == recipientId }.map { $0.key }
+        let targetPeers = peers(matching: recipientId)
         
         if targetPeers.isEmpty {
             // Send to all connected peers (broadcast)
@@ -248,7 +342,11 @@ public class WifiDirectManager: NSObject, TransportManager {
     // MARK: - State Management
     
     private func updateState(_ newState: TransportState) {
-        state = newState
+        setState(newState)
+        // Deliberately outside the lock: the delegate is the bridge module,
+        // and calling into it while holding [stateLock] would put arbitrary
+        // downstream work — including UniFFI calls — inside this manager's
+        // critical section.
         delegate?.transportManager(self, didChangeState: newState)
     }
     
@@ -270,7 +368,7 @@ extension WifiDirectManager: MCSessionDelegate {
             switch state {
             case .connected:
                 let peerId = peerID.displayName
-                self.connectedPeers[peerID] = peerId
+                self.setPeer(peerID, deviceId: peerId)
 
                 // NOT announced to the protocol layer — see
                 // `wifiDirectPeerIdIsUnavailable` on the type. `displayName`
@@ -281,9 +379,7 @@ extension WifiDirectManager: MCSessionDelegate {
                 ])
 
             case .notConnected:
-                if let peerId = self.connectedPeers[peerID] {
-                    self.connectedPeers.removeValue(forKey: peerID)
-
+                if let peerId = self.removePeer(peerID) {
                     // No disconnect notification: nothing was announced, so
                     // there is no neighbor for the core to lose.
                     self.emitDiagnostic("info", "Wi-Fi Direct peer disconnected", context: [
@@ -303,7 +399,7 @@ extension WifiDirectManager: MCSessionDelegate {
     }
     
     public func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
-        let senderId = connectedPeers[peerID] ?? peerID.displayName
+        let senderId = deviceId(forPeer: peerID) ?? peerID.displayName
 
         // Dropped, not ingested — see `wifiDirectPeerIdIsUnavailable`.
         // Attributing the frame to an unproven `displayName` would set it as
@@ -340,8 +436,18 @@ extension WifiDirectManager: MCNearbyServiceAdvertiserDelegate {
             "peerId": peerID.displayName
         ])
         
+        // One snapshot for the whole decision, like `foundPeer` below: reading
+        // `session` again at the accept would let a concurrent stop() hand the
+        // framework a different value than the budget check saw. A stopped
+        // transport has nothing to accept into, so it declines instead of
+        // accepting with a nil session.
+        guard let session = session else {
+            invitationHandler(false, nil)
+            return
+        }
+
         // Enforce connection budget: MCSession limit is 8; stay at 7 to avoid daemon overload.
-        let currentCount = session?.connectedPeers.count ?? connectedPeers.count
+        let currentCount = session.connectedPeers.count
         if Self.atConnectionBudgetLimit(connectedCount: currentCount) {
             emitDiagnostic("info", "Rejecting invitation: at connection budget limit", context: [
                 "connectedCount": currentCount,
@@ -372,15 +478,24 @@ extension WifiDirectManager: MCNearbyServiceBrowserDelegate {
         
         // Don't invite ourselves
         guard peerID != peerId else { return }
-        
+
+        // One snapshot for the whole decision. This read used to happen three
+        // separate times and end in `session!`, so a stop() landing between
+        // the guard and the invite crashed on the force-unwrap — the exact
+        // race the accessors above exist to close, at the one call site that
+        // still reached around them. A nil session means the transport is
+        // down, which is nothing to invite anyone to.
+        guard let session = session else { return }
+
         // Don't invite if already connected
-        guard session?.connectedPeers.contains(peerID) != true else { return }
-        
+        guard !session.connectedPeers.contains(peerID) else { return }
+
         // Enforce connection budget: avoid MCSession overflow and connection storms.
-        let currentCount = session?.connectedPeers.count ?? connectedPeers.count
-        guard !Self.atConnectionBudgetLimit(connectedCount: currentCount) else { return }
-        
-        browser.invitePeer(peerID, to: session!, withContext: nil, timeout: CONNECTION_TIMEOUT)
+        guard !Self.atConnectionBudgetLimit(connectedCount: session.connectedPeers.count) else {
+            return
+        }
+
+        browser.invitePeer(peerID, to: session, withContext: nil, timeout: CONNECTION_TIMEOUT)
     }
     
     public func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {

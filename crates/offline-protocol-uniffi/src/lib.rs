@@ -10860,6 +10860,1014 @@ mod tests {
         );
     }
 
+    /// No transport manager may take its ordering from the app's main looper.
+    ///
+    /// This is OFF-2123 as an invariant. Every call these managers make into
+    /// this crate serialises on one global protocol mutex, held across MLS
+    /// work and AndroidKeyStore-backed storage callbacks, so a manager that
+    /// posts its work to the main looper charges those waits to the thread
+    /// Android watches for ANRs. All four used to; each now confines itself to
+    /// a private looper through `TransportConfinement`.
+    ///
+    /// Pinned as the absence of `Looper.getMainLooper()` rather than the
+    /// presence of the confinement, because absence is what actually matters
+    /// and it catches the likely regression: not deleting the confinement, but
+    /// adding one more `Handler(Looper.getMainLooper())` next to it for
+    /// "just this one callback". Comments are stripped before the check, so
+    /// the historical notes explaining what moved off main are free to keep
+    /// saying so.
+    #[test]
+    fn react_native_transports_do_not_run_on_the_main_looper() {
+        // Named rather than globbed, because the directory holds plenty of
+        // files that are not transport managers. The cost of that is this
+        // list: a new transport manager is outside the invariant until it is
+        // added here, so add it with the manager.
+        for manager in [
+            "InternetManager",
+            "WifiDirectManager",
+            "NostrManager",
+            "ReticulumManager",
+        ] {
+            let rel = format!("android/src/main/java/com/offlineprotocol/{manager}.kt");
+            let code = rn_source_code_only(&rel);
+
+            assert!(
+                !code.contains("Looper.getMainLooper()"),
+                "{manager}.kt must not reference the main looper: every UniFFI call it makes \
+                 waits on the core's global protocol mutex, and doing that on the main thread \
+                 is the ANR OFF-2123 tracked. Confine the work with TransportConfinement \
+                 instead — including framework entry points, which take the looper to deliver \
+                 on (WifiP2pManager.initialize) or a scheduler Handler (registerReceiver)"
+            );
+
+            assert!(
+                code.contains("TransportConfinement.shared("),
+                "{manager}.kt must take its thread from TransportConfinement.shared, so a \
+                 manager rebuilt after stop() re-attaches to the same ordered queue instead of \
+                 racing a fresh thread against the old one's backlog"
+            );
+        }
+    }
+
+    /// Nothing that blocks on the network shares the thread `stop()` waits on.
+    ///
+    /// A background caller's `runSync` wait is deliberately unbounded — it is
+    /// the caller that needs the stop to have actually finished. That is safe
+    /// only while every delay on the confinement thread is the protocol mutex,
+    /// which some other thread is always making progress against. Reticulum's
+    /// socket work is not that: `connect` blocks for up to `CONNECTION_TIMEOUT_MS`
+    /// (60s) against an unreachable host, and a TCP write has no timeout at all
+    /// against a daemon that stops reading. Sharing one thread would let either
+    /// park a `stop()` — and the RN bridge thread behind it — so the blocking
+    /// half lives on its own looper.
+    ///
+    /// Splitting the loopers buys a second obligation, which is why the poll
+    /// lifecycle is pinned as *posts* rather than as direct calls. The
+    /// runnable reposts itself on the IO thread, so a `removeCallbacks` issued
+    /// from the lifecycle thread removes nothing while it is mid-flight and
+    /// loses to the repost. `stopUnsafe` and `handleConnectionClosed` survive
+    /// that by clearing `isConnected` first, but `pause()` clears nothing —
+    /// unposted, it leaves a paused transport polling the FFI and writing to
+    /// the daemon for the whole background stay.
+    ///
+    /// The split also constrains the teardown, which stays on the lifecycle
+    /// thread and therefore must not *wait* on the socket work it is tearing
+    /// down. `Socket.close()` is the one call that makes a blocked
+    /// `readLine()`/`println()` throw; the wrapped streams share a lock with
+    /// the I/O they wrap (`BufferedReader.close()` takes the lock `readLine()`
+    /// holds for its whole blocking duration, `PrintWriter.close()` likewise
+    /// against `println()`), so closing them *first* parks `disconnect()` —
+    /// and the unbounded background `stop()` wait behind it — until the daemon
+    /// happens to send a line, indefinitely if it has wedged. Hence the fourth
+    /// pin: the socket close must precede the stream closes.
+    #[test]
+    fn react_native_reticulum_socket_work_is_off_the_lifecycle_thread() {
+        let code =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/ReticulumManager.kt");
+
+        // Pinned by adjacency, like the iOS status-flip guard below: "an
+        // ioHandler.post appears somewhere" is satisfied by a manager that
+        // still opens its socket on the lifecycle thread and posts something
+        // unrelated elsewhere, which is precisely the regression.
+        for (what, pinned) in [
+            (
+                // Spanning through to `sock.connect(` rather than stopping at
+                // the post: this test is about where the *blocking* call runs,
+                // and a post whose body no longer contains it is exactly the
+                // regression.
+                "the blocking connect",
+                "ioHandler.post { val sock = Socket() \
+                 synchronized(this) { pendingConnectSocket = sock } try { sock.connect(",
+            ),
+            (
+                "the send/poll loop",
+                "private fun startMessagePolling() { ioHandler.post { \
+                 ioHandler.removeCallbacks(messagePollingRunnable) \
+                 messagePollingRunnable.run() } }",
+            ),
+            (
+                "cancelling the poll",
+                "private fun stopMessagePolling() { ioHandler.post { \
+                 ioHandler.removeCallbacks(messagePollingRunnable) } }",
+            ),
+        ] {
+            assert!(
+                code.contains(pinned),
+                "{what} must run on ioHandler, not the lifecycle confinement: a stop() waits on \
+                 that thread without a bound, so an unreachable daemon would park it for a \
+                 minute and a wedged one indefinitely. Expected to find:\n  {pinned}"
+            );
+        }
+
+        // Pinned as adjacency so the socket close cannot drift back below the
+        // stream closes, which is the shape this replaced: with the receive
+        // thread parked in readLine() (soTimeout = 0), reader?.close() blocks
+        // on the reader's own lock until the daemon sends a line, and the
+        // socket close that would unblock it sat one statement further down,
+        // never reached. interrupt() does not unblock a classic socket read.
+        assert!(
+            code.contains(
+                "try { socket?.close() } catch (_: Exception) {} \
+                 try { writer?.close() } catch (_: Exception) {} \
+                 try { reader?.close() } catch (_: Exception) {}"
+            ),
+            "disconnect() must close the socket before the wrapped streams: reader.close() and \
+             readLine() take the same lock (writer.close()/println() likewise), so closing the \
+             streams first waits on the very I/O the teardown exists to interrupt — parking the \
+             lifecycle thread, and the unbounded stop() wait behind it, until the daemon speaks. \
+             Only Socket.close() makes a blocked stream read/write throw"
+        );
+    }
+
+    /// A Reticulum connect attempt that outlives its session is retired, and a
+    /// failed one still drives the reconnect ladder.
+    ///
+    /// Two defects at the same seam, both invisible to the connected-edge gate
+    /// that [`react_native_transports_do_not_resurrect_a_stopped_connection`]
+    /// pins, because that gate answers "did a stop happen" and neither of these
+    /// does.
+    ///
+    /// **A superseded attempt used to publish anyway.** `disconnect` clears
+    /// `isConnecting` while the connect is still inside `Socket.connect` — up
+    /// to 60s against a host dropping SYNs — so a `stop()` followed by a
+    /// `start()` passes `connect`'s own guard and queues a *second* attempt
+    /// behind the first on the one shared IO looper. The gate cannot catch the
+    /// survivor: by the time it runs the state is legitimately `STARTING`
+    /// again. Both attempts publish, and the loser's socket and receive thread
+    /// leak with `isConnected` still true, so when that orphaned reader
+    /// eventually errors it tears down the session that replaced it. Hence a
+    /// generation, stamped before the post and checked at every point the
+    /// attempt can still act.
+    ///
+    /// **"Checked before publishing" was one boundary of three.** Publishing
+    /// the socket, claiming the flags and announcing the connection are three
+    /// steps with a scheduling gap after each, and the generation was consulted
+    /// only at the first. So a `stop()` landing after the publish still let
+    /// `handleConnectionOpened` set `isConnected` true against a socket the
+    /// teardown had already closed — and if a `start()` followed, the
+    /// announcement's state gate passed (a restarted transport is legitimately
+    /// `STARTING`, the very case the gate cannot see) and called
+    /// `reticulumStatusChanged(true)` with `writer` null. The core routed to a
+    /// transport with no socket, and the poll that announcement starts drained
+    /// the outbox straight into `reticulumSendFailed` — recoverable, since the
+    /// next attempt's result corrects the status and the core retries the
+    /// sends, but a self-inflicted burst of failed sends and a DORS score to
+    /// match.
+    ///
+    /// **A check beside the write it guards is still a check-then-act.** The
+    /// first fix put the two extra checks one statement above the publish and
+    /// the claim, which narrows the window without closing it: the check and
+    /// the write run on the IO thread while `disconnect` runs on the transport
+    /// thread, so a teardown still fits between them and is simply overwritten.
+    /// The claim was the consequential half — the announcement refuses either
+    /// way, so nothing is announced, but `isConnected` is left true against a
+    /// closed socket with no path that clears it, and `connect`'s own guard
+    /// reads exactly that flag. The next `start()` therefore returns having
+    /// done nothing, until the orphaned reader errors and the ladder recovers.
+    /// Both checks now sit *inside* the `synchronized(this)` that owns the
+    /// fields, which is the same lock `disconnect` clears them in, so claim and
+    /// clear are ordered rather than racing. The pins spell out the whole
+    /// locked block for that reason: a check hoisted back out of it would
+    /// satisfy any looser form.
+    ///
+    /// **A failed connect used to be terminal.** The catch cleared
+    /// `isConnecting` before handing off, and `handleConnectionClosed` decides
+    /// whether a failure is worth reacting to by reading exactly that flag and
+    /// `isConnected` — so it saw both false, returned early, and never reached
+    /// `scheduleReconnect`. The 1s→30s ladder was dead for the case it exists
+    /// for, a daemon that is not running: the transport sat in `STARTING`,
+    /// where `startUnsafe` throws `AlreadyRunning`, until an explicit
+    /// stop/start. iOS clears the flag *inside* that handler, under the lock
+    /// that samples it, which is why the ladder worked there and not here.
+    /// Pinned as adjacency — nothing between `catch` and the log — plus a count
+    /// of the clear's legitimate owners, so re-adding it anywhere fails here.
+    ///
+    /// **The teardown side needed the stamp too, and had none.** The five
+    /// checks above all live on the connect path, and every one of them
+    /// protects a *constructive* step. The destructive step is
+    /// `handleConnectionClosed`, which clears both session flags — and all
+    /// three of its callers reach it by posting from another thread (the IO
+    /// thread on a failed connect or an exhausted send budget, the receive
+    /// thread on a dropped link), so all three can arrive after the session
+    /// they describe is over. Its own `!wasConnected && !wasConnecting` guard
+    /// cannot substitute: it asks whether *a* session is live, never whether it
+    /// is *this* one, so after a stop *and* a start it reads the successor's
+    /// flags and passes. The stale post then clears `isConnected` under a
+    /// healthy connection, reports the transport down, and starts a reconnect
+    /// ladder against it — while the socket that was actually live is left open
+    /// with its reader parked in `readLine()` (soTimeout = 0) and
+    /// `receiveThread` already reassigned. Nothing closes either, and the next
+    /// connect publishes over `socket`/`writer`/`reader` without closing what
+    /// it displaces, so the thread and the descriptor leak for good.
+    ///
+    /// The check therefore sits at the top of the handler rather than beside
+    /// each post, which is the same lesson as the two locked checks below,
+    /// applied to a queue hop instead of a lock: a check on the near side of a
+    /// boundary the session can die inside is not a check. The connect catch's
+    /// pre-post check was exactly that shape and is gone; the receive loop and
+    /// the send-failure threshold carry the generation they belong to instead,
+    /// the latter sampled under the same lock as the writer it used.
+    #[test]
+    fn react_native_reticulum_retires_a_superseded_connect_attempt() {
+        let code =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/ReticulumManager.kt");
+
+        for (what, pinned) in [
+            (
+                "stamping the attempt, and publishing its socket before it blocks",
+                "val generation = connectGeneration.incrementAndGet() ioHandler.post { \
+                 val sock = Socket() synchronized(this) { pendingConnectSocket = sock } try {",
+            ),
+            (
+                "retiring it on teardown, under the lock the claim takes",
+                "private fun disconnect() { synchronized(this) { isConnected.set(false) \
+                 isConnecting.set(false) connectGeneration.incrementAndGet()",
+            ),
+            (
+                "checking it before publishing the socket",
+                "if (connectGeneration.get() != generation) { try { sock.close() } \
+                 catch (_: Exception) {} return@post } sock.soTimeout = 0",
+            ),
+            (
+                "checking it as part of the publish itself",
+                "var published = false synchronized(this) { \
+                 if (connectGeneration.get() == generation) { socket = sock writer = w \
+                 reader = r published = true } } if (!published) { try { sock.close() } \
+                 catch (_: Exception) {} return@post }",
+            ),
+            (
+                "checking it as part of the flag claim itself",
+                "private fun handleConnectionOpened(generation: Int): Boolean { \
+                 synchronized(this) { if (connectGeneration.get() != generation) return false \
+                 isConnected.set(true) isConnecting.set(false) }",
+            ),
+            (
+                "honouring a refused claim at the call site, and handing the \
+                 reader the generation it belongs to",
+                "if (!handleConnectionOpened(generation)) return@post \
+                 startReceiveLoop(r, generation)",
+            ),
+            (
+                "checking it inside the announcement block",
+                "transportHandler.post { if (connectGeneration.get() != generation) return@post \
+                 if (state == TransportState.STOPPING || state == TransportState.STOPPED) {",
+            ),
+            (
+                "checking it inside the teardown handler, where the flags are cleared",
+                "private fun handleConnectionClosed(generation: Int, code: Int, reason: String?) { \
+                 if (connectGeneration.get() != generation) return",
+            ),
+            (
+                "stamping the failure a connect attempt reports",
+                "transportHandler.post { handleConnectionClosed(generation, -1, e.message) }",
+            ),
+            (
+                "stamping the failure a dead receive loop reports",
+                "if (isConnected.get()) { transportHandler.post { \
+                 handleConnectionClosed(generation, -1, \"Connection lost\") } }",
+            ),
+            (
+                "sampling the writer and its generation together",
+                "val w: PrintWriter? val generation: Int synchronized(this) { w = writer \
+                 generation = connectGeneration.get() }",
+            ),
+            (
+                "stamping the failure an exhausted send budget reports",
+                "transportHandler.post { \
+                 handleConnectionClosed(generation, -1, \"Send failures exceeded threshold\") }",
+            ),
+            (
+                "leaving the in-flight flag for handleConnectionClosed to clear",
+                "} catch (e: Exception) { Log.e(TAG, \"Failed to connect to Reticulum daemon\", e)",
+            ),
+        ] {
+            assert!(
+                code.contains(pinned),
+                "ReticulumManager.kt: {what} is what keeps a connect that outlived its session \
+                 from publishing over the one that replaced it, and a failed connect from \
+                 silently ending the reconnect ladder. Expected to find:\n  {pinned}"
+            );
+        }
+
+        // Each pin above is disambiguated by what surrounds it, and this counts
+        // the whole family — the backstop for a check deleted somewhere the
+        // individual pins do not reach. Dropping any one reopens a boundary:
+        // the first stops a retired attempt building streams it will discard,
+        // the publish check stops it installing its socket over the current
+        // session's, the claim check stops it setting `isConnected` true
+        // against a socket `disconnect` already closed, the announcement check
+        // is the only thing standing between a stop-then-restart and a
+        // `RUNNING` state with a null writer, and the teardown check stops any
+        // of the three posted failure reports clearing the flags of a session
+        // that replaced theirs.
+        //
+        // Three of them are *inside* something rather than beside it — two
+        // inside the lock that owns what they guard, one inside the handler
+        // rather than at each call site — and that is load-bearing rather than
+        // tidy. Checked outside, each becomes a read-then-act with a teardown
+        // free to land in the middle: the publish would strand a socket in a
+        // field `disconnect` has already passed, the claim would put
+        // `isConnected` back to true after the teardown cleared it (leaving a
+        // flag nothing clears, which `connect`'s own guard then reads to refuse
+        // the next `start()`), and the teardown check would pass on the near
+        // side of a queue hop the session can die inside.
+        //
+        // The sixth is `sendMessage`'s, which is a *sample* rather than a
+        // check: it binds the generation to the writer it read under the same
+        // lock, so the failure it may report later names the session that write
+        // actually belonged to.
+        let generation_checks = code.matches("connectGeneration.get()").count();
+        assert_eq!(
+            generation_checks, 6,
+            "ReticulumManager.kt: expected the connect generation to be consulted at all six \
+             points a retired attempt can still act — before building the streams, inside the \
+             publish, inside the flag claim, inside the announcement block, inside the teardown \
+             handler every posted failure funnels through, and alongside the writer sampled by \
+             sendMessage; found {generation_checks}."
+        );
+
+        // Only a close ends a blocked `Socket.connect` — it has no
+        // interruption point and ignores `Thread.interrupt` — and this looper
+        // is shared and never quits, so an attempt left running against an
+        // unreachable host holds the *next* session's connect behind it for the
+        // rest of CONNECTION_TIMEOUT_MS. The per-session thread this replaced
+        // had no such coupling: it was abandoned mid-call and the restart got a
+        // fresh one, so the handle is what buys that property back.
+        for (what, pinned) in [
+            (
+                "the teardown closing it",
+                "try { pendingConnectSocket?.close() } catch (_: Exception) {} \
+                 pendingConnectSocket = null",
+            ),
+            (
+                "the attempt releasing it by identity on every exit",
+                "} finally { synchronized(this) { if (pendingConnectSocket === sock) \
+                 pendingConnectSocket = null } }",
+            ),
+        ] {
+            assert!(
+                code.contains(pinned),
+                "ReticulumManager.kt: {what} is what lets a stop() end a connect that has nothing \
+                 published yet. Without it a stop/start against an unreachable daemon leaves the \
+                 restart's connect queued behind the blocked one on the shared IO looper. \
+                 Expected to find:\n  {pinned}"
+            );
+        }
+
+        // The two legitimate owners: `disconnect`, ending a session, and
+        // `handleConnectionOpened`, promoting one. A third is the regression —
+        // the connect catch clearing it before the handoff, which is what made
+        // `handleConnectionClosed` return early and skip `scheduleReconnect`.
+        let clears = code.matches("isConnecting.set(false)").count();
+        assert_eq!(
+            clears, 2,
+            "ReticulumManager.kt: expected isConnecting to be cleared only by disconnect() and \
+             handleConnectionOpened(); found {clears} sites. A clear on the failure path makes \
+             handleConnectionClosed read both flags false and return before scheduling the \
+             reconnect, which strands the transport in STARTING for good."
+        );
+    }
+
+    /// A connection that completes after `stop()` does not resurrect the
+    /// transport.
+    ///
+    /// All four managers announce a new connection from a *posted* block, so a
+    /// `stop()` can land between the socket opening and the announcement. With
+    /// no gate the announcement then runs against a stopped transport: state
+    /// goes back to `RUNNING` and the core is told the transport is up after
+    /// being told it was down — with nothing left that will ever tear it down
+    /// again, and the next `start()` throwing `AlreadyRunning` off the wedged
+    /// state. `InternetManager` has always gated its posted blocks this way, on
+    /// both platforms; the Reticulum and Nostr managers did not, on either.
+    ///
+    /// **Both platforms, deliberately.** The first version of this covered only
+    /// the two Kotlin managers, which read as though the invariant held
+    /// everywhere it applies — while the identical unguarded block sat in the
+    /// two Swift ones. The iOS Reticulum window is the wider of the two: its
+    /// announcement crosses `DispatchQueue.main` *and* then `messageQueue`, so
+    /// there are two scheduling boundaries for a `stop()` to land in rather
+    /// than one, and a gate at the first boundary does nothing about the
+    /// second. Both are covered now — this test owns the state write at the
+    /// first, and
+    /// [`react_native_ios_status_flips_are_ordered_against_stop`] owns the
+    /// status flip at the second.
+    ///
+    /// Pinned as the *first* statement of the block, modulo the liveness
+    /// check that precedes it on Reticulum: a gate that has drifted below the
+    /// state write is not a gate.
+    ///
+    /// **The state gate is necessary and not sufficient, which is why
+    /// Reticulum carries a term in front of it.** "Did a stop happen" and "is
+    /// this still the current connection" are different questions, and only
+    /// the second one survives a restart — after `stop()`; `start()` the state
+    /// is legitimately `STARTING`, so the gate passes for a connection the
+    /// teardown already closed. Reticulum answers it with the connect
+    /// generation that
+    /// [`react_native_reticulum_retires_a_superseded_connect_attempt`] owns;
+    /// the other three managers have no equivalent and remain exposed to that
+    /// narrower window, which is tracked rather than pinned here.
+    ///
+    /// The two platforms need different amounts of machinery for the same
+    /// invariant, and that difference is the point. On Android the gate, the
+    /// state write, the status flip and `stopUnsafe` all execute on the one
+    /// confinement thread, so a plain `if` is genuinely atomic against a
+    /// `stop()` — nothing more is needed or wanted. On iOS the lifecycle runs
+    /// on the bridge queue, the gate on `main` or `messageQueue`, and the flip
+    /// on `messageQueue`, so an `if` followed by a state write is a
+    /// check-then-act across threads: a `stop()` landing between them writes
+    /// `.stopped` and the write puts `.running` back over it. iOS therefore
+    /// pins a compare-and-set (`markRunningIfLive`) instead, and the flip
+    /// itself is ordered separately by
+    /// [`react_native_ios_status_flips_are_ordered_against_stop`].
+    #[test]
+    fn react_native_transports_do_not_resurrect_a_stopped_connection() {
+        for (manager, liveness, cleanup) in [
+            (
+                "ReticulumManager",
+                "if (connectGeneration.get() != generation) return@post ",
+                "disconnect()",
+            ),
+            ("NostrManager", "", "disconnectAll()"),
+        ] {
+            let code = rn_source_code_only(&format!(
+                "android/src/main/java/com/offlineprotocol/{manager}.kt"
+            ));
+            let pinned = format!(
+                "transportHandler.post {{ {liveness}if (state == TransportState.STOPPING || \
+                 state == TransportState.STOPPED) {{ {cleanup} return@post }} \
+                 updateState(TransportState.RUNNING)"
+            );
+
+            assert!(
+                code.contains(&pinned),
+                "{manager}.kt's connected-edge post must open with the stopped-transport gate, \
+                 which also closes the socket it opened; otherwise a stop() racing the connect \
+                 leaves the state RUNNING and the core told the transport is up, and no later \
+                 signal corrects either. Expected to find:\n  {pinned}"
+            );
+        }
+
+        for (manager, cleanup) in [
+            ("ReticulumManager", "self.disconnect()"),
+            ("NostrManager", "self.disconnectAll(fromDeinit: false)"),
+        ] {
+            let code = rn_source_code_only(&format!("ios/{manager}.swift"));
+            let pinned = format!(
+                "guard let self = self else {{ return }} guard self.markRunningIfLive() \
+                 else {{ {cleanup} return }}"
+            );
+
+            assert!(
+                code.contains(&pinned),
+                "ios/{manager}.swift's connected-edge block must open by *claiming* .running \
+                 rather than testing the state and then writing it, and must close the \
+                 connection it opened when the claim is refused. A separate test-then-write is \
+                 two lock acquisitions with a stop() free to land between them, which leaves a \
+                 torn-down transport wedged at .running where the next start() throws \
+                 .alreadyRunning. Expected to find:\n  {pinned}"
+            );
+
+            // The claim is only worth pinning if it is actually atomic, so the
+            // compare-and-set itself is pinned too — identical in both files.
+            // Without this, `markRunningIfLive` could be reduced back to the
+            // guard-then-`updateState` pair it replaced and the pin above
+            // would still pass.
+            let cas = "private func markRunningIfLive() -> Bool { stateLock.lock() \
+                       guard _state != .stopping, _state != .stopped else { stateLock.unlock() \
+                       return false } _state = .running stateLock.unlock() \
+                       delegate?.transportManager(self, didChangeState: .running) return true }";
+
+            assert!(
+                code.contains(cas),
+                "ios/{manager}.swift's markRunningIfLive must read and write the state under one \
+                 stateLock acquisition, and notify the delegate outside it. Expected to \
+                 find:\n  {cas}"
+            );
+        }
+    }
+
+    /// The iOS status flips are ordered against `stop()`, not merely near a
+    /// state check.
+    ///
+    /// Each of these managers flips `…StatusChanged` from two places that no
+    /// queue orders against each other: the connected edge, which runs on
+    /// `messageQueue`, and `stop()`, which runs inline on whichever thread
+    /// tore the transport down (the bridge queue, or `deinit`'s). A state
+    /// check on the connected edge is not enough on its own — it can read a
+    /// live state, and a whole `stop()`, including its own `false`, can then
+    /// complete before the `true` it cleared reaches the core. The core is
+    /// left believing the transport is up moments after being told it was
+    /// down, against a `.stopped` transport with no polling, and nothing
+    /// corrects it: every correcting path is a teardown path that already ran.
+    ///
+    /// So both sites take `statusFlipLock`, and `stop()` publishes `.stopping`
+    /// *before* contending for it — which is the whole ordering argument, and
+    /// why the byte-offset check below is not a stylistic preference. Either
+    /// the announcement wins the lock and `stop()`'s `false` lands after its
+    /// `true`, or `stop()` wins and the announcement reads a state that
+    /// refuses it.
+    ///
+    /// **The pinned condition tests two things, and `stop()` is only one of
+    /// them** — the name of this test is the dominant half, not the whole
+    /// claim. `stop()` is not the only writer that can overtake the connected
+    /// edge: on Reticulum, `handleConnectionClosed` reaches `messageQueue` in
+    /// one hop from `connectionQueue` while the connected edge takes two
+    /// (`connectionQueue` → main → `messageQueue`), so a link that opens and
+    /// dies immediately enqueues its `false` *ahead* of the `true` announcing
+    /// it. No state check can see that: with `autoReconnect` on — the default
+    /// — that path leaves `.running` untouched, so the core is told "up" about
+    /// a dead connection and routes to a transport that never drains until the
+    /// next attempt resolves the flags. `isConnected` is the term that answers
+    /// it, and it is pinned in the same string as the state check because they
+    /// are one decision. Nostr carries it for symmetry and for its own
+    /// narrower reason (the check-then-act in `updateConnectionStatus`); its
+    /// two flips already share a single hop, so it was never exposed to the
+    /// Reticulum window.
+    ///
+    /// A text pin cannot express cross-queue ordering, which is why this class
+    /// of bug reached review rather than CI. What it *can* do is make the
+    /// condition that answers it un-droppable, which is what the string below
+    /// is for.
+    ///
+    /// Android has no counterpart and must not grow one: its flips are already
+    /// atomic against each other by thread confinement, so a lock there would
+    /// be cargo-culted from a platform whose problem it does not have. Nor
+    /// does it need the liveness term — both its flips post to the one
+    /// transport handler, and `startReceiveLoop` runs only after
+    /// `handleConnectionOpened` has already enqueued its block, so enqueue
+    /// order there is causal.
+    #[test]
+    fn react_native_ios_status_flips_are_ordered_against_stop() {
+        for (manager, flip) in [
+            ("ReticulumManager", "reticulumStatusChanged"),
+            ("NostrManager", "nostrStatusChanged"),
+        ] {
+            let code = rn_source_code_only(&format!("ios/{manager}.swift"));
+
+            let connected = format!(
+                "self.statusFlipLock.lock() if self.isConnected && self.state != .stopping && \
+                 self.state != .stopped {{ try? self.protocolInstance.{flip}(isConnected: true) \
+                 }} self.statusFlipLock.unlock()"
+            );
+            assert!(
+                code.contains(&connected),
+                "ios/{manager}.swift's connected-edge flip must test that the connection is still \
+                 live AND that the transport is not stopping, and call {flip}, as one decision \
+                 under statusFlipLock, unlocked explicitly rather than by defer (which would hold \
+                 it across the flush that follows). Dropping the isConnected term leaves the \
+                 disconnect race open — a link that dies during the hop enqueues its false ahead \
+                 of this true, and no state check can tell. Expected to find:\n  {connected}"
+            );
+
+            let stopping = format!(
+                "statusFlipLock.lock() try? protocolInstance.{flip}(isConnected: false) \
+                 statusFlipLock.unlock()"
+            );
+            assert!(
+                code.contains(&stopping),
+                "ios/{manager}.swift's stop() must take statusFlipLock around its {flip}, or the \
+                 lock on the connected edge orders it against nothing. Expected to \
+                 find:\n  {stopping}"
+            );
+
+            // `.stopping` must be published *before* stop() contends for the
+            // lock: that is what makes losing the race safe for the connected
+            // edge, which re-reads the state under the lock it then wins.
+            //
+            // A byte-offset check is only as good as the uniqueness of what it
+            // locates — a second `.stopping` write added anywhere above stop()
+            // would satisfy the comparison no matter how stop() is ordered. So
+            // the count is asserted first, and a legitimate second writer must
+            // come here and say which one it means.
+            let writes = code.matches("updateState(.stopping)").count();
+            assert_eq!(
+                writes, 1,
+                "ios/{manager}.swift: expected exactly one .stopping write (stop()'s); found \
+                 {writes}, which makes the ordering check below ambiguous"
+            );
+            let published = code.find("updateState(.stopping)").unwrap_or_else(|| {
+                panic!("ios/{manager}.swift: stop() no longer publishes .stopping")
+            });
+            let contends = code
+                .find(&stopping)
+                .unwrap_or_else(|| panic!("ios/{manager}.swift: stop()'s guarded flip not found"));
+            assert!(
+                published < contends,
+                "ios/{manager}.swift must publish .stopping before stop() takes statusFlipLock. \
+                 Reversed, a connected edge that loses the race re-reads a state that still says \
+                 running and flips the core back to connected after this false."
+            );
+        }
+    }
+
+    /// The Wi-Fi Direct framework's own callbacks stay off the main thread too.
+    ///
+    /// This transport is the one where moving *our* posts off main is only half
+    /// the job. `WifiP2pManager.initialize` takes the looper every
+    /// `ActionListener` / `PeerListListener` / `ConnectionInfoListener` callback
+    /// is delivered on, and `registerReceiver` takes the scheduler `onReceive`
+    /// runs on. Left at their defaults both land on main — and `onReceive`
+    /// reaches `wifiDirectStatusChanged`, a UniFFI call, so the global protocol
+    /// mutex would still be waited on by the UI thread with every other trace of
+    /// the defect gone.
+    ///
+    /// Neither is caught by the `Looper.getMainLooper()` guard above: the
+    /// regression is a *default*, spelled `registerReceiver(p2pReceiver,
+    /// intentFilter)` with no scheduler and no mention of a looper anywhere.
+    /// Pinned as the full argument lists so dropping an argument fails here.
+    #[test]
+    fn react_native_wifi_direct_framework_callbacks_are_confined() {
+        let code =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+
+        for (what, pinned) in [
+            (
+                "the P2P channel's callback looper",
+                "channel = wifiP2pManager?.initialize(context, confinement.looper) {",
+            ),
+            (
+                "the broadcast receiver's scheduler on API 33+",
+                "context.registerReceiver( p2pReceiver, intentFilter, null, transportHandler, \
+                 Context.RECEIVER_NOT_EXPORTED, )",
+            ),
+            (
+                "the broadcast receiver's scheduler below API 33",
+                "context.registerReceiver(p2pReceiver, intentFilter, null, transportHandler)",
+            ),
+        ] {
+            assert!(
+                code.contains(pinned),
+                "{what} must be the transport confinement, not the default: a Wi-Fi P2P callback \
+                 or broadcast delivered on main calls wifiDirectStatusChanged, which waits on the \
+                 core's global protocol mutex — the ANR OFF-2123 tracked, reintroduced through the \
+                 framework's door rather than ours. Expected to find:\n  {pinned}"
+            );
+        }
+    }
+
+    /// No Android transport callback from Rust may wait on a confinement thread.
+    ///
+    /// **Android only, and deliberately so** — the title names the platform
+    /// because the mechanism is Android's. There is no `runSync` on iOS and no
+    /// confinement thread to wait on; the same hazard exists there in a
+    /// different shape (a callback that blocks on a lock whose holder needs the
+    /// core), and it is pinned separately by
+    /// [`react_native_ios_wifi_direct_state_lock_never_calls_the_core`]. A
+    /// guard over managers that are mirrored across `.kt` and `.swift` reads as
+    /// covering both unless it says otherwise, so this one says otherwise.
+    ///
+    /// This is the invariant that makes [`TransportConfinement.runSync`]'s
+    /// unbounded background wait safe, and it is the only one here whose
+    /// violation is unrecoverable at runtime. These callbacks are invoked by the
+    /// core *while it holds the global protocol mutex*. A callback that waited
+    /// on a confinement thread — directly, or through any lifecycle method,
+    /// since `start`/`stop`/`pause`/`resume` are all `runSync` — would be
+    /// waiting on a thread whose next act is to ask for that same mutex. Neither
+    /// side can yield: a hard, permanent deadlock of the core, not a slow path.
+    ///
+    /// So the body of each is pinned whole, closing braces included: a post and
+    /// nothing else. There is no weaker form of this worth checking, because
+    /// "mostly posts" is the same deadlock — and a prefix pin is exactly that
+    /// weaker form, since it matches a body that posts and *then* blocks:
+    ///
+    /// ```text
+    /// fun onMessagesAvailable() {
+    ///     transportHandler.post { … }   // a prefix pin stops reading here
+    ///     confinement.runSync { … }     // permanent deadlock, guard green
+    /// }
+    /// ```
+    ///
+    /// Wi-Fi Direct's carries one branch — the drain-continuation check — which
+    /// is inside the posted block, so its pin spells that branch out rather
+    /// than stopping short of it.
+    #[test]
+    fn react_native_transport_callbacks_never_wait_on_a_confinement() {
+        for (manager, entry, pinned) in [
+            (
+                "ReticulumManager",
+                "onMessagesAvailable",
+                "fun onMessagesAvailable() { ioHandler.post { pollAndSendMessages() } }",
+            ),
+            (
+                "NostrManager",
+                "onMessagesAvailable",
+                "fun onMessagesAvailable() { transportHandler.post { pollAndSendMessages() } }",
+            ),
+            (
+                "WifiDirectManager",
+                "onMessagesAvailable",
+                "fun onMessagesAvailable() { transportHandler.post { \
+                 if (drainContinuationQueued) return@post drainAndSendMessages() } }",
+            ),
+            (
+                "ble/BleTransportFacade",
+                "onFragmentsAvailable",
+                "fun onFragmentsAvailable() { bleHandler.post { drainAndSendFragments() } }",
+            ),
+        ] {
+            let code = rn_source_code_only(&format!(
+                "android/src/main/java/com/offlineprotocol/{manager}.kt"
+            ));
+
+            assert!(
+                code.contains(pinned),
+                "{manager}.kt's {entry} must hand its work to a handler and return. The core calls \
+                 it holding the global protocol mutex, so anything that waits on a confinement \
+                 thread here deadlocks against the very mutex that thread is about to ask for. \
+                 Expected to find:\n  {pinned}"
+            );
+        }
+
+        // The other half of Wi-Fi Direct's callback: the flag its early return
+        // reads has to be cleared at the *top* of the drain, so that every way
+        // out of a pass — the stopped-transport return, the drained return, a
+        // throwing send — leaves it false, and only the one path that actually
+        // queues a successor sets it again. Moved to the drained return (the
+        // obvious-looking simplification, since that is where the chain
+        // normally ends), a pass that exits because the transport stopped
+        // leaves it stuck true: every subsequent `onMessagesAvailable` returns
+        // early *forever*, and the send path silently degrades to the 2s
+        // fallback poll's one message per tick. Nothing else would fail.
+        let code =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        let pinned = "private fun drainAndSendMessages() { drainContinuationQueued = false \
+                      if (state != TransportState.RUNNING || connectedPeers.isEmpty()) return";
+        assert!(
+            code.contains(pinned),
+            "WifiDirectManager.kt must clear drainContinuationQueued as the first statement of \
+             drainAndSendMessages, before any early return. Cleared anywhere else, a pass that \
+             exits early leaves the flag set and onMessagesAvailable suppresses every later \
+             callback for the life of the transport. Expected to find:\n  {pinned}"
+        );
+    }
+
+    /// A transport's `pause()` has actually paused by the time it returns.
+    ///
+    /// `OfflineProtocolModule.pause` pauses the five transports and *then* the
+    /// core, and that order is the whole bound on how long a transport can
+    /// still re-enter UniFFI behind a paused core — it is why
+    /// `InternetManager.pause` can call its final drain "bounded to sends
+    /// already in flight". A `pause()` that hands its work to a handler and
+    /// returns has paused nothing yet, so the core pauses underneath it and the
+    /// bound is gone.
+    ///
+    /// This was the shape Nostr and Reticulum shipped with, left over from when
+    /// a post was the only way onto their per-session IO threads — the
+    /// confinement removed the reason and not the post. It is an easy
+    /// regression to re-introduce precisely because it *looks* like the
+    /// callback rule two tests up ("hand it to a handler and return"), which
+    /// applies to calls coming *from* the core and is the opposite obligation.
+    ///
+    /// A prefix pin is enough here, unlike the callback bodies, because the
+    /// hazard is a different first statement rather than something appended
+    /// after a correct one: `runSync` followed by more work is not a defect,
+    /// whereas `post` in its place is the whole defect. `resume` is pinned with
+    /// it because it is the same contract read backwards — the core resumes
+    /// first, and a transport that returns before it has resumed is one DORS
+    /// can select while its poll loop is still stopped.
+    #[test]
+    fn react_native_transport_pause_takes_effect_before_it_returns() {
+        for (manager, pause, resume) in [
+            (
+                "InternetManager",
+                "override fun pause() { runConfinedSync {",
+                "override fun resume() { runConfinedSync {",
+            ),
+            (
+                "NostrManager",
+                "override fun pause() { runConfinedSync {",
+                "override fun resume() { runConfinedSync {",
+            ),
+            (
+                "ReticulumManager",
+                "override fun pause() { runConfinedSync {",
+                "override fun resume() { runConfinedSync {",
+            ),
+            (
+                "WifiDirectManager",
+                "override fun pause() { confinement.runSync {",
+                "override fun resume() { confinement.runSync {",
+            ),
+            (
+                "ble/BleTransportFacade",
+                "override fun pause() { runOnBleThreadSync {",
+                "override fun resume() { runOnBleThreadSync {",
+            ),
+        ] {
+            let code = rn_source_code_only(&format!(
+                "android/src/main/java/com/offlineprotocol/{manager}.kt"
+            ));
+
+            for (entry, pinned) in [("pause", pause), ("resume", resume)] {
+                assert!(
+                    code.contains(pinned),
+                    "{manager}.kt's {entry} must run its body on the confinement and wait for it, \
+                     not post and return. The module pauses every transport and then the core, so \
+                     a transport that has not finished pausing when it returns can re-enter UniFFI \
+                     behind an already-paused core. The wait is safe: the module's caller is a \
+                     React Native background thread, which TransportConfinement.runSync does not \
+                     bound. Expected to find:\n  {pinned}"
+                );
+            }
+        }
+    }
+
+    /// The iOS half of the same invariant: nothing calls into the core while
+    /// holding `WifiDirectManager`'s `stateLock`.
+    ///
+    /// iOS has no `runSync`, so a transport callback cannot deadlock by
+    /// *waiting on a thread* the way the Android one can. It can deadlock by
+    /// waiting on a **lock**, and this manager is the one place that became
+    /// possible: `onMessagesAvailable` now runs inline on whichever thread the
+    /// core calls it from — holding the global protocol mutex — and takes
+    /// `stateLock` twice on the way to the drain. That is safe for exactly one
+    /// reason: no holder of `stateLock` ever calls the core back. Add a
+    /// `protocolInstance` call inside any accessor below and the two locks
+    /// acquire in opposite orders on two threads, which is the same permanent
+    /// deadlock the Android guard describes, reached through a lock instead of
+    /// a looper.
+    ///
+    /// Pinned as whole accessor bodies, one per accessor rather than as one
+    /// contiguous run, so reordering them is free and adding a call-out to any
+    /// of them is not. The count assert is the backstop the individual pins
+    /// cannot provide: a *new* accessor that takes the lock and calls the core
+    /// would satisfy every pin above it, so a tenth acquisition has to come
+    /// here and be accounted for.
+    ///
+    /// `updateState` is deliberately not in this list — it takes the lock only
+    /// through `setState` and notifies the delegate *outside* it, which is the
+    /// same reasoning and is documented at the call site.
+    #[test]
+    fn react_native_ios_wifi_direct_state_lock_never_calls_the_core() {
+        let code = rn_source_code_only("ios/WifiDirectManager.swift");
+
+        for (what, pinned) in [
+            (
+                "the state read",
+                "public var state: TransportState { stateLock.lock(); \
+                 defer { stateLock.unlock() } return _state }",
+            ),
+            (
+                "setState",
+                "private func setState(_ newState: TransportState) { stateLock.lock(); \
+                 defer { stateLock.unlock() } _state = newState }",
+            ),
+            (
+                "the session accessor",
+                "private var session: MCSession? { get { stateLock.lock(); \
+                 defer { stateLock.unlock() }; return _session } set { stateLock.lock(); \
+                 defer { stateLock.unlock() }; _session = newValue } }",
+            ),
+            (
+                "hasConnectedPeers",
+                "private var hasConnectedPeers: Bool { stateLock.lock(); \
+                 defer { stateLock.unlock() } return !_connectedPeers.isEmpty }",
+            ),
+            (
+                "deviceId(forPeer:)",
+                "private func deviceId(forPeer peerID: MCPeerID) -> String? { stateLock.lock(); \
+                 defer { stateLock.unlock() } return _connectedPeers[peerID] }",
+            ),
+            (
+                "peers(matching:)",
+                "private func peers(matching recipientId: String) -> [MCPeerID] { \
+                 stateLock.lock(); defer { stateLock.unlock() } \
+                 return _connectedPeers.filter { $0.value == recipientId }.map { $0.key } }",
+            ),
+            (
+                "setPeer",
+                "private func setPeer(_ peerID: MCPeerID, deviceId: String) { stateLock.lock(); \
+                 defer { stateLock.unlock() } _connectedPeers[peerID] = deviceId }",
+            ),
+            (
+                "removePeer",
+                "private func removePeer(_ peerID: MCPeerID) -> String? { stateLock.lock(); \
+                 defer { stateLock.unlock() } return _connectedPeers.removeValue(forKey: peerID) }",
+            ),
+            (
+                "removeAllPeers",
+                "private func removeAllPeers() { stateLock.lock(); \
+                 defer { stateLock.unlock() } _connectedPeers.removeAll() }",
+            ),
+        ] {
+            assert!(
+                code.contains(pinned),
+                "ios/WifiDirectManager.swift: {what} must hold stateLock across one field access \
+                 and nothing else. The core calls onMessagesAvailable holding its global mutex \
+                 and that path takes this lock, so a lock holder that calls back into the core \
+                 deadlocks both. Expected to find:\n  {pinned}"
+            );
+        }
+
+        let acquisitions = code.matches("stateLock.lock()").count();
+        assert_eq!(
+            acquisitions, 10,
+            "ios/WifiDirectManager.swift: expected the 10 pinned stateLock acquisitions; found \
+             {acquisitions}. A new one is not wrong, but it is unreviewed — pin its body above \
+             so it cannot grow a call into the core unnoticed."
+        );
+    }
+
+    /// The iOS Reticulum status flips stay off the main thread.
+    ///
+    /// `reticulum_status_changed` takes the global protocol mutex, and on the
+    /// false→true edge takes it again to run `flush_outbox_all` — the whole
+    /// outbox, under the mutex. Both call sites sat inside
+    /// `DispatchQueue.main.async` blocks, which made this the last iOS
+    /// transport with UniFFI on the main thread, at the cadence of a local
+    /// daemon that keeps reconnecting.
+    ///
+    /// The connect edge is pinned by *order*: the hop onto `messageQueue` must
+    /// appear before the status call, which is what puts the flip ahead of the
+    /// flush that follows it on the same serial queue.
+    ///
+    /// An earlier version of this pin required the status call to be the
+    /// literal first statement inside the hop, which is the wrong shape of
+    /// strictness: it rejected the state re-check that
+    /// [`react_native_ios_status_flips_are_ordered_against_stop`] requires
+    /// there, so the guard would have had to be edited to fix a bug it should
+    /// have caught. What it was really protecting against is a hop whose body
+    /// was emptied with the call left behind on main, and that is still caught
+    /// — the pin below spans the hop, the weak capture and the guarded call as
+    /// one string, so the call cannot leave it.
+    ///
+    /// That shape earned itself again: the guarded call has since grown an
+    /// `isConnected` term, because the same hop this test exists to require is
+    /// what let a `false` from `handleConnectionClosed` — one hop from
+    /// `connectionQueue`, against this edge's two — overtake the `true` it
+    /// answers. Spanning the condition rather than fixing the call's position
+    /// meant the pin absorbed that without being pointed anywhere new. See
+    /// [`react_native_ios_status_flips_are_ordered_against_stop`], which owns
+    /// the condition itself.
+    #[test]
+    fn react_native_reticulum_status_flips_run_off_the_main_thread() {
+        let code = rn_source_code_only("ios/ReticulumManager.swift");
+
+        // Pinned as *adjacency*, not as "a messageQueue.async appears somewhere
+        // earlier". The looser check passes against a hop whose block was
+        // emptied out with the status call left behind on main — which is
+        // exactly the regression this guards, so the pin has to span the hop
+        // and the call as one string, with nothing between them but the weak
+        // capture and the state gate that orders this against stop().
+        for (edge, pinned) in [
+            (
+                "connect",
+                "self.messageQueue.async { [weak self] in guard let self = self else { return } \
+                 self.statusFlipLock.lock() if self.isConnected && self.state != .stopping && \
+                 self.state != .stopped { try? self.protocolInstance\
+                 .reticulumStatusChanged(isConnected: true)",
+            ),
+            (
+                "disconnect",
+                "messageQueue.async { [weak self] in guard let self = self else { return } \
+                 do { try self.protocolInstance.reticulumStatusChanged(isConnected: false)",
+            ),
+        ] {
+            assert!(
+                code.contains(pinned),
+                "the {edge}-edge reticulumStatusChanged must be the first statement inside a \
+                 messageQueue.async block, not run on main: it takes the global protocol mutex, \
+                 and the connected edge flushes the entire outbox under it, which on the main \
+                 thread is the App Hang class OFF-2123 tracked. Expected to find:\n  {pinned}"
+            );
+        }
+
+        // Only the call sites inside closures, which `self.` identifies: the
+        // remaining one is `stop()`'s, which runs on the bridge queue with no
+        // dispatch of its own and is correct there, like every other
+        // manager's lifecycle FFI. A third would escape the adjacency pins
+        // above, so it has to fail here instead.
+        let closure_flips = code
+            .matches("self.protocolInstance.reticulumStatusChanged(")
+            .count();
+        assert_eq!(
+            closure_flips, 2,
+            "expected the connect and disconnect edges to be the only status flips inside \
+             closures; found {closure_flips} — if another was added, confine it the same way \
+             and pin it above"
+        );
+    }
+
     /// Wi-Fi Direct announces nothing, because it can name nobody.
     ///
     /// Both managers used to pass a transport-level string — a TCP endpoint on

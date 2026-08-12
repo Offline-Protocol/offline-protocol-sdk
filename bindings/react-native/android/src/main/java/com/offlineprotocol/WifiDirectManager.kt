@@ -11,7 +11,6 @@ import android.net.wifi.WifiManager
 import android.net.wifi.p2p.*
 import android.os.Build
 import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
 import uniffi.offline_protocol.OfflineProtocol
@@ -70,7 +69,11 @@ class WifiDirectManager(
     
     override val transportId = "wifi_direct"
     override val transportName = "WiFi Direct (P2P)"
-    override var state: TransportState = TransportState.UNAVAILABLE
+    // Volatile: written on the transport thread (updateState) but read from
+    // RN threads and the socket executor. The other three managers already
+    // declared this; this one did not, and the drain and poll both branch on
+    // it from a different thread than the lifecycle that writes it.
+    @Volatile override var state: TransportState = TransportState.UNAVAILABLE
         private set
     override var listener: TransportManagerListener? = null
 
@@ -82,6 +85,15 @@ class WifiDirectManager(
         private const val MESSAGE_POLL_INTERVAL_MS = 2000L
         private const val CONNECTION_TIMEOUT_MS = 30000L
         private const val SERVER_PORT = 8988
+        // Name of the private looper this manager confines itself to. Shared
+        // process-wide under this key, so a manager rebuilt after stop()
+        // inherits the same ordered queue.
+        private const val CONFINEMENT_THREAD = "offline-wifidirect"
+        // Messages one drain pass sends before yielding the transport looper
+        // back to the framework callbacks that share it — see
+        // [drainAndSendMessages]. A fairness budget, not a limit: the pass
+        // reposts itself when it spends the budget with the queue non-empty.
+        private const val MAX_DRAIN_BATCH = 32
         private const val SOCKET_TIMEOUT_MS = 5000
     }
 
@@ -91,14 +103,29 @@ class WifiDirectManager(
         context.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
     private var channel: WifiP2pManager.Channel? = null
     
-    // Handler for main thread operations
-    private val mainHandler = Handler(Looper.getMainLooper())
+    // The one thread this manager runs on.
+    //
+    // This used to be the app's main looper, which put two UniFFI paths on it:
+    // the 2s fallback poll, and the event-driven drain, whose `while (true)`
+    // takes the global protocol mutex once per queued message with no batch
+    // bound. The Wi-Fi P2P framework callbacks landed there too, since the
+    // channel was initialized with the main looper and the broadcast receiver
+    // registered without a scheduler — so a WIFI_P2P_STATE_CHANGED broadcast
+    // called into the protocol on the main thread as well. All of it moves
+    // here; see [TransportConfinement] for why a private looper is the same
+    // ordering primitive without the ANR exposure.
+    private val confinement = TransportConfinement.shared(CONFINEMENT_THREAD)
+    private val transportHandler = confinement.handler
     
     // Executor for socket operations
     private val socketExecutor = Executors.newCachedThreadPool()
     
-    // Server socket for receiving connections
-    private var serverSocket: ServerSocket? = null
+    // Server socket for receiving connections. Volatile because it crosses
+    // two threads with no lock: the socket executor binds and publishes it,
+    // and stopServerSocket() closes and nulls it from the transport thread —
+    // the close is what unblocks a parked accept(), so a stale read there
+    // skips the one call that ends the loop early.
+    @Volatile private var serverSocket: ServerSocket? = null
     private var serverRunning = AtomicBoolean(false)
     
     // Connected peers
@@ -108,14 +135,20 @@ class WifiDirectManager(
     // State tracking
     private var isGroupOwner = false
     private var groupOwnerAddress: String? = null
-    private var transportStartAt: Long = 0L
+
+    // True while a budget-spent drain pass has queued its own continuation.
+    // Confined to the transport thread — [drainAndSendMessages] and the block
+    // in [onMessagesAvailable] are its only reader and writer, and both run
+    // there — so a plain Boolean is enough; @Volatile would advertise a
+    // cross-thread access that must not exist.
+    private var drainContinuationQueued = false
 
     // Message polling
     private val messagePollingRunnable = object : Runnable {
         override fun run() {
             pollAndSendMessages()
             if (state == TransportState.RUNNING) {
-                mainHandler.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
+                transportHandler.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
             }
         }
     }
@@ -161,6 +194,11 @@ class WifiDirectManager(
 
     @SuppressLint("MissingPermission")
     override fun start() {
+        confinement.runSync { startUnsafe() }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startUnsafe() {
         if (state == TransportState.RUNNING) {
             throw TransportException.AlreadyRunning()
         }
@@ -175,25 +213,39 @@ class WifiDirectManager(
         ))
 
         updateState(TransportState.STARTING)
-        transportStartAt = System.currentTimeMillis()
 
-        // Initialize channel
-        channel = wifiP2pManager?.initialize(context, Looper.getMainLooper()) { 
+        // Initialize the channel on the transport looper: `srcLooper` is the
+        // thread every ActionListener / PeerListListener / ConnectionInfoListener
+        // callback is delivered on, and those callbacks share this manager's
+        // state with the drain and the poll. Passing the main looper here was
+        // what put the framework's half of this transport on the UI thread.
+        channel = wifiP2pManager?.initialize(context, confinement.looper) {
             emitDiagnostic("warning", "WiFi P2P channel disconnected")
         }
 
-        // Register broadcast receiver
+        // Register broadcast receiver. The scheduler overload delivers
+        // onReceive on the transport thread instead of main — without it a
+        // WIFI_P2P_STATE_CHANGED broadcast would still call
+        // wifiDirectStatusChanged (a UniFFI call, so the global protocol
+        // mutex) on the UI thread, which is the defect this manager is being
+        // moved off main to fix.
         val intentFilter = IntentFilter().apply {
             addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION)
             addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
             addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
             addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION)
         }
-        
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(p2pReceiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
+            context.registerReceiver(
+                p2pReceiver,
+                intentFilter,
+                null,
+                transportHandler,
+                Context.RECEIVER_NOT_EXPORTED,
+            )
         } else {
-            context.registerReceiver(p2pReceiver, intentFilter)
+            context.registerReceiver(p2pReceiver, intentFilter, null, transportHandler)
         }
 
         // Start peer discovery
@@ -212,12 +264,16 @@ class WifiDirectManager(
         }
 
         // Start message polling
-        mainHandler.post(messagePollingRunnable)
+        transportHandler.post(messagePollingRunnable)
 
         emitDiagnostic("info", "WiFi Direct transport started")
     }
 
     override fun stop() {
+        confinement.runSync { stopUnsafe() }
+    }
+
+    private fun stopUnsafe() {
         if (state != TransportState.RUNNING && state != TransportState.STARTING) {
             return
         }
@@ -225,7 +281,7 @@ class WifiDirectManager(
         updateState(TransportState.STOPPING)
 
         // Stop message polling
-        mainHandler.removeCallbacks(messagePollingRunnable)
+        transportHandler.removeCallbacks(messagePollingRunnable)
 
         // Stop peer discovery
         stopPeerDiscovery()
@@ -243,6 +299,15 @@ class WifiDirectManager(
             // Ignore - might not be registered
         }
 
+        // Release the framework channel. start() creates a fresh one every
+        // time, so an unclosed channel leaks its binder connection once per
+        // start()/stop() cycle. close() exists since API 27; below that the
+        // framework offers no release and the leak is unavoidable.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            try { channel?.close() } catch (_: Exception) {}
+        }
+        channel = null
+
         // Notify protocol
         try {
             protocol.wifiDirectStatusChanged(false)
@@ -255,14 +320,27 @@ class WifiDirectManager(
     }
 
     override fun pause() {
-        mainHandler.removeCallbacks(messagePollingRunnable)
-        stopPeerDiscovery()
+        confinement.runSync {
+            transportHandler.removeCallbacks(messagePollingRunnable)
+            stopPeerDiscovery()
+        }
     }
 
     override fun resume() {
-        if (state == TransportState.RUNNING) {
-            startPeerDiscovery()
-            mainHandler.post(messagePollingRunnable)
+        confinement.runSync {
+            if (state == TransportState.RUNNING) {
+                startPeerDiscovery()
+                // Removed before posting, which is the idiom the other three
+                // managers keep in their startMessagePolling helpers. This
+                // runnable reposts itself, and [startUnsafe] already posted one
+                // — so a resume() that does not follow a pause() (two in a row,
+                // or one against a transport that never paused) leaves two
+                // self-reposting chains running and doubles the FFI rate until
+                // the next stop(). Same-thread, so removeCallbacks is exact
+                // here rather than racing an in-flight repost.
+                transportHandler.removeCallbacks(messagePollingRunnable)
+                transportHandler.post(messagePollingRunnable)
+            }
         }
     }
 
@@ -331,11 +409,27 @@ class WifiDirectManager(
         ))
 
         if (!enabled && state == TransportState.RUNNING) {
-            // WiFi P2P was disabled
-            try {
-                protocol.wifiDirectStatusChanged(false)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error notifying protocol", e)
+            // WiFi P2P was disabled.
+            //
+            // Posted rather than called inline, even though this already runs
+            // on the transport thread. This body *is* the broadcast receiver's
+            // onReceive — [startUnsafe] registers with this handler as the
+            // scheduler — and wifiDirectStatusChanged is a UniFFI call that
+            // waits on the core's global protocol mutex, seconds of it under
+            // contention. Holding a receiver's dispatch window open for that is
+            // the hazard [drainAndSendMessages] spends a batch budget to avoid,
+            // reached through the framework's door instead of ours. Posting
+            // lets onReceive return and runs the call as the next item on the
+            // same queue, so the ordering is unchanged.
+            //
+            // Re-read inside, because a stop() fits in the gap the post opens.
+            transportHandler.post {
+                if (state != TransportState.RUNNING) return@post
+                try {
+                    protocol.wifiDirectStatusChanged(false)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error notifying protocol", e)
+                }
             }
         }
     }
@@ -414,18 +508,34 @@ class WifiDirectManager(
         serverRunning.set(true)
         
         socketExecutor.execute {
+            // Held locally as well as published, so the finally closes exactly
+            // the socket this task bound. A stop() can land before the bind
+            // publishes: it clears serverRunning, closes a still-null field
+            // and nulls it — then the bind completes, the loop guard reads
+            // false and exits immediately, and without the finally the
+            // freshly bound socket would leak with port 8988 still held,
+            // failing the next start() with BindException.
+            var server: ServerSocket? = null
             try {
-                serverSocket = ServerSocket(SERVER_PORT)
-                serverSocket?.soTimeout = SOCKET_TIMEOUT_MS
+                server = ServerSocket(SERVER_PORT)
+                server.soTimeout = SOCKET_TIMEOUT_MS
+                serverSocket = server
                 
                 emitDiagnostic("info", "Server socket started on port $SERVER_PORT")
                 
-                while (serverRunning.get()) {
+                // `serverRunning` alone is the wrong question, because it is
+                // process state and this loop is asking about *its* socket. A
+                // stop() clears the flag and closes the socket; a start()
+                // landing before this thread is next scheduled sets the flag
+                // back — and there is room for one, since stopUnsafe still has
+                // closeAllConnections, unregisterReceiver, channel.close() and
+                // a status FFI under the global mutex to get through. The
+                // accept then throws on the closed socket, the catch reads a
+                // flag that is true again, and this spins at full tilt emitting
+                // a diagnostic per turn, never reaching the finally.
+                while (serverRunning.get() && !server.isClosed) {
                     try {
-                        val client = serverSocket?.accept()
-                        if (client != null) {
-                            handleClientConnection(client)
-                        }
+                        handleClientConnection(server.accept())
                     } catch (e: java.net.SocketTimeoutException) {
                         // Expected timeout, continue
                     } catch (e: Exception) {
@@ -440,6 +550,8 @@ class WifiDirectManager(
                 emitDiagnostic("error", "Failed to start server socket", mapOf(
                     "error" to (e.message ?: "unknown")
                 ))
+            } finally {
+                try { server?.close() } catch (_: Exception) {}
             }
         }
     }
@@ -490,7 +602,7 @@ class WifiDirectManager(
                             // `wifiDirectMessageReceived` would attribute the
                             // frame to a socket string, which the core would
                             // then compare against `Message.sender` and reject.
-                            mainHandler.post {
+                            transportHandler.post {
                                 try {
                                     emitDiagnostic("warning", "Wi-Fi Direct frame dropped: sender cannot be identified", mapOf(
                                         "socket" to clientAddress,
@@ -577,21 +689,66 @@ class WifiDirectManager(
      * This is the primary send path, replacing the 100ms polling loop.
      */
     fun onMessagesAvailable() {
-        mainHandler.post { drainAndSendMessages() }
+        transportHandler.post {
+            // A pass that spent its budget has already queued a continuation,
+            // and that continuation drains whatever this callback is
+            // announcing. Without the check, every callback arriving against a
+            // deep queue starts its own self-reposting chain of
+            // [MAX_DRAIN_BATCH] mutex acquisitions apiece — several budgets
+            // running concurrently, which is precisely the looper starvation
+            // the budget exists to prevent.
+            if (drainContinuationQueued) return@post
+            drainAndSendMessages()
+        }
     }
 
     /**
      * Drains the Rust message queue and sends each message over WiFi Direct.
      * Called from onMessagesAvailable() and from the fallback polling timer.
+     *
+     * Bounded, and reposting rather than looping past the bound, because this
+     * looper is not this manager's alone. [startUnsafe] hands it to
+     * `WifiP2pManager.initialize` as the callback looper and to
+     * `registerReceiver` as the broadcast scheduler, so every P2P framework
+     * callback queues behind whatever the drain is doing — and a broadcast
+     * that does not reach `onReceive` inside Android's dispatch budget is an
+     * ANR wherever the receiver lives, main or not. `stop()` waits on this
+     * thread without a bound too ([TransportConfinement.runSync]), so an
+     * unbounded drain would put a teardown behind an arbitrary number of
+     * mutex acquisitions.
+     *
+     * Each iteration takes the global protocol mutex once, so the bound is a
+     * fairness budget rather than a correctness one: a queue deeper than
+     * [MAX_DRAIN_BATCH] finishes on the next posted pass, after everything
+     * else sharing this looper has had its turn.
+     *
+     * There is at most one such chain at a time — [drainContinuationQueued] is
+     * what makes the budget mean anything, since N concurrent chains spend N
+     * budgets between the framework callbacks they were meant to make room for.
      */
     private fun drainAndSendMessages() {
+        // Reached the front of the queue, so whatever continuation was pending
+        // is this one. Cleared here rather than at each exit so that every way
+        // out leaves it false — the stopped-transport return, the drained
+        // return, a throwing send — and only the one path that actually queues
+        // a successor sets it again. A chain that ends because the transport
+        // stopped must not leave the flag suppressing the callbacks that the
+        // next start() delivers.
+        drainContinuationQueued = false
+
         if (state != TransportState.RUNNING || connectedPeers.isEmpty()) return
 
         try {
-            while (true) {
-                val message = protocol.wifiDirectGetNextMessage() ?: break
+            var sent = 0
+            while (sent < MAX_DRAIN_BATCH) {
+                val message = protocol.wifiDirectGetNextMessage() ?: return
                 sendMessage(message.recipientId, message.data.map { it.toByte() }.toByteArray())
+                sent++
             }
+            // Budget spent with the queue still non-empty: yield the looper and
+            // come back, rather than starving the callbacks that share it.
+            drainContinuationQueued = true
+            transportHandler.post { drainAndSendMessages() }
         } catch (e: Exception) {
             emitDiagnostic("error", "Error in drainAndSendMessages", mapOf(
                 "error" to (e.message ?: "unknown")

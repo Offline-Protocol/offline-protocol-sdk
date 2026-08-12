@@ -1166,6 +1166,10 @@ class OfflineProtocolModule: RCTEventEmitter {
         print("[OfflineProtocolModule] Internet Manager stopped")
         emitDiagnostic(level: "info", message: "Internet manager stopped")
 
+        // Stop Wi-Fi Direct manager
+        wifiDirectManager?.stop()
+        emitDiagnostic(level: "info", message: "WiFi Direct manager stopped")
+
         // Stop Reticulum manager
         reticulumManager?.stop()
         print("[OfflineProtocolModule] Reticulum Manager stopped")
@@ -1678,6 +1682,11 @@ class OfflineProtocolModule: RCTEventEmitter {
         bleManager = nil
         internetManager?.stop()
         internetManager = nil
+        // Wi-Fi Direct was missing here and in stop(): only deinit stopped it,
+        // so a destroyed module could leave a live drain path holding the
+        // protocol instance it was told to release.
+        wifiDirectManager?.stop()
+        wifiDirectManager = nil
         reticulumManager?.stop()
         reticulumManager = nil
         nostrManager?.stop()
@@ -4318,7 +4327,25 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// bridge — the tick itself is short, and the timeout is far longer than one
     /// takes. Safe from any other queue: `destroy` runs on the bridge queue,
     /// never on `processQueue`.
+    ///
+    /// That last sentence is the load-bearing one, so it is checked rather
+    /// than assumed. This blocks the caller for up to two seconds behind a
+    /// queue whose handler is `process()` plus a `receiveMessage()` drain —
+    /// both of which take the core's global protocol mutex. On the bridge
+    /// queue that is a stall; on main it is an App Hang of exactly the kind
+    /// this bridge keeps having to remove.
+    ///
+    /// Debug-only deliberately. `dispatchPrecondition` is `precondition`,
+    /// which traps under `-O` as well as `-Onone` — only `-Ounchecked` elides
+    /// it, and React Native's Release configuration is `-O`. Left unguarded it
+    /// would turn a `destroy` that ever reached main into a hard crash in a
+    /// shipped app: a two-second stall traded for the teardown abort class
+    /// this bridge has already shipped once. The check belongs where it fails
+    /// the developer who introduces the call, not the user.
     private func drainProcessQueue() {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(.main))
+        #endif
         let drained = DispatchSemaphore(value: 0)
         processQueue.async { drained.signal() }
         _ = drained.wait(timeout: .now() + 2.0)
