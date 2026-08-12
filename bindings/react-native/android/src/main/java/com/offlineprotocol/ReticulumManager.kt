@@ -44,6 +44,8 @@ class ReticulumManager(
         // process-wide under this key, so a manager rebuilt after stop()
         // inherits the same ordered queue.
         private const val CONFINEMENT_THREAD = "offline-reticulum"
+        // Name of the second looper, for blocking socket work only.
+        private const val IO_THREAD = "offline-reticulum-io"
     }
 
     // MARK: - Properties
@@ -53,28 +55,43 @@ class ReticulumManager(
     private var autoReconnect = true
     private var maxReconnectAttempts = 0 // 0 = infinite
 
-    // The one thread this manager runs on.
+    // The thread this manager's state, lifecycle and FFI run on.
     //
-    // This used to be two: a per-session "ReticulumIO" HandlerThread for
-    // polling and TCP writes, and the app's main looper for state updates and
-    // the status flips. The split is what left OFF-2123 alive here — the poll
-    // was already off main, but `reticulumStatusChanged` is a UniFFI call and
-    // it ran on main at every connect and disconnect, which for a daemon that
-    // is down means once per rung of the 1s→30s backoff ladder.
+    // This used to be the app's main looper, which is what left OFF-2123 alive
+    // here — the poll was already off main, but `reticulumStatusChanged` is a
+    // UniFFI call and it ran on main at every connect and disconnect, which
+    // for a daemon that is down means once per rung of the 1s→30s backoff
+    // ladder. See [TransportConfinement].
     //
-    // Collapsing both onto one confinement removes the FFI from main and the
-    // per-session thread lifecycle with it: nothing has to decide whether
-    // `ioHandler` is non-null before posting, and no reconnect can race a
-    // quitSafely() that already ran. See [TransportConfinement].
+    // Lifecycle callers block on this thread ([runConfinedSync]), and a
+    // background caller waits without a bound on purpose, so nothing posted
+    // here may block for longer than the protocol mutex does — which is why
+    // the socket work lives on [ioHandler] and not here.
     private val confinement = TransportConfinement.shared(CONFINEMENT_THREAD)
     private val transportHandler = confinement.handler
 
-    // Message polling runnable — runs on the transport thread
+    // The thread the blocking socket work runs on: connecting (up to
+    // CONNECTION_TIMEOUT_MS), and the TCP writes, which have no timeout at all
+    // — a daemon that stops reading blocks a write until the socket is closed.
+    //
+    // Separate from [confinement] because those durations are bounded by the
+    // network rather than by us, and `stop()` waits on that thread unbounded:
+    // sharing one would let an unreachable host park a stop() (and the RN
+    // bridge thread behind it) for a minute, or a wedged daemon park it
+    // indefinitely. Both are loopers rather than the old per-session
+    // HandlerThread, so neither can be quit out from under a reconnect.
+    //
+    // Ordered, not pooled: this is one TCP stream and its writes must stay in
+    // order. `stop()` closes the socket from [confinement], which is what
+    // unblocks an in-flight write here rather than waiting for it.
+    private val ioHandler = TransportConfinement.shared(IO_THREAD).handler
+
+    // Message polling runnable — runs on the IO thread
     private val messagePollingRunnable = object : Runnable {
         override fun run() {
             pollAndSendMessages()
             if (state == TransportState.RUNNING && isConnected.get()) {
-                transportHandler.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
+                ioHandler.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
             }
         }
     }
@@ -238,7 +255,7 @@ class ReticulumManager(
      * This is the primary send path, replacing timer-based polling.
      */
     fun onMessagesAvailable() {
-        transportHandler.post { pollAndSendMessages() }
+        ioHandler.post { pollAndSendMessages() }
     }
 
     // MARK: - Connection Management
@@ -254,7 +271,7 @@ class ReticulumManager(
         ))
 
         // Connect on the IO thread to avoid blocking and prevent unmanaged threads
-        transportHandler.post {
+        ioHandler.post {
             try {
                 val sock = Socket()
                 sock.connect(
@@ -340,7 +357,7 @@ class ReticulumManager(
 
             // Start polling + immediately flush queued messages
             startMessagePolling()
-            transportHandler.post { pollAndSendMessages() }
+            ioHandler.post { pollAndSendMessages() }
         }
     }
 
@@ -498,11 +515,11 @@ class ReticulumManager(
 
     private fun startMessagePolling() {
         stopMessagePolling()
-        transportHandler.post(messagePollingRunnable)
+        ioHandler.post(messagePollingRunnable)
     }
 
     private fun stopMessagePolling() {
-        transportHandler.removeCallbacks(messagePollingRunnable)
+        ioHandler.removeCallbacks(messagePollingRunnable)
     }
 
     private fun pollAndSendMessages() {

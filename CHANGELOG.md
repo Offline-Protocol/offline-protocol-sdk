@@ -280,6 +280,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   instance the caller had released; and that manager's session and peer map
   were read and written from three threads without synchronisation.
 
+- **A Reticulum daemon that was unreachable or had stopped reading could stall
+  `stop()`.** Its connect (up to 60s) and its TCP writes (no timeout at all)
+  shared the thread that lifecycle calls wait on, so tearing the transport down
+  queued behind them — and with it the React Native bridge thread. The blocking
+  socket work now has its own thread, and `stop()` closes the socket rather
+  than waiting for whatever is on it.
+
 - **A relay-delivered group message could be lost silently while the sender saw
   it delivered.** The relay's group path names senders by relay-account
   username, while the MLS credential inside the ciphertext is the sender's

@@ -10909,6 +10909,47 @@ mod tests {
         }
     }
 
+    /// Nothing that blocks on the network shares the thread `stop()` waits on.
+    ///
+    /// A background caller's `runSync` wait is deliberately unbounded — it is
+    /// the caller that needs the stop to have actually finished. That is safe
+    /// only while every delay on the confinement thread is the protocol mutex,
+    /// which some other thread is always making progress against. Reticulum's
+    /// socket work is not that: `connect` blocks for up to `CONNECTION_TIMEOUT_MS`
+    /// (60s) against an unreachable host, and a TCP write has no timeout at all
+    /// against a daemon that stops reading. Sharing one thread would let either
+    /// park a `stop()` — and the RN bridge thread behind it — so the blocking
+    /// half lives on its own looper.
+    #[test]
+    fn react_native_reticulum_socket_work_is_off_the_lifecycle_thread() {
+        let code =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/ReticulumManager.kt");
+
+        // Pinned by adjacency, like the iOS status-flip guard below: "an
+        // ioHandler.post appears somewhere" is satisfied by a manager that
+        // still opens its socket on the lifecycle thread and posts something
+        // unrelated elsewhere, which is precisely the regression.
+        for (what, pinned) in [
+            ("the blocking connect", "ioHandler.post { try { val sock = Socket()"),
+            (
+                "the send/poll loop",
+                "private fun startMessagePolling() { stopMessagePolling() \
+                 ioHandler.post(messagePollingRunnable) }",
+            ),
+            (
+                "cancelling the poll",
+                "private fun stopMessagePolling() { ioHandler.removeCallbacks(messagePollingRunnable) }",
+            ),
+        ] {
+            assert!(
+                code.contains(pinned),
+                "{what} must run on ioHandler, not the lifecycle confinement: a stop() waits on \
+                 that thread without a bound, so an unreachable daemon would park it for a \
+                 minute and a wedged one indefinitely. Expected to find:\n  {pinned}"
+            );
+        }
+    }
+
     /// The iOS Reticulum status flips stay off the main thread.
     ///
     /// `reticulum_status_changed` takes the global protocol mutex, and on the
