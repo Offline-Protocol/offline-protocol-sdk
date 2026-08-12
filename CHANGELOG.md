@@ -273,10 +273,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Wi-Fi Direct explicitly, since its fallback would otherwise trickle a backlog
   out at one message every two seconds.
 
-  Two of the three are live today. `WifiDirectTransport` is not registered by
-  the bindings layer, so its managers cannot resolve a transport to drain and
-  the fix there is forward-looking; the behaviour this changes in a shipped app
-  is Nostr's and Reticulum's.
+- **The iOS bridge now pauses and resumes the Wi-Fi Direct manager.** It held
+  one and drove its full lifecycle everywhere else, but omitted it from the
+  pause/resume fan-out that covers the other four transports — so a
+  backgrounded app went on browsing for peers over MultipeerConnectivity, and
+  the manager's pause handling could never engage. The Android bridge already
+  paused all five.
+
+  Two of the three transports are live today. `WifiDirectTransport` is not
+  registered by the bindings layer, so its managers cannot resolve a transport
+  to drain and the send-path half of the fix there is forward-looking; the send
+  behaviour this changes in a shipped app is Nostr's and Reticulum's. The iOS
+  browsing leak above is live now.
 
 - **The remaining transports no longer run protocol calls on the app's main
   thread.** Completing what the BLE fixes started: on Android all four

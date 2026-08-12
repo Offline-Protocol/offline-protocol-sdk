@@ -12073,6 +12073,199 @@ mod tests {
         }
     }
 
+    /// Every transport manager the bridge holds is on the pause/resume fan-out.
+    ///
+    /// The obligation the pause guards above structurally cannot state. They
+    /// pin the *bodies* of `pause()` and `resume()`; a body pin is green
+    /// whether or not anything calls the function. iOS held a
+    /// `WifiDirectManager`, gave it an `isPaused` flag, a drain gate, a
+    /// per-iteration re-read and a resume drain — and never called either
+    /// method, so the flag could not become true, every gate written against
+    /// it was dead, and all three of that manager's pins were vacuous. Android
+    /// had the same five managers and paused all five.
+    ///
+    /// So the set is derived from what each module *holds* rather than listed:
+    /// a field of a manager type is a manager the module can pause, and the
+    /// invariant is that both lifecycle methods name every one of them. Adding
+    /// a sixth transport puts it inside this the moment the field is declared,
+    /// which is the same reason
+    /// [react_native_transports_do_not_run_on_the_main_looper] derives its set.
+    ///
+    /// Scoped to the two lifecycle methods by slicing the module source between
+    /// the `pause` entry point and the end of `resume`, so an unrelated
+    /// `nostrManager?.stop()` elsewhere in a 4000-line file cannot satisfy it.
+    #[test]
+    fn react_native_bridges_pause_and_resume_every_transport_manager() {
+        for (rel, manager_types, start_marker) in [
+            (
+                "ios/OfflineProtocolModule.swift",
+                rn_ios_transport_manager_types(),
+                "@objc func pause(",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+                rn_android_transport_manager_types(),
+                "fun pause(promise: Promise)",
+            ),
+        ] {
+            let code = rn_source_code_only(rel);
+
+            // Both modules end `resume` by rejecting with this code, so it is
+            // the first thing past the pair on either platform.
+            let start = code.find(start_marker).unwrap_or_else(|| {
+                panic!("{rel}: cannot find the pause entry point {start_marker}")
+            });
+            let end = code[start..]
+                .find("ERROR_RESUME")
+                .map(|offset| start + offset)
+                .unwrap_or_else(|| panic!("{rel}: cannot find the end of resume (ERROR_RESUME)"));
+            let lifecycle = &code[start..end];
+
+            // The slice has to hold both methods before its contents mean
+            // anything — markers that stopped bracketing the pair would leave
+            // every assertion below passing against the wrong text.
+            assert!(
+                lifecycle.contains("resume"),
+                "{rel}: the pause..resume slice found no resume — the markers no longer bracket \
+                 the two lifecycle methods, so this guard is vacuous"
+            );
+
+            let mut held = 0;
+            for ty in &manager_types {
+                // A manager type the module does not hold is a manager it
+                // cannot pause, and that is legitimate — the iOS module has no
+                // field for a manager it never builds. The obligation attaches
+                // to the field, not to the type.
+                let Some(field) = rn_module_field_of_type(&code, ty) else {
+                    continue;
+                };
+                held += 1;
+
+                for method in ["pause", "resume"] {
+                    let expected = format!("{field}?.{method}()");
+                    assert!(
+                        lifecycle.contains(&expected),
+                        "{rel}: the module holds `{field}: {ty}?` but its lifecycle fan-out never \
+                         calls {expected}. A manager missing here is not paused-but-dormant — its \
+                         isPaused can never become true, so every gate written against that flag \
+                         is dead code and every source pin over its pause() body is vacuous. Add \
+                         it to both pause() and resume(), or drop the field"
+                    );
+                }
+            }
+
+            // Non-vacuity floor. The derivation above is two greps deep — the
+            // manager-type scan and the field scan — and either coming back
+            // empty would silently assert nothing. Five is what both modules
+            // hold today; a sixth transport raises it deliberately.
+            assert_eq!(
+                held, 5,
+                "{rel}: derived {held} held transport managers from {manager_types:?}, expected 5 \
+                 — either the manager class declarations or the `private var name: Type?` field \
+                 form changed, and the derivation is now blind"
+            );
+        }
+    }
+
+    /// The Android transport-manager *type* names, derived from the same scan
+    /// [react_native_transports_do_not_run_on_the_main_looper] uses, so the two
+    /// invariants can never disagree about what a manager is.
+    fn rn_android_transport_manager_types() -> Vec<String> {
+        rn_android_transport_managers()
+            .into_iter()
+            .map(|(rel, _)| {
+                rel.rsplit('/')
+                    .next()
+                    .and_then(|file| file.strip_suffix(".kt"))
+                    .expect("a .kt manager path")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The iOS transport-manager type names, derived the same way its Android
+    /// counterpart is: every file that declares itself a `TransportManager`.
+    ///
+    /// The class name is taken from the file stem and then *checked* against
+    /// the declaration rather than assumed, so a file whose class stops
+    /// matching its name fails here instead of quietly dropping out of the
+    /// derived set.
+    fn rn_ios_transport_manager_types() -> Vec<String> {
+        rn_ios_swift_sources()
+            .into_iter()
+            .filter_map(|(rel, code)| {
+                let stem = rel.rsplit('/').next()?.strip_suffix(".swift")?;
+                let decl = format!("class {stem}: NSObject, TransportManager {{");
+                code.contains(&decl).then(|| stem.to_string())
+            })
+            .collect()
+    }
+
+    /// The field a module holds a `ty` in, if it holds one.
+    ///
+    /// Matched as a whole `private var <name>: <ty>?` declaration rather than
+    /// on the type alone, because both modules also carry `weak var` captures
+    /// of the same types inside their transport-callback shims — taking the
+    /// first mention of the type would find one of those instead.
+    fn rn_module_field_of_type(module_code: &str, ty: &str) -> Option<String> {
+        let needle = format!(": {ty}?");
+        module_code.match_indices(&needle).find_map(|(at, _)| {
+            let before = &module_code[..at];
+            let field: String = before
+                .chars()
+                .rev()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            (!field.is_empty() && before.ends_with(&format!("private var {field}")))
+                .then_some(field)
+        })
+    }
+
+    /// Every hand-written `.swift` file under the React Native iOS directory,
+    /// as (path relative to `ios/`, comment-stripped source), sorted by path.
+    ///
+    /// `Generated`, `libs` and `tests` are skipped: the first two are UniFFI
+    /// output and vendored code rather than anything hand-written here, and
+    /// both are large enough that reading them on every call would be the
+    /// dominant cost of the suite. Which files are hand-written is governed
+    /// separately by [react_native_podspec_ships_every_hand_written_ios_source].
+    fn rn_ios_swift_sources() -> Vec<(String, String)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bindings/react-native/ios");
+
+        fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<(String, String)>) {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+            for entry in entries {
+                let entry = entry.expect("directory entry");
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if matches!(name.as_str(), "Generated" | "libs" | "tests") {
+                    continue;
+                }
+                let rel = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, &rel, out);
+                } else if name.ends_with(".swift") {
+                    let code = rn_source_code_only(&format!("ios/{rel}"));
+                    out.push((rel, code));
+                }
+            }
+        }
+
+        let mut found = Vec::new();
+        walk(&dir, "", &mut found);
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
+    }
+
     /// The iOS half of the same invariant: nothing calls into the core while
     /// holding `WifiDirectManager`'s `stateLock`.
     ///
