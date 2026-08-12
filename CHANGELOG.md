@@ -347,6 +347,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   on API 27+. Both pre-existing, and low real-world impact while this
   transport stays unregistered.
 
+- **Android: Nostr's reconnect bookkeeping was three plain maps crossed by two
+  threads.** OkHttp's reader thread reset a relay's attempt counter and delay
+  on every successful connect while the transport thread structurally modified
+  the same maps scheduling reconnects — a plain `HashMap` read racing a resize
+  is the classic corruption case. All three are `ConcurrentHashMap` now. Also
+  fixed while there: `stop()` never shut down the OkHttp dispatcher (the relay
+  manager already did), so its threads outlived every stop/start cycle.
+
 - **A relay-delivered group message could be lost silently while the sender saw
   it delivered.** The relay's group path names senders by relay-account
   username, while the MLS credential inside the ciphertext is the sender's

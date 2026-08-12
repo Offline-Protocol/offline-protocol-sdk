@@ -11,6 +11,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import uniffi.offline_protocol.OfflineProtocol
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -122,9 +123,14 @@ class NostrManager(
 
     // Connection state
     private val isConnected = AtomicBoolean(false)
-    private val reconnectAttempts = mutableMapOf<String, AtomicInteger>()
-    private val currentReconnectDelay = mutableMapOf<String, AtomicLong>()
-    private val reconnectRunnables = mutableMapOf<String, Runnable>()
+    // Concurrent, not plain: handleRelayConnected reads these on OkHttp's
+    // reader thread while scheduleReconnect's getOrPut structurally modifies
+    // them on the transport thread. A plain HashMap read racing a resize is
+    // the classic corruption/endless-probe case — the atomics inside the
+    // values only cover the counter, not the map that holds it.
+    private val reconnectAttempts = ConcurrentHashMap<String, AtomicInteger>()
+    private val currentReconnectDelay = ConcurrentHashMap<String, AtomicLong>()
+    private val reconnectRunnables = ConcurrentHashMap<String, Runnable>()
 
     // Pending relay confirmations: Nostr event_id → protocol message_id.
     // Populated when a WebSocket send succeeds; removed on relay ["OK", ...].
@@ -291,6 +297,12 @@ class NostrManager(
 
         // Close all WebSocket connections
         disconnectAll()
+
+        // Shut down OkHttp's dispatcher like InternetManager does — start()
+        // builds a fresh client, so a stop that leaves the executor alive
+        // leaks its threads once per stop()/start() cycle.
+        okHttpClient?.dispatcher?.executorService?.shutdown()
+        okHttpClient = null
 
         // The transport thread is process-wide and outlives this stop() — see
         // [TransportConfinement]. Quitting it here is what the per-session
