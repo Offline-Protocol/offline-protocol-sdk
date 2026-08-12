@@ -358,6 +358,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   resolved. Recoverable, since the following attempt corrects the status and
   the core retries the sends, but self-inflicted.
 
+  Two of those checks sit inside the lock that owns what they guard, rather
+  than beside it, because a check next to the write it protects is still a
+  check followed by an act on another thread. The consequential one was the
+  connected flags: a teardown landing between the check and the write was
+  simply overwritten, leaving the transport marked connected against a socket
+  that teardown had already closed — and since a connect refuses to start while
+  that flag is set, the next `start()` returned having done nothing until the
+  orphaned reader errored and the reconnect ladder picked it up.
+
+  Tearing down now also ends a connect that has nothing to publish yet. Only
+  closing the socket ends a blocked connect — it ignores interruption — and the
+  thread it runs on is shared and outlives the session, so an attempt left
+  running against an unreachable daemon held the *next* session's connect
+  behind it for the rest of the 60s timeout. The per-session thread this
+  replaced never had that coupling: it was abandoned mid-call and the restart
+  got a fresh one.
+
 - **Android: Wi-Fi Direct teardown could strand port 8988, and every session
   leaked a framework channel.** A `stop()` racing the server socket's bind
   closed a still-null field; the bind then completed, the accept loop saw the

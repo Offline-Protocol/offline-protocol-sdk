@@ -10951,8 +10951,13 @@ mod tests {
         // unrelated elsewhere, which is precisely the regression.
         for (what, pinned) in [
             (
+                // Spanning through to `sock.connect(` rather than stopping at
+                // the post: this test is about where the *blocking* call runs,
+                // and a post whose body no longer contains it is exactly the
+                // regression.
                 "the blocking connect",
-                "ioHandler.post { try { val sock = Socket()",
+                "ioHandler.post { val sock = Socket() \
+                 synchronized(this) { pendingConnectSocket = sock } try { sock.connect(",
             ),
             (
                 "the send/poll loop",
@@ -11027,8 +11032,23 @@ mod tests {
     /// the outbox straight into `reticulumSendFailed` — recoverable, since the
     /// next attempt's result corrects the status and the core retries the
     /// sends, but a self-inflicted burst of failed sends and a DORS score to
-    /// match. The two added checks are pinned by what *follows* them, because
-    /// the two socket checkpoints are textually identical.
+    /// match.
+    ///
+    /// **A check beside the write it guards is still a check-then-act.** The
+    /// first fix put the two extra checks one statement above the publish and
+    /// the claim, which narrows the window without closing it: the check and
+    /// the write run on the IO thread while `disconnect` runs on the transport
+    /// thread, so a teardown still fits between them and is simply overwritten.
+    /// The claim was the consequential half — the announcement refuses either
+    /// way, so nothing is announced, but `isConnected` is left true against a
+    /// closed socket with no path that clears it, and `connect`'s own guard
+    /// reads exactly that flag. The next `start()` therefore returns having
+    /// done nothing, until the orphaned reader errors and the ladder recovers.
+    /// Both checks now sit *inside* the `synchronized(this)` that owns the
+    /// fields, which is the same lock `disconnect` clears them in, so claim and
+    /// clear are ordered rather than racing. The pins spell out the whole
+    /// locked block for that reason: a check hoisted back out of it would
+    /// satisfy any looser form.
     ///
     /// **A failed connect used to be terminal.** The catch cleared
     /// `isConnecting` before handing off, and `handleConnectionClosed` decides
@@ -11048,14 +11068,14 @@ mod tests {
 
         for (what, pinned) in [
             (
-                "stamping the attempt before posting it",
-                "val generation = connectGeneration.incrementAndGet() ioHandler.post { try { \
-                 val sock = Socket()",
+                "stamping the attempt, and publishing its socket before it blocks",
+                "val generation = connectGeneration.incrementAndGet() ioHandler.post { \
+                 val sock = Socket() synchronized(this) { pendingConnectSocket = sock } try {",
             ),
             (
-                "retiring it on teardown",
-                "isConnected.set(false) isConnecting.set(false) \
-                 connectGeneration.incrementAndGet()",
+                "retiring it on teardown, under the lock the claim takes",
+                "private fun disconnect() { synchronized(this) { isConnected.set(false) \
+                 isConnecting.set(false) connectGeneration.incrementAndGet()",
             ),
             (
                 "checking it before publishing the socket",
@@ -11063,10 +11083,21 @@ mod tests {
                  catch (_: Exception) {} return@post } sock.soTimeout = 0",
             ),
             (
-                "checking it again before claiming the flags",
-                "if (connectGeneration.get() != generation) { try { sock.close() } \
-                 catch (_: Exception) {} return@post } handleConnectionOpened(generation) \
-                 startReceiveLoop(r)",
+                "checking it as part of the publish itself",
+                "var published = false synchronized(this) { \
+                 if (connectGeneration.get() == generation) { socket = sock writer = w \
+                 reader = r published = true } } if (!published) { try { sock.close() } \
+                 catch (_: Exception) {} return@post }",
+            ),
+            (
+                "checking it as part of the flag claim itself",
+                "private fun handleConnectionOpened(generation: Int): Boolean { \
+                 synchronized(this) { if (connectGeneration.get() != generation) return false \
+                 isConnected.set(true) isConnecting.set(false) }",
+            ),
+            (
+                "honouring a refused claim at the call site",
+                "if (!handleConnectionOpened(generation)) return@post startReceiveLoop(r)",
             ),
             (
                 "checking it inside the announcement block",
@@ -11091,24 +11122,60 @@ mod tests {
             );
         }
 
-        // Two of the pins above are textually identical (both socket
-        // checkpoints close `sock` and return), so `contains` alone cannot
-        // tell four checks from three — each pin is disambiguated by what
-        // follows it, and this counts the whole family. Dropping any one of
-        // them reopens a boundary: the pre-publish check stops a retired
-        // attempt installing its socket over the current session's, the
-        // pre-handoff check stops it claiming `isConnected` against a socket
-        // `disconnect` already closed, and the announcement check is the only
-        // thing standing between a stop-then-restart and a `RUNNING` state
-        // with a null writer.
+        // Each pin above is disambiguated by what surrounds it, and this counts
+        // the whole family — the backstop for a check deleted somewhere the
+        // individual pins do not reach. Dropping any one reopens a boundary:
+        // the first stops a retired attempt building streams it will discard,
+        // the publish check stops it installing its socket over the current
+        // session's, the claim check stops it setting `isConnected` true
+        // against a socket `disconnect` already closed, the announcement check
+        // is the only thing standing between a stop-then-restart and a
+        // `RUNNING` state with a null writer, and the last stops a superseded
+        // failure firing the ladder against the session that replaced it.
+        //
+        // Two of them are *inside* the lock rather than beside it, and that is
+        // load-bearing rather than tidy. Checked outside, each is a
+        // read-then-write with a teardown free to land in the middle: the
+        // publish would strand a socket in a field `disconnect` has already
+        // passed, and the claim would put `isConnected` back to true after the
+        // teardown cleared it — leaving a flag nothing clears, which
+        // `connect`'s own guard then reads to refuse the next `start()`.
         let generation_checks = code.matches("connectGeneration.get()").count();
         assert_eq!(
-            generation_checks, 4,
-            "ReticulumManager.kt: expected the connect generation to be consulted at all four \
-             points a retired attempt can still act — before publishing the socket, before \
-             claiming the flags, inside the announcement block, and before reporting a failure; \
-             found {generation_checks}."
+            generation_checks, 5,
+            "ReticulumManager.kt: expected the connect generation to be consulted at all five \
+             points a retired attempt can still act — before building the streams, inside the \
+             publish, inside the flag claim, inside the announcement block, and before reporting \
+             a failure; found {generation_checks}."
         );
+
+        // Only a close ends a blocked `Socket.connect` — it has no
+        // interruption point and ignores `Thread.interrupt` — and this looper
+        // is shared and never quits, so an attempt left running against an
+        // unreachable host holds the *next* session's connect behind it for the
+        // rest of CONNECTION_TIMEOUT_MS. The per-session thread this replaced
+        // had no such coupling: it was abandoned mid-call and the restart got a
+        // fresh one, so the handle is what buys that property back.
+        for (what, pinned) in [
+            (
+                "the teardown closing it",
+                "try { pendingConnectSocket?.close() } catch (_: Exception) {} \
+                 pendingConnectSocket = null",
+            ),
+            (
+                "the attempt releasing it by identity on every exit",
+                "} finally { synchronized(this) { if (pendingConnectSocket === sock) \
+                 pendingConnectSocket = null } }",
+            ),
+        ] {
+            assert!(
+                code.contains(pinned),
+                "ReticulumManager.kt: {what} is what lets a stop() end a connect that has nothing \
+                 published yet. Without it a stop/start against an unreachable daemon leaves the \
+                 restart's connect queued behind the blocked one on the shared IO looper. \
+                 Expected to find:\n  {pinned}"
+            );
+        }
 
         // The two legitimate owners: `disconnect`, ending a session, and
         // `handleConnectionOpened`, promoting one. A third is the regression —

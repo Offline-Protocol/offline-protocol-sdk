@@ -91,7 +91,12 @@ class ReticulumManager(
     //
     // Ordered, not pooled: this is one TCP stream and its writes must stay in
     // order. `stop()` closes the socket from [confinement], which is what
-    // unblocks an in-flight write here rather than waiting for it.
+    // unblocks an in-flight write here rather than waiting for it — and the
+    // same applies to a connect that has not published one yet, which is what
+    // [pendingConnectSocket] is for. Both matter more now than they did when
+    // this was a per-session thread: that thread was abandoned mid-call and the
+    // restart got a fresh one, whereas here the next session's work queues
+    // behind whatever is still blocked.
     private val ioHandler = TransportConfinement.shared(IO_THREAD).handler
 
     // Message polling runnable — runs on the IO thread
@@ -113,6 +118,20 @@ class ReticulumManager(
     // IO thread, [disconnect] interrupts and clears it from the transport
     // thread. It was the one field in this group left outside the lock.
     private var receiveThread: Thread? = null
+
+    // The socket a connect attempt is blocked inside, before it has anything
+    // to publish. Same lock as the fields above, and for a sharper reason than
+    // visibility: closing it is the only way to end a `Socket.connect` early —
+    // it has no interruption point, ignores `Thread.interrupt`, and runs for
+    // up to CONNECTION_TIMEOUT_MS (60s) against a host dropping SYNs.
+    //
+    // That is a teardown obligation because [ioHandler] is shared and never
+    // quits. A `stop()` does not wait on it, so the stop itself is fine — but
+    // the *restart* posts its connect behind the one still blocked, so without
+    // this a stop/start cycle against an unreachable daemon stalls for the rest
+    // of the timeout. The per-session HandlerThread this replaced never had
+    // that problem: it was left blocked and the new session got a new thread.
+    private var pendingConnectSocket: Socket? = null
 
     // Configuration state
     private val isConfigured = AtomicBoolean(false)
@@ -294,10 +313,20 @@ class ReticulumManager(
      * Costs nothing extra: the module's caller is React Native's
      * native-modules thread, so the wait is the unbounded background one
      * ([TransportConfinement.runSync]) that `stop()` already takes from the
-     * same place. The actual `removeCallbacks` still lands on [ioHandler] a
-     * hop later — see [startMessagePolling] — which is unchanged and correct;
-     * what is now guaranteed is that the cancel has been *issued* before the
-     * core is paused.
+     * same place.
+     *
+     * What this guarantees is issuance, not quiescence, and the difference is
+     * worth stating because it is weaker than [InternetManager.pause]'s. The
+     * `removeCallbacks` lands on [ioHandler] a hop later (see
+     * [startMessagePolling]), and that looper can be inside a connect for up to
+     * CONNECTION_TIMEOUT_MS — so a poll tick already queued behind it can still
+     * re-enter UniFFI after the core has been paused. Internet has no such gap
+     * because its pause and its poll share one thread. Closing it here would
+     * mean waiting on the socket thread, which is exactly what [ioHandler]
+     * exists to stop the lifecycle doing. The residual is bounded and benign:
+     * the core tolerates a poll against a paused protocol (it hands back
+     * nothing), and `stop()` — the path that must actually quiesce — closes the
+     * socket rather than waiting for it.
      */
     override fun pause() {
         runConfinedSync { stopMessagePolling() }
@@ -335,8 +364,13 @@ class ReticulumManager(
 
         // Connect on the IO thread to avoid blocking and prevent unmanaged threads
         ioHandler.post {
+            val sock = Socket()
+            // Published before the blocking call rather than after it, because
+            // this is the only window in which the socket exists and nothing
+            // else can reach it — and a teardown needs to reach it to end the
+            // connect. See [pendingConnectSocket].
+            synchronized(this) { pendingConnectSocket = sock }
             try {
-                val sock = Socket()
                 sock.connect(
                     java.net.InetSocketAddress(daemonHost, daemonPort),
                     CONNECTION_TIMEOUT_MS
@@ -357,10 +391,26 @@ class ReticulumManager(
                 val w = PrintWriter(sock.getOutputStream(), true)
                 val r = BufferedReader(InputStreamReader(sock.getInputStream()))
 
+                // Second checkpoint, folded into the publish rather than
+                // standing beside it: the check and the write have to be one
+                // step under the lock that owns these fields, or a teardown
+                // landing between them installs this socket over a session
+                // that has already been torn down — the field then holds a
+                // socket `disconnect` will never see again. Inside the lock,
+                // the teardown either wins (this closes what it opened) or
+                // loses (it finds the socket published and closes it there).
+                var published = false
                 synchronized(this) {
-                    socket = sock
-                    writer = w
-                    reader = r
+                    if (connectGeneration.get() == generation) {
+                        socket = sock
+                        writer = w
+                        reader = r
+                        published = true
+                    }
+                }
+                if (!published) {
+                    try { sock.close() } catch (_: Exception) {}
+                    return@post
                 }
 
                 // Send identification
@@ -370,22 +420,14 @@ class ReticulumManager(
                 }
                 w.println(identifyMsg.toString())
 
-                // Second checkpoint, for the window the first cannot cover:
-                // publishing the socket, sending Identify and claiming the
-                // flags are not one step, and a stop() — or a stop and a
-                // restart — fits between them. Claiming `isConnected` past
-                // that point leaves it true against a socket `disconnect`
-                // has already closed, and the announcement's own gate cannot
-                // see it: after a restart the state is legitimately STARTING
-                // again, which is the case [connectGeneration] exists for.
-                // Skips [startReceiveLoop] too — a reader for a retired
-                // socket has nothing to read.
-                if (connectGeneration.get() != generation) {
-                    try { sock.close() } catch (_: Exception) {}
-                    return@post
-                }
-
-                handleConnectionOpened(generation)
+                // Third checkpoint, inside [handleConnectionOpened]: sending
+                // Identify sits between the publish and the flag claim, so a
+                // stop() — or a stop and a restart — fits there too. It
+                // refuses rather than claiming, and [startReceiveLoop] is
+                // skipped with it: a reader for a retired socket has nothing
+                // to read, and starting one against the `isConnected` a
+                // teardown just cleared would exit immediately anyway.
+                if (!handleConnectionOpened(generation)) return@post
                 startReceiveLoop(r)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to connect to Reticulum daemon", e)
@@ -414,23 +456,42 @@ class ReticulumManager(
                 if (connectGeneration.get() == generation) {
                     transportHandler.post { handleConnectionClosed(-1, e.message) }
                 }
+            } finally {
+                // By identity, because a teardown may already have closed this
+                // socket and moved the field on. Nothing else runs on this
+                // looper while this block does, so the check can only ever
+                // fail against a null — but the field is the one thing here a
+                // *different* thread writes, and a blanket clear would undo it.
+                synchronized(this) {
+                    if (pendingConnectSocket === sock) pendingConnectSocket = null
+                }
             }
         }
     }
 
     private fun disconnect() {
-        // Clear flags before interrupting the receive thread so it sees
-        // isConnected == false and skips the redundant handleConnectionClosed post.
-        isConnected.set(false)
-        isConnecting.set(false)
-
-        // Any connect still inside Socket.connect on the IO thread belongs to
-        // the session this call is ending, so retire its generation: it closes
-        // what it opened rather than publishing it over whatever comes next.
-        // See [connectGeneration].
-        connectGeneration.incrementAndGet()
-
         synchronized(this) {
+            // Clear flags before interrupting the receive thread so it sees
+            // isConnected == false and skips the redundant handleConnectionClosed post.
+            //
+            // Under the lock, and next to the generation bump, because
+            // [handleConnectionOpened] claims these same flags from the IO
+            // thread. Left outside it they are two unordered writes: a teardown
+            // landing between that thread's generation check and its set(true)
+            // is simply overwritten, so `isConnected` stays true against a
+            // socket this call has already closed. Nothing corrects it until
+            // the orphaned reader errors out — and in the meantime connect()'s
+            // own `isConnected` guard refuses the next start(), so a restart
+            // silently does nothing.
+            isConnected.set(false)
+            isConnecting.set(false)
+
+            // Any connect still inside Socket.connect on the IO thread belongs
+            // to the session this call is ending, so retire its generation: it
+            // closes what it opened rather than publishing it over whatever
+            // comes next. See [connectGeneration].
+            connectGeneration.incrementAndGet()
+
             receiveThread?.interrupt()
             receiveThread = null
             // Socket first. Socket.close() is the one call that makes a
@@ -451,12 +512,39 @@ class ReticulumManager(
             writer = null
             reader = null
             socket = null
+
+            // The attempt that has not published yet, for the same reason and
+            // by the same mechanism: only a close ends a blocked
+            // Socket.connect, and leaving one running holds the shared IO
+            // looper against the next session's connect. See
+            // [pendingConnectSocket].
+            try { pendingConnectSocket?.close() } catch (_: Exception) {}
+            pendingConnectSocket = null
         }
     }
 
-    private fun handleConnectionOpened(generation: Int) {
-        isConnected.set(true)
-        isConnecting.set(false)
+    /**
+     * Promotes this attempt's connection to the current session, or refuses
+     * when the attempt was retired while it was completing.
+     *
+     * The generation check and the flag claim are one step under the lock
+     * [disconnect] clears them in, because those two are the only writers and
+     * nothing else orders them. Checked outside the lock — as the caller used
+     * to do, one statement earlier — the claim is a read-then-write a teardown
+     * can land inside: it clears the flags, and this sets `isConnected` back to
+     * true against a socket that teardown has already closed. The announcement
+     * below still refuses (its own generation check sees the bump), so nothing
+     * is announced; what is left is a flag no path clears, and `connect`'s
+     * guard reads exactly that flag, so the next `start()` returns having done
+     * nothing. It recovers — the orphaned reader errors and the ladder picks it
+     * up — but a restart should not have to wait out a backoff rung.
+     */
+    private fun handleConnectionOpened(generation: Int): Boolean {
+        synchronized(this) {
+            if (connectGeneration.get() != generation) return false
+            isConnected.set(true)
+            isConnecting.set(false)
+        }
         reconnectAttempts.set(0)
         currentReconnectDelay.set(RECONNECT_INITIAL_DELAY_MS)
         consecutiveSendFailures.set(0)
@@ -509,6 +597,8 @@ class ReticulumManager(
             startMessagePolling()
             ioHandler.post { pollAndSendMessages() }
         }
+
+        return true
     }
 
     private fun startReceiveLoop(reader: BufferedReader) {
