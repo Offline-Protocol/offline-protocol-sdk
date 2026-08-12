@@ -137,10 +137,19 @@ class ReticulumManager(
     // with `isConnected` still true, so when that orphaned reader finally
     // errored it would tear down the session that had replaced it.
     //
-    // Checked before publishing rather than folded into the connected-edge
-    // gate on the transport thread: that gate catches a connection which
-    // outlived a stop, but not one which outlived a stop *and* a restart,
-    // because by then the state is legitimately STARTING again.
+    // Checked at every point a retired attempt can still act, because those
+    // are separate boundaries rather than one: before publishing the socket,
+    // before claiming the flags, inside the announcement block on the
+    // transport thread, and — on the other branch — before reporting a
+    // failure that belongs to a session already moved on.
+    //
+    // The connected-edge state gate cannot stand in for the announcement
+    // check. It catches a connection which outlived a stop, but not one which
+    // outlived a stop *and* a restart, because by then the state is
+    // legitimately STARTING again and the gate passes — which was the
+    // announcement firing against a closed socket: the core told the transport
+    // was up with `writer` null, and the poll it starts draining the outbox
+    // into reticulumSendFailed until the next attempt resolved the flags.
     private val connectGeneration = AtomicInteger(0)
 
     // Failure tracking for DORS
@@ -361,7 +370,22 @@ class ReticulumManager(
                 }
                 w.println(identifyMsg.toString())
 
-                handleConnectionOpened()
+                // Second checkpoint, for the window the first cannot cover:
+                // publishing the socket, sending Identify and claiming the
+                // flags are not one step, and a stop() — or a stop and a
+                // restart — fits between them. Claiming `isConnected` past
+                // that point leaves it true against a socket `disconnect`
+                // has already closed, and the announcement's own gate cannot
+                // see it: after a restart the state is legitimately STARTING
+                // again, which is the case [connectGeneration] exists for.
+                // Skips [startReceiveLoop] too — a reader for a retired
+                // socket has nothing to read.
+                if (connectGeneration.get() != generation) {
+                    try { sock.close() } catch (_: Exception) {}
+                    return@post
+                }
+
+                handleConnectionOpened(generation)
                 startReceiveLoop(r)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to connect to Reticulum daemon", e)
@@ -430,7 +454,7 @@ class ReticulumManager(
         }
     }
 
-    private fun handleConnectionOpened() {
+    private fun handleConnectionOpened(generation: Int) {
         isConnected.set(true)
         isConnecting.set(false)
         reconnectAttempts.set(0)
@@ -442,6 +466,19 @@ class ReticulumManager(
         // Update state first, then notify protocol, so state is RUNNING before
         // protocol sees the connection event
         transportHandler.post {
+            // Re-checked here, and not merely before this block was posted:
+            // the two are separated by however long this thread was busy, and
+            // a whole stop() plus start() fits in that gap. The state gate
+            // below is blind to exactly that pair — a restarted transport is
+            // legitimately STARTING, so the gate passes and this announces a
+            // socket the stop already closed, with `writer` null. The core is
+            // told the transport is up, and the poll this starts drains the
+            // outbox straight into reticulumSendFailed. Nothing to clean up
+            // here: the generation only moves on when `disconnect` retires it
+            // or a fresh `connect` claims it, and both leave the socket this
+            // attempt opened to the checkpoint in [connect] that owns it.
+            if (connectGeneration.get() != generation) return@post
+
             // A stop() that landed while this connection was still being
             // established has already told the protocol we are down and moved
             // to STOPPED. Announcing the connection now would put the state

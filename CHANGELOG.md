@@ -336,6 +336,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   that had replaced it. Attempts are now versioned, so one that outlives its
   session closes what it opened instead of publishing it.
 
+  The version is checked everywhere a retired attempt could still act, not
+  only before it publishes. Publishing the connection, claiming the connected
+  flags and announcing the connection are three steps with a scheduling gap
+  after each, and the stopped-transport check that guards the announcement is
+  blind to precisely this case — after a stop *and* a restart the transport is
+  legitimately starting again, so the check passes and the announcement
+  reports a connection the teardown had already closed. The core would route
+  to a transport with no socket, and the send loop that announcement starts
+  drained the outbox straight into send failures until the next attempt
+  resolved. Recoverable, since the following attempt corrects the status and
+  the core retries the sends, but self-inflicted.
+
 - **Android: Wi-Fi Direct teardown could strand port 8988, and every session
   leaked a framework channel.** A `stop()` racing the server socket's bind
   closed a still-null field; the bind then completed, the accept loop saw the

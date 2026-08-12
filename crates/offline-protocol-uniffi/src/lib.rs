@@ -11011,7 +11011,24 @@ mod tests {
     /// again. Both attempts publish, and the loser's socket and receive thread
     /// leak with `isConnected` still true, so when that orphaned reader
     /// eventually errors it tears down the session that replaced it. Hence a
-    /// generation, stamped before the post and checked before publishing.
+    /// generation, stamped before the post and checked at every point the
+    /// attempt can still act.
+    ///
+    /// **"Checked before publishing" was one boundary of three.** Publishing
+    /// the socket, claiming the flags and announcing the connection are three
+    /// steps with a scheduling gap after each, and the generation was consulted
+    /// only at the first. So a `stop()` landing after the publish still let
+    /// `handleConnectionOpened` set `isConnected` true against a socket the
+    /// teardown had already closed — and if a `start()` followed, the
+    /// announcement's state gate passed (a restarted transport is legitimately
+    /// `STARTING`, the very case the gate cannot see) and called
+    /// `reticulumStatusChanged(true)` with `writer` null. The core routed to a
+    /// transport with no socket, and the poll that announcement starts drained
+    /// the outbox straight into `reticulumSendFailed` — recoverable, since the
+    /// next attempt's result corrects the status and the core retries the
+    /// sends, but a self-inflicted burst of failed sends and a DORS score to
+    /// match. The two added checks are pinned by what *follows* them, because
+    /// the two socket checkpoints are textually identical.
     ///
     /// **A failed connect used to be terminal.** The catch cleared
     /// `isConnecting` before handing off, and `handleConnectionClosed` decides
@@ -11043,7 +11060,18 @@ mod tests {
             (
                 "checking it before publishing the socket",
                 "if (connectGeneration.get() != generation) { try { sock.close() } \
-                 catch (_: Exception) {} return@post }",
+                 catch (_: Exception) {} return@post } sock.soTimeout = 0",
+            ),
+            (
+                "checking it again before claiming the flags",
+                "if (connectGeneration.get() != generation) { try { sock.close() } \
+                 catch (_: Exception) {} return@post } handleConnectionOpened(generation) \
+                 startReceiveLoop(r)",
+            ),
+            (
+                "checking it inside the announcement block",
+                "transportHandler.post { if (connectGeneration.get() != generation) return@post \
+                 if (state == TransportState.STOPPING || state == TransportState.STOPPED) {",
             ),
             (
                 "checking it before reporting a failure",
@@ -11062,6 +11090,25 @@ mod tests {
                  silently ending the reconnect ladder. Expected to find:\n  {pinned}"
             );
         }
+
+        // Two of the pins above are textually identical (both socket
+        // checkpoints close `sock` and return), so `contains` alone cannot
+        // tell four checks from three — each pin is disambiguated by what
+        // follows it, and this counts the whole family. Dropping any one of
+        // them reopens a boundary: the pre-publish check stops a retired
+        // attempt installing its socket over the current session's, the
+        // pre-handoff check stops it claiming `isConnected` against a socket
+        // `disconnect` already closed, and the announcement check is the only
+        // thing standing between a stop-then-restart and a `RUNNING` state
+        // with a null writer.
+        let generation_checks = code.matches("connectGeneration.get()").count();
+        assert_eq!(
+            generation_checks, 4,
+            "ReticulumManager.kt: expected the connect generation to be consulted at all four \
+             points a retired attempt can still act — before publishing the socket, before \
+             claiming the flags, inside the announcement block, and before reporting a failure; \
+             found {generation_checks}."
+        );
 
         // The two legitimate owners: `disconnect`, ending a session, and
         // `handleConnectionOpened`, promoting one. A third is the regression —
@@ -11101,8 +11148,20 @@ mod tests {
     /// [`react_native_ios_status_flips_are_ordered_against_stop`] owns the
     /// status flip at the second.
     ///
-    /// Pinned as the *first* statement of the block: a gate that has drifted
-    /// below the state write is not a gate.
+    /// Pinned as the *first* statement of the block, modulo the liveness
+    /// check that precedes it on Reticulum: a gate that has drifted below the
+    /// state write is not a gate.
+    ///
+    /// **The state gate is necessary and not sufficient, which is why
+    /// Reticulum carries a term in front of it.** "Did a stop happen" and "is
+    /// this still the current connection" are different questions, and only
+    /// the second one survives a restart — after `stop()`; `start()` the state
+    /// is legitimately `STARTING`, so the gate passes for a connection the
+    /// teardown already closed. Reticulum answers it with the connect
+    /// generation that
+    /// [`react_native_reticulum_retires_a_superseded_connect_attempt`] owns;
+    /// the other three managers have no equivalent and remain exposed to that
+    /// narrower window, which is tracked rather than pinned here.
     ///
     /// The two platforms need different amounts of machinery for the same
     /// invariant, and that difference is the point. On Android the gate, the
@@ -11118,15 +11177,19 @@ mod tests {
     /// [`react_native_ios_status_flips_are_ordered_against_stop`].
     #[test]
     fn react_native_transports_do_not_resurrect_a_stopped_connection() {
-        for (manager, cleanup) in [
-            ("ReticulumManager", "disconnect()"),
-            ("NostrManager", "disconnectAll()"),
+        for (manager, liveness, cleanup) in [
+            (
+                "ReticulumManager",
+                "if (connectGeneration.get() != generation) return@post ",
+                "disconnect()",
+            ),
+            ("NostrManager", "", "disconnectAll()"),
         ] {
             let code = rn_source_code_only(&format!(
                 "android/src/main/java/com/offlineprotocol/{manager}.kt"
             ));
             let pinned = format!(
-                "transportHandler.post {{ if (state == TransportState.STOPPING || \
+                "transportHandler.post {{ {liveness}if (state == TransportState.STOPPING || \
                  state == TransportState.STOPPED) {{ {cleanup} return@post }} \
                  updateState(TransportState.RUNNING)"
             );
