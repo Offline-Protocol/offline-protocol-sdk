@@ -11473,6 +11473,28 @@ mod tests {
                  Expected to find:\n  {pinned}"
             );
         }
+
+        // The other half of Wi-Fi Direct's callback: the flag its early return
+        // reads has to be cleared at the *top* of the drain, so that every way
+        // out of a pass — the stopped-transport return, the drained return, a
+        // throwing send — leaves it false, and only the one path that actually
+        // queues a successor sets it again. Moved to the drained return (the
+        // obvious-looking simplification, since that is where the chain
+        // normally ends), a pass that exits because the transport stopped
+        // leaves it stuck true: every subsequent `onMessagesAvailable` returns
+        // early *forever*, and the send path silently degrades to the 2s
+        // fallback poll's one message per tick. Nothing else would fail.
+        let code =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        let pinned = "private fun drainAndSendMessages() { drainContinuationQueued = false \
+                      if (state != TransportState.RUNNING || connectedPeers.isEmpty()) return";
+        assert!(
+            code.contains(pinned),
+            "WifiDirectManager.kt must clear drainContinuationQueued as the first statement of \
+             drainAndSendMessages, before any early return. Cleared anywhere else, a pass that \
+             exits early leaves the flag set and onMessagesAvailable suppresses every later \
+             callback for the life of the transport. Expected to find:\n  {pinned}"
+        );
     }
 
     /// A transport's `pause()` has actually paused by the time it returns.
