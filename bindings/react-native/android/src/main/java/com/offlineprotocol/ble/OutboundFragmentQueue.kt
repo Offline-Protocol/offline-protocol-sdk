@@ -4,11 +4,32 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
+ * Outcome of one [OutboundFragmentQueue.flush] pass.
+ *
+ * [sent] exists because progress is **not** derivable from a queue-size delta:
+ * [OutboundFragmentQueue.flush] also evicts entries past their TTL, so a queue
+ * that shrank may have delivered nothing at all. The drain's backpressure
+ * ladder resets on progress, and a permanently stalled peer shedding expired
+ * fragments every TTL window would otherwise re-earn the fast retry ladder
+ * forever — which is precisely the peer the ladder's ceiling exists to stop
+ * (OFF-2123). Counting accepted sends keeps the two apart.
+ */
+internal data class FlushResult(
+    /** Fragments the sender accepted this pass. Expiry evictions do not count. */
+    val sent: Int,
+    /**
+     * True if at least one recipient still had unsent fragments when the flush
+     * finished. Callers use this as the "stalled writer" signal.
+     */
+    val hasUnsent: Boolean,
+)
+
+/**
  * FIFO buffer of outbound BLE fragments that cannot be sent immediately —
  * either because the recipient has no open connection, or because the
  * previous write hit flow control.
  *
- * Thread-safety contract: every mutating operation must run on the main
+ * Thread-safety contract: every mutating operation must run on the BLE
  * thread. The per-recipient [ArrayDeque] values are not thread-safe, and
  * even a `size` read computes `tail - head` over a backing array that the
  * BLE-thread writer may be resizing. The outer [ConcurrentHashMap] exists
@@ -139,14 +160,11 @@ internal class OutboundFragmentQueue(
      * If [send] returns false the fragment is left in place (so the next
      * flush retries it) and iteration for that recipient stops — but other
      * recipients continue to drain.
-     *
-     * @return true if at least one recipient still had unsent fragments
-     *   when flush finished. Callers use this as a "stalled writer" signal
-     *   for diagnostics.
      */
-    fun flush(send: (recipientId: String, data: ByteArray) -> Boolean): Boolean {
+    fun flush(send: (recipientId: String, data: ByteArray) -> Boolean): FlushResult {
         bleThreadCheck()
         var hasUnsent = false
+        var sent = 0
         val now = clock()
 
         for (recipientId in queues.keys.toList()) {
@@ -186,6 +204,7 @@ internal class OutboundFragmentQueue(
                 if (send(recipientId, fragment.data)) {
                     sendIter.remove()
                     total.decrementAndGet()
+                    sent++
                 } else {
                     hasUnsent = true
                     break
@@ -196,7 +215,7 @@ internal class OutboundFragmentQueue(
                 queues.remove(recipientId)
             }
         }
-        return hasUnsent
+        return FlushResult(sent = sent, hasUnsent = hasUnsent)
     }
 
     companion object {

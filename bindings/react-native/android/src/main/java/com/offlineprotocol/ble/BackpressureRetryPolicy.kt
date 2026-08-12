@@ -12,9 +12,13 @@ import android.os.Handler
  * *permanently* unable to accept writes: a half-open link whose CCCD is never
  * acked keeps `sendFragmentData` returning false forever, so the drain reposts
  * at 20Hz indefinitely. Each pass takes the core protocol mutex through
- * `bleGetNextFragment`, contending with the 100ms `process()` tick, and on the
- * main thread that aggregate wait is what surfaces as an ANR (OFF-2123) rather
- * than as any single long block.
+ * `bleGetNextFragment`, contending with the 100ms `process()` tick — and back
+ * when the drain still ran on the app's main looper, that aggregate wait is
+ * what surfaced as an ANR (OFF-2123) rather than any single long block. The
+ * drain has since moved off main, so the ceiling no longer stands between the
+ * app and an ANR; it stands between one wedged peer and a pointless 20Hz
+ * contention loop on the shared protocol mutex, which still starves every
+ * other FFI caller.
  *
  * The ladder keeps the fast first retries — a genuinely transient stall still
  * clears in tens of milliseconds — then decays to [maxDelayMs] and finally
@@ -24,8 +28,10 @@ import android.os.Handler
  * ceiling degrades the retry rate from ~20Hz to 0.5Hz without ever abandoning
  * the fragments. [reset] re-arms the fast ladder as soon as anything is
  * actually sent, so a peer that recovers is not punished for having stalled.
+ * "Sent" means a fragment the stack accepted, never a queue that merely shrank
+ * — see [FlushResult].
  *
- * Main-thread only, like the drain it serves; it holds no lock of its own.
+ * BLE-thread only, like the drain it serves; it holds no lock of its own.
  */
 internal class BackpressureRetryPolicy(
     private val handler: Handler,

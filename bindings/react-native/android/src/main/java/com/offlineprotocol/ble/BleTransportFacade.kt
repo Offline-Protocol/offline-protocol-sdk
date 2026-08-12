@@ -400,7 +400,7 @@ class BleTransportFacade(
     // Scanner components
     private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var scanCallback: ScanCallback? = null
-    // Main-thread only today: every reader and writer runs on bleHandler,
+    // BLE-thread only today: every reader and writer runs on bleHandler,
     // onScanFailed included — it reposts before touching this. @Volatile is
     // kept deliberately rather than as a live requirement; this flag has been
     // written from a binder thread before, and a volatile read on a field
@@ -575,7 +575,7 @@ class BleTransportFacade(
     private var cachedLocalAddress: String? = null
 
     // Backoff state for updateSignedIdentity retries when MLS is not yet
-    // initialized or signing fails. Main-thread only.
+    // initialized or signing fails. BLE-thread only.
     private var identityRefreshRetryScheduled: Boolean = false
     private var identityRefreshRetryDelayMs: Long = IDENTITY_REFRESH_MIN_BACKOFF_MS
     private var identityRefreshAttempts: Int = 0
@@ -598,7 +598,7 @@ class BleTransportFacade(
     // device id. The Rust core stores ONE MTU per peer, so the value flushed
     // is min(this, the peripheral-link payload below) — see [flushPeerMtu].
     // Entries persist until link teardown (they are inputs to the min, not
-    // one-shot), and are cleared in [dropStagedPeerMtu] / on stop. Main-thread
+    // one-shot), and are cleared in [dropStagedPeerMtu] / on stop. BLE-thread
     // only — every access is guarded by [assertOnBleThread], and the type is a
     // plain `HashMap` to make the discipline visible.
     private val peerMaxPayloads = HashMap<String, Int>()
@@ -609,8 +609,8 @@ class BleTransportFacade(
     // egressed as a peripheral notify would overflow this link and be
     // truncated/dropped on air; folding this into the per-peer MTU via min()
     // is the offline-convergence fix. Cleared when the peripheral link drops
-    // (in [handleCentralDisconnectedOnMain]) so the central MTU is restored.
-    // Main-thread only.
+    // (in [handleCentralDisconnectedOnBleThread]) so the central MTU is restored.
+    // BLE-thread only.
     private val peripheralMaxPayloads = HashMap<String, Int>()
     // Per-DEVICE-ID negotiated ATT payloads, one slot per direction. A peer can
     // be reachable over two links with DIFFERENT BLE addresses (iOS uses distinct
@@ -621,7 +621,7 @@ class BleTransportFacade(
     // targets). The per-address maps above are the deferral buffer for a payload
     // negotiated before the device id resolves; [flushPeerMtu] promotes them into
     // these per-device slots and mins across THESE. Cleared per-direction on that
-    // link's teardown. Main-thread only.
+    // link's teardown. BLE-thread only.
     private val centralPayloadByDevice = HashMap<String, Int>()
     private val peripheralPayloadByDevice = HashMap<String, Int>()
     private val discoveryLogTimestamps = ConcurrentHashMap<String, Long>()
@@ -762,6 +762,10 @@ class BleTransportFacade(
         maxConsecutiveAttempts = MAX_BACKPRESSURE_RETRY_ATTEMPTS,
     )
 
+    /** The BLE thread did not answer a main-thread caller in time. */
+    internal class MainThreadSyncTimeout :
+        RuntimeException("BLE thread did not respond within ${MAIN_THREAD_SYNC_TIMEOUT_MS}ms")
+
     /**
      * Run [action] on the BLE thread and wait for it.
      *
@@ -780,16 +784,15 @@ class BleTransportFacade(
      * assumed at every call site.
      *
      * On expiry the work is not cancelled: it still runs on the BLE thread, we
-     * simply stop waiting for it. Every action routed through here
-     * (`startUnsafe`, `stopUnsafe`, `pauseUnsafe`, `resumeUnsafe`) is
-     * self-contained and idempotent, so completing late is safe; returning a
-     * default is what the caller must tolerate, and it is strictly better than
-     * an ANR.
+     * simply stop waiting for it, and the caller gets [MainThreadSyncTimeout].
+     * Every action routed through here (`startUnsafe`, `stopUnsafe`,
+     * `pauseUnsafe`, `resumeUnsafe`) is self-contained and idempotent, so
+     * completing late is safe. Tolerating that throw is what the caller owes:
+     * every main-reachable lifecycle path runs its transport stops through
+     * `TeardownSequence`, which records a throwing step and carries on, so a
+     * timeout costs one late-completing action and never a skipped teardown —
+     * strictly better than an ANR.
      */
-    /** The BLE thread did not answer a main-thread caller in time. */
-    internal class MainThreadSyncTimeout :
-        RuntimeException("BLE thread did not respond within ${MAIN_THREAD_SYNC_TIMEOUT_MS}ms")
-
     private fun <T> runOnBleThreadSync(action: () -> T): T {
         if (Looper.myLooper() == bleLooper) {
             return action()
@@ -1137,7 +1140,7 @@ class BleTransportFacade(
     // address and release it from [onWriteCompleted] (the onCharacteristicWrite
     // callback). The value is the elapsedRealtime() the write was issued, used
     // as a watchdog so a lost completion callback cannot wedge a peer forever.
-    // Main-thread only (every accessor runs under assertOnBleThread).
+    // BLE-thread only (every accessor runs under assertOnBleThread).
     private val writeInFlight = HashMap<String, Long>()
 
     // MARK: - TransportManager Implementation
@@ -1713,7 +1716,7 @@ class BleTransportFacade(
                 // which can synchronously reach updateSignedIdentity() via
                 // evictPeer → refreshAdvertising and which mutates
                 // LeAdvertiser state that is otherwise BLE-thread only —
-                // never runs off-main. Matches the threading model used by
+                // never runs off the BLE thread. Matches the threading model used by
                 // the GATT server listener callbacks.
                 override fun onScanResult(callbackType: Int, result: ScanResult) {
                     bleHandler.post { handleScanResult(result) }
@@ -2627,7 +2630,7 @@ class BleTransportFacade(
      * over the live GATT-server subscription set and the connection registry so the
      * MTU floor and the notify egress resolve notify-reachability identically — see
      * [resolveSubscribedAddress] for why that shared predicate is load-bearing.
-     * Main-thread only (reads [connections] and the GATT-server snapshot).
+     * BLE-thread only (reads [connections] and the GATT-server snapshot).
      */
     private fun subscribedNotifyAddressFor(deviceId: String): String? {
         val server = peripheralGattServer ?: return null
@@ -2790,12 +2793,12 @@ class BleTransportFacade(
      * alive central-role link would otherwise demote that link from
      * its negotiated BLE 5 MTU back to the 185-byte floor for the
      * rest of the link's life. See the comment block in
-     * [handleCentralDisconnectedOnMain] for the bug this invariant
+     * [handleCentralDisconnectedOnBleThread] for the bug this invariant
      * exists to prevent.
      *
      * [address] may be null on paths where we only know the device id; the
      * per-device direction slots keyed by [deviceId] are still cleared.
-     * Main-thread only.
+     * BLE-thread only.
      */
     private fun dropStagedPeerMtu(address: String?, deviceId: String?) {
         assertOnBleThread("dropStagedPeerMtu")
@@ -2952,12 +2955,13 @@ class BleTransportFacade(
         // the polling floor for the rest of the session.
         var sentAny = false
         try {
-            val queuedBeforeFlush = outboundQueue.totalCount()
-            val stalledAfterFlush = outboundQueue.flush(::sendFragmentData)
-            if (outboundQueue.totalCount() < queuedBeforeFlush) {
+            val flushed = outboundQueue.flush(::sendFragmentData)
+            // Accepted sends only — a queue that shrank because entries hit
+            // their TTL delivered nothing, and must not read as progress.
+            if (flushed.sent > 0) {
                 sentAny = true
             }
-            if (stalledAfterFlush) {
+            if (flushed.hasUnsent) {
                 hitBackpressure = true
                 if (logThrottler.shouldLog("drain_flush_stalled", intervalMs = 5000)) {
                     val recipientCount = outboundQueue.recipientCount()
@@ -3136,13 +3140,17 @@ class BleTransportFacade(
         try {
             // The old logic would return early if there were unsent fragments, preventing new fragments
             // from being polled. This caused messages to get stuck when connections weren't ready.
-            val queuedBeforeFlush = outboundQueue.totalCount()
-            val hasUnsentFragments = outboundQueue.flush(::sendFragmentData)
+            val flushed = outboundQueue.flush(::sendFragmentData)
+            val hasUnsentFragments = flushed.hasUnsent
             // The polling floor is where a peer that burned the whole
             // backpressure ladder recovers. Clearing the ladder here is what
             // lets it get the fast retry back for its next stall; without it
             // the ceiling would be permanent for the rest of the session.
-            if (outboundQueue.totalCount() < queuedBeforeFlush) {
+            // Gated on accepted sends, not on the queue shrinking: a stalled
+            // peer sheds expired fragments every TTL window, and treating that
+            // as recovery would hand the ladder back to the one peer the
+            // ceiling exists to hold down.
+            if (flushed.sent > 0) {
                 backpressureRetry.reset()
             }
 
@@ -3230,7 +3238,7 @@ class BleTransportFacade(
      * write path so notifications stay serialised (one outstanding per peer), but
      * paces on the INDICATE-aware [NOTIFY_GATE_WATCHDOG_MS] fallback — the fast
      * path is onNotificationSent firing on the indication confirmation.
-     * Main-thread only.
+     * BLE-thread only.
      */
     private fun sendViaNotify(recipientId: String, address: String, data: ByteArray): Boolean {
         assertOnBleThread("sendViaNotify")
@@ -3546,7 +3554,7 @@ class BleTransportFacade(
                     // Proactively attempt to resolve the device ID by initiating a client connection.
                     // We're already on a caller-controlled thread (usually a binder GATT callback);
                     // [connectToDevice] is safe to invoke from any thread, so there is no reason to
-                    // pay an extra main-handler hop here — the old `bleHandler.post` widened the
+                    // pay an extra handler hop here — the historical `mainHandler.post` widened the
                     // queue-vs-drain race window above.
                     bluetoothAdapter?.let { adapter ->
                         try {
@@ -3917,7 +3925,7 @@ class BleTransportFacade(
             if (shuttingDown) return
             bleHandler.post {
                 if (shuttingDown) return@post
-                handleCentralConnectedOnMain(device)
+                handleCentralConnectedOnBleThread(device)
             }
         }
 
@@ -3925,7 +3933,7 @@ class BleTransportFacade(
             if (shuttingDown) return
             bleHandler.post {
                 if (shuttingDown) return@post
-                handleCentralDisconnectedOnMain(device, status)
+                handleCentralDisconnectedOnBleThread(device, status)
             }
         }
 
@@ -4067,7 +4075,7 @@ class BleTransportFacade(
         }
     }
 
-    private fun handleCentralConnectedOnMain(device: BluetoothDevice) {
+    private fun handleCentralConnectedOnBleThread(device: BluetoothDevice) {
         val observation = lastSeenMeshAdvertisements[device.address]
         val decision = meshController.shouldAcceptInboundConnection(
             connections.deviceIdForAddress(device.address),
@@ -4098,7 +4106,7 @@ class BleTransportFacade(
         emitDiagnostic("info", "Device connected to GATT server", mapOf("address" to device.address))
     }
 
-    private fun handleCentralDisconnectedOnMain(device: BluetoothDevice, status: Int) {
+    private fun handleCentralDisconnectedOnBleThread(device: BluetoothDevice, status: Int) {
         val address = device.address
         connections.untrackServerConnection(address)
         connections.consumePendingRole(address)
