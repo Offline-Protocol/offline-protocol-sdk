@@ -8,7 +8,7 @@ import org.junit.Test
 
 /**
  * Unit tests for [InboundFragmentBuffer]. Mirrors the style and injection
- * points of [OutboundFragmentQueueTest] — fake clock, no-op main-thread
+ * points of [OutboundFragmentQueueTest] — fake clock, no-op BLE-thread
  * guard, and a drop-event recorder — so the class can be exercised in plain
  * JVM unit tests without an Android looper.
  *
@@ -25,9 +25,9 @@ import org.junit.Test
  *     never tears a buffer whose fragments are still arriving — all while
  *     keeping the aggregate counter consistent.
  *   - `removeAll` / `clear` bring the total counter back to zero.
- *   - `totalCount` is readable without tripping the main-thread guard, so
+ *   - `totalCount` is readable without tripping the BLE-thread guard, so
  *     callback-thread diagnostic paths stay safe.
- *   - The main-thread guard is invoked exactly once per mutating call.
+ *   - The BLE-thread guard is invoked exactly once per mutating call.
  */
 class InboundFragmentBufferTest {
 
@@ -51,9 +51,9 @@ class InboundFragmentBufferTest {
     ) {
         val clock = FakeClock()
         val drops = mutableListOf<DropEvent>()
-        val mainThreadInvocations = java.util.concurrent.atomic.AtomicInteger(0)
+        val bleThreadInvocations = java.util.concurrent.atomic.AtomicInteger(0)
         val buffer = InboundFragmentBuffer(
-            mainThreadCheck = { mainThreadInvocations.incrementAndGet() },
+            bleThreadCheck = { bleThreadInvocations.incrementAndGet() },
             maxPerPeer = maxPerPeer,
             maxPeers = maxPeers,
             timeoutMs = timeoutMs,
@@ -278,32 +278,32 @@ class InboundFragmentBufferTest {
     }
 
     @Test
-    fun `totalCount is readable without invoking the main-thread guard`() {
+    fun `totalCount is readable without invoking the BLE-thread guard`() {
         val h = Harness()
         h.buffer.enqueue("aa:00", byteArrayOf(1))
-        val enqueueInvocations = h.mainThreadInvocations.get()
+        val enqueueInvocations = h.bleThreadInvocations.get()
         // totalCount is an AtomicInteger snapshot — safe from any thread.
         // It must not call the guard or off-thread diagnostic paths would
         // crash under the default Looper check.
         h.buffer.totalCount()
-        assertEquals(enqueueInvocations, h.mainThreadInvocations.get())
+        assertEquals(enqueueInvocations, h.bleThreadInvocations.get())
     }
 
     @Test
-    fun `pendingAddresses returns a snapshot and touches the main-thread guard`() {
+    fun `pendingAddresses returns a snapshot and touches the BLE-thread guard`() {
         val h = Harness()
         h.buffer.enqueue("aa:00", byteArrayOf(1))
         h.buffer.enqueue("bb:11", byteArrayOf(2))
-        val before = h.mainThreadInvocations.get()
+        val before = h.bleThreadInvocations.get()
         val snapshot = h.buffer.pendingAddresses()
         assertEquals(setOf("aa:00", "bb:11"), snapshot.toSet())
-        assertTrue(h.mainThreadInvocations.get() > before)
+        assertTrue(h.bleThreadInvocations.get() > before)
     }
 
     @Test
-    fun `main-thread guard fires for every mutating method`() {
+    fun `BLE-thread guard fires for every mutating method`() {
         val h = Harness()
-        val baseline = h.mainThreadInvocations.get()
+        val baseline = h.bleThreadInvocations.get()
         h.buffer.enqueue("aa:00", byteArrayOf(1))
         h.buffer.hasPending("aa:00")
         h.buffer.drain("aa:00")
@@ -312,6 +312,6 @@ class InboundFragmentBufferTest {
         h.buffer.evictExpired()
         h.buffer.clear()
         // Lower bound: every call above touches the guard at least once.
-        assertTrue(h.mainThreadInvocations.get() - baseline >= 7)
+        assertTrue(h.bleThreadInvocations.get() - baseline >= 7)
     }
 }

@@ -57,13 +57,13 @@ import java.util.concurrent.ConcurrentHashMap
  *     callback and the facade's connection monitor.
  *
  * Concurrency: binder-thread GATT callbacks either (a) snapshot the state
- * they need and repost to main for further processing, matching the
+ * they need and repost to the BLE thread for further processing, matching the
  * threading model used by [PeripheralGattServer], or (b) early-return on
  * the [Host.isShuttingDown] gate. No UniFFI call is ever issued from a
- * binder callback thread — every protocol entry happens on main.
+ * binder callback thread — every protocol entry happens on the BLE thread.
  */
 internal class CentralGattClient(
-    private val mainHandler: Handler,
+    private val bleHandler: Handler,
     private val serviceUuid: UUID,
     private val messageCharUuid: UUID,
     private val deviceIdCharUuid: UUID,
@@ -108,22 +108,22 @@ internal class CentralGattClient(
          *  ERROR_GATT_WRITE_REQUEST_BUSY (201) while one is still outstanding,
          *  even for WRITE_TYPE_NO_RESPONSE, so the facade serialises one
          *  outstanding write per peer and uses this signal to drain the next
-         *  fragment. Called on the main thread. */
+         *  fragment. Called on the BLE thread. */
         fun onWriteCompleted(address: String)
 
         /** Hand a received fragment to the facade (either via client
-         *  notify or via central-side write). Called on the main thread. */
+         *  notify or via central-side write). Called on the BLE thread. */
         fun handleInboundFragment(address: String, data: ByteArray)
 
         /** Notify the facade that a remote peripheral's ATT MTU negotiation
          *  has completed. [maxPayload] is the already header-adjusted max
          *  fragment size (ATT MTU minus the 3-byte header). Called from the
-         *  binder GATT thread; implementations must repost to main before
+         *  binder GATT thread; implementations must repost to the BLE thread before
          *  touching UniFFI. */
         fun onPeerMtuNegotiated(address: String, maxPayload: Int)
 
         /** Notify the facade that a remote peripheral's device ID has been
-         *  resolved via a reverse GATT read. Called on the main thread,
+         *  resolved via a reverse GATT read. Called on the BLE thread,
          *  immediately after [MeshConnectionRegistry.setDeviceIdentifier] has
          *  been populated for [address]. Used by the facade to flush any
          *  MTU value previously staged under [address] into the Rust
@@ -132,7 +132,7 @@ internal class CentralGattClient(
 
         /** Notify the facade that a peer has been permanently given up on
          *  (retry budget exhausted or stale callback post-teardown). Called
-         *  from [finalizeGivenUpPeer] on the main thread — the facade uses
+         *  from [finalizeGivenUpPeer] on the BLE thread — the facade uses
          *  this to drop facade-only state that is not already cleared via
          *  [clearPeerBuffers] (the staged negotiated-MTU map, the Rust-side
          *  per-peer MTU entry). */
@@ -169,7 +169,7 @@ internal class CentralGattClient(
         private const val MAX_INBOUND_NOTIFICATION_BYTES = 4096
         /** Re-drain iteration cap inside [drainPendingInboundFor] so a
          *  pathologically chatty peer racing with the drain loop cannot
-         *  pin the main thread indefinitely. */
+         *  pin the BLE thread indefinitely. */
         private const val MAX_DRAIN_ITERATIONS = 8
         /** ATT MTU we ask for in `requestMtu`. 517 is the BLE 5 spec max;
          *  controllers negotiate down to whatever both peers support. The
@@ -204,7 +204,7 @@ internal class CentralGattClient(
     private val mtuInFlight = ConcurrentHashMap<String, Boolean>()
 
     // Pending watchdog Runnables keyed by address, so they can be cancelled
-    // via `mainHandler.removeCallbacks` when the real `onMtuChanged` lands
+    // via `bleHandler.removeCallbacks` when the real `onMtuChanged` lands
     // first. Separate from [mtuInFlight] because `ConcurrentHashMap<_, Unit>`
     // does not model "present-or-absent" cleanly.
     private val mtuWatchdogs = ConcurrentHashMap<String, Runnable>()
@@ -252,7 +252,7 @@ internal class CentralGattClient(
         deviceIdResolutionAttempts.clear()
         advertisedDeviceIds.clear()
         mtuInFlight.clear()
-        mtuWatchdogs.values.forEach { mainHandler.removeCallbacks(it) }
+        mtuWatchdogs.values.forEach { bleHandler.removeCallbacks(it) }
         mtuWatchdogs.clear()
     }
 
@@ -265,7 +265,7 @@ internal class CentralGattClient(
      */
     private fun cancelMtuWatchdog(address: String) {
         mtuInFlight.remove(address)
-        mtuWatchdogs.remove(address)?.let { mainHandler.removeCallbacks(it) }
+        mtuWatchdogs.remove(address)?.let { bleHandler.removeCallbacks(it) }
     }
 
     fun markResolutionAttempt(address: String, now: Long) {
@@ -280,11 +280,13 @@ internal class CentralGattClient(
 
     // --- Helpers ---
 
-    private fun runOnMain(action: () -> Unit) {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
+    private fun runOnBleThread(action: () -> Unit) {
+        // Derived from the injected handler rather than the facade's companion
+        // so tests that supply their own looper stay self-consistent.
+        if (Looper.myLooper() == bleHandler.looper) {
             action()
         } else {
-            mainHandler.post(action)
+            bleHandler.post(action)
         }
     }
 
@@ -294,7 +296,7 @@ internal class CentralGattClient(
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (host.isShuttingDown()) {
                 // A stale callback landing mid-teardown must not touch the
-                // shared state the main thread has just cleared. Close the
+                // shared state the BLE thread has just cleared. Close the
                 // gatt handle locally so the stack releases its LL slot.
                 try { gatt.close() } catch (_: Exception) {}
                 return
@@ -363,7 +365,7 @@ internal class CentralGattClient(
          * [readDeviceIdCharacteristicOrClose] under the controller-default
          * MTU. Called from the GATT binder callback thread (the same
          * thread as the rest of [onServicesDiscovered]); the watchdog
-         * Runnable it arms runs on [mainHandler] instead, and the two
+         * Runnable it arms runs on [bleHandler] instead, and the two
          * race to claim the `mtuInFlight` slot via ConcurrentHashMap CAS.
          */
         private fun requestPeerMtuOrResumeChain(
@@ -372,7 +374,7 @@ internal class CentralGattClient(
             address: String,
         ) {
             // Arm the MTU watchdog BEFORE requestMtu so that a racing
-            // fire from `mainHandler.postDelayed` always sees an entry in
+            // fire from `bleHandler.postDelayed` always sees an entry in
             // [mtuInFlight]. On success this is cancelled from the top of
             // [onMtuChanged]; on the synchronous-false / permission-denied
             // fallbacks below we cancel explicitly before taking the
@@ -393,7 +395,7 @@ internal class CentralGattClient(
                     "MTU watchdog fired",
                     mapOf("address" to address, "timeoutMs" to MTU_WATCHDOG_MS),
                 )
-                // Re-entrancy note: this block runs on the main handler
+                // Re-entrancy note: this block runs on the BLE handler
                 // while an `onMtuChanged` callback for the same `gatt`
                 // may still be dispatched by the binder GATT thread
                 // moments later. That race is safe because:
@@ -424,7 +426,7 @@ internal class CentralGattClient(
                 }
             }
             mtuWatchdogs[address] = watchdog
-            mainHandler.postDelayed(watchdog, MTU_WATCHDOG_MS)
+            bleHandler.postDelayed(watchdog, MTU_WATCHDOG_MS)
 
             try {
                 val mtuRequested = gatt.requestMtu(REQUESTED_ATT_MTU)
@@ -490,7 +492,7 @@ internal class CentralGattClient(
                 }
                 return
             }
-            mtuWatchdogs.remove(address)?.let { mainHandler.removeCallbacks(it) }
+            mtuWatchdogs.remove(address)?.let { bleHandler.removeCallbacks(it) }
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 val maxPayload = (mtu - ATT_HEADER_BYTES).coerceAtLeast(0)
                 Log.i(TAG, "MTU negotiated for $address: mtu=$mtu payload=$maxPayload")
@@ -567,7 +569,7 @@ internal class CentralGattClient(
             if (host.isShuttingDown()) return
             // Snapshot the payload on the binder thread before the BLE
             // stack reuses the buffer for the next operation, then repost
-            // the entire body to the main handler. Everything downstream
+            // the entire body to the BLE handler. Everything downstream
             // from here calls into UniFFI (blePeerDiscovered,
             // bleFragmentReceived, verifySignature, learnRoute) and must
             // never run on the shared binder-thread pool — stalling it
@@ -576,9 +578,9 @@ internal class CentralGattClient(
             val charUuid = characteristic.uuid
             @Suppress("DEPRECATION")
             val snapshot = characteristic.value?.copyOf()
-            mainHandler.post {
+            bleHandler.post {
                 if (host.isShuttingDown()) return@post
-                handleCharacteristicReadOnMain(gatt, charUuid, snapshot, status)
+                handleCharacteristicReadOnBleThread(gatt, charUuid, snapshot, status)
             }
         }
 
@@ -600,14 +602,14 @@ internal class CentralGattClient(
             }
             // Ack arrives on the binder thread. The previous shape added
             // `address` to [linkReady] here and only then posted the drain
-            // to main — that opened a race where a concurrent
-            // `evictPeer → forgetLink(address)` running on main could
+            // to the BLE thread — that opened a race where a concurrent
+            // `evictPeer → forgetLink(address)` running on the BLE thread could
             // remove the address *before* this binder-thread `add`
             // reinstated it, leaving a zombie linkReady entry pointing at
             // a gatt the facade has already torn down. Moving both the
-            // mutation and the drain into the same main-thread post makes
+            // mutation and the drain into the same BLE-thread post makes
             // evict and CCCD-ack mutually serialisable on the looper.
-            mainHandler.post {
+            bleHandler.post {
                 if (host.isShuttingDown()) return@post
                 Log.i(TAG, "CCCD write acknowledged for $address — link ready")
                 diagnosticEmitter("info", "BLE link ready", mapOf("address" to address))
@@ -625,7 +627,7 @@ internal class CentralGattClient(
             // even on a non-success status so a failed write cannot leave the
             // gate stuck and wedge the peer; the facade re-drives from the queue.
             val address = gatt.device.address
-            mainHandler.post {
+            bleHandler.post {
                 if (host.isShuttingDown()) return@post
                 host.onWriteCompleted(address)
             }
@@ -636,9 +638,9 @@ internal class CentralGattClient(
             if (characteristic.uuid != messageCharUuid) return
             // Snapshot the value on the binder thread — characteristic.value
             // is overwritten by the BLE stack on the next notification —
-            // then repost processing to the main thread so we never hold up
+            // then repost processing to the BLE thread so we never hold up
             // a binder callback on the UniFFI mutex. The .copyOf() is
-            // load-bearing: without it the main-thread handler reads whatever
+            // load-bearing: without it the BLE-thread handler reads whatever
             // bytes happen to be in the framework buffer when it eventually
             // runs, which is the *next* notification under burst load.
             @Suppress("DEPRECATION")
@@ -660,7 +662,7 @@ internal class CentralGattClient(
             }
             val data = raw.copyOf()
             val address = gatt.device.address
-            mainHandler.post {
+            bleHandler.post {
                 if (host.isShuttingDown()) return@post
                 host.handleInboundFragment(address, data)
             }
@@ -739,7 +741,7 @@ internal class CentralGattClient(
                 ))
                 connectionRetryCount.remove(address)
                 // Notify peer lost since we're giving up. Post the entire
-                // body to the main handler so connection bookkeeping, queue
+                // body to the BLE handler so connection bookkeeping, queue
                 // clear, and peer-loss notification land as one atomic step
                 // against drainAndSendFragments — Handler posts are totally
                 // ordered per-looper, so serialisation is preserved without
@@ -747,7 +749,7 @@ internal class CentralGattClient(
                 // latch.
                 val peerId = host.connections.deviceIdForAddress(address)
                 if (peerId != null) {
-                    mainHandler.post { finalizeGivenUpPeer(address, peerId) }
+                    bleHandler.post { finalizeGivenUpPeer(address, peerId) }
                 }
                 return
             }
@@ -758,7 +760,7 @@ internal class CentralGattClient(
                 MIN_RECONNECT_INTERVAL_MS * (1L shl (retryCount - 1)),
             )
 
-            mainHandler.postDelayed({
+            bleHandler.postDelayed({
                 if (host.isRunning() && host.connections.hasDeviceForAddress(address)) {
                     try {
                         val device = host.bluetoothAdapter?.getRemoteDevice(address)
@@ -778,23 +780,23 @@ internal class CentralGattClient(
             // Bluetooth binder thread. That is exactly the pattern the
             // rest of this file is built to avoid — it blocks GATT work
             // for every client in this process while the UniFFI mutex is
-            // held. Post the whole body to main and reuse the
+            // held. Post the whole body to the BLE thread and reuse the
             // give-up-cleanup helper so the queue/state clear stays
             // consistent with the max-retries path.
             val peerId = host.connections.deviceIdForAddress(address)
             if (peerId != null) {
-                mainHandler.post { finalizeGivenUpPeer(address, peerId) }
+                bleHandler.post { finalizeGivenUpPeer(address, peerId) }
             }
         }
     }
 
     /**
-     * Tear down every scrap of main-thread state held for a peer we are
+     * Tear down every scrap of BLE-thread state held for a peer we are
      * giving up on — both the max-retries-exhausted branch and the
      * stale-callback/!isRunning branch funnel through here so the cleanup
      * sequence stays single-sourced.
      *
-     * Must run on the main thread. Drops the outbound queue for this
+     * Must run on the BLE thread. Drops the outbound queue for this
      * peer alongside the inbound buffer — without that, fragments
      * destined for an address that has been permanently lost sit in the
      * outbound queue until either the 30s per-entry TTL or capacity
@@ -837,9 +839,9 @@ internal class CentralGattClient(
         host.maybeHandleRebalance("disconnect_give_up")
     }
 
-    // --- Read handlers (main-thread) ---
+    // --- Read handlers (BLE-thread) ---
 
-    private fun handleCharacteristicReadOnMain(
+    private fun handleCharacteristicReadOnBleThread(
         gatt: BluetoothGatt,
         charUuid: UUID,
         value: ByteArray?,
@@ -962,7 +964,7 @@ internal class CentralGattClient(
         host.meshController.markPeerActive(peerId)
         host.meshController.markPeerActive(host.selfDeviceId)
         host.refreshSelfMetrics()
-        // Already on main — no extra hop needed.
+        // Already on the BLE thread — no extra hop needed.
         if (host.isRunning()) {
             host.refreshAdvertising("membership_change")
         }
@@ -1178,7 +1180,7 @@ internal class CentralGattClient(
      * protocol in FIFO order and learns routes from any complete messages
      * that fall out of the reassembler.
      *
-     * Called from [handleDeviceIdRead], which runs on the main thread, so
+     * Called from [handleDeviceIdRead], which runs on the BLE thread, so
      * all protocol calls here are safely off the binder thread.
      */
     private fun drainPendingInboundFor(address: String, deviceId: String) {
@@ -1221,7 +1223,7 @@ internal class CentralGattClient(
 }
 
 /**
- * Drop every piece of main-thread-only buffer state the central client
+ * Drop every piece of BLE-thread-only buffer state the central client
  * holds for a peer we are giving up on — the inbound fragment buffer
  * keyed by BLE address, the outbound fragment queue keyed by device id,
  * and the device-id resolution throttle map.

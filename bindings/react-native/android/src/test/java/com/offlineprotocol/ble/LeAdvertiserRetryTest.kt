@@ -99,7 +99,7 @@ class LeAdvertiserRetryTest {
     private val looper = shadowOf(Looper.getMainLooper())
     private val host = FakeHost()
     private val advertiser = LeAdvertiser(
-        mainHandler = Handler(Looper.getMainLooper()),
+        bleHandler = Handler(Looper.getMainLooper()),
         host = host,
         diagnosticEmitter = { _, _, _ -> },
     )

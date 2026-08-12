@@ -16,7 +16,7 @@ import java.util.concurrent.ThreadLocalRandom
  *   - a single place for the [AdvertiseCallback] lifecycle.
  */
 class LeAdvertiser(
-    private val mainHandler: Handler,
+    private val bleHandler: Handler,
     private val host: Host,
     private val diagnosticEmitter: (level: String, message: String, context: Map<String, Any?>) -> Unit =
         { _, _, _ -> },
@@ -38,7 +38,7 @@ class LeAdvertiser(
          * can refresh the signed identity that will be served via the GATT
          * identity characteristic. This is load-bearing: centrals reading
          * identity on the reconnect would otherwise see stale bytes.
-         * Must be safe to invoke on the main thread and must not block on
+         * Must be safe to invoke on the BLE thread and must not block on
          * network or disk.
          */
         fun refreshPublishedIdentity()
@@ -88,7 +88,7 @@ class LeAdvertiser(
     private val advertiseRetryRunnable = Runnable { start(ADVERTISE_RETRY_REASON) }
 
     private val advertiseRetryScheduler = BleRecoveryScheduler(
-        handler = mainHandler,
+        handler = bleHandler,
         task = advertiseRetryRunnable,
         minDelayMs = ADVERTISE_RETRY_MIN_MS,
         maxDelayMs = ADVERTISE_RETRY_MAX_MS,
@@ -144,7 +144,7 @@ class LeAdvertiser(
         // Gate on a dedicated in-flight flag, not on `isAdvertising`. The
         // latter is only flipped to true once the platform `onStartSuccess`
         // callback arrives on a private Binder thread, which leaves a window
-        // where a fast stop() → start() on the main thread would submit a
+        // where a fast stop() → start() on the BLE thread would submit a
         // second startAdvertising while the first is still in flight and
         // earn itself ADVERTISE_FAILED_ALREADY_STARTED.
         if (startInFlight) return
@@ -221,7 +221,7 @@ class LeAdvertiser(
                     // the next outage is retried fast rather than at the cap.
                     // Posted because this arrives on a private Binder thread
                     // while the scheduler's ladder is main-confined.
-                    mainHandler.post {
+                    bleHandler.post {
                         if (advertiseCallback === self) {
                             advertiseRetryScheduler.cancel()
                         }
@@ -250,10 +250,10 @@ class LeAdvertiser(
                     // required, which closes the retry window.
                     startInFlight = false
                     val willRetry = isRetriableFailure(errorCode)
-                    // Drop the stop-reference on main so a concurrent stop()
-                    // doesn't race our clear. stop() is main-thread only, so
+                    // Drop the stop-reference on the BLE thread so a concurrent stop()
+                    // doesn't race our clear. stop() is BLE-thread only, so
                     // posting here is sufficient.
-                    mainHandler.post {
+                    bleHandler.post {
                         if (advertiseCallback === self) {
                             advertiseCallback = null
                             // Arm inside the identity check, not beside it. A
@@ -363,7 +363,7 @@ class LeAdvertiser(
         startInFlight = false
         isAdvertising = false
         pendingAdvertiseRestart?.let {
-            mainHandler.removeCallbacks(it)
+            bleHandler.removeCallbacks(it)
             pendingAdvertiseRestart = null
         }
         // Cancel the failure retry *above* the early return below, not beside
@@ -420,13 +420,13 @@ class LeAdvertiser(
         val jitter = ThreadLocalRandom.current()
             .nextLong(ADVERTISE_RESTART_MIN_MS, ADVERTISE_RESTART_MAX_MS + 1)
         val delay = cooldownDelay + jitter
-        pendingAdvertiseRestart?.let { mainHandler.removeCallbacks(it) }
+        pendingAdvertiseRestart?.let { bleHandler.removeCallbacks(it) }
         val runnable = Runnable {
             pendingAdvertiseRestart = null
             start(reason)
         }
         pendingAdvertiseRestart = runnable
-        mainHandler.postDelayed(runnable, delay)
+        bleHandler.postDelayed(runnable, delay)
     }
 
     /** Call when [PeripheralGattServer] signals the service registration has completed. */
@@ -434,7 +434,7 @@ class LeAdvertiser(
         val reason = pendingAdvertiseReason ?: return
         pendingAdvertiseReason = null
         Log.i(TAG, "Starting deferred advertising after GATT service ready (reason=$reason)")
-        // Caller is already on the main thread (the facade posts onReady
+        // Caller is already on the BLE thread (the facade posts onReady
         // listener callbacks there), so start inline — no extra hop.
         start(reason)
     }
@@ -445,7 +445,7 @@ class LeAdvertiser(
 
     fun shutdown() {
         stop()
-        pendingAdvertiseRestart?.let { mainHandler.removeCallbacks(it) }
+        pendingAdvertiseRestart?.let { bleHandler.removeCallbacks(it) }
         pendingAdvertiseRestart = null
         pendingAdvertiseReason = null
         lastAdvertiseRestartAt = 0L

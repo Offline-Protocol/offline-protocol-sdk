@@ -8,7 +8,7 @@ import org.junit.Test
 
 /**
  * Unit tests for [OutboundFragmentQueue]. The class is exercised in plain
- * JVM tests by injecting a no-op main-thread guard and a deterministic
+ * JVM tests by injecting a no-op BLE-thread guard and a deterministic
  * clock — this is the whole reason those hooks exist.
  *
  * Properties under test:
@@ -25,7 +25,7 @@ import org.junit.Test
  *     still waiting, and passes through otherwise.
  *   - `removeAll` / `clear` bring the total counter back to zero.
  *   - `totalCount`, `recipientIds`, `recipientCount` are readable without
- *     tripping the main-thread guard, so callback-thread diagnostic paths
+ *     tripping the BLE-thread guard, so callback-thread diagnostic paths
  *     stay safe.
  */
 class OutboundFragmentQueueTest {
@@ -49,9 +49,9 @@ class OutboundFragmentQueueTest {
     ) {
         val clock = FakeClock()
         val drops = mutableListOf<DropEvent>()
-        val mainThreadInvocations = java.util.concurrent.atomic.AtomicInteger(0)
+        val bleThreadInvocations = java.util.concurrent.atomic.AtomicInteger(0)
         val queue = OutboundFragmentQueue(
-            mainThreadCheck = { mainThreadInvocations.incrementAndGet() },
+            bleThreadCheck = { bleThreadInvocations.incrementAndGet() },
             maxPerPeer = maxPerPeer,
             timeoutMs = timeoutMs,
             clock = clock,
@@ -70,11 +70,12 @@ class OutboundFragmentQueueTest {
         assertEquals(3, h.queue.totalCount())
 
         val sent = mutableListOf<ByteArray>()
-        val hasUnsent = h.queue.flush { _, data ->
+        val flushed = h.queue.flush { _, data ->
             sent += data
             true
         }
-        assertFalse(hasUnsent)
+        assertFalse(flushed.hasUnsent)
+        assertEquals(3, flushed.sent)
         assertEquals(0, h.queue.totalCount())
         assertEquals(3, sent.size)
         assertArrayEquals(byteArrayOf(1), sent[0])
@@ -166,20 +167,70 @@ class OutboundFragmentQueueTest {
         assertEquals(3, h.queue.totalCount())
 
         val sent = mutableListOf<ByteArray>()
-        val hasUnsent = h.queue.flush { _, data ->
+        val flushed = h.queue.flush { _, data ->
             sent += data
             true
         }
-        assertFalse(hasUnsent)
+        assertFalse(flushed.hasUnsent)
         assertEquals(0, h.queue.totalCount())
         // Only the fresh fragment survived the flush.
         assertEquals(1, sent.size)
+        assertEquals(1, flushed.sent)
         assertArrayEquals(byteArrayOf(3), sent[0])
         assertEquals(1, h.drops.size)
         assertEquals(
             DropEvent("alice", OutboundFragmentQueue.DropReason.EXPIRED, 2),
             h.drops[0],
         )
+    }
+
+    @Test
+    fun `an expiry-only flush reports zero sends even though the queue shrank`() {
+        // The drain reads `sent` as its progress signal and resets the
+        // backpressure ladder on it. A permanently stalled peer sheds expired
+        // fragments every TTL window, which shrinks the queue while delivering
+        // nothing — if that read as progress it would hand the fast retry
+        // ladder back to the exact peer the ceiling exists to hold down
+        // (OFF-2123). So an expiry-only pass must report sent == 0.
+        val h = Harness(timeoutMs = 1_000L)
+        h.queue.enqueue("alice", byteArrayOf(1))
+        h.queue.enqueue("alice", byteArrayOf(2))
+        h.clock.advance(1_500L)
+
+        val before = h.queue.totalCount()
+        val flushed = h.queue.flush { _, _ ->
+            throw AssertionError("nothing survives to be sent")
+        }
+
+        assertEquals(0, flushed.sent)
+        assertFalse(flushed.hasUnsent)
+        // The queue really did shrink — which is exactly why the size delta is
+        // not a usable progress signal.
+        assertEquals(2, before)
+        assertEquals(0, h.queue.totalCount())
+        assertEquals(1, h.drops.size)
+        assertEquals(
+            DropEvent("alice", OutboundFragmentQueue.DropReason.EXPIRED, 2),
+            h.drops[0],
+        )
+    }
+
+    @Test
+    fun `a stalled flush that expires older fragments still reports zero sends`() {
+        // Same hazard, mid-stall shape: alice's link refuses every write while
+        // her oldest fragments age out. The queue shrinks by the expired count
+        // and nothing is delivered.
+        val h = Harness(timeoutMs = 1_000L)
+        h.queue.enqueue("alice", byteArrayOf(1))
+        h.queue.enqueue("alice", byteArrayOf(2))
+        h.clock.advance(1_500L)
+        h.queue.enqueue("alice", byteArrayOf(3))
+
+        val flushed = h.queue.flush { _, _ -> false }
+
+        assertEquals(0, flushed.sent)
+        assertTrue(flushed.hasUnsent)
+        assertEquals(1, h.queue.totalCount())
     }
 
     @Test
@@ -190,7 +241,7 @@ class OutboundFragmentQueueTest {
         h.queue.enqueue("bob", byteArrayOf(10))
 
         val sent = mutableListOf<Pair<String, Byte>>()
-        val hasUnsent = h.queue.flush { recipientId, data ->
+        val flushed = h.queue.flush { recipientId, data ->
             if (recipientId == "alice") {
                 false // alice's link is stalled
             } else {
@@ -198,7 +249,8 @@ class OutboundFragmentQueueTest {
                 true
             }
         }
-        assertTrue(hasUnsent)
+        assertTrue(flushed.hasUnsent)
+        assertEquals(1, flushed.sent)
         // Alice's 2 fragments still queued; bob drained cleanly.
         assertEquals(2, h.queue.totalCount())
         assertTrue(h.queue.hasPending("alice"))
@@ -219,7 +271,7 @@ class OutboundFragmentQueueTest {
 
         val sent = mutableListOf<Byte>()
         var call = 0
-        val hasUnsent = h.queue.flush { _, data ->
+        val flushed = h.queue.flush { _, data ->
             call++
             if (call == 1) {
                 false // stall on the first send
@@ -228,7 +280,8 @@ class OutboundFragmentQueueTest {
                 true
             }
         }
-        assertTrue(hasUnsent)
+        assertTrue(flushed.hasUnsent)
+        assertEquals(0, flushed.sent)
         assertEquals(3, h.queue.totalCount())
         assertTrue(sent.isEmpty())
     }
@@ -268,13 +321,13 @@ class OutboundFragmentQueueTest {
 
     @Test
     fun `recipientIds and recipientCount are safe to read from any thread`() {
-        // Contract: the main-thread guard is only invoked by mutating and
+        // Contract: the BLE-thread guard is only invoked by mutating and
         // single-entry lookup methods. Diagnostic paths on callback threads
         // must be able to read aggregate state without tripping the check.
         val h = Harness()
         h.queue.enqueue("alice", byteArrayOf(1))
         h.queue.enqueue("bob", byteArrayOf(2))
-        val mainCallsBefore = h.mainThreadInvocations.get()
+        val mainCallsBefore = h.bleThreadInvocations.get()
 
         assertEquals(2, h.queue.totalCount())
         assertEquals(2, h.queue.recipientCount())
@@ -282,19 +335,19 @@ class OutboundFragmentQueueTest {
         assertEquals(setOf("alice", "bob"), ids)
 
         assertEquals(
-            "off-thread reads must not call the main-thread guard",
+            "off-thread reads must not call the BLE-thread guard",
             mainCallsBefore,
-            h.mainThreadInvocations.get(),
+            h.bleThreadInvocations.get(),
         )
     }
 
     @Test
-    fun `main-thread guard is invoked on every mutating entry point`() {
-        // If a future refactor forgets to mainThreadCheck() in a mutating
+    fun `BLE-thread guard is invoked on every mutating entry point`() {
+        // If a future refactor forgets to bleThreadCheck() in a mutating
         // method, this test fails. Cheap insurance for a load-bearing
         // invariant.
         val h = Harness()
-        val before = h.mainThreadInvocations.get()
+        val before = h.bleThreadInvocations.get()
 
         h.queue.enqueue("alice", byteArrayOf(1))
         h.queue.enqueueIfBlocked("alice", byteArrayOf(2))
@@ -304,13 +357,13 @@ class OutboundFragmentQueueTest {
         h.queue.removeAll("bob")
         h.queue.clear()
 
-        val delta = h.mainThreadInvocations.get() - before
+        val delta = h.bleThreadInvocations.get() - before
         // 7 direct calls above. enqueueIfBlocked internally calls hasPending
         // and enqueue, which trip the guard again (the invariant is that
         // *every* entry point asserts, so nested calls double-count and
         // that is fine — we only care the counter moved far enough).
         assertTrue(
-            "expected >= 7 main-thread guard invocations, got $delta",
+            "expected >= 7 BLE-thread guard invocations, got $delta",
             delta >= 7,
         )
     }
@@ -326,10 +379,11 @@ class OutboundFragmentQueueTest {
         h.queue.enqueue("charlie", byteArrayOf(20))
         h.queue.enqueue("charlie", byteArrayOf(21))
 
-        val hasUnsent = h.queue.flush { recipientId, _ ->
+        val flushed = h.queue.flush { recipientId, _ ->
             recipientId != "alice"
         }
-        assertTrue(hasUnsent)
+        assertTrue(flushed.hasUnsent)
+        assertEquals(3, flushed.sent)
         assertEquals(2, h.queue.totalCount())
         assertTrue(h.queue.hasPending("alice"))
         assertFalse(h.queue.hasPending("bob"))

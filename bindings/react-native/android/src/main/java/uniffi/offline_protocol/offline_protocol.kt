@@ -1110,6 +1110,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_proc
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request(
@@ -1522,6 +1524,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process(`p
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process_file_chunk(`ptr`: Long,`fileId`: RustBuffer.ByValue,`chunkIndex`: Int,`totalChunks`: Int,`fileSize`: Long,`fileName`: RustBuffer.ByValue,`fileChecksum`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_protocol_lock_diagnostics(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_receive_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reject_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2103,6 +2107,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk() != 46065.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics() != 26003.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() != 33217.toShort()) {
@@ -3412,6 +3419,8 @@ public interface OfflineProtocolInterface {
     fun `process`()
     
     fun `processFileChunk`(`fileId`: kotlin.String, `chunkIndex`: kotlin.UInt, `totalChunks`: kotlin.UInt, `fileSize`: kotlin.ULong, `fileName`: kotlin.String, `fileChecksum`: kotlin.String, `data`: List<kotlin.UByte>)
+    
+    fun `protocolLockDiagnostics`(): ProtocolLockDiagnostics
     
     fun `receiveMessage`(): kotlin.String?
     
@@ -5037,6 +5046,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
 }
     }
     
+    
+
+    override fun `protocolLockDiagnostics`(): ProtocolLockDiagnostics {
+            return FfiConverterTypeProtocolLockDiagnostics.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_protocol_lock_diagnostics(
+        it,
+        _status)
+}
+    }
+    )
+    }
     
 
     override fun `receiveMessage`(): kotlin.String? {
@@ -7489,6 +7511,52 @@ public object FfiConverterTypeProtocolConfigExtended: FfiConverterRustBuffer<Pro
             FfiConverterTypePathConfig.write(value.`path`, buf)
             FfiConverterTypeReliabilityConfig.write(value.`reliability`, buf)
             FfiConverterUByte.write(value.`initialTtl`, buf)
+    }
+}
+
+
+
+data class ProtocolLockDiagnostics (
+    var `held`: kotlin.Boolean
+    , 
+    var `holderLocation`: kotlin.String
+    , 
+    var `holderThread`: kotlin.String
+    , 
+    var `heldForMs`: kotlin.ULong
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeProtocolLockDiagnostics: FfiConverterRustBuffer<ProtocolLockDiagnostics> {
+    override fun read(buf: ByteBuffer): ProtocolLockDiagnostics {
+        return ProtocolLockDiagnostics(
+            FfiConverterBoolean.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ProtocolLockDiagnostics) = (
+            FfiConverterBoolean.allocationSize(value.`held`) +
+            FfiConverterString.allocationSize(value.`holderLocation`) +
+            FfiConverterString.allocationSize(value.`holderThread`) +
+            FfiConverterULong.allocationSize(value.`heldForMs`)
+    )
+
+    override fun write(value: ProtocolLockDiagnostics, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`held`, buf)
+            FfiConverterString.write(value.`holderLocation`, buf)
+            FfiConverterString.write(value.`holderThread`, buf)
+            FfiConverterULong.write(value.`heldForMs`, buf)
     }
 }
 

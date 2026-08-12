@@ -18,19 +18,19 @@ import org.junit.Test
  */
 class CentralGattClientTest {
 
-    private val noopMainThreadCheck: () -> Unit = {}
+    private val noopBleThreadCheck: () -> Unit = {}
 
     @Test
     fun `clearPeerBuffers drains the outbound queue for the given peer`() {
         // Outbound queue is keyed by device id, not BLE address. Populate
         // two peers so we can verify the helper only touches the one we
         // asked for.
-        val outbound = OutboundFragmentQueue(mainThreadCheck = noopMainThreadCheck)
+        val outbound = OutboundFragmentQueue(bleThreadCheck = noopBleThreadCheck)
         outbound.enqueue("peer-alpha", byteArrayOf(1, 2, 3))
         outbound.enqueue("peer-alpha", byteArrayOf(4, 5, 6))
         outbound.enqueue("peer-beta", byteArrayOf(7, 8, 9))
 
-        val pending = InboundFragmentBuffer(mainThreadCheck = noopMainThreadCheck)
+        val pending = InboundFragmentBuffer(bleThreadCheck = noopBleThreadCheck)
         val attempts = mutableMapOf<String, Long>()
 
         clearPeerBuffers(
@@ -57,8 +57,8 @@ class CentralGattClientTest {
 
     @Test
     fun `clearPeerBuffers drains pendingInbound for the given address`() {
-        val outbound = OutboundFragmentQueue(mainThreadCheck = noopMainThreadCheck)
-        val pending = InboundFragmentBuffer(mainThreadCheck = noopMainThreadCheck)
+        val outbound = OutboundFragmentQueue(bleThreadCheck = noopBleThreadCheck)
+        val pending = InboundFragmentBuffer(bleThreadCheck = noopBleThreadCheck)
         pending.enqueue("AA:BB:CC:DD:EE:FF", byteArrayOf(1, 2, 3))
         pending.enqueue("AA:BB:CC:DD:EE:FF", byteArrayOf(4, 5, 6))
         pending.enqueue("11:22:33:44:55:66", byteArrayOf(7))
@@ -85,8 +85,8 @@ class CentralGattClientTest {
 
     @Test
     fun `clearPeerBuffers drops the resolution attempt entry for the address`() {
-        val outbound = OutboundFragmentQueue(mainThreadCheck = noopMainThreadCheck)
-        val pending = InboundFragmentBuffer(mainThreadCheck = noopMainThreadCheck)
+        val outbound = OutboundFragmentQueue(bleThreadCheck = noopBleThreadCheck)
+        val pending = InboundFragmentBuffer(bleThreadCheck = noopBleThreadCheck)
         val attempts = mutableMapOf(
             "AA:BB:CC:DD:EE:FF" to 12345L,
             "11:22:33:44:55:66" to 67890L,
@@ -115,8 +115,8 @@ class CentralGattClientTest {
         // The give-up path is also reachable for peers that never managed
         // to transmit anything (e.g. failed handshake). Cleanup must not
         // throw or corrupt state in that case.
-        val outbound = OutboundFragmentQueue(mainThreadCheck = noopMainThreadCheck)
-        val pending = InboundFragmentBuffer(mainThreadCheck = noopMainThreadCheck)
+        val outbound = OutboundFragmentQueue(bleThreadCheck = noopBleThreadCheck)
+        val pending = InboundFragmentBuffer(bleThreadCheck = noopBleThreadCheck)
         val attempts = mutableMapOf<String, Long>()
 
         clearPeerBuffers(

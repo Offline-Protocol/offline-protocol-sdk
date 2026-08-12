@@ -741,6 +741,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk() != 40225:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics() != 1672:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() != 1745:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request() != 496:
@@ -2007,6 +2009,11 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process_file
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process_file_chunk.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_protocol_lock_diagnostics.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_protocol_lock_diagnostics.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_receive_message.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2695,6 +2702,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_proces
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message.restype = ctypes.c_uint16
@@ -6058,6 +6068,54 @@ class _UniffiFfiConverterTypeProtocolConfigExtended(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt8.write(value.initial_ttl, buf)
 
 @dataclass
+class ProtocolLockDiagnostics:
+    def __init__(self, *, held:bool, holder_location:str, holder_thread:str, held_for_ms:int):
+        self.held = held
+        self.holder_location = holder_location
+        self.holder_thread = holder_thread
+        self.held_for_ms = held_for_ms
+        
+        
+
+    
+    def __str__(self):
+        return "ProtocolLockDiagnostics(held={}, holder_location={}, holder_thread={}, held_for_ms={})".format(self.held, self.holder_location, self.holder_thread, self.held_for_ms)
+    def __eq__(self, other):
+        if self.held != other.held:
+            return False
+        if self.holder_location != other.holder_location:
+            return False
+        if self.holder_thread != other.holder_thread:
+            return False
+        if self.held_for_ms != other.held_for_ms:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeProtocolLockDiagnostics(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return ProtocolLockDiagnostics(
+            held=_UniffiFfiConverterBoolean.read(buf),
+            holder_location=_UniffiFfiConverterString.read(buf),
+            holder_thread=_UniffiFfiConverterString.read(buf),
+            held_for_ms=_UniffiFfiConverterUInt64.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterBoolean.check_lower(value.held)
+        _UniffiFfiConverterString.check_lower(value.holder_location)
+        _UniffiFfiConverterString.check_lower(value.holder_thread)
+        _UniffiFfiConverterUInt64.check_lower(value.held_for_ms)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterBoolean.write(value.held, buf)
+        _UniffiFfiConverterString.write(value.holder_location, buf)
+        _UniffiFfiConverterString.write(value.holder_thread, buf)
+        _UniffiFfiConverterUInt64.write(value.held_for_ms, buf)
+
+@dataclass
 class ReticulumMessage:
     def __init__(self, *, message_id:str, recipient_id:str, data:typing.List[int], reply_to_msg:typing.Optional[str]):
         self.message_id = message_id
@@ -9209,6 +9267,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def process_file_chunk(self, file_id: str,chunk_index: int,total_chunks: int,file_size: int,file_name: str,file_checksum: str,data: typing.List[int]) -> None:
         raise NotImplementedError
+    def protocol_lock_diagnostics(self, ) -> ProtocolLockDiagnostics:
+        raise NotImplementedError
     def receive_message(self, ) -> typing.Optional[str]:
         raise NotImplementedError
     def reject_connection_request(self, recipient: str) -> str:
@@ -10948,6 +11008,18 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def protocol_lock_diagnostics(self, ) -> ProtocolLockDiagnostics:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterTypeProtocolLockDiagnostics.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_protocol_lock_diagnostics,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def receive_message(self, ) -> typing.Optional[str]:
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -11905,6 +11977,7 @@ __all__ = [
     "RetryConfig",
     "ReliabilityConfig",
     "ProtocolConfigExtended",
+    "ProtocolLockDiagnostics",
     "ReticulumMessage",
     "RouteEntry",
     "RoutingScoreEntry",
