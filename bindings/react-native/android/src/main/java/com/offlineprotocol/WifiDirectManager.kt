@@ -330,6 +330,15 @@ class WifiDirectManager(
         confinement.runSync {
             if (state == TransportState.RUNNING) {
                 startPeerDiscovery()
+                // Removed before posting, which is the idiom the other three
+                // managers keep in their startMessagePolling helpers. This
+                // runnable reposts itself, and [startUnsafe] already posted one
+                // — so a resume() that does not follow a pause() (two in a row,
+                // or one against a transport that never paused) leaves two
+                // self-reposting chains running and doubles the FFI rate until
+                // the next stop(). Same-thread, so removeCallbacks is exact
+                // here rather than racing an in-flight repost.
+                transportHandler.removeCallbacks(messagePollingRunnable)
                 transportHandler.post(messagePollingRunnable)
             }
         }
@@ -400,11 +409,27 @@ class WifiDirectManager(
         ))
 
         if (!enabled && state == TransportState.RUNNING) {
-            // WiFi P2P was disabled
-            try {
-                protocol.wifiDirectStatusChanged(false)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error notifying protocol", e)
+            // WiFi P2P was disabled.
+            //
+            // Posted rather than called inline, even though this already runs
+            // on the transport thread. This body *is* the broadcast receiver's
+            // onReceive — [startUnsafe] registers with this handler as the
+            // scheduler — and wifiDirectStatusChanged is a UniFFI call that
+            // waits on the core's global protocol mutex, seconds of it under
+            // contention. Holding a receiver's dispatch window open for that is
+            // the hazard [drainAndSendMessages] spends a batch budget to avoid,
+            // reached through the framework's door instead of ours. Posting
+            // lets onReceive return and runs the call as the next item on the
+            // same queue, so the ordering is unchanged.
+            //
+            // Re-read inside, because a stop() fits in the gap the post opens.
+            transportHandler.post {
+                if (state != TransportState.RUNNING) return@post
+                try {
+                    protocol.wifiDirectStatusChanged(false)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error notifying protocol", e)
+                }
             }
         }
     }
@@ -498,7 +523,17 @@ class WifiDirectManager(
                 
                 emitDiagnostic("info", "Server socket started on port $SERVER_PORT")
                 
-                while (serverRunning.get()) {
+                // `serverRunning` alone is the wrong question, because it is
+                // process state and this loop is asking about *its* socket. A
+                // stop() clears the flag and closes the socket; a start()
+                // landing before this thread is next scheduled sets the flag
+                // back — and there is room for one, since stopUnsafe still has
+                // closeAllConnections, unregisterReceiver, channel.close() and
+                // a status FFI under the global mutex to get through. The
+                // accept then throws on the closed socket, the catch reads a
+                // flag that is true again, and this spins at full tilt emitting
+                // a diagnostic per turn, never reaching the finally.
+                while (serverRunning.get() && !server.isClosed) {
                     try {
                         handleClientConnection(server.accept())
                     } catch (e: java.net.SocketTimeoutException) {

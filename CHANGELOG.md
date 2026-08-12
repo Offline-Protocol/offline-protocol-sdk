@@ -393,10 +393,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   stop and exited, and the freshly bound socket leaked with the port still
   held — the next `start()` failed with `BindException`. The accept task now
   closes the socket it bound on every exit, and the field is published safely
-  across the two threads that touch it. Separately, each `start()` created a
-  `WifiP2pManager` channel that nothing ever released; `stop()` now closes it
-  on API 27+. Both pre-existing, and low real-world impact while this
-  transport stays unregistered.
+  across the two threads that touch it. The accept loop also stops when *its
+  own* socket closes rather than only when the transport flag clears: a
+  restart that set the flag back while the old task was still waking from the
+  close left it spinning at full tilt on a dead socket, emitting a diagnostic
+  per turn. Separately, each `start()` created a `WifiP2pManager` channel that
+  nothing ever released; `stop()` now closes it on API 27+. All pre-existing,
+  and low real-world impact while this transport stays unregistered.
+
+  Two smaller ones in the same file: the P2P state-change broadcast no longer
+  makes its protocol call inside the receiver's dispatch window (it hands it to
+  the same queue and returns, which is what the send drain's batch budget is
+  for), and `resume()` clears the previous poll before posting one, so a resume
+  that does not follow a pause no longer leaves two polling loops running.
 
 - **Android: Nostr's reconnect bookkeeping was three plain maps crossed by two
   threads.** OkHttp's reader thread reset a relay's attempt counter and delay
