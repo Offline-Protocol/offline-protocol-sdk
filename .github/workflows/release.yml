@@ -28,7 +28,9 @@ env:
   # Keep in sync with the `uniffi` pin in crates/offline-protocol-uniffi/Cargo.toml.
   # scripts/generate-bindings.sh compares the two and fails the build on a
   # minor-version disagreement, so drift here is loud rather than silent — but
-  # it is still four edits (this, ci.yml, README, CLAUDE.md) on a uniffi bump.
+  # a uniffi bump still means editing several files that name the version
+  # prescriptively (this, ci.yml, README, CLAUDE.md, CONTRIBUTING.md and the
+  # install hints the scripts print).
   UNIFFI_VERSION: "0.30.0"
 
 jobs:

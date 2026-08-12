@@ -57,7 +57,8 @@ The quickest way to try it end-to-end on real hardware:
 
 Alternatively, scaffold native projects for this directory yourself
 (`npx react-native init` or an Expo prebuild), build the SDK's native libraries
-(`cd ../../bindings/react-native && npm run build:all`), then:
+(`cargo install uniffi --version 0.30.0 --features cli --locked`, then
+`cd ../../bindings/react-native && npm run build:all`), then:
 
 ```bash
 npm install

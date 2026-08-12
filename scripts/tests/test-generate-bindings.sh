@@ -70,7 +70,15 @@ INVOCATION="$INVOCATION|uniffi-bindgen[\"${SQ}]?[],[:space:]\"${SQ}[]*generate"
 # deletes the real call. The path-separator requirement keeps this from also
 # matching `bash scripts/tests/test-generate-bindings.sh`, which would let a
 # workflow that runs only the guard read as delegating to the generator.
-DELEGATION='^[[:space:]]*(run:[[:space:]]+)?(exec[[:space:]]+)?((bash|sh)[[:space:]]+)?([^|;&]*[/"])?generate-bindings\.sh([[:space:]]|"|$)'
+#
+# The path prefix must contain no whitespace and no quotes, and that is the
+# part doing the work above. A permissive `[^|;&]*` prefix swallows a whole
+# comment or echo body, so `# TODO restore: bash .../generate-bindings.sh`
+# satisfied the check — commenting out the call, which is the most natural way
+# this regression actually happens, read as still delegating. Requiring a
+# single unbroken path token is what makes the sentence above true rather than
+# aspirational.
+DELEGATION='^[[:space:]]*(run:[[:space:]]+)?(exec[[:space:]]+)?((bash|sh)[[:space:]]+)?"?([^[:space:]"]*/)?generate-bindings\.sh([[:space:]]|"|$)'
 
 # Every caller the generator's header claims delegates to it. Listed here so
 # that deleting a delegation is a test failure rather than a silent return to
@@ -373,7 +381,7 @@ while IFS= read -r spec; do
   counterpart="${spec#*:}"
   if [[ ! -f "$alias_script" ]]; then
     fail "$alias_script is missing — package.json still exposes it as an npm build script"
-  elif grep -Eq "^[[:space:]]*(exec[[:space:]]+)?((bash|sh)[[:space:]]+)?[^|;&]*/$counterpart" "$alias_script"; then
+  elif grep -Eq "^[[:space:]]*(exec[[:space:]]+)?((bash|sh)[[:space:]]+)?\"?[^[:space:]\"]*/$counterpart" "$alias_script"; then
     pass "$(basename "$alias_script") routes through $counterpart"
   else
     fail "$alias_script no longer routes through $counterpart — it would build native artifacts without regenerating bindings"
