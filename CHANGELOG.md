@@ -312,6 +312,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   socket work now has its own thread, and `stop()` closes the socket rather
   than waiting for whatever is on it.
 
+- **Android: a Reticulum connect that failed never retried.** The failure path
+  cleared its own in-flight flag before handing off, and the handler that
+  receives the failure decides whether to react by reading exactly that flag —
+  so it saw nothing to do and returned before scheduling anything. The 1s→30s
+  reconnect ladder was therefore dead for the case it exists for: a daemon
+  that is not running. The transport sat in `STARTING`, where `start()` throws
+  `AlreadyRunning`, until the app stopped and started it by hand. iOS was
+  unaffected. Configuration set by `configure()` is also now published safely
+  to the threads that read it, so a mid-session reconfigure cannot leave a
+  reconnect dialling the previous host or relay set.
+
+- **Android: stopping and restarting Reticulum while it was connecting could
+  leave a second connection live and unowned.** Tearing down clears the
+  in-flight flag while the connect is still blocked inside the socket call, so
+  the restart opened a second connection without the first being closed.
+  Whichever lost the race was left with a live reader that still believed it
+  was connected — and when it eventually failed it tore down the connection
+  that had replaced it. Attempts are now versioned, so one that outlives its
+  session closes what it opened instead of publishing it.
+
 - **A relay-delivered group message could be lost silently while the sender saw
   it delivered.** The relay's group path names senders by relay-account
   username, while the MLS credential inside the ciphertext is the sender's

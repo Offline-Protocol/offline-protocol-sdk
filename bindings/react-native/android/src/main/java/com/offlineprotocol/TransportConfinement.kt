@@ -210,6 +210,18 @@ internal class TransportConfinement(
         /**
          * Far below the 5s input-dispatch ANR budget, and far above a healthy
          * queue turnaround.
+         *
+         * Per call, which is not the same as per teardown, and the difference
+         * is worth knowing before anyone raises this. Confinements are
+         * per-transport, so the one main-reachable caller that stops several
+         * in a row — `OfflineProtocolModule.invalidate`, five managers
+         * including the BLE facade's own bound of the same size — can spend
+         * this five times over. That is still strictly better than what it
+         * replaced (from main the old helpers took an inline fast path
+         * straight into an unbounded UniFFI call), and `invalidate` runs on a
+         * React Native internal thread rather than main today, which is why
+         * the bound is enforced rather than relied on. But the headroom the
+         * number claims belongs to one call, not to the sequence.
          */
         const val MAIN_THREAD_SYNC_TIMEOUT_MS = 1_000L
 

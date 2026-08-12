@@ -261,6 +261,17 @@ public class WifiDirectManager: NSObject, TransportManager {
     }
 
     /// Drains the Rust message queue and sends each message over MultipeerConnectivity.
+    ///
+    /// Unbounded, where the Android manager's mirror of this spends a batch
+    /// budget and reposts. The asymmetry is deliberate: the budget there exists
+    /// because that looper is shared — it also delivers the Wi-Fi P2P framework
+    /// callbacks and the broadcast receiver, and a broadcast that misses its
+    /// dispatch budget is an ANR wherever the receiver runs — and because a
+    /// `stop()` waits on that same thread without a bound. Neither holds here.
+    /// `messageQueue` is this manager's alone, carries no framework callbacks,
+    /// and no lifecycle path waits on it, so a long drain delays nothing but
+    /// the next drain. Add a budget here only if one of those three facts
+    /// changes.
     private func drainAndSendMessages() {
         guard state == .running, hasConnectedPeers else { return }
 

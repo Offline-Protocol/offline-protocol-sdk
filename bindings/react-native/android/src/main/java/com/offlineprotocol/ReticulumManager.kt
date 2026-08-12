@@ -50,10 +50,18 @@ class ReticulumManager(
 
     // MARK: - Properties
 
-    private var daemonHost: String = "localhost"
-    private var daemonPort: Int = 4242
-    private var autoReconnect = true
-    private var maxReconnectAttempts = 0 // 0 = infinite
+    // Written by configure() on the RN bridge thread; read on the transport
+    // thread (connect, scheduleReconnect) and on the IO thread (the blocking
+    // connect itself, which reads the host and port it dials). The first
+    // start() gets happens-before from runConfinedSync's post, but a
+    // mid-session reconfigure has no such edge — volatile so a reconnect
+    // cannot dial a stale host or apply a retired retry policy.
+    // InternetManager annotates serverUrl/authToken for exactly this reason;
+    // these mirrors were missed when it did.
+    @Volatile private var daemonHost: String = "localhost"
+    @Volatile private var daemonPort: Int = 4242
+    @Volatile private var autoReconnect = true
+    @Volatile private var maxReconnectAttempts = 0 // 0 = infinite
 
     // The thread this manager's state, lifecycle and FFI run on.
     //
@@ -100,6 +108,10 @@ class ReticulumManager(
     private var socket: Socket? = null
     private var writer: PrintWriter? = null
     private var reader: BufferedReader? = null
+    // Under the same `synchronized(this)` as the socket it reads, because it
+    // crosses the same two threads: [startReceiveLoop] publishes it from the
+    // IO thread, [disconnect] interrupts and clears it from the transport
+    // thread. It was the one field in this group left outside the lock.
     private var receiveThread: Thread? = null
 
     // Configuration state
@@ -111,6 +123,25 @@ class ReticulumManager(
     private var reconnectAttempts = AtomicInteger(0)
     private var currentReconnectDelay = AtomicLong(RECONNECT_INITIAL_DELAY_MS)
     private var reconnectRunnable: Runnable? = null
+
+    // Which connect attempt is the current one.
+    //
+    // [connect] stamps this before handing its blocking work to [ioHandler],
+    // and [disconnect] retires it, so a block that outlives the attempt that
+    // queued it can tell. The flags above cannot answer that question:
+    // `disconnect` clears `isConnecting` while the connect is still inside
+    // `Socket.connect` — up to CONNECTION_TIMEOUT_MS against a host dropping
+    // SYNs — so a stop() followed by a start() passes connect()'s guard and
+    // queues a *second* attempt behind the first on the one shared IO looper.
+    // Both would publish, and the loser's socket and receive thread would leak
+    // with `isConnected` still true, so when that orphaned reader finally
+    // errored it would tear down the session that had replaced it.
+    //
+    // Checked before publishing rather than folded into the connected-edge
+    // gate on the transport thread: that gate catches a connection which
+    // outlived a stop, but not one which outlived a stop *and* a restart,
+    // because by then the state is legitimately STARTING again.
+    private val connectGeneration = AtomicInteger(0)
 
     // Failure tracking for DORS
     private var consecutiveSendFailures = AtomicInteger(0)
@@ -270,6 +301,8 @@ class ReticulumManager(
             "port" to daemonPort
         ))
 
+        val generation = connectGeneration.incrementAndGet()
+
         // Connect on the IO thread to avoid blocking and prevent unmanaged threads
         ioHandler.post {
             try {
@@ -278,6 +311,17 @@ class ReticulumManager(
                     java.net.InetSocketAddress(daemonHost, daemonPort),
                     CONNECTION_TIMEOUT_MS
                 )
+
+                // A teardown, or a restart, happened while this attempt was
+                // still inside connect(). Nothing below is wanted: publishing
+                // now would install this socket over the current session's,
+                // stranding one of the two with a live reader thread. Close
+                // what this opened instead — see [connectGeneration].
+                if (connectGeneration.get() != generation) {
+                    try { sock.close() } catch (_: Exception) {}
+                    return@post
+                }
+
                 sock.soTimeout = 0 // No read timeout — blocking receive
 
                 val w = PrintWriter(sock.getOutputStream(), true)
@@ -299,14 +343,32 @@ class ReticulumManager(
                 handleConnectionOpened()
                 startReceiveLoop(r)
             } catch (e: Exception) {
-                isConnecting.set(false)
                 Log.e(TAG, "Failed to connect to Reticulum daemon", e)
                 emitDiagnostic("error", "Failed to connect to Reticulum daemon", mapOf(
                     "error" to (e.message ?: "unknown"),
                     "host" to daemonHost,
                     "port" to daemonPort
                 ))
-                transportHandler.post { handleConnectionClosed(-1, e.message) }
+
+                // `isConnecting` is deliberately NOT cleared here, and that is
+                // the fix rather than an oversight. [handleConnectionClosed]
+                // decides whether a failure is worth reacting to by reading
+                // exactly these two flags — clearing this one first made that
+                // read false on both counts, so it returned early and never
+                // reached [scheduleReconnect]. The whole 1s→30s ladder was
+                // dead for the case it exists for: a daemon that is not
+                // running. The transport simply sat in STARTING, where
+                // startUnsafe throws AlreadyRunning, until an explicit
+                // stop()/start(). iOS clears the flag inside that handler,
+                // under the same lock that samples it, which is why the ladder
+                // worked there and not here.
+                //
+                // A superseded attempt hands nothing over: the generation that
+                // replaced it owns the flags now, and reporting this failure
+                // would fire the ladder against a session that already moved on.
+                if (connectGeneration.get() == generation) {
+                    transportHandler.post { handleConnectionClosed(-1, e.message) }
+                }
             }
         }
     }
@@ -317,10 +379,15 @@ class ReticulumManager(
         isConnected.set(false)
         isConnecting.set(false)
 
-        receiveThread?.interrupt()
-        receiveThread = null
+        // Any connect still inside Socket.connect on the IO thread belongs to
+        // the session this call is ending, so retire its generation: it closes
+        // what it opened rather than publishing it over whatever comes next.
+        // See [connectGeneration].
+        connectGeneration.incrementAndGet()
 
         synchronized(this) {
+            receiveThread?.interrupt()
+            receiveThread = null
             try { writer?.close() } catch (_: Exception) {}
             try { reader?.close() } catch (_: Exception) {}
             try { socket?.close() } catch (_: Exception) {}
@@ -375,7 +442,7 @@ class ReticulumManager(
     }
 
     private fun startReceiveLoop(reader: BufferedReader) {
-        receiveThread = Thread {
+        val thread = Thread {
             try {
                 while (isConnected.get() && !Thread.currentThread().isInterrupted) {
                     val line = reader.readLine() ?: break
@@ -390,7 +457,15 @@ class ReticulumManager(
             if (isConnected.get()) {
                 transportHandler.post { handleConnectionClosed(-1, "Connection lost") }
             }
-        }.also { it.start() }
+        }
+        // Published under the socket's lock, because this runs on the IO
+        // thread while [disconnect] clears the field from the transport one.
+        // Assigned before start() rather than after, so a teardown landing in
+        // between finds the thread instead of a null: interrupting one that
+        // has not started is a no-op, and the loop it then enters reads the
+        // `isConnected` that teardown already cleared and exits immediately.
+        synchronized(this) { receiveThread = thread }
+        thread.start()
     }
 
     private fun handleConnectionClosed(code: Int, reason: String?) {

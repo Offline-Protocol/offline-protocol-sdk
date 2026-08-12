@@ -63,9 +63,16 @@ class NostrManager(
 
     // MARK: - Properties
 
-    private var relayUrls: List<String> = emptyList()
-    private var autoReconnect = true
-    private var maxReconnectAttempts = 0 // 0 = infinite
+    // Written by configure() on the RN bridge thread, read on the transport
+    // thread (connectToRelay, scheduleReconnect) and on OkHttp's reader
+    // threads. The first start() gets happens-before from runConfinedSync's
+    // post, but a mid-session reconfigure has no such edge — volatile so a
+    // reconnect cannot dial a retired relay set or apply a retired retry
+    // policy. InternetManager annotates serverUrl/authToken for exactly this
+    // reason; these mirrors were missed when it did.
+    @Volatile private var relayUrls: List<String> = emptyList()
+    @Volatile private var autoReconnect = true
+    @Volatile private var maxReconnectAttempts = 0 // 0 = infinite
 
     // The one thread this manager runs on.
     //
@@ -98,8 +105,9 @@ class NostrManager(
     private val subscriptionIds = mutableMapOf<String, String>()
     private val relayLock = Object()
 
-    // Nostr identity (obtained from Rust core)
-    private var publicKeyHex: String = ""
+    // Nostr identity (obtained from Rust core). Same writer and readers as the
+    // configuration above — it is filled in by the same configure() call.
+    @Volatile private var publicKeyHex: String = ""
 
     // Configuration state
     private val isConfigured = AtomicBoolean(false)

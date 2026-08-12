@@ -10964,6 +10964,89 @@ mod tests {
         }
     }
 
+    /// A Reticulum connect attempt that outlives its session is retired, and a
+    /// failed one still drives the reconnect ladder.
+    ///
+    /// Two defects at the same seam, both invisible to the connected-edge gate
+    /// that [`react_native_transports_do_not_resurrect_a_stopped_connection`]
+    /// pins, because that gate answers "did a stop happen" and neither of these
+    /// does.
+    ///
+    /// **A superseded attempt used to publish anyway.** `disconnect` clears
+    /// `isConnecting` while the connect is still inside `Socket.connect` — up
+    /// to 60s against a host dropping SYNs — so a `stop()` followed by a
+    /// `start()` passes `connect`'s own guard and queues a *second* attempt
+    /// behind the first on the one shared IO looper. The gate cannot catch the
+    /// survivor: by the time it runs the state is legitimately `STARTING`
+    /// again. Both attempts publish, and the loser's socket and receive thread
+    /// leak with `isConnected` still true, so when that orphaned reader
+    /// eventually errors it tears down the session that replaced it. Hence a
+    /// generation, stamped before the post and checked before publishing.
+    ///
+    /// **A failed connect used to be terminal.** The catch cleared
+    /// `isConnecting` before handing off, and `handleConnectionClosed` decides
+    /// whether a failure is worth reacting to by reading exactly that flag and
+    /// `isConnected` — so it saw both false, returned early, and never reached
+    /// `scheduleReconnect`. The 1s→30s ladder was dead for the case it exists
+    /// for, a daemon that is not running: the transport sat in `STARTING`,
+    /// where `startUnsafe` throws `AlreadyRunning`, until an explicit
+    /// stop/start. iOS clears the flag *inside* that handler, under the lock
+    /// that samples it, which is why the ladder worked there and not here.
+    /// Pinned as adjacency — nothing between `catch` and the log — plus a count
+    /// of the clear's legitimate owners, so re-adding it anywhere fails here.
+    #[test]
+    fn react_native_reticulum_retires_a_superseded_connect_attempt() {
+        let code =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/ReticulumManager.kt");
+
+        for (what, pinned) in [
+            (
+                "stamping the attempt before posting it",
+                "val generation = connectGeneration.incrementAndGet() ioHandler.post { try { \
+                 val sock = Socket()",
+            ),
+            (
+                "retiring it on teardown",
+                "isConnected.set(false) isConnecting.set(false) \
+                 connectGeneration.incrementAndGet()",
+            ),
+            (
+                "checking it before publishing the socket",
+                "if (connectGeneration.get() != generation) { try { sock.close() } \
+                 catch (_: Exception) {} return@post }",
+            ),
+            (
+                "checking it before reporting a failure",
+                "if (connectGeneration.get() == generation) { transportHandler.post { \
+                 handleConnectionClosed(-1, e.message) } }",
+            ),
+            (
+                "leaving the in-flight flag for handleConnectionClosed to clear",
+                "} catch (e: Exception) { Log.e(TAG, \"Failed to connect to Reticulum daemon\", e)",
+            ),
+        ] {
+            assert!(
+                code.contains(pinned),
+                "ReticulumManager.kt: {what} is what keeps a connect that outlived its session \
+                 from publishing over the one that replaced it, and a failed connect from \
+                 silently ending the reconnect ladder. Expected to find:\n  {pinned}"
+            );
+        }
+
+        // The two legitimate owners: `disconnect`, ending a session, and
+        // `handleConnectionOpened`, promoting one. A third is the regression —
+        // the connect catch clearing it before the handoff, which is what made
+        // `handleConnectionClosed` return early and skip `scheduleReconnect`.
+        let clears = code.matches("isConnecting.set(false)").count();
+        assert_eq!(
+            clears, 2,
+            "ReticulumManager.kt: expected isConnecting to be cleared only by disconnect() and \
+             handleConnectionOpened(); found {clears} sites. A clear on the failure path makes \
+             handleConnectionClosed read both flags false and return before scheduling the \
+             reconnect, which strands the transport in STARTING for good."
+        );
+    }
+
     /// A connection that completes after `stop()` does not resurrect the
     /// transport.
     ///
@@ -11197,7 +11280,16 @@ mod tests {
         }
     }
 
-    /// No transport callback from Rust may wait on a confinement thread.
+    /// No Android transport callback from Rust may wait on a confinement thread.
+    ///
+    /// **Android only, and deliberately so** — the title names the platform
+    /// because the mechanism is Android's. There is no `runSync` on iOS and no
+    /// confinement thread to wait on; the same hazard exists there in a
+    /// different shape (a callback that blocks on a lock whose holder needs the
+    /// core), and it is pinned separately by
+    /// [`react_native_ios_wifi_direct_state_lock_never_calls_the_core`]. A
+    /// guard over managers that are mirrored across `.kt` and `.swift` reads as
+    /// covering both unless it says otherwise, so this one says otherwise.
     ///
     /// This is the invariant that makes [`TransportConfinement.runSync`]'s
     /// unbounded background wait safe, and it is the only one here whose
@@ -11260,6 +11352,102 @@ mod tests {
                  Expected to find:\n  {pinned}"
             );
         }
+    }
+
+    /// The iOS half of the same invariant: nothing calls into the core while
+    /// holding `WifiDirectManager`'s `stateLock`.
+    ///
+    /// iOS has no `runSync`, so a transport callback cannot deadlock by
+    /// *waiting on a thread* the way the Android one can. It can deadlock by
+    /// waiting on a **lock**, and this manager is the one place that became
+    /// possible: `onMessagesAvailable` now runs inline on whichever thread the
+    /// core calls it from — holding the global protocol mutex — and takes
+    /// `stateLock` twice on the way to the drain. That is safe for exactly one
+    /// reason: no holder of `stateLock` ever calls the core back. Add a
+    /// `protocolInstance` call inside any accessor below and the two locks
+    /// acquire in opposite orders on two threads, which is the same permanent
+    /// deadlock the Android guard describes, reached through a lock instead of
+    /// a looper.
+    ///
+    /// Pinned as whole accessor bodies, one per accessor rather than as one
+    /// contiguous run, so reordering them is free and adding a call-out to any
+    /// of them is not. The count assert is the backstop the individual pins
+    /// cannot provide: a *new* accessor that takes the lock and calls the core
+    /// would satisfy every pin above it, so a tenth acquisition has to come
+    /// here and be accounted for.
+    ///
+    /// `updateState` is deliberately not in this list — it takes the lock only
+    /// through `setState` and notifies the delegate *outside* it, which is the
+    /// same reasoning and is documented at the call site.
+    #[test]
+    fn react_native_ios_wifi_direct_state_lock_never_calls_the_core() {
+        let code = rn_source_code_only("ios/WifiDirectManager.swift");
+
+        for (what, pinned) in [
+            (
+                "the state read",
+                "public var state: TransportState { stateLock.lock(); \
+                 defer { stateLock.unlock() } return _state }",
+            ),
+            (
+                "setState",
+                "private func setState(_ newState: TransportState) { stateLock.lock(); \
+                 defer { stateLock.unlock() } _state = newState }",
+            ),
+            (
+                "the session accessor",
+                "private var session: MCSession? { get { stateLock.lock(); \
+                 defer { stateLock.unlock() }; return _session } set { stateLock.lock(); \
+                 defer { stateLock.unlock() }; _session = newValue } }",
+            ),
+            (
+                "hasConnectedPeers",
+                "private var hasConnectedPeers: Bool { stateLock.lock(); \
+                 defer { stateLock.unlock() } return !_connectedPeers.isEmpty }",
+            ),
+            (
+                "deviceId(forPeer:)",
+                "private func deviceId(forPeer peerID: MCPeerID) -> String? { stateLock.lock(); \
+                 defer { stateLock.unlock() } return _connectedPeers[peerID] }",
+            ),
+            (
+                "peers(matching:)",
+                "private func peers(matching recipientId: String) -> [MCPeerID] { \
+                 stateLock.lock(); defer { stateLock.unlock() } \
+                 return _connectedPeers.filter { $0.value == recipientId }.map { $0.key } }",
+            ),
+            (
+                "setPeer",
+                "private func setPeer(_ peerID: MCPeerID, deviceId: String) { stateLock.lock(); \
+                 defer { stateLock.unlock() } _connectedPeers[peerID] = deviceId }",
+            ),
+            (
+                "removePeer",
+                "private func removePeer(_ peerID: MCPeerID) -> String? { stateLock.lock(); \
+                 defer { stateLock.unlock() } return _connectedPeers.removeValue(forKey: peerID) }",
+            ),
+            (
+                "removeAllPeers",
+                "private func removeAllPeers() { stateLock.lock(); \
+                 defer { stateLock.unlock() } _connectedPeers.removeAll() }",
+            ),
+        ] {
+            assert!(
+                code.contains(pinned),
+                "ios/WifiDirectManager.swift: {what} must hold stateLock across one field access \
+                 and nothing else. The core calls onMessagesAvailable holding its global mutex \
+                 and that path takes this lock, so a lock holder that calls back into the core \
+                 deadlocks both. Expected to find:\n  {pinned}"
+            );
+        }
+
+        let acquisitions = code.matches("stateLock.lock()").count();
+        assert_eq!(
+            acquisitions, 10,
+            "ios/WifiDirectManager.swift: expected the 10 pinned stateLock acquisitions; found \
+             {acquisitions}. A new one is not wrong, but it is unreviewed — pin its body above \
+             so it cannot grow a call into the core unnoticed."
+        );
     }
 
     /// The iOS Reticulum status flips stay off the main thread.
