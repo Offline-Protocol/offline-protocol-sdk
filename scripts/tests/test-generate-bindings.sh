@@ -115,6 +115,25 @@ bindings/react-native/scripts/build-android.sh:build-uniffi-android.sh
 bindings/react-native/scripts/build-all.sh:build-uniffi-all.sh
 "
 
+# The negative-control fixtures, by name. Listed here with the other driver
+# lists so they are size-pinned too: they are what proves the scan can fire.
+HIT_FIXTURES="
+inline
+continued
+global-option
+cargo-run
+gradle-kotlin
+gradle-groovy
+argv-list
+nested-list
+"
+
+MISS_FIXTURES="
+delegating
+prose
+prose-adjacent
+"
+
 # The three committed paths, repo-relative. CI deletes exactly these before
 # regenerating and diffs exactly these afterwards; if the generator ever writes
 # somewhere else, `git diff` on a path nothing wrote to reports no diff and the
@@ -126,27 +145,69 @@ kotlin:bindings/react-native/android/src/main/java
 python:bindings/python/offline_protocol_sdk
 "
 
-FAILURES=0
+# Total number of assertions a healthy run makes. This is the backstop for the
+# whole "silently deleted assertion" class, which five review rounds hit five
+# different ways: a trimmed driver list, a fixture whose creation was removed,
+# a loop whose glob stopped matching. Each was fixed where it was found, and
+# each time the next one appeared somewhere the previous fix did not reach.
+# Counting is the check that does not need to anticipate the mechanism — a run
+# that asserts fewer things than it used to is wrong however it got that way.
+#
+# It does mean this number moves when assertions are added or removed on
+# purpose. That is the intended cost: the failure is loud, names the expected
+# and actual counts, and updating it is a deliberate one-line acknowledgement
+# that the guard's coverage changed.
+EXPECTED_ASSERTIONS=50
 
-pass() { echo "  ok — $*"; }
+FAILURES=0
+ASSERTIONS=0
+
+pass() {
+  ASSERTIONS=$((ASSERTIONS + 1))
+  echo "  ok — $*"
+}
 
 fail() {
+  ASSERTIONS=$((ASSERTIONS + 1))
   echo "  FAIL — $*" >&2
   FAILURES=$((FAILURES + 1))
 }
 
-# Every list below drives a loop, and an emptied list silently deletes its
-# assertions while the run still reports success — emptying EXPECTED_OUTPUTS
-# alone removed fifteen checks and still printed "All binding-generator guards
-# passed." Pin each size, so deleting an entry is a failure rather than a
-# quieter test run.
+# Size pins for the lists that drive loops. Necessary but not sufficient on
+# their own — a list can keep its length while losing coverage (swapping the
+# python entry for a second swift entry left the count at 3 and the run at
+# "all passed" with Python entirely untested), so the loops below also pin the
+# *identity* of what they processed.
 assert_list_size() {
   local name="$1" expected="$2" actual
-  actual="$(printf '%s\n' "$3" | grep -c .)"
+  # `|| true` because `grep -c` exits 1 on a zero count, which under
+  # `set -euo pipefail` would abort the script at this assignment — killing the
+  # run before it could print the message written to explain exactly this case.
+  actual="$(printf '%s\n' "$3" | grep -c . || true)"
   if [[ "$actual" -eq "$expected" ]]; then
     pass "$name still has $expected entries"
   else
     fail "$name has $actual entries, expected $expected — an emptied or trimmed list silently deletes the assertions it drives"
+  fi
+}
+
+# Identity pin: the set a loop actually processed must be the set it was meant
+# to. Catches duplicates and substitutions that leave the count intact.
+# Sorted, not deduplicated: a duplicate must read as different from the set it
+# displaced, which is the whole point (swapping python for a second swift kept
+# every count correct).
+normalize_set() {
+  printf '%s\n' "$1" | tr '[:space:]' '\n' | grep . | sort | tr '\n' ' '
+}
+
+assert_set_equals() {
+  local name="$1" expected actual
+  expected="$(normalize_set "$2")"
+  actual="$(normalize_set "$3")"
+  if [[ "$expected" == "$actual" ]]; then
+    pass "$name covered exactly [${expected% }]"
+  else
+    fail "$name covered [${actual% }] but should have covered [${expected% }] — a duplicated or substituted entry drops coverage while keeping the count"
   fi
 }
 
@@ -290,10 +351,12 @@ else
   fail "it invoked bindgen $call_count time(s), expected 3 (Swift, Kotlin, Python)"
 fi
 
+languages_seen=""
 while IFS= read -r spec; do
   [[ -z "$spec" ]] && continue
   language="${spec%%:*}"
   expected_dir="${spec#*:}"
+  languages_seen="$languages_seen $language"
 
   call=""
   for candidate in "$call_dir"/*; do
@@ -352,6 +415,8 @@ while IFS= read -r spec; do
 done <<EOF
 $EXPECTED_OUTPUTS
 EOF
+
+assert_set_equals "the per-language checks" "swift kotlin python" "$languages_seen"
 
 # ---------------------------------------------------------------------------
 # 3. Behavioral: the version gate actually rejects a mismatched bindgen.
@@ -469,37 +534,52 @@ printf 'if command -v uniffi-bindgen; then bash %s; fi\n' "$GENERATOR" >"$fixtur
 printf 'Run uniffi-bindgen to generate the Swift bindings.\n'        >"$fixtures/miss-prose"
 printf 'the uniffi-bindgen generator produces code\n'                >"$fixtures/miss-prose-adjacent"
 
-for fixture in "$fixtures"/hit-*; do
-  if [[ ! -f "$fixture" ]]; then
-    fail "expected hit fixtures are missing — these negative controls are vacuous"
-    break
-  fi
-  if grep -Eq "$INVOCATION" "$fixture"; then
-    pass "the scan detects $(basename "$fixture" | sed 's/^hit-//') invocations"
-  else
-    fail "the scan MISSES $(basename "$fixture" | sed 's/^hit-//') invocations — it would pass vacuously"
-  fi
-done
+# Driven by an explicit list rather than a glob. A glob makes the fixture set
+# its own silent driver list: deleting three of the eight hit- fixtures left
+# the run green at 44 assertions, because the loop simply had less to do and
+# the `-f` guard only fires when *nothing* matches. These negative controls are
+# the only evidence INVOCATION can fire at all, so quietly shrinking them is
+# the purest form of the vacuous pass.
+assert_list_size HIT_FIXTURES 8 "$HIT_FIXTURES"
+assert_list_size MISS_FIXTURES 3 "$MISS_FIXTURES"
 
-for fixture in "$fixtures"/miss-*; do
-  # The -f test is load-bearing here in a way it is not in the loop above: an
-  # unmatched glob leaves the literal pattern, grep fails on the nonexistent
-  # file, and "does not match" reads as "the scan correctly ignores it". The
-  # hit- loop fails safe in that situation; this one would not.
+while IFS= read -r name; do
+  [[ -z "$name" ]] && continue
+  fixture="$fixtures/hit-$name"
   if [[ ! -f "$fixture" ]]; then
-    fail "expected miss fixtures are missing — these negative controls are vacuous"
-    break
-  fi
-  if grep -Eq "$INVOCATION" "$fixture"; then
-    fail "the scan falsely flags $(basename "$fixture" | sed 's/^miss-//')"
+    fail "the hit fixture '$name' was never created — its negative control is vacuous"
+  elif grep -Eq "$INVOCATION" "$fixture"; then
+    pass "the scan detects $name invocations"
   else
-    pass "the scan ignores $(basename "$fixture" | sed 's/^miss-//')"
+    fail "the scan MISSES $name invocations — it would pass vacuously"
   fi
-done
+done <<EOF
+$HIT_FIXTURES
+EOF
+
+while IFS= read -r name; do
+  [[ -z "$name" ]] && continue
+  fixture="$fixtures/miss-$name"
+  if [[ ! -f "$fixture" ]]; then
+    fail "the miss fixture '$name' was never created — its negative control is vacuous"
+  elif grep -Eq "$INVOCATION" "$fixture"; then
+    fail "the scan falsely flags $name"
+  else
+    pass "the scan ignores $name"
+  fi
+done <<EOF
+$MISS_FIXTURES
+EOF
+
+# Deliberately not routed through fail(), which would itself increment.
+if [[ "$ASSERTIONS" -ne "$EXPECTED_ASSERTIONS" ]]; then
+  echo "  FAIL — ran $ASSERTIONS assertions, expected $EXPECTED_ASSERTIONS — checks were added or silently deleted; if the change was intentional, update EXPECTED_ASSERTIONS" >&2
+  FAILURES=$((FAILURES + 1))
+fi
 
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
-  echo "All binding-generator guards passed."
+  echo "All $ASSERTIONS binding-generator guards passed."
 else
   echo "$FAILURES guard(s) failed." >&2
   exit 1
