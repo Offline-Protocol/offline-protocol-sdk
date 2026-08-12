@@ -375,6 +375,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   replaced never had that coupling: it was abandoned mid-call and the restart
   got a fresh one.
 
+  The version guards the teardown as well as the connect, which is the half
+  with a permanent consequence. Every way a disconnect gets *observed* — a
+  failed connect, a dead receive loop, a send budget exhausted — is noticed on
+  one thread and handled on another, so each can arrive after the session it
+  describes is over. The handler's own duplicate check could not tell: it asks
+  whether *a* connection is live, never whether it is *that* one, so after a
+  stop and a restart it read the new session's flags and passed. The stale
+  report then marked a healthy connection down, told the core so, and started
+  a reconnect ladder against it — while the connection that was actually live
+  was left open with its reader parked on a socket nothing would ever close,
+  leaking a thread and a descriptor for the life of the process.
+
 - **Android: Wi-Fi Direct teardown could strand port 8988, and every session
   leaked a framework channel.** A `stop()` racing the server socket's bind
   closed a still-null field; the bind then completed, the accept loop saw the

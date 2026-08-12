@@ -11061,6 +11061,32 @@ mod tests {
     /// that samples it, which is why the ladder worked there and not here.
     /// Pinned as adjacency — nothing between `catch` and the log — plus a count
     /// of the clear's legitimate owners, so re-adding it anywhere fails here.
+    ///
+    /// **The teardown side needed the stamp too, and had none.** The five
+    /// checks above all live on the connect path, and every one of them
+    /// protects a *constructive* step. The destructive step is
+    /// `handleConnectionClosed`, which clears both session flags — and all
+    /// three of its callers reach it by posting from another thread (the IO
+    /// thread on a failed connect or an exhausted send budget, the receive
+    /// thread on a dropped link), so all three can arrive after the session
+    /// they describe is over. Its own `!wasConnected && !wasConnecting` guard
+    /// cannot substitute: it asks whether *a* session is live, never whether it
+    /// is *this* one, so after a stop *and* a start it reads the successor's
+    /// flags and passes. The stale post then clears `isConnected` under a
+    /// healthy connection, reports the transport down, and starts a reconnect
+    /// ladder against it — while the socket that was actually live is left open
+    /// with its reader parked in `readLine()` (soTimeout = 0) and
+    /// `receiveThread` already reassigned. Nothing closes either, and the next
+    /// connect publishes over `socket`/`writer`/`reader` without closing what
+    /// it displaces, so the thread and the descriptor leak for good.
+    ///
+    /// The check therefore sits at the top of the handler rather than beside
+    /// each post, which is the same lesson as the two locked checks below,
+    /// applied to a queue hop instead of a lock: a check on the near side of a
+    /// boundary the session can die inside is not a check. The connect catch's
+    /// pre-post check was exactly that shape and is gone; the receive loop and
+    /// the send-failure threshold carry the generation they belong to instead,
+    /// the latter sampled under the same lock as the writer it used.
     #[test]
     fn react_native_reticulum_retires_a_superseded_connect_attempt() {
         let code =
@@ -11096,8 +11122,10 @@ mod tests {
                  isConnected.set(true) isConnecting.set(false) }",
             ),
             (
-                "honouring a refused claim at the call site",
-                "if (!handleConnectionOpened(generation)) return@post startReceiveLoop(r)",
+                "honouring a refused claim at the call site, and handing the \
+                 reader the generation it belongs to",
+                "if (!handleConnectionOpened(generation)) return@post \
+                 startReceiveLoop(r, generation)",
             ),
             (
                 "checking it inside the announcement block",
@@ -11105,9 +11133,28 @@ mod tests {
                  if (state == TransportState.STOPPING || state == TransportState.STOPPED) {",
             ),
             (
-                "checking it before reporting a failure",
-                "if (connectGeneration.get() == generation) { transportHandler.post { \
-                 handleConnectionClosed(-1, e.message) } }",
+                "checking it inside the teardown handler, where the flags are cleared",
+                "private fun handleConnectionClosed(generation: Int, code: Int, reason: String?) { \
+                 if (connectGeneration.get() != generation) return",
+            ),
+            (
+                "stamping the failure a connect attempt reports",
+                "transportHandler.post { handleConnectionClosed(generation, -1, e.message) }",
+            ),
+            (
+                "stamping the failure a dead receive loop reports",
+                "if (isConnected.get()) { transportHandler.post { \
+                 handleConnectionClosed(generation, -1, \"Connection lost\") } }",
+            ),
+            (
+                "sampling the writer and its generation together",
+                "val w: PrintWriter? val generation: Int synchronized(this) { w = writer \
+                 generation = connectGeneration.get() }",
+            ),
+            (
+                "stamping the failure an exhausted send budget reports",
+                "transportHandler.post { \
+                 handleConnectionClosed(generation, -1, \"Send failures exceeded threshold\") }",
             ),
             (
                 "leaving the in-flight flag for handleConnectionClosed to clear",
@@ -11130,23 +11177,33 @@ mod tests {
         // session's, the claim check stops it setting `isConnected` true
         // against a socket `disconnect` already closed, the announcement check
         // is the only thing standing between a stop-then-restart and a
-        // `RUNNING` state with a null writer, and the last stops a superseded
-        // failure firing the ladder against the session that replaced it.
+        // `RUNNING` state with a null writer, and the teardown check stops any
+        // of the three posted failure reports clearing the flags of a session
+        // that replaced theirs.
         //
-        // Two of them are *inside* the lock rather than beside it, and that is
-        // load-bearing rather than tidy. Checked outside, each is a
-        // read-then-write with a teardown free to land in the middle: the
-        // publish would strand a socket in a field `disconnect` has already
-        // passed, and the claim would put `isConnected` back to true after the
-        // teardown cleared it — leaving a flag nothing clears, which
-        // `connect`'s own guard then reads to refuse the next `start()`.
+        // Three of them are *inside* something rather than beside it — two
+        // inside the lock that owns what they guard, one inside the handler
+        // rather than at each call site — and that is load-bearing rather than
+        // tidy. Checked outside, each becomes a read-then-act with a teardown
+        // free to land in the middle: the publish would strand a socket in a
+        // field `disconnect` has already passed, the claim would put
+        // `isConnected` back to true after the teardown cleared it (leaving a
+        // flag nothing clears, which `connect`'s own guard then reads to refuse
+        // the next `start()`), and the teardown check would pass on the near
+        // side of a queue hop the session can die inside.
+        //
+        // The sixth is `sendMessage`'s, which is a *sample* rather than a
+        // check: it binds the generation to the writer it read under the same
+        // lock, so the failure it may report later names the session that write
+        // actually belonged to.
         let generation_checks = code.matches("connectGeneration.get()").count();
         assert_eq!(
-            generation_checks, 5,
-            "ReticulumManager.kt: expected the connect generation to be consulted at all five \
+            generation_checks, 6,
+            "ReticulumManager.kt: expected the connect generation to be consulted at all six \
              points a retired attempt can still act — before building the streams, inside the \
-             publish, inside the flag claim, inside the announcement block, and before reporting \
-             a failure; found {generation_checks}."
+             publish, inside the flag claim, inside the announcement block, inside the teardown \
+             handler every posted failure funnels through, and alongside the writer sampled by \
+             sendMessage; found {generation_checks}."
         );
 
         // Only a close ends a blocked `Socket.connect` — it has no

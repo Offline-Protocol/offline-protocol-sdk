@@ -159,8 +159,13 @@ class ReticulumManager(
     // Checked at every point a retired attempt can still act, because those
     // are separate boundaries rather than one: before publishing the socket,
     // before claiming the flags, inside the announcement block on the
-    // transport thread, and — on the other branch — before reporting a
-    // failure that belongs to a session already moved on.
+    // transport thread, and — on the other branch — inside
+    // [handleConnectionClosed], which is where every teardown that was
+    // *observed* on another thread (a failed connect, a dead reader, an
+    // exhausted send budget) lands. All three of those hop to the transport
+    // thread to get there, so all three can arrive after the session they
+    // describe is gone; the check belongs on the far side of the hop, where
+    // the flags are actually cleared, not beside each post.
     //
     // The connected-edge state gate cannot stand in for the announcement
     // check. It catches a connection which outlived a stop, but not one which
@@ -428,7 +433,7 @@ class ReticulumManager(
                 // to read, and starting one against the `isConnected` a
                 // teardown just cleared would exit immediately anyway.
                 if (!handleConnectionOpened(generation)) return@post
-                startReceiveLoop(r)
+                startReceiveLoop(r, generation)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to connect to Reticulum daemon", e)
                 emitDiagnostic("error", "Failed to connect to Reticulum daemon", mapOf(
@@ -453,9 +458,11 @@ class ReticulumManager(
                 // A superseded attempt hands nothing over: the generation that
                 // replaced it owns the flags now, and reporting this failure
                 // would fire the ladder against a session that already moved on.
-                if (connectGeneration.get() == generation) {
-                    transportHandler.post { handleConnectionClosed(-1, e.message) }
-                }
+                // Carried into the post rather than checked before it, because
+                // a check here would be on the wrong side of the hop — the same
+                // reasoning the announcement block below spells out. The
+                // handler re-reads it on the transport thread.
+                transportHandler.post { handleConnectionClosed(generation, -1, e.message) }
             } finally {
                 // By identity, because a teardown may already have closed this
                 // socket and moved the field on. Nothing else runs on this
@@ -601,7 +608,7 @@ class ReticulumManager(
         return true
     }
 
-    private fun startReceiveLoop(reader: BufferedReader) {
+    private fun startReceiveLoop(reader: BufferedReader, generation: Int) {
         val thread = Thread {
             try {
                 while (isConnected.get() && !Thread.currentThread().isInterrupted) {
@@ -613,9 +620,14 @@ class ReticulumManager(
                     Log.e(TAG, "Receive loop error", e)
                 }
             }
-            // Connection closed or errored
+            // Connection closed or errored. Stamped with the generation this
+            // reader belongs to, because the `isConnected` check below is not
+            // one: a teardown clears the flag and wakes this thread, and if a
+            // start() lands before it is next scheduled the flag reads true
+            // again — belonging to the session that replaced this one. See
+            // [handleConnectionClosed].
             if (isConnected.get()) {
-                transportHandler.post { handleConnectionClosed(-1, "Connection lost") }
+                transportHandler.post { handleConnectionClosed(generation, -1, "Connection lost") }
             }
         }
         // Published under the socket's lock, because this runs on the IO
@@ -628,7 +640,38 @@ class ReticulumManager(
         thread.start()
     }
 
-    private fun handleConnectionClosed(code: Int, reason: String?) {
+    /**
+     * The teardown half of [connectGeneration], and the sixth point a retired
+     * attempt can still act.
+     *
+     * Every caller reaches this through `transportHandler.post` from another
+     * thread — the IO thread on a failed connect or an exhausted send budget,
+     * the receive thread on a dropped link — so each of them names a session
+     * that may already be over by the time this runs. Both flags below are
+     * *session* state, and clearing them is what makes this destructive: a
+     * stale post lands on whatever session holds them now.
+     *
+     * The `!wasConnected && !wasConnecting` check below cannot stand in for
+     * this one, and that is the whole reason the parameter exists. It is a
+     * duplicate-suppression check, and it answers "is some session live",
+     * never "is it *this* one" — so after a stop() *and* a start() it reads
+     * the successor's flags and passes. The stale post then clears
+     * `isConnected` under a healthy connection, tells the core the transport
+     * is down, and starts a reconnect ladder against it, while the socket that
+     * was actually live is left open with its reader parked in `readLine()`
+     * (soTimeout = 0) and `receiveThread` already reassigned — nothing ever
+     * closes either. The next connect publishes over `socket`/`writer`/
+     * `reader` under the lock without closing what it displaces, so the thread
+     * and the descriptor leak for the life of the process.
+     *
+     * Checked before the flags are touched, for the same reason the publish
+     * and the flag claim fold their checks into the write rather than standing
+     * beside it: the point of a generation is that nothing destructive happens
+     * on behalf of a session that has moved on.
+     */
+    private fun handleConnectionClosed(generation: Int, code: Int, reason: String?) {
+        if (connectGeneration.get() != generation) return
+
         val wasConnected = isConnected.getAndSet(false)
         val wasConnecting = isConnecting.getAndSet(false)
 
@@ -837,9 +880,17 @@ class ReticulumManager(
         data: ByteArray,
         replyToMsg: String? = null
     ) {
+        // The writer and the generation that owns it, sampled together under
+        // the lock `disconnect` clears both in, so the pair is consistent: a
+        // teardown either wins and this sees a null writer, or loses and this
+        // holds a writer with the generation it belonged to. Read separately
+        // they could straddle a stop/start, and the failure teardown below
+        // would name the session that replaced this one.
         val w: PrintWriter?
+        val generation: Int
         synchronized(this) {
             w = writer
+            generation = connectGeneration.get()
         }
 
         if (!isConnected.get() || w == null) {
@@ -899,7 +950,9 @@ class ReticulumManager(
                 emitDiagnostic("warning", "Too many consecutive send failures, triggering reconnect", mapOf(
                     "failures" to failures
                 ))
-                transportHandler.post { handleConnectionClosed(-1, "Send failures exceeded threshold") }
+                transportHandler.post {
+                    handleConnectionClosed(generation, -1, "Send failures exceeded threshold")
+                }
             }
         }
     }
