@@ -44,7 +44,9 @@ public class ReticulumManager: NSObject, TransportManager {
     private let connectionQueue = DispatchQueue(label: "com.offlineprotocol.reticulum.connection")
 
     // Message polling
-    private var messageTimer: DispatchSourceTimer?
+    // Guarded by [stateLock] — see [startMessagePolling] for why it has to
+    // share the flag's lock rather than sit beside it.
+    private var _messageTimer: DispatchSourceTimer?
     private let messageQueue = DispatchQueue(label: "com.offlineprotocol.reticulum.messages")
 
     // Reconnection (guarded by stateLock)
@@ -252,6 +254,12 @@ public class ReticulumManager: NSObject, TransportManager {
         // Set before the timer is cancelled, and read by both paths a
         // cancellation was never going to reach — `onMessagesAvailable` and
         // the reconnect edge in `handleConnectionOpened`. See `isPaused`.
+        //
+        // The ordering is what makes this a pause rather than a cancel: any
+        // arming that has not yet taken [stateLock] sees the flag and refuses
+        // ([startMessagePolling]), and any that already holds it installs a
+        // timer the `stop` below then cancels. Neither order leaves a live
+        // timer behind.
         isPaused = true
         stopMessagePolling()
     }
@@ -388,6 +396,13 @@ public class ReticulumManager: NSObject, TransportManager {
             // background stay reaches here and re-armed the poll for the rest
             // of it. Mirrors `InternetManager.handleAuthenticated`'s
             // `if !isPaused`.
+            //
+            // Belt to the braces [startMessagePolling] now carries internally.
+            // It refuses to arm while paused whatever this reads, which is
+            // what makes the refusal proof against a `pause()` landing between
+            // this check and the call — this block runs on main while
+            // `pause()` runs on the React Native method queue, so nothing
+            // orders them.
             if !self.isPaused {
                 self.startMessagePolling()
             }
@@ -657,21 +672,64 @@ public class ReticulumManager: NSObject, TransportManager {
         }
     }
 
+    /// Arms the fallback poll timer, unless the transport is paused.
+    ///
+    /// The pause gate lives *here*, not at the call sites that arm this, and
+    /// it shares one [stateLock] critical section with installing the timer.
+    /// Both halves of that are load-bearing.
+    ///
+    /// **Why here.** A gate at the call site is an invariant every future
+    /// caller has to remember; a gate at the one function that can violate it
+    /// is an invariant a new caller cannot get wrong.
+    ///
+    /// **Why under the lock.** `pause()` runs on the React Native method
+    /// queue while [handleConnectionOpened] arms this from *main*, so the two
+    /// are fully concurrent — wider than the Nostr manager's window, which at
+    /// least shares `messageQueue` with its own poll. A caller that read
+    /// `isPaused` and then called in could be overtaken by the whole of
+    /// `pause()` in between — flag set, timer cancelled — and arm a fresh 5s
+    /// timer against a transport the app just paused, which then polls for the
+    /// rest of the background stay. That is the durable symptom `isPaused`
+    /// exists to remove, so the check and the install are one decision. The
+    /// Android manager gets this for free: its `pause()` and its reconnect
+    /// edge are the same thread.
+    ///
+    /// The source is created inside the critical section and resumed outside
+    /// it, which is safe in both directions: a `pause()` that lands in the gap
+    /// cancels the timer through [stopMessagePolling] before it ever fires,
+    /// and the `resume()` below is still required — releasing a suspended
+    /// `DispatchSource` is a hard crash, so the paused branch must return
+    /// *before* a source exists rather than cancel one it never resumed.
     private func startMessagePolling() {
-        stopMessagePolling()
-
+        stateLock.lock()
+        guard !_isPaused else {
+            stateLock.unlock()
+            return
+        }
+        let previous = _messageTimer
         let timer = DispatchSource.makeTimerSource(queue: messageQueue)
+        _messageTimer = timer
+        stateLock.unlock()
+
+        previous?.cancel()
         timer.schedule(deadline: .now(), repeating: MESSAGE_POLL_INTERVAL)
         timer.setEventHandler { [weak self] in
-            self?.pollAndSendMessages()
+            // Re-read per tick: `cancel()` cannot reach a handler already
+            // dispatched onto `messageQueue`, so without this one full poll
+            // batch leaks past every `pause()`. The Android polling runnable
+            // carries the identical check.
+            guard let self = self, !self.isPaused else { return }
+            self.pollAndSendMessages()
         }
         timer.resume()
-        messageTimer = timer
     }
 
     private func stopMessagePolling() {
-        messageTimer?.cancel()
-        messageTimer = nil
+        stateLock.lock()
+        let timer = _messageTimer
+        _messageTimer = nil
+        stateLock.unlock()
+        timer?.cancel()
     }
 
     private func pollAndSendMessages() {

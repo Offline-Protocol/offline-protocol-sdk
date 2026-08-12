@@ -384,12 +384,15 @@ class WifiDirectManager(
                 //
                 // Carries [onMessagesAvailable]'s continuation check for the
                 // same reason it does, and skipping it here would not have
-                // been harmless: a continuation posted before the pause is
-                // still queued when this runs (it returns early once, on the
-                // pause, and clears the flag doing so), so continuation ->
-                // this lambda gives two self-reposting chains spending a
-                // [MAX_DRAIN_BATCH] budget each — the state
-                // [drainContinuationQueued] exists to make impossible. The
+                // been harmless. The reachable ordering is this one: a
+                // continuation queued before the pause is still ahead of us
+                // on the looper when `resume()` posts this lambda — it does
+                // *not* self-cancel, because by the time it runs the flag is
+                // already false again — so it drains, spends its budget, and
+                // reposts. Without the check this lambda then starts a second
+                // self-reposting chain alongside it, two [MAX_DRAIN_BATCH]
+                // budgets deep, which is exactly the state
+                // [drainContinuationQueued] exists to make impossible. That
                 // continuation drains this backlog anyway, so returning here
                 // loses nothing.
                 transportHandler.post {
@@ -753,8 +756,19 @@ class WifiDirectManager(
     /**
      * Called by the Rust transport callback when new outgoing messages are available.
      * This is the primary send path, replacing the 100ms polling loop.
+     *
+     * The pre-post check mirrors [NostrManager.onMessagesAvailable] and
+     * [ReticulumManager.onMessagesAvailable], and earns its keep for a reason
+     * specific to this manager: [drainAndSendMessages] already refuses while
+     * paused, so without this every core callback during a background stay
+     * still posts a runnable onto [transportHandler] just to return. That
+     * looper is not this manager's alone — [startUnsafe] hands it to
+     * `WifiP2pManager.initialize` and to `registerReceiver`, and a broadcast
+     * that misses Android's dispatch budget is an ANR wherever the receiver
+     * lives. Not posting at all is strictly better than posting a no-op.
      */
     fun onMessagesAvailable() {
+        if (isPaused) return
         transportHandler.post {
             // A pass that spent its budget has already queued a continuation,
             // and that continuation drains whatever this callback is

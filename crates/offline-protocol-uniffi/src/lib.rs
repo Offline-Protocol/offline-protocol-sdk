@@ -11740,7 +11740,7 @@ mod tests {
             (
                 "WifiDirectManager",
                 "onMessagesAvailable",
-                "fun onMessagesAvailable() { transportHandler.post { \
+                "fun onMessagesAvailable() { if (isPaused) return transportHandler.post { \
                  if (drainContinuationQueued) return@post drainAndSendMessages() } }",
             ),
             (
@@ -11914,15 +11914,11 @@ mod tests {
                 "the reconnect edge",
                 "if (!isPaused) { startMessagePolling() ioHandler.post { pollAndSendMessages() } }",
             ),
-            // The ping sits *above* the guard on purpose: it is the socket's
-            // liveness keepalive, not the send path, and this manager has no
-            // watchdog to notice a reconnected-while-paused socket going
-            // zombie — see the comment at the call site.
             (
                 "ios/NostrManager.swift",
                 "the reconnect edge",
-                "self.startPingTimer() guard !self.isPaused else { return } \
-                 self.startMessagePolling() self.pollAndSendMessages()",
+                "guard !self.isPaused else { return } self.startMessagePolling() \
+                 self.startPingTimer() self.pollAndSendMessages()",
             ),
             (
                 "ios/ReticulumManager.swift",
@@ -12061,6 +12057,103 @@ mod tests {
                 "ios/WifiDirectManager.swift",
                 "start",
                 "isPaused = false updateState(.starting)",
+            ),
+            // --- iOS only: the arming functions gate themselves, atomically -
+            //
+            // The one obligation on this list that is not a mirror of an
+            // Android site, because the hazard it answers does not exist on
+            // Android. There `pause()` and the reconnect edge are the same
+            // thread, so a call-site check cannot be overtaken. On iOS
+            // `pause()` runs on the React Native method queue while the edge
+            // arms from `messageQueue` (Reticulum's, from *main*), so a caller
+            // that reads the flag and then arms can have the whole of
+            // `pause()` land in between — flag set, timer cancelled — and
+            // install a fresh timer against a paused transport that then polls
+            // for the rest of the background stay. That is the durable symptom
+            // the flag exists to remove, reached through the fix for it.
+            //
+            // Pinned as the `_isPaused` read *and* the `_messageTimer` write
+            // inside one `stateLock` section, because splitting them is what
+            // reopens the window and the split reads as a harmless tidy-up.
+            // `_`-prefixed on purpose: the accessor form (`isPaused`) takes and
+            // releases the lock on its own, so using it here would compile,
+            // pass a laxer pin, and race exactly as before.
+            (
+                "ios/NostrManager.swift",
+                "the self-gating poll arm",
+                "private func startMessagePolling() { stateLock.lock() \
+                 guard !_isPaused else { stateLock.unlock() return } \
+                 let previous = _messageTimer \
+                 let timer = DispatchSource.makeTimerSource(queue: messageQueue) \
+                 _messageTimer = timer stateLock.unlock()",
+            ),
+            (
+                "ios/ReticulumManager.swift",
+                "the self-gating poll arm",
+                "private func startMessagePolling() { stateLock.lock() \
+                 guard !_isPaused else { stateLock.unlock() return } \
+                 let previous = _messageTimer \
+                 let timer = DispatchSource.makeTimerSource(queue: messageQueue) \
+                 _messageTimer = timer stateLock.unlock()",
+            ),
+            (
+                "ios/NostrManager.swift",
+                "the self-gating ping arm",
+                "private func startPingTimer() { stateLock.lock() \
+                 guard !_isPaused else { stateLock.unlock() return } \
+                 let previous = _pingTimer \
+                 let timer = DispatchSource.makeTimerSource(queue: connectionQueue) \
+                 _pingTimer = timer stateLock.unlock()",
+            ),
+            // The suspended-source rule that makes the arm above safe to write
+            // this way: the paused branch returns *before* a `DispatchSource`
+            // exists. Cancelling one that was never resumed and dropping it is
+            // a hard crash ("release of a suspended object"), so a refactor
+            // that hoists the `makeTimerSource` above the guard to "simplify"
+            // turns a pause into a SIGABRT. The `resume()` is what discharges
+            // it on the armed path.
+            (
+                "ios/NostrManager.swift",
+                "the resumed-before-release rule",
+                "_messageTimer = timer stateLock.unlock() previous?.cancel()",
+            ),
+            (
+                "ios/ReticulumManager.swift",
+                "the resumed-before-release rule",
+                "_messageTimer = timer stateLock.unlock() previous?.cancel()",
+            ),
+            // --- iOS only: the timer handler re-reads the flag -------------
+            //
+            // `DispatchSourceTimer.cancel()` cannot reach a handler already
+            // dispatched onto its queue, which is the same window Android's
+            // polling runnables close with their own `if (isPaused) return`.
+            // Without it one full poll batch leaks past every `pause()`.
+            //
+            // Anchored on the `timer.resume()` that closes the arming
+            // function, and that suffix is not decoration. `onMessagesAvailable`
+            // opens its own posted block with the identical guard-then-poll
+            // pair, so the handler body alone is a substring of a *different*
+            // function on both managers: the Reticulum pin without this anchor
+            // was satisfied by `onMessagesAvailable` and stayed green with the
+            // timer handler's guard deleted. Caught by mutation-testing this
+            // guard, which is the only reason it is not still vacuous.
+            (
+                "ios/NostrManager.swift",
+                "the poll handler's re-read",
+                "guard let self = self, !self.isPaused else { return } \
+                 self.pollAndSendMessages() self.pollAndSendQueries() } timer.resume()",
+            ),
+            (
+                "ios/ReticulumManager.swift",
+                "the poll handler's re-read",
+                "guard let self = self, !self.isPaused else { return } \
+                 self.pollAndSendMessages() } timer.resume()",
+            ),
+            (
+                "ios/NostrManager.swift",
+                "the ping handler's re-read",
+                "guard let self = self, !self.isPaused else { return } self.sendPings() } \
+                 timer.resume()",
             ),
         ] {
             let code = rn_source_code_only(rel);

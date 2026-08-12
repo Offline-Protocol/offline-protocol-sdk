@@ -273,6 +273,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Wi-Fi Direct explicitly, since its fallback would otherwise trickle a backlog
   out at one message every two seconds.
 
+  On iOS the arming itself is what refuses: `startMessagePolling` and
+  `startPingTimer` check the flag and install the timer in one locked step,
+  because there — unlike Android, where `pause()` and the reconnect edge share
+  a thread — the two run on unrelated queues, and a check at the call site
+  could be overtaken by a whole `pause()` and arm a fresh timer against a
+  paused transport for the rest of the background stay. The poll and ping
+  handlers re-read the flag as well, since cancelling a timer cannot reach a
+  tick already dispatched.
+
 - **The iOS bridge now pauses and resumes the Wi-Fi Direct manager.** It held
   one and drove its full lifecycle everywhere else, but omitted it from the
   pause/resume fan-out that covers the other four transports — so a
@@ -282,9 +291,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
   Two of the three transports are live today. `WifiDirectTransport` is not
   registered by the bindings layer, so its managers cannot resolve a transport
-  to drain and the send-path half of the fix there is forward-looking; the send
-  behaviour this changes in a shipped app is Nostr's and Reticulum's. The iOS
-  browsing leak above is live now.
+  to drain and the send-path half of the fix there is forward-looking; the
+  send behaviour this changes in a shipped app is Nostr's and Reticulum's. The
+  iOS browsing leak above is live now.
 
 - **The remaining transports no longer run protocol calls on the app's main
   thread.** Completing what the BLE fixes started: on Android all four
