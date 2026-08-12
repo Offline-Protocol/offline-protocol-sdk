@@ -66,24 +66,43 @@ interface TransportManager {
     /**
      * Starts the transport
      * @throws TransportException if start fails
+     *
+     * ## Threading
+     *
+     * An implementation must not run UniFFI calls on the caller's thread.
+     * Every call into the core serialises on one global protocol mutex, held
+     * across MLS work and platform keystore access, so a lifecycle method that
+     * calls the protocol inline hands those waits to whoever called it — and
+     * the callers here include the app's main thread. Confine the work
+     * instead; [TransportConfinement] is what the shipped transports use.
      */
     fun start()
-    
+
     /**
      * Stops the transport
+     *
+     * Same threading obligation as [start].
      */
     fun stop()
-    
+
     /**
      * Pauses the transport (for background mode)
+     *
+     * The default delegates to [stop] and therefore inherits the caller's
+     * thread. Every transport in this module overrides it, so nothing reaches
+     * this body today — but a new transport that does not override is exactly
+     * how lifecycle FFI creeps back onto main. Override both, or confine
+     * inside [start] and [stop].
      */
     fun pause() {
         // Default implementation: stop the transport
         stop()
     }
-    
+
     /**
      * Resumes the transport from paused state
+     *
+     * Same caveat as [pause].
      */
     fun resume() {
         // Default implementation: try to start the transport

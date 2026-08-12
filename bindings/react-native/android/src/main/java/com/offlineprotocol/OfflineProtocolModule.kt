@@ -115,7 +115,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     private var currentConfig: ProtocolConfig? = null
-    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     companion object {
         const val NAME = "OfflineProtocolModule"
