@@ -10860,6 +10860,109 @@ mod tests {
         );
     }
 
+    /// No transport manager may take its ordering from the app's main looper.
+    ///
+    /// This is OFF-2123 as an invariant. Every call these managers make into
+    /// this crate serialises on one global protocol mutex, held across MLS
+    /// work and AndroidKeyStore-backed storage callbacks, so a manager that
+    /// posts its work to the main looper charges those waits to the thread
+    /// Android watches for ANRs. All four used to; each now confines itself to
+    /// a private looper through `TransportConfinement`.
+    ///
+    /// Pinned as the absence of `Looper.getMainLooper()` rather than the
+    /// presence of the confinement, because absence is what actually matters
+    /// and it catches the likely regression: not deleting the confinement, but
+    /// adding one more `Handler(Looper.getMainLooper())` next to it for
+    /// "just this one callback". Comments are stripped before the check, so
+    /// the historical notes explaining what moved off main are free to keep
+    /// saying so.
+    #[test]
+    fn react_native_transports_do_not_run_on_the_main_looper() {
+        for manager in [
+            "InternetManager",
+            "WifiDirectManager",
+            "NostrManager",
+            "ReticulumManager",
+        ] {
+            let rel = format!("android/src/main/java/com/offlineprotocol/{manager}.kt");
+            let code = rn_source_code_only(&rel);
+
+            assert!(
+                !code.contains("Looper.getMainLooper()"),
+                "{manager}.kt must not reference the main looper: every UniFFI call it makes \
+                 waits on the core's global protocol mutex, and doing that on the main thread \
+                 is the ANR OFF-2123 tracked. Confine the work with TransportConfinement \
+                 instead — including framework entry points, which take the looper to deliver \
+                 on (WifiP2pManager.initialize) or a scheduler Handler (registerReceiver)"
+            );
+
+            assert!(
+                code.contains("TransportConfinement.shared("),
+                "{manager}.kt must take its thread from TransportConfinement.shared, so a \
+                 manager rebuilt after stop() re-attaches to the same ordered queue instead of \
+                 racing a fresh thread against the old one's backlog"
+            );
+        }
+    }
+
+    /// The iOS Reticulum status flips stay off the main thread.
+    ///
+    /// `reticulum_status_changed` takes the global protocol mutex, and on the
+    /// false→true edge takes it again to run `flush_outbox_all` — the whole
+    /// outbox, under the mutex. Both call sites sat inside
+    /// `DispatchQueue.main.async` blocks, which made this the last iOS
+    /// transport with UniFFI on the main thread, at the cadence of a local
+    /// daemon that keeps reconnecting.
+    ///
+    /// The connect edge is pinned by *order*: the hop onto `messageQueue` must
+    /// appear before the status call, which is what puts the flip ahead of the
+    /// flush that follows it on the same serial queue.
+    #[test]
+    fn react_native_reticulum_status_flips_run_off_the_main_thread() {
+        let code = rn_source_code_only("ios/ReticulumManager.swift");
+
+        // Pinned as *adjacency*, not as "a messageQueue.async appears somewhere
+        // earlier". The looser check passes against a hop whose block was
+        // emptied out with the status call left behind on main — which is
+        // exactly the regression this guards, so it has to see the call as the
+        // first statement of the block rather than merely after one.
+        for (edge, pinned) in [
+            (
+                "connect",
+                "self.messageQueue.async { try? self.protocolInstance\
+                 .reticulumStatusChanged(isConnected: true)",
+            ),
+            (
+                "disconnect",
+                "messageQueue.async { [weak self] in guard let self = self else { return } \
+                 do { try self.protocolInstance.reticulumStatusChanged(isConnected: false)",
+            ),
+        ] {
+            assert!(
+                code.contains(pinned),
+                "the {edge}-edge reticulumStatusChanged must be the first statement inside a \
+                 messageQueue.async block, not run on main: it takes the global protocol mutex, \
+                 and the connected edge flushes the entire outbox under it, which on the main \
+                 thread is the App Hang class OFF-2123 tracked. Expected to find:\n  {pinned}"
+            );
+        }
+
+        // Only the call sites inside closures, which `self.` identifies: the
+        // remaining one is `stop()`'s, which runs on the bridge queue with no
+        // dispatch of its own and is correct there, like every other
+        // manager's lifecycle FFI. A third would escape the adjacency pins
+        // above, so it has to fail here instead.
+        let closure_flips = code
+            .matches("self.protocolInstance.reticulumStatusChanged(")
+            .count();
+        assert_eq!(
+            closure_flips, 2,
+            "expected the connect and disconnect edges to be the only status flips inside \
+             closures; found {closure_flips} — if another was added, confine it the same way \
+             and pin it above"
+        );
+    }
+
     /// Wi-Fi Direct announces nothing, because it can name nobody.
     ///
     /// Both managers used to pass a transport-level string — a TCP endpoint on
