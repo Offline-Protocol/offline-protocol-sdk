@@ -10878,6 +10878,10 @@ mod tests {
     /// saying so.
     #[test]
     fn react_native_transports_do_not_run_on_the_main_looper() {
+        // Named rather than globbed, because the directory holds plenty of
+        // files that are not transport managers. The cost of that is this
+        // list: a new transport manager is outside the invariant until it is
+        // added here, so add it with the manager.
         for manager in [
             "InternetManager",
             "WifiDirectManager",
