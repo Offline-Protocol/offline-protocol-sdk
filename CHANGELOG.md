@@ -276,7 +276,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `stop()` is no longer cut off by a timeout (it is the caller that needs the
   stop to have finished), while a main-thread caller now gives up rather than
   parking behind the mutex. `internetForceReconnect` no longer waits at all;
-  it already resolved "accepted", not "reconnected".
+  it already resolved "accepted", not "reconnected". `pause()` and `resume()`
+  went the other way — on Nostr and Reticulum they used to hand the work to a
+  handler and return, which paused nothing, so the core could pause underneath
+  a transport still calling into it. Both now wait, and the module's pause and
+  resume run their fan-out the way the stop paths already do: every transport
+  is still paused (or resumed) even if one of them throws, and the first
+  failure is reported once the rest are done rather than skipping them.
 
   Also fixed while in these files: iOS `stop()` and `destroy()` never stopped
   the Wi-Fi Direct manager, leaving a live send path holding a protocol

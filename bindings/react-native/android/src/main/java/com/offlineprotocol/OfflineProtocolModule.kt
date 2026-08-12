@@ -1391,6 +1391,24 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /**
+     * Pauses the transports and then the core, in that order.
+     *
+     * The order is the contract, not a preference: pausing the transports first
+     * is what bounds the window in which one of them can still re-enter UniFFI
+     * behind a paused core, and it is why [InternetManager.pause] can describe
+     * its final drain as "bounded to sends already in flight".
+     *
+     * Which is exactly why the fan-out runs through [TeardownSequence], like the
+     * two stop paths already do. Each of these is now a synchronous wait on that
+     * transport's own confinement thread, so each is a place a real exception
+     * can surface; written as a plain statement list the first throw skips the
+     * four transports after it *and* the core pause, leaving the core running
+     * against a half-paused transport set — the opposite of what the ordering is
+     * for. Failures are collected, everything still gets paused, and the first
+     * one is rethrown so this method's promise rejects with the same cause it
+     * would have before.
+     */
     @ReactMethod
     fun pause(promise: Promise) {
         try {
@@ -1398,36 +1416,53 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             stopProcessScheduler()
 
             // Pause all transports consistently
-            bleTransport?.pause()
-            internetManager?.pause()
-            wifiDirectManager?.pause()
-            reticulumManager?.pause()
-            nostrManager?.pause()
+            val teardown = TeardownSequence()
+            teardown.step("BLE manager") { bleTransport?.pause() }
+            teardown.step("Internet manager") { internetManager?.pause() }
+            teardown.step("WiFi Direct manager") { wifiDirectManager?.pause() }
+            teardown.step("Reticulum manager") { reticulumManager?.pause() }
+            teardown.step("Nostr manager") { nostrManager?.pause() }
+            teardown.step("protocol") { protocol?.pause() }
+            teardown.firstFailureOrNull()?.let { throw it }
 
-            protocol?.pause()
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("ERROR_PAUSE", "Failed to pause protocol: ${e.message}", e)
         }
     }
 
+    /**
+     * The mirror of [pause], core first — a transport must not hand work to a
+     * still-paused core — and through [TeardownSequence] for the same reason.
+     *
+     * A resume that gives up halfway is the worse half of the pair: [pause] at
+     * least fails safe (things stay stopped), whereas a transport left paused
+     * here is one DORS can still select and nothing will restart until the next
+     * background/foreground cycle. The scheduler restart is the step that most
+     * needs to survive a transport throwing, since without it the core stops
+     * ticking its outbox entirely.
+     */
     @ReactMethod
     fun resume(promise: Promise) {
         try {
-            protocol?.resume()
-            
+            val teardown = TeardownSequence()
+            teardown.step("protocol") { protocol?.resume() }
+
             // Resume all transports consistently
-            bleTransport?.resume()
-            internetManager?.resume()
-            wifiDirectManager?.resume()
-            reticulumManager?.resume()
-            nostrManager?.resume()
+            teardown.step("BLE manager") { bleTransport?.resume() }
+            teardown.step("Internet manager") { internetManager?.resume() }
+            teardown.step("WiFi Direct manager") { wifiDirectManager?.resume() }
+            teardown.step("Reticulum manager") { reticulumManager?.resume() }
+            teardown.step("Nostr manager") { nostrManager?.resume() }
 
             // Restart the process scheduler
-            if (protocol?.getState() == ProtocolState.RUNNING) {
-                startProcessScheduler()
+            teardown.step("process scheduler") {
+                if (protocol?.getState() == ProtocolState.RUNNING) {
+                    startProcessScheduler()
+                }
             }
-            
+            teardown.firstFailureOrNull()?.let { throw it }
+
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("ERROR_RESUME", "Failed to resume protocol: ${e.message}", e)

@@ -11475,6 +11475,77 @@ mod tests {
         }
     }
 
+    /// A transport's `pause()` has actually paused by the time it returns.
+    ///
+    /// `OfflineProtocolModule.pause` pauses the five transports and *then* the
+    /// core, and that order is the whole bound on how long a transport can
+    /// still re-enter UniFFI behind a paused core — it is why
+    /// `InternetManager.pause` can call its final drain "bounded to sends
+    /// already in flight". A `pause()` that hands its work to a handler and
+    /// returns has paused nothing yet, so the core pauses underneath it and the
+    /// bound is gone.
+    ///
+    /// This was the shape Nostr and Reticulum shipped with, left over from when
+    /// a post was the only way onto their per-session IO threads — the
+    /// confinement removed the reason and not the post. It is an easy
+    /// regression to re-introduce precisely because it *looks* like the
+    /// callback rule two tests up ("hand it to a handler and return"), which
+    /// applies to calls coming *from* the core and is the opposite obligation.
+    ///
+    /// A prefix pin is enough here, unlike the callback bodies, because the
+    /// hazard is a different first statement rather than something appended
+    /// after a correct one: `runSync` followed by more work is not a defect,
+    /// whereas `post` in its place is the whole defect. `resume` is pinned with
+    /// it because it is the same contract read backwards — the core resumes
+    /// first, and a transport that returns before it has resumed is one DORS
+    /// can select while its poll loop is still stopped.
+    #[test]
+    fn react_native_transport_pause_takes_effect_before_it_returns() {
+        for (manager, pause, resume) in [
+            (
+                "InternetManager",
+                "override fun pause() { runConfinedSync {",
+                "override fun resume() { runConfinedSync {",
+            ),
+            (
+                "NostrManager",
+                "override fun pause() { runConfinedSync {",
+                "override fun resume() { runConfinedSync {",
+            ),
+            (
+                "ReticulumManager",
+                "override fun pause() { runConfinedSync {",
+                "override fun resume() { runConfinedSync {",
+            ),
+            (
+                "WifiDirectManager",
+                "override fun pause() { confinement.runSync {",
+                "override fun resume() { confinement.runSync {",
+            ),
+            (
+                "ble/BleTransportFacade",
+                "override fun pause() { runOnBleThreadSync {",
+                "override fun resume() { runOnBleThreadSync {",
+            ),
+        ] {
+            let code = rn_source_code_only(&format!(
+                "android/src/main/java/com/offlineprotocol/{manager}.kt"
+            ));
+
+            for (entry, pinned) in [("pause", pause), ("resume", resume)] {
+                assert!(
+                    code.contains(pinned),
+                    "{manager}.kt's {entry} must run its body on the confinement and wait for it, \
+                     not post and return. The module pauses every transport and then the core, so \
+                     a transport that has not finished pausing when it returns can re-enter UniFFI \
+                     behind an already-paused core. The wait is safe: the module's caller is a \
+                     React Native background thread, which TransportConfinement.runSync does not \
+                     bound. Expected to find:\n  {pinned}"
+                );
+            }
+        }
+    }
+
     /// The iOS half of the same invariant: nothing calls into the core while
     /// holding `WifiDirectManager`'s `stateLock`.
     ///
