@@ -269,12 +269,33 @@ class ReticulumManager(
         emitDiagnostic("info", "Reticulum transport stopped")
     }
 
+    /**
+     * Synchronous like every other lifecycle entry point here, and unlike the
+     * fire-and-forget post this replaces.
+     *
+     * `OfflineProtocolModule.pause` pauses the five transports and then the
+     * core, and that order is the point — it is why [InternetManager.pause]
+     * can call its final drain "bounded to sends already in flight". A posted
+     * pause returns before it has done anything, so the core could pause
+     * first and this manager's next poll tick would re-enter UniFFI behind it.
+     * BLE, Internet and Wi-Fi Direct all confine-and-wait here; these two were
+     * the outliers, left over from when the post was the only way onto their
+     * old per-session IO thread.
+     *
+     * Costs nothing extra: the module's caller is React Native's
+     * native-modules thread, so the wait is the unbounded background one
+     * ([TransportConfinement.runSync]) that `stop()` already takes from the
+     * same place. The actual `removeCallbacks` still lands on [ioHandler] a
+     * hop later — see [startMessagePolling] — which is unchanged and correct;
+     * what is now guaranteed is that the cancel has been *issued* before the
+     * core is paused.
+     */
     override fun pause() {
-        transportHandler.post { stopMessagePolling() }
+        runConfinedSync { stopMessagePolling() }
     }
 
     override fun resume() {
-        transportHandler.post {
+        runConfinedSync {
             if (state == TransportState.RUNNING && isConnected.get()) {
                 startMessagePolling()
             }

@@ -93,6 +93,15 @@ interface TransportManager {
      * this body today — but a new transport that does not override is exactly
      * how lifecycle FFI creeps back onto main. Override both, or confine
      * inside [start] and [stop].
+     *
+     * Confining does not mean posting and returning. This must have *taken
+     * effect* by the time it returns: `OfflineProtocolModule.pause` pauses
+     * every transport and then the core, and that order is what bounds the
+     * window in which a paused transport can still re-enter UniFFI. An
+     * implementation that hands the work to its handler and returns has paused
+     * nothing yet, so the core can pause underneath it. Wait on the
+     * confinement — the module's caller is a React Native background thread,
+     * where [TransportConfinement.runSync] does not bound the wait.
      */
     fun pause() {
         // Default implementation: stop the transport

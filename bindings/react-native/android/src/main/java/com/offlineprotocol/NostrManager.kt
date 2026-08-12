@@ -105,8 +105,16 @@ class NostrManager(
     private val subscriptionIds = mutableMapOf<String, String>()
     private val relayLock = Object()
 
-    // Nostr identity (obtained from Rust core). Same writer and readers as the
-    // configuration above — it is filled in by the same configure() call.
+    // Nostr identity (obtained from Rust core). Unlike the configuration
+    // above this has a second writer, and it is the one that earns the
+    // annotation: configure() seeds it on the RN bridge thread, but
+    // sendSubscription() re-reads it from the core on OkHttp's reader thread
+    // at every relay (re)connect — deliberately, because the signing key
+    // rotates when MLS initialization installs the persisted secret and the
+    // fresh value has to be in place before any event can arrive on the
+    // subscription being opened. Read on the transport thread and, in
+    // processNostrMessage, on the reader thread again for the self-event
+    // filter. Volatile so that reader-thread write is visible to all of them.
     @Volatile private var publicKeyHex: String = ""
 
     // Configuration state
@@ -302,14 +310,21 @@ class NostrManager(
         emitDiagnostic("info", "Nostr transport stopped")
     }
 
+    /**
+     * Synchronous like the other lifecycle entry points — see
+     * [ReticulumManager.pause] for the argument. In short: the module pauses
+     * the transports and then the core, and a posted pause returns before it
+     * has stopped anything, so the poll could re-enter UniFFI after the core
+     * was already paused.
+     */
     override fun pause() {
-        transportHandler.post {
+        runConfinedSync {
             stopMessagePolling()
         }
     }
 
     override fun resume() {
-        transportHandler.post {
+        runConfinedSync {
             if (state == TransportState.RUNNING && isConnected.get()) {
                 startMessagePolling()
             }
