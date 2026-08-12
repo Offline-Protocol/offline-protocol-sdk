@@ -136,6 +136,22 @@ class WifiDirectManager(
     private var isGroupOwner = false
     private var groupOwnerAddress: String? = null
 
+    // True between pause() and resume(). Mirrors InternetManager's flag of the
+    // same name, and exists for the same reason: stopping the poll timer is not
+    // the same as pausing the transport.
+    //
+    // The timer [pause] removes is the 2s *fallback*. The primary send path is
+    // [onMessagesAvailable] → [drainAndSendMessages], which gated only on
+    // `state` — and pause does not change `state` — so a paused transport went
+    // on draining batches of [MAX_DRAIN_BATCH], each message a global-mutex
+    // acquisition. Worse, a budget-spent pass reposts itself as an anonymous
+    // lambda, which `removeCallbacks` cannot target: nothing but this flag can
+    // stop a continuation already in flight.
+    //
+    // Volatile because [onMessagesAvailable] arrives on whichever thread the
+    // core calls it from, while pause/resume write on the transport thread.
+    @Volatile private var isPaused = false
+
     // True while a budget-spent drain pass has queued its own continuation.
     // Confined to the transport thread — [drainAndSendMessages] and the block
     // in [onMessagesAvailable] are its only reader and writer, and both run
@@ -146,6 +162,10 @@ class WifiDirectManager(
     // Message polling
     private val messagePollingRunnable = object : Runnable {
         override fun run() {
+            // Returning here also stops the repost, so a paused transport's
+            // poll chain terminates itself rather than relying on the
+            // `removeCallbacks` in [pause] having landed first.
+            if (isPaused) return
             pollAndSendMessages()
             if (state == TransportState.RUNNING) {
                 transportHandler.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
@@ -213,6 +233,11 @@ class WifiDirectManager(
         ))
 
         updateState(TransportState.STARTING)
+
+        // An explicit start() means "run": a pause() from a previous session
+        // must not leave this fresh transport connected-but-mute. Mirrors
+        // InternetManager.startUnsafe.
+        isPaused = false
 
         // Initialize the channel on the transport looper: `srcLooper` is the
         // thread every ActionListener / PeerListListener / ConnectionInfoListener
@@ -321,6 +346,10 @@ class WifiDirectManager(
 
     override fun pause() {
         confinement.runSync {
+            // Set before the removal, and the only thing that stops a drain
+            // continuation already queued — those are posted as anonymous
+            // lambdas, which removeCallbacks cannot target. See [isPaused].
+            isPaused = true
             transportHandler.removeCallbacks(messagePollingRunnable)
             stopPeerDiscovery()
         }
@@ -328,8 +357,18 @@ class WifiDirectManager(
 
     override fun resume() {
         confinement.runSync {
+            isPaused = false
             if (state == TransportState.RUNNING) {
                 startPeerDiscovery()
+                // Drain what queued during the pause. Unlike the other three
+                // managers, restarting the timer is not enough here: a poll
+                // tick sends one message every 2s, and the core does not
+                // re-issue [onMessagesAvailable] for messages it already
+                // announced, so a backlog would trickle out at that rate.
+                // Safe inline — this already runs on the transport thread,
+                // which is where the drain belongs. Mirrors
+                // WifiDirectManager.swift's resume().
+                drainAndSendMessages()
                 // Removed before posting, which is the idiom the other three
                 // managers keep in their startMessagePolling helpers. This
                 // runnable reposts itself, and [startUnsafe] already posted one
@@ -736,7 +775,14 @@ class WifiDirectManager(
         // next start() delivers.
         drainContinuationQueued = false
 
-        if (state != TransportState.RUNNING || connectedPeers.isEmpty()) return
+        // `isPaused` alongside the state, because pause() does not change the
+        // state and this is the *primary* send path — the timer it removes is
+        // the 2s fallback. Checked here rather than in [onMessagesAvailable]
+        // alone so it also catches the self-posted continuation, which no
+        // removeCallbacks can reach. Clearing the flag above first is what
+        // keeps a pause from wedging the callback path: the pass exits with
+        // drainContinuationQueued false, so resume()'s drain is not suppressed.
+        if (isPaused || state != TransportState.RUNNING || connectedPeers.isEmpty()) return
 
         try {
             var sent = 0

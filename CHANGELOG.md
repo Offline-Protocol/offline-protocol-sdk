@@ -254,6 +254,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **`pause()` now stops a transport sending, not just its fallback timer.**
+  Every transport drives sends from two places: a timer, which `pause()`
+  cancelled, and the callback the core makes whenever it has something to send
+  — which is the *primary* path. Nostr, Reticulum and Wi-Fi Direct cancelled
+  only the timer, on both platforms, so a backgrounded app went on draining a
+  full batch per callback: a global-mutex acquisition per message, plus a TCP
+  write on Reticulum.
+
+  The reconnect edge was the worse half, because it was durable rather than
+  transient. A relay or daemon that dropped and reconnected during a background
+  stay ran the connected branch, which restarted the timers unconditionally —
+  so the 100ms Nostr poll (and its 30s ping) came back for the rest of the
+  stay, against a transport the app had paused. The internet transport has
+  always guarded that branch; the other three now do too, along with the
+  callback, and both clear on `resume()` and on an explicit `start()`. Nothing
+  is stranded: messages stay queued in the core, and `resume()` drains them —
+  Wi-Fi Direct explicitly, since its fallback would otherwise trickle a backlog
+  out at one message every two seconds.
+
 - **The remaining transports no longer run protocol calls on the app's main
   thread.** Completing what the BLE fixes started: on Android all four
   non-BLE transport managers took their ordering from the app's main looper,

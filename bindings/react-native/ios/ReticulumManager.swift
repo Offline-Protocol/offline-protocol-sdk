@@ -104,6 +104,24 @@ public class ReticulumManager: NSObject, TransportManager {
     }
 
     // State tracking (guarded by stateLock)
+    /// True between `pause()` and `resume()`. Mirrors `InternetManager`'s flag
+    /// of the same name, and exists for the same reason: stopping the poll
+    /// timer is not the same as pausing the transport.
+    ///
+    /// Two paths re-arm the send loop behind a pause without it. The reconnect
+    /// edge is the durable one — a daemon that drops and reconnects while the
+    /// app is backgrounded reaches `handleConnectionOpened`, which restarted
+    /// the poll for the whole background stay. The other is
+    /// `onMessagesAvailable`, the *primary* send path: the timer this manager's
+    /// pause stops is only the fallback, so a core callback still drained a
+    /// batch straight through a paused transport. The Android manager carries
+    /// the identical pair.
+    private var _isPaused = false
+    private var isPaused: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _isPaused }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _isPaused = newValue }
+    }
+
     private var _isConnected = false
     private var isConnected: Bool {
         get { stateLock.lock(); defer { stateLock.unlock() }; return _isConnected }
@@ -187,6 +205,11 @@ public class ReticulumManager: NSObject, TransportManager {
             "daemonAddress": "\(daemonHost):\(daemonPort)"
         ])
 
+        // An explicit start() means "run": a pause() from a previous session
+        // must not leave this fresh transport connected-but-mute. Mirrors
+        // `InternetManager.start()`.
+        isPaused = false
+
         updateState(.starting)
         connect()
     }
@@ -226,11 +249,19 @@ public class ReticulumManager: NSObject, TransportManager {
     }
 
     public func pause() {
+        // Set before the timer is cancelled, and read by both paths a
+        // cancellation was never going to reach — `onMessagesAvailable` and
+        // the reconnect edge in `handleConnectionOpened`. See `isPaused`.
+        isPaused = true
         stopMessagePolling()
     }
 
     public func resume() {
+        isPaused = false
         if state == .running && isConnected {
+            // Also drains whatever queued during the pause: the poll timer is
+            // scheduled at `.now()`, and the core does not re-issue
+            // `onMessagesAvailable` for messages it already announced.
             startMessagePolling()
         }
     }
@@ -350,7 +381,16 @@ public class ReticulumManager: NSObject, TransportManager {
                 return
             }
 
-            self.startMessagePolling()
+            // Skipped while paused. The status flip below stands either way
+            // (the daemon really is connected, and DORS needs to know), but
+            // the timer does not: this is the durable half of what `isPaused`
+            // closes, since a daemon that drops and reconnects during a
+            // background stay reaches here and re-armed the poll for the rest
+            // of it. Mirrors `InternetManager.handleAuthenticated`'s
+            // `if !isPaused`.
+            if !self.isPaused {
+                self.startMessagePolling()
+            }
             // The status flip is a UniFFI call and does not belong on main:
             // it takes the global protocol mutex, and on the false→true edge
             // takes it a second time to flush the entire outbox. That is the
@@ -403,7 +443,9 @@ public class ReticulumManager: NSObject, TransportManager {
                     try? self.protocolInstance.reticulumStatusChanged(isConnected: true)
                 }
                 self.statusFlipLock.unlock()
-                // Immediately flush queued messages
+                // Immediately flush queued messages — unless paused, for the
+                // same reason the poll restart above is skipped.
+                guard !self.isPaused else { return }
                 self.pollAndSendMessages()
             }
         }
@@ -533,9 +575,20 @@ public class ReticulumManager: NSObject, TransportManager {
 
     /// Called by the Rust transport callback when new outgoing messages are available.
     /// This is the primary send path, replacing timer-based polling.
+    /// Called by the Rust transport callback when new outgoing messages are
+    /// available.
+    ///
+    /// This is the *primary* send path — the timer `pause()` cancels is the
+    /// fallback — so it carries the pause check itself. Without it a paused
+    /// transport still drained a batch per callback, each message taking the
+    /// core's global protocol mutex, for as long as the core kept announcing.
+    /// The messages are not lost: they stay queued in the core and `resume()`
+    /// drains them.
     public func onMessagesAvailable() {
+        guard !isPaused else { return }
         messageQueue.async { [weak self] in
-            self?.pollAndSendMessages()
+            guard let self = self, !self.isPaused else { return }
+            self.pollAndSendMessages()
         }
     }
 

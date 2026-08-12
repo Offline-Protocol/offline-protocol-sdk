@@ -95,12 +95,29 @@ public class WifiDirectManager: NSObject, TransportManager {
     /// out, so nothing can re-enter and need recursion.
     private let stateLock = NSLock()
     private var _state: TransportState = .unavailable
+
+    /// True between `pause()` and `resume()`. Mirrors `InternetManager`'s flag
+    /// of the same name.
+    ///
+    /// This manager's `pause()` stopped browsing and nothing else, so the send
+    /// path ignored it entirely: `onMessagesAvailable` runs
+    /// `drainAndSendMessages`, which gated on `state` — and pause does not
+    /// change `state` — so a paused transport drained the whole queue, each
+    /// message taking the core's global protocol mutex. Guarded here rather
+    /// than only at the callback because `drainAndSendMessages` is also reached
+    /// from `resume()`, and because the drain loop re-reads it every iteration.
+    private var _isPaused = false
     private var _session: MCSession?
     private var _connectedPeers: [MCPeerID: String] = [:] // MCPeerID -> deviceId
 
     private func setState(_ newState: TransportState) {
         stateLock.lock(); defer { stateLock.unlock() }
         _state = newState
+    }
+
+    private var isPaused: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _isPaused }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _isPaused = newValue }
     }
 
     private var session: MCSession? {
@@ -172,7 +189,12 @@ public class WifiDirectManager: NSObject, TransportManager {
         emitDiagnostic("info", "Starting WiFi Direct transport", context: [
             "deviceId": deviceId
         ])
-        
+
+        // An explicit start() means "run": a pause() from a previous session
+        // must not leave this fresh transport connected-but-mute. Mirrors
+        // `InternetManager.start()`.
+        isPaused = false
+
         updateState(.starting)
         transportStartAt = Date()
         
@@ -234,13 +256,21 @@ public class WifiDirectManager: NSObject, TransportManager {
     }
     
     public func pause() {
+        // Set before browsing stops. This is what actually pauses the send
+        // path — see `isPaused`; stopping the browser only stops finding new
+        // peers, and this manager has no timer to cancel.
+        isPaused = true
         browser?.stopBrowsingForPeers()
     }
 
     public func resume() {
+        isPaused = false
         if state == .running {
             browser?.startBrowsingForPeers()
-            // Drain any messages that accumulated while paused
+            // Drain any messages that accumulated while paused. Required
+            // rather than tidy: the core does not re-issue
+            // `onMessagesAvailable` for messages it already announced, and
+            // this manager has no fallback timer to pick them up.
             drainAndSendMessages()
         }
     }
@@ -282,12 +312,17 @@ public class WifiDirectManager: NSObject, TransportManager {
     /// message that `sendMessage` then drops for want of a session — a warning
     /// per message, against a transport that is already down.
     private func drainAndSendMessages() {
-        guard state == .running, hasConnectedPeers else { return }
+        guard !isPaused, state == .running, hasConnectedPeers else { return }
 
         messageQueue.async { [weak self] in
             guard let self = self else { return }
 
-            while self.state == .running,
+            // `isPaused` re-read every iteration alongside the state, and for
+            // the same reason the state is: this loop can run for as long as
+            // the queue is deep, and a `pause()` landing inside it would
+            // otherwise keep taking the core's global protocol mutex once per
+            // remaining message against a transport the app has backgrounded.
+            while !self.isPaused, self.state == .running,
                   let message = self.protocolInstance.wifiDirectGetNextMessage() {
                 self.sendMessage(recipientId: message.recipientId, data: Data(message.data))
             }

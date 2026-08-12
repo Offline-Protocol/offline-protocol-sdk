@@ -10876,24 +10876,75 @@ mod tests {
     /// "just this one callback". Comments are stripped before the check, so
     /// the historical notes explaining what moved off main are free to keep
     /// saying so.
+    ///
+    /// The set of managers is **derived, not listed**, and that is the point of
+    /// this guard rather than a tidiness detail. A hand-maintained list — what
+    /// this used to carry — is blind to exactly the regression the invariant
+    /// exists to stop: a *new* transport manager, written against
+    /// `Handler(Looper.getMainLooper())` because that is what the other four
+    /// looked like before OFF-2123. It would simply not be in the list, and the
+    /// guard would stay green while the defect shipped. Deriving flips the
+    /// default: a new manager is inside the invariant the moment it declares
+    /// itself one, and getting out takes a deliberate entry in
+    /// [MAIN_LOOPER_EXEMPT] with a reason.
     #[test]
     fn react_native_transports_do_not_run_on_the_main_looper() {
-        // Named rather than globbed, because the directory holds plenty of
-        // files that are not transport managers. The cost of that is this
-        // list: a new transport manager is outside the invariant until it is
-        // added here, so add it with the manager.
-        for manager in [
-            "InternetManager",
-            "WifiDirectManager",
-            "NostrManager",
-            "ReticulumManager",
+        /// Managers held to a *different* form of the same invariant.
+        ///
+        /// The BLE facade predates `TransportConfinement` and owns the private
+        /// looper the confinement was extracted from (`bleThread`/`bleLooper`),
+        /// so it cannot satisfy the `TransportConfinement.shared(` pin. It also
+        /// reads `Looper.getMainLooper()` legitimately, to tell a main-thread
+        /// caller from a background one and bound only the former — which is
+        /// precisely the job `TransportConfinement.runSync` does on behalf of
+        /// the other four. Exempt from the two pins below, held to the two
+        /// beneath them instead. This is the one manager for which "references
+        /// the main looper" is not the same question as "runs on it".
+        const MAIN_LOOPER_EXEMPT: &[&str] = &["ble/BleTransportFacade.kt"];
+
+        let managers = rn_android_transport_managers();
+        let found: Vec<&str> = managers.iter().map(|(rel, _)| rel.as_str()).collect();
+
+        // The harness has to prove it found something before its per-file
+        // assertions mean anything: a moved directory or a changed class
+        // declaration would otherwise leave this iterating an empty set and
+        // reporting success. Named here purely as a non-vacuity floor — the
+        // *checking* is derived, so a fifth manager needs no edit here.
+        for expected in [
+            "InternetManager.kt",
+            "WifiDirectManager.kt",
+            "NostrManager.kt",
+            "ReticulumManager.kt",
+            "ble/BleTransportFacade.kt",
         ] {
-            let rel = format!("android/src/main/java/com/offlineprotocol/{manager}.kt");
-            let code = rn_source_code_only(&rel);
+            assert!(
+                found.contains(&expected),
+                "the transport-manager scan found {found:?}, which is missing {expected} — \
+                 the scan itself is broken (moved directory, or a changed class declaration \
+                 form), so every assertion below it is vacuous"
+            );
+        }
+
+        for (rel, code) in &managers {
+            if MAIN_LOOPER_EXEMPT.contains(&rel.as_str()) {
+                assert!(
+                    !code.contains("Handler(Looper.getMainLooper())"),
+                    "{rel} must not build a main-looper Handler: it is exempt from the blanket \
+                     ban only because it reads the main looper to *identify* a main-thread \
+                     caller, never to run its own work there"
+                );
+                assert!(
+                    code.contains("bleThread") && code.contains("bleLooper"),
+                    "{rel} is exempt from the TransportConfinement pin only because it owns the \
+                     private looper that confinement was extracted from. If bleThread/bleLooper \
+                     are gone it must adopt TransportConfinement and leave MAIN_LOOPER_EXEMPT"
+                );
+                continue;
+            }
 
             assert!(
                 !code.contains("Looper.getMainLooper()"),
-                "{manager}.kt must not reference the main looper: every UniFFI call it makes \
+                "{rel} must not reference the main looper: every UniFFI call it makes \
                  waits on the core's global protocol mutex, and doing that on the main thread \
                  is the ANR OFF-2123 tracked. Confine the work with TransportConfinement \
                  instead — including framework entry points, which take the looper to deliver \
@@ -10902,11 +10953,56 @@ mod tests {
 
             assert!(
                 code.contains("TransportConfinement.shared("),
-                "{manager}.kt must take its thread from TransportConfinement.shared, so a \
+                "{rel} must take its thread from TransportConfinement.shared, so a \
                  manager rebuilt after stop() re-attaches to the same ordered queue instead of \
                  racing a fresh thread against the old one's backlog"
             );
         }
+    }
+
+    /// Every Android `TransportManager` implementation, as
+    /// (path relative to the managers package, comment-stripped source).
+    ///
+    /// Walks the package directory rather than taking a list, so a manager
+    /// added in a subdirectory (as the BLE facade is) is found too. The
+    /// discriminator is the Kotlin class-declaration form `) : TransportManager
+    /// {` — every implementation here takes constructor parameters, so the
+    /// supertype lands on the line that closes them. It is deliberately
+    /// narrower than a bare `: TransportManager`, which also matches the
+    /// interface's own method signatures and the module's listener object.
+    fn rn_android_transport_managers() -> Vec<(String, String)> {
+        let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bindings/react-native/android/src/main/java/com/offlineprotocol");
+
+        fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<(String, String)>) {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+            for entry in entries {
+                let entry = entry.expect("directory entry");
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let rel = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, &rel, out);
+                } else if name.ends_with(".kt") {
+                    let code = rn_source_code_only(&format!(
+                        "android/src/main/java/com/offlineprotocol/{rel}"
+                    ));
+                    if code.contains(") : TransportManager {") {
+                        out.push((rel, code));
+                    }
+                }
+            }
+        }
+
+        let mut found = Vec::new();
+        walk(&package, "", &mut found);
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
     }
 
     /// Nothing that blocks on the network shares the thread `stop()` waits on.
@@ -11557,21 +11653,28 @@ mod tests {
     /// }
     /// ```
     ///
-    /// Wi-Fi Direct's carries one branch — the drain-continuation check — which
-    /// is inside the posted block, so its pin spells that branch out rather
-    /// than stopping short of it.
+    /// Bodies that carry a branch spell it out rather than stopping short of
+    /// it: Wi-Fi Direct's drain-continuation check, and — on Nostr and
+    /// Reticulum — the `isPaused` pair that
+    /// `react_native_transport_pause_silences_the_event_driven_send_path` owns
+    /// the *reasoning* for. Both guards therefore have to be edited together
+    /// when either changes, which is the price of pinning whole bodies and is
+    /// paid deliberately: a pin that stopped before the branch would admit the
+    /// blocking tail this test exists to forbid.
     #[test]
     fn react_native_transport_callbacks_never_wait_on_a_confinement() {
         for (manager, entry, pinned) in [
             (
                 "ReticulumManager",
                 "onMessagesAvailable",
-                "fun onMessagesAvailable() { ioHandler.post { pollAndSendMessages() } }",
+                "fun onMessagesAvailable() { if (isPaused) return ioHandler.post { \
+                 if (isPaused) return@post pollAndSendMessages() } }",
             ),
             (
                 "NostrManager",
                 "onMessagesAvailable",
-                "fun onMessagesAvailable() { transportHandler.post { pollAndSendMessages() } }",
+                "fun onMessagesAvailable() { if (isPaused) return transportHandler.post { \
+                 if (isPaused) return@post pollAndSendMessages() } }",
             ),
             (
                 "WifiDirectManager",
@@ -11608,16 +11711,26 @@ mod tests {
         // leaves it stuck true: every subsequent `onMessagesAvailable` returns
         // early *forever*, and the send path silently degrades to the 2s
         // fallback poll's one message per tick. Nothing else would fail.
+        //
+        // The `isPaused` term rides inside the same pin because it makes that
+        // ordering load-bearing a second time over: a pause arrives while a
+        // continuation is queued, the continuation runs, and it must leave the
+        // flag false or `resume()`'s drain is suppressed by a chain that no
+        // longer exists. Clear-then-return is what guarantees that; the two
+        // cannot be reordered independently.
         let code =
             rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
         let pinned = "private fun drainAndSendMessages() { drainContinuationQueued = false \
-                      if (state != TransportState.RUNNING || connectedPeers.isEmpty()) return";
+                      if (isPaused || state != TransportState.RUNNING || \
+                      connectedPeers.isEmpty()) return";
         assert!(
             code.contains(pinned),
             "WifiDirectManager.kt must clear drainContinuationQueued as the first statement of \
-             drainAndSendMessages, before any early return. Cleared anywhere else, a pass that \
-             exits early leaves the flag set and onMessagesAvailable suppresses every later \
-             callback for the life of the transport. Expected to find:\n  {pinned}"
+             drainAndSendMessages, before an early return that also tests isPaused. Cleared \
+             anywhere else, a pass that exits early leaves the flag set and onMessagesAvailable \
+             suppresses every later callback for the life of the transport. Without the isPaused \
+             term the primary send path ignores pause() entirely — the timer pause() removes is \
+             only the 2s fallback. Expected to find:\n  {pinned}"
         );
     }
 
@@ -11689,6 +11802,195 @@ mod tests {
                      bound. Expected to find:\n  {pinned}"
                 );
             }
+        }
+    }
+
+    /// `pause()` silences the *primary* send path, not just the fallback timer.
+    ///
+    /// The guard above pins the mechanism — pause runs on the confinement and
+    /// waits — and for a while that was mistaken for pinning the contract. It
+    /// is not. Every one of these managers drives sends from two places: a
+    /// timer, which `pause()` cancels, and `onMessagesAvailable`, the callback
+    /// the core makes whenever it has something to send. The callback is the
+    /// primary path; the timer is a 2s–5s fallback (100ms on Nostr). Cancelling
+    /// only the timer left a paused transport draining a full batch per
+    /// callback — a global-mutex acquisition per message, plus a TCP write on
+    /// Reticulum — for as long as the core kept announcing.
+    ///
+    /// The reconnect edge is the worse half, because it is durable rather than
+    /// transient. A relay or daemon that drops and reconnects during a
+    /// background stay runs the connected branch, which restarted the timers
+    /// unconditionally — so the poll the app paused came back for the rest of
+    /// the stay. `InternetManager` has always guarded that branch with
+    /// `if (!isPaused)`; the other three did not, on either platform.
+    ///
+    /// Pinned **site by site**, and deliberately not as a count of `isPaused`
+    /// mentions. A count was tried first and is worth recording as a failure:
+    /// these managers mention the flag ten or more times, so a floor loose
+    /// enough not to be brittle was loose enough to pass with the reconnect-edge
+    /// gate deleted — the single most valuable of the four checks, and the one a
+    /// well-meaning simplification is likeliest to reach for, since it *looks*
+    /// redundant beside the callback gate. It is not: they cover different
+    /// paths. Each obligation therefore gets its own pinned text.
+    ///
+    /// The callback gate itself is pinned elsewhere and on purpose — Android's
+    /// inside `react_native_transport_callbacks_never_wait_on_a_confinement`,
+    /// whose whole-body pins already have to spell it out, and Wi-Fi Direct's
+    /// inside the drain pin in that same test. Only what those do not reach is
+    /// pinned here.
+    #[test]
+    fn react_native_transport_pause_silences_the_event_driven_send_path() {
+        for (rel, what, pinned) in [
+            // --- the reconnect edge: restart the timers only if not paused ---
+            (
+                "android/src/main/java/com/offlineprotocol/NostrManager.kt",
+                "the reconnect edge",
+                "if (!isPaused) { startMessagePolling() \
+                 transportHandler.post { pollAndSendMessages() } }",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/ReticulumManager.kt",
+                "the reconnect edge",
+                "if (!isPaused) { startMessagePolling() ioHandler.post { pollAndSendMessages() } }",
+            ),
+            (
+                "ios/NostrManager.swift",
+                "the reconnect edge",
+                "guard !self.isPaused else { return } self.startMessagePolling() \
+                 self.startPingTimer() self.pollAndSendMessages()",
+            ),
+            (
+                "ios/ReticulumManager.swift",
+                "the reconnect edge",
+                "if !self.isPaused { self.startMessagePolling() }",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/InternetManager.kt",
+                "the reconnect edge",
+                "if (!isPaused) { startMessagePolling() startPresenceWatch()",
+            ),
+            (
+                "ios/InternetManager.swift",
+                "the reconnect edge",
+                "if !isPaused { startMessagePolling()",
+            ),
+            // --- pause sets the flag, and sets it first --------------------
+            (
+                "android/src/main/java/com/offlineprotocol/NostrManager.kt",
+                "pause",
+                "override fun pause() { runConfinedSync { isPaused = true",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/ReticulumManager.kt",
+                "pause",
+                "override fun pause() { runConfinedSync { isPaused = true",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
+                "pause",
+                "override fun pause() { confinement.runSync { isPaused = true",
+            ),
+            (
+                "ios/NostrManager.swift",
+                "pause",
+                "public func pause() { isPaused = true",
+            ),
+            (
+                "ios/ReticulumManager.swift",
+                "pause",
+                "public func pause() { isPaused = true",
+            ),
+            (
+                "ios/WifiDirectManager.swift",
+                "pause",
+                "public func pause() { isPaused = true",
+            ),
+            // --- resume clears it, and clears it first ---------------------
+            (
+                "android/src/main/java/com/offlineprotocol/NostrManager.kt",
+                "resume",
+                "override fun resume() { runConfinedSync { isPaused = false",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/ReticulumManager.kt",
+                "resume",
+                "override fun resume() { runConfinedSync { isPaused = false",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
+                "resume",
+                "override fun resume() { confinement.runSync { isPaused = false",
+            ),
+            (
+                "ios/NostrManager.swift",
+                "resume",
+                "public func resume() { isPaused = false",
+            ),
+            (
+                "ios/ReticulumManager.swift",
+                "resume",
+                "public func resume() { isPaused = false",
+            ),
+            (
+                "ios/WifiDirectManager.swift",
+                "resume",
+                "public func resume() { isPaused = false",
+            ),
+            // --- Wi-Fi Direct resume drains, since it has no fallback timer -
+            //
+            // The other three restart a timer that fires immediately and picks
+            // the backlog up. This one's fallback sends a single message every
+            // two seconds, and the core does not re-announce what it already
+            // announced, so without this the queue trickles out at that rate.
+            (
+                "android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
+                "the resume drain",
+                "startPeerDiscovery() drainAndSendMessages()",
+            ),
+            (
+                "ios/WifiDirectManager.swift",
+                "the resume drain",
+                "browser?.startBrowsingForPeers() drainAndSendMessages()",
+            ),
+            // --- an explicit start() means "run" ---------------------------
+            (
+                "android/src/main/java/com/offlineprotocol/NostrManager.kt",
+                "start",
+                "isPaused = false Log.i(TAG, \"Starting Nostr transport",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/ReticulumManager.kt",
+                "start",
+                "isPaused = false Log.i(TAG, \"Starting Reticulum transport",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
+                "start",
+                "updateState(TransportState.STARTING) isPaused = false",
+            ),
+            (
+                "ios/NostrManager.swift",
+                "start",
+                "isPaused = false updateState(.starting)",
+            ),
+            (
+                "ios/ReticulumManager.swift",
+                "start",
+                "isPaused = false updateState(.starting)",
+            ),
+            (
+                "ios/WifiDirectManager.swift",
+                "start",
+                "isPaused = false updateState(.starting)",
+            ),
+        ] {
+            let code = rn_source_code_only(rel);
+            assert!(
+                code.contains(pinned),
+                "{rel}: {what} must honour isPaused — see this test's docstring for which path \
+                 each site covers and why none of them is redundant with the others. \
+                 Expected to find:\n  {pinned}"
+            );
         }
     }
 
@@ -11769,6 +12071,12 @@ mod tests {
                 "private func removeAllPeers() { stateLock.lock(); \
                  defer { stateLock.unlock() } _connectedPeers.removeAll() }",
             ),
+            (
+                "the isPaused accessor",
+                "private var isPaused: Bool { get { stateLock.lock(); \
+                 defer { stateLock.unlock() }; return _isPaused } set { stateLock.lock(); \
+                 defer { stateLock.unlock() }; _isPaused = newValue } }",
+            ),
         ] {
             assert!(
                 code.contains(pinned),
@@ -11781,8 +12089,8 @@ mod tests {
 
         let acquisitions = code.matches("stateLock.lock()").count();
         assert_eq!(
-            acquisitions, 10,
-            "ios/WifiDirectManager.swift: expected the 10 pinned stateLock acquisitions; found \
+            acquisitions, 12,
+            "ios/WifiDirectManager.swift: expected the 12 pinned stateLock acquisitions; found \
              {acquisitions}. A new one is not wrong, but it is unreviewed — pin its body above \
              so it cannot grow a call into the core unnoticed."
         );
