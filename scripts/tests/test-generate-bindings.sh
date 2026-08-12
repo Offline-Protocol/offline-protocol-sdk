@@ -25,6 +25,10 @@
 # for a composite action, a package.json script, a Gradle exec task, or a doc
 # that simply tells a human to run bindgen. Extension-scoped scanning would
 # call this rule enforced while leaving those exempt.
+#
+# Standing rule for anything added below: an assertion whose *setup* can fail
+# silently is worse than no assertion, because it reports success. Every check
+# that depends on a fixture proves the fixture exists first.
 
 set -euo pipefail
 
@@ -32,27 +36,41 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 GENERATOR="scripts/generate-bindings.sh"
 SELF="scripts/tests/test-generate-bindings.sh"
+CI_WORKFLOW=".github/workflows/ci.yml"
 
 cd "$REPO_ROOT"
 
 # A direct invocation, in every shape it gets written in: subcommand adjacent
 # (`uniffi-bindgen generate`), behind global options (`uniffi-bindgen --config
-# x.toml generate`), continued onto the next line (`uniffi-bindgen \`), or via
-# cargo (`cargo run --bin uniffi-bindgen -- generate`). Only flag-shaped tokens
-# and their values may sit between the binary and the subcommand, which is what
-# keeps prose like "run uniffi-bindgen to generate the bindings" from matching
-# while the command forms all do.
-INVOCATION='(^|[^[:alnum:]_-])uniffi-bindgen([[:space:]]+-{1,2}[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+generate|(^|[^[:alnum:]_-])uniffi-bindgen[[:space:]]*\\[[:space:]]*$|--bin[[:space:]]+uniffi-bindgen'
+# x.toml generate`), continued onto the next line (`uniffi-bindgen \`), via
+# cargo (`cargo run --bin uniffi-bindgen -- generate`), or as an argument list
+# rather than a command line — `commandLine("uniffi-bindgen", "generate", …)`
+# in a Gradle task, `subprocess.run([...])`, `spawnSync('uniffi-bindgen',
+# ['generate', …])`. The list forms matter because this is a Gradle-built
+# Android repo, so a codegen task is a realistic place for the rule to be
+# broken, and a command-line-only regex would call it covered.
+#
+# In the command-line form only flag-shaped tokens and their values may sit
+# between the binary and the subcommand, which is what keeps prose like "run
+# uniffi-bindgen to generate the bindings" from matching while every command
+# form does.
+SQ=\'
+INVOCATION='(^|[^[:alnum:]_-])uniffi-bindgen([[:space:]]+-{1,2}[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+generate'
+INVOCATION="$INVOCATION"'|(^|[^[:alnum:]_-])uniffi-bindgen[[:space:]]*\\[[:space:]]*$'
+INVOCATION="$INVOCATION"'|--bin[[:space:]]+uniffi-bindgen'
+INVOCATION="$INVOCATION|uniffi-bindgen[\"${SQ}]?[],[:space:]\"${SQ}[]*generate"
 
 # A line that actually *runs* the generator, as opposed to merely naming it.
-# Anchored at the start of the line (allowing a YAML `run:` prefix) so that a
-# comment pointing at the script, or an echo printing it in an error message,
-# does not count as delegating — those are exactly what is left behind when
-# someone deletes the real call.
-# The trailing path-separator requirement matters: without it this also matches
-# `bash scripts/tests/test-generate-bindings.sh`, so a workflow that runs only
-# the guard would read as delegating to the generator it is supposed to guard.
-DELEGATION='^[[:space:]]*(run:[[:space:]]+)?(exec[[:space:]]+)?bash[[:space:]]+([^|;&]*[/"])?generate-bindings\.sh'
+# The interpreter is optional because the script is executable and this PR's
+# own docs teach `./scripts/generate-bindings.sh`; requiring a literal `bash `
+# would report a caller refactored to the direct-exec form as no longer
+# delegating. Anchored at the start of the line (allowing a YAML `run:` prefix)
+# so a comment pointing at the script, or an echo printing it in an error
+# message, does not count — those are exactly what is left behind when someone
+# deletes the real call. The path-separator requirement keeps this from also
+# matching `bash scripts/tests/test-generate-bindings.sh`, which would let a
+# workflow that runs only the guard read as delegating to the generator.
+DELEGATION='^[[:space:]]*(run:[[:space:]]+)?(exec[[:space:]]+)?((bash|sh)[[:space:]]+)?([^|;&]*[/"])?generate-bindings\.sh([[:space:]]|"|$)'
 
 # Every caller the generator's header claims delegates to it. Listed here so
 # that deleting a delegation is a test failure rather than a silent return to
@@ -66,10 +84,23 @@ bindings/python/scripts/build-desktop.sh
 .github/workflows/release.yml
 "
 
-# The three committed paths, repo-relative. The drift gate in ci.yml checks
-# exactly these; if the generator ever writes somewhere else, `git diff` on a
-# path nothing wrote to reports no diff and the gate goes green on stale
-# bindings. This list is what makes that detectable.
+# The npm-exposed build scripts, which must reach the generator through their
+# build-uniffi-* counterpart. They used to be near-copies that built native
+# libraries and regenerated nothing — the most travelled way to produce a
+# mismatched artifact set, since six example READMEs start with
+# `npm run build:all`. A script that generates nothing satisfies both checks
+# above trivially, so it needs its own.
+NATIVE_BUILD_ALIASES="
+bindings/react-native/scripts/build-ios.sh:build-uniffi-ios.sh
+bindings/react-native/scripts/build-android.sh:build-uniffi-android.sh
+bindings/react-native/scripts/build-all.sh:build-uniffi-all.sh
+"
+
+# The three committed paths, repo-relative. CI deletes exactly these before
+# regenerating and diffs exactly these afterwards; if the generator ever writes
+# somewhere else, `git diff` on a path nothing wrote to reports no diff and the
+# gate goes green on stale bindings. This list is the single record of what
+# those three places must agree on, and it is checked against both.
 EXPECTED_OUTPUTS="
 swift:bindings/react-native/ios/Generated
 kotlin:bindings/react-native/android/src/main/java
@@ -83,6 +114,17 @@ pass() { echo "  ok — $*"; }
 fail() {
   echo "  FAIL — $*" >&2
   FAILURES=$((FAILURES + 1))
+}
+
+# Body of a named step in ci.yml, used to check that the workflow's own path
+# lists have not drifted from EXPECTED_OUTPUTS. Steps in that file are indented
+# six spaces.
+ci_step_body() {
+  awk -v want="      - name: $1" '
+    index($0, want) == 1 { f = 1; next }
+    f && /^      - name: / { exit }
+    f { print }
+  ' "$CI_WORKFLOW"
 }
 
 echo "Guarding the shared binding generator..."
@@ -99,15 +141,17 @@ fi
 
 # ---------------------------------------------------------------------------
 # 2. Behavioral: run the real generator against a stub bindgen and check what
-#    it actually asked for — languages, output paths, and --no-format.
+#    it actually asked for — languages, output paths, UDL, and --no-format.
 # ---------------------------------------------------------------------------
 
 STUB_ROOT="$(mktemp -d)"
 trap 'rm -rf "$STUB_ROOT"' EXIT
 
-# Reports a patch version deliberately different from the crate pin, so the
-# run also proves the version gate tolerates patch drift (uniffi's FFI contract
-# is not patch-scoped) rather than only that it exists.
+# Logs argv NUL-separated, one file per call, so the assertions below can read
+# the arguments structurally. String-slicing the joined command line instead
+# would make a correct refactor (flag reordering, `--out-dir=X`, generating to
+# a temp dir and moving) report "never generated <language>" — a false failure
+# whose message points at the wrong thing entirely.
 make_stub() {
   local bin_dir="$1" reported="$2"
   mkdir -p "$bin_dir"
@@ -117,30 +161,76 @@ if [[ "\${1:-}" == "--version" ]]; then
   echo "uniffi-bindgen $reported"
   exit 0
 fi
-printf '%s\n' "\$*" >>"\$STUB_LOG"
+mkdir -p "\$STUB_LOG_DIR"
+printf '%s\0' "\$@" >"\$(mktemp "\$STUB_LOG_DIR/call-XXXXXX")"
 exit 0
 STUB
   chmod +x "$bin_dir/uniffi-bindgen"
 }
 
+# Value of `--flag value` or `--flag=value`, from a NUL-separated argv file.
+arg_value() {
+  local file="$1" flag="$2" arg take=""
+  while IFS= read -r -d '' arg; do
+    if [[ -n "$take" ]]; then
+      printf '%s' "$arg"
+      return 0
+    fi
+    case "$arg" in
+      "$flag") take=1 ;;
+      "$flag"=*) printf '%s' "${arg#*=}"; return 0 ;;
+    esac
+  done <"$file"
+  return 1
+}
+
+has_arg() {
+  local file="$1" flag="$2" arg
+  while IFS= read -r -d '' arg; do
+    [[ "$arg" == "$flag" || "$arg" == "$flag"=* ]] && return 0
+  done <"$file"
+  return 1
+}
+
 CRATE_PIN="$(sed -n 's/^uniffi = "\([0-9.]*\)"$/\1/p' crates/offline-protocol-uniffi/Cargo.toml | head -1)"
-if [[ -z "$CRATE_PIN" ]]; then
-  fail "could not read the uniffi pin from crates/offline-protocol-uniffi/Cargo.toml"
-  CRATE_PIN="0.0"
+PIN_MAJOR="$(printf '%s' "$CRATE_PIN" | cut -d. -f1)"
+PIN_MINOR="$(printf '%s' "$CRATE_PIN" | cut -d. -f2)"
+if [[ ! "$PIN_MAJOR" =~ ^[0-9]+$ || ! "$PIN_MINOR" =~ ^[0-9]+$ ]]; then
+  fail "could not read a major.minor uniffi pin from crates/offline-protocol-uniffi/Cargo.toml (got '$CRATE_PIN') — the checks below cannot be trusted"
+  PIN_MAJOR=0
+  PIN_MINOR=0
+fi
+
+# Pulled once, and asserted non-empty: if a step is renamed these go blank and
+# every path check below would "pass" against an empty haystack.
+RM_STEP="$(ci_step_body 'Remove generated bindings so regeneration must replace them')"
+DRIFT_STEP="$(ci_step_body 'Fail on stale bindings')"
+if [[ -n "$RM_STEP" ]]; then
+  pass "$CI_WORKFLOW has the pre-regeneration delete step"
+else
+  fail "$CI_WORKFLOW has no 'Remove generated bindings...' step — the drift gate can no longer tell 'up to date' from 'never written', and the per-path checks below are vacuous"
+fi
+if [[ -n "$DRIFT_STEP" ]]; then
+  pass "$CI_WORKFLOW has the drift gate step"
+else
+  fail "$CI_WORKFLOW has no 'Fail on stale bindings' step — nothing checks the committed bindings, and the per-path checks below are vacuous"
 fi
 
 ok_bin="$STUB_ROOT/ok"
-call_log="$STUB_ROOT/calls.log"
-: >"$call_log"
-make_stub "$ok_bin" "$CRATE_PIN.99"
+call_dir="$STUB_ROOT/calls"
+mkdir -p "$call_dir"
+# A patch level the pin does not name, so a passing run also proves the version
+# gate tolerates patch drift (uniffi's FFI contract is not patch-scoped) rather
+# than only that the gate exists.
+make_stub "$ok_bin" "$PIN_MAJOR.$PIN_MINOR.99"
 
-if PATH="$ok_bin:$PATH" STUB_LOG="$call_log" bash "$GENERATOR" >"$STUB_ROOT/out" 2>&1; then
+if PATH="$ok_bin:$PATH" STUB_LOG_DIR="$call_dir" bash "$GENERATOR" >"$STUB_ROOT/out" 2>&1; then
   pass "$GENERATOR runs to completion (patch-level version drift tolerated)"
 else
   fail "$GENERATOR failed against a stub bindgen: $(tail -3 "$STUB_ROOT/out" | tr '\n' ' ')"
 fi
 
-call_count="$(grep -c . "$call_log" || true)"
+call_count="$(find "$call_dir" -type f | wc -l | tr -d ' ')"
 if [[ "$call_count" -eq 3 ]]; then
   pass "it invoked bindgen exactly 3 times — one per language"
 else
@@ -151,47 +241,79 @@ while IFS= read -r spec; do
   [[ -z "$spec" ]] && continue
   language="${spec%%:*}"
   expected_dir="${spec#*:}"
-  line="$(grep -- "--language $language " "$call_log" || true)"
-  if [[ -z "$line" ]]; then
+
+  call=""
+  for candidate in "$call_dir"/*; do
+    [[ -f "$candidate" ]] || continue
+    if [[ "$(arg_value "$candidate" --language || true)" == "$language" ]]; then
+      call="$candidate"
+      break
+    fi
+  done
+
+  if [[ -z "$call" ]]; then
     fail "$GENERATOR never generated $language — a caller would ship a partial set"
     continue
   fi
-  actual_dir="${line##*--out-dir }"
-  actual_dir="${actual_dir%% *}"
+
+  actual_dir="$(arg_value "$call" --out-dir || true)"
   actual_dir="${actual_dir#"$REPO_ROOT"/}"
   if [[ "$actual_dir" == "$expected_dir" ]]; then
     pass "$language -> $expected_dir"
   else
-    fail "$language written to '$actual_dir', but the drift gate checks '$expected_dir' — a mismatch here is invisible to CI (git diff on a path nothing wrote to reports no diff)"
-    # mkdir -p in the generator may have created the wrong path; take it back
-    # if it is empty so a failing run does not litter the tree.
-    rmdir "$actual_dir" 2>/dev/null || true
+    fail "$language written to '$actual_dir', but CI deletes and diffs '$expected_dir' — a mismatch here is invisible (git diff on a path nothing wrote to reports no diff)"
+    # The generator mkdir -p's its out-dir, so a wrong path may have just been
+    # created. Take it back if empty, but never climb outside the repo.
+    case "$actual_dir" in
+      /* | *..*) : ;;
+      "") : ;;
+      *) rmdir -p "$actual_dir" 2>/dev/null || true ;;
+    esac
+  fi
+
+  # The workflow's delete list and drift-gate list are two more copies of this
+  # path. Gutting either one restores the silent-stale-bindings hole without
+  # touching the generator, so pin them here.
+  if printf '%s' "$RM_STEP" | grep -Fq "$expected_dir"; then
+    pass "$CI_WORKFLOW deletes $language output before regenerating"
+  else
+    fail "$CI_WORKFLOW no longer deletes '$expected_dir' before regenerating — the drift gate can no longer tell 'up to date' from 'never written'"
+  fi
+  if printf '%s' "$DRIFT_STEP" | grep -Fq "$expected_dir"; then
+    pass "$CI_WORKFLOW diffs $language output"
+  else
+    fail "$CI_WORKFLOW no longer diffs '$expected_dir' — stale $language bindings would ship unnoticed"
+  fi
+
+  if has_arg "$call" --no-format; then
+    pass "$language is generated with --no-format"
+  else
+    fail "$language is generated without --no-format — output would depend on whether ktlint/swiftformat are installed"
+  fi
+
+  if grep -qa 'offline_protocol.udl' "$call"; then
+    pass "$language is generated from the UDL"
+  else
+    fail "$language was not generated from src/offline_protocol.udl"
   fi
 done <<EOF
 $EXPECTED_OUTPUTS
 EOF
-
-# --no-format is load-bearing: uniffi-bindgen post-processes with ktlint and
-# swiftformat when they are on PATH, so without it the committed bytes depend
-# on what the developer happens to have installed and a correct regeneration
-# can still fail the drift gate.
-unformatted="$(grep -c -- '--no-format' "$call_log" || true)"
-if [[ "$unformatted" -eq "$call_count" && "$call_count" -gt 0 ]]; then
-  pass "every invocation passes --no-format, so output does not vary by machine"
-else
-  fail "only $unformatted of $call_count invocations pass --no-format — output would depend on whether ktlint/swiftformat are installed"
-fi
 
 # ---------------------------------------------------------------------------
 # 3. Behavioral: the version gate actually rejects a mismatched bindgen.
 # ---------------------------------------------------------------------------
 
 bad_bin="$STUB_ROOT/bad"
-bad_major="${CRATE_PIN%%.*}"
-bad_minor="${CRATE_PIN#*.}"
-make_stub "$bad_bin" "$bad_major.$((bad_minor + 1)).0"
+make_stub "$bad_bin" "$PIN_MAJOR.$((PIN_MINOR + 1)).0"
 
-if PATH="$bad_bin:$PATH" STUB_LOG="$STUB_ROOT/bad.log" bash "$GENERATOR" >/dev/null 2>&1; then
+if [[ ! -x "$bad_bin/uniffi-bindgen" ]]; then
+  # Without this the check is worse than absent: with no stub on PATH and no
+  # real bindgen (the CI ordering — this runs before `cargo install uniffi`)
+  # the generator exits 1 with "not found", which reads exactly like "mismatch
+  # rejected" and reports ok.
+  fail "the mismatched-bindgen stub was not created — this check would pass vacuously"
+elif PATH="$bad_bin:$PATH" STUB_LOG_DIR="$STUB_ROOT/bad-calls" bash "$GENERATOR" >/dev/null 2>&1; then
   fail "$GENERATOR generated with a bindgen whose minor version disagrees with the crate pin — those bindings' checksums fail at runtime, not at build time"
 else
   pass "a bindgen disagreeing with the crate pin is rejected before anything is written"
@@ -228,9 +350,8 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. The enumerated callers still delegate. Without this, deleting the
-#    delegation from a build script leaves the guard green while that script
-#    builds a fresh native library against stale committed bindings.
+# 5. The enumerated callers still delegate, and the npm build scripts still
+#    route through a counterpart that does.
 # ---------------------------------------------------------------------------
 
 while IFS= read -r caller; do
@@ -246,6 +367,21 @@ done <<EOF
 $DELEGATING_CALLERS
 EOF
 
+while IFS= read -r spec; do
+  [[ -z "$spec" ]] && continue
+  alias_script="${spec%%:*}"
+  counterpart="${spec#*:}"
+  if [[ ! -f "$alias_script" ]]; then
+    fail "$alias_script is missing — package.json still exposes it as an npm build script"
+  elif grep -Eq "^[[:space:]]*(exec[[:space:]]+)?((bash|sh)[[:space:]]+)?[^|;&]*/$counterpart" "$alias_script"; then
+    pass "$(basename "$alias_script") routes through $counterpart"
+  else
+    fail "$alias_script no longer routes through $counterpart — it would build native artifacts without regenerating bindings"
+  fi
+done <<EOF
+$NATIVE_BUILD_ALIASES
+EOF
+
 # ---------------------------------------------------------------------------
 # 6. Negative controls for the scan regex. A detector that cannot fire is
 #    indistinguishable from one that passes vacuously, so prove it catches
@@ -255,12 +391,17 @@ EOF
 fixtures="$STUB_ROOT/fixtures"
 mkdir -p "$fixtures"
 
-printf 'uniffi-bindgen generate x.udl --language swift\n'          >"$fixtures/hit-inline"
-printf 'uniffi-bindgen \\\n  generate x.udl --language kotlin\n'   >"$fixtures/hit-continued"
-printf 'uniffi-bindgen --config u.toml generate x.udl\n'           >"$fixtures/hit-global-option"
-printf 'cargo run --bin uniffi-bindgen -- generate x.udl\n'        >"$fixtures/hit-cargo-run"
+printf 'uniffi-bindgen generate x.udl --language swift\n'            >"$fixtures/hit-inline"
+printf 'uniffi-bindgen \\\n  generate x.udl --language kotlin\n'     >"$fixtures/hit-continued"
+printf 'uniffi-bindgen --config u.toml generate x.udl\n'             >"$fixtures/hit-global-option"
+printf 'cargo run --bin uniffi-bindgen -- generate x.udl\n'          >"$fixtures/hit-cargo-run"
+printf 'commandLine("uniffi-bindgen", "generate", "x.udl")\n'        >"$fixtures/hit-gradle-kotlin"
+printf "commandLine 'uniffi-bindgen', 'generate', 'x.udl'\n"         >"$fixtures/hit-gradle-groovy"
+printf 'subprocess.run(["uniffi-bindgen", "generate", "x.udl"])\n'   >"$fixtures/hit-argv-list"
+printf "spawnSync('uniffi-bindgen', ['generate', 'x.udl'])\n"        >"$fixtures/hit-nested-list"
 printf 'if command -v uniffi-bindgen; then bash %s; fi\n' "$GENERATOR" >"$fixtures/miss-delegating"
-printf 'Run uniffi-bindgen to generate the Swift bindings.\n'      >"$fixtures/miss-prose"
+printf 'Run uniffi-bindgen to generate the Swift bindings.\n'        >"$fixtures/miss-prose"
+printf 'the uniffi-bindgen generator produces code\n'                >"$fixtures/miss-prose-adjacent"
 
 for fixture in "$fixtures"/hit-*; do
   if grep -Eq "$INVOCATION" "$fixture"; then
