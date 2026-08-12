@@ -89,6 +89,12 @@ class NostrManager(
     // Message polling runnable
     private val messagePollingRunnable = object : Runnable {
         override fun run() {
+            // Returning here also stops the repost, so a paused transport's
+            // poll chain terminates itself. Belt to `removeCallbacks`' braces:
+            // pause and this runnable share the transport thread, so the
+            // removal is already exact — but the reconnect edge can start a
+            // fresh chain, and this is what stops that one too.
+            if (isPaused) return
             pollAndSendMessages()
             pollAndSendQueries()
             if (state == TransportState.RUNNING && isConnected.get()) {
@@ -123,6 +129,22 @@ class NostrManager(
 
     // Connection state
     private val isConnected = AtomicBoolean(false)
+
+    // True between pause() and resume(). Mirrors InternetManager's flag of the
+    // same name, and exists for the same reason: stopping the poll timer is not
+    // the same as pausing the transport.
+    //
+    // Two paths re-arm the send loop behind a pause without it. The reconnect
+    // edge is the durable one — a relay that drops and reconnects while the app
+    // is backgrounded runs [updateConnectionStatus]'s connected branch, which
+    // restarted a 100ms poll for the whole background stay. The other is
+    // [onMessagesAvailable], the *primary* send path: the timer this manager's
+    // pause stops is only the fallback, so a core callback still drained a
+    // batch of ten straight through a paused transport.
+    //
+    // Volatile because [onMessagesAvailable] arrives on whichever thread the
+    // core calls it from, while pause/resume write on the transport thread.
+    @Volatile private var isPaused = false
     // Concurrent, not plain: handleRelayConnected reads these on OkHttp's
     // reader thread while scheduleReconnect's getOrPut structurally modifies
     // them on the transport thread. A plain HashMap read racing a resize is
@@ -250,6 +272,11 @@ class NostrManager(
             )
         }
 
+        // An explicit start() means "run": a pause() from a previous session
+        // must not leave this fresh transport connected-but-mute. Mirrors
+        // InternetManager.startUnsafe.
+        isPaused = false
+
         Log.i(TAG, "Starting Nostr transport for address: $address")
         emitDiagnostic("info", "Starting Nostr transport", mapOf(
             "address" to address,
@@ -331,13 +358,24 @@ class NostrManager(
      */
     override fun pause() {
         runConfinedSync {
+            // Set before the timer is stopped, and read by both paths that
+            // would otherwise re-arm the send loop behind this call — see
+            // [isPaused]. Stopping the timer alone paused the fallback and
+            // left the primary path running.
+            isPaused = true
             stopMessagePolling()
         }
     }
 
     override fun resume() {
         runConfinedSync {
+            isPaused = false
             if (state == TransportState.RUNNING && isConnected.get()) {
+                // Also drains whatever queued during the pause:
+                // [startMessagePolling] runs the runnable immediately rather
+                // than waiting out a first interval, and the core does not
+                // re-issue [onMessagesAvailable] for messages it already
+                // announced.
                 startMessagePolling()
             }
         }
@@ -345,9 +383,23 @@ class NostrManager(
 
     /**
      * Called by the Rust transport callback when new outgoing messages are available.
+     *
+     * This is the *primary* send path — the timer [pause] stops is the 100ms
+     * fallback — so it carries the pause check itself. Without it a paused
+     * transport still drained a batch of ten per callback, each one taking the
+     * core's global protocol mutex, for as long as the core kept announcing.
+     * The messages are not lost: they stay queued in the core and [resume]
+     * drains them.
      */
     fun onMessagesAvailable() {
-        transportHandler.post { pollAndSendMessages() }
+        if (isPaused) return
+        transportHandler.post {
+            // Re-read on the transport thread: pause() writes there, so a
+            // callback that passed the check above can still be overtaken by
+            // the pause it raced.
+            if (isPaused) return@post
+            pollAndSendMessages()
+        }
     }
 
     // MARK: - Relay Connection Management
@@ -497,8 +549,17 @@ class NostrManager(
                 } catch (e: Exception) {
                     Log.e(TAG, "Error notifying protocol of connect", e)
                 }
-                startMessagePolling()
-                transportHandler.post { pollAndSendMessages() }
+                // The status flip stands even while paused — the transport
+                // really is up, and DORS needs to know — but the timers do
+                // not. This is the durable half of what [isPaused] closes: a
+                // relay that drops and reconnects during a background stay
+                // reaches here, and restarting the 100ms poll from it re-armed
+                // the loop the app paused, for the rest of the stay. Mirrors
+                // InternetManager.handleAuthenticated's `if (!isPaused)`.
+                if (!isPaused) {
+                    startMessagePolling()
+                    transportHandler.post { pollAndSendMessages() }
+                }
             }
         } else if (!anyConnected && wasConnected) {
             // Lost all connections

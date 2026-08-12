@@ -254,6 +254,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **`pause()` now stops a transport sending, not just its fallback timer.**
+  Every transport drives sends from two places: a timer, which `pause()`
+  cancelled, and the callback the core makes whenever it has something to send
+  — which is the *primary* path. Nostr, Reticulum and Wi-Fi Direct cancelled
+  only the timer, on both platforms, so a backgrounded app went on draining a
+  full batch per callback: a global-mutex acquisition per message, plus a TCP
+  write on Reticulum.
+
+  The reconnect edge was the worse half, because it was durable rather than
+  transient. A relay or daemon that dropped and reconnected during a background
+  stay ran the connected branch, which restarted the timers unconditionally —
+  so the 100ms Nostr poll (and its 30s ping) came back for the rest of the
+  stay, against a transport the app had paused. The internet transport has
+  always guarded that branch; the other three now do too, along with the
+  callback, and both clear on `resume()` and on an explicit `start()`. Nothing
+  is stranded: messages stay queued in the core, and `resume()` drains them —
+  Wi-Fi Direct explicitly, since its fallback would otherwise trickle a backlog
+  out at one message every two seconds.
+
+  On iOS the arming itself is what refuses: `startMessagePolling` and
+  `startPingTimer` check the flag and install the timer in one locked step,
+  because there — unlike Android, where `pause()` and the reconnect edge share
+  a thread — the two run on unrelated queues, and a check at the call site
+  could be overtaken by a whole `pause()` and arm a fresh timer against a
+  paused transport for the rest of the background stay. The poll and ping
+  handlers re-read the flag as well, since cancelling a timer cannot reach a
+  tick already dispatched.
+
+- **The iOS bridge now pauses and resumes the Wi-Fi Direct manager.** It held
+  one and drove its full lifecycle everywhere else, but omitted it from the
+  pause/resume fan-out that covers the other four transports — so a
+  backgrounded app went on browsing for peers over MultipeerConnectivity, and
+  the manager's pause handling could never engage. The Android bridge already
+  paused all five.
+
+  Two of the three transports are live today. `WifiDirectTransport` is not
+  registered by the bindings layer, so its managers cannot resolve a transport
+  to drain and the send-path half of the fix there is forward-looking; the
+  send behaviour this changes in a shipped app is Nostr's and Reticulum's. The
+  iOS browsing leak above is live now.
+
 - **The remaining transports no longer run protocol calls on the app's main
   thread.** Completing what the BLE fixes started: on Android all four
   non-BLE transport managers took their ordering from the app's main looper,

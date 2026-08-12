@@ -1195,11 +1195,20 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func pause(_ resolver: @escaping RCTPromiseResolveBlock,
                     rejecter: @escaping RCTPromiseRejectBlock) {
         do {
-            // Pause transports for background mode
+            // Pause transports for background mode.
+            //
+            // Every manager the module can hold, and the Android mirror
+            // ([OfflineProtocolModule.pause]) names the same five — a manager
+            // missing from this list is not "paused but dormant", it is a
+            // transport whose `isPaused` can never become true, so every gate
+            // written against that flag is dead code and every source pin over
+            // its `pause()` body is vacuous. Wi-Fi Direct was exactly that
+            // until this call was added. Pinned in the uniffi source guards.
             bleManager?.pause()
             reticulumManager?.pause()
             nostrManager?.pause()
             internetManager?.pause()
+            wifiDirectManager?.pause()
 
             try protocolInstance?.pause()
             resolver(nil)
@@ -1213,11 +1222,13 @@ class OfflineProtocolModule: RCTEventEmitter {
         do {
             try protocolInstance?.resume()
 
-            // Resume transports
+            // Resume transports — the same five [pause] stops, core first so a
+            // transport never hands work to a still-paused core.
             bleManager?.resume()
             reticulumManager?.resume()
             nostrManager?.resume()
             internetManager?.resume()
+            wifiDirectManager?.resume()
 
             resolver(nil)
         } catch {

@@ -97,11 +97,32 @@ class ReticulumManager(
     // this was a per-session thread: that thread was abandoned mid-call and the
     // restart got a fresh one, whereas here the next session's work queues
     // behind whatever is still blocked.
+    //
+    // "Next session" includes the next *manager*, and that is the one coupling
+    // the per-session thread did not have. [TransportConfinement.shared] is
+    // keyed by name and process-wide, so two ReticulumManager instances share
+    // this looper — reachable on a React Native reload, where the new
+    // ReactContext's module can be built before the old one's `invalidate()`
+    // runs. Only the *owning* manager's `disconnect` can close its own
+    // `pendingConnectSocket`, so a stale instance that is never stopped holds a
+    // fresh instance's connect for the rest of CONNECTION_TIMEOUT_MS. Bounded
+    // at 60s and self-healing, and `invalidate()`'s stop is what normally
+    // prevents it — but it is a real window, and the rule on
+    // [TransportConfinement] ("nothing whose worst case is the network may
+    // share the thread a stop() waits on") does not cover it: nothing waits
+    // here, the cost is queueing behind a stranger.
     private val ioHandler = TransportConfinement.shared(IO_THREAD).handler
 
     // Message polling runnable — runs on the IO thread
     private val messagePollingRunnable = object : Runnable {
         override fun run() {
+            // Returning here also stops the repost, so a paused transport's
+            // poll chain terminates itself rather than depending on the
+            // cross-looper `removeCallbacks` winning its race. That ordering
+            // still holds (see [startMessagePolling]) — this is the belt to
+            // its braces, and the only thing that covers a tick already past
+            // the removal.
+            if (isPaused) return
             pollAndSendMessages()
             if (state == TransportState.RUNNING && isConnected.get()) {
                 ioHandler.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
@@ -139,6 +160,25 @@ class ReticulumManager(
     // Connection state
     private val isConnected = AtomicBoolean(false)
     private val isConnecting = AtomicBoolean(false)
+
+    // True between pause() and resume(). Mirrors InternetManager's flag of the
+    // same name, and exists for the same reason: stopping the poll timer is not
+    // the same as pausing the transport.
+    //
+    // Two paths re-arm the send loop behind a pause without it. The reconnect
+    // edge is the durable one — a daemon that drops and reconnects while the
+    // app is backgrounded reaches [handleConnectionOpened], which restarted the
+    // 5s poll for the whole background stay. The other is
+    // [onMessagesAvailable], the *primary* send path: the timer this manager's
+    // pause stops is only the fallback, so a core callback still drained a
+    // batch of ten — each one a UniFFI call plus a TCP write — straight
+    // through a paused transport.
+    //
+    // Volatile because it is read on the IO thread — [messagePollingRunnable]'s
+    // tick and the block [onMessagesAvailable] posts — and on whichever thread
+    // the core calls [onMessagesAvailable] from (its pre-post check), while
+    // pause/resume write on the transport thread.
+    @Volatile private var isPaused = false
     private var reconnectAttempts = AtomicInteger(0)
     private var currentReconnectDelay = AtomicLong(RECONNECT_INITIAL_DELAY_MS)
     private var reconnectRunnable: Runnable? = null
@@ -251,6 +291,11 @@ class ReticulumManager(
             throw TransportException.AlreadyRunning()
         }
 
+        // An explicit start() means "run": a pause() from a previous session
+        // must not leave this fresh transport connected-but-mute. Mirrors
+        // InternetManager.startUnsafe.
+        isPaused = false
+
         Log.i(TAG, "Starting Reticulum transport for device: $deviceId")
         emitDiagnostic("info", "Starting Reticulum transport", mapOf(
             "deviceId" to deviceId,
@@ -320,26 +365,36 @@ class ReticulumManager(
      * ([TransportConfinement.runSync]) that `stop()` already takes from the
      * same place.
      *
-     * What this guarantees is issuance, not quiescence, and the difference is
-     * worth stating because it is weaker than [InternetManager.pause]'s. The
-     * `removeCallbacks` lands on [ioHandler] a hop later (see
-     * [startMessagePolling]), and that looper can be inside a connect for up to
-     * CONNECTION_TIMEOUT_MS — so a poll tick already queued behind it can still
-     * re-enter UniFFI after the core has been paused. Internet has no such gap
-     * because its pause and its poll share one thread. Closing it here would
-     * mean waiting on the socket thread, which is exactly what [ioHandler]
-     * exists to stop the lifecycle doing. The residual is bounded and benign:
-     * the core tolerates a poll against a paused protocol (it hands back
-     * nothing), and `stop()` — the path that must actually quiesce — closes the
-     * socket rather than waiting for it.
+     * The `removeCallbacks` alone guarantees issuance rather than quiescence,
+     * which is why [isPaused] carries the rest. The removal lands on
+     * [ioHandler] a hop later (see [startMessagePolling]), and that looper can
+     * be inside a connect for up to CONNECTION_TIMEOUT_MS — so a poll tick
+     * already queued behind it outlives this call however long it waits.
+     * Closing *that* by waiting is not available: it would mean the lifecycle
+     * thread blocking on the socket thread, exactly what [ioHandler] exists to
+     * prevent. So the tick is allowed to run and made a no-op instead, which is
+     * what the flag is for. Same for the two paths a `removeCallbacks` was
+     * never going to reach at all — [onMessagesAvailable] and the reconnect
+     * edge in [handleConnectionOpened].
      */
     override fun pause() {
-        runConfinedSync { stopMessagePolling() }
+        runConfinedSync {
+            // Set before the removal is issued, so the tick that outruns the
+            // removal still reads it. See the note above.
+            isPaused = true
+            stopMessagePolling()
+        }
     }
 
     override fun resume() {
         runConfinedSync {
+            isPaused = false
             if (state == TransportState.RUNNING && isConnected.get()) {
+                // Also drains whatever queued during the pause:
+                // [startMessagePolling] runs the runnable immediately rather
+                // than waiting out a first interval, and the core does not
+                // re-issue [onMessagesAvailable] for messages it already
+                // announced.
                 startMessagePolling()
             }
         }
@@ -348,9 +403,24 @@ class ReticulumManager(
     /**
      * Called by the Rust transport callback when new outgoing messages are available.
      * This is the primary send path, replacing timer-based polling.
+     *
+     * Which is why it carries its own pause check: the timer [pause] stops is
+     * the 5s *fallback*, so without this a paused transport still drained a
+     * batch of ten per callback — a UniFFI call and a TCP write apiece — for as
+     * long as the core kept announcing. The messages are not lost; they stay
+     * queued in the core and [resume] drains them.
      */
     fun onMessagesAvailable() {
-        ioHandler.post { pollAndSendMessages() }
+        if (isPaused) return
+        ioHandler.post {
+            // Re-read on the IO thread. The check above can be overtaken by a
+            // pause() on the transport thread, and this post can additionally
+            // sit behind a connect for up to CONNECTION_TIMEOUT_MS — the same
+            // window the poll tick has, and the reason the flag rather than a
+            // removal is what answers it.
+            if (isPaused) return@post
+            pollAndSendMessages()
+        }
     }
 
     // MARK: - Connection Management
@@ -600,9 +670,18 @@ class ReticulumManager(
                 Log.e(TAG, "Error notifying protocol of connect", e)
             }
 
-            // Start polling + immediately flush queued messages
-            startMessagePolling()
-            ioHandler.post { pollAndSendMessages() }
+            // Start polling + immediately flush queued messages — unless the
+            // app paused the transport. The status flip above stands either
+            // way (the daemon really is connected, and DORS needs to know),
+            // but the timers do not: this is the durable half of what
+            // [isPaused] closes, since a daemon that drops and reconnects
+            // during a background stay reaches here and re-armed the 5s poll
+            // for the rest of it. Mirrors
+            // InternetManager.handleAuthenticated's `if (!isPaused)`.
+            if (!isPaused) {
+                startMessagePolling()
+                ioHandler.post { pollAndSendMessages() }
+            }
         }
 
         return true

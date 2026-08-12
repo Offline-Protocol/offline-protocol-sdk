@@ -136,6 +136,26 @@ class WifiDirectManager(
     private var isGroupOwner = false
     private var groupOwnerAddress: String? = null
 
+    // True between pause() and resume(). Mirrors InternetManager's flag of the
+    // same name, and exists for the same reason: stopping the poll timer is not
+    // the same as pausing the transport.
+    //
+    // The timer [pause] removes is the 2s *fallback*. The primary send path is
+    // [onMessagesAvailable] → [drainAndSendMessages], which gated only on
+    // `state` — and pause does not change `state` — so a paused transport went
+    // on draining batches of [MAX_DRAIN_BATCH], each message a global-mutex
+    // acquisition. Worse, a budget-spent pass reposts itself as an anonymous
+    // lambda, which `removeCallbacks` cannot target: nothing but this flag can
+    // stop a continuation already in flight.
+    //
+    // Volatile although every current access is confined to the transport
+    // thread: writes come from `runSync` blocks and reads from posted blocks
+    // — this manager's [onMessagesAvailable] posts unconditionally and never
+    // reads the flag itself. Kept volatile because this is exactly the kind
+    // of flag a future callback will read from the core's thread, as Nostr's
+    // and Reticulum's already do.
+    @Volatile private var isPaused = false
+
     // True while a budget-spent drain pass has queued its own continuation.
     // Confined to the transport thread — [drainAndSendMessages] and the block
     // in [onMessagesAvailable] are its only reader and writer, and both run
@@ -146,6 +166,10 @@ class WifiDirectManager(
     // Message polling
     private val messagePollingRunnable = object : Runnable {
         override fun run() {
+            // Returning here also stops the repost, so a paused transport's
+            // poll chain terminates itself rather than relying on the
+            // `removeCallbacks` in [pause] having landed first.
+            if (isPaused) return
             pollAndSendMessages()
             if (state == TransportState.RUNNING) {
                 transportHandler.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
@@ -213,6 +237,11 @@ class WifiDirectManager(
         ))
 
         updateState(TransportState.STARTING)
+
+        // An explicit start() means "run": a pause() from a previous session
+        // must not leave this fresh transport connected-but-mute. Mirrors
+        // InternetManager.startUnsafe.
+        isPaused = false
 
         // Initialize the channel on the transport looper: `srcLooper` is the
         // thread every ActionListener / PeerListListener / ConnectionInfoListener
@@ -321,6 +350,10 @@ class WifiDirectManager(
 
     override fun pause() {
         confinement.runSync {
+            // Set before the removal, and the only thing that stops a drain
+            // continuation already queued — those are posted as anonymous
+            // lambdas, which removeCallbacks cannot target. See [isPaused].
+            isPaused = true
             transportHandler.removeCallbacks(messagePollingRunnable)
             stopPeerDiscovery()
         }
@@ -328,8 +361,44 @@ class WifiDirectManager(
 
     override fun resume() {
         confinement.runSync {
+            isPaused = false
             if (state == TransportState.RUNNING) {
                 startPeerDiscovery()
+                // Drain what queued during the pause. Unlike the other three
+                // managers, restarting the timer is not enough here: a poll
+                // tick sends one message every 2s, and the core does not
+                // re-issue [onMessagesAvailable] for messages it already
+                // announced, so a backlog would trickle out at that rate.
+                //
+                // Posted, not inline. This block already runs on the
+                // transport thread, so an inline call would be correct — but
+                // the `runSync` wrapping it holds the caller until the whole
+                // block finishes, and the caller is the RN native-modules
+                // thread ([OfflineProtocolModule.resume]). Inline, that
+                // thread waits through up to [MAX_DRAIN_BATCH] global-mutex
+                // acquisitions; posted, it is released after the cheap
+                // lifecycle work and the drain runs on this same thread a
+                // moment later. Ordering is preserved: this post is enqueued
+                // ahead of the polling runnable below, so the backlog still
+                // goes out before the first fallback tick.
+                //
+                // Carries [onMessagesAvailable]'s continuation check for the
+                // same reason it does, and skipping it here would not have
+                // been harmless. The reachable ordering is this one: a
+                // continuation queued before the pause is still ahead of us
+                // on the looper when `resume()` posts this lambda — it does
+                // *not* self-cancel, because by the time it runs the flag is
+                // already false again — so it drains, spends its budget, and
+                // reposts. Without the check this lambda then starts a second
+                // self-reposting chain alongside it, two [MAX_DRAIN_BATCH]
+                // budgets deep, which is exactly the state
+                // [drainContinuationQueued] exists to make impossible. That
+                // continuation drains this backlog anyway, so returning here
+                // loses nothing.
+                transportHandler.post {
+                    if (drainContinuationQueued) return@post
+                    drainAndSendMessages()
+                }
                 // Removed before posting, which is the idiom the other three
                 // managers keep in their startMessagePolling helpers. This
                 // runnable reposts itself, and [startUnsafe] already posted one
@@ -687,8 +756,19 @@ class WifiDirectManager(
     /**
      * Called by the Rust transport callback when new outgoing messages are available.
      * This is the primary send path, replacing the 100ms polling loop.
+     *
+     * The pre-post check mirrors [NostrManager.onMessagesAvailable] and
+     * [ReticulumManager.onMessagesAvailable], and earns its keep for a reason
+     * specific to this manager: [drainAndSendMessages] already refuses while
+     * paused, so without this every core callback during a background stay
+     * still posts a runnable onto [transportHandler] just to return. That
+     * looper is not this manager's alone — [startUnsafe] hands it to
+     * `WifiP2pManager.initialize` and to `registerReceiver`, and a broadcast
+     * that misses Android's dispatch budget is an ANR wherever the receiver
+     * lives. Not posting at all is strictly better than posting a no-op.
      */
     fun onMessagesAvailable() {
+        if (isPaused) return
         transportHandler.post {
             // A pass that spent its budget has already queued a continuation,
             // and that continuation drains whatever this callback is
@@ -736,7 +816,14 @@ class WifiDirectManager(
         // next start() delivers.
         drainContinuationQueued = false
 
-        if (state != TransportState.RUNNING || connectedPeers.isEmpty()) return
+        // `isPaused` alongside the state, because pause() does not change the
+        // state and this is the *primary* send path — the timer it removes is
+        // the 2s fallback. Checked here rather than in [onMessagesAvailable]
+        // alone so it also catches the self-posted continuation, which no
+        // removeCallbacks can reach. Clearing the flag above first is what
+        // keeps a pause from wedging the callback path: the pass exits with
+        // drainContinuationQueued false, so resume()'s drain is not suppressed.
+        if (isPaused || state != TransportState.RUNNING || connectedPeers.isEmpty()) return
 
         try {
             var sent = 0

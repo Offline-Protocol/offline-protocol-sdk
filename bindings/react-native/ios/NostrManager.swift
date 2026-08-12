@@ -48,9 +48,11 @@ public class NostrManager: NSObject, TransportManager {
     // Nostr public key (obtained from Rust core)
     private var publicKeyHex: String = ""
 
-    // Message polling
-    private var messageTimer: DispatchSourceTimer?
-    private var pingTimer: DispatchSourceTimer?
+    // Message polling. Both timers are guarded by [stateLock] — see
+    // [startMessagePolling] for why they have to share the flag's lock rather
+    // than sit beside it.
+    private var _messageTimer: DispatchSourceTimer?
+    private var _pingTimer: DispatchSourceTimer?
     private let messageQueue = DispatchQueue(label: "com.offlineprotocol.nostr.messages")
     private let connectionQueue = DispatchQueue(label: "com.offlineprotocol.nostr.connection")
 
@@ -121,6 +123,24 @@ public class NostrManager: NSObject, TransportManager {
     private var isConnected: Bool {
         get { stateLock.lock(); defer { stateLock.unlock() }; return _isConnected }
         set { stateLock.lock(); defer { stateLock.unlock() }; _isConnected = newValue }
+    }
+
+    /// True between `pause()` and `resume()`. Mirrors `InternetManager`'s flag
+    /// of the same name, and exists for the same reason: stopping the poll and
+    /// ping timers is not the same as pausing the transport.
+    ///
+    /// Two paths re-arm the send loop behind a pause without it. The reconnect
+    /// edge is the durable one — a relay that drops and reconnects while the
+    /// app is backgrounded runs `updateConnectionStatus`'s connected branch,
+    /// which restarted a 100ms poll *and* the 30s ping for the whole background
+    /// stay. The other is `onMessagesAvailable`, the *primary* send path: the
+    /// timer this manager's pause stops is only the fallback, so a core
+    /// callback still drained a batch of ten straight through a paused
+    /// transport. The Android manager carries the identical pair.
+    private var _isPaused = false
+    private var isPaused: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _isPaused }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _isPaused = newValue }
     }
 
     // Failure tracking for DORS
@@ -238,6 +258,11 @@ public class NostrManager: NSObject, TransportManager {
             "publicKey": publicKeyHex
         ])
 
+        // An explicit start() means "run": a pause() from a previous session
+        // must not leave this fresh transport connected-but-mute. Mirrors
+        // `InternetManager.start()`.
+        isPaused = false
+
         updateState(.starting)
 
         // Create URL session for WebSocket connections
@@ -293,12 +318,26 @@ public class NostrManager: NSObject, TransportManager {
     }
 
     public func pause() {
+        // Set before the timers are cancelled, and read by both paths a
+        // cancellation was never going to reach — `onMessagesAvailable` and
+        // the reconnect edge in `updateConnectionStatus`. See `isPaused`.
+        //
+        // The ordering is what makes this a pause rather than a cancel: any
+        // arming that has not yet taken [stateLock] sees the flag and refuses
+        // (`startMessagePolling`), and any that already holds it installs a
+        // timer the `stop` below then cancels. Neither order leaves a live
+        // timer behind.
+        isPaused = true
         stopMessagePolling()
         stopPingTimer()
     }
 
     public func resume() {
+        isPaused = false
         if state == .running && isConnected {
+            // Also drains whatever queued during the pause: the poll timer is
+            // scheduled at `.now()`, and the core does not re-issue
+            // `onMessagesAvailable` for messages it already announced.
             startMessagePolling()
             startPingTimer()
         }
@@ -306,10 +345,20 @@ public class NostrManager: NSObject, TransportManager {
 
     // MARK: - Event-Driven Sending
 
-    /// Called by the Rust transport callback when new outgoing messages are available.
+    /// Called by the Rust transport callback when new outgoing messages are
+    /// available.
+    ///
+    /// This is the *primary* send path — the timer `pause()` cancels is the
+    /// 100ms fallback — so it carries the pause check itself. Without it a
+    /// paused transport still drained a batch of ten per callback, each one
+    /// taking the core's global protocol mutex, for as long as the core kept
+    /// announcing. The messages are not lost: they stay queued in the core and
+    /// `resume()` drains them.
     public func onMessagesAvailable() {
+        guard !isPaused else { return }
         messageQueue.async { [weak self] in
-            self?.pollAndSendMessages()
+            guard let self = self, !self.isPaused else { return }
+            self.pollAndSendMessages()
         }
     }
 
@@ -490,6 +539,24 @@ public class NostrManager: NSObject, TransportManager {
                 }
                 self.statusFlipLock.unlock()
                 self.consecutiveSendFailures = 0
+                // The status flip above stands even while paused — the relay
+                // really is up, and DORS needs to know — but the timers do
+                // not. This is the durable half of what `isPaused` closes: a
+                // relay that drops and reconnects during a background stay
+                // reaches here, and restarting the poll from it re-armed the
+                // 100ms timer for the rest of the stay. Mirrors
+                // `InternetManager.handleAuthenticated`'s `if !isPaused`,
+                // ping included — the earlier ping exception here is gone,
+                // see `startPingTimer`.
+                //
+                // Belt to the braces `startMessagePolling`/`startPingTimer`
+                // now carry internally: those two refuse to arm while paused
+                // whatever this reads, which is what makes the refusal proof
+                // against a `pause()` landing between this guard and the
+                // calls below. What the guard still earns on its own is
+                // `pollAndSendMessages`, which is not a timer and has no
+                // internal gate to fall back on.
+                guard !self.isPaused else { return }
                 self.startMessagePolling()
                 self.startPingTimer()
                 self.pollAndSendMessages()
@@ -907,39 +974,115 @@ public class NostrManager: NSObject, TransportManager {
 
     // MARK: - Message Polling
 
+    /// Arms the fallback poll timer, unless the transport is paused.
+    ///
+    /// The pause gate lives *here*, not at the four call sites that arm this,
+    /// and it shares one [stateLock] critical section with installing the
+    /// timer. Both halves of that are load-bearing.
+    ///
+    /// **Why here.** A gate at the call site is an invariant every future
+    /// caller has to remember; a gate at the one function that can violate it
+    /// is an invariant a new caller cannot get wrong. This is the same move
+    /// `react_native_transports_do_not_run_on_the_main_looper` makes by
+    /// deriving its manager set instead of listing it.
+    ///
+    /// **Why under the lock.** `pause()` runs on the React Native method
+    /// queue, while the reconnect edge that arms this runs on `messageQueue`
+    /// (Reticulum's, on main). They are not ordered against each other, so a
+    /// caller that read `isPaused` and *then* called in could be overtaken by
+    /// the whole of `pause()` in between — flag set, timer cancelled — and
+    /// arm a fresh 100ms timer against a transport the app just paused, which
+    /// then polls for the rest of the background stay. That is precisely the
+    /// durable symptom `isPaused` exists to remove, so the check and the
+    /// install have to be one decision. The Android managers get this for
+    /// free: their `pause()` and their reconnect edge are the same thread.
+    ///
+    /// The source is created inside the critical section and resumed outside
+    /// it, which is safe in both directions: a `pause()` that lands in the gap
+    /// cancels the timer through [stopMessagePolling] before it ever fires,
+    /// and the `resume()` below is still required — releasing a suspended
+    /// `DispatchSource` is a hard crash, so the paused branch must return
+    /// *before* a source exists rather than cancel one it never resumed.
+    ///
+    /// The same crash is why the gap is safe against a *second* arming, which
+    /// is less obvious. Two callers can overlap so that the second one reads
+    /// the first's source as its `previous` and cancels it while the first has
+    /// not resumed it yet. Cancelling a suspended source is fine; *releasing*
+    /// one is not, and the release cannot happen there — the first caller
+    /// still holds its own strong reference and drops it only after
+    /// `timer.resume()` returns. Anything that moves the `resume()` off this
+    /// straight-line path, or hands the source somewhere it can outlive this
+    /// frame while suspended, reintroduces the crash.
     private func startMessagePolling() {
-        stopMessagePolling()
-
+        stateLock.lock()
+        guard !_isPaused else {
+            stateLock.unlock()
+            return
+        }
+        let previous = _messageTimer
         let timer = DispatchSource.makeTimerSource(queue: messageQueue)
+        _messageTimer = timer
+        stateLock.unlock()
+
+        previous?.cancel()
         timer.schedule(deadline: .now(), repeating: MESSAGE_POLL_INTERVAL)
         timer.setEventHandler { [weak self] in
-            self?.pollAndSendMessages()
-            self?.pollAndSendQueries()
+            // Re-read per tick: `cancel()` cannot reach a handler already
+            // dispatched onto `messageQueue`, so without this one full poll
+            // batch — messages *and* queries — leaks past every `pause()`.
+            // The Android polling runnables carry the identical check.
+            guard let self = self, !self.isPaused else { return }
+            self.pollAndSendMessages()
+            self.pollAndSendQueries()
         }
         timer.resume()
-        messageTimer = timer
     }
 
     private func stopMessagePolling() {
-        messageTimer?.cancel()
-        messageTimer = nil
+        stateLock.lock()
+        let timer = _messageTimer
+        _messageTimer = nil
+        stateLock.unlock()
+        timer?.cancel()
     }
 
+    /// The keepalive ping, armed under the same rule as the poll above.
+    ///
+    /// Gating it here is what lets the reconnect edge call this
+    /// unconditionally and still honour a pause — and it is why `pause()`
+    /// stopping the ping is now the whole story rather than half of it. An
+    /// earlier revision left the reconnect edge restarting the ping on the
+    /// grounds that an unpinged paused socket is an undetectable zombie; that
+    /// argument applies at least as strongly to a socket already connected
+    /// when the pause landed, whose ping `pause()` stops and never restarts,
+    /// so it bought nothing and only diverged from `InternetManager`, which
+    /// gates both timers together.
     private func startPingTimer() {
-        stopPingTimer()
-
+        stateLock.lock()
+        guard !_isPaused else {
+            stateLock.unlock()
+            return
+        }
+        let previous = _pingTimer
         let timer = DispatchSource.makeTimerSource(queue: connectionQueue)
+        _pingTimer = timer
+        stateLock.unlock()
+
+        previous?.cancel()
         timer.schedule(deadline: .now() + PING_INTERVAL, repeating: PING_INTERVAL)
         timer.setEventHandler { [weak self] in
-            self?.sendPings()
+            guard let self = self, !self.isPaused else { return }
+            self.sendPings()
         }
         timer.resume()
-        pingTimer = timer
     }
 
     private func stopPingTimer() {
-        pingTimer?.cancel()
-        pingTimer = nil
+        stateLock.lock()
+        let timer = _pingTimer
+        _pingTimer = nil
+        stateLock.unlock()
+        timer?.cancel()
     }
 
     /// Must be called on `connectionQueue` (the ping timer fires there).

@@ -10876,24 +10876,122 @@ mod tests {
     /// "just this one callback". Comments are stripped before the check, so
     /// the historical notes explaining what moved off main are free to keep
     /// saying so.
+    ///
+    /// The set of managers is **derived, not listed**, and that is the point of
+    /// this guard rather than a tidiness detail. A hand-maintained list — what
+    /// this used to carry — is blind to exactly the regression the invariant
+    /// exists to stop: a *new* transport manager, written against
+    /// `Handler(Looper.getMainLooper())` because that is what the other four
+    /// looked like before OFF-2123. It would simply not be in the list, and the
+    /// guard would stay green while the defect shipped. Deriving flips the
+    /// default: a new manager is inside the invariant the moment it declares
+    /// itself one, and getting out takes a deliberate entry in
+    /// [MAIN_LOOPER_EXEMPT] with a reason.
     #[test]
     fn react_native_transports_do_not_run_on_the_main_looper() {
-        // Named rather than globbed, because the directory holds plenty of
-        // files that are not transport managers. The cost of that is this
-        // list: a new transport manager is outside the invariant until it is
-        // added here, so add it with the manager.
-        for manager in [
-            "InternetManager",
-            "WifiDirectManager",
-            "NostrManager",
-            "ReticulumManager",
+        /// Managers held to a *different* form of the same invariant.
+        ///
+        /// The BLE facade predates `TransportConfinement` and owns the private
+        /// looper the confinement was extracted from (`bleThread`/`bleLooper`),
+        /// so it cannot satisfy the `TransportConfinement.shared(` pin. It also
+        /// reads `Looper.getMainLooper()` legitimately, to tell a main-thread
+        /// caller from a background one and bound only the former — which is
+        /// precisely the job `TransportConfinement.runSync` does on behalf of
+        /// the other four. Exempt from the two pins below, held to the two
+        /// beneath them instead. This is the one manager for which "references
+        /// the main looper" is not the same question as "runs on it".
+        const MAIN_LOOPER_EXEMPT: &[&str] = &["ble/BleTransportFacade.kt"];
+
+        let managers = rn_android_transport_managers();
+        let found: Vec<&str> = managers.iter().map(|(rel, _)| rel.as_str()).collect();
+
+        // The harness has to prove it found something before its per-file
+        // assertions mean anything: a moved directory or a changed class
+        // declaration would otherwise leave this iterating an empty set and
+        // reporting success. Named here purely as a non-vacuity floor — the
+        // *checking* is derived, so a fifth manager needs no edit here.
+        for expected in [
+            "InternetManager.kt",
+            "WifiDirectManager.kt",
+            "NostrManager.kt",
+            "ReticulumManager.kt",
+            "ble/BleTransportFacade.kt",
         ] {
-            let rel = format!("android/src/main/java/com/offlineprotocol/{manager}.kt");
-            let code = rn_source_code_only(&rel);
+            assert!(
+                found.contains(&expected),
+                "the transport-manager scan found {found:?}, which is missing {expected} — \
+                 the scan itself is broken (moved directory, or a changed class declaration \
+                 form), so every assertion below it is vacuous"
+            );
+        }
+
+        // The floor above proves the five *known* files were found; it
+        // structurally cannot notice a sixth being missed. The scan's
+        // discriminator is deliberately narrow (see
+        // [rn_android_transport_managers]), so a manager declared in a form
+        // it cannot see — no constructor parameters, a second supertype, a
+        // base class — would vanish from the invariant silently, which is
+        // the exact regression deriving the set was meant to kill. Close it
+        // with the wide form: every file that names the supertype in *any*
+        // supertype-list position is either a manager the narrow scan found,
+        // or is listed here with a reason.
+        //
+        // Both separators are needed, and the comma one is not decoration.
+        // A colon-only match sees `: TransportManager` and
+        // `: TransportManager, Other`, but not `: Base(), TransportManager`
+        // — the base-class form named above — so a manager whose `listener`
+        // property is inherited rather than declared in-file matched neither
+        // scan and passed this test green. (A colon-only match did catch the
+        // in-file spellings of that form, but only by accident: it also
+        // matches `: TransportManagerListener`, which every in-file
+        // implementation carries via `override var listener`. That prefix
+        // breadth is now load-bearing on purpose — narrowing either term to
+        // an exact `": TransportManager {"` or a word boundary reopens the
+        // hole for all three forms at once.)
+        //
+        // TransportManager.kt is the interface itself (its listener methods
+        // take `manager: TransportManager` parameters); OfflineProtocolModule.kt
+        // hosts the listener objects, whose overrides carry the same
+        // parameter.
+        const NOT_A_MANAGER: &[&str] = &["TransportManager.kt", "OfflineProtocolModule.kt"];
+        let expected_from_wide_scan: Vec<String> = rn_android_kotlin_sources()
+            .into_iter()
+            .filter(|(rel, code)| {
+                (code.contains(": TransportManager") || code.contains(", TransportManager"))
+                    && !NOT_A_MANAGER.contains(&rel.as_str())
+            })
+            .map(|(rel, _)| rel)
+            .collect();
+        assert_eq!(
+            found, expected_from_wide_scan,
+            "a file names TransportManager but the narrow `) : TransportManager {{` scan \
+             disagrees with the wide one. If a new manager is declared in a form the narrow \
+             scan cannot see (no constructor parameters, a second supertype, a base class), \
+             it is outside the main-looper invariant without anyone having decided that — \
+             widen the discriminator. If the file is genuinely not a manager, add it to \
+             NOT_A_MANAGER with a reason"
+        );
+
+        for (rel, code) in &managers {
+            if MAIN_LOOPER_EXEMPT.contains(&rel.as_str()) {
+                assert!(
+                    !code.contains("Handler(Looper.getMainLooper())"),
+                    "{rel} must not build a main-looper Handler: it is exempt from the blanket \
+                     ban only because it reads the main looper to *identify* a main-thread \
+                     caller, never to run its own work there"
+                );
+                assert!(
+                    code.contains("bleThread") && code.contains("bleLooper"),
+                    "{rel} is exempt from the TransportConfinement pin only because it owns the \
+                     private looper that confinement was extracted from. If bleThread/bleLooper \
+                     are gone it must adopt TransportConfinement and leave MAIN_LOOPER_EXEMPT"
+                );
+                continue;
+            }
 
             assert!(
                 !code.contains("Looper.getMainLooper()"),
-                "{manager}.kt must not reference the main looper: every UniFFI call it makes \
+                "{rel} must not reference the main looper: every UniFFI call it makes \
                  waits on the core's global protocol mutex, and doing that on the main thread \
                  is the ANR OFF-2123 tracked. Confine the work with TransportConfinement \
                  instead — including framework entry points, which take the looper to deliver \
@@ -10902,11 +11000,70 @@ mod tests {
 
             assert!(
                 code.contains("TransportConfinement.shared("),
-                "{manager}.kt must take its thread from TransportConfinement.shared, so a \
+                "{rel} must take its thread from TransportConfinement.shared, so a \
                  manager rebuilt after stop() re-attaches to the same ordered queue instead of \
                  racing a fresh thread against the old one's backlog"
             );
         }
+    }
+
+    /// Every Android `TransportManager` implementation, as
+    /// (path relative to the managers package, comment-stripped source).
+    ///
+    /// Walks the package directory rather than taking a list, so a manager
+    /// added in a subdirectory (as the BLE facade is) is found too. The
+    /// discriminator is the Kotlin class-declaration form `) : TransportManager
+    /// {` — every implementation here takes constructor parameters, so the
+    /// supertype lands on the line that closes them. It is deliberately
+    /// narrower than a bare `: TransportManager`, which also matches the
+    /// interface's own method signatures and the module's listener objects —
+    /// and that narrowness is a silent escape hatch on its own: a manager
+    /// declared in any other form (`class Foo : TransportManager {` with no
+    /// constructor parameters, a second supertype, a base class before the
+    /// interface) matches nothing and falls outside the invariant without
+    /// anyone deciding that. The caller closes it by cross-checking against
+    /// the wide form; keep the two in sync.
+    fn rn_android_transport_managers() -> Vec<(String, String)> {
+        rn_android_kotlin_sources()
+            .into_iter()
+            .filter(|(_, code)| code.contains(") : TransportManager {"))
+            .collect()
+    }
+
+    /// Every `.kt` file under the React Native Android package, as
+    /// (path relative to the package, comment-stripped source), sorted by
+    /// path.
+    fn rn_android_kotlin_sources() -> Vec<(String, String)> {
+        let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bindings/react-native/android/src/main/java/com/offlineprotocol");
+
+        fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<(String, String)>) {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+            for entry in entries {
+                let entry = entry.expect("directory entry");
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let rel = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, &rel, out);
+                } else if name.ends_with(".kt") {
+                    let code = rn_source_code_only(&format!(
+                        "android/src/main/java/com/offlineprotocol/{rel}"
+                    ));
+                    out.push((rel, code));
+                }
+            }
+        }
+
+        let mut found = Vec::new();
+        walk(&package, "", &mut found);
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
     }
 
     /// Nothing that blocks on the network shares the thread `stop()` waits on.
@@ -11557,26 +11714,33 @@ mod tests {
     /// }
     /// ```
     ///
-    /// Wi-Fi Direct's carries one branch — the drain-continuation check — which
-    /// is inside the posted block, so its pin spells that branch out rather
-    /// than stopping short of it.
+    /// Bodies that carry a branch spell it out rather than stopping short of
+    /// it: Wi-Fi Direct's drain-continuation check, and — on Nostr and
+    /// Reticulum — the `isPaused` pair that
+    /// `react_native_transport_pause_silences_the_event_driven_send_path` owns
+    /// the *reasoning* for. Both guards therefore have to be edited together
+    /// when either changes, which is the price of pinning whole bodies and is
+    /// paid deliberately: a pin that stopped before the branch would admit the
+    /// blocking tail this test exists to forbid.
     #[test]
     fn react_native_transport_callbacks_never_wait_on_a_confinement() {
         for (manager, entry, pinned) in [
             (
                 "ReticulumManager",
                 "onMessagesAvailable",
-                "fun onMessagesAvailable() { ioHandler.post { pollAndSendMessages() } }",
+                "fun onMessagesAvailable() { if (isPaused) return ioHandler.post { \
+                 if (isPaused) return@post pollAndSendMessages() } }",
             ),
             (
                 "NostrManager",
                 "onMessagesAvailable",
-                "fun onMessagesAvailable() { transportHandler.post { pollAndSendMessages() } }",
+                "fun onMessagesAvailable() { if (isPaused) return transportHandler.post { \
+                 if (isPaused) return@post pollAndSendMessages() } }",
             ),
             (
                 "WifiDirectManager",
                 "onMessagesAvailable",
-                "fun onMessagesAvailable() { transportHandler.post { \
+                "fun onMessagesAvailable() { if (isPaused) return transportHandler.post { \
                  if (drainContinuationQueued) return@post drainAndSendMessages() } }",
             ),
             (
@@ -11608,16 +11772,26 @@ mod tests {
         // leaves it stuck true: every subsequent `onMessagesAvailable` returns
         // early *forever*, and the send path silently degrades to the 2s
         // fallback poll's one message per tick. Nothing else would fail.
+        //
+        // The `isPaused` term rides inside the same pin because it makes that
+        // ordering load-bearing a second time over: a pause arrives while a
+        // continuation is queued, the continuation runs, and it must leave the
+        // flag false or `resume()`'s drain is suppressed by a chain that no
+        // longer exists. Clear-then-return is what guarantees that; the two
+        // cannot be reordered independently.
         let code =
             rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
         let pinned = "private fun drainAndSendMessages() { drainContinuationQueued = false \
-                      if (state != TransportState.RUNNING || connectedPeers.isEmpty()) return";
+                      if (isPaused || state != TransportState.RUNNING || \
+                      connectedPeers.isEmpty()) return";
         assert!(
             code.contains(pinned),
             "WifiDirectManager.kt must clear drainContinuationQueued as the first statement of \
-             drainAndSendMessages, before any early return. Cleared anywhere else, a pass that \
-             exits early leaves the flag set and onMessagesAvailable suppresses every later \
-             callback for the life of the transport. Expected to find:\n  {pinned}"
+             drainAndSendMessages, before an early return that also tests isPaused. Cleared \
+             anywhere else, a pass that exits early leaves the flag set and onMessagesAvailable \
+             suppresses every later callback for the life of the transport. Without the isPaused \
+             term the primary send path ignores pause() entirely — the timer pause() removes is \
+             only the 2s fallback. Expected to find:\n  {pinned}"
         );
     }
 
@@ -11690,6 +11864,499 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `pause()` silences the *primary* send path, not just the fallback timer.
+    ///
+    /// The guard above pins the mechanism — pause runs on the confinement and
+    /// waits — and for a while that was mistaken for pinning the contract. It
+    /// is not. Every one of these managers drives sends from two places: a
+    /// timer, which `pause()` cancels, and `onMessagesAvailable`, the callback
+    /// the core makes whenever it has something to send. The callback is the
+    /// primary path; the timer is a 2s–5s fallback (100ms on Nostr). Cancelling
+    /// only the timer left a paused transport draining a full batch per
+    /// callback — a global-mutex acquisition per message, plus a TCP write on
+    /// Reticulum — for as long as the core kept announcing.
+    ///
+    /// The reconnect edge is the worse half, because it is durable rather than
+    /// transient. A relay or daemon that drops and reconnects during a
+    /// background stay runs the connected branch, which restarted the timers
+    /// unconditionally — so the poll the app paused came back for the rest of
+    /// the stay. `InternetManager` has always guarded that branch with
+    /// `if (!isPaused)`; the other three did not, on either platform.
+    ///
+    /// Pinned **site by site**, and deliberately not as a count of `isPaused`
+    /// mentions. A count was tried first and is worth recording as a failure:
+    /// these managers mention the flag ten or more times, so a floor loose
+    /// enough not to be brittle was loose enough to pass with the reconnect-edge
+    /// gate deleted — the single most valuable of the four checks, and the one a
+    /// well-meaning simplification is likeliest to reach for, since it *looks*
+    /// redundant beside the callback gate. It is not: they cover different
+    /// paths. Each obligation therefore gets its own pinned text.
+    ///
+    /// The callback gate itself is pinned elsewhere and on purpose — Android's
+    /// inside `react_native_transport_callbacks_never_wait_on_a_confinement`,
+    /// whose whole-body pins already have to spell it out, and Wi-Fi Direct's
+    /// inside the drain pin in that same test. Only what those do not reach is
+    /// pinned here.
+    #[test]
+    fn react_native_transport_pause_silences_the_event_driven_send_path() {
+        for (rel, what, pinned) in [
+            // --- the reconnect edge: restart the timers only if not paused ---
+            (
+                "android/src/main/java/com/offlineprotocol/NostrManager.kt",
+                "the reconnect edge",
+                "if (!isPaused) { startMessagePolling() \
+                 transportHandler.post { pollAndSendMessages() } }",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/ReticulumManager.kt",
+                "the reconnect edge",
+                "if (!isPaused) { startMessagePolling() ioHandler.post { pollAndSendMessages() } }",
+            ),
+            (
+                "ios/NostrManager.swift",
+                "the reconnect edge",
+                "guard !self.isPaused else { return } self.startMessagePolling() \
+                 self.startPingTimer() self.pollAndSendMessages()",
+            ),
+            (
+                "ios/ReticulumManager.swift",
+                "the reconnect edge",
+                "if !self.isPaused { self.startMessagePolling() }",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/InternetManager.kt",
+                "the reconnect edge",
+                "if (!isPaused) { startMessagePolling() startPresenceWatch()",
+            ),
+            (
+                "ios/InternetManager.swift",
+                "the reconnect edge",
+                "if !isPaused { startMessagePolling()",
+            ),
+            // --- pause sets the flag, and sets it first --------------------
+            (
+                "android/src/main/java/com/offlineprotocol/NostrManager.kt",
+                "pause",
+                "override fun pause() { runConfinedSync { isPaused = true",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/ReticulumManager.kt",
+                "pause",
+                "override fun pause() { runConfinedSync { isPaused = true",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
+                "pause",
+                "override fun pause() { confinement.runSync { isPaused = true",
+            ),
+            (
+                "ios/NostrManager.swift",
+                "pause",
+                "public func pause() { isPaused = true",
+            ),
+            (
+                "ios/ReticulumManager.swift",
+                "pause",
+                "public func pause() { isPaused = true",
+            ),
+            (
+                "ios/WifiDirectManager.swift",
+                "pause",
+                "public func pause() { isPaused = true",
+            ),
+            // --- resume clears it, and clears it first ---------------------
+            (
+                "android/src/main/java/com/offlineprotocol/NostrManager.kt",
+                "resume",
+                "override fun resume() { runConfinedSync { isPaused = false",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/ReticulumManager.kt",
+                "resume",
+                "override fun resume() { runConfinedSync { isPaused = false",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
+                "resume",
+                "override fun resume() { confinement.runSync { isPaused = false",
+            ),
+            (
+                "ios/NostrManager.swift",
+                "resume",
+                "public func resume() { isPaused = false",
+            ),
+            (
+                "ios/ReticulumManager.swift",
+                "resume",
+                "public func resume() { isPaused = false",
+            ),
+            (
+                "ios/WifiDirectManager.swift",
+                "resume",
+                "public func resume() { isPaused = false",
+            ),
+            // --- Wi-Fi Direct resume drains, since it has no fallback timer -
+            //
+            // The other three restart a timer that fires immediately and picks
+            // the backlog up. This one's fallback sends a single message every
+            // two seconds, and the core does not re-announce what it already
+            // announced, so without this the queue trickles out at that rate.
+            // Posted rather than inline on Android: resume() runs under
+            // `runSync`, so an inline drain keeps the RN native-modules
+            // caller waiting through up to MAX_DRAIN_BATCH global-mutex
+            // acquisitions. The post keeps the ordering (drain ahead of the
+            // polling runnable posted after it).
+            //
+            // The continuation check rides inside the pin because dropping it
+            // is invisible at runtime: a continuation posted before the pause
+            // is still queued when resume() runs, so without it this lambda
+            // starts a second self-reposting chain alongside that one and each
+            // spends its own MAX_DRAIN_BATCH — the state `drainContinuationQueued`
+            // exists to make impossible, reintroduced by the one path that does
+            // not go through `onMessagesAvailable`.
+            (
+                "android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
+                "the resume drain",
+                "startPeerDiscovery() transportHandler.post { \
+                 if (drainContinuationQueued) return@post drainAndSendMessages() }",
+            ),
+            (
+                "ios/WifiDirectManager.swift",
+                "the resume drain",
+                "browser?.startBrowsingForPeers() drainAndSendMessages()",
+            ),
+            // --- an explicit start() means "run" ---------------------------
+            (
+                "android/src/main/java/com/offlineprotocol/NostrManager.kt",
+                "start",
+                "isPaused = false Log.i(TAG, \"Starting Nostr transport",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/ReticulumManager.kt",
+                "start",
+                "isPaused = false Log.i(TAG, \"Starting Reticulum transport",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
+                "start",
+                "updateState(TransportState.STARTING) isPaused = false",
+            ),
+            (
+                "ios/NostrManager.swift",
+                "start",
+                "isPaused = false updateState(.starting)",
+            ),
+            (
+                "ios/ReticulumManager.swift",
+                "start",
+                "isPaused = false updateState(.starting)",
+            ),
+            (
+                "ios/WifiDirectManager.swift",
+                "start",
+                "isPaused = false updateState(.starting)",
+            ),
+            // --- iOS only: the arming functions gate themselves, atomically -
+            //
+            // The one obligation on this list that is not a mirror of an
+            // Android site, because the hazard it answers does not exist on
+            // Android. There `pause()` and the reconnect edge are the same
+            // thread, so a call-site check cannot be overtaken. On iOS
+            // `pause()` runs on the React Native method queue while the edge
+            // arms from `messageQueue` (Reticulum's, from *main*), so a caller
+            // that reads the flag and then arms can have the whole of
+            // `pause()` land in between — flag set, timer cancelled — and
+            // install a fresh timer against a paused transport that then polls
+            // for the rest of the background stay. That is the durable symptom
+            // the flag exists to remove, reached through the fix for it.
+            //
+            // Pinned as the `_isPaused` read *and* the `_messageTimer` write
+            // inside one `stateLock` section, because splitting them is what
+            // reopens the window and the split reads as a harmless tidy-up.
+            // `_`-prefixed on purpose: the accessor form (`isPaused`) takes and
+            // releases the lock on its own, so using it here would compile,
+            // pass a laxer pin, and race exactly as before.
+            (
+                "ios/NostrManager.swift",
+                "the self-gating poll arm",
+                "private func startMessagePolling() { stateLock.lock() \
+                 guard !_isPaused else { stateLock.unlock() return } \
+                 let previous = _messageTimer \
+                 let timer = DispatchSource.makeTimerSource(queue: messageQueue) \
+                 _messageTimer = timer stateLock.unlock()",
+            ),
+            (
+                "ios/ReticulumManager.swift",
+                "the self-gating poll arm",
+                "private func startMessagePolling() { stateLock.lock() \
+                 guard !_isPaused else { stateLock.unlock() return } \
+                 let previous = _messageTimer \
+                 let timer = DispatchSource.makeTimerSource(queue: messageQueue) \
+                 _messageTimer = timer stateLock.unlock()",
+            ),
+            (
+                "ios/NostrManager.swift",
+                "the self-gating ping arm",
+                "private func startPingTimer() { stateLock.lock() \
+                 guard !_isPaused else { stateLock.unlock() return } \
+                 let previous = _pingTimer \
+                 let timer = DispatchSource.makeTimerSource(queue: connectionQueue) \
+                 _pingTimer = timer stateLock.unlock()",
+            ),
+            // The suspended-source rule that makes the arm above safe to write
+            // this way: the paused branch returns *before* a `DispatchSource`
+            // exists. Cancelling one that was never resumed and dropping it is
+            // a hard crash ("release of a suspended object"), so a refactor
+            // that hoists the `makeTimerSource` above the guard to "simplify"
+            // turns a pause into a SIGABRT. The `resume()` is what discharges
+            // it on the armed path.
+            (
+                "ios/NostrManager.swift",
+                "the resumed-before-release rule",
+                "_messageTimer = timer stateLock.unlock() previous?.cancel()",
+            ),
+            (
+                "ios/ReticulumManager.swift",
+                "the resumed-before-release rule",
+                "_messageTimer = timer stateLock.unlock() previous?.cancel()",
+            ),
+            // --- iOS only: the timer handler re-reads the flag -------------
+            //
+            // `DispatchSourceTimer.cancel()` cannot reach a handler already
+            // dispatched onto its queue, which is the same window Android's
+            // polling runnables close with their own `if (isPaused) return`.
+            // Without it one full poll batch leaks past every `pause()`.
+            //
+            // Anchored on the `timer.resume()` that closes the arming
+            // function, and that suffix is not decoration. `onMessagesAvailable`
+            // opens its own posted block with the identical guard-then-poll
+            // pair, so the handler body alone is a substring of a *different*
+            // function on both managers: the Reticulum pin without this anchor
+            // was satisfied by `onMessagesAvailable` and stayed green with the
+            // timer handler's guard deleted. Caught by mutation-testing this
+            // guard, which is the only reason it is not still vacuous.
+            (
+                "ios/NostrManager.swift",
+                "the poll handler's re-read",
+                "guard let self = self, !self.isPaused else { return } \
+                 self.pollAndSendMessages() self.pollAndSendQueries() } timer.resume()",
+            ),
+            (
+                "ios/ReticulumManager.swift",
+                "the poll handler's re-read",
+                "guard let self = self, !self.isPaused else { return } \
+                 self.pollAndSendMessages() } timer.resume()",
+            ),
+            (
+                "ios/NostrManager.swift",
+                "the ping handler's re-read",
+                "guard let self = self, !self.isPaused else { return } self.sendPings() } \
+                 timer.resume()",
+            ),
+        ] {
+            let code = rn_source_code_only(rel);
+            assert!(
+                code.contains(pinned),
+                "{rel}: {what} must honour isPaused — see this test's docstring for which path \
+                 each site covers and why none of them is redundant with the others. \
+                 Expected to find:\n  {pinned}"
+            );
+        }
+    }
+
+    /// Every transport manager the bridge holds is on the pause/resume fan-out.
+    ///
+    /// The obligation the pause guards above structurally cannot state. They
+    /// pin the *bodies* of `pause()` and `resume()`; a body pin is green
+    /// whether or not anything calls the function. iOS held a
+    /// `WifiDirectManager`, gave it an `isPaused` flag, a drain gate, a
+    /// per-iteration re-read and a resume drain — and never called either
+    /// method, so the flag could not become true, every gate written against
+    /// it was dead, and all three of that manager's pins were vacuous. Android
+    /// had the same five managers and paused all five.
+    ///
+    /// So the set is derived from what each module *holds* rather than listed:
+    /// a field of a manager type is a manager the module can pause, and the
+    /// invariant is that both lifecycle methods name every one of them. Adding
+    /// a sixth transport puts it inside this the moment the field is declared,
+    /// which is the same reason
+    /// [react_native_transports_do_not_run_on_the_main_looper] derives its set.
+    ///
+    /// Scoped to the two lifecycle methods by slicing the module source between
+    /// the `pause` entry point and the end of `resume`, so an unrelated
+    /// `nostrManager?.stop()` elsewhere in a 4000-line file cannot satisfy it.
+    #[test]
+    fn react_native_bridges_pause_and_resume_every_transport_manager() {
+        for (rel, manager_types, start_marker) in [
+            (
+                "ios/OfflineProtocolModule.swift",
+                rn_ios_transport_manager_types(),
+                "@objc func pause(",
+            ),
+            (
+                "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+                rn_android_transport_manager_types(),
+                "fun pause(promise: Promise)",
+            ),
+        ] {
+            let code = rn_source_code_only(rel);
+
+            // Both modules end `resume` by rejecting with this code, so it is
+            // the first thing past the pair on either platform.
+            let start = code.find(start_marker).unwrap_or_else(|| {
+                panic!("{rel}: cannot find the pause entry point {start_marker}")
+            });
+            let end = code[start..]
+                .find("ERROR_RESUME")
+                .map(|offset| start + offset)
+                .unwrap_or_else(|| panic!("{rel}: cannot find the end of resume (ERROR_RESUME)"));
+            let lifecycle = &code[start..end];
+
+            // The slice has to hold both methods before its contents mean
+            // anything — markers that stopped bracketing the pair would leave
+            // every assertion below passing against the wrong text.
+            assert!(
+                lifecycle.contains("resume"),
+                "{rel}: the pause..resume slice found no resume — the markers no longer bracket \
+                 the two lifecycle methods, so this guard is vacuous"
+            );
+
+            let mut held = 0;
+            for ty in &manager_types {
+                // A manager type the module does not hold is a manager it
+                // cannot pause, and that is legitimate — the iOS module has no
+                // field for a manager it never builds. The obligation attaches
+                // to the field, not to the type.
+                let Some(field) = rn_module_field_of_type(&code, ty) else {
+                    continue;
+                };
+                held += 1;
+
+                for method in ["pause", "resume"] {
+                    let expected = format!("{field}?.{method}()");
+                    assert!(
+                        lifecycle.contains(&expected),
+                        "{rel}: the module holds `{field}: {ty}?` but its lifecycle fan-out never \
+                         calls {expected}. A manager missing here is not paused-but-dormant — its \
+                         isPaused can never become true, so every gate written against that flag \
+                         is dead code and every source pin over its pause() body is vacuous. Add \
+                         it to both pause() and resume(), or drop the field"
+                    );
+                }
+            }
+
+            // Non-vacuity floor. The derivation above is two greps deep — the
+            // manager-type scan and the field scan — and either coming back
+            // empty would silently assert nothing. Five is what both modules
+            // hold today; a sixth transport raises it deliberately.
+            assert_eq!(
+                held, 5,
+                "{rel}: derived {held} held transport managers from {manager_types:?}, expected 5 \
+                 — either the manager class declarations or the `private var name: Type?` field \
+                 form changed, and the derivation is now blind"
+            );
+        }
+    }
+
+    /// The Android transport-manager *type* names, derived from the same scan
+    /// [react_native_transports_do_not_run_on_the_main_looper] uses, so the two
+    /// invariants can never disagree about what a manager is.
+    fn rn_android_transport_manager_types() -> Vec<String> {
+        rn_android_transport_managers()
+            .into_iter()
+            .map(|(rel, _)| {
+                rel.rsplit('/')
+                    .next()
+                    .and_then(|file| file.strip_suffix(".kt"))
+                    .expect("a .kt manager path")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The iOS transport-manager type names, derived the same way its Android
+    /// counterpart is: every file that declares itself a `TransportManager`.
+    ///
+    /// The class name is taken from the file stem and then *checked* against
+    /// the declaration rather than assumed, so a file whose class stops
+    /// matching its name fails here instead of quietly dropping out of the
+    /// derived set.
+    fn rn_ios_transport_manager_types() -> Vec<String> {
+        rn_ios_swift_sources()
+            .into_iter()
+            .filter_map(|(rel, code)| {
+                let stem = rel.rsplit('/').next()?.strip_suffix(".swift")?;
+                let decl = format!("class {stem}: NSObject, TransportManager {{");
+                code.contains(&decl).then(|| stem.to_string())
+            })
+            .collect()
+    }
+
+    /// The field a module holds a `ty` in, if it holds one.
+    ///
+    /// Matched as a whole `private var <name>: <ty>?` declaration rather than
+    /// on the type alone, because both modules also carry `weak var` captures
+    /// of the same types inside their transport-callback shims — taking the
+    /// first mention of the type would find one of those instead.
+    fn rn_module_field_of_type(module_code: &str, ty: &str) -> Option<String> {
+        let needle = format!(": {ty}?");
+        module_code.match_indices(&needle).find_map(|(at, _)| {
+            let before = &module_code[..at];
+            let field: String = before
+                .chars()
+                .rev()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            (!field.is_empty() && before.ends_with(&format!("private var {field}")))
+                .then_some(field)
+        })
+    }
+
+    /// Every hand-written `.swift` file under the React Native iOS directory,
+    /// as (path relative to `ios/`, comment-stripped source), sorted by path.
+    ///
+    /// `Generated`, `libs` and `tests` are skipped: the first two are UniFFI
+    /// output and vendored code rather than anything hand-written here, and
+    /// both are large enough that reading them on every call would be the
+    /// dominant cost of the suite. Which files are hand-written is governed
+    /// separately by [react_native_podspec_ships_every_hand_written_ios_source].
+    fn rn_ios_swift_sources() -> Vec<(String, String)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bindings/react-native/ios");
+
+        fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<(String, String)>) {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+            for entry in entries {
+                let entry = entry.expect("directory entry");
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if matches!(name.as_str(), "Generated" | "libs" | "tests") {
+                    continue;
+                }
+                let rel = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, &rel, out);
+                } else if name.ends_with(".swift") {
+                    let code = rn_source_code_only(&format!("ios/{rel}"));
+                    out.push((rel, code));
+                }
+            }
+        }
+
+        let mut found = Vec::new();
+        walk(&dir, "", &mut found);
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
     }
 
     /// The iOS half of the same invariant: nothing calls into the core while
@@ -11769,6 +12436,12 @@ mod tests {
                 "private func removeAllPeers() { stateLock.lock(); \
                  defer { stateLock.unlock() } _connectedPeers.removeAll() }",
             ),
+            (
+                "the isPaused accessor",
+                "private var isPaused: Bool { get { stateLock.lock(); \
+                 defer { stateLock.unlock() }; return _isPaused } set { stateLock.lock(); \
+                 defer { stateLock.unlock() }; _isPaused = newValue } }",
+            ),
         ] {
             assert!(
                 code.contains(pinned),
@@ -11781,8 +12454,8 @@ mod tests {
 
         let acquisitions = code.matches("stateLock.lock()").count();
         assert_eq!(
-            acquisitions, 10,
-            "ios/WifiDirectManager.swift: expected the 10 pinned stateLock acquisitions; found \
+            acquisitions, 12,
+            "ios/WifiDirectManager.swift: expected the 12 pinned stateLock acquisitions; found \
              {acquisitions}. A new one is not wrong, but it is unreviewed — pin its body above \
              so it cannot grow a call into the core unnoticed."
         );
