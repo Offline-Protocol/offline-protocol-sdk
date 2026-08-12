@@ -292,10 +292,23 @@ public class ReticulumManager: NSObject, TransportManager {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.updateState(.running)
-            try? self.protocolInstance.reticulumStatusChanged(isConnected: true)
             self.startMessagePolling()
-            // Immediately flush queued messages
+            // The status flip is a UniFFI call and does not belong on main:
+            // it takes the global protocol mutex, and on the false→true edge
+            // takes it a second time to flush the entire outbox. That is the
+            // heaviest call this manager makes, at the cadence of a daemon
+            // that keeps reconnecting — the same work InternetManager already
+            // refuses to do on main (see its handleAuthenticated hop), and
+            // the scene-update watchdog does not care that the wait is the
+            // core's fault. messageQueue is where every other FFI call in
+            // this file runs.
+            //
+            // Enqueued from inside the main block on purpose: it puts the
+            // status flip ahead of the flush below on the same serial queue,
+            // preserving the ordering this block already had.
             self.messageQueue.async {
+                try? self.protocolInstance.reticulumStatusChanged(isConnected: true)
+                // Immediately flush queued messages
                 self.pollAndSendMessages()
             }
         }
@@ -355,12 +368,13 @@ public class ReticulumManager: NSObject, TransportManager {
             "wasConnected": wasConnected
         ])
 
-        // Notify protocol and handle reconnection on main thread,
-        // consistent with handleConnectionOpened which also dispatches to main.
-        DispatchQueue.main.async { [weak self] in
+        // Notify the protocol off main, and handle reconnection on main —
+        // consistent with handleConnectionOpened, which splits the same way.
+        // The status flip is a UniFFI call, so it waits on the global protocol
+        // mutex; the reconnect scheduling is timer and state work that the
+        // rest of this manager already drives from main.
+        messageQueue.async { [weak self] in
             guard let self = self else { return }
-
-            // Notify protocol
             do {
                 try self.protocolInstance.reticulumStatusChanged(isConnected: false)
             } catch {
@@ -368,6 +382,10 @@ public class ReticulumManager: NSObject, TransportManager {
                     "error": error.localizedDescription
                 ])
             }
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
 
             // Attempt reconnection if enabled
             if self.autoReconnect && self.state != .stopping && self.state != .stopped {
