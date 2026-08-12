@@ -254,6 +254,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **The remaining transports no longer run protocol calls on the app's main
+  thread.** Completing what the BLE fixes started: on Android all four
+  non-BLE transport managers took their ordering from the app's main looper,
+  so every call into the core — which serialises on one global mutex held
+  across MLS work and AndroidKeyStore access — was charged to the thread
+  Android watches for ANRs. The relay transport was the worst of them, at
+  10Hz for any connected session plus a keystore-backed signing burst on
+  every authenticate; Wi-Fi Direct added an unbounded drain and its
+  framework callbacks; Nostr and Reticulum polled off main already but kept
+  their lifecycle and connect/disconnect status calls on it. Each manager now
+  confines itself to a private looper. On iOS only Reticulum was still
+  affected, and its connected-edge status call is the expensive one — it
+  flushes the entire outbox under the mutex — so both edges move to the
+  queue the rest of that file already uses.
+
+  Two lifecycle waits changed shape as part of this. A background caller of
+  `stop()` is no longer cut off by a timeout (it is the caller that needs the
+  stop to have finished), while a main-thread caller now gives up rather than
+  parking behind the mutex. `internetForceReconnect` no longer waits at all;
+  it already resolved "accepted", not "reconnected".
+
+  Also fixed while in these files: iOS `stop()` and `destroy()` never stopped
+  the Wi-Fi Direct manager, leaving a live send path holding a protocol
+  instance the caller had released; and that manager's session and peer map
+  were read and written from three threads without synchronisation.
+
 - **A relay-delivered group message could be lost silently while the sender saw
   it delivered.** The relay's group path names senders by relay-account
   username, while the MLS credential inside the ciphertext is the sender's
