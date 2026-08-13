@@ -165,6 +165,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   hex; set `scrub_ids: false` to opt out, as for every other identifier. Group
   and file names are unchanged, and stay raw: they label a shared thing, not an
   individual.
+- **Group members were trusted on an identity claim nobody checked.** The
+  addressing work made a claim provable — an address is the hash of its
+  identity key — and wired that check to the two places a claim was known to
+  arrive: control frames, and key packages this device imports. A third was
+  missed. A leaf reaching the MLS ratchet tree any other way — in a Welcome's
+  tree, or in an Add another member commits — was never re-derived, so the
+  credential stayed what RFC 9420 calls it: "a bare assertion of an identity".
+  SEC-M1 compares the wire sender against exactly that credential, which meant
+  it was checking a name the forger had chosen against a name the forger had
+  chosen. Reachable without a signature from anyone, since `__GROUP_MSG__` is
+  data-plane and its exemption rests on SEC-M1; and cheap to reach, needing
+  only a committed Add (membership commits are unauthorized by default) or an
+  accepted group invite. Every leaf entering local group state is now bound to
+  its own signature key at three points — joining a Welcome, merging a commit,
+  and attributing a decrypted message — which is the Authentication Service
+  RFC 9420 §5.3.1 leaves to the application and OpenMLS declines to perform.
+  The check is unconditional, unlike the admin-commit enforcement beside it,
+  because its verdict comes from the commit's own bytes rather than from
+  replicated state: every honest member reaches the same answer, so a refusal
+  forks the attacker off a group that stays consistent. Refusals surface as
+  `GROUP_LEAF_IDENTITY_UNPROVEN`. Coverage includes the update path, where a
+  member renames *their own* leaf to a peer's address — no new leaf, no key
+  package, no invite, and the cheapest form of the attack.
 - **`SecurityWarning.peer_id` printed in the clear via `Debug`.** Every other
   peer-bearing event redacts it, and the telemetry scrubber hashed this one
   correctly — only `{:?}` disagreed, which is the formatting an operator
