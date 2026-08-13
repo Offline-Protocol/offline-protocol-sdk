@@ -44,6 +44,13 @@ jobs:
       - name: License consistency check
         run: ./scripts/check-license-consistency.sh
 
+      # crates.io renders a crate's README from its archive and a published
+      # version is immutable, so a crate that ships without one stays bare on
+      # the registry until the next release. Cargo infers the README silently
+      # and omits it just as silently, so nothing else catches the miss.
+      - name: Crate README presence
+        run: ./scripts/check-crate-readmes.sh
+
       # The NIP-44 vectors are a crypto conformance fixture vendored into the
       # tree. Pinning them to the checksum the spec publishes is what stops a
       # green suite from being achieved by editing the vectors.
