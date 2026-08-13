@@ -847,9 +847,13 @@ pub enum Event {
     /// event alone.
     ///
     /// `reason` is diagnostic text and must not be parsed. It carries no
-    /// third-party identifier: the arms that would have rendered one — the
-    /// identity refusals above — substitute a fixed string, because the
-    /// telemetry scrubber hashes `peer_id` and ships `reason` verbatim.
+    /// identifier, of this peer or of anyone else: the telemetry scrubber
+    /// hashes `peer_id` and ships `reason` verbatim, so every arm that fills it
+    /// contributes either a fixed string or
+    /// [`MlsError::privacy_safe_reason`](offline_protocol_mls::MlsError::privacy_safe_reason),
+    /// never a rendered error. The full error stays in the device log at the
+    /// refusal site. This is a classification, so apps get the failure *class*
+    /// here and must look to the log for the specifics.
     SecureSessionFailed {
         /// Peer ID of the other party.
         peer_id: String,

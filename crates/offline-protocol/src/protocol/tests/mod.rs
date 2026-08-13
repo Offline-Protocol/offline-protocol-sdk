@@ -33129,3 +33129,163 @@ fn test_forged_session_welcome_is_reported_on_the_adopt_path() {
         "expected a secure_session_failed beside the warning; saw {seen:?}"
     );
 }
+
+/// Asserts that no event's free-text `reason` carries an identifier.
+///
+/// The telemetry scrubber hashes an event's *named* actor fields and ships
+/// `reason` verbatim, so this is the property that stops a refused Welcome from
+/// handing a sink running `scrub_ids: true` an address it never had. Both the
+/// generic address prefix and the specific strings the error rendered are
+/// checked, because half of what these particular refusals carry is text the
+/// *sender* chose, which need not look like an address — or like anything.
+fn assert_no_reason_names(events: &[Event], forbidden: &[&str]) {
+    for event in events {
+        let reason = match event {
+            Event::SecurityWarning { reason, .. } => reason,
+            Event::SecureSessionFailed { reason, .. } => reason,
+            _ => continue,
+        };
+        assert!(
+            !reason.contains("off1"),
+            "an address reached an event reason verbatim: {event:?}"
+        );
+        for needle in forbidden {
+            assert!(
+                !reason.contains(needle),
+                "{needle:?} reached an event reason verbatim: {event:?}"
+            );
+        }
+    }
+}
+
+/// A session Welcome naming a *third party's* slot is refused without putting
+/// that slot into the failure event (#346).
+///
+/// The cheapest reachable form of the leak, and the one that needs nothing:
+/// `verify_welcome_slot` runs before the Welcome blob is deserialized, so the
+/// refusal is reachable by anyone who can put a frame on the wire — no key
+/// material, no valid Welcome, no prior contact. The slot it renders carries
+/// two addresses, neither of them the event's `peer_id`, so neither is hashed
+/// on the way to a sink.
+#[test]
+fn test_welcome_naming_a_foreign_session_slot_is_refused_without_naming_it() {
+    let (mut bob, _bob_h) = make_encrypted_protocol("bob");
+    bob.start().unwrap();
+
+    let seen: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let sink = Arc::clone(&seen);
+        bob.on_event(move |e| sink.lock().unwrap().push(e));
+    }
+
+    // Carol and dave have no part in this exchange; mallory names their slot.
+    let foreign_slot = session_slot("carol", "dave");
+    let welcome = offline_protocol_mls::WelcomeMessage {
+        group_id: offline_protocol_mls::GroupId::new(&foreign_slot).unwrap(),
+        // Never parsed: the slot binding refuses first. That is the point.
+        welcome_data: b"not a welcome at all".to_vec(),
+        inviter_id: id("mallory"),
+        group_name: None,
+        timestamp_ms: 0,
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::WELCOME,
+        serde_json::to_string(&welcome).unwrap()
+    );
+    bob.process_internal_message(&signed_frame(&id("mallory"), &id("bob"), &content));
+
+    let seen = seen.lock().unwrap();
+    // Premise: the refusal really did surface as a session failure. Without
+    // this the scan below passes on an empty event list.
+    assert!(
+        seen.iter().any(|e| matches!(
+            e,
+            Event::SecureSessionFailed { peer_id, .. } if *peer_id == id("mallory")
+        )),
+        "expected a secure_session_failed for the refused Welcome; saw {seen:?}"
+    );
+    assert_no_reason_names(&seen, &[&foreign_slot, &id("carol"), &id("dave")]);
+
+    // Nothing was installed for the slot mallory named.
+    assert!(
+        !bob.mls_manager
+            .as_ref()
+            .unwrap()
+            .read()
+            .unwrap()
+            .has_session(&id("mallory"))
+            .unwrap(),
+        "a refused Welcome must not leave a session behind"
+    );
+}
+
+/// A session Welcome whose *embedded* group id names a third party's slot is
+/// refused without putting that slot into the failure event (#346).
+///
+/// The sibling of the test above at the other binding: here the wire slot is
+/// the one mallory is entitled to, so `verify_welcome_slot` passes and the
+/// refusal comes from `verify_staged_group_id` instead. Worth pinning
+/// separately because the two render different fields, and the embedded id is
+/// the worse of the two — it is lossy UTF-8 over raw `GroupContext` bytes, so
+/// unlike the wire field it passes through neither charset validation nor
+/// `GroupId::MAX_LEN`.
+#[test]
+fn test_welcome_embedding_a_foreign_session_slot_is_refused_without_naming_it() {
+    let (mut bob, _bob_h) = make_encrypted_protocol("bob");
+    bob.start().unwrap();
+
+    let seen: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let sink = Arc::clone(&seen);
+        bob.on_event(move |e| sink.lock().unwrap().push(e));
+    }
+
+    let carol = crate::test_identity::manager_for("carol", Arc::new(InMemoryStorage::new()));
+    let mallory = crate::test_identity::manager_for("mallory", Arc::new(InMemoryStorage::new()));
+
+    // Mallory builds a real group whose embedded id is her slot with *carol*,
+    // then invites bob into it and presents the invite under the one wire slot
+    // bob will accept from her. The refusal therefore renders carol's address
+    // on the `embedded` side — a third party to this exchange.
+    let carol_kp = carol.get_or_create_key_package().unwrap();
+    mallory
+        .import_key_package(&id("carol"), &carol_kp.key_package_data)
+        .unwrap();
+    mallory.create_session(&id("carol")).unwrap();
+    let embedded_slot = session_slot("carol", "mallory");
+
+    let bob_kp = {
+        let m = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap()
+    };
+    let welcome = mallory
+        .add_group_member(
+            &offline_protocol_mls::GroupId::new(&embedded_slot).unwrap(),
+            &id("bob"),
+            &bob_kp.key_package_data,
+        )
+        .unwrap()
+        .0;
+    let attack = offline_protocol_mls::WelcomeMessage {
+        group_id: offline_protocol_mls::GroupId::new(&session_slot("bob", "mallory")).unwrap(),
+        ..welcome
+    };
+
+    let content = format!(
+        "{}{}",
+        internal_prefixes::WELCOME,
+        serde_json::to_string(&attack).unwrap()
+    );
+    bob.process_internal_message(&signed_frame(&id("mallory"), &id("bob"), &content));
+
+    let seen = seen.lock().unwrap();
+    assert!(
+        seen.iter().any(|e| matches!(
+            e,
+            Event::SecureSessionFailed { peer_id, .. } if *peer_id == id("mallory")
+        )),
+        "expected a secure_session_failed for the refused Welcome; saw {seen:?}"
+    );
+    assert_no_reason_names(&seen, &[&embedded_slot, &id("carol")]);
+}

@@ -431,14 +431,16 @@ impl OfflineProtocol {
             let mut unproven_leaf_session = false;
             // The `secure_session_failed` reason for a refused-identity Welcome.
             //
-            // Deliberately NOT `e.to_string()`, unlike every other arm that
-            // fills `error_reason`. `LeafAddressMismatch` renders *two*
-            // addresses — the impersonated third party's and the forger's real
-            // one — and `reason` is shipped verbatim by the telemetry scrubber,
-            // which hashes only `peer_id` (see `scrub_event.rs`). That is the
-            // same leak the `GroupLeafIdentityUnproven` detail avoids a few
-            // lines down, and it would be no better for arriving on the sibling
-            // event. The full error stays in the `warn!` at each refusal site.
+            // Hand-written rather than `MlsError::privacy_safe_reason`, which
+            // would also be safe: this one describes the refusal in the app's
+            // terms — a session invite was declined — where the generic
+            // classification speaks about ratchet-tree leaves. Both are
+            // identifier-free, and so is every other arm that fills
+            // `error_reason` now: `reason` is shipped verbatim by the telemetry
+            // scrubber, which hashes only `peer_id` (see `scrub_event.rs`), so
+            // anything rendered into one reaches a sink running
+            // `scrub_ids: true` in the clear. The full error stays in the
+            // `warn!` at each refusal site.
             const UNPROVEN_LEAF_SESSION_REASON: &str =
                 "Session invite declined: it carried an identity claim this device could not \
                  verify";
@@ -537,7 +539,7 @@ impl OfflineProtocol {
                                         resend_confirm_on_retransmit = true;
                                     } else {
                                         warn!(error = %e, sender = %sender, "Failed to replace session");
-                                        error_reason = Some(e.to_string());
+                                        error_reason = Some(e.privacy_safe_reason().to_string());
                                     }
                                 }
                             }
@@ -610,12 +612,22 @@ impl OfflineProtocol {
                                     unproven_leaf_session = true;
                                     // Identifier-free, for the reason
                                     // `UNPROVEN_LEAF_SESSION_REASON` documents.
-                                    // Every other join failure here is a fault
-                                    // rather than an accusation and names
-                                    // nobody, so those keep the raw error.
                                     error_reason = Some(UNPROVEN_LEAF_SESSION_REASON.to_string());
                                 } else {
-                                    error_reason = Some(e.to_string());
+                                    // Classified, never rendered. "Every other
+                                    // join failure is a fault rather than an
+                                    // accusation and names nobody" was the
+                                    // premise this arm used to run on, and it
+                                    // was false: a Welcome refused for naming
+                                    // the wrong session slot, or for embedding
+                                    // a group id that disagrees with the slot
+                                    // it arrived under, renders both a slot
+                                    // (two addresses, one of them possibly a
+                                    // third party's) and a string its sender
+                                    // chose — the latter unbounded, since the
+                                    // embedded id is lossy UTF-8 over raw
+                                    // GroupContext bytes (#346).
+                                    error_reason = Some(e.privacy_safe_reason().to_string());
                                 }
                             }
                         }
@@ -715,10 +727,21 @@ impl OfflineProtocol {
                         }
                     }
                     Err(e) => {
+                        // Same rule as the refusal arms above, reached by a
+                        // different route: the storage layer interpolates the
+                        // record's id into its error, so the rendering names
+                        // the peer. It goes to the log; the event gets a fixed
+                        // string, and the peer is already in the (hashed)
+                        // `peer_id` beside it.
+                        warn!(
+                            error = %e,
+                            sender = %sender_owned,
+                            "Failed to persist session confirmation after Welcome"
+                        );
                         if let Ok(state) = lock_shared_state(&self.shared_state) {
                             state.emit_event(Event::secure_session_failed(
                                 sender_owned.clone(),
-                                format!("Failed to persist confirmation: {}", e),
+                                "Failed to persist session confirmation".to_string(),
                             ));
                         }
                     }
