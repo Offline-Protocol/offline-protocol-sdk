@@ -1339,7 +1339,11 @@ longer exist.
 Ed25519 signature *and* the key that produced it re-derives to the address in
 `sender`. That check has no first-contact window — the pin store's weakest
 point, where whoever claimed a name first became its owner — so impersonation
-goes from winning a race to finding a 160-bit second preimage.
+goes from winning a race to finding a 160-bit second preimage (~2^160). That is
+the cost of aiming at an address that already exists. The birthday bound on the
+same truncation is ~2^80, which produces two keys sharing one address rather
+than a chosen peer's address — a deliberate trade against BLE frame budget,
+documented on `Address::HASH_LEN`.
 
 **Three behaviour changes to plan for:**
 

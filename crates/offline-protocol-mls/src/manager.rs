@@ -629,7 +629,7 @@ impl MlsManager {
     /// another's name.
     ///
     /// The identity claim is then *proved* rather than trusted: see
-    /// [`Self::verify_address_binding`]. No Authentication Service verdict
+    /// `Self::verify_address_binding`. No Authentication Service verdict
     /// travels with the call any more, because there is nothing for the caller
     /// to know — the key package carries its own proof.
     pub fn import_key_package(&self, user_id: &str, key_package_data: &[u8]) -> Result<()> {

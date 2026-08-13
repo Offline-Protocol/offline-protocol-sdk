@@ -110,9 +110,29 @@ impl Address {
 
     /// Length of the truncated identity-key hash, in bytes.
     ///
-    /// 160 bits of second-preimage margin. Kept short because every mesh
-    /// frame carries a sender and a recipient address, and BLE budget is the
-    /// binding constraint.
+    /// 160 bits, which is a **second-preimage** margin of ~2^160 and a
+    /// **collision** margin of ~2^80 — the birthday bound on the same
+    /// truncation. Both are stated here because they buy different things and
+    /// only the first is what the impersonation claim rests on:
+    ///
+    /// - ~2^160 is the cost of aiming at an address that already exists:
+    ///   producing a key that derives to *someone else's* address. That is the
+    ///   attack the sender-derivation gate replaced the trust-pin store to
+    ///   stop, and it is the figure the guides and changelog quote.
+    /// - ~2^80 is the cost of producing *two* identity keys that share one
+    ///   address, neither fixed in advance. It impersonates nobody, but it does
+    ///   let a single entity hold two signing keys that are indistinguishable
+    ///   at the address layer — enough to equivocate, and enough to defeat the
+    ///   "one identity cannot hold two leaves" property that the MLS leaf
+    ///   binding otherwise inherits from MLS signature-key uniqueness.
+    ///
+    /// ~2^80 is below the ~2^128 a greenfield design would target, and is a
+    /// deliberate trade rather than an oversight: every mesh frame carries a
+    /// sender and a recipient address, and BLE budget is the binding
+    /// constraint. Widening the hash changes the wire, so it is a [`VERSION`]
+    /// bump and a migration, not a patch.
+    ///
+    /// [`VERSION`]: Address::VERSION
     pub const HASH_LEN: usize = 20;
 
     /// Length of the encoded payload: version byte followed by the hash.

@@ -247,6 +247,15 @@ pub(crate) fn now_unix_secs() -> i64 {
 /// events are never authenticated against it (sender authenticity comes from
 /// the protocol layer).
 ///
+/// **The scalar is not a secret and is not claimed to be.** It *is*
+/// `SHA-256(address)`, so anyone holding an address can reconstruct the whole
+/// keypair behind that address's tag. That is harmless only because of the
+/// sentence above — nothing signs with it and nothing seals to it — and it is
+/// what makes the previous shape a trap worth having removed: the key that
+/// does seal is now a separate domain-separated derivation
+/// ([`record_seal_keypair_for_address`]), so reconstructing a tag decrypts
+/// nothing.
+///
 /// # Why an identity-derived label is acceptable here
 ///
 /// Deriving a delivery address from stable identity material is normally the
@@ -284,9 +293,37 @@ pub fn routing_tag_for_address(address: &Address) -> Result<String> {
     Ok(hex::encode(tag_key.verifying_key().to_bytes()))
 }
 
-/// Event kind for a NIP-59 gift wrap. Relays and other clients see our sealed
-/// traffic as ordinary wrapped DMs, which is the whole point: the anonymity set
-/// is every NIP-17 conversation on the relay, not "the Offline Protocol users".
+/// Event kind for a NIP-59 gift wrap. Taken in isolation one of our events is
+/// an ordinary wrapped DM — kind, unlinkable per-event pubkey, opaque `#p`
+/// tag, coarse timestamp, ciphertext — which is why we reuse the wrapper
+/// instead of minting a kind of our own: a scrape *by kind alone* cannot
+/// enumerate the userbase.
+///
+/// # What this does not buy
+///
+/// The anonymity set is **not** "every NIP-17 conversation on the relay", and
+/// it is worth being exact about that, because a relay separates our tags from
+/// generic NIP-17 recipients in several ways and none of them has to break the
+/// sealing to do it:
+///
+/// - **Our own subscription names the tag.** `NostrTransport::create_subscription`
+///   sends `{"#p":[<our tag>], "kinds":[4, 1059], …}` to every relay we connect
+///   to, so a relay serving that `REQ` learns the tag belongs to the connected
+///   client directly, with no correlation work at all. This one is decisive and
+///   unavoidable while the recipient subscribes on a stable tag.
+/// - **The `kinds` pair is a fingerprint.** Requesting the legacy kind 4
+///   alongside 1059 under a single `#p` is a shape a NIP-17-only client does
+///   not have.
+/// - **The key-package record cross-links the tag.** With cold contact enabled
+///   (the default), [`NOSTR_KEY_PACKAGE_KIND`] records sit at our *own* routing
+///   tag and are signed by the install's real Nostr key, so a relay can join
+///   the tag to that pubkey and mark it as an MLS-over-Nostr client rather than
+///   a generic correspondent.
+///
+/// What the wrapper does buy is that none of that reveals *content*: who is
+/// talking to whom, about what, and under which app id all stay sealed. The
+/// gift wrap hides the conversation, not the fact that a given tag is one of
+/// ours to a relay we speak to.
 pub const NOSTR_GIFT_WRAP_KIND: u32 = 1059;
 
 /// Legacy NIP-04 direct-message kind. Deprecated upstream (`unrecommended`,
@@ -306,6 +343,12 @@ pub const NOSTR_LEGACY_DM_KIND: u32 = 4;
 /// client that publishes MLS key packages to Nostr. The payloads are not
 /// interchangeable — a Marmot client fetching ours reads a NIP-44 blob it holds
 /// no key for — but interoperability was never the point; the anonymity set is.
+///
+/// That set is the honest bound for a scrape *by kind*, and no larger. The
+/// record is published at our own routing tag and signed by the install's real
+/// Nostr key, so a relay holding it can join the two — which is one of the ways
+/// a routing tag is distinguishable from a generic NIP-17 recipient's, listed
+/// on [`NOSTR_GIFT_WRAP_KIND`].
 pub const NOSTR_KEY_PACKAGE_KIND: u32 = 30443;
 
 /// Picks a `created_at` uniformly in `[now - NOSTR_CREATED_AT_JITTER_SECS, now]`.
