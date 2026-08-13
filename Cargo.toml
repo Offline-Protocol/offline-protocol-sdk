@@ -13,7 +13,20 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+# The release version, shared with the `vX.Y.Z` git tag and the npm package —
+# `offline-protocol 0.20.1` on crates.io is the same release as `v0.20.1` and
+# `@offline-protocol/mesh-sdk@0.20.1`. This was a decoupled internal `0.x`
+# until crates.io publishing landed; two numbers for one release is a
+# reasonable trade while nothing is published, and a bad one once `cargo add`
+# is how people consume the SDK, because crates.io then carries a version
+# nothing else in the project answers to.
+#
+# Bump this as part of the release cut, together with the internal-dependency
+# versions below (the workspace will not resolve if they disagree) and
+# `bindings/python/pyproject.toml`. release.yml refuses to publish a tag whose
+# number does not match this one — crates.io versions are immutable, so
+# discovering the mismatch afterwards means the number is wrong forever.
+version = "0.20.1"
 edition = "2021"
 authors = ["Offline Protocol, Inc."]
 # Dual-licensed: AGPL-3.0-only for open-source use, with a separate commercial
@@ -93,13 +106,13 @@ chacha20poly1305 = "0.10"
 # Keep these in lockstep with `workspace.package.version` above — a crate can
 # only be published once its dependencies exist on the registry at the named
 # version, so all seven move together.
-offline-protocol-core = { path = "crates/offline-protocol-core", version = "0.2.0" }
-offline-protocol-transport = { path = "crates/offline-protocol-transport", version = "0.2.0" }
-offline-protocol-router = { path = "crates/offline-protocol-router", version = "0.2.0" }
-offline-protocol-reliability = { path = "crates/offline-protocol-reliability", version = "0.2.0" }
-offline-protocol-mls = { path = "crates/offline-protocol-mls", version = "0.2.0" }
-offline-protocol-services = { path = "crates/offline-protocol-services", version = "0.2.0" }
-offline-protocol = { path = "crates/offline-protocol", version = "0.2.0" }
+offline-protocol-core = { path = "crates/offline-protocol-core", version = "0.20.1" }
+offline-protocol-transport = { path = "crates/offline-protocol-transport", version = "0.20.1" }
+offline-protocol-router = { path = "crates/offline-protocol-router", version = "0.20.1" }
+offline-protocol-reliability = { path = "crates/offline-protocol-reliability", version = "0.20.1" }
+offline-protocol-mls = { path = "crates/offline-protocol-mls", version = "0.20.1" }
+offline-protocol-services = { path = "crates/offline-protocol-services", version = "0.20.1" }
+offline-protocol = { path = "crates/offline-protocol", version = "0.20.1" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

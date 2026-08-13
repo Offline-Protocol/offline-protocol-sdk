@@ -60,10 +60,12 @@ env:
 # `actions/*` is GitHub's own org, served from the same trust root as the runner
 # and the token, so in the credential-free build jobs it is deliberately left on
 # major tags. The `release` and `publish-crates` jobs are the exceptions,
-# because there the argument above turns back on itself: `attest-build-provenance` is the action that
-# *mints* the signature consumers are told to trust, `download-artifact` is what
-# hands it the binaries to sign, and `setup-node` configures the registry the
-# NPM_TOKEN publish authenticates against. Leaving those mutable would reopen
+# because there the argument above turns back on itself:
+# `attest-build-provenance` is the action that *mints* the signature consumers
+# are told to trust, `download-artifact` is what hands it the binaries to sign,
+# `setup-node` configures the registry the NPM_TOKEN publish authenticates
+# against, and `checkout` decides which source gets packaged into the .crate
+# files CARGO_REGISTRY_TOKEN uploads. Leaving those mutable would reopen
 # exactly the hole the rest of this pinning closes. Org membership does not cover
 # it either — the attack that actually happens is tag re-pointing from a
 # compromised maintainer account (tj-actions/changed-files, March 2025), not a
@@ -803,15 +805,27 @@ jobs:
     needs: [build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python]
     runs-on: ubuntu-latest
     env:
-      # crates.io publishes are immutable — a version can be yanked but never
-      # replaced — so a prerelease tag must not burn the workspace version the
-      # final tag will need. Prerelease runs get the dry-run verification only.
-      PRERELEASE_TAG: ${{ contains(github.ref, '-alpha') || contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
+      # The single gate on every step that uploads. Three conditions, each
+      # guarding a failure this registry cannot undo:
+      #
+      #   - a tag ref, because a `workflow_dispatch` from a branch with the
+      #     dry-run box unchecked would otherwise publish branch code and burn
+      #     the workspace version permanently. npm survives that mistake (72h
+      #     unpublish window, and its version comes from the tag or falls to
+      #     0.0.0-dev); crates.io has no equivalent escape.
+      #   - not a dry run, matching the npm job.
+      #   - not a prerelease, because crates.io versions are immutable — a
+      #     version can be yanked but never replaced — so an -rc tag must not
+      #     burn the version its final tag will need.
+      #
+      # Dry runs and prerelease tags still run the version gate and the full
+      # packaging verification below; they just stop short of uploading.
+      REAL_PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true && !contains(github.ref, '-alpha') && !contains(github.ref, '-beta') && !contains(github.ref, '-rc') }}
     steps:
       # Fail in seconds, not after the verify builds: cargo only discovers a
       # missing token at upload time, minutes of packaging work in.
       - name: Ensure crates.io token is configured
-        if: inputs.dry_run != true && env.PRERELEASE_TAG != 'true'
+        if: env.REAL_PUBLISH == 'true'
         env:
           TOKEN_SET: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
         run: |
@@ -831,15 +845,74 @@ jobs:
           toolchain: stable
 
       # No rust-cache here, unlike the build jobs: restored cache artifacts
-      # (dependency rlibs, build-script executables) execute inside the verify
-      # builds below, an injection vector a credential-holding job doesn't need
-      # to accept for one release-time build.
+      # (dependency rlibs, build-script executables) execute during the
+      # packaging verification and the cargo-workspaces build below, both of
+      # them inside a job that holds a publish credential. Not an injection
+      # vector worth accepting to save one release-time build.
+
+      # The crate version is the workspace version, and it must equal the tag —
+      # the two version in lockstep with the npm package, so `offline-protocol
+      # 0.21.0` on crates.io is the same release as `v0.21.0` and
+      # `@offline-protocol/mesh-sdk@0.21.0`.
+      #
+      # This is verified rather than written. The npm job sets its version from
+      # the tag, but the same trick is unavailable here and would be wrong
+      # anyway: Cargo.lock pins the workspace members' own versions, so
+      # rewriting the manifests at release time invalidates it and the --locked
+      # verification below stops working — and the published .crate would no
+      # longer match the tag it claims to come from, which is the property the
+      # release attestations exist to make checkable.
+      #
+      # So the bump is part of the release cut (see CONTRIBUTING.md) and this
+      # step is what makes forgetting it loud. Failing here costs a re-tag;
+      # not failing costs a permanent, immutable, wrongly-numbered publish.
+      # Runs on prerelease and dry-run tags too, where it is free rehearsal.
+      - name: Verify the workspace version matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          # A prerelease suffix lives on the tag only: v0.21.0-rc.1 rehearses
+          # the 0.21.0 the workspace already carries. Compare the release cores.
+          TAG_CORE="${TAG_VERSION%%-*}"
+          TAG_CORE="${TAG_CORE%%+*}"
+
+          CARGO_VERSION="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "offline-protocol") | .version')"
+
+          if [ "$TAG_CORE" != "$CARGO_VERSION" ]; then
+            echo "::error title=Workspace version does not match the tag::Tag v$TAG_VERSION wants crates at $TAG_CORE, but [workspace.package].version is $CARGO_VERSION. Bump it and the seven internal-dependency versions in [workspace.dependencies] together (they must agree or the workspace will not resolve), refresh Cargo.lock, and re-tag."
+            exit 1
+          fi
+
+          echo "Workspace version $CARGO_VERSION matches tag v$TAG_VERSION."
 
       # Packages every publishable crate (bench is `publish = false`) and runs
       # the verify builds, resolving workspace siblings from cargo's local
       # overlay — so this works even before anything exists on the registry.
-      - name: Verify packaging (dry run)
-        if: inputs.dry_run == true || env.PRERELEASE_TAG == 'true'
+      #
+      # Unconditional, and that is the point: this is the only verification the
+      # real publish gets. crates.io uploads are immutable and not atomic, so a
+      # packaging defect discovered at crate six leaves five published at a
+      # version the run can never complete — and since all eight version in
+      # lockstep, the whole workspace has to skip to the next number with that
+      # one half-published forever. The skip-already-published resumability
+      # below rescues transient faults (a rate limit, a dropped connection),
+      # never a deterministic one. Running this first turns that class into a
+      # failed job with nothing uploaded.
+      #
+      # It also runs with no token in the environment, which is what lets the
+      # publish step below skip its own verify builds — see there.
+      #
+      # Safe to run unconditionally only because dry-run mode downgrades an
+      # already-published version to `warning: crate X@Y already exists on
+      # crates.io index` and still exits 0 (verified against the real registry
+      # on cargo 1.97). Were it an error, this step would break exactly the
+      # re-run it exists to protect. Note that is dry-run behaviour only — in
+      # real mode native workspace publish does refuse, which is the whole
+      # reason the publish below goes through cargo-workspaces.
+      - name: Verify packaging
         run: cargo publish --workspace --locked --dry-run
 
       # cargo-workspaces publishes every publishable crate in topological
@@ -862,30 +935,36 @@ jobs:
       # registry token in its environment, the same poisoning vector the
       # missing rust-cache note above declines.
       - name: Install cargo-workspaces
-        if: inputs.dry_run != true && env.PRERELEASE_TAG != 'true'
+        if: env.REAL_PUBLISH == 'true'
         run: cargo install cargo-workspaces@0.4.2 --locked
 
-      # The published version is the Cargo workspace version
-      # ([workspace.package] in Cargo.toml), NOT the release tag — the two are
-      # decoupled by design (CHANGELOG 0.11.0 "Licensing"). A tag that ships
-      # no Rust changes finds every crate already published and no-ops (the
-      # pre-check below makes that loud); shipping Rust changes means bumping
-      # [workspace.package].version and the internal-dependency versions
-      # beside it before tagging. --publish-as-is (hidden alias: --from-git)
-      # publishes the manifests exactly as committed, which keeps that
-      # contract — without it, `cargo workspaces publish` runs its interactive
-      # version-bump/commit/tag flow first, which must never happen here.
+      # --publish-as-is (hidden alias: --from-git) publishes the manifests
+      # exactly as committed. Without it, `cargo workspaces publish` runs its
+      # interactive version-bump/commit/tag flow first, which must never happen
+      # here — the version gate above already established that what is
+      # committed is what this tag is supposed to ship.
+      #
+      # --no-verify, because the verification already ran: the packaging step
+      # above builds every crate from the committed manifests, with --locked
+      # and with no credential in the environment. Repeating it here would
+      # compile build scripts and proc macros — third-party code, at versions
+      # this invocation cannot pin (see --locked below) — in a step holding the
+      # registry token. That is the same poisoning vector the missing
+      # rust-cache and the uncached cargo-workspaces binary above both decline,
+      # and declining it twice while accepting it here would be incoherent.
+      # Stripped dev-deps only shrink the build, so nothing verified above can
+      # break here.
       #
       # Deliberately NOT --locked, unlike every other cargo invocation in this
       # workflow: cargo-workspaces temporarily strips [dev-dependencies] from
       # any crate whose dev-deps name workspace siblings with versions
-      # (offline-protocol-uniffi), and a manifest whose dep set shrank needs a
-      # lockfile update, which --locked refuses — so the run would publish
-      # seven crates and then die on the eighth. The dry-run pre-flight above
-      # keeps --locked, because native workspace publish leaves manifests
-      # alone; it, not this step, is where lockfile drift gets caught.
+      # (offline-protocol and offline-protocol-uniffi), and a manifest whose
+      # dep set shrank needs a lockfile update, which --locked refuses — so the
+      # run would publish six crates and then die on the seventh. The packaging
+      # step above keeps --locked, because native workspace publish leaves
+      # manifests alone; it, not this step, is where lockfile drift gets caught.
       - name: Publish crates
-        if: inputs.dry_run != true && env.PRERELEASE_TAG != 'true'
+        if: env.REAL_PUBLISH == 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
@@ -897,13 +976,15 @@ jobs:
           # All workspace crates version in lockstep, and offline-protocol sits
           # atop the internal dependency graph — so if it is already published
           # at this version, the whole run is a no-op. Say so as a warning
-          # annotation rather than letting eight "skipping" lines scroll by:
-          # the likely cause is a tag that meant to ship Rust changes without
-          # bumping the workspace version, which can't be fixed by re-running.
+          # annotation rather than letting eight "skipping" lines scroll by.
+          # Since the version gate above pins the version to the tag, this can
+          # only mean a re-run of a release that already published, which is
+          # exactly what the skip below exists to make safe — but it is worth
+          # saying out loud, because the run reports success either way.
           url="https://index.crates.io/of/fl/offline-protocol"
           if curl -fsS --retry 3 "$url" 2>/dev/null \
             | jq -e --arg v "$VERSION" 'select(.vers == $v)' >/dev/null; then
-            echo "::warning title=crates.io publish is a no-op::offline-protocol@$VERSION already exists, so every crate below it does too. If this tag was meant to ship Rust changes, bump [workspace.package].version (and the internal-dependency versions beside it in [workspace.dependencies]) and cut a new tag."
+            echo "::warning title=crates.io publish is a no-op::offline-protocol@$VERSION already exists, so every crate below it does too. This run published nothing — expected when re-running a release that already reached crates.io."
           fi
 
-          cargo workspaces publish --publish-as-is --yes
+          cargo workspaces publish --publish-as-is --no-verify --yes

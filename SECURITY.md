@@ -13,10 +13,10 @@ backports to earlier lines. If you are on an older line, upgrading is the fix.
 Report against the latest published release
 ([releases](https://github.com/Offline-Protocol/offline-protocol-sdk/releases),
 `npm view @offline-protocol/mesh-sdk version`); a fix ships in the next release
-on the current line. These are release versions — the git tag and the
-`@offline-protocol/mesh-sdk` npm package, which share a number. The workspace
-`Cargo.toml` version is an internal, deliberately decoupled `0.x` and is not
-what this table refers to.
+on the current line. One number covers every channel: the git tag, the
+`@offline-protocol/mesh-sdk` npm package, and the `offline-protocol*` crates on
+crates.io all share it. Releases up to and including `v0.20.1` predate crates.io
+publishing and exist as tags and npm packages only.
 
 ## Reporting a Vulnerability
 

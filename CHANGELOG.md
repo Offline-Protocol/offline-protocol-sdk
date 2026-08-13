@@ -302,6 +302,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **The Rust workspace publishes to crates.io, and its version is now the
+  release version.** A `publish-crates` job runs beside the npm publish, behind
+  the same build-and-test gates, and ships all eight crates in dependency order.
+  Two things had to change for that to be safe. The workspace version moves from
+  the decoupled internal `0.2.0` to `0.20.1`, in lockstep with the git tag and
+  the npm package — two numbers for one release is a fine trade while nothing is
+  published, and a bad one once `cargo add offline-protocol` is how people
+  consume the SDK, because crates.io would then carry a version nothing else in
+  the project answers to. (`bindings/python/pyproject.toml` moves with it; it
+  tracked the Cargo version and would otherwise have become a third scheme.) And
+  because crates.io versions are immutable — yankable, never replaceable — the
+  release workflow now *verifies* the version rather than writing it: publishing
+  is refused unless `[workspace.package].version` equals the tag, unless the ref
+  is a tag at all, and unless packaging has already verified cleanly with
+  `--locked` and no credential in the environment. Bumping the version is part
+  of the release cut, now written down in
+  [CONTRIBUTING](./CONTRIBUTING.md#cutting-a-release). Consumers of the npm,
+  Python, or binary artifacts see no change; the crates are a new distribution
+  channel, published under the same AGPL-3.0-only terms.
 - `getBleDiagnostics()` (React Native) returns the three BLE degraded-path
   counters — `fragmentFallbacks`, `recipientNotAmongPeers`,
   `undersizedMtuReports` — which previously stopped at the UniFFI layer and
