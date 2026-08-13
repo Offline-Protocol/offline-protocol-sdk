@@ -309,6 +309,14 @@ pub enum MlsError {
     /// compare against, and an `ExternalSenders` credential is not a leaf at
     /// all. Refusing keeps the tree to identities that entered through a gate
     /// this SDK actually operates.
+    ///
+    /// One further condition shares this variant because it shares the
+    /// disposition exactly — permanent, unattributable, never buffered: a
+    /// sender index that resolves to no leaf at all. That is a tree-integrity
+    /// fault rather than an unsupported role, and it cannot happen for a
+    /// message OpenMLS just authenticated against that leaf, so it is
+    /// defensive; its `detail` is prefixed `tree integrity:` to keep the two
+    /// readable apart in a log.
     #[error("Unsupported sender: {detail}")]
     UnsupportedSender {
         /// Which unsupported sender shape arrived, and where.

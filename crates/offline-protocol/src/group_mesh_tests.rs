@@ -13556,3 +13556,144 @@ fn test_group_invite_with_an_unprovable_member_is_declined_and_reported() {
             .collect::<Vec<_>>()
     );
 }
+
+/// A forged-leaf commit must be refused **permanently**, not parked on the
+/// retry path.
+///
+/// The security refusal was never in doubt — carol does not enter the roster
+/// either way. What this pins is the *disposition*, which is where the real
+/// defect was: `process_commit_core` decides retriability from an allowlist,
+/// and a refusal missing from it falls through to `CommitOutcome::Retriable`.
+/// A buffered commit that can never succeed is re-decrypted on every drain,
+/// occupies one of `MAX_PENDING_COMMITS_PER_GROUP` slots that legitimate
+/// out-of-order commits need, and — the part that turns a closed vulnerability
+/// back into an open one — expires with `retry_count > 0`, which
+/// `drain_pending_commits` reads as an epoch fork. That emits a false
+/// `group_epoch_fork_detected` and has the elected leader fan an `update_keys`
+/// commit out to the whole group. One forged commit from any member, and
+/// membership commits are unauthorized by default.
+///
+/// Asserted through `handle_group_mls_commit` rather than at the MLS layer on
+/// purpose: every other test of this fix asserts on `decrypt_from_group`, which
+/// returns the right error and tells you nothing about what the protocol layer
+/// then does with it. That is exactly why the class was invisible.
+#[test]
+fn test_forged_leaf_commit_is_rejected_permanently_and_not_buffered() {
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Forged Leaf Commit Group");
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let collector = events.clone();
+    bob.on_event(move |event| collector.lock().unwrap().push(event));
+
+    let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+    let epoch_before = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.get_group_info(&gid).unwrap().unwrap().epoch
+    };
+
+    // Alice seats a leaf claiming carol, and ships the resulting Add commit.
+    let (commit_bytes, alice_epoch) = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let bytes = alice_mls
+            .seat_forged_leaf_for_testing(&gid, &id("carol"))
+            .unwrap();
+        let epoch = alice_mls.get_group_info(&gid).unwrap().unwrap().epoch;
+        (bytes, epoch)
+    };
+
+    let commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
+        group_id: group_id.clone(),
+        commit_type: GroupCommitType::Add,
+        ciphertext: base64_encode(&commit_bytes),
+        epoch: alice_epoch,
+        affected_member: Some(id("carol")),
+        role: None,
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::GROUP_MLS_COMMIT,
+        serde_json::to_string(&commit_payload).unwrap()
+    );
+    bob.process_internal_message(&make_message(&id("alice"), &id("bob"), &content));
+
+    // Permanent: nothing buffered, so nothing to retry and nothing to expire
+    // into a false fork.
+    assert!(
+        !bob.group_mesh.pending_commits.contains_key(&group_id),
+        "a forged-leaf commit can never succeed and must not enter the retry buffer"
+    );
+    assert!(
+        !bob.group_mesh.epoch_forks.contains_key(&group_id),
+        "refusing a forged-leaf commit must not be mistaken for an epoch fork"
+    );
+
+    // And the refusal itself still holds.
+    let after = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.get_group_info(&gid).unwrap().unwrap()
+    };
+    assert_eq!(
+        after.epoch, epoch_before,
+        "a refused commit must not advance the epoch"
+    );
+    assert!(
+        !after.members.contains(&id("carol")),
+        "roster: {:?}",
+        after.members
+    );
+
+    // The app is told, and told who delivered it.
+    let unproven = |events: &Vec<Event>| -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::SecurityWarning {
+                    peer_id,
+                    reason_code,
+                    ..
+                } if *reason_code
+                    == crate::events::SecurityWarningCode::GroupLeafIdentityUnproven =>
+                {
+                    Some(peer_id.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    {
+        let events = events.lock().unwrap();
+        assert_eq!(
+            unproven(&events),
+            vec![id("alice")],
+            "a refused membership change must be reported once, against its sender; events: {:?}",
+            events
+                .iter()
+                .map(|e| format!("{:?}", e))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // Refusals are permanent and cost the sender nothing, so the same member
+    // can drive one per frame. A fresh wire id gets past dedup and reaches the
+    // same refusal; the report must still be suppressed inside its window, or
+    // the signal is buried in its own repetition.
+    bob.process_internal_message(&make_message(&id("alice"), &id("bob"), &content));
+    {
+        let events = events.lock().unwrap();
+        assert_eq!(
+            unproven(&events).len(),
+            1,
+            "repeat refusals by the same (group, sender) must stay suppressed; events: {:?}",
+            events
+                .iter()
+                .map(|e| format!("{:?}", e))
+                .collect::<Vec<_>>()
+        );
+    }
+    // Note: a *replay* of the same frame fails earlier, as a spent ratchet
+    // generation (`Decryption`), and is buffered like any replayed commit.
+    // That is pre-existing behaviour common to every commit and is unrelated
+    // to the binding — the leaf refusal is what must not be buffered, and a
+    // fresh forged commit always takes that path.
+}

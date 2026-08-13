@@ -689,12 +689,53 @@ protocol.on('group_role_changed', (event) => {
 ### Group Security
 
 - Use MLS's built-in member removal to ensure forward secrecy
+- Every group leaf is bound to the address its own signature key derives to, unconditionally; see [Member identity binding](#member-identity-binding) for the refusals this can produce
 - Role changes and group renames are admin-gated **on receive** — a non-admin's role or rename frame is rejected by every peer
 - Invite and removal are admin-gated **on send**; see [Group authorization model](#group-authorization-model) for what that does and does not guarantee
 - The last-admin invariant prevents orphaned groups
 - Removed members receive a notification and should clean up local group state
 - Rotate group keys periodically
 - Consider re-creating groups for maximum security after member removal
+
+### Member identity binding
+
+Every leaf entering local group state must carry the address its **own signature
+key** derives to. An address *is* `bech32m(0x01 ‖ SHA-256(signature_key)[..20])`,
+so a leaf carries its own proof and no prior contact is needed to check it. This
+is the Authentication Service RFC 9420 §5.3.1 assigns to the application; OpenMLS
+does not perform it.
+
+It is checked at three points — joining a Welcome, merging a commit, and
+attributing a decrypted message — and it is **unconditional**, unlike
+`enforce_admin_commits`. The verdict is computed from the message's own bytes, so
+every honest member reaches the same answer and a refusal forks the *attacker*
+off a group that stays consistent.
+
+What integrators need to know:
+
+- **A legitimate-looking invite or membership change can now be refused.** It is
+  declined outright — nothing is delivered, no group is installed, and a refused
+  commit is not retried.
+- **The signal is `GROUP_LEAF_IDENTITY_UNPROVEN`** on `security_warning`, emitted
+  from three sites: a declined group invite, a refused membership commit, and a
+  declined session Welcome. The group sites are rate-limited per
+  `(group, sender)` over 5 minutes.
+- **`peer_id` is the peer that delivered the forgery** — the inviter, or the
+  sender of the membership change — not the identity the forged leaf claimed.
+  That attribution is proved: both frames are security-gated against the
+  sender's own address. The claimed identity appears only in `reason`, which is
+  diagnostic text and **must not be parsed**.
+- **There is no benign reading.** Unlike most warnings, this one accuses someone
+  the user is already in a room with. Treat a group that produces it as
+  untrusted for attribution — a message shown as coming from a member is exactly
+  what the forged leaf was for.
+- **Rosters skip unproven leaves.** `get_group_info` omits them with a warning
+  rather than failing the whole read, so a member can disappear from a roster
+  without an explicit removal.
+
+Peers on a build predating self-certifying addressing carry username credentials
+and will fail this check. That is the same cliff as the addressing change itself
+— such peers already fail credential verification — not a new one.
 
 ### Group authorization model
 

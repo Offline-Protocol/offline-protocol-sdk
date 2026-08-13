@@ -427,6 +427,8 @@ impl OfflineProtocol {
             let group_id = welcome.group_id.as_str().to_string();
             let is_session = group_id.starts_with("session:");
             let mut error_reason: Option<String> = None;
+            // Collected under the MLS lock, emitted after it drops.
+            let mut unproven_leaf_session: Option<String> = None;
             // Receiver-side convergence instrumentation: prove the Welcome
             // actually reassembled and reached MLS handling on THIS device.
             // (Absent in logs => the Welcome never fully arrived — a transport
@@ -554,6 +556,24 @@ impl OfflineProtocol {
                             }
                             Err(e) => {
                                 warn!(error = %e, sender = %sender, "Failed to join MLS session");
+                                // A forged ratchet tree is the one join failure
+                                // that is an accusation rather than a fault, and
+                                // a session Welcome is still a Welcome. Without
+                                // this it would surface only as
+                                // `secure_session_failed`, which apps reasonably
+                                // read as "retry later" rather than "this peer
+                                // built a leaf around someone else's name".
+                                // Unthrottled, unlike the group sites: staging a
+                                // Welcome consumes a one-time key package, so the
+                                // rate is bounded by key material the peer has to
+                                // spend.
+                                if matches!(
+                                    e,
+                                    offline_protocol_mls::MlsError::LeafAddressMismatch { .. }
+                                        | offline_protocol_mls::MlsError::UnsupportedSender { .. }
+                                ) {
+                                    unproven_leaf_session = Some(e.to_string());
+                                }
                                 error_reason = Some(e.to_string());
                             }
                         }
@@ -666,6 +686,18 @@ impl OfflineProtocol {
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
                     state.emit_event(Event::secure_session_failed(sender_owned.clone(), reason));
                 }
+            }
+
+            if let Some(detail) = unproven_leaf_session {
+                self.emit_security_warning(
+                    &sender_owned,
+                    SecurityWarningCode::GroupLeafIdentityUnproven,
+                    format!(
+                        "Session invite declined: its ratchet tree contains an identity \
+                         nobody proved, so messages in it could not be attributed ({})",
+                        detail
+                    ),
+                );
             }
 
             // Retransmit case: we already adopted the owner's group (session
@@ -799,6 +831,26 @@ impl OfflineProtocol {
                                 "SECURITY: encrypted envelope names a group that is not the claimed sender's session, rejecting"
                             );
                             DecryptResult::SessionSlotMismatch
+                        }
+                        Err(
+                            ref e @ (offline_protocol_mls::MlsError::LeafAddressMismatch { .. }
+                            | offline_protocol_mls::MlsError::UnsupportedSender { .. }),
+                        ) => {
+                            // Reachable here because an `__MLS_ENC__` envelope
+                            // may name a `group:` id, which routes this path
+                            // into group decrypt — so the group handler's
+                            // interception does not cover it. Intercepted for
+                            // the same reason as the two arms above: both
+                            // classify as `SessionStateError::Unknown`, whose
+                            // terminal disposition is drop-*and-ACK*, and an
+                            // ACK tells an injector their target is live and
+                            // processing their frames.
+                            error!(
+                                sender = %sender,
+                                error = %e,
+                                "SECURITY: group leaf does not prove the identity it claims, rejecting message"
+                            );
+                            DecryptResult::SecurityRejected
                         }
                         Err(e) => {
                             let session_state_error = SessionStateError::from(&e);

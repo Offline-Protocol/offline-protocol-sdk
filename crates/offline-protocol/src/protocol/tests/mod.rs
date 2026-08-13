@@ -27223,6 +27223,24 @@ fn test_media_security_rejection_classifies_both_identity_mismatches() {
         }),
         "an envelope naming a foreign session slot is a security rejection"
     );
+    // The leaf-binding refusals. Reachable on this path because an
+    // `__MLS_ENC__` envelope may name a `group:` id, which routes into group
+    // decrypt without passing through the group handler that intercepts them
+    // there.
+    assert!(
+        is_media_security_rejection(&MlsError::LeafAddressMismatch {
+            claimed: "off1alice".to_string(),
+            derived: "off1mallory".to_string(),
+            context: offline_protocol_mls::error::LeafSource::MessageSender,
+        }),
+        "a leaf that does not derive its own credential is a security rejection"
+    );
+    assert!(
+        is_media_security_rejection(&MlsError::UnsupportedSender {
+            detail: "external sender".to_string(),
+        }),
+        "an unsupported sender role is a security rejection"
+    );
 
     // Negative controls. Both classify as `SessionStateError::Unknown` alongside
     // the two above, which is exactly why the intercept has to run *before*

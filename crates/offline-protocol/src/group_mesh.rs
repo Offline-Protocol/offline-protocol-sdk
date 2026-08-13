@@ -290,6 +290,17 @@ pub(crate) struct GroupMeshState {
     /// refusal doubles as a partition alarm), so neither may suppress the
     /// other's first report inside one window.
     pub(crate) unauthorized_change_reports: HashMap<(String, String, bool), Instant>,
+
+    /// When an unproven-leaf refusal by (group_id, delivering peer) was last
+    /// reported, for rate-limiting `GroupLeafIdentityUnproven` — same window
+    /// and same bound as [`Self::unauthorized_change_reports`], kept separate
+    /// so neither signal can suppress the other's first report.
+    ///
+    /// Needed because the commit half of this report is driven by an
+    /// authenticated group member: refusals are permanent and cheap, so an
+    /// insider can produce one per frame, and an unthrottled event channel
+    /// buries the signal in its own repetition.
+    pub(crate) unproven_leaf_reports: HashMap<(String, String), Instant>,
 }
 
 /// Outcome of attempting to process an MLS Commit.
@@ -1350,15 +1361,16 @@ impl OfflineProtocol {
         drop(mls_guard);
 
         if let Some(detail) = unproven_leaf_invite {
-            self.emit_event(Event::security_warning(
-                sender.to_string(),
-                crate::events::SecurityWarningCode::GroupLeafIdentityUnproven,
+            let group_id = payload.group_id.clone();
+            self.report_unproven_leaf(
+                &group_id,
+                sender,
                 format!(
                     "Group invite declined: its member list contains an identity nobody \
                      proved, so messages in it could not be attributed ({})",
                     detail
                 ),
-            ));
+            );
         }
 
         if let Some(members) = join_result {
@@ -1662,12 +1674,29 @@ impl OfflineProtocol {
                 // like application messages. A spoofed sender (SEC-M1) is
                 // permanent — retrying the same forged commit can never
                 // succeed.
+                //
+                // The leaf-binding refusals are permanent for the same reason,
+                // and getting this wrong is worse here than merely wasteful. A
+                // leaf whose key does not hash to its own credential can never
+                // start doing so, and an unsupported sender role never becomes
+                // supported, so every retry re-runs a full MLS `process_message`
+                // on a frame with no reachable success. Worse, a buffered commit
+                // that expires with `retry_count > 0` is read as an epoch fork
+                // (`drain_pending_commits`), which emits a false
+                // `group_epoch_fork_detected` and has the elected leader fan an
+                // `update_keys` commit out to the whole group — so one forged
+                // commit, from any member, would buy an attacker a group-wide
+                // re-key round and a bogus security alarm. Buffering also spends
+                // one of `MAX_PENDING_COMMITS_PER_GROUP` slots, evicting
+                // legitimate out-of-order commits.
                 let is_permanent = matches!(
                     e,
                     offline_protocol_mls::MlsError::Deserialization(_)
                         | offline_protocol_mls::MlsError::InvalidMessage(_)
                         | offline_protocol_mls::MlsError::Storage(_)
                         | offline_protocol_mls::MlsError::SenderIdentityMismatch { .. }
+                        | offline_protocol_mls::MlsError::LeafAddressMismatch { .. }
+                        | offline_protocol_mls::MlsError::UnsupportedSender { .. }
                 );
                 if is_permanent {
                     error!(
@@ -1676,6 +1705,29 @@ impl OfflineProtocol {
                         error = %e,
                         "Permanently failed to process group commit (not retriable)"
                     );
+                    // The commit half of `GroupLeafIdentityUnproven`. This is
+                    // the more serious of the two sites the code emits it from:
+                    // a Welcome refusal declines an invite from a stranger, but
+                    // this accuses a member of a group the user is already in.
+                    // `sender` is the peer that delivered the commit and it is
+                    // proved — `__GRP_MLS_COMMIT__` is security-gated, so the
+                    // sender signed with the key its own address derives from
+                    // — while the identity the forged leaf claimed stays in the
+                    // diagnostic text.
+                    if matches!(
+                        e,
+                        offline_protocol_mls::MlsError::LeafAddressMismatch { .. }
+                            | offline_protocol_mls::MlsError::UnsupportedSender { .. }
+                    ) {
+                        let detail = format!(
+                            "Group membership change refused: it would have seated an \
+                             identity nobody proved, so messages from it could not be \
+                             attributed ({})",
+                            e
+                        );
+                        let group_id = payload.group_id.clone();
+                        self.report_unproven_leaf(&group_id, sender, detail);
+                    }
                     return CommitOutcome::Rejected;
                 }
                 error!(
@@ -1910,6 +1962,67 @@ impl OfflineProtocol {
             sender_is_admin,
             authorized,
         }
+    }
+
+    /// Emits the rate-limited `GroupLeafIdentityUnproven` report.
+    ///
+    /// Shared by the two sites that refuse a leaf which does not derive its own
+    /// credential: declining a Welcome whose ratchet tree contains one, and
+    /// refusing a commit that would install one. `peer` is the peer that
+    /// delivered it — the inviter or the committing sender — which is proved,
+    /// both frames being security-gated against the sender's own address. The
+    /// identity the forged leaf claimed stays in `detail`, which is diagnostic
+    /// text.
+    ///
+    /// Rate-limited per `(group, peer)` on the same window and bound as
+    /// [`Self::report_unauthorized_membership_change`]. The commit half makes
+    /// this necessary rather than tidy: refusals are permanent and cost the
+    /// sender nothing, so an authenticated member can emit one per frame and
+    /// bury the signal in its own repetition.
+    fn report_unproven_leaf(&mut self, group_id: &str, peer: &str, detail: String) {
+        let key = (group_id.to_string(), peer.to_string());
+        let now = Instant::now();
+        let suppressed = self
+            .group_mesh
+            .unproven_leaf_reports
+            .get(&key)
+            .is_some_and(|last| {
+                now.duration_since(*last).as_secs() < UNAUTHORIZED_REPORT_SUPPRESS_SECS
+            });
+        if suppressed {
+            debug!(
+                group_id = %group_id,
+                sender = %peer,
+                "Suppressing repeated unproven-leaf report within the rate-limit window"
+            );
+            return;
+        }
+
+        // Bound the tracking map: drop lapsed windows first, then the oldest
+        // live entry if still at cap.
+        if self.group_mesh.unproven_leaf_reports.len() >= MAX_UNAUTHORIZED_REPORT_ENTRIES {
+            self.group_mesh.unproven_leaf_reports.retain(|_, last| {
+                now.duration_since(*last).as_secs() < UNAUTHORIZED_REPORT_SUPPRESS_SECS
+            });
+        }
+        if self.group_mesh.unproven_leaf_reports.len() >= MAX_UNAUTHORIZED_REPORT_ENTRIES {
+            if let Some(oldest) = self
+                .group_mesh
+                .unproven_leaf_reports
+                .iter()
+                .min_by_key(|(_, t)| **t)
+                .map(|(k, _)| k.clone())
+            {
+                self.group_mesh.unproven_leaf_reports.remove(&oldest);
+            }
+        }
+        self.group_mesh.unproven_leaf_reports.insert(key, now);
+
+        self.emit_event(Event::security_warning(
+            peer.to_string(),
+            crate::events::SecurityWarningCode::GroupLeafIdentityUnproven,
+            detail,
+        ));
     }
 
     /// Emits the rate-limited unauthorized-membership-change report.

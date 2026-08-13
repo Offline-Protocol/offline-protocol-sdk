@@ -79,16 +79,18 @@ fn verify_leaf_binding(
     signature_key: &[u8],
     context: LeafSource,
 ) -> Result<()> {
-    let claimed = String::from_utf8_lossy(credential.serialized_content()).into_owned();
-
     // A key that cannot derive at all (wrong length) is refused with the same
     // verdict as one that derives elsewhere: either way the leaf has not
     // proved the identity it claims.
+    //
+    // `claimed` is rendered only on the failure arms. It is attacker-controlled
+    // and this runs per inbound group message and per member of every roster
+    // read, so the success path must not pay for a string it discards.
     let derived = match crate::MlsManager::derive_address(signature_key) {
         Ok(address) => address,
         Err(e) => {
             return Err(MlsError::LeafAddressMismatch {
-                claimed,
+                claimed: rendered_credential(credential),
                 derived: format!("<no address: {}>", e),
                 context,
             });
@@ -97,12 +99,33 @@ fn verify_leaf_binding(
 
     if derived.to_string().as_bytes() != credential.serialized_content() {
         return Err(MlsError::LeafAddressMismatch {
-            claimed,
+            claimed: rendered_credential(credential),
             derived: derived.to_string(),
             context,
         });
     }
     Ok(())
+}
+
+/// Renders a credential's content for a diagnostic, bounded.
+///
+/// A credential is TLS `VLBytes` — the wire permits megabytes of it, and a leaf
+/// that reaches [`verify_leaf_binding`] has not proved anything, so its content
+/// is attacker-chosen. That string is `error!`-logged and interpolated verbatim
+/// into the user-facing `security_warning` reason, so it is bounded here rather
+/// than at each of those sinks. An honest address is 62 characters.
+fn rendered_credential(credential: &Credential) -> String {
+    const MAX_RENDERED_CREDENTIAL_BYTES: usize = 80;
+
+    let content = credential.serialized_content();
+    let shown = content
+        .get(..MAX_RENDERED_CREDENTIAL_BYTES)
+        .unwrap_or(content);
+    let mut rendered = String::from_utf8_lossy(shown).into_owned();
+    if shown.len() < content.len() {
+        rendered.push_str("… (truncated)");
+    }
+    rendered
 }
 
 /// Manages MLS groups for encrypted messaging.
@@ -440,8 +463,19 @@ impl GroupManager {
                     .map_err(|e| MlsError::Decryption(format!("Failed to merge commit: {}", e)))?;
                 Ok(None)
             }
+            // Unreachable since the leaf binding landed: an external join
+            // proposal is authenticated to `Sender::NewMemberProposal`, which
+            // `verify_sender_leaf` refuses above with
+            // `MlsError::UnsupportedSender` before `into_content` is reached.
+            // Kept because the enum is `#[non_exhaustive]`-shaped in practice
+            // and a match arm is cheaper than a panic, but note the disposition
+            // is now *refuse*, not tolerate-and-ignore — do not read this arm as
+            // the policy.
             ProcessedMessageContent::ExternalJoinProposalMessage(_) => {
-                warn!("Received external join proposal (not supported)");
+                warn!(
+                    "Received external join proposal (not supported); \
+                     expected `verify_sender_leaf` to have refused it already"
+                );
                 Ok(None)
             }
         }
@@ -493,7 +527,8 @@ impl GroupManager {
             .member_at(leaf_index)
             .ok_or_else(|| MlsError::UnsupportedSender {
                 detail: format!(
-                    "a message was authenticated to leaf {} , which is not in the tree",
+                    "tree integrity: a message was authenticated to leaf {}, which is not \
+                     in the tree",
                     leaf_index.u32()
                 ),
             })?;
@@ -560,6 +595,19 @@ impl GroupManager {
         }
 
         // 2. Members replacing their own leaf.
+        //
+        // Defensive, and unreachable through this SDK today — noted because an
+        // untested loop that cannot fire looks identical to one that is merely
+        // untested, and a future change re-opens it silently. An Update
+        // proposal reaches a commit two ways, and both are currently closed:
+        // inline, where MLS attributes the proposal to the *committer* and
+        // forbids committing your own Update (OpenMLS drops it when building
+        // and answers `CommitterIncludedOwnUpdate` when validating); or by
+        // reference, which requires the *receiver* to hold the proposal in its
+        // store, and this SDK drops every received `ProposalMessage` rather
+        // than storing it (see `decrypt_message`). Give the SDK a propose-only
+        // API — or start storing received proposals — and this loop becomes
+        // live, which is the point of keeping it.
         for proposal in staged_commit.update_proposals() {
             let leaf = proposal.update_proposal().leaf_node();
             verify_leaf_binding(
@@ -843,6 +891,28 @@ impl GroupManager {
                 LeafSource::WelcomeTree,
             )?;
         }
+
+        // The commit gate refuses a proposal that would *add* an
+        // `ExternalSenders` extension; a group created with one already in its
+        // context arrives this way instead. Refused here too, so the two entry
+        // gates are symmetric rather than differing by which one the inviter
+        // chose. Inert today — `verify_sender_leaf` refuses `Sender::External`
+        // at use time — but an entry gate that admits what the use gate always
+        // refuses is a group we can never fully participate in, and it is
+        // better to decline the invite than to hold it.
+        if staged
+            .group_context()
+            .extensions()
+            .external_senders()
+            .is_some()
+        {
+            return Err(MlsError::UnsupportedSender {
+                detail: "a Welcome's group context carries an ExternalSenders extension, \
+                         which would authorize a non-member to send into this group"
+                    .to_string(),
+            });
+        }
+
         Ok(())
     }
 
@@ -965,6 +1035,13 @@ impl GroupManager {
     /// Skipping rather than failing keeps a tampered store from taking the
     /// whole group down, and the message it would have carried is refused
     /// anyway — [`Self::verify_sender_leaf`] judges the same leaf at decrypt.
+    ///
+    /// O(N) in the roster, against [`Self::verify_sender_leaf`]'s O(1): one
+    /// SHA-256 over 32 bytes plus a bech32m encode per member, per call, and
+    /// `process_commit_core` calls this twice per commit to derive a membership
+    /// delta. Immaterial next to the MLS crypto on the same path — microseconds
+    /// at a hundred members — but this is the expensive seam of the two, so do
+    /// not reach for it in a loop.
     pub fn get_group_info(&self, group: &MlsGroup, group_id: &GroupId) -> GroupInfo {
         let members: Vec<String> = group
             .members()
@@ -1017,6 +1094,51 @@ mod tests {
     fn test_group_manager_creation() {
         let manager = create_test_group_manager();
         assert!(manager.list_groups().unwrap().is_empty());
+    }
+
+    /// An oversized credential is bounded before it reaches a log line or a
+    /// user-facing `security_warning` reason.
+    ///
+    /// A credential is TLS `VLBytes` and a leaf reaching the binding check has
+    /// proved nothing, so its content is attacker-chosen and unbounded on the
+    /// wire. Both sinks interpolate it verbatim.
+    #[test]
+    fn an_oversized_credential_is_truncated_in_the_error() {
+        let huge = vec![b'A'; 4096];
+        let credential = Credential::new(CredentialType::Basic, huge);
+
+        let err = verify_leaf_binding(&credential, &[0u8; 31], LeafSource::WelcomeTree)
+            .expect_err("a leaf claiming 4 KiB of nonsense must not pass");
+        let MlsError::LeafAddressMismatch { claimed, .. } = &err else {
+            panic!("got {err:?}");
+        };
+        assert!(
+            claimed.len() < 128,
+            "an unbounded credential reached the error text: {} bytes",
+            claimed.len()
+        );
+        assert!(claimed.ends_with("… (truncated)"), "{claimed}");
+
+        // An honest address is well under the cap and must survive intact.
+        let keys = openmls_basic_credential::SignatureKeyPair::new(
+            DEFAULT_CIPHERSUITE.signature_algorithm(),
+        )
+        .unwrap();
+        let address = crate::MlsManager::derive_address(keys.public()).unwrap();
+        let honest = Credential::new(
+            CredentialType::Basic,
+            address.to_string().as_bytes().to_vec(),
+        );
+        let err = verify_leaf_binding(&honest, &[0u8; 31], LeafSource::WelcomeTree)
+            .expect_err("a key that cannot derive must fail regardless");
+        let MlsError::LeafAddressMismatch { claimed, .. } = &err else {
+            panic!("got {err:?}");
+        };
+        assert_eq!(
+            *claimed,
+            address.to_string(),
+            "a normal address must be reported verbatim"
+        );
     }
 
     /// A leaf whose signature key cannot yield an address at all is refused,

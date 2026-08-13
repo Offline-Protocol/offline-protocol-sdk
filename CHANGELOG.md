@@ -28,6 +28,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **BREAKING**: `GroupManager::remove_member` now takes `&[LeafNodeIndex]`
+  instead of a single `LeafNodeIndex`, and `MlsManager::remove_group_member`
+  removes *every* leaf whose credential names the member rather than the first
+  one found. One identity holding two leaves is refused by the wire gates, but
+  not by a tampered local store — and there first-match leaves the peer in the
+  group holding live keys while the roster shows them gone.
+- **BREAKING**: non-`Member` MLS senders (`NewMemberCommit`,
+  `NewMemberProposal`, `External`) are now refused with
+  `MlsError::UnsupportedSender` rather than skipped, as is a commit or Welcome
+  carrying an `ExternalSenders` group-context extension. This SDK issues none of
+  them and configures no external senders, so no honest peer is affected; a peer
+  running something else that did will now be declined instead of silently
+  ignored.
 - **BREAKING**: `ProtocolConfig.user_id` → `ProtocolConfig.profile` across Rust,
   UniFFI (both config dictionaries), React Native, and Python. `profile` selects
   a storage namespace and is never sent; it is not an identity.
@@ -185,7 +198,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   because its verdict comes from the commit's own bytes rather than from
   replicated state: every honest member reaches the same answer, so a refusal
   forks the attacker off a group that stays consistent. Refusals surface as
-  `GROUP_LEAF_IDENTITY_UNPROVEN`. Coverage includes the update path, where a
+  `GROUP_LEAF_IDENTITY_UNPROVEN` from all three refusal sites — a declined group
+  invite, a refused membership commit, and a declined session Welcome — with the
+  group sites rate-limited per `(group, sender)` on the same 300s window as the
+  unauthorized-membership report, since a refusal is permanent and costs an
+  insider nothing to repeat. A refused commit is **not** buffered for retry: it
+  can never succeed, and a buffered commit that expires after retries is read as
+  an epoch fork, which would have let one forged commit trigger a group-wide
+  re-key round and a false alarm. Coverage includes the update path, where a
   member renames *their own* leaf to a peer's address — no new leaf, no key
   package, no invite, and the cheapest form of the attack.
 - **`SecurityWarning.peer_id` printed in the clear via `Debug`.** Every other

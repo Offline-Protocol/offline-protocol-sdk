@@ -1014,21 +1014,26 @@ impl MlsManager {
     /// Removes **every** leaf whose credential names `member_id`, in one
     /// commit, rather than the first one found.
     ///
-    /// Two leaves cannot name one identity in a well-formed tree, and the
-    /// reason is worth writing down because it is not obvious: RFC 9420
-    /// requires signature keys to be unique across a group (OpenMLS enforces it
-    /// — "Duplicate signature key in proposals and group"), and since
-    /// `verify_leaf_binding` ties a credential to the hash of its own signature
-    /// key, two leaves with the same credential would have to carry the same
-    /// key. So the duplicate case is refused one layer down, twice over.
+    /// Two leaves cannot name one identity in a tree whose leaves all passed
+    /// the binding, and the reason is worth writing down because it is not
+    /// obvious: RFC 9420 requires signature keys to be unique across a group
+    /// (OpenMLS enforces it — "Duplicate signature key in proposals and
+    /// group"), and since `verify_leaf_binding` ties a credential to the hash
+    /// of its own signature key, two leaves with the same credential would have
+    /// to carry the same key. So through the wire gates the duplicate case is
+    /// refused one layer down, twice over.
     ///
-    /// The loop is therefore not fixing a reachable bug; it is removing a way
-    /// for one to exist. A first-match removal is only correct while that
-    /// argument holds, and it holds across two invariants in two crates — one
-    /// of them OpenMLS's. If either ever slips, first-match leaves the peer in
-    /// the group holding live keys while every roster read shows them gone,
-    /// which is an access-revocation failure that would surface as nothing at
-    /// all. Removing every match costs one `Vec` and cannot have that failure
+    /// That argument covers the gates, not the tree. It says nothing about the
+    /// case `verify_sender_leaf` and the `get_group_info` filter exist for — a
+    /// leaf written straight into the install-scoped provider store. A forged
+    /// leaf claiming a peer's address carries the *attacker's* signature key,
+    /// so it violates no uniqueness rule and sits alongside that peer's real
+    /// leaf quite happily. There the loop is doing real work: first-match would
+    /// remove one of the two and leave the other in the group holding live
+    /// keys, while every roster read shows the member gone — an
+    /// access-revocation failure that would surface as nothing at all.
+    ///
+    /// Removing every match costs one `Vec` and cannot have that failure
     /// mode.
     pub fn remove_group_member(
         &self,
@@ -1811,8 +1816,9 @@ impl MlsManager {
 /// Forging a leaf needs raw OpenMLS, which the protocol crate deliberately does
 /// not depend on, and needs to go *past* `add_group_member`'s binding check —
 /// which is the whole point, since the attacker runs their own build and that
-/// check is theirs to delete. Feature-gated so it cannot be reached from a
-/// shipped build, and kept in this module because it touches private state.
+/// check is theirs to delete. Feature-gated so no release build in this
+/// workspace enables it — a downstream consumer could still turn the feature on
+/// for itself — and kept in this module because it touches private state.
 #[cfg(feature = "test-utils")]
 impl MlsManager {
     /// Seats a leaf in `group_id` whose credential claims `impersonated` but
@@ -1821,11 +1827,18 @@ impl MlsManager {
     /// The group must already exist and this manager must be able to commit to
     /// it. Every later Welcome for that group carries the forged leaf in its
     /// ratchet tree, which is what a receiver must refuse.
+    ///
+    /// Returns the Add commit, TLS-serialized. That is the *other* half of the
+    /// attack and needs to be reachable from the protocol crate: a receiver
+    /// already in the group is attacked by the commit, not by a Welcome, and
+    /// what it must do with one differs — refuse it **permanently**, since a
+    /// refusal parked on the retry path is re-decrypted until it expires and is
+    /// then misread as an epoch fork.
     pub fn seat_forged_leaf_for_testing(
         &self,
         group_id: &GroupId,
         impersonated: &str,
-    ) -> Result<()> {
+    ) -> Result<Vec<u8>> {
         let forged_storage: Arc<dyn MlsStorage> = Arc::new(crate::storage::InMemoryStorage::new());
         let forged_provider = MlsProvider::new(MlsStorageAdapter::new(forged_storage));
         let forged_keys = SignatureKeyPair::new(DEFAULT_CIPHERSUITE.signature_algorithm())
@@ -1860,9 +1873,14 @@ impl MlsManager {
             .load_group(group_id)?
             .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
         let signer = self.get_signer()?;
-        self.group_manager
+        let (commit, _welcome) = self
+            .group_manager
             .add_member(&mut group, validated, &signer)?;
-        self.group_manager.save_group(group_id, &group)
+        self.group_manager.save_group(group_id, &group)?;
+
+        commit
+            .tls_serialize_detached()
+            .map_err(|e| MlsError::Serialization(e.to_string()))
     }
 }
 
@@ -3770,9 +3788,13 @@ mod tests {
             after.members
         );
 
-        // And the leaf cannot speak: Mallory's own copy of the group merged, so
-        // she can still produce ciphertext, but it names an epoch Alice never
-        // adopted and an identity nobody proved.
+        // And the leaf cannot speak. Note the mechanism here is epoch
+        // divergence, not the sender-leaf check: Alice refused the commit, so
+        // she never advanced to the epoch the impostor is sealing at. That is
+        // the honest consequence of refusing, and it is what a real victim
+        // experiences — the identity seam itself, on a leaf that *did* reach
+        // the tree, is covered by
+        // `test_forged_leaf_seated_behind_the_gates_still_cannot_speak`.
         impostor.join(&forged_welcome);
         let forged = impostor.encrypt(b"send me the recovery phrase");
         assert!(
@@ -3965,16 +3987,14 @@ mod tests {
     /// enumeration rather than the book's shorter "add & update proposals".
     #[test]
     fn test_member_renaming_their_own_leaf_to_a_peers_address_is_refused() {
-        let (alice, mallory, gid) = {
-            let (a, b, g) = create_test_group_with_bob();
-            (a, b, g)
-        };
         // `create_test_group_with_bob` seats alice as creator and bob as
-        // member; bob plays the insider here.
+        // member; bob is the insider here, renaming his own leaf to alice's
+        // address.
+        let (alice, bob, gid) = create_test_group_with_bob();
         let epoch_before = alice.get_group_info(&gid).unwrap().unwrap().epoch;
 
-        let mut group = mallory.group_manager.load_group(&gid).unwrap().unwrap();
-        let signer = mallory.get_signer().unwrap();
+        let mut group = bob.group_manager.load_group(&gid).unwrap().unwrap();
+        let signer = bob.get_signer().unwrap();
         let forged = CredentialWithKey {
             // Claims alice, signed by bob's own key — which is the whole point:
             // the leaf is genuinely his, the name on it is not.
@@ -3985,10 +4005,10 @@ mod tests {
             .with_credential_with_key(forged)
             .build();
         let bundle = group
-            .self_update(&mallory.provider, &signer, params)
+            .self_update(&bob.provider, &signer, params)
             .expect("MLS permits a credential change; the AS is what refuses it");
-        group.merge_pending_commit(&mallory.provider).unwrap();
-        mallory.group_manager.save_group(&gid, &group).unwrap();
+        group.merge_pending_commit(&bob.provider).unwrap();
+        bob.group_manager.save_group(&gid, &group).unwrap();
         let (commit, _, _) = bundle.into_contents();
 
         let err = alice
@@ -4072,6 +4092,116 @@ mod tests {
             .unwrap()
             .members
             .contains(&addr("bob")));
+    }
+
+    /// The Welcome-side mirror of the `ExternalSenders` refusal.
+    ///
+    /// The commit gate refuses a proposal that would *add* the extension; a
+    /// group created with one already in its context arrives this way instead,
+    /// and the two entry gates should not differ by which route the inviter
+    /// took. Mallory merges the extension into her own group first, so the
+    /// Welcome she then sends carries it in the group context.
+    #[test]
+    fn test_welcome_whose_group_context_has_external_senders_is_refused() {
+        let mallory = create_test_manager("mallory");
+        let alice = create_test_manager("alice");
+
+        let gid = mallory.create_group("Team").unwrap().group_id;
+
+        // Merge an ExternalSenders extension into mallory's own group context.
+        {
+            let mut group = mallory.group_manager.load_group(&gid).unwrap().unwrap();
+            let signer = mallory.get_signer().unwrap();
+            let outsider =
+                SignatureKeyPair::new(DEFAULT_CIPHERSUITE.signature_algorithm()).unwrap();
+            let external = ExternalSender::new(
+                outsider.public().into(),
+                Credential::new(CredentialType::Basic, b"off1outsider".to_vec()),
+            );
+            group
+                .commit_builder()
+                .propose_group_context_extensions(Extensions::single(Extension::ExternalSenders(
+                    vec![external],
+                )))
+                .load_psks(mallory.provider.storage())
+                .unwrap()
+                .build(
+                    mallory.provider.rand(),
+                    mallory.provider.crypto(),
+                    &signer,
+                    |_| true,
+                )
+                .unwrap()
+                .stage_commit(&mallory.provider)
+                .unwrap();
+            group.merge_pending_commit(&mallory.provider).unwrap();
+            mallory.group_manager.save_group(&gid, &group).unwrap();
+        }
+
+        let alice_kp = alice.generate_key_package().unwrap();
+        let (welcome, _) = mallory
+            .add_group_member(&gid, &addr("alice"), &alice_kp.key_package_data)
+            .unwrap();
+
+        let err = alice.join_group(&welcome).unwrap_err();
+        assert!(
+            matches!(err, MlsError::UnsupportedSender { ref detail, .. }
+                if detail.contains("ExternalSenders")),
+            "expected the invite to be declined for its ExternalSenders context, got {err:?}"
+        );
+        assert!(
+            alice.get_group_info(&gid).unwrap().is_none(),
+            "a declined Welcome must not install the group"
+        );
+    }
+
+    /// Source 4 of the commit walk: a commit proposing an `ExternalSenders`
+    /// group-context extension is refused.
+    ///
+    /// Not a leaf, so there is no binding to check — which is exactly why it
+    /// needs its own arm rather than falling off the end of the walk. The
+    /// extension authorizes a non-member to send into the group, and its
+    /// credential would never be judged by any of the three leaf seams.
+    /// Untested, this arm survives deletion.
+    #[test]
+    fn test_commit_proposing_external_senders_is_refused() {
+        let (alice, mallory, gid) = create_test_group_with_bob();
+
+        let mut group = mallory.group_manager.load_group(&gid).unwrap().unwrap();
+        let signer = mallory.get_signer().unwrap();
+
+        // An ExternalSenders extension naming a party that is in no leaf.
+        let outsider = SignatureKeyPair::new(DEFAULT_CIPHERSUITE.signature_algorithm()).unwrap();
+        let external = ExternalSender::new(
+            outsider.public().into(),
+            Credential::new(CredentialType::Basic, b"off1outsider".to_vec()),
+        );
+        let extensions = Extensions::single(Extension::ExternalSenders(vec![external]));
+
+        let bundle = group
+            .commit_builder()
+            .propose_group_context_extensions(extensions)
+            .load_psks(mallory.provider.storage())
+            .unwrap()
+            .build(
+                mallory.provider.rand(),
+                mallory.provider.crypto(),
+                &signer,
+                |_| true,
+            )
+            .unwrap()
+            .stage_commit(&mallory.provider)
+            .unwrap();
+        let (commit, _, _) = bundle.into_contents();
+
+        let err = alice
+            .decrypt_from_group(&commit_message(&gid, &commit, &addr("bob")), &addr("bob"))
+            .unwrap_err();
+        assert!(
+            matches!(err, MlsError::UnsupportedSender { ref detail, .. }
+                if detail.contains("ExternalSenders")),
+            "expected an ExternalSenders refusal, got {err:?}"
+        );
     }
 
     /// Why `remove_group_member`'s loop can never find a second leaf — and why
