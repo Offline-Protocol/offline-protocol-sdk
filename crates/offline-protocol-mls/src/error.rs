@@ -5,6 +5,48 @@ use thiserror::Error;
 /// Result type alias for MLS operations.
 pub type Result<T> = std::result::Result<T, MlsError>;
 
+/// Which validation gate refused a leaf in [`MlsError::LeafAddressMismatch`].
+///
+/// RFC 9420 §7.3 names two moments at which a client validates a ratchet tree
+/// — joining, and processing a Commit — and the SDK adds a third at use time
+/// (the sender's own leaf, checked where the message is attributed). They fail
+/// for the same reason but mean different things operationally: a Welcome
+/// refusal is an invite that was never joined, a commit refusal is a member of
+/// a group you are already in forging identities, and a sender refusal on a
+/// leaf that passed the first two means local group state was written behind
+/// the SDK's back.
+// Adding a variant is a breaking change without this attribute.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafSource {
+    /// A leaf in the ratchet tree of a Welcome being joined.
+    WelcomeTree,
+    /// A leaf added by an Add proposal in a staged commit.
+    CommitAdd,
+    /// A leaf replaced by an Update proposal in a staged commit.
+    CommitUpdate,
+    /// The committer's own leaf, carried in the commit's update path.
+    CommitPath,
+    /// The leaf a decrypted message is attributed to.
+    MessageSender,
+    /// A leaf read back out of stored group state to build a roster.
+    RosterEntry,
+}
+
+impl std::fmt::Display for LeafSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::WelcomeTree => "Welcome ratchet-tree",
+            Self::CommitAdd => "committed Add proposal's",
+            Self::CommitUpdate => "committed Update proposal's",
+            Self::CommitPath => "commit update-path",
+            Self::MessageSender => "message sender's",
+            Self::RosterEntry => "stored roster",
+        };
+        f.write_str(name)
+    }
+}
+
 /// Errors that can occur during MLS operations.
 // Adding a variant to a public error enum is a breaking change without
 // this attribute; downstream crates must carry a wildcard arm.
@@ -208,6 +250,87 @@ pub enum MlsError {
         claimed: String,
         /// The address its leaf signature key actually derives to.
         derived: String,
+    },
+
+    /// A leaf node in a ratchet tree carries a credential its own signature
+    /// key does not derive to.
+    ///
+    /// The tree-side sibling of [`MlsError::KeyPackageAddressMismatch`]. That
+    /// one fires on a key package *this device supplied* — imported for a
+    /// contact, read back from the contact cache, or handed to
+    /// `add_group_member`. This one fires on a leaf that entered the tree some
+    /// other way: a Welcome's ratchet tree, or an Add/Update another member
+    /// committed. The two are kept separate so the error text says which gate
+    /// refused, because the recovery differs — a bad key package means
+    /// re-exchange, a bad leaf means someone in the group is forging identities.
+    ///
+    /// RFC 9420 §5.3.1 puts this check on the application: the Authentication
+    /// Service must verify "that the credential's presented identifiers are
+    /// correctly associated with the `signature_key` field in the member's
+    /// LeafNode", and §7.3 applies that "when a client validates a ratchet
+    /// tree, e.g., when joining a group or after processing a Commit". OpenMLS
+    /// does not do it for you — its own external-commit validation says so in
+    /// as many words ("This MUST be checked by the application"), and
+    /// `StagedCommit::credentials_to_verify` exists precisely to hand the
+    /// application the credentials it must judge.
+    ///
+    /// Without this, SEC-M1 ([`MlsError::SenderIdentityMismatch`]) is checking
+    /// a wire-claimed sender against a *self-asserted* string: a member who
+    /// commits a leaf whose credential names someone else is then attributed as
+    /// that someone else, which on the `__GROUP_MSG__` data-plane path needs no
+    /// signature from anyone.
+    #[error(
+        "{context} leaf signature key derives to '{derived}', not the address its credential claims ('{claimed}')"
+    )]
+    LeafAddressMismatch {
+        /// The identity the leaf's credential asserts.
+        claimed: String,
+        /// The address the leaf's own signature key derives to, or a rendering
+        /// of why no address could be derived from it.
+        derived: String,
+        /// Which gate refused, so a report names the path rather than only the
+        /// verdict (see [`LeafSource`]).
+        context: LeafSource,
+    },
+
+    /// A message, or a commit, was authenticated to a sender that is not a
+    /// member of the group.
+    ///
+    /// MLS admits three such senders: an external joiner committing itself in
+    /// (`NewMemberCommit`), a would-be member proposing its own Add
+    /// (`NewMemberProposal`), and a party authorized by the group's
+    /// `ExternalSenders` extension. This SDK issues none of them and configures
+    /// no external senders, so any of the three arriving is either a peer
+    /// running something else or an attacker.
+    ///
+    /// They are refused rather than ignored because each one is a leaf, or a
+    /// signing key, that [`MlsError::LeafAddressMismatch`] cannot judge the
+    /// usual way: an external joiner's leaf has no prior entry in the tree to
+    /// compare against, and an `ExternalSenders` credential is not a leaf at
+    /// all. Refusing keeps the tree to identities that entered through a gate
+    /// this SDK actually operates.
+    ///
+    /// One further condition shares this variant because it shares the
+    /// disposition exactly — permanent, unattributable, never buffered: a
+    /// sender index that resolves to no leaf at all. That is a tree-integrity
+    /// fault rather than an unsupported role, and it cannot happen for a
+    /// message OpenMLS just authenticated against that leaf, so it is
+    /// defensive; its `detail` is prefixed `tree integrity:` to keep the two
+    /// readable apart in a log.
+    ///
+    /// **Contract for anything added here.** Three separate dispositions key
+    /// off the bare variant — `process_commit_core`'s `is_permanent`,
+    /// `is_media_security_rejection`, and the `__MLS_ENC__` intercept in
+    /// `handle_encrypted_message` — so a new condition mapped to this variant
+    /// silently inherits *permanent, un-ACKed, and reported as a security
+    /// warning*. Only map conditions that genuinely share all three: the frame
+    /// can never become processable, the sender must learn nothing from an ACK,
+    /// and no honest peer produces it. Anything recoverable needs its own
+    /// variant.
+    #[error("Unsupported sender: {detail}")]
+    UnsupportedSender {
+        /// Which unsupported sender shape arrived, and where.
+        detail: String,
     },
 
     /// The MLS-authenticated sender of a decrypted message does not match

@@ -13461,3 +13461,470 @@ fn test_repeated_refusals_by_one_committer_are_still_rate_limited() {
         "repeat refusals by the same (group, committer) must stay suppressed within the window"
     );
 }
+
+/// A group invite whose ratchet tree names an identity nobody can prove is
+/// declined, and says so.
+///
+/// The end-to-end shape of the impersonation the leaf binding closes: mallory
+/// seats a leaf claiming carol's address in a group she controls, then invites
+/// bob. Before the binding, bob joined, carol appeared in his roster, and every
+/// message from that leaf was attributed to carol — the wire sender and the
+/// credential agreed because mallory chose both.
+///
+/// Asserts through the protocol surface rather than the MLS one because that is
+/// where the plumbing being tested lives: the join must be declined *and* the
+/// refusal must reach the app, since a silently-dropped invite is
+/// indistinguishable from a delivery failure.
+#[test]
+fn test_group_invite_with_an_unprovable_member_is_declined_and_reported() {
+    let storage_m = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
+    let mut mallory = OfflineProtocol::new(create_test_config_for_user("mallory")).unwrap();
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    mallory.initialize_mls_for_test(storage_m).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
+    mallory.start().unwrap();
+    bob.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let collector = events.clone();
+    bob.on_event(move |event| collector.lock().unwrap().push(event));
+
+    let group_info = mallory.create_group("mallory-group").unwrap();
+    let gid = offline_protocol_mls::GroupId::new(group_info.group_id.as_str()).unwrap();
+
+    // Seat a leaf claiming carol, then invite bob into the poisoned room.
+    let bob_kp = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.generate_key_package().unwrap()
+    };
+    let welcome = {
+        let mallory_mls = mallory.mls_manager_for_testing().read().unwrap();
+        mallory_mls
+            .seat_forged_leaf_for_testing(&gid, &id("carol"))
+            .unwrap();
+        mallory_mls
+            .add_group_member(&gid, &id("bob"), &bob_kp.key_package_data)
+            .unwrap()
+            .0
+    };
+
+    let payload = GroupMlsWelcomePayload {
+        member_rich: HashMap::new(),
+        created_by: None,
+        group_id: group_info.group_id.to_string(),
+        group_name: Some("mallory-group".to_string()),
+        welcome_data: base64_encode(&welcome.welcome_data),
+        member_list: vec![id("mallory"), id("carol"), id("bob")],
+        member_roles: HashMap::new(),
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::GROUP_MLS_WELCOME,
+        serde_json::to_string(&payload).unwrap()
+    );
+    bob.process_internal_message(&make_message(&id("mallory"), &id("bob"), &content));
+
+    // The invite was declined: no group, and no roster naming carol.
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        assert!(
+            bob_mls.get_group_info(&gid).unwrap().is_none(),
+            "a Welcome carrying an unprovable member must not install the group"
+        );
+    }
+
+    // And the refusal reached the app, attributed to the peer that sent it.
+    let events = events.lock().unwrap();
+    let reported = events.iter().find_map(|event| match event {
+        Event::SecurityWarning {
+            peer_id,
+            reason_code,
+            ..
+        } if *reason_code == crate::events::SecurityWarningCode::GroupLeafIdentityUnproven => {
+            Some(peer_id.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(
+        reported.as_deref(),
+        Some(id("mallory").as_str()),
+        "expected the declined invite to be reported against its sender; events: {:?}",
+        events
+            .iter()
+            .map(|e| format!("{:?}", e))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A forged-leaf commit must be refused **permanently**, not parked on the
+/// retry path.
+///
+/// The security refusal was never in doubt — carol does not enter the roster
+/// either way. What this pins is the *disposition*, which is where the real
+/// defect was: `process_commit_core` decides retriability from an allowlist,
+/// and a refusal missing from it falls through to `CommitOutcome::Retriable`.
+/// A buffered commit that can never succeed is re-decrypted on every drain,
+/// occupies one of `MAX_PENDING_COMMITS_PER_GROUP` slots that legitimate
+/// out-of-order commits need, and — the part that turns a closed vulnerability
+/// back into an open one — expires with `retry_count > 0`, which
+/// `drain_pending_commits` reads as an epoch fork. That emits a false
+/// `group_epoch_fork_detected` and has the elected leader fan an `update_keys`
+/// commit out to the whole group. One forged commit from any member, and
+/// membership commits are unauthorized by default.
+///
+/// Asserted through `handle_group_mls_commit` rather than at the MLS layer on
+/// purpose: every other test of this fix asserts on `decrypt_from_group`, which
+/// returns the right error and tells you nothing about what the protocol layer
+/// then does with it. That is exactly why the class was invisible.
+#[test]
+fn test_forged_leaf_commit_is_rejected_permanently_and_not_buffered() {
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Forged Leaf Commit Group");
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let collector = events.clone();
+    bob.on_event(move |event| collector.lock().unwrap().push(event));
+
+    let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+    let epoch_before = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.get_group_info(&gid).unwrap().unwrap().epoch
+    };
+
+    // Alice seats a leaf claiming carol, and ships the resulting Add commit.
+    let (commit_bytes, alice_epoch) = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let bytes = alice_mls
+            .seat_forged_leaf_for_testing(&gid, &id("carol"))
+            .unwrap();
+        let epoch = alice_mls.get_group_info(&gid).unwrap().unwrap().epoch;
+        (bytes, epoch)
+    };
+
+    let commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
+        group_id: group_id.clone(),
+        commit_type: GroupCommitType::Add,
+        ciphertext: base64_encode(&commit_bytes),
+        epoch: alice_epoch,
+        affected_member: Some(id("carol")),
+        role: None,
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::GROUP_MLS_COMMIT,
+        serde_json::to_string(&commit_payload).unwrap()
+    );
+    bob.process_internal_message(&make_message(&id("alice"), &id("bob"), &content));
+
+    // Permanent: nothing buffered, so nothing to retry and nothing to expire
+    // into a false fork.
+    assert!(
+        !bob.group_mesh.pending_commits.contains_key(&group_id),
+        "a forged-leaf commit can never succeed and must not enter the retry buffer"
+    );
+    assert!(
+        !bob.group_mesh.epoch_forks.contains_key(&group_id),
+        "refusing a forged-leaf commit must not be mistaken for an epoch fork"
+    );
+
+    // And the refusal itself still holds.
+    let after = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.get_group_info(&gid).unwrap().unwrap()
+    };
+    assert_eq!(
+        after.epoch, epoch_before,
+        "a refused commit must not advance the epoch"
+    );
+    assert!(
+        !after.members.contains(&id("carol")),
+        "roster: {:?}",
+        after.members
+    );
+
+    // The app is told, and told who delivered it.
+    let unproven = |events: &Vec<Event>| -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::SecurityWarning {
+                    peer_id,
+                    reason_code,
+                    ..
+                } if *reason_code
+                    == crate::events::SecurityWarningCode::GroupLeafIdentityUnproven =>
+                {
+                    Some(peer_id.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    {
+        let events = events.lock().unwrap();
+        assert_eq!(
+            unproven(&events),
+            vec![id("alice")],
+            "a refused membership change must be reported once, against its sender; events: {:?}",
+            events
+                .iter()
+                .map(|e| format!("{:?}", e))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // Deliberately not re-sent here to test the rate limit: a *replay* of the
+    // same frame fails earlier, as a spent ratchet generation (`Decryption`),
+    // never reaches the refusal, and is buffered like any replayed commit —
+    // so a "still only one event" assertion after a replay would be explained
+    // by the replay classification and would pass with the limiter deleted.
+    // Suppression is pinned by
+    // `test_repeated_unprovable_invites_from_one_sender_are_rate_limited`,
+    // which drives two refusals that both genuinely reach the report.
+}
+
+/// Repeat unprovable invites from the same sender for the same group are
+/// reported once, not once per frame.
+///
+/// Both refusals genuinely reach `report_unproven_leaf`, which is what makes
+/// this a real test of the limiter: each invite is a *distinct* Welcome built
+/// against a fresh key package of bob's, so neither is a replay and neither can
+/// fail early as a spent generation or a consumed package. (That is exactly the
+/// trap the commit-path test documents avoiding — a second copy of one frame is
+/// rejected for an unrelated reason and never exercises suppression at all.)
+///
+/// The limiter matters because a refusal is permanent and costs the sender
+/// nothing to repeat, so an unthrottled channel lets the accused bury the
+/// accusation in its own repetition.
+#[test]
+fn test_repeated_unprovable_invites_from_one_sender_are_rate_limited() {
+    let storage_m = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
+    let mut mallory = OfflineProtocol::new(create_test_config_for_user("mallory")).unwrap();
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    mallory.initialize_mls_for_test(storage_m).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
+    mallory.start().unwrap();
+    bob.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let collector = events.clone();
+    bob.on_event(move |event| collector.lock().unwrap().push(event));
+
+    let group_info = mallory.create_group("mallory-group").unwrap();
+    let gid = offline_protocol_mls::GroupId::new(group_info.group_id.as_str()).unwrap();
+    {
+        let mallory_mls = mallory.mls_manager_for_testing().read().unwrap();
+        mallory_mls
+            .seat_forged_leaf_for_testing(&gid, &id("carol"))
+            .unwrap();
+    }
+
+    // Two distinct invites into the same poisoned room. The re-invite needs a
+    // removal first: MLS refuses a second leaf for one identity.
+    let invite = |bob: &mut OfflineProtocol, mallory: &OfflineProtocol, remove_first: bool| {
+        let bob_kp = {
+            let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+            bob_mls.generate_key_package().unwrap()
+        };
+        let welcome = {
+            let mallory_mls = mallory.mls_manager_for_testing().read().unwrap();
+            if remove_first {
+                mallory_mls.remove_group_member(&gid, &id("bob")).unwrap();
+            }
+            mallory_mls
+                .add_group_member(&gid, &id("bob"), &bob_kp.key_package_data)
+                .unwrap()
+                .0
+        };
+        let payload = GroupMlsWelcomePayload {
+            member_rich: HashMap::new(),
+            created_by: None,
+            group_id: group_info.group_id.to_string(),
+            group_name: Some("mallory-group".to_string()),
+            welcome_data: base64_encode(&welcome.welcome_data),
+            member_list: vec![id("mallory"), id("carol"), id("bob")],
+            member_roles: HashMap::new(),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_WELCOME,
+            serde_json::to_string(&payload).unwrap()
+        );
+        bob.process_internal_message(&make_message(&id("mallory"), &id("bob"), &content));
+    };
+
+    invite(&mut bob, &mallory, false);
+    let after_first = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            matches!(e, Event::SecurityWarning { reason_code, .. }
+                if *reason_code == crate::events::SecurityWarningCode::GroupLeafIdentityUnproven)
+        })
+        .count();
+    assert_eq!(after_first, 1, "the first refusal must be reported");
+
+    invite(&mut bob, &mallory, true);
+    let events = events.lock().unwrap();
+    let total = events
+        .iter()
+        .filter(|e| {
+            matches!(e, Event::SecurityWarning { reason_code, .. }
+                if *reason_code == crate::events::SecurityWarningCode::GroupLeafIdentityUnproven)
+        })
+        .count();
+    assert_eq!(
+        total,
+        1,
+        "a second refusal for the same (group, sender) must stay suppressed inside the window; \
+         events: {:?}",
+        events
+            .iter()
+            .map(|e| format!("{:?}", e))
+            .collect::<Vec<_>>()
+    );
+
+    // The reason text must name no identifier. `SecurityWarning` scrubbing
+    // hashes `peer_id` and ships `reason` verbatim, so an address interpolated
+    // here reaches a sink running `scrub_ids: true` in the clear — and the
+    // address at stake is the impersonated third party's, who is not even a
+    // party to this exchange.
+    let reasons: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::SecurityWarning {
+                reason_code,
+                reason,
+                ..
+            } if *reason_code == crate::events::SecurityWarningCode::GroupLeafIdentityUnproven => {
+                Some(reason.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    for reason in &reasons {
+        assert!(
+            !reason.contains("off1"),
+            "the warning reason must carry no address; got {reason:?}"
+        );
+    }
+
+    // Premise guard: the second invite really did reach the refusal rather than
+    // failing early for some unrelated reason, which would make the assertion
+    // above pass with the limiter deleted.
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        assert!(
+            bob_mls.get_group_info(&gid).unwrap().is_none(),
+            "neither invite may install the group"
+        );
+    }
+}
+
+/// A leaf already seated in local group state is *reported*, not only hidden.
+///
+/// The three wire seams refuse a claim as it arrives and say so loudly. This is
+/// the fourth case and the only one that is not about a frame: the leaf is
+/// already in the tree, so no gate can refuse it and no peer delivered it. Until
+/// this, the sole response was a `warn!` inside the MLS crate — the roster
+/// quietly got shorter and the app was never told, which is strictly worse than
+/// showing the entry, because a hidden leaf cannot be reasoned about at all
+/// while it still holds live group secrets and reads every message sent.
+///
+/// Reachable two ways, neither exotic: a direct write to the install-scoped
+/// provider store, and a group joined by a build predating the entry gates and
+/// then upgraded. The second is the one that matters for a release — the fix
+/// closes the door, and this is what tells anyone already inside.
+///
+/// Attributed to *this device*, not to a peer: there is no delivering peer to
+/// name, and naming the impersonated address would be the leak every other site
+/// here avoids.
+#[test]
+fn test_leaf_seated_in_local_state_is_reported_on_the_roster_read() {
+    let (_alice, mut bob, group_id) = setup_alice_bob_group("Seated Leaf Group");
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let collector = events.clone();
+    bob.on_event(move |event| collector.lock().unwrap().push(event));
+
+    let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+
+    // Premise: a clean group reports nothing, so the assertion below cannot
+    // pass merely because the event fires unconditionally.
+    bob.refresh_group_members(&group_id).unwrap();
+    let unproven = |events: &Arc<Mutex<Vec<Event>>>| -> Vec<String> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                Event::SecurityWarning {
+                    peer_id,
+                    reason_code,
+                    ..
+                } if *reason_code
+                    == crate::events::SecurityWarningCode::GroupLeafIdentityUnproven =>
+                {
+                    Some(peer_id.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(
+        unproven(&events).is_empty(),
+        "an honest group must report nothing"
+    );
+
+    // Seat a leaf claiming carol directly in bob's own tree, past every wire
+    // gate — the shape a tampered store, or a pre-fix join, leaves behind.
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls
+            .seat_forged_leaf_for_testing(&gid, &id("carol"))
+            .unwrap();
+    }
+
+    let members = bob.refresh_group_members(&group_id).unwrap();
+    assert!(
+        !members.contains(&id("carol")),
+        "the roster must still exclude the unproven leaf: {members:?}"
+    );
+    assert_eq!(
+        unproven(&events),
+        vec![bob.local_id.clone()],
+        "a seated unprovable leaf must be reported once, against this device"
+    );
+
+    // Persistent, unlike the wire cases: the leaf does not go away, so every
+    // later roster read would re-report it without the rate limit. Groups are
+    // refreshed on every commit, send and drain.
+    bob.refresh_group_members(&group_id).unwrap();
+    bob.refresh_group_members(&group_id).unwrap();
+    assert_eq!(
+        unproven(&events).len(),
+        1,
+        "a persistent finding must not re-report on every roster read"
+    );
+
+    // The reason carries no identifier, for the same scrubber rule the other
+    // sites follow: `reason` ships verbatim while only `peer_id` is hashed.
+    for event in events.lock().unwrap().iter() {
+        if let Event::SecurityWarning {
+            reason_code,
+            reason,
+            ..
+        } = event
+        {
+            if *reason_code == crate::events::SecurityWarningCode::GroupLeafIdentityUnproven {
+                assert!(
+                    !reason.contains("off1"),
+                    "the warning reason must carry no address; got {reason:?}"
+                );
+            }
+        }
+    }
+}

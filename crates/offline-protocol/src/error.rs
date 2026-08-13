@@ -142,6 +142,22 @@ impl From<&offline_protocol_mls::MlsError> for SessionStateError {
             // 1:1 text path intercepts this variant before classification so it
             // can withhold the ACK; see `handle_encrypted_message`.
             offline_protocol_mls::MlsError::SessionIdentityMismatch { .. } => Self::Unknown,
+            // Not a session-state condition either, and `Unknown` is the
+            // disposition both need on any path that reaches this classifier
+            // (a group commit or message wrapped in an `__MLS_ENC__`
+            // envelope): never queue — a leaf whose key does not hash to its
+            // own credential can never start doing so, and an unsupported
+            // sender role never becomes supported — and never re-key, since
+            // neither says anything about the health of our session with the
+            // claimed sender. Both intercept these before classification so
+            // they can withhold the ACK — the group path in
+            // `decrypt_group_application`, and the 1:1 path inline in
+            // `handle_encrypted_message` plus `is_media_security_rejection`,
+            // which is not redundant: an `__MLS_ENC__` envelope may name a
+            // `group:` id and so reach group decrypt without going through the
+            // group handler.
+            offline_protocol_mls::MlsError::LeafAddressMismatch { .. }
+            | offline_protocol_mls::MlsError::UnsupportedSender { .. } => Self::Unknown,
             _ => Self::Unknown,
         }
     }

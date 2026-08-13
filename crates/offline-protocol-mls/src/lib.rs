@@ -41,7 +41,10 @@ pub mod storage;
 mod storage_adapter;
 pub mod types;
 
-pub use error::{MlsError, Result};
+// `LeafSource` rides here with `MlsError` because it is a public field type on
+// a public variant: matching on `LeafAddressMismatch { context, .. }` should not
+// need a deeper path than the error it came out of.
+pub use error::{LeafSource, MlsError, Result};
 pub use manager::{is_mls_framed, MlsManager, PushKeyPackage, MAX_PUSH_KEY_PACKAGES};
 pub use storage::{MlsStorage, StorageError};
 pub use types::{

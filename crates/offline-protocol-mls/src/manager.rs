@@ -1010,6 +1010,31 @@ impl MlsManager {
     }
 
     /// Removes a member from a group.
+    ///
+    /// Removes **every** leaf whose credential names `member_id`, in one
+    /// commit, rather than the first one found.
+    ///
+    /// Two leaves cannot name one identity in a tree whose leaves all passed
+    /// the binding, and the reason is worth writing down because it is not
+    /// obvious: RFC 9420 requires signature keys to be unique across a group
+    /// (OpenMLS enforces it — "Duplicate signature key in proposals and
+    /// group"), and since `verify_leaf_binding` ties a credential to the hash
+    /// of its own signature key, two leaves with the same credential would have
+    /// to carry the same key. So through the wire gates the duplicate case is
+    /// refused one layer down, twice over.
+    ///
+    /// That argument covers the gates, not the tree. It says nothing about the
+    /// case `verify_sender_leaf` and the `get_group_info` filter exist for — a
+    /// leaf written straight into the install-scoped provider store. A forged
+    /// leaf claiming a peer's address carries the *attacker's* signature key,
+    /// so it violates no uniqueness rule and sits alongside that peer's real
+    /// leaf quite happily. There the loop is doing real work: first-match would
+    /// remove one of the two and leave the other in the group holding live
+    /// keys, while every roster read shows the member gone — an
+    /// access-revocation failure that would surface as nothing at all.
+    ///
+    /// Removing every match costs one `Vec` and cannot have that failure
+    /// mode.
     pub fn remove_group_member(
         &self,
         group_id: &GroupId,
@@ -1020,22 +1045,20 @@ impl MlsManager {
             .load_group(group_id)?
             .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
 
-        let member_index = group
+        let member_indices: Vec<LeafNodeIndex> = group
             .members()
-            .find_map(|m| {
-                let cred_data = m.credential.serialized_content();
-                if cred_data == member_id.as_bytes() {
-                    Some(m.index)
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| MlsError::UserNotInGroup(member_id.to_string()))?;
+            .filter(|m| m.credential.serialized_content() == member_id.as_bytes())
+            .map(|m| m.index)
+            .collect();
+
+        if member_indices.is_empty() {
+            return Err(MlsError::UserNotInGroup(member_id.to_string()));
+        }
 
         let signature_keys = self.get_signer()?;
-        let commit = self
-            .group_manager
-            .remove_member(&mut group, member_index, &signature_keys)?;
+        let commit =
+            self.group_manager
+                .remove_member(&mut group, &member_indices, &signature_keys)?;
 
         self.group_manager.save_group(group_id, &group)?;
 
@@ -1785,6 +1808,79 @@ impl MlsManager {
         let mut truncated = [0u8; Address::HASH_LEN];
         truncated.copy_from_slice(&hash[..Address::HASH_LEN]);
         Address::from_hash_bytes(truncated).to_string()
+    }
+}
+
+/// Adversarial fixtures for tests in other crates.
+///
+/// Forging a leaf needs raw OpenMLS, which the protocol crate deliberately does
+/// not depend on, and needs to go *past* `add_group_member`'s binding check —
+/// which is the whole point, since the attacker runs their own build and that
+/// check is theirs to delete. Feature-gated so no release build in this
+/// workspace enables it — a downstream consumer could still turn the feature on
+/// for itself — and kept in this module because it touches private state.
+#[cfg(feature = "test-utils")]
+impl MlsManager {
+    /// Seats a leaf in `group_id` whose credential claims `impersonated` but
+    /// whose signature key is minted here — an identity nobody can prove.
+    ///
+    /// The group must already exist and this manager must be able to commit to
+    /// it. Every later Welcome for that group carries the forged leaf in its
+    /// ratchet tree, which is what a receiver must refuse.
+    ///
+    /// Returns the Add commit, TLS-serialized. That is the *other* half of the
+    /// attack and needs to be reachable from the protocol crate: a receiver
+    /// already in the group is attacked by the commit, not by a Welcome, and
+    /// what it must do with one differs — refuse it **permanently**, since a
+    /// refusal parked on the retry path is re-decrypted until it expires and is
+    /// then misread as an epoch fork.
+    pub fn seat_forged_leaf_for_testing(
+        &self,
+        group_id: &GroupId,
+        impersonated: &str,
+    ) -> Result<Vec<u8>> {
+        let forged_storage: Arc<dyn MlsStorage> = Arc::new(crate::storage::InMemoryStorage::new());
+        let forged_provider = MlsProvider::new(MlsStorageAdapter::new(forged_storage));
+        let forged_keys = SignatureKeyPair::new(DEFAULT_CIPHERSUITE.signature_algorithm())
+            .map_err(|e| MlsError::CryptoGeneration(format!("{:?}", e)))?;
+        forged_keys
+            .store(forged_provider.storage())
+            .map_err(|e| MlsError::CryptoGeneration(format!("storing forged key: {:?}", e)))?;
+
+        let credential = CredentialWithKey {
+            credential: Credential::new(CredentialType::Basic, impersonated.as_bytes().to_vec()),
+            signature_key: forged_keys.public().into(),
+        };
+        let key_package = KeyPackage::builder()
+            .build(
+                DEFAULT_CIPHERSUITE,
+                &forged_provider,
+                &forged_keys,
+                credential,
+            )
+            .map_err(|e| MlsError::KeyPackageCreation(e.to_string()))?
+            .key_package()
+            .tls_serialize_detached()
+            .map_err(|e| MlsError::Serialization(e.to_string()))?;
+
+        let validated = KeyPackageIn::tls_deserialize_exact(&key_package)
+            .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?
+            .validate(self.provider.crypto(), ProtocolVersion::Mls10)
+            .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?;
+
+        let mut group = self
+            .group_manager
+            .load_group(group_id)?
+            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
+        let signer = self.get_signer()?;
+        let (commit, _welcome) = self
+            .group_manager
+            .add_member(&mut group, validated, &signer)?;
+        self.group_manager.save_group(group_id, &group)?;
+
+        commit
+            .tls_serialize_detached()
+            .map_err(|e| MlsError::Serialization(e.to_string()))
     }
 }
 
@@ -3472,5 +3568,786 @@ mod tests {
     fn manager_with_a_non_address_id_skips_the_binding_check() {
         let manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
         assert_eq!(manager.user_id(), "alice");
+    }
+
+    // ========================================================================
+    // LEAF IDENTITY BINDING (the Authentication Service, RFC 9420 §5.3.1/§7.3)
+    // ========================================================================
+
+    /// An impostor holding a leaf that claims someone else's address.
+    ///
+    /// [`substituted_key_package`] throws its provider away, which is enough to
+    /// test a key package being *refused* but not to test what a forged leaf
+    /// does once it is in a tree: processing the Welcome addressed to that leaf
+    /// needs the private init key, so the provider has to outlive the key
+    /// package. This keeps it, and is otherwise the same forgery — a fresh
+    /// keypair with a credential naming a victim.
+    struct Impostor {
+        provider: MlsProvider,
+        keys: SignatureKeyPair,
+        key_package: Vec<u8>,
+        group: Option<MlsGroup>,
+    }
+
+    impl Impostor {
+        /// Mints a leaf whose credential claims `claimed` and whose signature
+        /// key is `key_label`'s — i.e. the attacker's own.
+        fn claiming(claimed: &str, key_label: &str) -> Self {
+            let storage: Arc<dyn MlsStorage> = Arc::new(InMemoryStorage::new());
+            let provider = MlsProvider::new(MlsStorageAdapter::new(storage));
+            let (keys, _) = test_identity(key_label);
+            keys.store(provider.storage()).unwrap();
+
+            let credential = CredentialWithKey {
+                credential: Credential::new(CredentialType::Basic, claimed.as_bytes().to_vec()),
+                signature_key: keys.public().into(),
+            };
+            let key_package = KeyPackage::builder()
+                .build(DEFAULT_CIPHERSUITE, &provider, &keys, credential)
+                .unwrap()
+                .key_package()
+                .tls_serialize_detached()
+                .unwrap();
+
+            Self {
+                provider,
+                keys,
+                key_package,
+                group: None,
+            }
+        }
+
+        /// Joins the group via the Welcome minted against this leaf.
+        fn join(&mut self, welcome: &MlsMessageOut) {
+            let bytes = welcome.tls_serialize_detached().unwrap();
+            let welcome = match MlsMessageIn::tls_deserialize_exact(&bytes)
+                .unwrap()
+                .extract()
+            {
+                MlsMessageBodyIn::Welcome(w) => w,
+                _ => panic!("not a welcome"),
+            };
+            let cfg = MlsGroupJoinConfig::builder()
+                .use_ratchet_tree_extension(true)
+                .build();
+            self.group = Some(
+                StagedWelcome::new_from_welcome(&self.provider, &cfg, welcome, None)
+                    .unwrap()
+                    .into_group(&self.provider)
+                    .unwrap(),
+            );
+        }
+
+        /// Merges a commit so the forged leaf tracks the group's epoch.
+        ///
+        /// Needed because a message is only decryptable at the epoch it was
+        /// sealed in: without this the forgery fails as a stale generation and
+        /// the test would pass for the wrong reason.
+        fn merge_commit(&mut self, commit_bytes: &[u8]) {
+            let group = self.group.as_mut().expect("join first");
+            let message = MlsMessageIn::tls_deserialize_exact(commit_bytes)
+                .unwrap()
+                .try_into_protocol_message()
+                .unwrap();
+            let processed = group.process_message(&self.provider, message).unwrap();
+            match processed.into_content() {
+                ProcessedMessageContent::StagedCommitMessage(staged) => {
+                    group.merge_staged_commit(&self.provider, *staged).unwrap();
+                }
+                _ => panic!("not a commit"),
+            }
+        }
+
+        /// Speaks from the forged leaf.
+        fn encrypt(&mut self, plaintext: &[u8]) -> Vec<u8> {
+            self.group
+                .as_mut()
+                .expect("join first")
+                .create_message(&self.provider, &self.keys, plaintext)
+                .unwrap()
+                .tls_serialize_detached()
+                .unwrap()
+        }
+    }
+
+    /// Adds `key_package_bytes` to `group_id` the way an attacker would: past
+    /// `add_group_member`, which refuses it.
+    ///
+    /// The attacker runs their own build, so the send-side check is theirs to
+    /// delete. Every test here that plants a forged leaf goes through this, so
+    /// none of them are accidentally testing the send-side check instead of the
+    /// receive-side one.
+    fn add_member_bypassing_checks(
+        manager: &MlsManager,
+        group_id: &GroupId,
+        key_package_bytes: &[u8],
+    ) -> (MlsMessageOut, MlsMessageOut) {
+        let mut group = manager
+            .group_manager
+            .load_group(group_id)
+            .unwrap()
+            .expect("group exists");
+        let key_package = KeyPackageIn::tls_deserialize_exact(key_package_bytes)
+            .unwrap()
+            .validate(
+                manager.group_manager.provider().crypto(),
+                ProtocolVersion::Mls10,
+            )
+            .unwrap();
+        let signer = manager.get_signer().unwrap();
+        let (commit, welcome) = manager
+            .group_manager
+            .add_member(&mut group, key_package, &signer)
+            .unwrap();
+        manager.group_manager.save_group(group_id, &group).unwrap();
+        (commit, welcome)
+    }
+
+    fn commit_message(
+        group_id: &GroupId,
+        commit: &MlsMessageOut,
+        sender: &str,
+    ) -> EncryptedMessage {
+        EncryptedMessage {
+            group_id: group_id.clone(),
+            message_type: MlsMessageType::Commit,
+            epoch: 0,
+            ciphertext: commit.tls_serialize_detached().unwrap(),
+            sender_id: sender.to_string(),
+            timestamp_ms: 0,
+        }
+    }
+
+    fn app_message(group_id: &GroupId, ciphertext: Vec<u8>, sender: &str) -> EncryptedMessage {
+        EncryptedMessage {
+            group_id: group_id.clone(),
+            message_type: MlsMessageType::Application,
+            epoch: 0,
+            ciphertext,
+            sender_id: sender.to_string(),
+            timestamp_ms: 0,
+        }
+    }
+
+    /// The whole vulnerability, end to end, as a rejection.
+    ///
+    /// Mallory is in a group with Alice. She commits a leaf whose credential
+    /// says "bob" but whose key is hers, then speaks from it as bob. Before the
+    /// binding existed this reached Alice's app: the commit merged, bob showed
+    /// up in her roster, and SEC-M1 waved the message through because the wire
+    /// sender and the credential agreed — both being strings Mallory chose.
+    #[test]
+    fn test_committed_forged_leaf_is_refused_and_cannot_speak_as_its_victim() {
+        let mallory = create_test_manager("mallory");
+        let alice = create_test_manager("alice");
+        let alice_kp = alice.generate_key_package().unwrap();
+
+        let gid = mallory.create_group("Team").unwrap().group_id;
+        let (welcome, _) = mallory
+            .add_group_member(&gid, &addr("alice"), &alice_kp.key_package_data)
+            .unwrap();
+        alice.join_group(&welcome).unwrap();
+        let epoch_before = alice.get_group_info(&gid).unwrap().unwrap().epoch;
+
+        // The send-side check refuses the forgery, so Mallory goes around it.
+        let mut impostor = Impostor::claiming(&addr("bob"), "mallorys-second-key");
+        assert!(matches!(
+            mallory
+                .add_group_member(&gid, &addr("bob"), &impostor.key_package)
+                .unwrap_err(),
+            MlsError::KeyPackageAddressMismatch { .. }
+        ));
+        let (commit, forged_welcome) =
+            add_member_bypassing_checks(&mallory, &gid, &impostor.key_package);
+
+        // Alice refuses the commit, pre-merge.
+        let err = alice
+            .decrypt_from_group(
+                &commit_message(&gid, &commit, &addr("mallory")),
+                &addr("mallory"),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MlsError::LeafAddressMismatch { ref claimed, ref context, .. }
+                    if *claimed == addr("bob") && *context == crate::error::LeafSource::CommitAdd
+            ),
+            "expected a CommitAdd binding refusal, got {err:?}"
+        );
+
+        // Nothing moved: the epoch is unchanged and bob is not in the roster.
+        let after = alice.get_group_info(&gid).unwrap().unwrap();
+        assert_eq!(
+            after.epoch, epoch_before,
+            "a refused commit advanced the epoch"
+        );
+        assert!(
+            !after.members.contains(&addr("bob")),
+            "roster: {:?}",
+            after.members
+        );
+
+        // And the leaf cannot speak. Note the mechanism here is epoch
+        // divergence, not the sender-leaf check: Alice refused the commit, so
+        // she never advanced to the epoch the impostor is sealing at. That is
+        // the honest consequence of refusing, and it is what a real victim
+        // experiences — the identity seam itself, on a leaf that *did* reach
+        // the tree, is covered by
+        // `test_forged_leaf_seated_behind_the_gates_still_cannot_speak`.
+        impostor.join(&forged_welcome);
+        let forged = impostor.encrypt(b"send me the recovery phrase");
+        assert!(
+            alice
+                .decrypt_from_group(&app_message(&gid, forged, &addr("bob")), &addr("bob"))
+                .is_err(),
+            "a forged leaf's message was delivered"
+        );
+    }
+
+    /// The same forgery placed in a Welcome's ratchet tree, which is the
+    /// cheaper attack: it needs no existing group, only that the victim accept
+    /// one invite from anyone.
+    #[test]
+    fn test_welcome_carrying_a_forged_leaf_is_refused() {
+        let mallory = create_test_manager("mallory");
+        let alice = create_test_manager("alice");
+
+        let gid = mallory.create_group("Team").unwrap().group_id;
+        let impostor = Impostor::claiming(&addr("bob"), "mallorys-second-key");
+        add_member_bypassing_checks(&mallory, &gid, &impostor.key_package);
+
+        // Now invite Alice into the poisoned room.
+        let alice_kp = alice.generate_key_package().unwrap();
+        let (welcome, _) = mallory
+            .add_group_member(&gid, &addr("alice"), &alice_kp.key_package_data)
+            .unwrap();
+
+        let err = alice.join_group(&welcome).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MlsError::LeafAddressMismatch { ref claimed, ref context, .. }
+                    if *claimed == addr("bob") && *context == crate::error::LeafSource::WelcomeTree
+            ),
+            "expected a WelcomeTree binding refusal, got {err:?}"
+        );
+
+        // The refusal precedes `into_group`, so nothing was installed.
+        assert!(alice.get_group_info(&gid).unwrap().is_none());
+    }
+
+    /// A forged leaf in a *session* Welcome, refused on the same path.
+    ///
+    /// `join_session` routes through `join_group_replacing`, whose reject must
+    /// also leave any pre-existing session at that slot untouched.
+    #[test]
+    fn test_session_welcome_carrying_a_forged_leaf_is_refused_non_destructively() {
+        let alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+        let mallory = create_test_manager("mallory");
+
+        // Bob has a real session with Alice.
+        let bob_kp = bob.generate_key_package().unwrap();
+        alice
+            .import_key_package(&addr("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        bob.join_session(&alice.create_session(&addr("bob")).unwrap())
+            .unwrap();
+        assert!(bob.has_session(&addr("alice")).unwrap());
+
+        // Mallory builds a session slot with Bob, then splices a third leaf
+        // claiming carol into it before sending the Welcome.
+        let bob_kp2 = bob.generate_key_package().unwrap();
+        let slot_id = slot("bob", "mallory");
+        let cred = mallory.get_credential().unwrap();
+        let signer = mallory.get_signer().unwrap();
+        mallory
+            .group_manager
+            .create_group(&slot_id, &cred, &signer)
+            .unwrap();
+        let impostor = Impostor::claiming(&addr("carol"), "mallorys-second-key");
+        add_member_bypassing_checks(&mallory, &slot_id, &impostor.key_package);
+        let (welcome, _) = mallory
+            .add_group_member(&slot_id, &addr("bob"), &bob_kp2.key_package_data)
+            .unwrap();
+
+        let err = bob.join_session(&welcome).unwrap_err();
+        assert!(
+            matches!(err, MlsError::LeafAddressMismatch { ref context, .. }
+                if *context == crate::error::LeafSource::WelcomeTree),
+            "expected a WelcomeTree binding refusal, got {err:?}"
+        );
+
+        // Bob's real session with Alice is intact and still works.
+        assert!(bob.has_session(&addr("alice")).unwrap());
+        let ct = bob
+            .encrypt_for_user(&addr("alice"), b"still private")
+            .unwrap();
+        assert_eq!(
+            alice
+                .decrypt_from_user(&ct, &addr("bob"))
+                .unwrap()
+                .as_deref(),
+            Some(&b"still private"[..])
+        );
+    }
+
+    /// The use-time half, which is the only one that covers a leaf the entry
+    /// gates never saw.
+    ///
+    /// Installs the poisoned group by staging the Welcome straight into the
+    /// provider — the shape a direct write to the install-scoped store leaves,
+    /// and the reason the binding is re-checked at decrypt rather than trusted
+    /// from join time.
+    #[test]
+    fn test_forged_leaf_seated_behind_the_gates_still_cannot_speak() {
+        let mallory = create_test_manager("mallory");
+        let alice = create_test_manager("alice");
+
+        let gid = mallory.create_group("Team").unwrap().group_id;
+        let mut impostor = Impostor::claiming(&addr("bob"), "mallorys-second-key");
+        let (_, forged_welcome) =
+            add_member_bypassing_checks(&mallory, &gid, &impostor.key_package);
+        impostor.join(&forged_welcome);
+
+        let alice_kp = alice.generate_key_package().unwrap();
+        let (welcome, add_alice_commit) = mallory
+            .add_group_member(&gid, &addr("alice"), &alice_kp.key_package_data)
+            .unwrap();
+        // The forged leaf has to follow the group to Alice's epoch, or its
+        // message fails as a stale generation instead of on its identity.
+        impostor.merge_commit(&add_alice_commit.ciphertext);
+
+        // Bypass `join_group` entirely: stage and install directly, as a
+        // tampered store (or a build predating the gates) would leave things.
+        let bytes = welcome.welcome_data.clone();
+        let staged_welcome = match MlsMessageIn::tls_deserialize_exact(&bytes)
+            .unwrap()
+            .extract()
+        {
+            MlsMessageBodyIn::Welcome(w) => w,
+            _ => panic!("not a welcome"),
+        };
+        let cfg = MlsGroupJoinConfig::builder()
+            .use_ratchet_tree_extension(true)
+            .build();
+        let group = StagedWelcome::new_from_welcome(&alice.provider, &cfg, staged_welcome, None)
+            .unwrap()
+            .into_group(&alice.provider)
+            .unwrap();
+        alice.group_manager.save_group(&gid, &group).unwrap();
+
+        // Premise: the forged leaf really is seated in Alice's tree.
+        assert!(
+            group
+                .members()
+                .any(|m| m.credential.serialized_content() == addr("bob").as_bytes()),
+            "test premise: the forged leaf must be installed"
+        );
+
+        // The message is still refused, at the sender-leaf seam.
+        let forged = impostor.encrypt(b"send me the recovery phrase");
+        let err = alice
+            .decrypt_from_group(&app_message(&gid, forged, &addr("bob")), &addr("bob"))
+            .unwrap_err();
+        assert!(
+            matches!(err, MlsError::LeafAddressMismatch { ref context, .. }
+                if *context == crate::error::LeafSource::MessageSender),
+            "expected a MessageSender binding refusal, got {err:?}"
+        );
+
+        // And the roster read skips it rather than reporting a member that
+        // proved nothing.
+        let info = alice.get_group_info(&gid).unwrap().unwrap();
+        assert!(
+            !info.members.contains(&addr("bob")),
+            "roster surfaced an unproven member: {:?}",
+            info.members
+        );
+        assert!(
+            info.members.contains(&addr("mallory")),
+            "{:?}",
+            info.members
+        );
+    }
+
+    /// A member renaming *their own* leaf to someone else's address, refused.
+    ///
+    /// The cheapest form of the attack, and the one an Add-only reading of the
+    /// fix would have missed entirely: no new leaf, no key package, no invite.
+    /// A member already in the group commits a self-update whose new credential
+    /// names a different member, and from then on every message from their leaf
+    /// is attributed to that member. MLS permits the credential change — RFC
+    /// 9420 §5.3.1 says an Update may carry a new credential and leaves the
+    /// verdict to the Authentication Service, which is this.
+    ///
+    /// This is the `CommitPath` source, the first entry in OpenMLS's own
+    /// `credentials_to_verify` and the reason the commit walk follows that
+    /// enumeration rather than the book's shorter "add & update proposals".
+    #[test]
+    fn test_member_renaming_their_own_leaf_to_a_peers_address_is_refused() {
+        // `create_test_group_with_bob` seats alice as creator and bob as
+        // member; bob is the insider here, renaming his own leaf to alice's
+        // address.
+        let (alice, bob, gid) = create_test_group_with_bob();
+        let epoch_before = alice.get_group_info(&gid).unwrap().unwrap().epoch;
+
+        let mut group = bob.group_manager.load_group(&gid).unwrap().unwrap();
+        let signer = bob.get_signer().unwrap();
+        let forged = CredentialWithKey {
+            // Claims alice, signed by bob's own key — which is the whole point:
+            // the leaf is genuinely his, the name on it is not.
+            credential: Credential::new(CredentialType::Basic, addr("alice").as_bytes().to_vec()),
+            signature_key: signer.public().into(),
+        };
+        let params = LeafNodeParameters::builder()
+            .with_credential_with_key(forged)
+            .build();
+        let bundle = group
+            .self_update(&bob.provider, &signer, params)
+            .expect("MLS permits a credential change; the AS is what refuses it");
+        group.merge_pending_commit(&bob.provider).unwrap();
+        bob.group_manager.save_group(&gid, &group).unwrap();
+        let (commit, _, _) = bundle.into_contents();
+
+        let err = alice
+            .decrypt_from_group(&commit_message(&gid, &commit, &addr("bob")), &addr("bob"))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MlsError::LeafAddressMismatch { ref claimed, ref context, .. }
+                    if *claimed == addr("alice") && *context == crate::error::LeafSource::CommitPath
+            ),
+            "expected a CommitPath binding refusal, got {err:?}"
+        );
+
+        // Not merged: alice's epoch is untouched and her roster still names bob
+        // as bob.
+        let after = alice.get_group_info(&gid).unwrap().unwrap();
+        assert_eq!(after.epoch, epoch_before);
+        assert!(after.members.contains(&addr("bob")), "{:?}", after.members);
+        assert_eq!(
+            after
+                .members
+                .iter()
+                .filter(|m| **m == addr("alice"))
+                .count(),
+            1,
+            "alice must appear once, as herself: {:?}",
+            after.members
+        );
+    }
+
+    /// A nickname credential must be refused, not waved through for having no
+    /// derivation to check — the bypass every other gate in this SDK names.
+    #[test]
+    fn test_leaf_with_a_nickname_credential_is_refused() {
+        let mallory = create_test_manager("mallory");
+        let alice = create_test_manager("alice");
+        let alice_kp = alice.generate_key_package().unwrap();
+
+        let gid = mallory.create_group("Team").unwrap().group_id;
+        let impostor = Impostor::claiming("bob", "mallorys-second-key");
+        add_member_bypassing_checks(&mallory, &gid, &impostor.key_package);
+        let (welcome, _) = mallory
+            .add_group_member(&gid, &addr("alice"), &alice_kp.key_package_data)
+            .unwrap();
+
+        let err = alice.join_group(&welcome).unwrap_err();
+        assert!(
+            matches!(err, MlsError::LeafAddressMismatch { ref claimed, .. } if claimed == "bob"),
+            "a nickname credential was accepted or misreported: {err:?}"
+        );
+    }
+
+    /// The honest paths this check could plausibly break, pinned.
+    ///
+    /// `update_keys` rotates the leaf's HPKE keys through the commit's update
+    /// path but keeps the signature key and credential
+    /// (`LeafNodeParameters::default()`). If that ever changed — or if someone
+    /// reached for `self_update_with_new_signer` — every member would start
+    /// refusing every honest key rotation, and this is what says so.
+    #[test]
+    fn test_key_rotation_and_ordinary_traffic_still_pass_the_binding() {
+        let (alice, bob, gid) = create_test_group_with_bob();
+
+        let commit = alice.update_keys(&gid).unwrap();
+        bob.decrypt_from_group(&commit, &addr("alice"))
+            .expect("an honest key rotation must still merge");
+
+        let ct = alice.encrypt_for_group(&gid, b"after rotation").unwrap();
+        assert_eq!(
+            bob.decrypt_from_group(&ct, &addr("alice"))
+                .unwrap()
+                .as_deref(),
+            Some(&b"after rotation"[..])
+        );
+
+        // And a member added the ordinary way is in both rosters.
+        assert!(bob
+            .get_group_info(&gid)
+            .unwrap()
+            .unwrap()
+            .members
+            .contains(&addr("bob")));
+    }
+
+    /// The Welcome-side mirror of the `ExternalSenders` refusal.
+    ///
+    /// The commit gate refuses a proposal that would *add* the extension; a
+    /// group created with one already in its context arrives this way instead,
+    /// and the two entry gates should not differ by which route the inviter
+    /// took. Mallory merges the extension into her own group first, so the
+    /// Welcome she then sends carries it in the group context.
+    #[test]
+    fn test_welcome_whose_group_context_has_external_senders_is_refused() {
+        let mallory = create_test_manager("mallory");
+        let alice = create_test_manager("alice");
+
+        let gid = mallory.create_group("Team").unwrap().group_id;
+
+        // Merge an ExternalSenders extension into mallory's own group context.
+        {
+            let mut group = mallory.group_manager.load_group(&gid).unwrap().unwrap();
+            let signer = mallory.get_signer().unwrap();
+            let outsider =
+                SignatureKeyPair::new(DEFAULT_CIPHERSUITE.signature_algorithm()).unwrap();
+            let external = ExternalSender::new(
+                outsider.public().into(),
+                Credential::new(CredentialType::Basic, b"off1outsider".to_vec()),
+            );
+            group
+                .commit_builder()
+                .propose_group_context_extensions(Extensions::single(Extension::ExternalSenders(
+                    vec![external],
+                )))
+                .load_psks(mallory.provider.storage())
+                .unwrap()
+                .build(
+                    mallory.provider.rand(),
+                    mallory.provider.crypto(),
+                    &signer,
+                    |_| true,
+                )
+                .unwrap()
+                .stage_commit(&mallory.provider)
+                .unwrap();
+            group.merge_pending_commit(&mallory.provider).unwrap();
+            mallory.group_manager.save_group(&gid, &group).unwrap();
+        }
+
+        let alice_kp = alice.generate_key_package().unwrap();
+        let (welcome, _) = mallory
+            .add_group_member(&gid, &addr("alice"), &alice_kp.key_package_data)
+            .unwrap();
+
+        let err = alice.join_group(&welcome).unwrap_err();
+        assert!(
+            matches!(err, MlsError::UnsupportedSender { ref detail, .. }
+                if detail.contains("ExternalSenders")),
+            "expected the invite to be declined for its ExternalSenders context, got {err:?}"
+        );
+        assert!(
+            alice.get_group_info(&gid).unwrap().is_none(),
+            "a declined Welcome must not install the group"
+        );
+    }
+
+    /// Source 4 of the commit walk: a commit proposing an `ExternalSenders`
+    /// group-context extension is refused.
+    ///
+    /// Not a leaf, so there is no binding to check — which is exactly why it
+    /// needs its own arm rather than falling off the end of the walk. The
+    /// extension authorizes a non-member to send into the group, and its
+    /// credential would never be judged by any of the three leaf seams.
+    /// Untested, this arm survives deletion.
+    #[test]
+    fn test_commit_proposing_external_senders_is_refused() {
+        let (alice, mallory, gid) = create_test_group_with_bob();
+
+        let mut group = mallory.group_manager.load_group(&gid).unwrap().unwrap();
+        let signer = mallory.get_signer().unwrap();
+
+        // An ExternalSenders extension naming a party that is in no leaf.
+        let outsider = SignatureKeyPair::new(DEFAULT_CIPHERSUITE.signature_algorithm()).unwrap();
+        let external = ExternalSender::new(
+            outsider.public().into(),
+            Credential::new(CredentialType::Basic, b"off1outsider".to_vec()),
+        );
+        let extensions = Extensions::single(Extension::ExternalSenders(vec![external]));
+
+        let bundle = group
+            .commit_builder()
+            .propose_group_context_extensions(extensions)
+            .load_psks(mallory.provider.storage())
+            .unwrap()
+            .build(
+                mallory.provider.rand(),
+                mallory.provider.crypto(),
+                &signer,
+                |_| true,
+            )
+            .unwrap()
+            .stage_commit(&mallory.provider)
+            .unwrap();
+        let (commit, _, _) = bundle.into_contents();
+
+        let err = alice
+            .decrypt_from_group(&commit_message(&gid, &commit, &addr("bob")), &addr("bob"))
+            .unwrap_err();
+        assert!(
+            matches!(err, MlsError::UnsupportedSender { ref detail, .. }
+                if detail.contains("ExternalSenders")),
+            "expected an ExternalSenders refusal, got {err:?}"
+        );
+    }
+
+    /// Why `remove_group_member`'s loop can never find a second leaf — and why
+    /// it is a loop anyway.
+    ///
+    /// The duplicate it would guard against is refused a layer down: RFC 9420
+    /// requires unique signature keys across a group, so seating one identity
+    /// twice is rejected by OpenMLS before the roster ever sees it. Pinned as a
+    /// test because the *removal* code's correctness rests on it, and it is an
+    /// invariant enforced in another crate — exactly the kind that changes
+    /// without anyone here noticing.
+    #[test]
+    fn test_one_identity_cannot_hold_two_leaves_in_a_group() {
+        let alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+
+        let gid = alice.create_group("Team").unwrap().group_id;
+        let first = bob.generate_key_package().unwrap();
+        alice
+            .add_group_member(&gid, &addr("bob"), &first.key_package_data)
+            .unwrap();
+
+        // A second, distinct key package for the same identity: different init
+        // key, same signature key, because the signature key *is* the identity.
+        let second = bob.generate_key_package().unwrap();
+        assert_ne!(first.package_id, second.package_id);
+        let err = alice
+            .add_group_member(&gid, &addr("bob"), &second.key_package_data)
+            .unwrap_err();
+        assert!(
+            matches!(err, MlsError::AddMember(ref m) if m.contains("Duplicate signature key")),
+            "expected MLS to refuse a duplicate signature key, got {err:?}"
+        );
+
+        // One leaf, and removing it removes the member.
+        alice.remove_group_member(&gid, &addr("bob")).unwrap();
+        assert!(!alice
+            .get_group_info(&gid)
+            .unwrap()
+            .unwrap()
+            .members
+            .contains(&addr("bob")));
+    }
+
+    /// A non-`Member` sender is refused, not ignored.
+    ///
+    /// `verify_sender_leaf` covers four sender shapes and only one of them —
+    /// `Sender::Member` — resolves to a leaf that can be bound. The other three
+    /// take the `UnsupportedSender` arm, and this is the one of them that is
+    /// cheap to build: an external join proposal, authenticated to
+    /// `Sender::NewMemberProposal`, whose leaf is by definition in no tree yet.
+    ///
+    /// Worth its own test because the arm *changed disposition* in this change.
+    /// It used to fall through to `ProcessedMessageContent::
+    /// ExternalJoinProposalMessage` and be tolerated as `Ok(None)`; the same
+    /// tolerance applied to a `NewMemberCommit` would have *merged* a commit
+    /// from a party holding an unjudged leaf. Nothing else pins that the
+    /// tolerance is gone — the surviving `ExternalJoinProposalMessage` arm still
+    /// reads like the policy, and its comment says it is not.
+    #[test]
+    fn test_external_join_proposal_is_refused_as_an_unsupported_sender() {
+        let (alice, _bob, gid) = create_test_group_with_bob();
+
+        // An outsider asks to join. The proposal is well-formed and correctly
+        // signed by its own key — it is refused for its *sender role*, not for
+        // anything malformed, which is the point.
+        let outsider = create_test_manager("mallory");
+        let kp_bytes = outsider.generate_key_package().unwrap().key_package_data;
+        let key_package = KeyPackageIn::tls_deserialize_exact(&kp_bytes)
+            .unwrap()
+            .validate(alice.provider.crypto(), ProtocolVersion::Mls10)
+            .unwrap();
+        let signer = outsider.get_signer().unwrap();
+
+        let (mls_group_id, epoch) = {
+            let group = alice.group_manager.load_group(&gid).unwrap().unwrap();
+            (group.group_id().clone(), group.epoch())
+        };
+        let proposal =
+            JoinProposal::new::<MlsStorageAdapter>(key_package, mls_group_id, epoch, &signer)
+                .expect(
+                    "an external join proposal is well-formed; the SDK just declines to honour it",
+                );
+
+        let err = alice
+            .decrypt_from_group(
+                &app_message(
+                    &gid,
+                    proposal.tls_serialize_detached().unwrap(),
+                    &addr("mallory"),
+                ),
+                &addr("mallory"),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, MlsError::UnsupportedSender { ref detail, .. }
+                if detail.contains("not a group member")),
+            "expected an UnsupportedSender refusal, got {err:?}"
+        );
+    }
+
+    /// A leaf seated behind the gates is *counted*, not merely hidden.
+    ///
+    /// The roster filter is the only seam at which a leaf already in local
+    /// group state surfaces, and a `warn!` reaches no app. The count is what
+    /// the protocol layer turns into `GroupLeafIdentityUnproven`, so a filter
+    /// that silently returned the same shortened roster would look identical
+    /// here without it.
+    ///
+    /// Built with the in-module fixture rather than
+    /// `seat_forged_leaf_for_testing`, which is behind the `test-utils` feature
+    /// for the *protocol* crate's benefit: workspace feature unification turns
+    /// it on for `cargo test --workspace`, but `cargo test -p
+    /// offline-protocol-mls` would then not compile.
+    #[test]
+    fn test_roster_read_counts_the_leaves_it_skips() {
+        let (alice, _bob, gid) = create_test_group_with_bob();
+
+        let before = alice.get_group_info(&gid).unwrap().unwrap();
+        assert_eq!(
+            before.unproven_members, 0,
+            "an honest group must report no unproven members: {:?}",
+            before.members
+        );
+        let honest_members = before.members.len();
+
+        // Seat a leaf claiming carol, bypassing the gates as a tampered store
+        // would. Alice commits it into her own group, so it is in *her* tree.
+        let impostor = Impostor::claiming(&addr("carol"), "an-attackers-key");
+        add_member_bypassing_checks(&alice, &gid, &impostor.key_package);
+
+        let after = alice.get_group_info(&gid).unwrap().unwrap();
+        assert_eq!(
+            after.unproven_members, 1,
+            "the skipped leaf must be counted, not only dropped"
+        );
+        assert_eq!(
+            after.members.len(),
+            honest_members,
+            "the roster must be unchanged: {:?}",
+            after.members
+        );
+        assert!(
+            !after.members.contains(&addr("carol")),
+            "roster surfaced the unproven member: {:?}",
+            after.members
+        );
     }
 }

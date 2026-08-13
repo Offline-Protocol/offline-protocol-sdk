@@ -200,6 +200,58 @@ pub enum SecurityWarningCode {
     /// displaced by a newer login. No retry is attempted — the next reconnect
     /// declares from scratch.
     RelayAddressDeclarationRefused,
+    /// A group leaf carries a credential its own signature key does not derive
+    /// to — an identity claimed inside a group without the key to prove it.
+    ///
+    /// There is no benign reading, and unlike most codes here it accuses
+    /// someone the user is already in a room with. An address *is* the hash of
+    /// its identity key, so every honest leaf reproduces its own credential;
+    /// producing one that does not means deliberately building a leaf around
+    /// someone else's name.
+    ///
+    /// `peer_id` is **who the finding concerns, not always who to blame**. On
+    /// the three refusal sites it is the peer that delivered the forgery — the
+    /// Welcome's inviter, or the sender of the frame carrying the commit — and
+    /// never the address the forged leaf claimed. That attribution is worth
+    /// something because it is proved independently: `__GRP_MLS_WELCOME__`,
+    /// `__GRP_MLS_COMMIT__` and `__MLS_WELCOME__` are all security-gated, so
+    /// the sender signed with the key its own address derives from. On the
+    /// fourth site there is no delivering peer at all and `peer_id` is this
+    /// device's own id.
+    ///
+    /// `reason` is diagnostic text, must not be parsed, and deliberately
+    /// carries **no identifier** — the impersonated address appears only in
+    /// this device's logs. Telemetry scrubbing hashes `peer_id` and passes
+    /// `reason` through verbatim, and the identity at stake belongs to a third
+    /// party who is not even part of the exchange.
+    ///
+    /// Emitted from four sites. The first three refuse a claim *arriving*, so
+    /// nothing is installed and the frame is dropped:
+    ///
+    /// 1. joining a group Welcome whose ratchet tree contains such a leaf (the
+    ///    invite is declined outright);
+    /// 2. processing a membership commit that would install one (the commit is
+    ///    not merged, and is never buffered for retry);
+    /// 3. joining a 1:1 session Welcome whose ratchet tree contains one —
+    ///    including when we already hold a session with that peer, where the
+    ///    refusal is non-destructive and the existing session stays live (so a
+    ///    `secure_session_failed` alongside this does *not* mean the working
+    ///    session ended).
+    ///
+    /// The fourth is different in kind and needs a different response:
+    ///
+    /// 4. a roster read skipping a leaf **already seated in local group
+    ///    state**. No wire gate can have admitted it, so it arrived by a direct
+    ///    write to this device's secure store or via a group joined by a build
+    ///    predating those gates. Such a leaf is kept out of every roster and
+    ///    cannot speak — but it holds live group secrets and reads everything
+    ///    sent to the group, which no later refusal undoes. The remedy is to
+    ///    abandon the group, not to evict a member of it.
+    ///
+    /// Apps should treat a group that produces this as untrusted for
+    /// attribution — a message shown as coming from a member is exactly what
+    /// the forged leaf was for.
+    GroupLeafIdentityUnproven,
 }
 
 impl SecurityWarningCode {
@@ -219,6 +271,7 @@ impl SecurityWarningCode {
             Self::PushKeyPackagePoolExhausted => "PUSH_KEY_PACKAGE_POOL_EXHAUSTED",
             Self::RelayAddressBindingMismatch => "RELAY_ADDRESS_BINDING_MISMATCH",
             Self::RelayAddressDeclarationRefused => "RELAY_ADDRESS_DECLARATION_REFUSED",
+            Self::GroupLeafIdentityUnproven => "GROUP_LEAF_IDENTITY_UNPROVEN",
         }
     }
 }
@@ -784,6 +837,19 @@ pub enum Event {
     },
 
     /// Failed to establish a secure MLS session.
+    ///
+    /// Reports a failed *handshake attempt*, which is not the same as "the
+    /// session with this peer is gone". One case makes the difference visible:
+    /// a Welcome refused for carrying an unprovable identity
+    /// ([`SecurityWarningCode::GroupLeafIdentityUnproven`], emitted alongside)
+    /// is refused non-destructively, so any session already held with that peer
+    /// stays live and usable. Apps must not tear down session state on this
+    /// event alone.
+    ///
+    /// `reason` is diagnostic text and must not be parsed. It carries no
+    /// third-party identifier: the arms that would have rendered one — the
+    /// identity refusals above — substitute a fixed string, because the
+    /// telemetry scrubber hashes `peer_id` and ships `reason` verbatim.
     SecureSessionFailed {
         /// Peer ID of the other party.
         peer_id: String,
@@ -3574,6 +3640,7 @@ mod tests {
             SecurityWarningCode::PushKeyPackagePoolExhausted,
             SecurityWarningCode::RelayAddressBindingMismatch,
             SecurityWarningCode::RelayAddressDeclarationRefused,
+            SecurityWarningCode::GroupLeafIdentityUnproven,
         ];
         for code in all {
             // serde renders a unit enum variant as a quoted JSON string.
@@ -3599,7 +3666,8 @@ mod tests {
                 | SecurityWarningCode::NostrKeyPackageSlotExhausted
                 | SecurityWarningCode::PushKeyPackagePoolExhausted
                 | SecurityWarningCode::RelayAddressBindingMismatch
-                | SecurityWarningCode::RelayAddressDeclarationRefused => {}
+                | SecurityWarningCode::RelayAddressDeclarationRefused
+                | SecurityWarningCode::GroupLeafIdentityUnproven => {}
             }
         }
     }

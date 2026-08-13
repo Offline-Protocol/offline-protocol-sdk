@@ -1309,5 +1309,11 @@ pub(super) fn is_media_security_rejection(error: &offline_protocol_mls::MlsError
         error,
         offline_protocol_mls::MlsError::SenderIdentityMismatch { .. }
             | offline_protocol_mls::MlsError::SessionIdentityMismatch { .. }
+            // The leaf-binding refusals join them for the same reason: an
+            // `__MLS_ENC__` envelope naming a `group:` id reaches group decrypt
+            // through this path, both classify as `Unknown`, and `Unknown` must
+            // keep drop-and-ACK for `CommitNotAuthorized`.
+            | offline_protocol_mls::MlsError::LeafAddressMismatch { .. }
+            | offline_protocol_mls::MlsError::UnsupportedSender { .. }
     )
 }
