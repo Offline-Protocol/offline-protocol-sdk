@@ -32,6 +32,7 @@ use base64::Engine;
 use offline_protocol_core::{Address, Message, MutexExt, RwLockExt};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -314,6 +315,14 @@ pub struct NostrTransport {
     reconnect_attempts: Arc<Mutex<u32>>,
     platform_handle: Arc<Mutex<Option<usize>>>,
     on_messages_available: SharedCallback,
+    /// Whether the [`Transport::get_next_message`] refusal has already been
+    /// logged for this transport.
+    ///
+    /// The refusal reports a *misintegration* — a caller polling the wrong
+    /// drain — which is a standing condition, not an event: the caller is on a
+    /// timer or a wake callback and will hit it again on every tick. One
+    /// report identifies the bug; the rest are noise that would bury it.
+    generic_poll_refusal_logged: AtomicBool,
 }
 
 impl NostrTransport {
@@ -384,6 +393,7 @@ impl NostrTransport {
             reconnect_attempts: Arc::new(Mutex::new(0)),
             platform_handle: Arc::new(Mutex::new(None)),
             on_messages_available: Arc::new(Mutex::new(None)),
+            generic_poll_refusal_logged: AtomicBool::new(false),
         })
     }
 
@@ -1566,8 +1576,33 @@ impl Transport for NostrTransport {
     /// **Nothing is consumed here.** The refusal returns before the send queue
     /// or `pending_confirmation` are read, so a caller that reaches this by
     /// mistake cannot also steal a frame out from under the sealed drain — it
-    /// stays queued, and the next `get_next_signed_event` serves it.
+    /// stays queued, and the next `get_next_signed_event` serves it. What such
+    /// a caller *will* observe is a queue that only grows: `queue_depth` rises,
+    /// `congestion` saturates at 1.0 by depth 50, and DORS stops selecting
+    /// Nostr. That is the intended shape of the failure — traffic reroutes
+    /// instead of publishing cleartext — but it is a misintegration, not
+    /// backpressure, which is why it is also logged.
+    ///
+    /// The refusal is logged **once** per transport, not per call. Every
+    /// in-tree caller of this trait method takes the shape
+    /// `if let Ok(Some((..))) = t.get_next_message()`, which discards an `Err`
+    /// down the same silent path as `Ok(None)` — so for exactly the mistake
+    /// this guard exists to catch, returning `Err` is no louder than the
+    /// `Ok(None)` it was chosen over. The log is what makes it loud; the
+    /// one-shot is what keeps a polling caller from burying it.
     fn get_next_message(&self) -> Result<Option<(String, Vec<u8>)>> {
+        if !self
+            .generic_poll_refusal_logged
+            .swap(true, Ordering::Relaxed)
+        {
+            tracing::error!(
+                "Nostr get_next_message() refused: this transport has no \
+                 unsealed whole-message drain. Poll get_next_signed_event() \
+                 instead. Outbound frames stay queued until it is polled. \
+                 Logged once per transport."
+            );
+        }
+
         Err(crate::Error::ConfigurationError(
             "Nostr has no unsealed message drain: get_next_message() would \
              return the bare protocol envelope in cleartext. Poll \
@@ -2171,10 +2206,26 @@ mod tests {
 
         let generic: &dyn Transport = &transport;
         let err = generic.get_next_message().unwrap_err();
+        // Asserted on `code()` rather than the variant or the message text:
+        // `Error` documents the code as the stable contract and `Display` as
+        // free to change, so this is the surface a caller is entitled to
+        // classify on.
+        assert_eq!(err.code(), "CONFIGURATION_ERROR", "got {err:?}");
+
+        // The other generic egress door must stay shut too. Nostr is safe here
+        // only because it does not override the trait's `Ok(None)` default —
+        // nothing else records that as a requirement, so a later fragmenting
+        // implementation would reopen this leak on a method nobody thinks of
+        // as a leak surface.
         assert!(
-            matches!(err, crate::Error::ConfigurationError(_)),
-            "expected a refusal, got {err:?}"
+            generic.get_next_fragment().unwrap().is_none(),
+            "Nostr must expose no generic fragment drain either"
         );
+
+        // The one-shot on the log must gate the *log*, never the refusal: a
+        // second caller has to be refused exactly as loudly as the first.
+        let second = generic.get_next_message().unwrap_err();
+        assert_eq!(second.code(), "CONFIGURATION_ERROR", "got {second:?}");
 
         // The refusal returns before the queue or the pending map are touched,
         // so a caller that lands here by mistake cannot also strand the frame
