@@ -302,6 +302,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **The Rust workspace publishes to crates.io, and its version is now the
+  release version.** A `publish-crates` job runs beside the npm publish, behind
+  the same build-and-test gates, and ships all eight crates in dependency order.
+  Two things had to change for that to be safe. The workspace version moves from
+  the decoupled internal `0.2.0` to `0.20.1`, in lockstep with the git tag and
+  the npm package — two numbers for one release is a fine trade while nothing is
+  published, and a bad one once `cargo add offline-protocol` is how people
+  consume the SDK, because crates.io would then carry a version nothing else in
+  the project answers to. (`bindings/python/pyproject.toml` moves with it; it
+  tracked the Cargo version and would otherwise have become a third scheme.) And
+  because crates.io versions are immutable — yankable, never replaceable — the
+  release workflow now *verifies* the version rather than writing it: publishing
+  is refused unless `[workspace.package].version` and `pyproject.toml` both
+  equal the tag, unless the ref is a tag at all, unless the tag is free of any
+  prerelease suffix or build metadata, and unless packaging has already verified
+  cleanly with `--locked` and no credential in the environment. The version
+  check is its own job, ahead of *both* publishes, so a forgotten bump stops npm
+  too — checked inside the crates job alone it would fail there while npm
+  shipped the number regardless, leaving a version that can never be completed
+  on crates.io and can only be abandoned. Bumping the version is part
+  of the release cut, now written down in
+  [CONTRIBUTING](./CONTRIBUTING.md#cutting-a-release) — which also records why
+  force-moving a released tag, previously the cheap fix for a post-release
+  failure, is no longer one. Consumers of the npm, Python, or binary artifacts
+  see no change; the crates are a new distribution channel, published under the
+  same AGPL-3.0-only terms.
 - `getBleDiagnostics()` (React Native) returns the three BLE degraded-path
   counters — `fragmentFallbacks`, `recipientNotAmongPeers`,
   `undersizedMtuReports` — which previously stopped at the UniFFI layer and
@@ -699,6 +725,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### CI/CD
 
+- **A prerelease tag no longer takes over the npm `latest` dist-tag.** `npm
+  publish` defaults every upload to `latest`, so a `vX.Y.Z-rc.N` tag — or a
+  branch dispatch, which falls back to `0.0.0-dev` — became what a plain `npm
+  install @offline-protocol/mesh-sdk` resolved to. Prerelease versions now
+  publish under `next`, derived from the resolved version rather than the ref so
+  a hyphenated branch name cannot trip it. This matters more than it used to:
+  crates.io publishing treats an rc tag as a full rehearsal, which makes cutting
+  one a routine thing to do rather than a rarity.
 - **`cargo doc` is gated in CI.** A new `Rustdoc` job builds the workspace under
   `RUSTDOCFLAGS: -D warnings`. It caught six broken intra-doc links: four public
   items linking to private ones — which resolve to nothing for every reader not

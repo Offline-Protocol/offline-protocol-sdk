@@ -239,6 +239,64 @@ cargo bench --package offline-protocol-bench --bench '*' --locked -- \
   --baseline-lenient before
 ```
 
+## Cutting a Release
+
+One number identifies a release across every channel: the `vX.Y.Z` git tag, the
+`@offline-protocol/mesh-sdk` npm package, the `offline-protocol*` crates on
+crates.io, and the GitHub release assets. Pushing the tag is what publishes, so
+everything below happens on a `chore/release-X.Y.Z` branch that merges first.
+
+Version files to bump together:
+
+| File | How |
+| --- | --- |
+| `Cargo.toml` | `[workspace.package].version` **and** the seven internal-dependency versions in `[workspace.dependencies]`. A partial *minor* bump fails to resolve immediately and locally; a partial *patch* bump resolves silently, because `version = "X.Y.Z"` is a caret requirement that a sibling one patch ahead still satisfies. Harmless if it ships, but move them together |
+| `Cargo.lock` | any `cargo` command refreshes it once the manifests change |
+| `bindings/python/pyproject.toml` | `version` — release.yml gates this one against the tag too |
+| `bindings/react-native/package.json` + `package-lock.json` | `npm version X.Y.Z --no-git-tag-version --allow-same-version` from `bindings/react-native/` |
+| `THIRD-PARTY-NOTICES.md` (×3) | `scripts/generate-third-party-notices.sh` — the notices list our own crates by version, and the CI drift gate fails on a stale copy |
+
+Then the prose: `CHANGELOG.md` (replace `## [Unreleased]` with
+`## [X.Y.Z] — <date>`, leaving no empty `[Unreleased]` behind), `SECURITY.md`
+(the supported-versions table — minor bumps only; a patch stays on its line),
+and `docs/UPGRADING.md` (the current-line reference, and a labelled subsection
+for anything that compiles fine but behaves differently).
+
+To rehearse the whole thing, push a `vX.Y.Z-rc.N` tag. Every gate runs, every
+crate is packaged and verify-built, and npm publishes under the `next`
+dist-tag — but crates.io gets nothing, because those versions are immutable and
+an rc must never burn the number the final tag needs. Point the rc at the same
+`X.Y.Z` the workspace already carries; the gate compares release cores and
+ignores the suffix.
+
+Three failure modes worth naming:
+
+- **`release.yml` refuses to publish a tag whose number does not match
+  `[workspace.package].version`** (and `pyproject.toml`'s). That gate exists
+  because crates.io versions are immutable — a wrong number can be yanked but
+  never corrected, so the release has to fail before it uploads rather than
+  after. It runs as its own `version-gate` job ahead of *both* publish jobs, so
+  a forgotten bump stops npm as well: caught inside the crates job alone, it
+  would fail there while npm published the number anyway, and that split is one
+  of the permanent ones below. Because it lands before anything ships, deleting
+  and re-pushing the tag is the correct fix here — the one point in the release
+  where re-tagging is still safe.
+- **The npm version is written from the tag at release time; the Cargo version
+  is not.** Rewriting manifests in CI would invalidate `Cargo.lock` and leave
+  the published `.crate` no longer matching the tag it names, so the repo is
+  the source of truth and the tag is checked against it.
+- **Never force-move a released tag — that recovery move stopped working when
+  crates.io publishing landed.** It used to be the cheap fix for a failure
+  after the GitHub release (the `v0.20.1` npm-provenance 422, for instance):
+  move the tag, re-run, done. Now it silently splits the release across
+  registries in either direction. If the tag already published crates, the
+  re-run skips them as already-present and crates.io keeps serving the *old*
+  source while npm and the release assets get the new. If the tag predates
+  crates.io publishing — every tag through `v0.20.1` — moving it onto a commit
+  that carries the `publish-crates` job passes every gate and publishes crates
+  built from source that the npm package of the same number never contained.
+  Both are permanent. Recover by cutting the next patch version instead.
+
 ## Architecture Decisions
 
 When making significant changes:
