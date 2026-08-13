@@ -32,6 +32,7 @@ use base64::Engine;
 use offline_protocol_core::{Address, Message, MutexExt, RwLockExt};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -314,6 +315,14 @@ pub struct NostrTransport {
     reconnect_attempts: Arc<Mutex<u32>>,
     platform_handle: Arc<Mutex<Option<usize>>>,
     on_messages_available: SharedCallback,
+    /// Whether the [`Transport::get_next_message`] refusal has already been
+    /// logged for this transport.
+    ///
+    /// The refusal reports a *misintegration* — a caller polling the wrong
+    /// drain — which is a standing condition, not an event: the caller is on a
+    /// timer or a wake callback and will hit it again on every tick. One
+    /// report identifies the bug; the rest are noise that would bury it.
+    generic_poll_refusal_logged: AtomicBool,
 }
 
 impl NostrTransport {
@@ -384,6 +393,7 @@ impl NostrTransport {
             reconnect_attempts: Arc::new(Mutex::new(0)),
             platform_handle: Arc::new(Mutex::new(None)),
             on_messages_available: Arc::new(Mutex::new(None)),
+            generic_poll_refusal_logged: AtomicBool::new(false),
         })
     }
 
@@ -1540,43 +1550,67 @@ impl Transport for NostrTransport {
         crate::common::on_data_received_from(&self.receive_queue, data, peer_id)
     }
 
-    /// Gets the next message to send (for platform implementation).
+    /// **Refused.** This transport has no unsealed whole-message drain.
     ///
-    /// Returns `(message_id, serialized_bytes)` or `None` if no messages.
-    /// The message enters the pending-confirmation state until the platform
-    /// calls [`Transport::confirm_sent`] or [`Transport::report_send_failure`].
+    /// The signature can only return a bare serialized `Message` — the entire
+    /// protocol envelope, both endpoints included — with no gift wrap, no
+    /// signature and no event around it, so publishing the result would put
+    /// exactly the cleartext this transport exists to avoid in front of every
+    /// relay. There is nowhere to put a signed, sealed event in a
+    /// `(String, Vec<u8>)`, and a Nostr frame without its event envelope is
+    /// not deliverable anyway.
     ///
-    /// **This path does not seal, and no Nostr bridge should use it.** It
-    /// returns the bare serialized `Message` — the entire protocol envelope,
-    /// both usernames included — with no gift wrap and no event around it, so
-    /// publishing the result puts exactly the cleartext this transport now
-    /// avoids in front of every relay. There is nowhere to put a sealed event
-    /// in this signature; it exists only to satisfy the generic [`Transport`]
-    /// trait.
+    /// It used to return that cleartext, with this comment warning callers off
+    /// it. A doc comment is not a control: this method sits on the generic
+    /// [`Transport`] trait, which the engine hands out as `dyn Transport` from
+    /// `TransportManager::get_transport`, so reaching the unsealed bytes took
+    /// no downcast and no unsafe — and the leak ran regardless of
+    /// `nostr_sealing_enabled`, since this path never consulted it. The
+    /// refusal is the enforcement.
     ///
     /// Poll [`NostrTransport::get_next_signed_event`] instead: it produces a
     /// complete signed, sealed `["EVENT", …]` message ready for the wire. That
     /// is what the bundled bridges and the UniFFI `nostr_get_next_message`
     /// entry call.
+    ///
+    /// **Nothing is consumed here.** The refusal returns before the send queue
+    /// or `pending_confirmation` are read, so a caller that reaches this by
+    /// mistake cannot also steal a frame out from under the sealed drain — it
+    /// stays queued, and the next `get_next_signed_event` serves it. What such
+    /// a caller *will* observe is a queue that only grows: `queue_depth` rises,
+    /// `congestion` saturates at 1.0 by depth 50, and DORS stops selecting
+    /// Nostr. That is the intended shape of the failure — traffic reroutes
+    /// instead of publishing cleartext — but it is a misintegration, not
+    /// backpressure, which is why it is also logged.
+    ///
+    /// The refusal is logged **once** per transport, not per call. Every
+    /// in-tree caller of this trait method takes the shape
+    /// `if let Ok(Some((..))) = t.get_next_message()`, which discards an `Err`
+    /// down the same silent path as `Ok(None)` — so for exactly the mistake
+    /// this guard exists to catch, returning `Err` is no louder than the
+    /// `Ok(None)` it was chosen over. The log is what makes it loud; the
+    /// one-shot is what keeps a polling caller from burying it.
     fn get_next_message(&self) -> Result<Option<(String, Vec<u8>)>> {
-        self.drain_expired_pending();
+        if !self
+            .generic_poll_refusal_logged
+            .swap(true, Ordering::Relaxed)
+        {
+            tracing::error!(
+                "Nostr get_next_message() refused: this transport has no \
+                 unsealed whole-message drain. Poll get_next_signed_event() \
+                 instead. Outbound frames stay queued until it is polled. \
+                 Logged once per transport."
+            );
+        }
 
-        let message = {
-            let mut queue = self.send_queue.lock_or_recover();
-            match queue.pop_front() {
-                Some(m) => m,
-                None => return Ok(None),
-            }
-        };
-
-        let message_id = message.id.to_string();
-        let data = self.serialize_message(&message)?;
-
-        self.pending_confirmation
-            .lock_or_recover()
-            .insert(message_id.clone(), Instant::now());
-
-        Ok(Some((message_id, data)))
+        Err(crate::Error::ConfigurationError(
+            "Nostr has no unsealed message drain: get_next_message() would \
+             return the bare protocol envelope in cleartext. Poll \
+             NostrTransport::get_next_signed_event() instead, which returns a \
+             signed, sealed [\"EVENT\", …] relay message. The queued frame is \
+             untouched."
+                .to_string(),
+        ))
     }
 
     /// Sets the callback invoked when outgoing messages are queued.
@@ -1851,22 +1885,11 @@ mod tests {
         assert_eq!(transport.config().max_reconnect_attempts, 5);
     }
 
-    #[test]
-    fn test_send_receive() {
-        let transport = NostrTransport::new(addr("device1")).unwrap();
-        transport.start().unwrap();
-        transport.on_status_changed(TransportStatus::Available);
-
-        let msg = create_test_message();
-        transport.send(&msg).unwrap();
-
-        let (msg_id, data) = transport.get_next_message().unwrap().unwrap();
-        assert!(!msg_id.is_empty());
-        assert!(!data.is_empty());
-
-        let deserialized = transport.deserialize_message(&data).unwrap();
-        assert_eq!(deserialized.id, msg.id);
-    }
+    // `test_send_receive` lived here. Its two assertions moved to the sealed
+    // drain rather than being duplicated onto it: the queue-to-pending
+    // transition is `test_get_next_signed_event`, and the content round trip
+    // is `test_sealed_frame_round_trips_through_the_recipients_transport`,
+    // which asserts the sender as well as the id.
 
     #[test]
     fn test_send_when_unavailable_fails() {
@@ -1890,8 +1913,8 @@ mod tests {
         let msg = create_test_message();
         transport.send(&msg).unwrap();
 
-        let (msg_id, _) = transport.get_next_message().unwrap().unwrap();
-        transport.confirm_sent(&msg_id);
+        let signed = transport.get_next_signed_event().unwrap().unwrap();
+        transport.confirm_sent(&signed.message_id);
 
         let metrics = transport.metrics();
         assert_eq!(metrics.success_count, 1);
@@ -1907,8 +1930,8 @@ mod tests {
         let msg = create_test_message();
         transport.send(&msg).unwrap();
 
-        let (msg_id, _) = transport.get_next_message().unwrap().unwrap();
-        transport.report_send_failure(&msg_id);
+        let signed = transport.get_next_signed_event().unwrap().unwrap();
+        transport.report_send_failure(&signed.message_id);
 
         let metrics = transport.metrics();
         assert_eq!(metrics.success_count, 0);
@@ -1923,7 +1946,7 @@ mod tests {
 
         let msg = create_test_message();
         transport.send(&msg).unwrap();
-        let _ = transport.get_next_message().unwrap();
+        let _ = transport.get_next_signed_event().unwrap();
 
         transport.on_status_changed(TransportStatus::Disconnected);
 
@@ -1939,7 +1962,7 @@ mod tests {
 
         let msg = create_test_message();
         transport.send(&msg).unwrap();
-        let _ = transport.get_next_message().unwrap();
+        let _ = transport.get_next_signed_event().unwrap();
 
         transport.stop().unwrap();
 
@@ -2037,8 +2060,8 @@ mod tests {
 
         let msg = create_test_message();
         transport.send(&msg).unwrap();
-        let (msg_id, _) = transport.get_next_message().unwrap().unwrap();
-        transport.confirm_sent(&msg_id);
+        let signed = transport.get_next_signed_event().unwrap().unwrap();
+        transport.confirm_sent(&signed.message_id);
 
         let mut new_metrics = TransportMetrics::default();
         new_metrics.rssi = Some(-70);
@@ -2122,7 +2145,7 @@ mod tests {
 
         let msg = create_test_message();
         transport.send(&msg).unwrap();
-        let _ = transport.get_next_message().unwrap();
+        let _ = transport.get_next_signed_event().unwrap();
 
         assert_eq!(transport.pending_confirmation_count(), 1);
     }
@@ -2162,6 +2185,66 @@ mod tests {
 
         // No more messages
         assert!(transport.get_next_signed_event().unwrap().is_none());
+    }
+
+    /// The generic whole-message poll must refuse rather than hand back the
+    /// unsealed envelope, and must cost the sealed drain nothing.
+    ///
+    /// Dispatched through `&dyn Transport` on purpose: that is the shape the
+    /// leak had. `TransportManager::get_transport` hands out an
+    /// `Arc<dyn Transport>`, so this was reachable with no downcast and no
+    /// unsafe, and a concrete-typed call here would not pin the vtable entry
+    /// that actually mattered.
+    #[test]
+    fn test_generic_transport_poll_refuses_rather_than_leaking_cleartext() {
+        let transport = NostrTransport::new(addr("device1")).unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        let msg = create_test_message();
+        transport.send(&msg).unwrap();
+
+        let generic: &dyn Transport = &transport;
+        let err = generic.get_next_message().unwrap_err();
+        // Asserted on `code()` rather than the variant or the message text:
+        // `Error` documents the code as the stable contract and `Display` as
+        // free to change, so this is the surface a caller is entitled to
+        // classify on.
+        assert_eq!(err.code(), "CONFIGURATION_ERROR", "got {err:?}");
+
+        // The other generic egress door must stay shut too. Nostr is safe here
+        // only because it does not override the trait's `Ok(None)` default —
+        // nothing else records that as a requirement, so a later fragmenting
+        // implementation would reopen this leak on a method nobody thinks of
+        // as a leak surface.
+        assert!(
+            generic.get_next_fragment().unwrap().is_none(),
+            "Nostr must expose no generic fragment drain either"
+        );
+
+        // The one-shot on the log must gate the *log*, never the refusal: a
+        // second caller has to be refused exactly as loudly as the first.
+        let second = generic.get_next_message().unwrap_err();
+        assert_eq!(second.code(), "CONFIGURATION_ERROR", "got {second:?}");
+
+        // The refusal returns before the queue or the pending map are touched,
+        // so a caller that lands here by mistake cannot also strand the frame
+        // it failed to get: nothing is dequeued, and nothing is left awaiting a
+        // confirmation that no bridge will ever send.
+        assert!(
+            transport.has_pending_sends(),
+            "the refused frame must stay queued"
+        );
+        assert_eq!(
+            transport.pending_confirmation_count(),
+            0,
+            "a refusal must not enter the confirmation loop"
+        );
+
+        // ...and the sealed drain still serves that same frame.
+        let signed = transport.get_next_signed_event().unwrap().unwrap();
+        assert_eq!(signed.message_id, msg.id.to_string());
+        assert!(signed.event_json.starts_with("[\"EVENT\",{"));
     }
 
     #[test]

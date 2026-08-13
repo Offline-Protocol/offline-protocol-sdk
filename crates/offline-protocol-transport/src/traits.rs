@@ -224,10 +224,23 @@ pub trait Transport: Send + Sync + Any {
     /// Returns `(key, serialized_bytes)` where the `key` is
     /// transport-specific: a recipient address for peer-to-peer transports
     /// (WiFi Direct), or the message id for confirmation-loop transports
-    /// (Internet, Nostr, Reticulum — pair with [`Transport::confirm_sent`] /
+    /// (Internet, Reticulum — pair with [`Transport::confirm_sent`] /
     /// [`Transport::report_send_failure`]). The default returns `Ok(None)`:
     /// fragmenting transports (BLE) expose
     /// [`Transport::get_next_fragment`] instead.
+    ///
+    /// **One transport refuses, and the poll calibration has that one
+    /// exception.** Nostr returns `ConfigurationError` here rather than
+    /// `Ok(None)` or bytes: this signature can carry only a bare serialized
+    /// `Message` — the whole protocol envelope, both endpoints included —
+    /// with no gift wrap, no signature and no event around it, so a caller
+    /// that published the result would put in front of every relay exactly
+    /// the cleartext that transport exists to avoid. There is nowhere in a
+    /// `(String, Vec<u8>)` to put a signed, sealed event. Poll
+    /// `NostrTransport::get_next_signed_event` instead. A transport whose
+    /// wire form cannot be expressed in this signature should follow that
+    /// precedent and refuse, rather than returning something publishable
+    /// that is not what the transport actually promises.
     fn get_next_message(&self) -> Result<Option<(String, Vec<u8>)>> {
         Ok(None)
     }
