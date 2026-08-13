@@ -78,6 +78,14 @@ for manifest in crates/*/Cargo.toml; do
     echo "       run 'cp LICENSE $crate_dir/LICENSE' to resync" >&2
     status=1
   fi
+  # The crate README is the front door of the crates.io page, the same role the
+  # root and per-binding READMEs above play for their packages, so it carries
+  # the same notice. scripts/check-crate-readmes.sh asserts the file exists at
+  # all; this asserts what it must say.
+  if [ -f "$crate_dir/README.md" ] && ! grep -qF "$NOTICE" "$crate_dir/README.md"; then
+    echo "error: $crate_dir/README.md is missing the copyright notice: $NOTICE" >&2
+    status=1
+  fi
   # Belt and braces: the two fields together are what produced the warning.
   # Matches an active key only -- the comment above it mentions the name too.
   if grep -qE '^[[:space:]]*license-file[[:space:]]*=' "$manifest"; then
