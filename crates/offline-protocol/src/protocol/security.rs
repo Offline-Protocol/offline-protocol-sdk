@@ -188,7 +188,10 @@ impl OfflineProtocol {
     /// seen; an address makes that comparison unnecessary, because the address
     /// already *is* `bech32m(0x01 ‖ SHA-256(key)[..20])`. Impersonation stops
     /// costing "be the first to claim the name" and starts costing a 160-bit
-    /// second preimage.
+    /// second preimage (~2^160). Note that this is the *targeted* figure — the
+    /// birthday bound on the same truncation is ~2^80, which buys two keys
+    /// under one address rather than a specific peer's address; see
+    /// `Address::HASH_LEN` for why that trade was taken.
     ///
     /// # Why an unparseable sender is rejected
     ///

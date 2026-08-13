@@ -121,7 +121,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Ed25519 signature verifies *and* the signing key re-derives to the address in
   `sender`. Unlike a pin, that check has no first-contact window, which was the
   window impersonation lived in: claiming a name went from winning a race to
-  finding a 160-bit second preimage. Removed with it: `resetTofuForPeer` (Rust,
+  finding a 160-bit second preimage (~2^160). That is the targeted figure; the
+  birthday bound on the same 160-bit truncation is ~2^80, which buys two keys
+  sharing one address rather than a specific peer's address — stated so it is
+  not left to be derived. See `Address::HASH_LEN` for the trade.
+  Removed with it: `resetTofuForPeer` (Rust,
   UniFFI, React Native, Python), the `tofu_reset` event, and the
   `TOFU_KEY_MISMATCH`, `TOFU_STORE_FULL`, and `SIGNATURE_DOWNGRADE` warning
   codes.
@@ -189,11 +193,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   over another transport; the same rule gates the key-package resolution queue.
 - **BREAKING**: the publicly-computable key that seals published key-package
   records and bootstrap frames is no longer the routing tag. Both are still
-  derived from the address, but through separate domain-separated derivations,
-  so no routing tag has a private half anyone can compute. The old shape was
-  not exploitable — nothing signs with a tag, and inbound is never authenticated
-  by pubkey — but it is a trap for anything that later adds NIP-42 AUTH or
-  pubkey-based filtering. `derivable_for_device_id` is replaced by
+  derived from the address, but by separate derivations — the tag is still
+  rooted in a bare `SHA-256(address)` with no domain separation, the seal key
+  is a domain-separated HKDF — so a routing tag no longer doubles as a live
+  encryption key. **The tag's own private half remains computable** and is not
+  claimed otherwise: its scalar *is* `SHA-256(address)` and the tag is that
+  scalar's x-only public key, so anyone holding an address can reconstruct the
+  keypair behind that address's tag. What changed is that nothing is sealed to
+  it any more, so reconstructing it decrypts nothing. The old shape was not
+  exploitable — nothing signs with a tag, and inbound is never authenticated
+  by pubkey — but a routing label that doubles as a live encryption key is a
+  trap for anything that later adds NIP-42 AUTH or pubkey-based filtering.
+  `derivable_for_device_id` is replaced by
   `record_seal_keypair_for_address`, and `routing_tag_for_device_id` by
   `routing_tag_for_address`.
 - **BREAKING (behaviour): cold contact by username is gone**, because a
@@ -638,6 +649,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   session attribution cannot run against an empty cache — which previously
   named *this* device as the remote peer.
 
+### Documentation
+
+- **Three privacy claims the code does not support are corrected.**
+  Documentation only; no behaviour change. Each is the kind of line a skeptical
+  reviewer tests first, and each was testable and wrong.
+
+  **"No routing tag has a computable private half" was false.** The tag is
+  `SHA-256(address)` → scalar → x-only pubkey, so anyone holding an address can
+  reconstruct the entire keypair behind that address's tag; the same sentence
+  also described both derivations as domain-separated when only the seal key
+  is. The property the addressing migration actually bought is narrower and is
+  now what gets claimed: nothing seals to the tag any more, so reconstructing
+  one decrypts nothing. Recorded on `routing_tag_for_address` itself, since
+  that is where the derivation is read.
+
+  **The gift-wrap anonymity set is not "every NIP-17 conversation on the
+  relay".** Reusing kind `1059` defeats a scrape *by kind*; it does not make a
+  tag anonymous to a relay you subscribe on. Three distinguishers are now
+  enumerated on `NOSTR_GIFT_WRAP_KIND` and under `docs/nostr.md` §"What a relay
+  can see" — the client's own `REQ` names its routing tag to every relay it
+  connects to (decisive, and unavoidable while a recipient subscribes on a
+  stable tag); requesting legacy kind `4` beside `1059` under one `#p` is a
+  shape a NIP-17-only client does not have; and kind-`30443` records sit at our
+  own tag signed by the install's real Nostr key, which a relay can join to it.
+  None of the three reveals content: who is talking to whom, about what, and
+  under which app id all stay sealed.
+
+  **The 160-bit second-preimage figure now names its collision bound.** ~2^160
+  is the cost of aiming at an address that already exists. The birthday bound on
+  the same truncation is ~2^80, which buys two identity keys under one address
+  rather than a chosen peer's — enough to equivocate, and enough to defeat the
+  "one identity cannot hold two leaves" property the MLS leaf binding otherwise
+  inherits from MLS signature-key uniqueness. Stated on `Address::HASH_LEN` as
+  the deliberate trade against BLE frame budget that it is, rather than left for
+  reviewers to derive.
+
+- **`SECURITY.md` no longer invites reports against a mechanism that was
+  deleted.** Its scope list asked for "TOFU key management bypasses"; the pin
+  store is removed in this release, so the entry now names the sender-address
+  derivation gate that replaced it, in both its control-frame and MLS-leaf
+  shapes. `CLAUDE.md` likewise stops describing the control gate as
+  "Ed25519+TOFU".
+
+- **The internal downstream codename is removed from shipped artifacts.** It
+  remained in two npm-shipped Swift files, in the historical cleartext envelope
+  reproduced here and in `docs/nostr.md`, and as the `AppId` fixture in the
+  transport's sealed-payload leak test.
+
+### CI/CD
+
+- **`cargo doc` is gated in CI.** A new `Rustdoc` job builds the workspace under
+  `RUSTDOCFLAGS: -D warnings`. It caught six broken intra-doc links: four public
+  items linking to private ones — which resolve to nothing for every reader not
+  building the crate themselves — and two simply wrong paths. Deliberately
+  *without* `--document-private-items`, which would have suppressed four of the
+  six rather than surfaced them.
+
 ## [0.20.1] — 2026-08-07
 
 > **Nothing breaks a build, and one event changes meaning.** A receiver no
@@ -861,7 +929,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
   ```json
   {"id":"…","sender":"alice_real_username","recipient":"bob_real_username",
-   "app_id":"fernweh","priority":"medium","ttl":8,"hop_count":0,
+   "app_id":"example-app","priority":"medium","ttl":8,"hop_count":0,
    "timestamp":1785919090277,"lamport_clock":0,"content_type":"text",
    "content":"__MLS_ENC__…","metadata":{…},"requires_ack":true}
   ```
@@ -870,7 +938,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
   Outgoing frames are now [NIP-59](https://github.com/nostr-protocol/nips/blob/master/59.md) gift wraps (kind `1059`) with [NIP-44 v2](https://github.com/nostr-protocol/nips/blob/master/44.md) inner encryption, each signed by a **freshly generated single-use key** and stamped with a `created_at` jittered uniformly up to an hour into the past. A relay now sees only: the kind, an unlinkable per-event pubkey, the recipient's opaque routing tag, a coarse timestamp, and ciphertext. Nothing identifies either party, and no two events this device publishes are linkable to each other.
 
-  Conforming to NIP-59's wrapper rather than inventing a sealed format was the decisive choice: **a custom event kind would have let one relay filter enumerate every Offline Protocol user**, turning a per-user privacy bug into a userbase-enumeration primitive. As kind 1059 the traffic is indistinguishable from ordinary NIP-17 DMs. (NIP-59's inner kind-13 seal layer is skipped — the inner `Message` already names the sender and MLS authenticates it — which is invisible on the wire, since relays only ever see the wrapper.)
+  Conforming to NIP-59's wrapper rather than inventing a sealed format was the decisive choice: **a custom event kind would have let one relay filter enumerate every Offline Protocol user**, turning a per-user privacy bug into a userbase-enumeration primitive. As kind 1059 an individual event is indistinguishable from an ordinary NIP-17 DM. (Later correction, for anyone testing that claim: it holds for a scrape *by kind*, not for a relay you subscribe on — the client's own `REQ` names its routing tag, so that relay learns the tag is the connected client's without any correlation work. `docs/nostr.md` §"What a relay can see" now enumerates this and the other distinguishers.) (NIP-59's inner kind-13 seal layer is skipped — the inner `Message` already names the sender and MLS authenticates it — which is invisible on the wire, since relays only ever see the wrapper.)
 
   **The NIP-44 implementation is asserted against the official vectors.** All 35 conversation-key vectors, 32 message-key vectors, both encrypt/decrypt sets, and every invalid-input vector run in-tree, plus the extended-length-prefix vectors from the spec body. The vector file is vendored and pinned by CI to the sha256 the spec publishes, so a green suite cannot be achieved by editing the fixture. Both length-prefix forms are implemented: the 6-byte extended prefix (added to NIP-44 on 2026-06-28, under the *same* version byte, so there is no negotiation and no way to detect support) sits at exactly 65536 bytes — the same boundary as this transport's own event cap. *Upstream inconsistency worth knowing:* `invalid.encrypt_msg_lengths` in the vector file still lists 65536 and above as invalid, because the vectors were not regenerated when the extended prefix landed. The spec body and its own extended-prefix vectors are authoritative; only the zero-length case is asserted from that list.
 

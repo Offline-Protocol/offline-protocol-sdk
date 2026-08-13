@@ -607,7 +607,7 @@ impl NostrTransport {
     /// Requests resolution of `user_id`'s published key packages.
     ///
     /// Returns whether a request was newly queued; a `false` means the peer was
-    /// already queued, was attempted within [`RESOLUTION_RETRY_INTERVAL`], or
+    /// already queued, was attempted within `RESOLUTION_RETRY_INTERVAL`, or
     /// cold contact is disabled. Callers treat it as advisory — the send that
     /// triggered it proceeds on the bootstrap leg either way, because waiting
     /// on a relay round-trip would convert a metadata upgrade into latency.
@@ -2592,7 +2592,7 @@ mod tests {
         let msg = Message::new(
             UserId::new(addr("alice")).unwrap(),
             UserId::new(addr("bob")).unwrap(),
-            AppId::new("fernweh").unwrap(),
+            AppId::new("example-app").unwrap(),
             "the quick brown fox",
         );
         transport.send(&msg).unwrap();
@@ -2617,7 +2617,7 @@ mod tests {
         event["content"] = serde_json::Value::String(String::new());
         let wire = serde_json::to_string(&event).unwrap().to_lowercase();
 
-        for leak in ["alice", "bob", "fernweh", "the quick brown fox"] {
+        for leak in ["alice", "bob", "example-app", "the quick brown fox"] {
             assert!(
                 !wire.contains(leak),
                 "relay-visible payload leaks {leak:?}: {}",

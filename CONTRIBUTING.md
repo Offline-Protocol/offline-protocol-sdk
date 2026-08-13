@@ -194,8 +194,10 @@ cargo fmt --all -- --check
 # Generate and open docs
 cargo doc --workspace --open
 
-# Check doc comments
-cargo doc --workspace --no-deps
+# Check doc comments — this is what the Rustdoc CI job runs. Keep the flag:
+# without it a broken intra-doc link only prints a warning and still exits 0,
+# so the check passes locally and fails in CI.
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
 ### Running Benchmarks

@@ -1066,7 +1066,7 @@ impl GroupManager {
     ///
     /// Skipping rather than failing keeps a tampered store from taking the
     /// whole group down, and the message it would have carried is refused
-    /// anyway — [`Self::verify_sender_leaf`] judges the same leaf at decrypt.
+    /// anyway — `Self::verify_sender_leaf` judges the same leaf at decrypt.
     ///
     /// Skipping silently would be the mistake, though: this is the *only* seam
     /// at which a leaf already seated in local state surfaces at all, and a
@@ -1076,7 +1076,7 @@ impl GroupManager {
     /// `GroupLeafIdentityUnproven` warning the wire gates emit. The count and
     /// not the identities, for the reason that field documents.
     ///
-    /// O(N) in the roster, against [`Self::verify_sender_leaf`]'s O(1): one
+    /// O(N) in the roster, against `Self::verify_sender_leaf`'s O(1): one
     /// SHA-256 over 32 bytes plus a bech32m encode per member, per call, and
     /// `process_commit_core` calls this twice per commit to derive a membership
     /// delta. Immaterial next to the MLS crypto on the same path — microseconds

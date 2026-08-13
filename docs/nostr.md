@@ -4,7 +4,7 @@
 
 The Nostr transport routes messages over [Nostr](https://nostr.com/) relays via WebSockets, providing a censorship-resistant, decentralized fallback when direct mesh and ordinary Internet endpoints are unreachable. Addressing uses a public *routing tag* deterministically derived from this device's **derived address** (the `off1…` identity the SDK generates at `initializeMls`), so peers can compute where to send without exchanging keys. Relays simply rebroadcast the signed events to subscribers.
 
-Outgoing frames are **sealed into [NIP-59](https://github.com/nostr-protocol/nips/blob/master/59.md) gift wraps** (kind `1059`, [NIP-44 v2](https://github.com/nostr-protocol/nips/blob/master/44.md) inner encryption), each signed by a fresh single-use key. A relay sees an opaque routing tag, an unlinkable per-event pubkey, a jittered timestamp, and ciphertext — and nothing that identifies either party. See [What a relay can see](#what-a-relay-can-see).
+Outgoing frames are **sealed into [NIP-59](https://github.com/nostr-protocol/nips/blob/master/59.md) gift wraps** (kind `1059`, [NIP-44 v2](https://github.com/nostr-protocol/nips/blob/master/44.md) inner encryption), each signed by a fresh single-use key. *In the event itself* a relay sees an opaque routing tag, an unlinkable per-event pubkey, a jittered timestamp, and ciphertext — and nothing that identifies either party. A relay you actually subscribe on knows more than that, because your own `REQ` names your tag to it; see [What a relay can see](#what-a-relay-can-see) for the full list.
 
 Nostr is the fifth transport in the Offline Protocol SDK, alongside BLE, WiFi Direct, Internet, and Reticulum. It is disabled by default because it requires at least one relay URL.
 
@@ -337,18 +337,26 @@ A sealed event carries exactly five things, and none of them names anybody:
 
 ```json
 {"id":"…","sender":"alice_real_username","recipient":"bob_real_username",
- "app_id":"fernweh","priority":"medium","ttl":8,"hop_count":0,
+ "app_id":"example-app","priority":"medium","ttl":8,"hop_count":0,
  "timestamp":1785919090277,"lamport_clock":0,"content_type":"text",
  "content":"__MLS_ENC__…","metadata":{…},"requires_ack":true}
 ```
 
 Only `content` was MLS ciphertext. Both usernames, the app id, the app's metadata map, the content type and a millisecond timestamp were readable by every relay, permanently. Relays are not hops — they are third-party-operated, public, and archival — so this was a durable social-graph disclosure, not transient hop metadata. Sealing closes it.
 
-**What remains observable** is traffic to `SHA-256(address)` for an address an observer already holds: that someone is publishing to that inbox, roughly when, and roughly how much. Sealing does not hide that, and rotating rendezvous tags — which would — is deliberately deferred: tying addressing to MLS epoch state turns a desync from "fails to decrypt" into "peers become mutually unreachable". (The Marmot protocol reached the same conclusion and likewise kept stable 1:1 inbox addressing.)
+**What remains observable** is traffic to the routing tag (the x-only public key of the scalar `SHA-256(address)`) for an address an observer already holds: that someone is publishing to that inbox, roughly when, and roughly how much. Sealing does not hide that, and rotating rendezvous tags — which would — is deliberately deferred: tying addressing to MLS epoch state turns a desync from "fails to decrypt" into "peers become mutually unreachable". (The Marmot protocol reached the same conclusion and likewise kept stable 1:1 inbox addressing.)
+
+**A relay you subscribe on knows more than that, and it is worth being exact.** Reusing kind `1059` means a scrape *by kind* cannot enumerate the userbase — but it does not make your tag anonymous to the relays you actually talk to, and three things separate our tags from generic NIP-17 recipients' without breaking any seal:
+
+- **Your own subscription names your tag.** The client sends `{"#p":[<your tag>], "kinds":[4, 1059], …}` to every relay it connects to, so a relay serving that `REQ` learns the tag belongs to the connected client outright. This is decisive, and unavoidable while a recipient subscribes on a stable tag.
+- **The `kinds` pair is a fingerprint.** Requesting legacy kind `4` alongside `1059` under one `#p` is a shape a NIP-17-only client does not have.
+- **The key-package record cross-links the tag.** With cold contact on (the default), kind `30443` records sit at your own routing tag and are signed by the install's real Nostr key, so a relay can join the two and mark the tag as an MLS-over-Nostr client rather than a generic correspondent.
+
+None of that reveals *content* — who is talking to whom, about what, and under which app id all stay sealed. The gift wrap hides the conversation, not the fact that a given tag is yours to a relay you speak to. Treat "which relays you connect to" as part of your threat model.
 
 ### Published key packages and cold first contact
 
-Sealing a frame requires the recipient's Nostr public key, and until it is known the frame falls back to the recipient's **record-seal key** — a keypair derived from their address, which anyone holding that address can reconstruct. (It is *not* the routing tag; those were the same value until the addressing migration, and are now separately domain-separated so that no routing tag has a computable private half.) That fallback is bulk-collection resistance only: a relay scraping everything cannot read it, but anyone who knows the address can.
+Sealing a frame requires the recipient's Nostr public key, and until it is known the frame falls back to the recipient's **record-seal key** — a keypair derived from their address, which anyone holding that address can reconstruct. (It is *not* the routing tag; those were the same value until the addressing migration, and are now separate derivations — the tag is still rooted in a bare `SHA-256(address)` with no domain separation, the seal key is a domain-separated HKDF — so that a routing tag no longer doubles as a live encryption key. The tag's private half is still computable by anyone holding the address, since its scalar *is* `SHA-256(address)` and the tag is that scalar's x-only public key; what changed is that nothing seals to it any more, so computing it decrypts nothing.) That fallback is bulk-collection resistance only: a relay scraping everything cannot read it, but anyone who knows the address can.
 
 To make the fallback rare rather than routine, each install **publishes MLS key packages as fetchable relay records**, and resolves a peer's before sealing to them.
 

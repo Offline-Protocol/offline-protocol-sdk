@@ -335,7 +335,7 @@ pub struct GroupInfo {
     /// provider store, or a group joined by a build predating those gates.
     ///
     /// A count, not the identities. The claimed credentials are attacker-chosen
-    /// strings, and the whole reason [`crate::GroupManager::get_group_info`]
+    /// strings, and the whole reason [`crate::group::GroupManager::get_group_info`]
     /// filters them out is that the roster must not carry an identity nobody
     /// proved; handing the same string back through a second field would return
     /// it by another door. It is also not what an app should act on: the leaf

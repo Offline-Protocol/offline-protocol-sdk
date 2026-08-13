@@ -3032,7 +3032,7 @@ extension InternetManager: URLSessionWebSocketDelegate {
             // re-latch and stop the current generation. We key this on socket
             // GENERATION, not object identity: identity can only see a live,
             // non-nil successor, but the systematic case is a nil reconnect
-            // window — forceReconnect (fernweh's foreground recovery) nils
+            // window — forceReconnect (the foreground recovery path) nils
             // webSocketTask and schedules connect() at a backoff, and on
             // foreground iOS flushes a background-queued 4000 for the old socket
             // into that window. Object identity would read webSocketTask == nil

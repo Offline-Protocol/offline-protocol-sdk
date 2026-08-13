@@ -122,6 +122,27 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --locked -- -D warnings
 
+  docs:
+    name: Rustdoc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-docs
+
+      # Gates the *public* doc surface, so no --document-private-items: a
+      # public item linking to a private one is precisely the breakage this
+      # catches (the link silently resolves to nothing for every reader who
+      # is not building the crate themselves).
+      - name: Build docs
+        run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   msrv:
     name: MSRV (Rust 1.87)
     runs-on: ubuntu-latest

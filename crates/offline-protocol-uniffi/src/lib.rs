@@ -4191,7 +4191,8 @@ impl OfflineProtocol {
     /// frames with the identity the core stamps into `Message.sender`, which
     /// the receiver's `validate_transport_sender` strict-matches. Disagreement
     /// emits `RELAY_ADDRESS_BINDING_MISMATCH` and nothing else — see
-    /// [`SecurityWarningCode::RelayAddressBindingMismatch`] for why acting on
+    /// [`offline_protocol::events::SecurityWarningCode::RelayAddressBindingMismatch`]
+    /// for why acting on
     /// it would buy nothing.
     ///
     /// A dedicated entry point rather than message-plane injection, on the

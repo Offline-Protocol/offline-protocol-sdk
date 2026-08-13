@@ -30,7 +30,7 @@ import Foundation
 
 final class ForegroundReconnectPolicy {
     /// Minimum background stay before a foreground transition forces a
-    /// reconnect. Aligned with fernweh's iOS ~4s background-disconnect window:
+    /// reconnect. Aligned with the observed iOS ~4s background-disconnect window:
     /// below it a quick app-switch keeps the live socket; at or above it the
     /// socket can no longer be trusted.
     static let defaultMinBackgroundIntervalMs: Int64 = 4_000

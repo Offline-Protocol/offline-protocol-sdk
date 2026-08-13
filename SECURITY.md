@@ -42,7 +42,9 @@ Instead, please email **gm@offlineprotocol.com** with the details. Include:
 The following are in scope for security reports:
 
 - MLS (RFC 9420) implementation flaws
-- TOFU key management bypasses
+- Sender-address derivation bypasses — a control frame accepted for an address
+  its signing key does not derive to, or an MLS leaf accepted carrying an
+  address other than the one its own signature key derives to
 - Transport-layer message injection or spoofing
 - Memory exhaustion via crafted payloads (DoS)
 - Signature verification bypasses
