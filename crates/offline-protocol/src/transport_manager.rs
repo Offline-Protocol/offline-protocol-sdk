@@ -872,9 +872,13 @@ impl TransportManager {
             )));
         }
 
-        transport
-            .send(message)
-            .map_err(|e| Error::Other(format!("Transport send failed: {}", e)))?;
+        // Preserved as `Error::Transport`, not flattened into `Error::Other`.
+        // Flattening discarded the variant every classifier keys on —
+        // `SessionStateError::classify` and `Protocol::is_no_carrier_error`
+        // both answer on `Error::Transport(_)`, so on this path they saw
+        // `Unknown`/`false` and the rendered string was the only surviving
+        // signal. That is exactly the string that must stop being read.
+        transport.send(message).map_err(Error::Transport)?;
 
         // Only update current transport after successful send
         self.current_transport = Some(transport_type);

@@ -1198,6 +1198,12 @@ export interface WelcomeSendFailedEvent extends BaseEvent {
   group_id: string;
   attempt: number;
   reason_code: WelcomeReasonCode;
+  /**
+   * Stable classification of the transport failure, when one was recorded —
+   * never the rendered error. Both feeders named an identifier (the relay's
+   * `DeliveryError` prose, and a local transport error that interpolates the
+   * peer), while `peer_id` and `group_id` beside it are hashed.
+   */
   transport_error?: string;
   retryable: boolean;
   next_retry_at?: number;
@@ -1243,10 +1249,12 @@ export interface ConnectionRequestUndeliverableEvent extends BaseEvent {
   recipient: string;
   message_id: string;
   /**
-   * Failure reason: starts with `recipient_unreachable` (transport-level
-   * offline signal), or is `max_retries_exceeded` (retry budget exhausted),
+   * Failure reason, drawn from a fixed local vocabulary:
+   * `recipient_unreachable` (transport-level offline signal),
+   * `max_retries_exceeded` (retry budget exhausted),
    * `outbox_lifetime_exceeded` (aged out of the store-and-forward outbox),
    * or `outbox_capacity_exceeded` (evicted when the outbox hit capacity).
+   * The relay's wording is no longer appended to the first of these.
    */
   reason: string;
 }
@@ -1776,6 +1784,17 @@ export interface MessageRelayedEvent extends BaseEvent {
 export interface MessageDeferredEvent extends BaseEvent {
   type: 'message_deferred';
   message_id: string;
+  /**
+   * Recipient's user ID. Carried as a field so the telemetry scrubber hashes
+   * it; it previously reached apps only inside the rendered `reason`.
+   */
+  recipient: string;
+  /**
+   * Stable classification of the deferral, drawn from a fixed local
+   * vocabulary (`peer_not_reachable`, `transport_not_connected`,
+   * `transport_send_failed`, ...). Not a rendered error — the underlying
+   * message, which names the peer, stays in the device log.
+   */
   reason: string;
   retry_count: number;
   next_retry_at?: number;
@@ -1819,7 +1838,13 @@ export interface MessageUndeliverableEvent extends BaseEvent {
   type: 'message_undeliverable';
   message_id: string;
   recipient: string;
-  /** Transport-reported reason (starts with `recipient_unreachable`). */
+  /**
+   * Stable classification of the failure — `recipient_unreachable` on the
+   * relay-verdict path this event is normally reached by. The relay's own
+   * wording is no longer appended: it is remote-chosen text, and `recipient`
+   * beside it is hashed for telemetry. On the internet path the bridges still
+   * deliver that wording raw on the `diagnostic` channel.
+   */
   reason: string;
   /** Owning media transfer when the message is a media chunk. */
   file_id?: string;

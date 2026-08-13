@@ -1,10 +1,11 @@
 //! Session confirmation, welcome lifecycle, and pending session reconciliation.
 
 use super::{
-    internal_prefixes, lock_shared_state, OfflineProtocol, PresenceRescueThrottle, PruneAllowance,
-    RestorableRecord, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
-    CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS, MAX_REKEY_TRACKED_PEERS,
-    RECONCILIATION_THROTTLE_MS, REKEY_INTERVAL_SECS, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS,
+    classify_transport_send_error, internal_prefixes, lock_shared_state, send_failure_token,
+    OfflineProtocol, PresenceRescueThrottle, PruneAllowance, RestorableRecord, SessionState,
+    WelcomeDeliveryState, WelcomeLifecycleRecord, CONFIRMATION_PROBE_INTERVAL_SECS,
+    CONFIRMATION_RETRY_INTERVAL_SECS, MAX_REKEY_TRACKED_PEERS, RECONCILIATION_THROTTLE_MS,
+    REKEY_INTERVAL_SECS, SEND_FAIL_REASON_CONFIRM_TIMEOUT, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS,
     WELCOME_LIFECYCLE_TTL_SECS, WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_PRESENCE_RESCUE_BASE_SECS, WELCOME_PRESENCE_RESCUE_MAX_SECS, WELCOME_RETRY_BATCH_SIZE,
     WELCOME_RETRY_JITTER_RATIO, WELCOME_UNREACHABLE_RETRY_CAP_SECS, WELCOME_WATCHLIST_MAX_AGE_SECS,
@@ -922,7 +923,7 @@ impl OfflineProtocol {
         &mut self,
         peer_id: &str,
         reason: crate::events::WelcomeReasonCode,
-        transport_error: Option<String>,
+        transport_error: Option<&'static str>,
         retry_in_secs: i64,
     ) -> Result<bool> {
         let snapshot = {
@@ -936,7 +937,7 @@ impl OfflineProtocol {
                     WELCOME_LIFECYCLE_TTL_SECS.max(retry_in_secs.saturating_mul(2)),
                 );
             record.last_reason_code = Some(reason);
-            record.last_transport_error = transport_error;
+            record.last_transport_error = transport_error.map(str::to_string);
             record.clone()
         };
         self.persist_welcome_lifecycle_entry(&snapshot)?;
@@ -1080,10 +1081,15 @@ impl OfflineProtocol {
             Err(err) => {
                 let no_carrier = Self::is_no_carrier_error(&err);
                 let reason = Self::map_welcome_reason_code(&err);
+                // Classified, not rendered: the transport layer interpolates
+                // the peer into `PeerNotReachable`, and this value is both
+                // persisted with the lifecycle record and emitted on
+                // `WelcomeSendFailed.transport_error`, where the scrubber
+                // hashes `peer_id` beside it. The full error is logged above.
                 self.apply_welcome_send_failure(
                     peer_id,
                     reason,
-                    Some(err.to_string()),
+                    Some(send_failure_token(&err)),
                     no_carrier,
                     source_event,
                 )
@@ -1509,7 +1515,7 @@ impl OfflineProtocol {
     pub(super) fn apply_recipient_unreachable_failure(
         &mut self,
         peer_id: &str,
-        transport_error: Option<String>,
+        transport_error: Option<&'static str>,
     ) -> Result<()> {
         // A late relay verdict for a session that has since been proven (the
         // welcome was rescued over another path and the peer confirmed) must
@@ -1532,12 +1538,12 @@ impl OfflineProtocol {
                 )?;
                 if let Some(record) = self.welcome_lifecycles.get_mut(peer_id) {
                     record.attempt = record.attempt.saturating_sub(1);
-                    record.last_transport_error = transport_error.clone();
+                    record.last_transport_error = transport_error.map(str::to_string);
                 }
             }
             WelcomeDeliveryState::Created | WelcomeDeliveryState::Failed => {
                 if let Some(record) = self.welcome_lifecycles.get_mut(peer_id) {
-                    record.last_transport_error = transport_error.clone();
+                    record.last_transport_error = transport_error.map(str::to_string);
                 }
             }
             WelcomeDeliveryState::Expired => return Ok(()),
@@ -1572,7 +1578,10 @@ impl OfflineProtocol {
                 snapshot.group_id.clone(),
                 snapshot.attempt,
                 crate::events::WelcomeReasonCode::PeerUnreachable,
-                snapshot.last_transport_error.clone(),
+                snapshot
+                    .last_transport_error
+                    .as_deref()
+                    .map(classify_transport_send_error),
                 // Retryable, and now always with a scheduled time: the park
                 // keeps an escalating timed probe on every carrier. The
                 // reachability edges (presence online / peer discovery) still
@@ -1597,7 +1606,7 @@ impl OfflineProtocol {
         &mut self,
         peer_id: &str,
         reason: crate::events::WelcomeReasonCode,
-        transport_error: Option<String>,
+        transport_error: Option<&'static str>,
         no_carrier: bool,
         source_event: &str,
     ) -> Result<bool> {
@@ -1639,7 +1648,7 @@ impl OfflineProtocol {
                     Error::Other(format!("Missing welcome lifecycle for {}", peer_id))
                 })?;
                 record.last_reason_code = Some(terminal_reason);
-                record.last_transport_error = transport_error.clone();
+                record.last_transport_error = transport_error.map(str::to_string);
                 record.next_retry_at = None;
             }
 
@@ -1666,7 +1675,10 @@ impl OfflineProtocol {
                     expired_snapshot.group_id.clone(),
                     expired_snapshot.attempt,
                     terminal_reason,
-                    expired_snapshot.last_transport_error.clone(),
+                    expired_snapshot
+                        .last_transport_error
+                        .as_deref()
+                        .map(classify_transport_send_error),
                     false,
                     None,
                 ));
@@ -1708,7 +1720,7 @@ impl OfflineProtocol {
                     Utc::now() + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS);
             }
             record.last_reason_code = Some(reason);
-            record.last_transport_error = transport_error;
+            record.last_transport_error = transport_error.map(str::to_string);
             record.next_retry_at = Some(retry_at);
         }
 
@@ -1730,7 +1742,10 @@ impl OfflineProtocol {
                 updated.group_id,
                 updated.attempt,
                 reason,
-                updated.last_transport_error.clone(),
+                updated
+                    .last_transport_error
+                    .as_deref()
+                    .map(classify_transport_send_error),
                 true,
                 Some(retry_at.timestamp_millis()),
             ));
@@ -1957,7 +1972,7 @@ impl OfflineProtocol {
             let _ = self.apply_welcome_send_failure(
                 &peer_id,
                 crate::events::WelcomeReasonCode::Timeout,
-                Some("Welcome send confirmation timed out".to_string()),
+                Some(SEND_FAIL_REASON_CONFIRM_TIMEOUT),
                 // A confirm timeout means the Welcome was sent over a carrier;
                 // this is not a no-carrier failure, so it ages normally.
                 false,
