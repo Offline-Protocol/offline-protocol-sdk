@@ -1954,19 +1954,29 @@ export type SecurityWarningCode =
  * it accuses someone the user is already in a room with. Every member of a
  * group carries an identity key whose hash *is* their address, so an honest
  * member always re-derives their own name; a member that does not was built
- * around someone else's. Emitted from three sites: a declined group invite, a
- * refused membership change, and a declined 1:1 session Welcome. In every case
- * the frame is refused, so nothing is delivered.
+ * around someone else's. Emitted from four sites. Three refuse a claim as it
+ * arrives — a declined group invite, a refused membership change, and a
+ * declined 1:1 session Welcome — and in each the frame is dropped, so nothing
+ * is delivered.
  *
  * The session case can fire while an *existing* session with that peer stays
  * live — the refusal is non-destructive — so a `secure_session_failed`
  * alongside it means "this handshake attempt failed", not "the session ended".
  *
- * `peer_id` is the peer that delivered the forgery — the inviter, or the
- * sender of the membership change — and it is proved: the frames carrying
- * these are signature-gated against the sender's own address. `reason` is
- * diagnostic text, must not be parsed, and carries no identifier: the
- * impersonated address stays in the sending device's logs.
+ * The fourth site needs a different response: a roster read finding such a leaf
+ * **already seated in local group state**. No wire gate can have admitted it,
+ * so it was written to this device's secure store directly, or joined by a
+ * build predating those gates. It is kept out of every roster and cannot speak,
+ * but it holds live group secrets and reads everything sent to the group — so
+ * the remedy is to leave and re-create the group, not to remove a member.
+ *
+ * `peer_id` is who the finding concerns, not always who to blame. On the three
+ * refusal sites it is the peer that delivered the forgery — the inviter, or the
+ * sender of the membership change — and it is proved: those frames are
+ * signature-gated against the sender's own address. On the fourth there is no
+ * delivering peer and it is this device's own id. `reason` is diagnostic text,
+ * must not be parsed, and carries no identifier: the impersonated address stays
+ * in the logs of the device that refused it.
  */
 export interface SecurityWarningEvent extends BaseEvent {
   type: 'security_warning';

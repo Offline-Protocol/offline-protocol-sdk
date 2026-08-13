@@ -13823,3 +13823,108 @@ fn test_repeated_unprovable_invites_from_one_sender_are_rate_limited() {
         );
     }
 }
+
+/// A leaf already seated in local group state is *reported*, not only hidden.
+///
+/// The three wire seams refuse a claim as it arrives and say so loudly. This is
+/// the fourth case and the only one that is not about a frame: the leaf is
+/// already in the tree, so no gate can refuse it and no peer delivered it. Until
+/// this, the sole response was a `warn!` inside the MLS crate — the roster
+/// quietly got shorter and the app was never told, which is strictly worse than
+/// showing the entry, because a hidden leaf cannot be reasoned about at all
+/// while it still holds live group secrets and reads every message sent.
+///
+/// Reachable two ways, neither exotic: a direct write to the install-scoped
+/// provider store, and a group joined by a build predating the entry gates and
+/// then upgraded. The second is the one that matters for a release — the fix
+/// closes the door, and this is what tells anyone already inside.
+///
+/// Attributed to *this device*, not to a peer: there is no delivering peer to
+/// name, and naming the impersonated address would be the leak every other site
+/// here avoids.
+#[test]
+fn test_leaf_seated_in_local_state_is_reported_on_the_roster_read() {
+    let (_alice, mut bob, group_id) = setup_alice_bob_group("Seated Leaf Group");
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let collector = events.clone();
+    bob.on_event(move |event| collector.lock().unwrap().push(event));
+
+    let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+
+    // Premise: a clean group reports nothing, so the assertion below cannot
+    // pass merely because the event fires unconditionally.
+    bob.refresh_group_members(&group_id).unwrap();
+    let unproven = |events: &Arc<Mutex<Vec<Event>>>| -> Vec<String> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                Event::SecurityWarning {
+                    peer_id,
+                    reason_code,
+                    ..
+                } if *reason_code
+                    == crate::events::SecurityWarningCode::GroupLeafIdentityUnproven =>
+                {
+                    Some(peer_id.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(
+        unproven(&events).is_empty(),
+        "an honest group must report nothing"
+    );
+
+    // Seat a leaf claiming carol directly in bob's own tree, past every wire
+    // gate — the shape a tampered store, or a pre-fix join, leaves behind.
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls
+            .seat_forged_leaf_for_testing(&gid, &id("carol"))
+            .unwrap();
+    }
+
+    let members = bob.refresh_group_members(&group_id).unwrap();
+    assert!(
+        !members.contains(&id("carol")),
+        "the roster must still exclude the unproven leaf: {members:?}"
+    );
+    assert_eq!(
+        unproven(&events),
+        vec![bob.local_id.clone()],
+        "a seated unprovable leaf must be reported once, against this device"
+    );
+
+    // Persistent, unlike the wire cases: the leaf does not go away, so every
+    // later roster read would re-report it without the rate limit. Groups are
+    // refreshed on every commit, send and drain.
+    bob.refresh_group_members(&group_id).unwrap();
+    bob.refresh_group_members(&group_id).unwrap();
+    assert_eq!(
+        unproven(&events).len(),
+        1,
+        "a persistent finding must not re-report on every roster read"
+    );
+
+    // The reason carries no identifier, for the same scrubber rule the other
+    // sites follow: `reason` ships verbatim while only `peer_id` is hashed.
+    for event in events.lock().unwrap().iter() {
+        if let Event::SecurityWarning {
+            reason_code,
+            reason,
+            ..
+        } = event
+        {
+            if *reason_code == crate::events::SecurityWarningCode::GroupLeafIdentityUnproven {
+                assert!(
+                    !reason.contains("off1"),
+                    "the warning reason must carry no address; got {reason:?}"
+                );
+            }
+        }
+    }
+}

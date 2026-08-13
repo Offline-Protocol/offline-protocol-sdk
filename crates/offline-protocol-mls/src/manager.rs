@@ -4245,4 +4245,109 @@ mod tests {
             .members
             .contains(&addr("bob")));
     }
+
+    /// A non-`Member` sender is refused, not ignored.
+    ///
+    /// `verify_sender_leaf` covers four sender shapes and only one of them —
+    /// `Sender::Member` — resolves to a leaf that can be bound. The other three
+    /// take the `UnsupportedSender` arm, and this is the one of them that is
+    /// cheap to build: an external join proposal, authenticated to
+    /// `Sender::NewMemberProposal`, whose leaf is by definition in no tree yet.
+    ///
+    /// Worth its own test because the arm *changed disposition* in this change.
+    /// It used to fall through to `ProcessedMessageContent::
+    /// ExternalJoinProposalMessage` and be tolerated as `Ok(None)`; the same
+    /// tolerance applied to a `NewMemberCommit` would have *merged* a commit
+    /// from a party holding an unjudged leaf. Nothing else pins that the
+    /// tolerance is gone — the surviving `ExternalJoinProposalMessage` arm still
+    /// reads like the policy, and its comment says it is not.
+    #[test]
+    fn test_external_join_proposal_is_refused_as_an_unsupported_sender() {
+        let (alice, _bob, gid) = create_test_group_with_bob();
+
+        // An outsider asks to join. The proposal is well-formed and correctly
+        // signed by its own key — it is refused for its *sender role*, not for
+        // anything malformed, which is the point.
+        let outsider = create_test_manager("mallory");
+        let kp_bytes = outsider.generate_key_package().unwrap().key_package_data;
+        let key_package = KeyPackageIn::tls_deserialize_exact(&kp_bytes)
+            .unwrap()
+            .validate(alice.provider.crypto(), ProtocolVersion::Mls10)
+            .unwrap();
+        let signer = outsider.get_signer().unwrap();
+
+        let (mls_group_id, epoch) = {
+            let group = alice.group_manager.load_group(&gid).unwrap().unwrap();
+            (group.group_id().clone(), group.epoch())
+        };
+        let proposal =
+            JoinProposal::new::<MlsStorageAdapter>(key_package, mls_group_id, epoch, &signer)
+                .expect(
+                    "an external join proposal is well-formed; the SDK just declines to honour it",
+                );
+
+        let err = alice
+            .decrypt_from_group(
+                &app_message(
+                    &gid,
+                    proposal.tls_serialize_detached().unwrap(),
+                    &addr("mallory"),
+                ),
+                &addr("mallory"),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, MlsError::UnsupportedSender { ref detail, .. }
+                if detail.contains("not a group member")),
+            "expected an UnsupportedSender refusal, got {err:?}"
+        );
+    }
+
+    /// A leaf seated behind the gates is *counted*, not merely hidden.
+    ///
+    /// The roster filter is the only seam at which a leaf already in local
+    /// group state surfaces, and a `warn!` reaches no app. The count is what
+    /// the protocol layer turns into `GroupLeafIdentityUnproven`, so a filter
+    /// that silently returned the same shortened roster would look identical
+    /// here without it.
+    ///
+    /// Built with the in-module fixture rather than
+    /// `seat_forged_leaf_for_testing`, which is behind the `test-utils` feature
+    /// for the *protocol* crate's benefit: workspace feature unification turns
+    /// it on for `cargo test --workspace`, but `cargo test -p
+    /// offline-protocol-mls` would then not compile.
+    #[test]
+    fn test_roster_read_counts_the_leaves_it_skips() {
+        let (alice, _bob, gid) = create_test_group_with_bob();
+
+        let before = alice.get_group_info(&gid).unwrap().unwrap();
+        assert_eq!(
+            before.unproven_members, 0,
+            "an honest group must report no unproven members: {:?}",
+            before.members
+        );
+        let honest_members = before.members.len();
+
+        // Seat a leaf claiming carol, bypassing the gates as a tampered store
+        // would. Alice commits it into her own group, so it is in *her* tree.
+        let impostor = Impostor::claiming(&addr("carol"), "an-attackers-key");
+        add_member_bypassing_checks(&alice, &gid, &impostor.key_package);
+
+        let after = alice.get_group_info(&gid).unwrap().unwrap();
+        assert_eq!(
+            after.unproven_members, 1,
+            "the skipped leaf must be counted, not only dropped"
+        );
+        assert_eq!(
+            after.members.len(),
+            honest_members,
+            "the roster must be unchanged: {:?}",
+            after.members
+        );
+        assert!(
+            !after.members.contains(&addr("carol")),
+            "roster surfaced the unproven member: {:?}",
+            after.members
+        );
+    }
 }

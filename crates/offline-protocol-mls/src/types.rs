@@ -325,6 +325,27 @@ pub struct GroupInfo {
 
     /// Timestamp of the last activity.
     pub last_activity_ms: u64,
+
+    /// How many leaves the roster read *skipped* because they do not carry the
+    /// address their own signature key derives to.
+    ///
+    /// Normally zero: the Welcome and commit gates refuse such a leaf before it
+    /// can enter local group state, so a non-zero count means the state was
+    /// written behind the SDK's back — a direct write to the install-scoped
+    /// provider store, or a group joined by a build predating those gates.
+    ///
+    /// A count, not the identities. The claimed credentials are attacker-chosen
+    /// strings, and the whole reason [`crate::GroupManager::get_group_info`]
+    /// filters them out is that the roster must not carry an identity nobody
+    /// proved; handing the same string back through a second field would return
+    /// it by another door. It is also not what an app should act on: the leaf
+    /// holds live group secrets and reads everything sent to the group, so the
+    /// remedy is to abandon the group, not to evict one member of it.
+    ///
+    /// Additive with `#[serde(default)]` so records written before this field
+    /// existed still load.
+    #[serde(default)]
+    pub unproven_members: u32,
 }
 
 /// Type of MLS message.

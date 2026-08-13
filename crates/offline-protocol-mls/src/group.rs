@@ -719,8 +719,35 @@ impl GroupManager {
             return Ok(());
         }
 
+        // Identity first, policy second — the same rule that puts
+        // `verify_staged_commit_leaves` ahead of this call, applied to the
+        // *pre-merge tree* rather than to the commit's own leaves. The roster
+        // feeds two things below: the `removed` names that go into a
+        // `GroupUnauthorizedMembershipChange` report, and — through the
+        // proposal-sender loop — the authorization verdict itself. Neither
+        // should ever resolve an index to a name nobody proved, for the same
+        // reason `get_group_info` keeps one out of the roster it hands the app.
+        //
+        // Unreachable today, and stated plainly rather than implied, like the
+        // Update-proposal loop in `verify_staged_commit_leaves`. Both uses
+        // require an unbound leaf in *this* tree, which the entry gates refuse;
+        // a store tampered with locally could seat one, but the index would
+        // then also have to be named by a committer whose own tree agrees with
+        // ours, i.e. the forgery is in the whole group's tree and this report is
+        // the least of it. A propose-only API, or any future path that admits a
+        // leaf the gates did not, makes it live without touching this function
+        // — which is the argument for filtering now rather than re-deriving the
+        // reachability later.
+        //
+        // Filtering fails closed either way: an index that no longer resolves
+        // makes `resolve` return `None`, which the `unwrap_or(true)` below reads
+        // as unauthorized.
         let roster: Vec<(LeafNodeIndex, String)> = group
             .members()
+            .filter(|m| {
+                verify_leaf_binding(&m.credential, &m.signature_key, LeafSource::RosterEntry)
+                    .is_ok()
+            })
             .filter_map(|m| {
                 String::from_utf8(m.credential.serialized_content().to_vec())
                     .ok()
@@ -1041,6 +1068,14 @@ impl GroupManager {
     /// whole group down, and the message it would have carried is refused
     /// anyway — [`Self::verify_sender_leaf`] judges the same leaf at decrypt.
     ///
+    /// Skipping silently would be the mistake, though: this is the *only* seam
+    /// at which a leaf already seated in local state surfaces at all, and a
+    /// `warn!` reaches no app. Every other refusal in this family is reported.
+    /// So the count rides out on [`GroupInfo::unproven_members`], and the
+    /// protocol layer turns a non-zero one into the same
+    /// `GroupLeafIdentityUnproven` warning the wire gates emit. The count and
+    /// not the identities, for the reason that field documents.
+    ///
     /// O(N) in the roster, against [`Self::verify_sender_leaf`]'s O(1): one
     /// SHA-256 over 32 bytes plus a bech32m encode per member, per call, and
     /// `process_commit_core` calls this twice per commit to derive a membership
@@ -1048,6 +1083,7 @@ impl GroupManager {
     /// at a hundred members — but this is the expensive seam of the two, so do
     /// not reach for it in a loop.
     pub fn get_group_info(&self, group: &MlsGroup, group_id: &GroupId) -> GroupInfo {
+        let mut unproven_members: u32 = 0;
         let members: Vec<String> = group
             .members()
             .filter_map(|m| {
@@ -1059,6 +1095,7 @@ impl GroupManager {
                         error = %e,
                         "Skipping a group member whose leaf does not prove its own identity"
                     );
+                    unproven_members = unproven_members.saturating_add(1);
                     return None;
                 }
                 let credential = m.credential.serialized_content();
@@ -1078,6 +1115,7 @@ impl GroupManager {
             is_session,
             created_at_ms: 0,
             last_activity_ms: chrono::Utc::now().timestamp_millis() as u64,
+            unproven_members,
         }
     }
 }

@@ -52,6 +52,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   first case where the distinction is observable, and apps that tear down
   session state on the event alone must stop. A
   `GROUP_LEAF_IDENTITY_UNPROVEN` security warning accompanies it.
+- `GroupInfo` gains `unproven_members: u32` — how many leaves the roster read
+  skipped for not deriving their own credential. Additive and `#[serde(default)]`;
+  not carried on the UniFFI `MlsGroupInfo` record, so no bindings change. A
+  non-zero count is reported to the app as `GROUP_LEAF_IDENTITY_UNPROVEN`
+  attributed to this device, not to a peer.
 - **BREAKING**: `ProtocolConfig.user_id` → `ProtocolConfig.profile` across Rust,
   UniFFI (both config dictionaries), React Native, and Python. `profile` selects
   a storage namespace and is never sent; it is not an identity.

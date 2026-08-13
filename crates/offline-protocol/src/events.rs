@@ -209,12 +209,15 @@ pub enum SecurityWarningCode {
     /// producing one that does not means deliberately building a leaf around
     /// someone else's name.
     ///
-    /// `peer_id` is the peer that delivered the forgery — the Welcome's
-    /// inviter, or the sender of the frame carrying the commit — not the
-    /// address the forged leaf claimed. That attribution is worth something
-    /// because it is proved independently: `__GRP_MLS_WELCOME__`,
+    /// `peer_id` is **who the finding concerns, not always who to blame**. On
+    /// the three refusal sites it is the peer that delivered the forgery — the
+    /// Welcome's inviter, or the sender of the frame carrying the commit — and
+    /// never the address the forged leaf claimed. That attribution is worth
+    /// something because it is proved independently: `__GRP_MLS_WELCOME__`,
     /// `__GRP_MLS_COMMIT__` and `__MLS_WELCOME__` are all security-gated, so
-    /// the sender signed with the key its own address derives from.
+    /// the sender signed with the key its own address derives from. On the
+    /// fourth site there is no delivering peer at all and `peer_id` is this
+    /// device's own id.
     ///
     /// `reason` is diagnostic text, must not be parsed, and deliberately
     /// carries **no identifier** — the impersonated address appears only in
@@ -222,7 +225,8 @@ pub enum SecurityWarningCode {
     /// `reason` through verbatim, and the identity at stake belongs to a third
     /// party who is not even part of the exchange.
     ///
-    /// Emitted from three sites, wherever the claim was refused:
+    /// Emitted from four sites. The first three refuse a claim *arriving*, so
+    /// nothing is installed and the frame is dropped:
     ///
     /// 1. joining a group Welcome whose ratchet tree contains such a leaf (the
     ///    invite is declined outright);
@@ -233,6 +237,16 @@ pub enum SecurityWarningCode {
     ///    refusal is non-destructive and the existing session stays live (so a
     ///    `secure_session_failed` alongside this does *not* mean the working
     ///    session ended).
+    ///
+    /// The fourth is different in kind and needs a different response:
+    ///
+    /// 4. a roster read skipping a leaf **already seated in local group
+    ///    state**. No wire gate can have admitted it, so it arrived by a direct
+    ///    write to this device's secure store or via a group joined by a build
+    ///    predating those gates. Such a leaf is kept out of every roster and
+    ///    cannot speak — but it holds live group secrets and reads everything
+    ///    sent to the group, which no later refusal undoes. The remedy is to
+    ///    abandon the group, not to evict a member of it.
     ///
     /// Apps should treat a group that produces this as untrusted for
     /// attribution — a message shown as coming from a member is exactly what

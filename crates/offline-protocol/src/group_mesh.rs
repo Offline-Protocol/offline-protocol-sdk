@@ -219,6 +219,20 @@ pub(crate) enum UnprovenLeafSite {
     WelcomeDeclined,
     /// A membership commit refused because it would have installed the leaf.
     CommitRefused,
+    /// A roster read skipped the leaf because it was already seated in local
+    /// group state.
+    ///
+    /// The odd one out, and the reason it needs its own site: the other two
+    /// refuse a frame *arriving*, so nothing is installed and there is a
+    /// delivering peer to name. This one reports a leaf that is already in the
+    /// tree, holding live group secrets — the wire gates cannot have admitted
+    /// it, so it arrived by a direct write to the install-scoped provider store
+    /// or by a build predating those gates. There is no delivering peer, so the
+    /// report is attributed to this device (see
+    /// [`OfflineProtocol::report_unproven_leaf`]), and the remedy it implies is
+    /// different too: abandon the group rather than evict a member, because the
+    /// leaf can already read everything sent to it.
+    RosterEntry,
 }
 
 /// Claims a rate-limit window for `key`, returning whether the caller should
@@ -2044,13 +2058,24 @@ impl OfflineProtocol {
 
     /// Emits the rate-limited `GroupLeafIdentityUnproven` report.
     ///
-    /// Shared by the two sites that refuse a leaf which does not derive its own
-    /// credential: declining a Welcome whose ratchet tree contains one, and
-    /// refusing a commit that would install one. `peer` is the peer that
-    /// delivered it — the inviter or the committing sender — which is proved,
-    /// both frames being security-gated against the sender's own address. The
-    /// identity the forged leaf claimed stays in `detail`, which is diagnostic
-    /// text.
+    /// Shared by the three group-side sites that find a leaf which does not
+    /// derive its own credential: declining a Welcome whose ratchet tree
+    /// contains one, refusing a commit that would install one, and a roster read
+    /// skipping one already seated in local state.
+    ///
+    /// `peer` is who the finding is attributed to, and it is not the same kind
+    /// of thing in all three. For the two wire sites it is the peer that
+    /// delivered the forgery — the inviter or the committing sender — which is
+    /// proved, both frames being security-gated against the sender's own
+    /// address. For [`UnprovenLeafSite::RosterEntry`] there is no delivering
+    /// peer at all: the leaf is already in the tree and no wire gate admitted
+    /// it, so the caller passes this device's own id, the same attribution
+    /// `RelayAddressDeclarationRefused` uses when the finding is about this
+    /// device rather than a peer's behaviour. Apps must therefore read `peer_id`
+    /// on this code as "who this concerns", not "who to blame".
+    ///
+    /// The identity the forged leaf claimed stays in `detail`, which is
+    /// diagnostic text.
     ///
     /// Rate-limited per `(group, peer, site)` through the shared
     /// [`claim_report_window`], on the same window and bound as
@@ -2895,6 +2920,18 @@ impl OfflineProtocol {
     }
 
     /// Refreshes the cached member list for a group from MlsManager.
+    ///
+    /// Also the reporting seam for leaves already seated in local group state:
+    /// `get_group_info` filters out any leaf that does not derive its own
+    /// credential and hands back the count, and a non-zero one is surfaced here
+    /// as `GroupLeafIdentityUnproven`. This is the chokepoint for it because it
+    /// is the roster read that runs after every membership change and before
+    /// every fan-out, and — unlike the public `get_group_info` getter beside it
+    /// — it holds `&mut self`, so it can emit.
+    ///
+    /// Rate-limited like the two wire sites, which matters more here than
+    /// there: a seated leaf is *persistent*, so without suppression every
+    /// commit, send and drain in the group would re-report the same finding.
     pub(crate) fn refresh_group_members(&mut self, group_id: &str) -> Result<Vec<String>> {
         let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id)?;
@@ -2902,10 +2939,35 @@ impl OfflineProtocol {
             .get_group_info(&gid)?
             .ok_or_else(|| Error::GroupNotFound(group_id.to_string()))?;
         let members = info.members.clone();
+        let unproven_members = info.unproven_members;
         drop(mls_guard);
         self.group_mesh
             .members
             .insert(group_id.to_string(), members.clone());
+
+        if unproven_members > 0 {
+            error!(
+                group_id = %group_id,
+                unproven_members,
+                "SECURITY: local group state holds leaves that do not prove the identity they \
+                 claim; they are kept out of the roster and cannot speak, but they can read"
+            );
+            let peer = self.local_id.clone();
+            self.report_unproven_leaf(
+                group_id,
+                &peer,
+                UnprovenLeafSite::RosterEntry,
+                // Identifier-free like the other two sites, and count-free for
+                // one further reason: the count is a property of local state,
+                // not of anything a peer did, so it says nothing a sink needs
+                // and narrows which install a record came from. It is in the
+                // `error!` above.
+                "This group holds membership state that could not be verified against the keys \
+                 it claims, so messages in this group cannot be reliably attributed. The group \
+                 should be treated as compromised and abandoned rather than repaired."
+                    .to_string(),
+            );
+        }
         Ok(members)
     }
 
