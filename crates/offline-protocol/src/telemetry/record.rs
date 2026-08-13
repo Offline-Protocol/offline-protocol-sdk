@@ -625,6 +625,7 @@ mod tests {
             Event::UserGroups { groups: Vec::new() },
             Event::GroupError {
                 reason: String::new(),
+                group_id: None,
             },
             Event::GroupRelaySyncChanged {
                 group_id: String::new(),

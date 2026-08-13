@@ -19,6 +19,28 @@ use offline_protocol_services::ServiceAction;
 use offline_protocol_transport::TransportType;
 use tracing::{debug, error, info, warn};
 
+/// Renders wire-supplied text for a device log, bounded.
+///
+/// The relay-answer frames this module handles are accepted unsigned, so any
+/// text they carry is attacker-chosen and attacker-sized. The classification
+/// at the emit site keeps that text off events; this keeps the one remaining
+/// diagnostic use — the local `warn!` — from being a place to dump megabytes.
+fn bounded_wire_text(text: &str) -> String {
+    const MAX_LOGGED_WIRE_TEXT_BYTES: usize = 200;
+
+    if text.len() <= MAX_LOGGED_WIRE_TEXT_BYTES {
+        return text.to_string();
+    }
+    // `str::get(..n)` yields `None` mid-codepoint, and the usual
+    // `.unwrap_or(text)` fallback would then log the whole untruncated
+    // string — so walk back to a boundary rather than fall back.
+    let end = (0..=MAX_LOGGED_WIRE_TEXT_BYTES)
+        .rev()
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or(0);
+    format!("{}… (truncated)", &text[..end])
+}
+
 impl OfflineProtocol {
     /// Handles an incoming MLS key package message.
     ///
@@ -1838,7 +1860,13 @@ impl OfflineProtocol {
 
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_ERROR) {
             if let Ok(payload) = serde_json::from_str::<GroupErrorPayload>(data) {
-                warn!(reason = %payload.reason, group_id = ?payload.group_id, "Group error");
+                // The relay's wording stops here: this log is device-local,
+                // while the event below carries only the local classification.
+                warn!(
+                    reason = %bounded_wire_text(&payload.reason),
+                    group_id = ?payload.group_id,
+                    "Group error"
+                );
                 // A group-scoped relay error (registration denied, not a
                 // member, ...) means relay-side fan-out cannot be trusted for
                 // this group: drop the sync flag so sends fall back to the
@@ -1870,8 +1898,12 @@ impl OfflineProtocol {
                         }
                     }
                 }
+                // Classified, never quoted: `reason` is unsigned wire input,
+                // so an event carries a local code and the scoping group id
+                // (a real field the scrubber hashes) instead of the text.
+                let code = payload.classify_reason();
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::group_error(payload.reason));
+                    state.emit_event(Event::group_error(code.to_string(), payload.group_id));
                 }
             } else {
                 warn!("Failed to parse GroupError payload");

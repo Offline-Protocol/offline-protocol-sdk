@@ -98,6 +98,26 @@
 //! `emit_content` knob so the identifier-scrubbing and payload-scrubbing
 //! concerns don't get conflated.
 //!
+//! # Producer rule: no wire-sourced free text on an event
+//!
+//! Because this scrubber ships free text verbatim by design, the burden sits
+//! entirely on producers, and there the rule is absolute: **an event field
+//! never carries text chosen by a remote party.** Not shortened, not
+//! sanitized in place — classified, to a fixed local vocabulary, with the
+//! remote wording kept (bounded) in a device log if it is worth keeping at
+//! all. `Event::GroupError::reason` is the worked example: it renders a
+//! relay answer that is accepted *unsigned*, so it used to be free text a
+//! stranger could choose, and it is now one of three locally-minted codes
+//! (see `GroupErrorPayload::classify_reason`).
+//!
+//! Two habits follow from it. Return `&'static str` from these
+//! classifications, so interpolating wire input is unrepresentable rather
+//! than merely discouraged (`MlsError::privacy_safe_reason` does the same
+//! for error renderings). And when the dropped text was carrying real
+//! structure — `GroupError`'s wording named the group it concerned — add
+//! that back as a *typed field*, which the scrubber can then hash, rather
+//! than leaving it smuggled inside prose.
+//!
 //! # Compile-time coverage
 //!
 //! [`event_variant_exhaustiveness_ward`] mirrors the pattern shipped in
@@ -543,7 +563,17 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
                 hash_string(&mut summary.group_id, scrubber);
             }
         }
-        Event::GroupError { reason: _ } => {}
+        // `reason` is a locally-minted code, not the relay's text — the
+        // producer classifies it precisely so nothing unscrubbable arrives
+        // here. `group_id` is an actor identifier like any other.
+        Event::GroupError {
+            group_id,
+            reason: _,
+        } => {
+            if let Some(group_id) = group_id {
+                hash_string(group_id, scrubber);
+            }
+        }
         Event::GroupRelaySyncChanged {
             group_id,
             synced: _,
@@ -1323,6 +1353,37 @@ mod tests {
                 assert_eq!(sender, "alice");
                 assert_eq!(sender_name, "Alice A.");
             }
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    /// `GroupError` used to have nothing to scrub, because the only thing it
+    /// carried was relay-chosen prose this scrubber ships verbatim by design
+    /// (#349). The producer now classifies that prose away and hands over the
+    /// group id as a real field — so the id must be hashed here, and the code
+    /// beside it must survive untouched or apps lose the ability to switch on
+    /// it.
+    #[test]
+    fn group_error_hashes_its_group_id_and_leaves_the_code_alone() {
+        let event = Event::GroupError {
+            reason: "sync_denied".into(),
+            group_id: Some("g-secret".into()),
+        };
+        match scrub_event(&event, &scrubber_enabled()).into_owned() {
+            Event::GroupError { reason, group_id } => {
+                assert_eq!(reason, "sync_denied");
+                assert_eq!(group_id.as_deref(), Some(hashed("g-secret").as_str()));
+            }
+            _ => panic!("unexpected variant"),
+        }
+
+        // An unscoped error has no id to hash and must not grow one.
+        let unscoped = Event::GroupError {
+            reason: "error".into(),
+            group_id: None,
+        };
+        match scrub_event(&unscoped, &scrubber_enabled()).into_owned() {
+            Event::GroupError { group_id, .. } => assert_eq!(group_id, None),
             _ => panic!("unexpected variant"),
         }
     }

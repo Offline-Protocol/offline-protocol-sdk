@@ -899,12 +899,57 @@ pub(crate) struct UserGroupsPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct GroupErrorPayload {
+    /// The relay's own wording. **Never emitted on an event** — see
+    /// [`GroupErrorPayload::classify_reason`]. Treat every read of this
+    /// field as a read of untrusted, unbounded wire input.
     pub(crate) reason: String,
     /// Group the error concerns, when the relay scoped it (e.g. a
     /// registration sync denial). Used to drop the group from
     /// `relay_synced` so sends fall back to per-member delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) group_id: Option<String>,
+}
+
+impl GroupErrorPayload {
+    /// Maps the relay's free-text `reason` onto a fixed local vocabulary.
+    ///
+    /// `__GROUP_ERROR__` is a relay answer: it rides
+    /// `RELAY_ANSWER_PREFIXES`, so on the relay ingest shape (Internet
+    /// arrival, no transport peer identity) it is accepted **unsigned** —
+    /// no key material, no session, no prior contact, just a frame on that
+    /// socket. Signed, it is reachable to any peer over any transport, since
+    /// the handler is deliberately not gated on the Internet path the way
+    /// the `GROUP_CREATED` ack is. Either way `reason` is whatever the
+    /// sender wrote: arbitrary content, arbitrary length, not ours.
+    ///
+    /// So the text does not travel any further. Nothing downstream needs it
+    /// — the sync revocation keys off `group_id`, and the platform bridges
+    /// already dual-emit the raw relay frame on the server-message channel
+    /// for apps that want the relay's exact wording. What an event carries
+    /// is this classification instead, which an attacker can at most steer
+    /// between three harmless codes.
+    ///
+    /// Even an *honest* relay makes this necessary: its `Not a member of
+    /// group {id}` renders an identifier into prose, smuggling past a
+    /// telemetry scrubber that hashes `group_id` fields but ships free text
+    /// verbatim by design.
+    ///
+    /// The `&'static str` return is load-bearing, the same way
+    /// `MlsError::privacy_safe_reason` is: it makes interpolating wire input
+    /// unrepresentable rather than merely discouraged. Matching is exact and
+    /// the fallback is closed, so a relay rewording an error degrades to
+    /// `error` — never back to shipping its text.
+    pub(crate) fn classify_reason(&self) -> &'static str {
+        match self.reason.as_str() {
+            // Relay has no such group: invite links and relay fan-out for it
+            // are dead, not merely refused.
+            "Group not found" => "not_found",
+            // Relay refused to register/sync the group for this caller.
+            "Only admins can sync this group" => "sync_denied",
+            // Everything else, including anything a forged frame chose.
+            _ => "error",
+        }
+    }
 }
 
 /// A received key package awaiting use for session creation.
