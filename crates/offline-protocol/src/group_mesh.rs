@@ -2095,7 +2095,7 @@ impl OfflineProtocol {
         peer: &str,
         site: UnprovenLeafSite,
         detail: String,
-    ) {
+    ) -> bool {
         let key = (group_id.to_string(), peer.to_string(), site);
         if !claim_report_window(&mut self.group_mesh.unproven_leaf_reports, key) {
             debug!(
@@ -2104,7 +2104,7 @@ impl OfflineProtocol {
                 ?site,
                 "Suppressing repeated unproven-leaf report within the rate-limit window"
             );
-            return;
+            return false;
         }
 
         self.emit_event(Event::security_warning(
@@ -2112,6 +2112,7 @@ impl OfflineProtocol {
             crate::events::SecurityWarningCode::GroupLeafIdentityUnproven,
             detail,
         ));
+        true
     }
 
     /// Emits the rate-limited unauthorized-membership-change report.
@@ -2946,14 +2947,17 @@ impl OfflineProtocol {
             .insert(group_id.to_string(), members.clone());
 
         if unproven_members > 0 {
-            error!(
-                group_id = %group_id,
-                unproven_members,
-                "SECURITY: local group state holds leaves that do not prove the identity they \
-                 claim; they are kept out of the roster and cannot speak, but they can read"
-            );
             let peer = self.local_id.clone();
-            self.report_unproven_leaf(
+            // The log rides the rate limit rather than the condition, which the
+            // other three sites do not need to do: they log once per refused
+            // *frame*, so inbound traffic bounds them. This one is driven by our
+            // own activity — a roster read runs on every commit, send and drain
+            // — and the finding is persistent, so an unthrottled line here would
+            // put an `error!` in the log for every message the user sends, for
+            // as long as the group exists. Same placement as
+            // `report_unauthorized_membership_change`, which also logs only
+            // after claiming the window.
+            let reported = self.report_unproven_leaf(
                 group_id,
                 &peer,
                 UnprovenLeafSite::RosterEntry,
@@ -2961,12 +2965,21 @@ impl OfflineProtocol {
                 // one further reason: the count is a property of local state,
                 // not of anything a peer did, so it says nothing a sink needs
                 // and narrows which install a record came from. It is in the
-                // `error!` above.
+                // `error!` below.
                 "This group holds membership state that could not be verified against the keys \
                  it claims, so messages in this group cannot be reliably attributed. The group \
                  should be treated as compromised and abandoned rather than repaired."
                     .to_string(),
             );
+            if reported {
+                error!(
+                    group_id = %group_id,
+                    unproven_members,
+                    "SECURITY: local group state holds leaves that do not prove the identity \
+                     they claim; they are kept out of the roster and cannot speak, but they \
+                     have read everything sent to this group"
+                );
+            }
         }
         Ok(members)
     }
