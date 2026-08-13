@@ -1105,9 +1105,31 @@ pub enum Event {
     },
 
     /// A group operation failed (from relay).
+    ///
+    /// The relay's own wording is **not** carried here. `__GROUP_ERROR__` is
+    /// a relay answer, accepted unsigned on the relay ingest path (the
+    /// bridges inject it unattributed), so its text is chosen by whoever put
+    /// the frame on that socket — arbitrary content, arbitrary length, and
+    /// not something this SDK can vouch for. `reason` is a fixed code
+    /// classified locally instead; the
+    /// relay's exact text is logged on-device and reaches apps, when they
+    /// want it, as the raw `GroupError` frame the bridges dual-emit on the
+    /// server-message channel.
     GroupError {
-        /// Human-readable error reason.
+        /// Why the operation failed, from a fixed set: `not_found` (the
+        /// relay has no such group — invite links and relay fan-out for it
+        /// are dead, not merely refused), `sync_denied` (the relay refused
+        /// to register or sync the group for this caller), or `error` (any
+        /// other refusal).
         reason: String,
+        /// Group the error concerns, when the relay scoped it. Absent for
+        /// unscoped errors.
+        ///
+        /// This is the group-scoping the free-text `reason` used to smuggle
+        /// past the telemetry scrubber — as a real field it is hashed like
+        /// every other `group_id` instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_id: Option<String>,
     },
 
     /// The relay-side registration state of a group changed.
@@ -2152,8 +2174,11 @@ impl Event {
     }
 
     /// Creates a GroupError event.
-    pub fn group_error(reason: String) -> Self {
-        Self::GroupError { reason }
+    ///
+    /// `reason` must be a locally-minted code, never relay text — callers on
+    /// the wire path get theirs from `GroupErrorPayload::classify_reason`.
+    pub fn group_error(reason: String, group_id: Option<String>) -> Self {
+        Self::GroupError { reason, group_id }
     }
 
     /// Creates a GroupRelaySyncChanged event.
@@ -3064,9 +3089,10 @@ impl fmt::Debug for Event {
                 .debug_struct("UserGroups")
                 .field("groups_count", &groups.len())
                 .finish(),
-            Self::GroupError { reason } => f
+            Self::GroupError { reason, group_id } => f
                 .debug_struct("GroupError")
                 .field("reason", reason)
+                .field("group_id", group_id)
                 .finish(),
             Self::GroupRelaySyncChanged {
                 group_id,
@@ -3473,6 +3499,23 @@ mod tests {
             None,
         );
         assert!(!received.to_json().unwrap().contains("initial_message"));
+    }
+
+    /// Pins the `group_error` wire shape (#349).
+    ///
+    /// `group_id` is additive, so a build that never scopes an error must
+    /// serialize byte-identically to pre-change builds — the same
+    /// `skip_serializing_if` contract `initial_message` is pinned on above.
+    #[test]
+    fn test_group_error_event_wire_shape() {
+        let scoped = Event::group_error("sync_denied".to_string(), Some("g-1".to_string()));
+        let json: serde_json::Value = serde_json::from_str(&scoped.to_json().unwrap()).unwrap();
+        assert_eq!(json["type"], "group_error");
+        assert_eq!(json["reason"], "sync_denied");
+        assert_eq!(json["group_id"], "g-1");
+
+        let unscoped = Event::group_error("error".to_string(), None);
+        assert!(!unscoped.to_json().unwrap().contains("group_id"));
     }
 
     #[test]

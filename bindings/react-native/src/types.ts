@@ -1407,11 +1407,27 @@ export interface UserGroupsEvent extends BaseEvent {
 }
 
 /**
- * Group error event (from relay)
+ * Group error event (from relay).
+ *
+ * `reason` is a **fixed code minted locally**, not the relay's wording:
+ * `not_found` (the relay has no such group — invite links and relay fan-out
+ * for it are dead, not merely refused), `sync_denied` (the relay refused to
+ * register or sync the group for this caller), or `error` (any other
+ * refusal). Do not parse it as prose or show it to users as-is.
+ *
+ * The relay's text is deliberately not carried here: `__GROUP_ERROR__` is
+ * accepted unsigned on the relay ingest path, so its wording is chosen by
+ * whoever put the frame on that socket. Apps that genuinely need the exact
+ * wording — invite-link flows correlating by `request_id`, for instance —
+ * should read the raw `GroupError` frame, which both bridges still dual-emit
+ * on the server-message channel.
+ *
+ * `group_id` is present when the relay scoped the error to a group.
  */
 export interface GroupErrorEvent extends BaseEvent {
   type: 'group_error';
-  reason: string;
+  reason: 'not_found' | 'sync_denied' | 'error';
+  group_id?: string;
 }
 
 /**

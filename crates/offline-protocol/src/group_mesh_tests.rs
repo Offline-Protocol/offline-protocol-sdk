@@ -2929,6 +2929,100 @@ fn test_group_relay_sync_changed_event_lifecycle() {
     protocol.stop().unwrap();
 }
 
+/// #349: the relay's `GroupError` wording must never reach an event.
+///
+/// `__GROUP_ERROR__` is a relay answer, so on the relay ingest shape
+/// (Internet arrival, no transport peer identity) the control gate admits it
+/// **unsigned** — reaching this needs no key material, no session and no
+/// prior contact. Its `reason` used to be copied verbatim onto
+/// `Event::GroupError`, which the telemetry scrubber ships as-is because
+/// free text is content and content scrubbing is deliberately out of its
+/// scope. So a stranger chose a string and the SDK handed it to the sink.
+///
+/// Two things are asserted, and the premise guard is what keeps them honest:
+/// the injected frame really does carry a marker and an address, otherwise
+/// "the event contains neither" would pass with the fix reverted.
+#[test]
+fn test_group_error_reason_is_classified_not_quoted_from_the_wire() {
+    let (mut protocol, events) = setup_started_with_events();
+
+    // The shape of text a hostile sender would pick: a marker, a third
+    // party's address, and a group id smuggled into prose — none of which a
+    // scrubber that hashes *fields* can reach.
+    let victim = id("victim");
+    let planted =
+        format!("LEAKMARKER-9f3: {victim} was denied in group secret-group-42 (see audit)");
+    let frame =
+        format!("__GROUP_ERROR__{{\"reason\":\"{planted}\",\"group_id\":\"secret-group-42\"}}");
+    // Premise guard: without this the assertions below can pass vacuously.
+    assert!(
+        frame.contains("LEAKMARKER-9f3") && frame.contains(victim.as_str()),
+        "fixture must actually carry the marker and the address"
+    );
+
+    // Unsigned on purpose, on the arrival shape the gate exempts — that is
+    // the whole reachability claim, not an incidental fixture detail.
+    let msg = make_unsigned_message("relay", &id("user123"), &frame);
+    protocol.process_internal_message_via(&msg, Some(TransportType::Internet));
+
+    let collected = events.lock().unwrap();
+    let errors: Vec<(&String, &Option<String>)> = collected
+        .iter()
+        .filter_map(|e| match e {
+            Event::GroupError { reason, group_id } => Some((reason, group_id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 1, "expected exactly one GroupError event");
+    let (reason, group_id) = errors[0];
+
+    assert_eq!(
+        reason, "error",
+        "unrecognized relay wording must classify to the closed fallback"
+    );
+    assert!(
+        !reason.contains("LEAKMARKER-9f3"),
+        "relay-chosen text reached the event: {reason}"
+    );
+    assert!(
+        !reason.contains(victim.as_str()),
+        "an address the sender wrote reached the event: {reason}"
+    );
+    // The scoping the prose used to smuggle now rides a real field, where
+    // the scrubber can hash it like any other group id.
+    assert_eq!(group_id.as_deref(), Some("secret-group-42"));
+}
+
+/// The two wordings the relay does mint map to distinct codes, so apps can
+/// still tell "relay has no such group" from "relay refused to sync it".
+#[test]
+fn test_group_error_known_relay_wordings_map_to_distinct_codes() {
+    let cases = [
+        ("Group not found", "not_found"),
+        ("Only admins can sync this group", "sync_denied"),
+        // Anything else, including an honest relay's interpolated prose,
+        // falls closed rather than travelling.
+        ("Not a member of group secret-group-42", "error"),
+    ];
+
+    for (wording, expected) in cases {
+        let (mut protocol, events) = setup_started_with_events();
+        let frame = format!("__GROUP_ERROR__{{\"reason\":\"{wording}\",\"group_id\":\"g-1\"}}");
+        let msg = make_unsigned_message("relay", &id("user123"), &frame);
+        protocol.process_internal_message_via(&msg, Some(TransportType::Internet));
+
+        let collected = events.lock().unwrap();
+        let reason = collected
+            .iter()
+            .find_map(|e| match e {
+                Event::GroupError { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .expect("GroupError event");
+        assert_eq!(reason, expected, "wording {wording:?} misclassified");
+    }
+}
+
 #[test]
 fn test_relay_register_ack_timeout_emits_sync_changed() {
     use offline_protocol_transport::mock::MockTransport;
