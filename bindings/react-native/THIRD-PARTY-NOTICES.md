@@ -38,14 +38,14 @@ upstream source on each crate's page) — the exact versions are listed below.
 
 Used by:
 
-- [offline-protocol 0.20.1](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-core 0.20.1](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-mls 0.20.1](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-reliability 0.20.1](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-router 0.20.1](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-services 0.20.1](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-transport 0.20.1](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-uniffi 0.20.1](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol 0.21.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-core 0.21.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-mls 0.21.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-reliability 0.21.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-router 0.21.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-services 0.21.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-transport 0.21.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-uniffi 0.21.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
 
 ```
 GNU AFFERO GENERAL PUBLIC LICENSE

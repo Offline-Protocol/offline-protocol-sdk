@@ -1,19 +1,24 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.20.x` line.
+current `v0.21.x` line.
 
 The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 `initialize_mls` changes shape, three config updaters become fallible, and
 several previously-accepted inputs are now rejected at the boundary. Sections
 1–12 below cover that release and are the ones that can stop your build.
 
-Since `v0.17.0` exactly one change can break a build, and only for React Native
-on iOS: `v0.20.0` enables iOS autolinking, so a manual `pod 'MeshSdk'` line left
-in your `Podfile` now fails `pod install`. It is a one-line deletion —
+Since `v0.17.0` two releases can break a build. `v0.20.0` enables iOS
+autolinking, so a manual `pod 'MeshSdk'` line left in your `Podfile` now fails
+`pod install` — React Native on iOS only; it is a one-line deletion, and
 [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) has the
 full list of Podfile leftovers to remove, and the same release is what makes iOS
-**simulator** builds link correctly.
+**simulator** builds link correctly. `v0.21.0` is breaking on **every** surface:
+`ProtocolConfig.userId` is replaced by `profile`, and the device's identity on
+the wire becomes a self-certifying `off1…` address derived from an identity key
+it mints for itself. [§14](#14-your-identity-is-derived-not-chosen-v0210) is the
+migration guide — read it before bumping, because there is deliberately no
+in-place migration of existing sessions.
 
 Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
@@ -44,6 +49,12 @@ can deliver.
 [§11.1](#111-messagedecryptionfailed-is-advisory-not-terminal-v0201) has the
 full contract and the events to settle on instead.
 
+`v0.21.0`'s changes are otherwise compile-breaking rather than quiet, but it
+adds one more of these: `secure_session_failed` can now fire while the session
+with that peer stays **live**
+([§11.2](#112-secure_session_failed-no-longer-implies-the-session-is-gone-v0210)),
+so an app that tears down session state on that event alone must stop.
+
 Work through it in order. [§0](#0-before-you-ship-downgrade-is-not-a-rollback)
 is a release-engineering decision, not a code change, and it is the one that
 cannot be undone later.
@@ -69,7 +80,7 @@ cannot be undone later.
 | 12 | [Build & packaging](#12-build-and-packaging) | — | regenerate bindings | rebuild native | — |
 | 12.1 | [iOS: delete your manual `pod 'MeshSdk'` line](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) | n/a | n/a | **breaking** (`pod install` fails) | n/a |
 | 13 | [Upgrade test checklist](#13-upgrade-test-checklist) | — | — | — | — |
-| 14 | [Your identity is derived, not chosen](#14-your-identity-is-derived-not-chosen-unreleased) | **breaking** | **breaking** | **breaking** | **breaking** |
+| 14 | [Your identity is derived, not chosen](#14-your-identity-is-derived-not-chosen-v0210) | **breaking** | **breaking** | **breaking** | **breaking** |
 
 ---
 
@@ -456,7 +467,7 @@ What changes in practice:
 *New in `v0.19.0`.* `peer_key_packages` is now a sealed category, and every use
 of a key package is checked against the peer's identity.
 
-> **Superseded by [§14](#14-your-identity-is-derived-not-chosen-unreleased).**
+> **Superseded by [§14](#14-your-identity-is-derived-not-chosen-v0210).**
 > In `v0.19.0` the check compared the key package against a TOFU-*pinned*
 > signature key. The pin store is gone; the check now re-derives the address
 > from the key package's own signature key and compares it to the peer id the
@@ -1026,6 +1037,23 @@ recovered. A repeated injection of the identical frame therefore re-emits
 `MEDIA_SENDER_GROUP_MISMATCH` on each attempt instead of being suppressed by
 dedup after the first — the rate is the signal, as with `SESSION_REKEY_TRIGGERED`.
 
+### 11.2 `secure_session_failed` no longer implies the session is gone *(v0.21.0)*
+
+The event has always meant "an establishment *attempt* failed", but until now
+every path that fired it also left no live session, so tearing down session
+state on it happened to work. `v0.21.0` adds the first counter-example: a
+session Welcome refused for carrying an unprovable identity
+([§14](#14-your-identity-is-derived-not-chosen-v0210)'s leaf binding) is
+refused **non-destructively** — the Welcome is declined, a
+`GROUP_LEAF_IDENTITY_UNPROVEN` security warning fires alongside it, and the
+session you already had with that peer keeps working.
+
+**What to change.** If your app clears conversation encryption state, resets a
+"secure" indicator, or re-triggers establishment on `secure_session_failed`
+alone, stop — the peer may still be reachable over the surviving session.
+Settle session liveness on `secure_session_established` and actual send
+results; treat `secure_session_failed` as a diagnostic about one attempt.
+
 ---
 
 ## 12. Build and packaging
@@ -1122,7 +1150,7 @@ Run these against a build of your **previous** version, then upgrade in place.
       is the sharpest failure mode — verify it explicitly.)*
 - [ ] MLS identity survives *within a release line*: existing sessions still
       decrypt and existing groups still work. **This does not hold across
-      [§14](#14-your-identity-is-derived-not-chosen-unreleased)** — the identity
+      [§14](#14-your-identity-is-derived-not-chosen-v0210)** — the identity
       becomes the MLS credential there, so every session and group from a
       pre-§14 build is invalidated by design. Upgrading across §14, verify the
       opposite: that peers re-establish cleanly from fresh key packages rather
@@ -1169,7 +1197,7 @@ Run these against a build of your **previous** version, then upgrade in place.
 
 ---
 
-## 14. Your identity is derived, not chosen (unreleased)
+## 14. Your identity is derived, not chosen (v0.21.0)
 
 **`ProtocolConfig.userId` is gone.** It is replaced by `profile`, and the two
 are not the same thing wearing a new name.

@@ -106,7 +106,7 @@ generates for itself, and read back with `local_address()` (or the
 the storage namespace and nothing else. It never leaves the device and no peer
 can see it. On a device with one account, a constant like `"default"` is fine.
 
-See [UPGRADING §14](./UPGRADING.md#14-your-identity-is-derived-not-chosen-unreleased)
+See [UPGRADING §14](./UPGRADING.md#14-your-identity-is-derived-not-chosen-v0210)
 for the migration, including the two ways an app can lose data by re-keying its
 own storage to the address.
 
