@@ -33289,3 +33289,210 @@ fn test_welcome_embedding_a_foreign_session_slot_is_refused_without_naming_it() 
     );
     assert_no_reason_names(&seen, &[&embedded_slot, &id("carol")]);
 }
+
+// ============================================================================
+// #350: SecurityWarning.reason carries no identifier and no relay text
+// ============================================================================
+
+/// A forged control frame is refused without either event naming an address
+/// (#350).
+///
+/// One refusal, two events. `verify_sender_derivation` reports the specific
+/// `SenderAddressMismatch` and the gate then reports its general
+/// `ControlSignatureInvalid` — and the second used to render the returned
+/// error, which names *both* the claimed sender and the address the signing
+/// key really derives to. That pair is what de-anonymizes the record: the
+/// scrubber hashes `peer_id`, which is the claimed sender, so shipping it in
+/// cleartext beside its own hash undoes the hashing, and the derived address is
+/// a second identity the sink never had at all.
+///
+/// Reachable by anyone who can put a frame on the wire: the signature is real,
+/// only the name on the envelope is not.
+#[test]
+fn test_forged_control_frame_is_refused_without_naming_either_address() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let handle = Arc::clone(&events);
+    protocol.on_event(move |e| handle.lock().unwrap().push(e));
+
+    let mut msg = unsigned_frame(
+        &id("alice"),
+        "user123",
+        format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+    );
+    crate::test_identity::sign_as("mallory", &mut msg);
+
+    // Premise: the error this refusal produces really does render both
+    // addresses. Without this the assertion below passes just as happily on an
+    // error that names nobody, and the leak it guards would be untested.
+    let rendered = {
+        let mut probe = OfflineProtocol::new(create_test_config()).unwrap();
+        probe
+            .verify_control_message(&msg)
+            .expect_err("a frame signed by another identity must be refused")
+            .to_string()
+    };
+    assert!(
+        rendered.contains(&id("alice")) && rendered.contains(&id("mallory")),
+        "premise failed: the refusal error should render both the claimed and \
+         the derived address, got: {rendered}"
+    );
+
+    assert!(
+        matches!(
+            protocol.security_gate_control_message(&msg, None),
+            ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected)
+        ),
+        "a frame signed by someone other than its claimed sender must be rejected"
+    );
+
+    let seen = events.lock().unwrap();
+    // Premise: both events really did fire. Sanitizing one while the other
+    // carries the full string is the decoy this issue is about, so a scan that
+    // silently covered only one event would miss exactly that.
+    for code in [
+        SecurityWarningCode::SenderAddressMismatch,
+        SecurityWarningCode::ControlSignatureInvalid,
+    ] {
+        assert!(
+            seen.iter().any(|e| matches!(
+                e,
+                Event::SecurityWarning { reason_code, .. } if *reason_code == code
+            )),
+            "expected a {code:?} warning for the forged frame; saw {seen:?}"
+        );
+    }
+    assert_no_reason_names(&seen, &[&id("alice"), &id("mallory")]);
+}
+
+/// A control frame whose sender is not an address is refused without echoing
+/// that sender (#350).
+///
+/// The sibling arm, and the one that is not about addresses at all: the sender
+/// is attacker-chosen text of arbitrary content, and the refusal used to render
+/// it into the same field. It is also the arm that had no sanitized event of
+/// its own — the derivation-mismatch arm above reported one, this one reported
+/// only through the gate's rendered catch-all.
+#[test]
+fn test_unparseable_control_sender_is_refused_without_echoing_it() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let handle = Arc::clone(&events);
+    protocol.on_event(move |e| handle.lock().unwrap().push(e));
+
+    // Not an address, and deliberately not address-shaped: what this arm
+    // carries need not look like an identifier to be the sender's own text.
+    let nickname = "MALLORY-CHOSE-THIS-MARKER";
+    let mut msg = unsigned_frame(
+        nickname,
+        "user123",
+        format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+    );
+    crate::test_identity::sign_as("mallory", &mut msg);
+
+    assert!(
+        matches!(
+            protocol.security_gate_control_message(&msg, None),
+            ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected)
+        ),
+        "a sender that is not an address has no derivation to prove and must be refused"
+    );
+
+    let seen = events.lock().unwrap();
+    assert!(
+        seen.iter().any(|e| matches!(
+            e,
+            Event::SecurityWarning { reason_code, .. }
+                if *reason_code == SecurityWarningCode::SenderAddressMismatch
+        )),
+        "the unparseable-sender arm must report a sanitized warning of its own; saw {seen:?}"
+    );
+    assert_no_reason_names(&seen, &[nickname]);
+}
+
+/// The relay binding this connection to an address that is not ours is
+/// reported without rendering that address (#350).
+///
+/// `declared` is passed as the event's `peer_id`, where the scrubber hashes it.
+/// Interpolating the same string into `reason`, which is shipped verbatim,
+/// undid that hashing inside a single record — the clearest form of the leak in
+/// this issue, since the raw and hashed copies of one identifier sat side by
+/// side. Both arms are covered: with and without a local identity to compare
+/// against.
+#[test]
+fn test_relay_address_binding_mismatch_is_reported_without_naming_the_address() {
+    // No local identity: the arm that answers a declaration this node never
+    // made. `OfflineProtocol::new` alone leaves `local_address()` unset.
+    let mut no_identity = OfflineProtocol::new(create_test_config()).unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let handle = Arc::clone(&events);
+    no_identity.on_event(move |e| handle.lock().unwrap().push(e));
+
+    no_identity.on_relay_address_declared(&id("mallory"));
+    {
+        let seen = events.lock().unwrap();
+        assert!(
+            seen.iter().any(|e| matches!(
+                e,
+                Event::SecurityWarning { reason_code, peer_id, .. }
+                    if *reason_code == SecurityWarningCode::RelayAddressBindingMismatch
+                        && *peer_id == id("mallory")
+            )),
+            "expected the mismatch to be reported against the declared address; saw {seen:?}"
+        );
+        assert_no_reason_names(&seen, &[&id("mallory")]);
+    }
+
+    // With a local identity: the arm that compares and disagrees.
+    let (mut bob, _bob_h) = make_encrypted_protocol("bob");
+    bob.start().unwrap();
+    let seen: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    bob.on_event(move |e| sink.lock().unwrap().push(e));
+
+    bob.on_relay_address_declared(&id("mallory"));
+
+    let seen = seen.lock().unwrap();
+    assert!(
+        seen.iter().any(|e| matches!(
+            e,
+            Event::SecurityWarning { reason_code, .. }
+                if *reason_code == SecurityWarningCode::RelayAddressBindingMismatch
+        )),
+        "expected a binding mismatch against our own address; saw {seen:?}"
+    );
+    // Neither the address the relay named nor our own reaches the reason.
+    assert_no_reason_names(&seen, &[&id("mallory"), &local_id(&bob)]);
+}
+
+/// The relay refusing our address declaration is reported without quoting the
+/// relay (#350).
+///
+/// The refusal text is written by the relay: remote-chosen, unbounded, and by
+/// this code's own description opaque. An event field never carries text a
+/// remote party wrote, so the code is the classification and the wording stays
+/// in the device log.
+#[test]
+fn test_relay_declaration_refusal_is_reported_without_quoting_the_relay() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let handle = Arc::clone(&events);
+    protocol.on_event(move |e| handle.lock().unwrap().push(e));
+
+    // A hostile relay is free to write an address, or anything else, here.
+    let relay_text = format!("RELAY-CHOSE-THIS-MARKER for {}", id("carol"));
+    protocol.on_relay_address_declaration_refused(&relay_text);
+
+    let seen = events.lock().unwrap();
+    assert!(
+        seen.iter().any(|e| matches!(
+            e,
+            Event::SecurityWarning { reason_code, .. }
+                if *reason_code == SecurityWarningCode::RelayAddressDeclarationRefused
+        )),
+        "expected the refusal to be reported; saw {seen:?}"
+    );
+    assert_no_reason_names(&seen, &["RELAY-CHOSE-THIS-MARKER", &id("carol")]);
+}

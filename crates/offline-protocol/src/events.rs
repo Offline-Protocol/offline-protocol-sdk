@@ -195,10 +195,13 @@ pub enum SecurityWarningCode {
     /// the account name against the `off1…` sender rejects them, while already
     /// established sessions keep working because `__MLS_ENC__` is data-plane.
     ///
-    /// The `reason` carries the relay's own text verbatim and is opaque: the
-    /// causes range from unusable key material to this socket having been
-    /// displaced by a newer login. No retry is attempted — the next reconnect
-    /// declares from scratch.
+    /// The relay's own text is **not** carried on the event. It is
+    /// remote-chosen, and this event's `reason` is shipped verbatim by the
+    /// telemetry scrubber, so the wording stays bounded in the device log
+    /// while the code above is the classification. The causes it distinguishes
+    /// range from unusable key material to this socket having been displaced
+    /// by a newer login; none of them changes what an app should do. No retry
+    /// is attempted — the next reconnect declares from scratch.
     RelayAddressDeclarationRefused,
     /// A group leaf carries a credential its own signature key does not derive
     /// to — an identity claimed inside a group without the key to prove it.

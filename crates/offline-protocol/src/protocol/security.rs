@@ -202,12 +202,28 @@ impl OfflineProtocol {
     /// is also what makes the check unconditional in the sense that matters:
     /// there is no input for which it declines to run.
     fn verify_sender_derivation(&mut self, sender: &str, public_key: &[u8]) -> Result<()> {
-        let claimed = sender.parse::<Address>().map_err(|e| {
-            Error::Other(format!(
-                "Control message sender '{}' is not an address: {}",
-                sender, e
-            ))
-        })?;
+        let claimed = match sender.parse::<Address>() {
+            Ok(claimed) => claimed,
+            Err(e) => {
+                // Reported like the mismatch arm below, and for the same
+                // reason: this is the other half of "the claim cannot be bound
+                // to the key that signed it". The event stays identifier-free
+                // — `sender` here is an unparseable, attacker-chosen string, so
+                // rendering it would put arbitrary wire text on the sink. The
+                // rendered error below reaches the device log through the
+                // caller's `warn!`.
+                self.warn_control_gate_rejection(
+                    sender,
+                    SecurityWarningCode::SenderAddressMismatch,
+                    "Control message sender is not an address, so no signing key can be bound \
+                     to the claim",
+                );
+                return Err(Error::Other(format!(
+                    "Control message sender '{}' is not an address: {}",
+                    sender, e
+                )));
+            }
+        };
 
         let derived = offline_protocol_mls::MlsManager::derive_address(public_key)
             .map_err(|e| Error::Other(format!("Cannot derive an address from the key: {}", e)))?;
@@ -408,10 +424,20 @@ impl OfflineProtocol {
                     error = %err,
                     "Dropping control message: signature verification failed"
                 );
+                // Classified, not rendered. `err` names both the claimed sender
+                // and — on the derivation-mismatch arm — the address the
+                // signing key really derives to, and a `SecurityWarning`'s
+                // `reason` is shipped verbatim by the telemetry scrubber (only
+                // `peer_id`, the *claimed* sender, is hashed). Rendering it
+                // here would hand the sink the pair that de-anonymizes that
+                // hash, beside the deliberately identifier-free event
+                // `verify_sender_derivation` already emitted for the same
+                // refusal. The full error is in the `warn!` above.
                 self.warn_control_gate_rejection(
                     sender,
                     SecurityWarningCode::ControlSignatureInvalid,
-                    format!("Control message rejected: {}", err),
+                    "Control message rejected: its signature, signing metadata, or \
+                     sender/key derivation failed verification",
                 );
                 return ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected);
             }
@@ -714,15 +740,16 @@ impl OfflineProtocol {
                     local = %local,
                     "Relay acknowledged an address that is not ours"
                 );
+                // `declared` is this event's `peer_id`, where the scrubber
+                // hashes it; interpolating it into `reason` — which is shipped
+                // verbatim — would undo that hashing inside the same record.
+                // The raw pair is in the `warn!` above.
                 self.emit_security_warning(
                     declared,
                     SecurityWarningCode::RelayAddressBindingMismatch,
-                    format!(
-                        "relay bound this connection to {}, which is not this device's \
-                         address: its frames are attributed to an identity we cannot \
-                         prove, so receivers will reject our security-gated control traffic",
-                        declared
-                    ),
+                    "relay bound this connection to an address that is not this device's: \
+                     its frames are attributed to an identity we cannot prove, so receivers \
+                     will reject our security-gated control traffic",
                 );
             }
             None => {
@@ -737,11 +764,8 @@ impl OfflineProtocol {
                 self.emit_security_warning(
                     declared,
                     SecurityWarningCode::RelayAddressBindingMismatch,
-                    format!(
-                        "relay bound this connection to {} while this device has no \
-                         established identity to declare: no declaration was sent from here",
-                        declared
-                    ),
+                    "relay bound this connection to an address while this device has no \
+                     established identity to declare: no declaration was sent from here",
                 );
             }
         }
@@ -753,7 +777,8 @@ impl OfflineProtocol {
     /// and keeps working in account-name space. What degrades is *new* MLS
     /// session establishment over the relay; see
     /// [`SecurityWarningCode::RelayAddressDeclarationRefused`]. `reason` is the
-    /// relay's own text and is treated as opaque.
+    /// relay's own text: opaque, remote-chosen, and logged rather than
+    /// emitted — an event field never carries text a remote party wrote.
     ///
     /// Attributed to this node rather than to a peer (the failure is ours, and
     /// no peer is involved), following the same convention as the Nostr
@@ -763,15 +788,16 @@ impl OfflineProtocol {
             reason = %reason,
             "Relay refused our address declaration; staying in account-name space"
         );
+        // The relay's own wording does not travel onto the event: it is
+        // remote-chosen text of arbitrary length and content, and this event's
+        // `reason` is shipped verbatim to telemetry sinks. The code *is* the
+        // classification; the wording stays in the `warn!` above.
         self.emit_security_warning(
             &self.local_id,
             SecurityWarningCode::RelayAddressDeclarationRefused,
-            format!(
-                "relay refused this connection's address declaration ({}): frames stay \
-                 attributed by account name, so new encrypted sessions cannot be \
-                 established over the relay until a later connection declares successfully",
-                reason
-            ),
+            "relay refused this connection's address declaration: frames stay \
+             attributed by account name, so new encrypted sessions cannot be \
+             established over the relay until a later connection declares successfully",
         );
     }
 
