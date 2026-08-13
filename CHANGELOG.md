@@ -721,6 +721,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### CI/CD
 
+- **A prerelease tag no longer takes over the npm `latest` dist-tag.** `npm
+  publish` defaults every upload to `latest`, so a `vX.Y.Z-rc.N` tag — or a
+  branch dispatch, which falls back to `0.0.0-dev` — became what a plain `npm
+  install @offline-protocol/mesh-sdk` resolved to. Prerelease versions now
+  publish under `next`, derived from the resolved version rather than the ref so
+  a hyphenated branch name cannot trip it. This matters more than it used to:
+  crates.io publishing treats an rc tag as a full rehearsal, which makes cutting
+  one a routine thing to do rather than a rarity.
 - **`cargo doc` is gated in CI.** A new `Rustdoc` job builds the workspace under
   `RUSTDOCFLAGS: -D warnings`. It caught six broken intra-doc links: four public
   items linking to private ones — which resolve to nothing for every reader not

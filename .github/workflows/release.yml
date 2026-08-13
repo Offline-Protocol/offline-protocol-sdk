@@ -698,6 +698,26 @@ jobs:
 
           printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
 
+          # A prerelease must not become what a plain `npm install` resolves to.
+          # npm dist-tags every publish `latest` unless told otherwise, so
+          # without this an `-rc` tag would quietly become the default version
+          # for every consumer. That matters more now than it used to: the
+          # crates job treats prerelease tags as free rehearsal — every gate and
+          # the full packaging verification run, only the immutable upload is
+          # skipped — which makes cutting one a reasonable thing to do rather
+          # than a rarity.
+          #
+          # Derived from the resolved, semver-validated version rather than the
+          # ref, so a branch dispatch off a hyphenated branch name cannot trip
+          # it.
+          if [[ "$VERSION" == *-* ]]; then
+            NPM_TAG=next
+          else
+            NPM_TAG=latest
+          fi
+          printf 'NPM_TAG=%s\n' "$NPM_TAG" >> "$GITHUB_OUTPUT"
+          echo "Version $VERSION publishes under the '$NPM_TAG' npm dist-tag."
+
       - name: Update package.json version
         working-directory: bindings/react-native
         env:
@@ -787,9 +807,10 @@ jobs:
       - name: Publish to npm
         if: inputs.dry_run != true
         working-directory: bindings/react-native
-        run: npm publish --access public ${{ steps.provenance.outputs.FLAG }}
+        run: npm publish --access public --tag "$NPM_TAG" ${{ steps.provenance.outputs.FLAG }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ steps.version.outputs.NPM_TAG }}
 
   # ---------------------------------------------------------------------------
   # crates.io
