@@ -11,9 +11,10 @@ use super::{
     MAX_PENDING_EXPIRIES_PER_PASS, MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER,
     MAX_PENDING_MESSAGE_BYTES_GLOBAL, MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS,
     MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL,
-    RICH_PAYLOAD_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, WELCOME_NO_CARRIER_RETRY_SECS,
-    WELCOME_UNREACHABLE_RETRY_CAP_SECS,
+    RICH_PAYLOAD_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, SEND_FAIL_REASON_TRANSPORT,
+    WELCOME_NO_CARRIER_RETRY_SECS, WELCOME_UNREACHABLE_RETRY_CAP_SECS,
 };
+use super::{classify_transport_send_error, send_failure_token};
 use crate::constants::{
     ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
 };
@@ -384,7 +385,8 @@ impl OfflineProtocol {
                 );
                 self.emit_event(Event::message_deferred(
                     message.id.clone(),
-                    format!("Transport send failed: {}", err),
+                    message.recipient.as_str().to_string(),
+                    send_failure_token(&err),
                     0,
                     next_retry_at.map(|at| at.timestamp_millis()),
                 ));
@@ -436,9 +438,13 @@ impl OfflineProtocol {
                     error = %err,
                     "Send via forced transport failed, message deferred"
                 );
+                // The forced transport is in the `warn!` above, not on the
+                // event: it is a routing detail, and the token names the
+                // failure class either way.
                 self.emit_event(Event::message_deferred(
                     message.id.clone(),
-                    format!("Send via {:?} failed: {}", transport, err),
+                    message.recipient.as_str().to_string(),
+                    send_failure_token(&err),
                     0,
                     next_retry_at.map(|at| at.timestamp_millis()),
                 ));
@@ -2542,7 +2548,7 @@ impl OfflineProtocol {
                         self.emit_event(Event::connection_request_undeliverable(
                             recipient,
                             oldest_id.as_str(),
-                            "outbox_capacity_exceeded".to_string(),
+                            "outbox_capacity_exceeded",
                         ));
                     }
                 }
@@ -2887,7 +2893,7 @@ impl OfflineProtocol {
                 self.emit_event(Event::connection_request_undeliverable(
                     recipient,
                     message_id.as_str(),
-                    "outbox_lifetime_exceeded".to_string(),
+                    "outbox_lifetime_exceeded",
                 ));
             }
         }
@@ -3237,6 +3243,29 @@ impl OfflineProtocol {
         message_id: &str,
         transport_error: Option<String>,
     ) -> Result<()> {
+        // Classified at the boundary, once, and never carried past it.
+        //
+        // The platform bridges build this string from the relay's own
+        // `DeliveryError.reason` (`recipient_unreachable: <relay text>`), and
+        // the Nostr bridge from a relay's `OK` rejection text — remote-chosen,
+        // unbounded, and downstream of here it reaches three event fields the
+        // telemetry scrubber ships verbatim, each beside a recipient it
+        // hashes. Even the honest relay renders the peer into its wording.
+        //
+        // The token itself is load-bearing and survives: the two prefix tests
+        // below and the DM park key on `recipient_unreachable`, so classifying
+        // to the bare token keeps every protocol decision intact and drops
+        // only the prose. The raw string stays in this one device log.
+        if let Some(raw) = transport_error.as_deref() {
+            debug!(
+                message_id = %message_id,
+                transport_error = %raw.chars().take(256).collect::<String>(),
+                "Platform reported a send failure"
+            );
+        }
+        let transport_error = transport_error
+            .as_deref()
+            .map(classify_transport_send_error);
         // Connection requests first: the relay's "recipient offline"
         // DeliveryError is the only fast, authoritative failure signal a
         // request gets (there is no ACK from an offline peer — the app
@@ -3253,9 +3282,7 @@ impl OfflineProtocol {
             if pending.sent_at.elapsed() > PENDING_CONNECTION_REQUEST_TTL {
                 self.pending_connection_requests.remove(message_id);
             } else {
-                let unreachable = transport_error
-                    .as_deref()
-                    .is_some_and(|r| r.starts_with(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE));
+                let unreachable = transport_error == Some(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE);
                 if unreachable {
                     let recipient = pending.recipient.clone();
                     self.pending_connection_requests.remove(message_id);
@@ -3268,7 +3295,7 @@ impl OfflineProtocol {
                         state.emit_event(Event::connection_request_undeliverable(
                             recipient,
                             message_id.to_string(),
-                            transport_error.unwrap_or_default(),
+                            transport_error.unwrap_or(SEND_FAIL_REASON_TRANSPORT),
                         ));
                     }
                     return Ok(());
@@ -3280,7 +3307,7 @@ impl OfflineProtocol {
             // Not a connection request, not a welcome: a plain DM or media
             // chunk. Surface the relay's verdict and park plain DMs so the
             // ACK retry budget stops burning against an offline peer.
-            self.handle_recipient_unreachable_for_message(message_id, transport_error.as_deref());
+            self.handle_recipient_unreachable_for_message(message_id, transport_error);
             return Ok(());
         };
         // A reason tagged "recipient_unreachable" (the internet bridge's
@@ -3291,9 +3318,7 @@ impl OfflineProtocol {
         // relay can answer, so the DeliveryError normally arrives when the
         // record is already Sent and the plain failure path below would
         // no-op on it, stranding a false `Sent`.
-        let peer_unreachable = transport_error
-            .as_deref()
-            .is_some_and(|r| r.starts_with(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE));
+        let peer_unreachable = transport_error == Some(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE);
         if peer_unreachable {
             return self.apply_recipient_unreachable_failure(&peer_id, transport_error);
         }
@@ -3349,10 +3374,9 @@ impl OfflineProtocol {
     fn handle_recipient_unreachable_for_message(
         &mut self,
         message_id: &str,
-        transport_error: Option<&str>,
+        transport_error: Option<&'static str>,
     ) {
-        let Some(reason) =
-            transport_error.filter(|r| r.starts_with(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE))
+        let Some(reason) = transport_error.filter(|r| *r == SEND_FAIL_REASON_RECIPIENT_UNREACHABLE)
         else {
             return;
         };
@@ -3387,7 +3411,7 @@ impl OfflineProtocol {
         self.emit_event(Event::message_undeliverable(
             parsed_id.clone(),
             recipient.clone(),
-            reason.to_string(),
+            reason,
             file_id,
         ));
         if is_media {

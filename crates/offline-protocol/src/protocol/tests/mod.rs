@@ -13627,14 +13627,19 @@ fn test_relay_declaration_refusal_warns_against_self() {
     );
 }
 
-/// The relay's refusal text reaches the app.
+/// The relay's refusal text does **not** reach the event (#350).
 ///
-/// The reasons are opaque strings owned by the relay and range from unusable
-/// key material to this socket having been displaced by a newer login — the
-/// operator needs the text to tell those apart, so it must survive into the
-/// event rather than being collapsed into the code.
+/// This test asserted the opposite until #350, on the rationale that the
+/// reasons range from unusable key material to a displaced socket and an
+/// operator needs the text to tell those apart. The conclusion did not follow
+/// from the premise. A `SecurityWarning`'s `reason` is shipped verbatim by the
+/// telemetry scrubber, so "reaches the operator" and "reaches a remote sink"
+/// were the same act — and the text is written by the relay, which may write an
+/// identifier or anything else into it. The operator keeps the distinction
+/// where it costs nothing: the `warn!` at the refusal site, which `tracing`
+/// does not bridge to a `TelemetrySink`.
 #[test]
-fn test_relay_declaration_refusal_carries_the_relay_reason() {
+fn test_relay_declaration_refusal_does_not_carry_the_relay_reason() {
     let (mut alice, _h) = make_encrypted_protocol("alice");
     let reasons: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     {
@@ -13649,14 +13654,18 @@ fn test_relay_declaration_refusal_carries_the_relay_reason() {
 
     alice.on_relay_address_declaration_refused("identity key is not valid base64");
 
+    let reasons = reasons.lock().unwrap();
+    // Premise: the refusal really did surface. Without this the assertion
+    // below passes on an empty list.
     assert!(
-        reasons
-            .lock()
-            .unwrap()
+        !reasons.is_empty(),
+        "the refusal must still be reported to the app"
+    );
+    assert!(
+        !reasons
             .iter()
             .any(|r| r.contains("identity key is not valid base64")),
-        "the relay's own reason must reach the app (got {:?})",
-        reasons.lock().unwrap()
+        "the relay's own wording must not reach the event (got {reasons:?})"
     );
 }
 
@@ -33495,4 +33504,297 @@ fn test_relay_declaration_refusal_is_reported_without_quoting_the_relay() {
         "expected the refusal to be reported; saw {seen:?}"
     );
     assert_no_reason_names(&seen, &["RELAY-CHOSE-THIS-MARKER", &id("carol")]);
+}
+
+// ============================================================================
+// #351: transport and relay error text never reaches an event reason
+// ============================================================================
+
+/// A relay-sourced reason is classified to its bare token, and the park it
+/// drives still happens (#351).
+///
+/// The two halves are one test on purpose. The bridges build this string as
+/// `recipient_unreachable: <relay prose>`, and that tail is written by the
+/// relay — remote-chosen, unbounded, and shipped verbatim beside a `recipient`
+/// the scrubber hashes. But the *prefix* is a cross-layer contract: core
+/// prefix-matches it to park the DM. Dropping the tail while keeping the token
+/// is only correct if the park still fires, so this asserts both.
+#[test]
+fn test_relay_unreachable_reason_is_classified_and_still_parks_the_dm() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let dm = signed_frame(&id("user123"), &id("bob"), "hello");
+    let dm_id = dm.id.clone();
+    protocol.outbox.insert(
+        dm_id.clone(),
+        OutboxEntry {
+            message: dm,
+            attempt_count: 1,
+            first_sent_at: chrono::Utc::now(),
+            last_sent_at: chrono::Utc::now(),
+            last_transport: Some(TransportType::BLE),
+            reseal: None,
+        },
+    );
+
+    // What a hostile — or merely honest — relay can put in `DeliveryError`.
+    let relay_text = format!(
+        "recipient_unreachable: RELAY-CHOSE-THIS-MARKER, no route to {}",
+        id("bob")
+    );
+    protocol
+        .on_transport_send_failed(&dm_id.as_str(), Some(relay_text))
+        .unwrap();
+
+    let captured = events.lock().unwrap();
+    let reason = captured
+        .iter()
+        .find_map(|event| match event {
+            Event::MessageUndeliverable { reason, .. } => Some(reason.clone()),
+            _ => None,
+        })
+        .expect("MessageUndeliverable must fire for the relay verdict");
+    assert_eq!(
+        reason, "recipient_unreachable",
+        "the token survives and the relay's prose does not"
+    );
+    assert!(
+        !reason.contains("RELAY-CHOSE-THIS-MARKER") && !reason.contains("off1"),
+        "neither the relay's text nor an address may reach the event: {reason}"
+    );
+    drop(captured);
+
+    // The half that proves the token is still doing its job: the classified
+    // value drove the park, so the ACK budget stops burning.
+    assert!(
+        protocol.dm_unreachable_parks.contains_key(&id("bob")),
+        "the classified token must still park the DM"
+    );
+}
+
+/// A relay-sourced reason on a pending connection request is classified the
+/// same way, and still fast-fails the request (#351).
+///
+/// The sibling path: this one used `transport_error.unwrap_or_default()`, so
+/// the relay's prose reached `ConnectionRequestUndeliverable.reason` whole.
+#[test]
+fn test_relay_unreachable_reason_is_classified_on_a_connection_request() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let request_id = MessageId::new();
+    protocol.pending_connection_requests.insert(
+        request_id.as_str(),
+        PendingConnectionRequest {
+            recipient: id("bob"),
+            sent_at: Instant::now(),
+        },
+    );
+
+    protocol
+        .on_transport_send_failed(
+            &request_id.as_str(),
+            Some(format!(
+                "recipient_unreachable: RELAY-CHOSE-THIS-MARKER for {}",
+                id("bob")
+            )),
+        )
+        .unwrap();
+
+    let captured = events.lock().unwrap();
+    let reason = captured
+        .iter()
+        .find_map(|event| match event {
+            Event::ConnectionRequestUndeliverable { reason, .. } => Some(reason.clone()),
+            _ => None,
+        })
+        .expect("the request must still fast-fail on the relay verdict");
+    assert_eq!(reason, "recipient_unreachable");
+    assert!(
+        !reason.contains("RELAY-CHOSE-THIS-MARKER") && !reason.contains("off1"),
+        "the relay's prose must not reach the event: {reason}"
+    );
+}
+
+/// A locally raised transport failure defers the message without rendering the
+/// peer into the reason (#351).
+///
+/// The highest-volume arm of the set, and the one with no attacker in it. The
+/// transport backends interpolate the recipient into `PeerNotReachable`, so
+/// `format!("{err}")` shipped the counterparty's address on every failed
+/// attempt — and `MessageDeferred` carried no hashed field at all, so that
+/// address was the *only* identity in the record. It now carries a typed
+/// `recipient`, which the scrubber hashes, and a token.
+///
+/// Driven through the forced-transport path deliberately: DORS collapses its
+/// per-transport errors into `SendFailed("All transports failed (tried …)")`,
+/// which names no peer, so the leak lives on the path that hands the backend's
+/// own error back — and that is also the path whose error used to be flattened
+/// into `Error::Other`, discarding the variant this classification reads.
+#[test]
+fn test_local_send_failure_defers_without_rendering_the_peer() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    // Available, but holding no link to the recipient: the ordinary
+    // "peer is not here" failure, not a configuration problem. That is what
+    // makes the transport render the peer into its error.
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.set_reject_unknown_recipients(true);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    // Premise: the error this path produces really does render the recipient.
+    // Without it, "the reason does not name the peer" passes vacuously.
+    let probe = signed_frame(&id("user123"), &id("bob"), "hello");
+    let rendered = protocol
+        .transport_manager_mut()
+        .send_via_transport(&probe, TransportType::BLE)
+        .expect_err("no connected peer means the send must fail")
+        .to_string();
+    assert!(
+        rendered.contains(&id("bob")),
+        "premise failed: the transport error should render the recipient, got: {rendered}"
+    );
+
+    let _ = protocol.send_message_via_transport(
+        id("bob"),
+        "hello",
+        None,
+        TransportType::BLE,
+        None::<String>,
+    );
+
+    let captured = events.lock().unwrap();
+    let (recipient, reason) = captured
+        .iter()
+        .find_map(|event| match event {
+            Event::MessageDeferred {
+                recipient, reason, ..
+            } => Some((recipient.clone(), reason.clone())),
+            _ => None,
+        })
+        .expect("a failed send must defer the message");
+    assert_eq!(
+        recipient,
+        id("bob"),
+        "the counterparty belongs in a typed field the scrubber can hash"
+    );
+    assert_eq!(
+        reason, "peer_not_reachable",
+        "the reason is a classification, not a rendered error"
+    );
+    assert!(
+        !reason.contains("off1"),
+        "no address may reach the reason: {reason}"
+    );
+}
+
+/// The relay's prose never reaches the persisted welcome record (#351).
+///
+/// `last_transport_error` is serde-persisted with the welcome lifecycle and
+/// emitted on `WelcomeSendFailed.transport_error`, where `peer_id` and
+/// `group_id` beside it are hashed. Classifying at the FFI boundary is what
+/// keeps the relay's wording off the disk in the first place, so this asserts
+/// the *stored* value, which is the one every emit then reads.
+///
+/// (The emit sites classify a second time. That is a backstop, not this path:
+/// all five writers overwrite the field before their emit, so a record
+/// restored from an older build cannot carry raw text into an event today.
+/// It holds the invariant if a future writer becomes conditional.)
+#[test]
+fn test_relay_prose_never_reaches_the_persisted_welcome_record() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    alice.start().unwrap();
+
+    alice.welcome_lifecycles.insert(
+        id("bob"),
+        WelcomeLifecycleRecord {
+            peer_id: id("bob"),
+            group_id: session_slot("alice", "bob"),
+            state: WelcomeDeliveryState::Sent,
+            attempt: 1,
+            unreachable_parks: 0,
+            welcome_message: signed_frame(&local_id(&alice), &id("bob"), "__MLS_WELCOME__{}"),
+            next_retry_at: None,
+            last_reason_code: None,
+            last_transport_error: None,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + ChronoDuration::seconds(60),
+        },
+    );
+    let welcome_id = alice.welcome_lifecycles[&id("bob")]
+        .welcome_message
+        .id
+        .as_str();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    alice.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    alice
+        .on_transport_send_failed(
+            &welcome_id,
+            Some(format!(
+                "recipient_unreachable: RELAY-CHOSE-THIS-MARKER, no route to {}",
+                id("bob")
+            )),
+        )
+        .unwrap();
+
+    let stored = alice.welcome_lifecycles[&id("bob")]
+        .last_transport_error
+        .clone();
+    assert_eq!(
+        stored.as_deref(),
+        Some("recipient_unreachable"),
+        "the bare token is what gets persisted, never the relay's prose"
+    );
+
+    let captured = events.lock().unwrap();
+    let transport_error = captured
+        .iter()
+        .find_map(|event| match event {
+            Event::WelcomeSendFailed {
+                transport_error, ..
+            } => Some(transport_error.clone()),
+            _ => None,
+        })
+        .expect("the unreachable verdict must surface as a welcome send failure");
+    assert_eq!(transport_error.as_deref(), Some("recipient_unreachable"));
 }

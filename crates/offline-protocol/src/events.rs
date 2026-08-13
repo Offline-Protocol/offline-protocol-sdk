@@ -730,7 +730,20 @@ pub enum Event {
     MessageDeferred {
         /// ID of the deferred message.
         message_id: String,
-        /// Reason for deferral.
+        /// Recipient's user ID.
+        ///
+        /// Added when `reason` stopped rendering the transport error: the
+        /// counterparty used to reach apps only inside that prose, which put an
+        /// unhashed address on every telemetry record for a routine send
+        /// failure. Carried as a field so the scrubber hashes it like any
+        /// other actor id.
+        recipient: String,
+        /// Stable classification of the deferral, not a rendered error.
+        ///
+        /// One of a fixed local vocabulary (`peer_not_reachable`,
+        /// `transport_not_connected`, `transport_send_failed`, …). Branch on it
+        /// if you must, but do not parse it for detail: the underlying error —
+        /// which renders the peer — stays in the device log.
         reason: String,
         /// Current retry count.
         retry_count: u32,
@@ -776,7 +789,15 @@ pub enum Event {
         message_id: String,
         /// Recipient's user ID.
         recipient: String,
-        /// Transport-reported reason (starts with `recipient_unreachable`).
+        /// Stable classification of the failure — `recipient_unreachable` on
+        /// the relay-verdict path this event is normally reached by.
+        ///
+        /// The transport's own wording used to be appended here verbatim, and
+        /// on the relay path that wording is written by the relay: unbounded
+        /// remote text, shipped beside a `recipient` the telemetry scrubber
+        /// hashes. It is now dropped at the boundary — kept in the device log,
+        /// and on the internet path still delivered raw to apps on the
+        /// bridges' `diagnostic` channel.
         reason: String,
         /// Owning media transfer when the message is a media chunk.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -914,7 +935,20 @@ pub enum Event {
         /// Machine-readable reason code.
         reason_code: WelcomeReasonCode,
         #[serde(skip_serializing_if = "Option::is_none")]
-        /// Optional transport/native error detail.
+        /// Stable classification of the transport failure, when one was
+        /// recorded — never the rendered error.
+        ///
+        /// Both feeders named an identifier: the platform-supplied string is
+        /// the relay's own `DeliveryError` prose, and the locally raised one
+        /// renders a transport error that interpolates the peer. `peer_id` and
+        /// `group_id` beside it are hashed, so either would have undone that.
+        /// Classified at the boundary, so the persisted record holds the token
+        /// too — and again at each emit as a backstop. The second pass is
+        /// unreachable today (every writer overwrites the field before its
+        /// emit, so no record restored from an older build can carry raw text
+        /// into an event) and kept because the field is persisted and has five
+        /// writers: it holds the invariant if one of them ever becomes
+        /// conditional.
         transport_error: Option<String>,
         /// Whether this failure will be retried.
         retryable: bool,
@@ -966,8 +1000,14 @@ pub enum Event {
         recipient: String,
         /// Message id returned by `send_connection_request`.
         message_id: String,
-        /// Failure reason: starts with `recipient_unreachable`, or is
-        /// `max_retries_exceeded` when the retry budget ran out.
+        /// Failure reason, drawn from a fixed local vocabulary:
+        /// `recipient_unreachable` on the transport verdict path, or
+        /// `max_retries_exceeded` / `outbox_lifetime_exceeded` /
+        /// `outbox_capacity_exceeded` on the give-up paths.
+        ///
+        /// The relay's wording is no longer appended to the first of these —
+        /// it is remote-chosen text, and `recipient` beside it is hashed by
+        /// the telemetry scrubber.
         reason: String,
     },
 
@@ -1768,13 +1808,15 @@ impl Event {
     /// Creates a MessageDeferred event.
     pub fn message_deferred(
         message_id: MessageId,
-        reason: String,
+        recipient: String,
+        reason: &'static str,
         retry_count: u32,
         next_retry_at: Option<i64>,
     ) -> Self {
         Self::MessageDeferred {
             message_id: message_id.as_str(),
-            reason,
+            recipient,
+            reason: reason.to_string(),
             retry_count,
             next_retry_at,
         }
@@ -1799,13 +1841,13 @@ impl Event {
     pub fn message_undeliverable(
         message_id: MessageId,
         recipient: String,
-        reason: String,
+        reason: &'static str,
         file_id: Option<String>,
     ) -> Self {
         Self::MessageUndeliverable {
             message_id: message_id.as_str(),
             recipient,
-            reason,
+            reason: reason.to_string(),
             file_id,
         }
     }
@@ -1922,7 +1964,7 @@ impl Event {
         group_id: String,
         attempt: u32,
         reason_code: WelcomeReasonCode,
-        transport_error: Option<String>,
+        transport_error: Option<&'static str>,
         retryable: bool,
         next_retry_at: Option<i64>,
     ) -> Self {
@@ -1932,7 +1974,7 @@ impl Event {
             group_id,
             attempt,
             reason_code,
-            transport_error,
+            transport_error: transport_error.map(str::to_string),
             retryable,
             next_retry_at,
         }
@@ -1974,12 +2016,12 @@ impl Event {
     pub fn connection_request_undeliverable(
         recipient: String,
         message_id: String,
-        reason: String,
+        reason: &'static str,
     ) -> Self {
         Self::ConnectionRequestUndeliverable {
             recipient,
             message_id,
-            reason,
+            reason: reason.to_string(),
         }
     }
 
@@ -2785,12 +2827,14 @@ impl fmt::Debug for Event {
                 .finish(),
             Self::MessageDeferred {
                 message_id,
+                recipient: _,
                 reason,
                 retry_count,
                 next_retry_at,
             } => f
                 .debug_struct("MessageDeferred")
                 .field("message_id", message_id)
+                .field("recipient", &"[REDACTED]")
                 .field("reason", reason)
                 .field("retry_count", retry_count)
                 .field("next_retry_at", next_retry_at)
@@ -3330,6 +3374,7 @@ impl fmt::Debug for Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::SEND_FAIL_REASON_RECIPIENT_UNREACHABLE;
     use offline_protocol_core::{AppId, Message, MessagePriority, UserId};
 
     #[test]
@@ -3473,13 +3518,14 @@ mod tests {
         let event = Event::connection_request_undeliverable(
             "bob".to_string(),
             "m1".to_string(),
-            "recipient_unreachable: User is offline".to_string(),
+            SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
         );
         let json: serde_json::Value = serde_json::from_str(&event.to_json().unwrap()).unwrap();
         assert_eq!(json["type"], "connection_request_undeliverable");
         assert_eq!(json["recipient"], "bob");
         assert_eq!(json["message_id"], "m1");
-        assert_eq!(json["reason"], "recipient_unreachable: User is offline");
+        // The bare token, never the relay's `recipient_unreachable: <prose>`.
+        assert_eq!(json["reason"], "recipient_unreachable");
 
         let received = Event::connection_request_received(
             "alice".to_string(),

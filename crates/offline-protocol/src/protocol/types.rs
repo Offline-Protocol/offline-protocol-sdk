@@ -111,6 +111,143 @@ pub(crate) const WELCOME_PRESENCE_RESCUE_MAX_SECS: i64 = 600;
 /// (`InternetManager.kt` / `InternetManager.swift`) hardcode this literal when
 /// calling `internet_send_failed_with_reason` — keep them in sync.
 pub(crate) const SEND_FAIL_REASON_RECIPIENT_UNREACHABLE: &str = "recipient_unreachable";
+
+/// Fallback token for a send failure that classifies as nothing more specific.
+pub(crate) const SEND_FAIL_REASON_TRANSPORT: &str = "transport_send_failed";
+/// A Welcome was written to a carrier that never confirmed it.
+pub(crate) const SEND_FAIL_REASON_CONFIRM_TIMEOUT: &str = "send_confirmation_timed_out";
+
+/// Every token [`classify_transport_send_error`] and
+/// [`send_failure_token`] can produce.
+///
+/// Membership is what makes classification idempotent: a value already drawn
+/// from this list re-classifies to itself, so a record written by one producer
+/// and re-read by the other is not degraded to the fallback. Keep it in sync
+/// with the two functions — the round-trip test
+/// `every_send_failure_token_classifies_to_itself` fails otherwise.
+pub(crate) const SEND_FAIL_REASON_TOKENS: &[&str] = &[
+    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
+    SEND_FAIL_REASON_TRANSPORT,
+    SEND_FAIL_REASON_CONFIRM_TIMEOUT,
+    "transport_not_connected",
+    "peer_not_reachable",
+    "message_too_large",
+    "serialization_failed",
+    "crypto_failed",
+    "session_not_ready",
+    "recipient_blocked",
+    "media_transfer_limit",
+    "group_not_found",
+    "invalid_request",
+    "protocol_state_invalid",
+];
+
+/// Maps a platform-supplied or previously-stored send-failure string onto a
+/// fixed local vocabulary.
+///
+/// # Why the string cannot be passed through
+///
+/// The bridges build this string from the relay's `DeliveryError.reason`
+/// (`"recipient_unreachable: <relay text>"` — the shape is a cross-layer
+/// contract, see [`SEND_FAIL_REASON_RECIPIENT_UNREACHABLE`]), and the Nostr
+/// bridge from a relay's `OK` rejection text. Both tails are remote-chosen,
+/// unbounded, and not ours. They reach `MessageUndeliverable.reason`,
+/// `ConnectionRequestUndeliverable.reason` and — through
+/// `WelcomeLifecycleRecord::last_transport_error` —
+/// `WelcomeSendFailed.transport_error`, every one of which the telemetry
+/// scrubber ships verbatim beside a `recipient`/`peer_id` it *hashes*. An
+/// identifier in the tail therefore undoes the hashing in the same record, and
+/// even the honest relay writes one: its own wording renders the peer it
+/// concerns.
+///
+/// # Why the prefix survives
+///
+/// The `recipient_unreachable` token is not decoration — core prefix-matches it
+/// to fast-fail connection requests and to park plain DMs, and the bridges
+/// hardcode it. So the classification *is* the bare token: everything the
+/// protocol reads is kept, and only the prose tail is dropped.
+///
+/// Matching is prefix-based for that one token (the bridges append to it) and
+/// exact otherwise, with a closed fallback — a bridge or relay rewording
+/// degrades to [`SEND_FAIL_REASON_TRANSPORT`], never back to shipping its text.
+/// The `&'static str` return is load-bearing the same way
+/// [`GroupErrorPayload::classify_reason`] and `MlsError::privacy_safe_reason`
+/// are: it makes interpolating the input unrepresentable rather than merely
+/// discouraged.
+///
+/// Idempotent by construction, which matters twice: a record persisted before
+/// this existed is classified when it is *read* (the stored string may be raw
+/// relay prose), and a record written after it is classified again on the way
+/// out without changing.
+pub(crate) fn classify_transport_send_error(raw: &str) -> &'static str {
+    // Prefix, not equality: this is the one token the bridges extend.
+    if raw.starts_with(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE) {
+        return SEND_FAIL_REASON_RECIPIENT_UNREACHABLE;
+    }
+    // Already classified: a re-read of a record either producer wrote. Returns
+    // the entry from the table rather than `raw`, which is what keeps the
+    // signature `&'static str`.
+    if let Some(token) = SEND_FAIL_REASON_TOKENS.iter().find(|t| **t == raw) {
+        return token;
+    }
+    match raw {
+        // The fixed literals the UniFFI layer substitutes when a bridge reports
+        // a failure without a reason of its own. Locally minted, but classified
+        // here too so the vocabulary has exactly one source.
+        "Internet transport send failed"
+        | "Reticulum transport send failed"
+        | "Nostr transport send failed" => SEND_FAIL_REASON_TRANSPORT,
+        "Welcome send confirmation timed out" => SEND_FAIL_REASON_CONFIRM_TIMEOUT,
+        // Everything else, including anything a relay or bridge chose.
+        _ => SEND_FAIL_REASON_TRANSPORT,
+    }
+}
+
+/// Classifies a locally raised send failure for an event field.
+///
+/// The sibling of [`classify_transport_send_error`] for errors this device
+/// produced rather than received. It exists for the same reason: the transport
+/// layer renders the counterparty into its own message —
+/// `PeerNotReachable("no mesh transport holds a link to {peer_id}…")`, and the
+/// same in the BLE and Wi-Fi Direct backends — so `format!("{}", err)` on a
+/// routine send failure ships the peer's address to a telemetry sink. On
+/// `MessageDeferred` that was the *only* identity in the record, since the
+/// event carried no field for the scrubber to hash.
+///
+/// The match over [`crate::Error`] is exhaustive with no `_` arm: it lives in
+/// the defining crate, so a new variant fails to compile here and forces the
+/// privacy decision where the variant is written. The transport arm delegates
+/// to `offline_protocol_transport::Error::code`, which is that crate's own
+/// exhaustive, documented-stable classifier — its doc names telemetry
+/// classification as the intended use. Matching its output needs a fallback
+/// arm (a foreign `#[non_exhaustive]` enum can grow a variant), and that
+/// fallback is closed: a new transport variant degrades to
+/// [`SEND_FAIL_REASON_TRANSPORT`], never to its rendered text.
+pub(crate) fn send_failure_token(err: &crate::Error) -> &'static str {
+    use crate::Error as E;
+    match err {
+        E::Transport(inner) => match inner.code() {
+            "TRANSPORT_NOT_AVAILABLE" => "transport_not_connected",
+            "PEER_NOT_REACHABLE" => "peer_not_reachable",
+            "MESSAGE_TOO_LARGE" => "message_too_large",
+            "SERIALIZATION_ERROR" => "serialization_failed",
+            "CRYPTO_ERROR" => "crypto_failed",
+            _ => SEND_FAIL_REASON_TRANSPORT,
+        },
+        E::NotStarted | E::AlreadyStarted | E::InvalidState(_) => "protocol_state_invalid",
+        E::InvalidConfiguration(_) | E::InvalidArgument(_) | E::PermissionDenied(_) => {
+            "invalid_request"
+        }
+        E::Core(_) | E::Serialization(_) => "serialization_failed",
+        E::Router(_) | E::Reliability(_) | E::Service(_) => SEND_FAIL_REASON_TRANSPORT,
+        E::Mls(_) | E::EncryptFailed(_) => "crypto_failed",
+        E::MlsNotInitialized | E::SessionNotReady(_) | E::NoKeyPackage(_) => "session_not_ready",
+        E::UserBlocked(_) => "recipient_blocked",
+        E::MediaTransferLimit(_) => "media_transfer_limit",
+        E::GroupNotFound(_) => "group_not_found",
+        E::Other(_) => SEND_FAIL_REASON_TRANSPORT,
+    }
+}
 /// Minimum interval between session reconciliation scans (list_sessions I/O).
 /// Keeps the expensive Keychain/Keystore I/O out of the hot path so that
 /// sendMessage() is not blocked by Mutex contention on every process tick.
@@ -1733,4 +1870,121 @@ pub(crate) struct MediaTransferDescriptor {
 pub(crate) enum OutboundSendPreparation {
     Ready(String),
     Queued(MessageId),
+}
+
+#[cfg(test)]
+mod send_failure_classification_tests {
+    use super::*;
+
+    /// Every token either producer can mint classifies to itself.
+    ///
+    /// This is what lets the two functions compose. A value written by
+    /// `send_failure_token` is later re-read from a persisted welcome
+    /// lifecycle and passed through `classify_transport_send_error`; without
+    /// idempotence that round trip would degrade a precise token to the
+    /// generic fallback on every emit.
+    #[test]
+    fn every_send_failure_token_classifies_to_itself() {
+        for token in SEND_FAIL_REASON_TOKENS {
+            assert_eq!(
+                classify_transport_send_error(token),
+                *token,
+                "{token} must survive a re-classification"
+            );
+        }
+    }
+
+    /// The vocabulary table really is the vocabulary.
+    ///
+    /// `classify_transport_send_error` answers from the table, so it cannot
+    /// disagree with it — but `send_failure_token` matches independently, and a
+    /// token added there and forgotten here would classify to the fallback on
+    /// the next round trip. Walking the transport codes catches that for the
+    /// arm most likely to grow.
+    #[test]
+    fn transport_error_tokens_are_in_the_vocabulary() {
+        use offline_protocol_transport::Error as T;
+        let cases = [
+            T::TransportNotAvailable("ble".into()),
+            T::PeerNotReachable("bob".into()),
+            T::SendFailed("x".into()),
+            T::ReceiveFailed("x".into()),
+            T::ConfigurationError("x".into()),
+            T::SerializationError("x".into()),
+            T::MessageTooLarge(2, 1),
+            T::CryptoError("x".into()),
+            T::Other("x".into()),
+        ];
+        for case in cases {
+            let token = send_failure_token(&crate::Error::Transport(case.clone()));
+            assert!(
+                SEND_FAIL_REASON_TOKENS.contains(&token),
+                "{case:?} produced {token}, which is not in SEND_FAIL_REASON_TOKENS"
+            );
+        }
+    }
+
+    /// A relay's prose is dropped and its token kept.
+    ///
+    /// The prefix is a cross-layer contract the bridges hardcode and core
+    /// prefix-matches to park a DM, so it must survive verbatim; everything
+    /// the relay appended to it must not.
+    #[test]
+    fn relay_prose_is_dropped_and_the_token_kept() {
+        assert_eq!(
+            classify_transport_send_error(
+                "recipient_unreachable: Recipient is offline and push notification could not be sent"
+            ),
+            SEND_FAIL_REASON_RECIPIENT_UNREACHABLE
+        );
+        // The relay's real vocabulary, all of it, collapses to one token.
+        for prose in [
+            "Recipient connection lost and push notification could not be sent",
+            "Push notification already sent for this message; recipient unreachable",
+            "Recipient unreachable and the message is too large to deliver by push",
+            "Group delivery did not settle for this recipient in time",
+        ] {
+            assert_eq!(
+                classify_transport_send_error(&format!("recipient_unreachable: {prose}")),
+                SEND_FAIL_REASON_RECIPIENT_UNREACHABLE
+            );
+        }
+    }
+
+    /// Anything unrecognized fails closed to the fallback, never to itself.
+    #[test]
+    fn unknown_text_falls_back_and_is_never_echoed() {
+        for raw in [
+            "Relay rejected event: blocked",
+            "off1qyvh9kjj4vy8f943a22qvxsct5s9ydew35v2dl2c is not connected",
+            "",
+        ] {
+            let classified = classify_transport_send_error(raw);
+            assert_eq!(classified, SEND_FAIL_REASON_TRANSPORT);
+            assert!(
+                SEND_FAIL_REASON_TOKENS.contains(&classified),
+                "the fallback must itself be a token"
+            );
+        }
+    }
+
+    /// The literals the UniFFI layer substitutes are classified too, so the
+    /// vocabulary has exactly one source rather than two that drift.
+    #[test]
+    fn uniffi_substituted_literals_are_classified() {
+        for literal in [
+            "Internet transport send failed",
+            "Reticulum transport send failed",
+            "Nostr transport send failed",
+        ] {
+            assert_eq!(
+                classify_transport_send_error(literal),
+                SEND_FAIL_REASON_TRANSPORT
+            );
+        }
+        assert_eq!(
+            classify_transport_send_error("Welcome send confirmation timed out"),
+            SEND_FAIL_REASON_CONFIRM_TIMEOUT
+        );
+    }
 }

@@ -484,6 +484,7 @@ mod tests {
             },
             Event::MessageDeferred {
                 message_id: String::new(),
+                recipient: String::new(),
                 reason: String::new(),
                 retry_count: 0,
                 next_retry_at: None,

@@ -2776,7 +2776,7 @@ impl OfflineProtocol {
             state.emit_event(Event::connection_request_undeliverable(
                 recipient,
                 message_id.as_str(),
-                "max_retries_exceeded".to_string(),
+                "max_retries_exceeded",
             ));
         }
         drop(state);

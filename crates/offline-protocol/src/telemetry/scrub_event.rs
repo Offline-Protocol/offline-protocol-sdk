@@ -89,10 +89,10 @@
 //! - **Free-form strings that may interpolate identifiers**: `reason` /
 //!   `reason_detail` fields are produced by upstream error paths. If an
 //!   author ever includes a peer ID in a reason string (e.g. "no session
-//!   for alice"), the identifier passes through unhashed. The SDK
-//!   currently avoids this, but the contract is one-way: sinks should
-//!   assume `reason` fields are free text and apply app-level redaction
-//!   if they ship logs off-device.
+//!   for alice"), the identifier passes through unhashed. Every such leak
+//!   found so far has been fixed at the producer under the rule below, but
+//!   the contract is one-way: sinks should assume `reason` fields are free
+//!   text and apply app-level redaction if they ship logs off-device.
 //!
 //! If that ever needs to change globally it belongs behind a separate
 //! `emit_content` knob so the identifier-scrubbing and payload-scrubbing
@@ -113,10 +113,29 @@
 //! Two habits follow from it. Return `&'static str` from these
 //! classifications, so interpolating wire input is unrepresentable rather
 //! than merely discouraged (`MlsError::privacy_safe_reason` does the same
-//! for error renderings). And when the dropped text was carrying real
-//! structure — `GroupError`'s wording named the group it concerned — add
-//! that back as a *typed field*, which the scrubber can then hash, rather
-//! than leaving it smuggled inside prose.
+//! for error renderings). Pushing that type all the way into the `Event`
+//! constructor is better still: `message_deferred`, `message_undeliverable`,
+//! `connection_request_undeliverable` and `welcome_send_failed` take
+//! `&'static str`, so a producer *cannot* hand them a rendered error. And
+//! when the dropped text was carrying real structure — `GroupError`'s
+//! wording named the group it concerned — add that back as a *typed field*,
+//! which the scrubber can then hash, rather than leaving it smuggled inside
+//! prose (`MessageDeferred` gained its `recipient` exactly this way).
+//!
+//! # The same rule covers text a remote party did not write
+//!
+//! A locally rendered error is the other half. `TransportManager::send`
+//! interpolates the recipient into `PeerNotReachable`, so
+//! `format!("{err}")` on a routine send failure ships the counterparty's
+//! address to a sink — no attacker involved, and the highest-volume leak of
+//! the set, since an unreachable peer produces one per attempt. These are
+//! classified through `protocol::types::send_failure_token`, whose match
+//! over `crate::Error` is exhaustive in the defining crate for the reason
+//! `privacy_safe_reason`'s is: a new variant fails to compile until someone
+//! decides what it may say. Platform- and relay-supplied strings coming the
+//! other way through the FFI go through `classify_transport_send_error`,
+//! which is prefix-tolerant for the one token that is a cross-layer
+//! contract and closed for everything else.
 //!
 //! # Compile-time coverage
 //!
@@ -353,10 +372,13 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
         }
         Event::MessageDeferred {
             message_id: _,
+            recipient,
             reason: _,
             retry_count: _,
             next_retry_at: _,
-        } => {}
+        } => {
+            hash_string(recipient, scrubber);
+        }
         Event::MessageRetrying {
             message_id: _,
             recipient,
