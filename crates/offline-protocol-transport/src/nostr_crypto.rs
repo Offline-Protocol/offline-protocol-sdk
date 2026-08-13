@@ -36,11 +36,18 @@
 //! What survived until the address migration was subtler: the record-seal
 //! key's public half **was** the routing tag, bit for bit. Nothing was wrong
 //! with it on its own — the two roles happened to want the same derivation —
-//! but it left every routing tag standing as a public key whose private half
-//! was computable, which is a live footgun the moment anything adds NIP-42
-//! AUTH or pubkey-based filtering. They are now separately domain-separated
-//! and deliberately unequal, pinned by
+//! but it left every routing tag standing as a live encryption key, which is a
+//! footgun the moment anything adds NIP-42 AUTH or pubkey-based filtering. The
+//! seal key now comes from its own domain-separated HKDF, so the two are
+//! deliberately unequal and nothing seals to a tag any more — pinned by
 //! `test_record_seal_key_is_not_the_routing_tag`.
+//!
+//! **What did not change: a routing tag's private half is still computable.**
+//! Its scalar *is* `SHA-256(address)` (the tag itself is that scalar's x-only
+//! public key), so anyone holding an address can reconstruct the keypair behind
+//! that address's tag — and must be able to, since that is how senders address
+//! it. What the split bought is that reconstructing one now decrypts nothing.
+//! See [`routing_tag_for_address`].
 
 use crate::constants::{NOSTR_CREATED_AT_JITTER_SECS, NOSTR_INITIAL_QUERY_LIMIT};
 use crate::nip44::{self, ConversationKey};

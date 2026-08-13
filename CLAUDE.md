@@ -28,8 +28,9 @@ cargo build --workspace --release
 cargo fmt --all
 cargo fmt --all -- --check                      # check only
 
-# Docs
-cargo doc --workspace --no-deps
+# Docs (CI gates this under -D warnings; without the flag broken intra-doc
+# links only print and still exit 0, so the plain command passes what CI fails)
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
 # Benchmarks (Criterion)
 cargo bench --package offline-protocol-bench

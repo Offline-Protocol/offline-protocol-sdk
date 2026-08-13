@@ -193,13 +193,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   over another transport; the same rule gates the key-package resolution queue.
 - **BREAKING**: the publicly-computable key that seals published key-package
   records and bootstrap frames is no longer the routing tag. Both are still
-  derived from the address, but by separate derivations — the tag stays
-  `SHA-256(address)`, the seal key is a domain-separated HKDF — so a routing
-  tag no longer doubles as a live encryption key. **The tag's own private half
-  remains computable** and is not claimed otherwise: its scalar *is*
-  `SHA-256(address)`, so anyone holding an address can reconstruct the keypair
-  behind that address's tag. What changed is that nothing is sealed to it any
-  more, so reconstructing it decrypts nothing. The old shape was not
+  derived from the address, but by separate derivations — the tag is still
+  rooted in a bare `SHA-256(address)` with no domain separation, the seal key
+  is a domain-separated HKDF — so a routing tag no longer doubles as a live
+  encryption key. **The tag's own private half remains computable** and is not
+  claimed otherwise: its scalar *is* `SHA-256(address)` and the tag is that
+  scalar's x-only public key, so anyone holding an address can reconstruct the
+  keypair behind that address's tag. What changed is that nothing is sealed to
+  it any more, so reconstructing it decrypts nothing. The old shape was not
   exploitable — nothing signs with a tag, and inbound is never authenticated
   by pubkey — but a routing label that doubles as a live encryption key is a
   trap for anything that later adds NIP-42 AUTH or pubkey-based filtering.

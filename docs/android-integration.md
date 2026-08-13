@@ -307,8 +307,11 @@ override fun onEvent(eventJson: String) {
 There is no trust pin to manage. A peer's address **is** the hash of their
 identity key, so every control message they send is checked by re-deriving the
 address from the key that signed it — on first contact as much as on the
-thousandth. An impersonator has to find a 160-bit second preimage, not win a
-race to a name.
+thousandth. An impersonator has to find a 160-bit second preimage (~2^160), not
+win a race to a name. (That is the cost of targeting an address that already
+exists. The birthday bound on the same truncation is ~2^80, which yields two
+keys sharing one address rather than a chosen peer's — a deliberate trade
+against BLE frame budget, documented on `Address::HASH_LEN`.)
 
 That also removes the reinstall problem the old `resetTofuForPeer` existed for:
 a peer who reinstalls generates a new identity key and therefore has a **new
