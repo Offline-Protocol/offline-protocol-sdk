@@ -33019,19 +33019,15 @@ fn test_forged_session_welcome_is_reported_on_the_adopt_path() {
     let (mut bob, _bob_h) = make_encrypted_protocol("bob");
     bob.start().unwrap();
 
-    let warnings: Arc<Mutex<Vec<(String, SecurityWarningCode)>>> = Arc::new(Mutex::new(Vec::new()));
+    // Every event, not only the warning: the identifier-free rule has to hold
+    // across *both* events this refusal produces, and it was the sibling
+    // `secure_session_failed` — same seam, same error, unscrubbed `reason` —
+    // that carried the impersonated address while the warning beside it was
+    // being carefully sanitized.
+    let seen: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
     {
-        let sink = Arc::clone(&warnings);
-        bob.on_event(move |e| {
-            if let Event::SecurityWarning {
-                peer_id,
-                reason_code,
-                ..
-            } = e
-            {
-                sink.lock().unwrap().push((peer_id, reason_code));
-            }
-        });
+        let sink = Arc::clone(&seen);
+        bob.on_event(move |e| sink.lock().unwrap().push(e));
     }
 
     let alice = crate::test_identity::manager_for("alice", Arc::new(InMemoryStorage::new()));
@@ -33081,11 +33077,55 @@ fn test_forged_session_welcome_is_reported_on_the_adopt_path() {
     );
     bob.process_internal_message(&signed_frame(&id("alice"), &id("bob"), &content));
 
-    let seen = warnings.lock().unwrap();
+    let seen = seen.lock().unwrap();
     assert!(
-        seen.iter().any(|(peer, code)| *peer == id("alice")
-            && *code == SecurityWarningCode::GroupLeafIdentityUnproven),
+        seen.iter().any(|e| matches!(
+            e,
+            Event::SecurityWarning { peer_id, reason_code, .. }
+                if *peer_id == id("alice")
+                    && *reason_code == SecurityWarningCode::GroupLeafIdentityUnproven
+        )),
         "a forged session Welcome must be reported against its sender even on the \
          adopt path; saw {seen:?}"
+    );
+
+    // Premise: the refusal really is non-destructive, so the session that
+    // existed before the forged Welcome is still usable. This is what makes the
+    // accompanying `secure_session_failed` mean "this attempt failed" rather
+    // than "the session ended", and it is the claim the event docs make to apps.
+    assert!(
+        bob.mls_manager
+            .as_ref()
+            .unwrap()
+            .read()
+            .unwrap()
+            .has_session(&id("alice"))
+            .unwrap(),
+        "the pre-existing session must survive a refused Welcome"
+    );
+
+    // Neither event may name an address. The scrubber hashes `peer_id` and
+    // ships `reason` verbatim, so an interpolated error reaches a sink running
+    // `scrub_ids: true` in the clear — and `LeafAddressMismatch` renders *two*
+    // addresses, the impersonated third party's and the forger's real one.
+    // Neither is `peer_id`, so neither is hashed on the way out.
+    for event in seen.iter() {
+        let reason = match event {
+            Event::SecurityWarning { reason, .. } => reason,
+            Event::SecureSessionFailed { reason, .. } => reason,
+            _ => continue,
+        };
+        assert!(
+            !reason.contains("off1"),
+            "an address reached an event reason verbatim: {event:?}"
+        );
+    }
+
+    // Premise guard for the loop above: it is vacuous unless the sibling event
+    // actually fired. Before this fix that event was the leak.
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, Event::SecureSessionFailed { .. })),
+        "expected a secure_session_failed beside the warning; saw {seen:?}"
     );
 }

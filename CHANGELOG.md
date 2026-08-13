@@ -45,6 +45,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   them and configures no external senders, so no honest peer is affected; a peer
   running something else that did will now be declined instead of silently
   ignored.
+- `secure_session_failed` can now fire while the session with that peer stays
+  **live**: a session Welcome refused for carrying an unprovable identity is
+  refused non-destructively, so the pre-existing session survives. It always
+  reported a failed *attempt* rather than a terminated session; this is the
+  first case where the distinction is observable, and apps that tear down
+  session state on the event alone must stop. A
+  `GROUP_LEAF_IDENTITY_UNPROVEN` security warning accompanies it.
 - **BREAKING**: `ProtocolConfig.user_id` → `ProtocolConfig.profile` across Rust,
   UniFFI (both config dictionaries), React Native, and Python. `profile` selects
   a storage namespace and is never sent; it is not an identity.

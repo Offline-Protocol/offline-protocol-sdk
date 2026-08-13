@@ -823,6 +823,19 @@ pub enum Event {
     },
 
     /// Failed to establish a secure MLS session.
+    ///
+    /// Reports a failed *handshake attempt*, which is not the same as "the
+    /// session with this peer is gone". One case makes the difference visible:
+    /// a Welcome refused for carrying an unprovable identity
+    /// ([`SecurityWarningCode::GroupLeafIdentityUnproven`], emitted alongside)
+    /// is refused non-destructively, so any session already held with that peer
+    /// stays live and usable. Apps must not tear down session state on this
+    /// event alone.
+    ///
+    /// `reason` is diagnostic text and must not be parsed. It carries no
+    /// third-party identifier: the arms that would have rendered one — the
+    /// identity refusals above — substitute a fixed string, because the
+    /// telemetry scrubber hashes `peer_id` and ships `reason` verbatim.
     SecureSessionFailed {
         /// Peer ID of the other party.
         peer_id: String,
