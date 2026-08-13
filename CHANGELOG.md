@@ -28,6 +28,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **BREAKING**: `NostrTransport::get_next_message` — the generic
+  `Transport` whole-message poll — now returns
+  `Error::ConfigurationError` instead of the next queued frame. It never
+  sealed, signed, or wrapped: it returned the bare serialized `Message`, the
+  whole protocol envelope with both endpoints on it, so anything that
+  published the result put in front of every relay exactly the cleartext
+  sealing exists to prevent — and did so regardless of
+  `nostr_sealing_enabled`, which this path never consulted. It had carried a
+  doc comment warning callers off it since gift wrapping landed, but the
+  method sits on the `Transport` trait and the engine hands that out as
+  `dyn Transport` from `TransportManager::get_transport`, so reaching the
+  cleartext took no downcast and no unsafe. **No bundled bridge or UniFFI
+  entry is affected** — `nostrGetNextMessage` routes to
+  `get_next_signed_event`, which returns a signed, sealed `["EVENT", …]`
+  relay message, and the iOS and Android bridges call it. Only a Rust
+  embedder polling Nostr through `dyn Transport` changes behavior, and such
+  an embedder was publishing cleartext. The refusal returns before the send
+  queue or the pending-confirmation map are read, so it cannot strand the
+  frame it declines to hand over: the message stays queued and the next
+  `get_next_signed_event` serves it.
 - **BREAKING**: `GroupManager::remove_member` now takes `&[LeafNodeIndex]`
   instead of a single `LeafNodeIndex`, and `MlsManager::remove_group_member`
   removes *every* leaf whose credential names the member rather than the first
