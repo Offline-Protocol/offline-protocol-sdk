@@ -323,11 +323,16 @@ impl GroupManager {
 
     /// Removes members from a group.
     ///
-    /// Takes every leaf to remove in one commit rather than one leaf per call:
-    /// a single identity can legitimately hold more than one leaf (two key
-    /// packages from the same peer, added separately), and removing "that
-    /// member" has to mean all of them or the peer stays in the group holding
-    /// live keys. See [`crate::MlsManager::remove_group_member`].
+    /// Takes every leaf to remove in one commit rather than one leaf per call,
+    /// because removing "that member" has to mean all of them or the peer stays
+    /// in the group holding live keys while every roster read shows them gone.
+    ///
+    /// Two leaves for one identity cannot arrive through the wire gates — MLS
+    /// requires unique signature keys and the binding ties credential to key —
+    /// but they can exist in a tampered provider store, where a forged leaf
+    /// claims a peer's address while carrying the attacker's key. See
+    /// [`crate::MlsManager::remove_group_member`] for the full argument; do not
+    /// restate it here, and do not reduce this to a first match.
     pub fn remove_member(
         &self,
         group: &mut MlsGroup,
@@ -414,7 +419,7 @@ impl GroupManager {
         // own signature key is shown to hash to it, matching it proves only
         // that the forger typed the name they wanted to be called.
         //
-        // The entry-point gates (`verify_staged_welcome_leaves`,
+        // The entry-point gates (`verify_staged_welcome_tree`,
         // `verify_staged_commit_leaves`) mean a leaf in the tree has already
         // passed this once. Re-checking here is the same import-time plus
         // use-time pairing `MlsManager::get_contact_key_package` documents, and
@@ -883,7 +888,7 @@ impl GroupManager {
     /// anyway would leave us in a group whose tree we know to be forged, at an
     /// epoch every other member computed over the full tree — decrypting
     /// nothing and holding a roster that agrees with nobody.
-    fn verify_staged_welcome_leaves(staged: &StagedWelcome) -> Result<()> {
+    fn verify_staged_welcome_tree(staged: &StagedWelcome) -> Result<()> {
         for member in staged.members() {
             verify_leaf_binding(
                 &member.credential,
@@ -932,8 +937,8 @@ impl GroupManager {
         Self::verify_staged_group_id(&staged, group_id)?;
 
         // The inviter picks the whole ratchet tree; judge every identity in it
-        // before adopting the roster. See `verify_staged_welcome_leaves`.
-        Self::verify_staged_welcome_leaves(&staged)?;
+        // before adopting the roster. See `verify_staged_welcome_tree`.
+        Self::verify_staged_welcome_tree(&staged)?;
 
         let group = staged
             .into_group(&self.provider)
@@ -990,8 +995,8 @@ impl GroupManager {
 
         // Same placement, same reason: refusing a forged tree here leaves the
         // existing group intact, because the destructive `delete_group` below
-        // has not run yet. See `verify_staged_welcome_leaves`.
-        Self::verify_staged_welcome_leaves(&staged)?;
+        // has not run yet. See `verify_staged_welcome_tree`.
+        Self::verify_staged_welcome_tree(&staged)?;
 
         // Staging consumed the key package; from here a failure is not
         // recoverable by retrying the same Welcome. Drop the prior group so its

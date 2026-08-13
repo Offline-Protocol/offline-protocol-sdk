@@ -487,11 +487,32 @@ impl OfflineProtocol {
                                     should_flush = true;
                                 }
                                 Err(e) => {
+                                    // A forged ratchet tree is tested for *before* the
+                                    // duplicate check below, and the order is the whole
+                                    // point: `join_group_replacing` refuses
+                                    // non-destructively, so our existing session survives
+                                    // and the refusal would otherwise read as a harmless
+                                    // retransmit. It is the opposite — this is the
+                                    // "accuses someone you are already in a room with"
+                                    // case the warning exists for, and reaching it needs
+                                    // only that we already hold a session with the peer
+                                    // (either half of a both-create race, or any
+                                    // re-invite).
+                                    let unproven_leaf = matches!(
+                                        e,
+                                        offline_protocol_mls::MlsError::LeafAddressMismatch { .. }
+                                            | offline_protocol_mls::MlsError::UnsupportedSender { .. }
+                                    );
+                                    if unproven_leaf {
+                                        warn!(error = %e, sender = %sender, "Refused a Welcome carrying an unprovable identity");
+                                        unproven_leaf_session = Some(e.to_string());
+                                        error_reason = Some(e.to_string());
+                                    }
                                     // Non-destructive adopt: if our session survived, the
                                     // staging failure is a retransmitted Welcome we already
                                     // adopted (the one-time key package is consumed). It is a
                                     // harmless duplicate — drop it instead of erroring/bricking.
-                                    if manager.has_session(sender).unwrap_or(false) {
+                                    else if manager.has_session(sender).unwrap_or(false) {
                                         debug!(
                                             error = %e,
                                             sender = %sender,
@@ -693,8 +714,9 @@ impl OfflineProtocol {
                     &sender_owned,
                     SecurityWarningCode::GroupLeafIdentityUnproven,
                     format!(
-                        "Session invite declined: its ratchet tree contains an identity \
-                         nobody proved, so messages in it could not be attributed ({})",
+                        "Session invite declined: it carried an identity claim this device \
+                         could not verify, so messages in this session could not be \
+                         reliably attributed ({})",
                         detail
                     ),
                 );

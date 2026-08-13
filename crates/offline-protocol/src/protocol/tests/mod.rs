@@ -33000,3 +33000,92 @@ fn control_gate_warnings_are_throttled_per_peer_per_code() {
         protocol.control_gate_warned.len()
     );
 }
+
+/// A forged ratchet tree in a session Welcome is reported even when we already
+/// hold a session with the sender — the *adopt* branch, which used to swallow
+/// it as a benign duplicate.
+///
+/// `join_group_replacing` refuses non-destructively, so our existing session
+/// survives the refusal. That is correct, and it is exactly what made the bug:
+/// the adopt branch tests `has_session` to distinguish a harmless retransmitted
+/// Welcome from a real failure, and a surviving session made a *forgery* look
+/// like a retransmit — `debug!` and nothing else. No warning, no
+/// `secure_session_failed`, and a re-sent confirm on top.
+///
+/// Reachable whenever we already hold a session with the peer: either half of a
+/// both-create race, or any re-invite. Bob is the greater id, so he adopts.
+#[test]
+fn test_forged_session_welcome_is_reported_on_the_adopt_path() {
+    let (mut bob, _bob_h) = make_encrypted_protocol("bob");
+    bob.start().unwrap();
+
+    let warnings: Arc<Mutex<Vec<(String, SecurityWarningCode)>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let sink = Arc::clone(&warnings);
+        bob.on_event(move |e| {
+            if let Event::SecurityWarning {
+                peer_id,
+                reason_code,
+                ..
+            } = e
+            {
+                sink.lock().unwrap().push((peer_id, reason_code));
+            }
+        });
+    }
+
+    let alice = crate::test_identity::manager_for("alice", Arc::new(InMemoryStorage::new()));
+    let bob_kp1 = {
+        let m = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap()
+    };
+
+    // Bob holds his own session toward alice, so the Welcome below lands on the
+    // adopt branch rather than a clean join.
+    {
+        let m = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        let alice_kp = alice.get_or_create_key_package().unwrap();
+        m.import_key_package(&id("alice"), &alice_kp.key_package_data)
+            .unwrap();
+        m.create_session(&id("alice")).unwrap();
+        assert!(
+            m.has_session(&id("alice")).unwrap(),
+            "test premise: bob must already hold a session with alice"
+        );
+    }
+
+    // Alice builds the slot, poisons its tree, then re-invites bob so the
+    // Welcome carries the forged leaf.
+    alice
+        .import_key_package(&id("bob"), &bob_kp1.key_package_data)
+        .unwrap();
+    alice.create_session(&id("bob")).unwrap();
+    let slot = offline_protocol_mls::GroupId::new(&session_slot("alice", "bob")).unwrap();
+    alice
+        .seat_forged_leaf_for_testing(&slot, &id("carol"))
+        .unwrap();
+    let bob_kp2 = {
+        let m = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap()
+    };
+    alice.remove_group_member(&slot, &id("bob")).unwrap();
+    let welcome = alice
+        .add_group_member(&slot, &id("bob"), &bob_kp2.key_package_data)
+        .unwrap()
+        .0;
+
+    let content = format!(
+        "{}{}",
+        internal_prefixes::WELCOME,
+        serde_json::to_string(&welcome).unwrap()
+    );
+    bob.process_internal_message(&signed_frame(&id("alice"), &id("bob"), &content));
+
+    let seen = warnings.lock().unwrap();
+    assert!(
+        seen.iter().any(|(peer, code)| *peer == id("alice")
+            && *code == SecurityWarningCode::GroupLeafIdentityUnproven),
+        "a forged session Welcome must be reported against its sender even on the \
+         adopt path; saw {seen:?}"
+    );
+}

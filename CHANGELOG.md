@@ -202,10 +202,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   invite, a refused membership commit, and a declined session Welcome — with the
   group sites rate-limited per `(group, sender)` on the same 300s window as the
   unauthorized-membership report, since a refusal is permanent and costs an
-  insider nothing to repeat. A refused commit is **not** buffered for retry: it
-  can never succeed, and a buffered commit that expires after retries is read as
-  an epoch fork, which would have let one forged commit trigger a group-wide
-  re-key round and a false alarm. Coverage includes the update path, where a
+  insider nothing to repeat. A forged commit's *first* delivery is **not** buffered
+  for retry: it can never succeed, and a buffered commit that expires after
+  retries is read as an epoch fork, which would have let one forged commit
+  trigger a group-wide re-key round and a false alarm. (A re-sent copy of the
+  same frame still fails earlier as a spent ratchet generation and is buffered
+  like any replayed commit — pre-existing behaviour common to all commits, not
+  specific to the binding.) Coverage includes the update path, where a
   member renames *their own* leaf to a peer's address — no new leaf, no key
   package, no invite, and the cheapest form of the attack.
 - **`SecurityWarning.peer_id` printed in the clear via `Debug`.** Every other

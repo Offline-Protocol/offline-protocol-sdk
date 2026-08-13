@@ -205,6 +205,59 @@ pub(crate) struct RelayBroadcastPending {
     pub(crate) attempts: u32,
 }
 
+/// Which gate refused a leaf, for the `GroupLeafIdentityUnproven` rate-limit
+/// key.
+///
+/// Part of the key for the same reason `unauthorized_change_reports` carries
+/// its `enforced` flag: the two are different signals with different urgency,
+/// and neither may suppress the other's first report inside one window. A
+/// declined invite is a stranger's group you never joined; a refused commit
+/// accuses a member of a group you are already in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum UnprovenLeafSite {
+    /// A group invite declined because its ratchet tree carried the leaf.
+    WelcomeDeclined,
+    /// A membership commit refused because it would have installed the leaf.
+    CommitRefused,
+}
+
+/// Claims a rate-limit window for `key`, returning whether the caller should
+/// report.
+///
+/// Shared by the two security reporters so their suppression, map bounding and
+/// eviction order cannot drift apart. Bounds the map by dropping lapsed windows
+/// first and only then evicting the oldest live entry — the longest-suppressed
+/// one, which is the safe direction to lose.
+fn claim_report_window<K: Eq + std::hash::Hash + Clone>(
+    reports: &mut HashMap<K, Instant>,
+    key: K,
+) -> bool {
+    let now = Instant::now();
+    let suppressed = reports.get(&key).is_some_and(|last| {
+        now.duration_since(*last).as_secs() < UNAUTHORIZED_REPORT_SUPPRESS_SECS
+    });
+    if suppressed {
+        return false;
+    }
+
+    if reports.len() >= MAX_UNAUTHORIZED_REPORT_ENTRIES {
+        reports.retain(|_, last| {
+            now.duration_since(*last).as_secs() < UNAUTHORIZED_REPORT_SUPPRESS_SECS
+        });
+    }
+    if reports.len() >= MAX_UNAUTHORIZED_REPORT_ENTRIES {
+        if let Some(oldest) = reports
+            .iter()
+            .min_by_key(|(_, t)| **t)
+            .map(|(k, _)| k.clone())
+        {
+            reports.remove(&oldest);
+        }
+    }
+    reports.insert(key, now);
+    true
+}
+
 /// Bundled state for group messaging.
 ///
 /// Groups together the cached member lists, dedup table, pending commit
@@ -291,16 +344,23 @@ pub(crate) struct GroupMeshState {
     /// other's first report inside one window.
     pub(crate) unauthorized_change_reports: HashMap<(String, String, bool), Instant>,
 
-    /// When an unproven-leaf refusal by (group_id, delivering peer) was last
-    /// reported, for rate-limiting `GroupLeafIdentityUnproven` — same window
-    /// and same bound as [`Self::unauthorized_change_reports`], kept separate
-    /// so neither signal can suppress the other's first report.
+    /// When an unproven-leaf refusal by (group_id, delivering peer, site) was
+    /// last reported, for rate-limiting `GroupLeafIdentityUnproven` — same
+    /// window and same bound as [`Self::unauthorized_change_reports`], kept
+    /// separate so neither signal can suppress the other's first report.
     ///
     /// Needed because the commit half of this report is driven by an
     /// authenticated group member: refusals are permanent and cheap, so an
     /// insider can produce one per frame, and an unthrottled event channel
     /// buries the signal in its own repetition.
-    pub(crate) unproven_leaf_reports: HashMap<(String, String), Instant>,
+    ///
+    /// [`UnprovenLeafSite`] is part of the key for the same reason
+    /// `unauthorized_change_reports` keys on `enforced`: a declined invite must
+    /// not swallow the first refused *commit*, which is the more urgent signal
+    /// of the two. Relying on the two never colliding — today they cannot,
+    /// because `handle_group_mls_welcome` returns early for a group already
+    /// joined — would hide that guarantee in a different function.
+    pub(crate) unproven_leaf_reports: HashMap<(String, String, UnprovenLeafSite), Instant>,
 }
 
 /// Outcome of attempting to process an MLS Commit.
@@ -1365,9 +1425,11 @@ impl OfflineProtocol {
             self.report_unproven_leaf(
                 &group_id,
                 sender,
+                UnprovenLeafSite::WelcomeDeclined,
                 format!(
-                    "Group invite declined: its member list contains an identity nobody \
-                     proved, so messages in it could not be attributed ({})",
+                    "Group invite declined: it carried an identity claim this device could \
+                     not verify, so messages in this group could not be reliably attributed \
+                     ({})",
                     detail
                 ),
             );
@@ -1719,14 +1781,24 @@ impl OfflineProtocol {
                         offline_protocol_mls::MlsError::LeafAddressMismatch { .. }
                             | offline_protocol_mls::MlsError::UnsupportedSender { .. }
                     ) {
+                        // Variant-neutral summary: the `UnsupportedSender`
+                        // half seats no leaf at all (an `ExternalSenders`
+                        // extension, or a non-member sender role), so the
+                        // "identity nobody proved" wording would be wrong for
+                        // it. The specifics are in the appended detail.
                         let detail = format!(
-                            "Group membership change refused: it would have seated an \
-                             identity nobody proved, so messages from it could not be \
-                             attributed ({})",
+                            "Group membership change refused: it carried an identity claim \
+                             this device could not verify, so messages in this group could \
+                             not be reliably attributed ({})",
                             e
                         );
                         let group_id = payload.group_id.clone();
-                        self.report_unproven_leaf(&group_id, sender, detail);
+                        self.report_unproven_leaf(
+                            &group_id,
+                            sender,
+                            UnprovenLeafSite::CommitRefused,
+                            detail,
+                        );
                     }
                     return CommitOutcome::Rejected;
                 }
@@ -1979,44 +2051,23 @@ impl OfflineProtocol {
     /// this necessary rather than tidy: refusals are permanent and cost the
     /// sender nothing, so an authenticated member can emit one per frame and
     /// bury the signal in its own repetition.
-    fn report_unproven_leaf(&mut self, group_id: &str, peer: &str, detail: String) {
-        let key = (group_id.to_string(), peer.to_string());
-        let now = Instant::now();
-        let suppressed = self
-            .group_mesh
-            .unproven_leaf_reports
-            .get(&key)
-            .is_some_and(|last| {
-                now.duration_since(*last).as_secs() < UNAUTHORIZED_REPORT_SUPPRESS_SECS
-            });
-        if suppressed {
+    fn report_unproven_leaf(
+        &mut self,
+        group_id: &str,
+        peer: &str,
+        site: UnprovenLeafSite,
+        detail: String,
+    ) {
+        let key = (group_id.to_string(), peer.to_string(), site);
+        if !claim_report_window(&mut self.group_mesh.unproven_leaf_reports, key) {
             debug!(
                 group_id = %group_id,
                 sender = %peer,
+                ?site,
                 "Suppressing repeated unproven-leaf report within the rate-limit window"
             );
             return;
         }
-
-        // Bound the tracking map: drop lapsed windows first, then the oldest
-        // live entry if still at cap.
-        if self.group_mesh.unproven_leaf_reports.len() >= MAX_UNAUTHORIZED_REPORT_ENTRIES {
-            self.group_mesh.unproven_leaf_reports.retain(|_, last| {
-                now.duration_since(*last).as_secs() < UNAUTHORIZED_REPORT_SUPPRESS_SECS
-            });
-        }
-        if self.group_mesh.unproven_leaf_reports.len() >= MAX_UNAUTHORIZED_REPORT_ENTRIES {
-            if let Some(oldest) = self
-                .group_mesh
-                .unproven_leaf_reports
-                .iter()
-                .min_by_key(|(_, t)| **t)
-                .map(|(k, _)| k.clone())
-            {
-                self.group_mesh.unproven_leaf_reports.remove(&oldest);
-            }
-        }
-        self.group_mesh.unproven_leaf_reports.insert(key, now);
 
         self.emit_event(Event::security_warning(
             peer.to_string(),
@@ -2051,15 +2102,7 @@ impl OfflineProtocol {
         enforced: bool,
     ) {
         let key = (group_id.to_string(), committer.to_string(), enforced);
-        let now = Instant::now();
-        let suppressed = self
-            .group_mesh
-            .unauthorized_change_reports
-            .get(&key)
-            .is_some_and(|last| {
-                now.duration_since(*last).as_secs() < UNAUTHORIZED_REPORT_SUPPRESS_SECS
-            });
-        if suppressed {
+        if !claim_report_window(&mut self.group_mesh.unauthorized_change_reports, key) {
             debug!(
                 group_id = %group_id,
                 sender = %committer,
@@ -2069,28 +2112,6 @@ impl OfflineProtocol {
             );
             return;
         }
-
-        // Bound the tracking map: drop lapsed windows first, then the
-        // oldest live entry if still at cap.
-        if self.group_mesh.unauthorized_change_reports.len() >= MAX_UNAUTHORIZED_REPORT_ENTRIES {
-            self.group_mesh
-                .unauthorized_change_reports
-                .retain(|_, last| {
-                    now.duration_since(*last).as_secs() < UNAUTHORIZED_REPORT_SUPPRESS_SECS
-                });
-        }
-        if self.group_mesh.unauthorized_change_reports.len() >= MAX_UNAUTHORIZED_REPORT_ENTRIES {
-            if let Some(oldest) = self
-                .group_mesh
-                .unauthorized_change_reports
-                .iter()
-                .min_by_key(|(_, t)| **t)
-                .map(|(k, _)| k.clone())
-            {
-                self.group_mesh.unauthorized_change_reports.remove(&oldest);
-            }
-        }
-        self.group_mesh.unauthorized_change_reports.insert(key, now);
         if enforced {
             warn!(
                 group_id = %group_id,

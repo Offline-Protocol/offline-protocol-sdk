@@ -13674,26 +13674,127 @@ fn test_forged_leaf_commit_is_rejected_permanently_and_not_buffered() {
         );
     }
 
-    // Refusals are permanent and cost the sender nothing, so the same member
-    // can drive one per frame. A fresh wire id gets past dedup and reaches the
-    // same refusal; the report must still be suppressed inside its window, or
-    // the signal is buried in its own repetition.
-    bob.process_internal_message(&make_message(&id("alice"), &id("bob"), &content));
+    // Deliberately not re-sent here to test the rate limit: a *replay* of the
+    // same frame fails earlier, as a spent ratchet generation (`Decryption`),
+    // never reaches the refusal, and is buffered like any replayed commit —
+    // so a "still only one event" assertion after a replay would be explained
+    // by the replay classification and would pass with the limiter deleted.
+    // Suppression is pinned by
+    // `test_repeated_unprovable_invites_from_one_sender_are_rate_limited`,
+    // which drives two refusals that both genuinely reach the report.
+}
+
+/// Repeat unprovable invites from the same sender for the same group are
+/// reported once, not once per frame.
+///
+/// Both refusals genuinely reach `report_unproven_leaf`, which is what makes
+/// this a real test of the limiter: each invite is a *distinct* Welcome built
+/// against a fresh key package of bob's, so neither is a replay and neither can
+/// fail early as a spent generation or a consumed package. (That is exactly the
+/// trap the commit-path test documents avoiding — a second copy of one frame is
+/// rejected for an unrelated reason and never exercises suppression at all.)
+///
+/// The limiter matters because a refusal is permanent and costs the sender
+/// nothing to repeat, so an unthrottled channel lets the accused bury the
+/// accusation in its own repetition.
+#[test]
+fn test_repeated_unprovable_invites_from_one_sender_are_rate_limited() {
+    let storage_m = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
+    let mut mallory = OfflineProtocol::new(create_test_config_for_user("mallory")).unwrap();
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    mallory.initialize_mls_for_test(storage_m).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
+    mallory.start().unwrap();
+    bob.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let collector = events.clone();
+    bob.on_event(move |event| collector.lock().unwrap().push(event));
+
+    let group_info = mallory.create_group("mallory-group").unwrap();
+    let gid = offline_protocol_mls::GroupId::new(group_info.group_id.as_str()).unwrap();
     {
-        let events = events.lock().unwrap();
-        assert_eq!(
-            unproven(&events).len(),
-            1,
-            "repeat refusals by the same (group, sender) must stay suppressed; events: {:?}",
-            events
-                .iter()
-                .map(|e| format!("{:?}", e))
-                .collect::<Vec<_>>()
+        let mallory_mls = mallory.mls_manager_for_testing().read().unwrap();
+        mallory_mls
+            .seat_forged_leaf_for_testing(&gid, &id("carol"))
+            .unwrap();
+    }
+
+    // Two distinct invites into the same poisoned room. The re-invite needs a
+    // removal first: MLS refuses a second leaf for one identity.
+    let invite = |bob: &mut OfflineProtocol, mallory: &OfflineProtocol, remove_first: bool| {
+        let bob_kp = {
+            let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+            bob_mls.generate_key_package().unwrap()
+        };
+        let welcome = {
+            let mallory_mls = mallory.mls_manager_for_testing().read().unwrap();
+            if remove_first {
+                mallory_mls.remove_group_member(&gid, &id("bob")).unwrap();
+            }
+            mallory_mls
+                .add_group_member(&gid, &id("bob"), &bob_kp.key_package_data)
+                .unwrap()
+                .0
+        };
+        let payload = GroupMlsWelcomePayload {
+            member_rich: HashMap::new(),
+            created_by: None,
+            group_id: group_info.group_id.to_string(),
+            group_name: Some("mallory-group".to_string()),
+            welcome_data: base64_encode(&welcome.welcome_data),
+            member_list: vec![id("mallory"), id("carol"), id("bob")],
+            member_roles: HashMap::new(),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_WELCOME,
+            serde_json::to_string(&payload).unwrap()
+        );
+        bob.process_internal_message(&make_message(&id("mallory"), &id("bob"), &content));
+    };
+
+    invite(&mut bob, &mallory, false);
+    let after_first = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            matches!(e, Event::SecurityWarning { reason_code, .. }
+                if *reason_code == crate::events::SecurityWarningCode::GroupLeafIdentityUnproven)
+        })
+        .count();
+    assert_eq!(after_first, 1, "the first refusal must be reported");
+
+    invite(&mut bob, &mallory, true);
+    let events = events.lock().unwrap();
+    let total = events
+        .iter()
+        .filter(|e| {
+            matches!(e, Event::SecurityWarning { reason_code, .. }
+                if *reason_code == crate::events::SecurityWarningCode::GroupLeafIdentityUnproven)
+        })
+        .count();
+    assert_eq!(
+        total,
+        1,
+        "a second refusal for the same (group, sender) must stay suppressed inside the window; \
+         events: {:?}",
+        events
+            .iter()
+            .map(|e| format!("{:?}", e))
+            .collect::<Vec<_>>()
+    );
+
+    // Premise guard: the second invite really did reach the refusal rather than
+    // failing early for some unrelated reason, which would make the assertion
+    // above pass with the limiter deleted.
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        assert!(
+            bob_mls.get_group_info(&gid).unwrap().is_none(),
+            "neither invite may install the group"
         );
     }
-    // Note: a *replay* of the same frame fails earlier, as a spent ratchet
-    // generation (`Decryption`), and is buffered like any replayed commit.
-    // That is pre-existing behaviour common to every commit and is unrelated
-    // to the binding — the leaf refusal is what must not be buffered, and a
-    // fresh forged commit always takes that path.
 }

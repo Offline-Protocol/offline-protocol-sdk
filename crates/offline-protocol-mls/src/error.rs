@@ -317,6 +317,16 @@ pub enum MlsError {
     /// message OpenMLS just authenticated against that leaf, so it is
     /// defensive; its `detail` is prefixed `tree integrity:` to keep the two
     /// readable apart in a log.
+    ///
+    /// **Contract for anything added here.** Three separate dispositions key
+    /// off the bare variant — `process_commit_core`'s `is_permanent`,
+    /// `is_media_security_rejection`, and the `__MLS_ENC__` intercept in
+    /// `handle_encrypted_message` — so a new condition mapped to this variant
+    /// silently inherits *permanent, un-ACKed, and reported as a security
+    /// warning*. Only map conditions that genuinely share all three: the frame
+    /// can never become processable, the sender must learn nothing from an ACK,
+    /// and no honest peer produces it. Anything recoverable needs its own
+    /// variant.
     #[error("Unsupported sender: {detail}")]
     UnsupportedSender {
         /// Which unsupported sender shape arrived, and where.

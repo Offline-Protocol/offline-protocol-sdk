@@ -715,7 +715,7 @@ What integrators need to know:
 
 - **A legitimate-looking invite or membership change can now be refused.** It is
   declined outright — nothing is delivered, no group is installed, and a refused
-  commit is not retried.
+  commit is not buffered for retry.
 - **The signal is `GROUP_LEAF_IDENTITY_UNPROVEN`** on `security_warning`, emitted
   from three sites: a declined group invite, a refused membership commit, and a
   declined session Welcome. The group sites are rate-limited per
