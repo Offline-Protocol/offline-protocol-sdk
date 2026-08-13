@@ -1954,14 +1954,19 @@ export type SecurityWarningCode =
  * it accuses someone the user is already in a room with. Every member of a
  * group carries an identity key whose hash *is* their address, so an honest
  * member always re-derives their own name; a member that does not was built
- * around someone else's. The invite or membership change is refused, so
- * nothing is delivered.
+ * around someone else's. Emitted from three sites: a declined group invite, a
+ * refused membership change, and a declined 1:1 session Welcome. In every case
+ * the frame is refused, so nothing is delivered.
+ *
+ * The session case can fire while an *existing* session with that peer stays
+ * live — the refusal is non-destructive — so a `secure_session_failed`
+ * alongside it means "this handshake attempt failed", not "the session ended".
  *
  * `peer_id` is the peer that delivered the forgery — the inviter, or the
  * sender of the membership change — and it is proved: the frames carrying
- * both are signature-gated against the sender's own address. The identity the
- * forged leaf claimed appears only in `reason`, which is diagnostic text and
- * must not be parsed.
+ * these are signature-gated against the sender's own address. `reason` is
+ * diagnostic text, must not be parsed, and carries no identifier: the
+ * impersonated address stays in the sending device's logs.
  */
 export interface SecurityWarningEvent extends BaseEvent {
   type: 'security_warning';

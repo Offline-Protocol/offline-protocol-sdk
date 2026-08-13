@@ -428,7 +428,7 @@ impl OfflineProtocol {
             let is_session = group_id.starts_with("session:");
             let mut error_reason: Option<String> = None;
             // Collected under the MLS lock, emitted after it drops.
-            let mut unproven_leaf_session: Option<String> = None;
+            let mut unproven_leaf_session = false;
             // Receiver-side convergence instrumentation: prove the Welcome
             // actually reassembled and reached MLS handling on THIS device.
             // (Absent in logs => the Welcome never fully arrived — a transport
@@ -505,7 +505,7 @@ impl OfflineProtocol {
                                     );
                                     if unproven_leaf {
                                         warn!(error = %e, sender = %sender, "Refused a Welcome carrying an unprovable identity");
-                                        unproven_leaf_session = Some(e.to_string());
+                                        unproven_leaf_session = true;
                                         error_reason = Some(e.to_string());
                                     }
                                     // Non-destructive adopt: if our session survived, the
@@ -593,7 +593,7 @@ impl OfflineProtocol {
                                     offline_protocol_mls::MlsError::LeafAddressMismatch { .. }
                                         | offline_protocol_mls::MlsError::UnsupportedSender { .. }
                                 ) {
-                                    unproven_leaf_session = Some(e.to_string());
+                                    unproven_leaf_session = true;
                                 }
                                 error_reason = Some(e.to_string());
                             }
@@ -709,16 +709,17 @@ impl OfflineProtocol {
                 }
             }
 
-            if let Some(detail) = unproven_leaf_session {
+            if unproven_leaf_session {
                 self.emit_security_warning(
                     &sender_owned,
                     SecurityWarningCode::GroupLeafIdentityUnproven,
-                    format!(
-                        "Session invite declined: it carried an identity claim this device \
-                         could not verify, so messages in this session could not be \
-                         reliably attributed ({})",
-                        detail
-                    ),
+                    // Identifier-free: a `SecurityWarning`'s `reason` is not
+                    // scrubbed (only `peer_id` is hashed), and the error names
+                    // the impersonated address. The full error is in the
+                    // `warn!` at the refusal site and in `secure_session_failed`.
+                    "Session invite declined: it carried an identity claim this device could \
+                     not verify, so messages in this session could not be reliably attributed"
+                        .to_string(),
                 );
             }
 

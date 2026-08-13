@@ -212,14 +212,28 @@ pub enum SecurityWarningCode {
     /// `peer_id` is the peer that delivered the forgery — the Welcome's
     /// inviter, or the sender of the frame carrying the commit — not the
     /// address the forged leaf claimed. That attribution is worth something
-    /// because it is proved independently: `__GRP_MLS_WELCOME__` and
-    /// `__GRP_MLS_COMMIT__` are security-gated, so the sender signed with the
-    /// key its own address derives from. The claimed identity is in `reason`,
-    /// which is diagnostic text and must not be parsed.
+    /// because it is proved independently: `__GRP_MLS_WELCOME__`,
+    /// `__GRP_MLS_COMMIT__` and `__MLS_WELCOME__` are all security-gated, so
+    /// the sender signed with the key its own address derives from.
     ///
-    /// Emitted where the claim was refused: joining a Welcome whose ratchet
-    /// tree contains such a leaf (the invite is declined outright), and
-    /// processing a commit that would install one (the commit is not merged).
+    /// `reason` is diagnostic text, must not be parsed, and deliberately
+    /// carries **no identifier** — the impersonated address appears only in
+    /// this device's logs. Telemetry scrubbing hashes `peer_id` and passes
+    /// `reason` through verbatim, and the identity at stake belongs to a third
+    /// party who is not even part of the exchange.
+    ///
+    /// Emitted from three sites, wherever the claim was refused:
+    ///
+    /// 1. joining a group Welcome whose ratchet tree contains such a leaf (the
+    ///    invite is declined outright);
+    /// 2. processing a membership commit that would install one (the commit is
+    ///    not merged, and is never buffered for retry);
+    /// 3. joining a 1:1 session Welcome whose ratchet tree contains one —
+    ///    including when we already hold a session with that peer, where the
+    ///    refusal is non-destructive and the existing session stays live (so a
+    ///    `secure_session_failed` alongside this does *not* mean the working
+    ///    session ended).
+    ///
     /// Apps should treat a group that produces this as untrusted for
     /// attribution — a message shown as coming from a member is exactly what
     /// the forged leaf was for.

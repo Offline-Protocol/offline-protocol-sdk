@@ -719,7 +719,9 @@ What integrators need to know:
 - **The signal is `GROUP_LEAF_IDENTITY_UNPROVEN`** on `security_warning`, emitted
   from three sites: a declined group invite, a refused membership commit, and a
   declined session Welcome. The group sites are rate-limited per
-  `(group, sender)` over 5 minutes.
+  `(group, sender, site)` over 5 minutes. The `reason` text carries no
+  identifier — it is not scrubbed for telemetry, and the address at stake
+  belongs to the impersonated third party.
 - **`peer_id` is the peer that delivered the forgery** — the inviter, or the
   sender of the membership change — not the identity the forged leaf claimed.
   That attribution is proved: both frames are security-gated against the
@@ -729,6 +731,10 @@ What integrators need to know:
   the user is already in a room with. Treat a group that produces it as
   untrusted for attribution — a message shown as coming from a member is exactly
   what the forged leaf was for.
+- **A declined *session* Welcome also emits `secure_session_failed`, even though
+  the existing session with that peer stays live.** The refusal is
+  non-destructive by design, so treat that event as "this handshake attempt
+  failed", not "tear down the session".
 - **Rosters skip unproven leaves.** `get_group_info` omits them with a warning
   rather than failing the whole read, so a member can disappear from a roster
   without an explicit removal.

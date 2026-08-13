@@ -34,6 +34,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   one found. One identity holding two leaves is refused by the wire gates, but
   not by a tampered local store — and there first-match leaves the peer in the
   group holding live keys while the roster shows them gone.
+- **BREAKING**: `SecurityWarningCode` gains `GroupLeafIdentityUnproven`
+  (`GROUP_LEAF_IDENTITY_UNPROVEN` on the wire and in the RN union). The Rust
+  enum is not `#[non_exhaustive]`, so a downstream exhaustive match must add an
+  arm; JSON and RN consumers are unaffected beyond handling the new string.
 - **BREAKING**: non-`Member` MLS senders (`NewMemberCommit`,
   `NewMemberProposal`, `External`) are now refused with
   `MlsError::UnsupportedSender` rather than skipped, as is a commit or Welcome
@@ -200,8 +204,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   forks the attacker off a group that stays consistent. Refusals surface as
   `GROUP_LEAF_IDENTITY_UNPROVEN` from all three refusal sites — a declined group
   invite, a refused membership commit, and a declined session Welcome — with the
-  group sites rate-limited per `(group, sender)` on the same 300s window as the
-  unauthorized-membership report, since a refusal is permanent and costs an
+  group sites rate-limited per `(group, sender, site)` on the same 300s window as
+  the unauthorized-membership report, since a refusal is permanent and costs an
   insider nothing to repeat. A forged commit's *first* delivery is **not** buffered
   for retry: it can never succeed, and a buffered commit that expires after
   retries is read as an epoch fork, which would have let one forged commit

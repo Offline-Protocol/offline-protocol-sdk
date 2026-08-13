@@ -1398,7 +1398,7 @@ impl OfflineProtocol {
         // Collected under the MLS guard, emitted after it drops: `emit_event`
         // takes the shared state, and holding both is the lock order this
         // module avoids everywhere else.
-        let mut unproven_leaf_invite: Option<String> = None;
+        let mut unproven_leaf_invite = false;
         let join_result = match mls_guard.join_group(&welcome) {
             Ok(group_info) => Some(group_info.members.clone()),
             Err(e) => {
@@ -1413,25 +1413,25 @@ impl OfflineProtocol {
                     offline_protocol_mls::MlsError::LeafAddressMismatch { .. }
                         | offline_protocol_mls::MlsError::UnsupportedSender { .. }
                 ) {
-                    unproven_leaf_invite = Some(e.to_string());
+                    unproven_leaf_invite = true;
                 }
                 None
             }
         };
         drop(mls_guard);
 
-        if let Some(detail) = unproven_leaf_invite {
+        if unproven_leaf_invite {
             let group_id = payload.group_id.clone();
             self.report_unproven_leaf(
                 &group_id,
                 sender,
                 UnprovenLeafSite::WelcomeDeclined,
-                format!(
-                    "Group invite declined: it carried an identity claim this device could \
-                     not verify, so messages in this group could not be reliably attributed \
-                     ({})",
-                    detail
-                ),
+                // Identifier-free for the same reason as the commit site: a
+                // `SecurityWarning`'s `reason` is not scrubbed, and the error
+                // names the impersonated address. The detail stays in the log.
+                "Group invite declined: it carried an identity claim this device could not \
+                 verify, so messages in this group could not be reliably attributed"
+                    .to_string(),
             );
         }
 
@@ -1785,13 +1785,19 @@ impl OfflineProtocol {
                         // half seats no leaf at all (an `ExternalSenders`
                         // extension, or a non-member sender role), so the
                         // "identity nobody proved" wording would be wrong for
-                        // it. The specifics are in the appended detail.
-                        let detail = format!(
-                            "Group membership change refused: it carried an identity claim \
-                             this device could not verify, so messages in this group could \
-                             not be reliably attributed ({})",
-                            e
-                        );
+                        // it.
+                        //
+                        // The error is deliberately NOT interpolated: it names
+                        // the impersonated address, and the telemetry scrubber
+                        // hashes only `peer_id` on a `SecurityWarning` — it
+                        // ships `reason` verbatim. Leaking a third party's
+                        // address to a sink running `scrub_ids: true` is the
+                        // exact trap the `convergence_diag` detail rule names.
+                        // The full error is in the `error!` above.
+                        let detail = "Group membership change refused: it carried an identity \
+                                      claim this device could not verify, so messages in this \
+                                      group could not be reliably attributed"
+                            .to_string();
                         let group_id = payload.group_id.clone();
                         self.report_unproven_leaf(
                             &group_id,
@@ -2046,11 +2052,18 @@ impl OfflineProtocol {
     /// identity the forged leaf claimed stays in `detail`, which is diagnostic
     /// text.
     ///
-    /// Rate-limited per `(group, peer)` on the same window and bound as
+    /// Rate-limited per `(group, peer, site)` through the shared
+    /// [`claim_report_window`], on the same window and bound as
     /// [`Self::report_unauthorized_membership_change`]. The commit half makes
     /// this necessary rather than tidy: refusals are permanent and cost the
     /// sender nothing, so an authenticated member can emit one per frame and
-    /// bury the signal in its own repetition.
+    /// bury the signal in its own repetition. `site` is in the key so a
+    /// declined invite cannot swallow the first refused *commit* — see
+    /// [`UnprovenLeafSite`].
+    ///
+    /// `detail` must stay **identifier-free**: it becomes the event `reason`,
+    /// which the telemetry scrubber passes through verbatim while hashing only
+    /// `peer_id`. The impersonated address belongs in the log, not here.
     fn report_unproven_leaf(
         &mut self,
         group_id: &str,

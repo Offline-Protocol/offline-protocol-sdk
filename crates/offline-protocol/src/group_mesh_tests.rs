@@ -13787,6 +13787,31 @@ fn test_repeated_unprovable_invites_from_one_sender_are_rate_limited() {
             .collect::<Vec<_>>()
     );
 
+    // The reason text must name no identifier. `SecurityWarning` scrubbing
+    // hashes `peer_id` and ships `reason` verbatim, so an address interpolated
+    // here reaches a sink running `scrub_ids: true` in the clear — and the
+    // address at stake is the impersonated third party's, who is not even a
+    // party to this exchange.
+    let reasons: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::SecurityWarning {
+                reason_code,
+                reason,
+                ..
+            } if *reason_code == crate::events::SecurityWarningCode::GroupLeafIdentityUnproven => {
+                Some(reason.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    for reason in &reasons {
+        assert!(
+            !reason.contains("off1"),
+            "the warning reason must carry no address; got {reason:?}"
+        );
+    }
+
     // Premise guard: the second invite really did reach the refusal rather than
     // failing early for some unrelated reason, which would make the assertion
     // above pass with the limiter deleted.
