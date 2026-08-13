@@ -1185,6 +1185,29 @@ impl OfflineProtocol {
                 );
                 GroupDecryptOutcome::SecurityRejected
             }
+            // The same class as SEC-M1 and the same disposition: a permanent
+            // refusal to attribute this frame to anyone. A leaf whose key does
+            // not hash to its own credential can never become legitimate, so
+            // this must not be buffered — and it must withhold the ACK and
+            // unmark the id, which is what `SecurityRejected` already carries.
+            Err(e @ offline_protocol_mls::MlsError::LeafAddressMismatch { .. }) => {
+                error!(
+                    group_id = %group_id,
+                    sender = %sender,
+                    error = %e,
+                    "SECURITY: group leaf does not prove the identity it claims, rejecting group message"
+                );
+                GroupDecryptOutcome::SecurityRejected
+            }
+            Err(e @ offline_protocol_mls::MlsError::UnsupportedSender { .. }) => {
+                error!(
+                    group_id = %group_id,
+                    sender = %sender,
+                    error = %e,
+                    "SECURITY: rejecting a group message from an unsupported sender role"
+                );
+                GroupDecryptOutcome::SecurityRejected
+            }
             Err(offline_protocol_mls::MlsError::CommitNotAuthorized {
                 committer,
                 added,
@@ -1301,14 +1324,42 @@ impl OfflineProtocol {
             group_name: payload.group_name.clone(),
             timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
         };
+        // Collected under the MLS guard, emitted after it drops: `emit_event`
+        // takes the shared state, and holding both is the lock order this
+        // module avoids everywhere else.
+        let mut unproven_leaf_invite: Option<String> = None;
         let join_result = match mls_guard.join_group(&welcome) {
             Ok(group_info) => Some(group_info.members.clone()),
             Err(e) => {
                 warn!(group_id = %payload.group_id, error = %e, "Failed to join mesh group");
+                // A forged ratchet tree is the one join failure that is an
+                // accusation rather than a fault: the inviter built a leaf
+                // around an identity they cannot prove. Everything else here
+                // (a spent key package, a storage error) is noise, so only
+                // this class is surfaced.
+                if matches!(
+                    e,
+                    offline_protocol_mls::MlsError::LeafAddressMismatch { .. }
+                        | offline_protocol_mls::MlsError::UnsupportedSender { .. }
+                ) {
+                    unproven_leaf_invite = Some(e.to_string());
+                }
                 None
             }
         };
         drop(mls_guard);
+
+        if let Some(detail) = unproven_leaf_invite {
+            self.emit_event(Event::security_warning(
+                sender.to_string(),
+                crate::events::SecurityWarningCode::GroupLeafIdentityUnproven,
+                format!(
+                    "Group invite declined: its member list contains an identity nobody \
+                     proved, so messages in it could not be attributed ({})",
+                    detail
+                ),
+            ));
+        }
 
         if let Some(members) = join_result {
             let group_id = payload.group_id.clone();

@@ -2,7 +2,7 @@
 //!
 //! This module handles creation, modification, and state management of MLS groups.
 
-use crate::error::{MlsError, Result};
+use crate::error::{LeafSource, MlsError, Result};
 use crate::provider::MlsProvider;
 use crate::storage::{MlsStorage, StorageError};
 use crate::types::{GroupId, GroupInfo, GroupMetadata, GroupRole, StorageKeyType};
@@ -43,6 +43,66 @@ fn sender_ratchet_configuration() -> SenderRatchetConfiguration {
         SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
         SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE,
     )
+}
+
+/// Requires a leaf's credential to be the address its own signature key
+/// derives to.
+///
+/// This is the Authentication Service RFC 9420 §5.3.1 delegates to the
+/// application, and for this SDK the whole service is one derivation: an
+/// address *is* `bech32m(0x01 ‖ SHA-256(signature_key)[..20])`, so a leaf
+/// carries its own proof and no prior contact is needed to check it. §7.3
+/// requires it wherever a ratchet tree is validated — on joining, and after
+/// processing a Commit — which is why this is called from three places rather
+/// than one.
+///
+/// # Why a non-address credential is refused, not skipped
+///
+/// The same reason [`crate::MlsManager::verify_address_binding`] and the
+/// control gate's `verify_sender_derivation` refuse one: a credential with no
+/// derivation to check is not a leaf that needs waving through, it is the
+/// bypass. Skip it and an impostor writes a nickname into their credential
+/// instead of an address and lands in the tree unjudged — and on the
+/// `__GROUP_MSG__` data-plane path, where the wire sender carries no signature,
+/// being attributed that nickname costs nothing further.
+///
+/// Nothing in this SDK produces such a leaf: production always constructs the
+/// manager at a derived address (`initialize_mls_inner`), and the only leaf
+/// this crate ever writes comes from the local credential or from a key package
+/// that already passed the same derivation.
+///
+/// Delegates to [`crate::MlsManager::derive_address`] rather than hashing here,
+/// because that is the SDK's single address derivation and a second one is a
+/// second format.
+fn verify_leaf_binding(
+    credential: &Credential,
+    signature_key: &[u8],
+    context: LeafSource,
+) -> Result<()> {
+    let claimed = String::from_utf8_lossy(credential.serialized_content()).into_owned();
+
+    // A key that cannot derive at all (wrong length) is refused with the same
+    // verdict as one that derives elsewhere: either way the leaf has not
+    // proved the identity it claims.
+    let derived = match crate::MlsManager::derive_address(signature_key) {
+        Ok(address) => address,
+        Err(e) => {
+            return Err(MlsError::LeafAddressMismatch {
+                claimed,
+                derived: format!("<no address: {}>", e),
+                context,
+            });
+        }
+    };
+
+    if derived.to_string().as_bytes() != credential.serialized_content() {
+        return Err(MlsError::LeafAddressMismatch {
+            claimed,
+            derived: derived.to_string(),
+            context,
+        });
+    }
+    Ok(())
 }
 
 /// Manages MLS groups for encrypted messaging.
@@ -238,15 +298,21 @@ impl GroupManager {
         Ok((commit, welcome))
     }
 
-    /// Removes a member from a group.
+    /// Removes members from a group.
+    ///
+    /// Takes every leaf to remove in one commit rather than one leaf per call:
+    /// a single identity can legitimately hold more than one leaf (two key
+    /// packages from the same peer, added separately), and removing "that
+    /// member" has to mean all of them or the peer stays in the group holding
+    /// live keys. See [`crate::MlsManager::remove_group_member`].
     pub fn remove_member(
         &self,
         group: &mut MlsGroup,
-        member_index: LeafNodeIndex,
+        member_indices: &[LeafNodeIndex],
         signer: &impl Signer,
     ) -> Result<MlsMessageOut> {
         let (commit, _welcome, _group_info) = group
-            .remove_members(&self.provider, signer, &[member_index])
+            .remove_members(&self.provider, signer, member_indices)
             .map_err(|e| MlsError::RemoveMember(e.to_string()))?;
 
         group
@@ -319,6 +385,22 @@ impl GroupManager {
                 }
             })?;
 
+        // SEC-M1 compares the wire sender against the MLS credential, so the
+        // credential has to be worth comparing against. Bind the sender's leaf
+        // first: a basic credential is a self-asserted string, and until its
+        // own signature key is shown to hash to it, matching it proves only
+        // that the forger typed the name they wanted to be called.
+        //
+        // The entry-point gates (`verify_staged_welcome_leaves`,
+        // `verify_staged_commit_leaves`) mean a leaf in the tree has already
+        // passed this once. Re-checking here is the same import-time plus
+        // use-time pairing `MlsManager::get_contact_key_package` documents, and
+        // it exists for the same window: group state is re-read from the
+        // install-scoped provider store long after the gate that admitted it,
+        // and anything able to write that store could otherwise seat a leaf the
+        // gates never saw.
+        Self::verify_sender_leaf(group, &processed)?;
+
         // Credentials in this SDK are basic credentials carrying the user id
         // as raw bytes (see `MlsManager::create_identity`).
         let authenticated = processed.credential().serialized_content();
@@ -344,6 +426,14 @@ impl GroupManager {
                 // commits riding the application channel, `__MLS_ENC__`
                 // envelopes naming a group id), so a check anywhere further
                 // up would be bypassable by reframing the same ciphertext.
+                //
+                // Identity first, policy second. The admin check reads the
+                // credentials this one validates — its `added` list, and the
+                // `GroupUnauthorizedMembershipChange` report built from it, are
+                // Add-proposal credential strings — so running it against
+                // unvalidated leaves would have it name identities nobody
+                // proved.
+                Self::verify_staged_commit_leaves(&staged_commit)?;
                 self.authorize_membership_commit(group, group_id, &staged_commit, claimed_sender)?;
                 group
                     .merge_staged_commit(&self.provider, *staged_commit)
@@ -355,6 +445,158 @@ impl GroupManager {
                 Ok(None)
             }
         }
+    }
+
+    /// Requires the leaf a processed message is authenticated to to carry the
+    /// address its own signature key derives to.
+    ///
+    /// The use-time half of the binding, and the one that actually closes the
+    /// attribution hole: it holds regardless of how the leaf reached the tree,
+    /// including paths no entry gate covers (a leaf seated by a direct write to
+    /// the provider store, or by a build predating the gates).
+    ///
+    /// O(1) — the sender's leaf is resolved by index, not by walking the
+    /// roster — so it costs one SHA-256 per inbound group message even in a
+    /// large group.
+    ///
+    /// # Non-member senders
+    ///
+    /// `Sender::Member` is the only shape this SDK sends or expects. The other
+    /// three are refused rather than skipped, because skipping would hand back
+    /// exactly what the check just took away: an external joiner's leaf is not
+    /// in the pre-merge tree, so there is no entry to resolve, and answering
+    /// "no leaf, nothing to check" would let a `NewMemberCommit` be attributed
+    /// to whatever its credential claims. The commit's own update-path leaf is
+    /// still validated by [`Self::verify_staged_commit_leaves`], so refusing
+    /// here costs nothing an honest peer was doing — this SDK issues no
+    /// external commits, no external proposals, and configures no external
+    /// senders.
+    fn verify_sender_leaf(group: &MlsGroup, processed: &ProcessedMessage) -> Result<()> {
+        let leaf_index = match processed.sender() {
+            Sender::Member(index) => *index,
+            other => {
+                return Err(MlsError::UnsupportedSender {
+                    detail: format!(
+                        "a message was authenticated to {:?}, which is not a group member; \
+                         this SDK issues and expects only member senders",
+                        other
+                    ),
+                });
+            }
+        };
+
+        // A sender index with no leaf cannot happen for a message OpenMLS just
+        // authenticated against that leaf — but resolving it is fallible, and
+        // the safe answer to "we cannot see the leaf" is the same as to "the
+        // leaf is wrong".
+        let member = group
+            .member_at(leaf_index)
+            .ok_or_else(|| MlsError::UnsupportedSender {
+                detail: format!(
+                    "a message was authenticated to leaf {} , which is not in the tree",
+                    leaf_index.u32()
+                ),
+            })?;
+
+        verify_leaf_binding(
+            &member.credential,
+            &member.signature_key,
+            LeafSource::MessageSender,
+        )
+    }
+
+    /// Requires every leaf a staged commit would install to carry the address
+    /// its own signature key derives to (RFC 9420 §7.3, "after processing a
+    /// Commit").
+    ///
+    /// # Why this is unconditional, when the admin check beside it is opt-in
+    ///
+    /// Both refuse a commit, and refusing a commit means not merging it, which
+    /// forks us from every member who did merge. For
+    /// [`Self::authorize_membership_commit`] that risk is what keeps it behind
+    /// [`GroupManager::set_enforce_admin_commits`]: its verdict depends on the
+    /// admin overlay, which replicates best-effort, so two honest members can
+    /// legitimately disagree and partition each other with no attacker present.
+    ///
+    /// This verdict has no such input. It is computed from the commit's own
+    /// bytes — a hash of a key in the commit, compared to a string in the
+    /// commit — so every honest member reaches the same answer from the same
+    /// message. A refused commit does not split the group; it forks the
+    /// *attacker* off a group that stays consistent. That is why it is safe to
+    /// run for everyone, and why it must: a check the fleet does not run is a
+    /// check an attacker chooses to be judged by.
+    ///
+    /// It also runs for `session:` groups, which the admin check skips. A 1:1
+    /// slot is already bound to its pair by `verify_welcome_slot` and the
+    /// session-id derivation, so there is nothing extra to catch there today —
+    /// but the cost is one hash and the alternative is a seam whose coverage
+    /// depends on the group id's spelling.
+    ///
+    /// # The four sources
+    ///
+    /// Taken from OpenMLS's own [`StagedCommit::credentials_to_verify`], which
+    /// enumerates exactly where a credential can enter through a commit. That
+    /// helper hands back bare `Credential`s, which is not enough here — the
+    /// whole check is credential *against its signature key* — so the leaves
+    /// are walked directly, but the enumeration is copied from it deliberately:
+    ///
+    /// 1. the commit's update-path leaf (the committer's own, rotated in place);
+    /// 2. Update proposals (a member replacing their leaf);
+    /// 3. Add proposals (a new member's key package leaf);
+    /// 4. `GroupContextExtensions` carrying `ExternalSenders` — not a leaf, and
+    ///    refused outright rather than bound, see [`MlsError::UnsupportedSender`].
+    ///
+    /// Validating only (3) would leave (1) and (2) as bypasses. The OpenMLS
+    /// book names only "add & update proposals"; its own helper is the more
+    /// complete list, and this follows the helper.
+    fn verify_staged_commit_leaves(staged_commit: &StagedCommit) -> Result<()> {
+        // 1. The committer's own leaf, rotated in place by the update path.
+        if let Some(leaf) = staged_commit.update_path_leaf_node() {
+            verify_leaf_binding(
+                leaf.credential(),
+                leaf.signature_key().as_slice(),
+                LeafSource::CommitPath,
+            )?;
+        }
+
+        // 2. Members replacing their own leaf.
+        for proposal in staged_commit.update_proposals() {
+            let leaf = proposal.update_proposal().leaf_node();
+            verify_leaf_binding(
+                leaf.credential(),
+                leaf.signature_key().as_slice(),
+                LeafSource::CommitUpdate,
+            )?;
+        }
+
+        // 3. New members. This is the source the impersonation rides: a member
+        // commits an Add whose key package credential names someone else, and
+        // from then on SEC-M1 attributes that leaf's messages to them.
+        for proposal in staged_commit.add_proposals() {
+            let leaf = proposal.add_proposal().key_package().leaf_node();
+            verify_leaf_binding(
+                leaf.credential(),
+                leaf.signature_key().as_slice(),
+                LeafSource::CommitAdd,
+            )?;
+        }
+
+        // 4. External senders authorize a non-member to send into the group.
+        // The SDK configures none and issues none, and their credentials are
+        // not leaves, so there is no binding to check — refuse instead.
+        for proposal in staged_commit.queued_proposals() {
+            if let Proposal::GroupContextExtensions(gce) = proposal.proposal() {
+                if gce.extensions().external_senders().is_some() {
+                    return Err(MlsError::UnsupportedSender {
+                        detail: "a commit proposes an ExternalSenders group-context extension, \
+                                 which would authorize a non-member to send into this group"
+                            .to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Refuses a staged membership commit whose committer or proposal senders
@@ -570,6 +812,40 @@ impl GroupManager {
         Ok(())
     }
 
+    /// Requires every leaf in a staged Welcome's ratchet tree to carry the
+    /// address its own signature key derives to (RFC 9420 §7.3, "when a client
+    /// validates a ratchet tree, e.g., when joining a group").
+    ///
+    /// The inviter chooses this tree wholesale. Nothing else validates it: the
+    /// wire `group_id` is bound by [`Self::verify_staged_group_id`] and the
+    /// inviter is authenticated a layer up, but neither says anything about
+    /// *who else* the inviter claims is in the room. Without this, an inviter
+    /// hands you a group whose roster names your real contacts on leaves the
+    /// inviter holds the keys to — and then speaks as them, since the only
+    /// thing standing between a leaf and an attributed message is SEC-M1's
+    /// comparison against that same unvalidated credential.
+    ///
+    /// Runs before `into_group`, alongside the group-id binding and for the
+    /// same reason: `into_group` is the step that persists, so a tree judged
+    /// after it would already be installed. Staging has consumed the one-time
+    /// key package by then, which costs the package and nothing else — the same
+    /// trade [`Self::verify_staged_group_id`] documents.
+    ///
+    /// All-or-nothing on purpose. Dropping the offending leaves and joining
+    /// anyway would leave us in a group whose tree we know to be forged, at an
+    /// epoch every other member computed over the full tree — decrypting
+    /// nothing and holding a roster that agrees with nobody.
+    fn verify_staged_welcome_leaves(staged: &StagedWelcome) -> Result<()> {
+        for member in staged.members() {
+            verify_leaf_binding(
+                &member.credential,
+                &member.signature_key,
+                LeafSource::WelcomeTree,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Joins a group using a Welcome message.
     pub fn join_group(&self, welcome: Welcome, group_id: &GroupId) -> Result<MlsGroup> {
         let group_config = MlsGroupJoinConfig::builder()
@@ -584,6 +860,10 @@ impl GroupManager {
         // before persisting — otherwise `into_group` would install under the
         // attacker-chosen embedded id. See `verify_staged_group_id`.
         Self::verify_staged_group_id(&staged, group_id)?;
+
+        // The inviter picks the whole ratchet tree; judge every identity in it
+        // before adopting the roster. See `verify_staged_welcome_leaves`.
+        Self::verify_staged_welcome_leaves(&staged)?;
 
         let group = staged
             .into_group(&self.provider)
@@ -638,6 +918,11 @@ impl GroupManager {
         // `verify_staged_group_id`.
         Self::verify_staged_group_id(&staged, group_id)?;
 
+        // Same placement, same reason: refusing a forged tree here leaves the
+        // existing group intact, because the destructive `delete_group` below
+        // has not run yet. See `verify_staged_welcome_leaves`.
+        Self::verify_staged_welcome_leaves(&staged)?;
+
         // Staging consumed the key package; from here a failure is not
         // recoverable by retrying the same Welcome. Drop the prior group so its
         // old-leaf epoch keypairs are not orphaned. `delete_group` already
@@ -664,10 +949,36 @@ impl GroupManager {
     }
 
     /// Gets information about a group.
+    ///
+    /// Members whose leaf does not carry the address its own signature key
+    /// derives to are skipped with a warning, the same disposition
+    /// [`Self::list_groups`] gives a stored group id that fails validation.
+    ///
+    /// Post-gates such a leaf cannot arrive over the wire, so one appearing
+    /// here means local group state was written behind the SDK's back. Keeping
+    /// it out of the roster matters because the roster is not only what the app
+    /// displays: it addresses the per-member fan-out, feeds the group's
+    /// rich-payload capability gate, and supplies the candidates for the
+    /// address-ordered tiebreakers (leave election, admin auto-promotion, fork
+    /// leader). A forged entry in it is not cosmetic.
+    ///
+    /// Skipping rather than failing keeps a tampered store from taking the
+    /// whole group down, and the message it would have carried is refused
+    /// anyway — [`Self::verify_sender_leaf`] judges the same leaf at decrypt.
     pub fn get_group_info(&self, group: &MlsGroup, group_id: &GroupId) -> GroupInfo {
         let members: Vec<String> = group
             .members()
             .filter_map(|m| {
+                if let Err(e) =
+                    verify_leaf_binding(&m.credential, &m.signature_key, LeafSource::RosterEntry)
+                {
+                    warn!(
+                        group_id = %group_id,
+                        error = %e,
+                        "Skipping a group member whose leaf does not prove its own identity"
+                    );
+                    return None;
+                }
                 let credential = m.credential.serialized_content();
                 String::from_utf8(credential.to_vec()).ok()
             })
@@ -706,5 +1017,44 @@ mod tests {
     fn test_group_manager_creation() {
         let manager = create_test_group_manager();
         assert!(manager.list_groups().unwrap().is_empty());
+    }
+
+    /// A leaf whose signature key cannot yield an address at all is refused,
+    /// not waved through.
+    ///
+    /// Unreachable through the wire — OpenMLS validates a key package's
+    /// signature key against the ciphersuite before any of this runs, so a
+    /// wrong-length key never reaches a tree — which is exactly why it is
+    /// tested directly: the arm is defensive, and an untested fail-open written
+    /// there would look identical to an untested fail-closed one. "No address
+    /// could be derived" is not "nothing to check", it is a leaf that proved
+    /// nothing.
+    #[test]
+    fn undecodable_signature_key_is_refused_not_skipped() {
+        let credential = Credential::new(CredentialType::Basic, b"off1whatever".to_vec());
+        // 31 bytes: one short of an Ed25519 public key.
+        let err = verify_leaf_binding(&credential, &[0u8; 31], LeafSource::WelcomeTree)
+            .expect_err("a key that cannot derive an address must not pass");
+        assert!(
+            matches!(err, MlsError::LeafAddressMismatch { ref derived, .. }
+                if derived.contains("no address")),
+            "got {err:?}"
+        );
+    }
+
+    /// The honest case, pinned next to it so the helper is not merely always
+    /// failing.
+    #[test]
+    fn a_leaf_carrying_its_own_derived_address_passes() {
+        use openmls_basic_credential::SignatureKeyPair;
+
+        let keys = SignatureKeyPair::new(DEFAULT_CIPHERSUITE.signature_algorithm()).unwrap();
+        let address = crate::MlsManager::derive_address(keys.public()).unwrap();
+        let credential = Credential::new(
+            CredentialType::Basic,
+            address.to_string().as_bytes().to_vec(),
+        );
+        verify_leaf_binding(&credential, keys.public(), LeafSource::WelcomeTree)
+            .expect("a leaf that derives its own credential must pass");
     }
 }

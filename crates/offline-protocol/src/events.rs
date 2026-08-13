@@ -200,6 +200,30 @@ pub enum SecurityWarningCode {
     /// displaced by a newer login. No retry is attempted — the next reconnect
     /// declares from scratch.
     RelayAddressDeclarationRefused,
+    /// A group leaf carries a credential its own signature key does not derive
+    /// to — an identity claimed inside a group without the key to prove it.
+    ///
+    /// There is no benign reading, and unlike most codes here it accuses
+    /// someone the user is already in a room with. An address *is* the hash of
+    /// its identity key, so every honest leaf reproduces its own credential;
+    /// producing one that does not means deliberately building a leaf around
+    /// someone else's name.
+    ///
+    /// `peer_id` is the peer that delivered the forgery — the Welcome's
+    /// inviter, or the sender of the frame carrying the commit — not the
+    /// address the forged leaf claimed. That attribution is worth something
+    /// because it is proved independently: `__GRP_MLS_WELCOME__` and
+    /// `__GRP_MLS_COMMIT__` are security-gated, so the sender signed with the
+    /// key its own address derives from. The claimed identity is in `reason`,
+    /// which is diagnostic text and must not be parsed.
+    ///
+    /// Emitted where the claim was refused: joining a Welcome whose ratchet
+    /// tree contains such a leaf (the invite is declined outright), and
+    /// processing a commit that would install one (the commit is not merged).
+    /// Apps should treat a group that produces this as untrusted for
+    /// attribution — a message shown as coming from a member is exactly what
+    /// the forged leaf was for.
+    GroupLeafIdentityUnproven,
 }
 
 impl SecurityWarningCode {
@@ -219,6 +243,7 @@ impl SecurityWarningCode {
             Self::PushKeyPackagePoolExhausted => "PUSH_KEY_PACKAGE_POOL_EXHAUSTED",
             Self::RelayAddressBindingMismatch => "RELAY_ADDRESS_BINDING_MISMATCH",
             Self::RelayAddressDeclarationRefused => "RELAY_ADDRESS_DECLARATION_REFUSED",
+            Self::GroupLeafIdentityUnproven => "GROUP_LEAF_IDENTITY_UNPROVEN",
         }
     }
 }
@@ -3574,6 +3599,7 @@ mod tests {
             SecurityWarningCode::PushKeyPackagePoolExhausted,
             SecurityWarningCode::RelayAddressBindingMismatch,
             SecurityWarningCode::RelayAddressDeclarationRefused,
+            SecurityWarningCode::GroupLeafIdentityUnproven,
         ];
         for code in all {
             // serde renders a unit enum variant as a quoted JSON string.
@@ -3599,7 +3625,8 @@ mod tests {
                 | SecurityWarningCode::NostrKeyPackageSlotExhausted
                 | SecurityWarningCode::PushKeyPackagePoolExhausted
                 | SecurityWarningCode::RelayAddressBindingMismatch
-                | SecurityWarningCode::RelayAddressDeclarationRefused => {}
+                | SecurityWarningCode::RelayAddressDeclarationRefused
+                | SecurityWarningCode::GroupLeafIdentityUnproven => {}
             }
         }
     }

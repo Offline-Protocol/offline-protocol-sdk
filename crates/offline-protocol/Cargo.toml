@@ -39,6 +39,10 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 offline-protocol-transport = { workspace = true, features = ["test-utils"] }
+# Forging a leaf that lies about its identity needs raw OpenMLS, which this
+# crate deliberately does not depend on. The fixture lives with the code it
+# attacks; this pulls it in for tests only.
+offline-protocol-mls = { workspace = true, features = ["test-utils"] }
 # Test identities are seeded from their label so that ordering-dependent
 # fixtures (leave election, admin promotion, fork leader) are reproducible:
 # addresses sort by key hash, so a randomly minted key would reshuffle them

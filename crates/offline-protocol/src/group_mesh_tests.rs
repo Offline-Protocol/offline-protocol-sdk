@@ -13461,3 +13461,98 @@ fn test_repeated_refusals_by_one_committer_are_still_rate_limited() {
         "repeat refusals by the same (group, committer) must stay suppressed within the window"
     );
 }
+
+/// A group invite whose ratchet tree names an identity nobody can prove is
+/// declined, and says so.
+///
+/// The end-to-end shape of the impersonation the leaf binding closes: mallory
+/// seats a leaf claiming carol's address in a group she controls, then invites
+/// bob. Before the binding, bob joined, carol appeared in his roster, and every
+/// message from that leaf was attributed to carol — the wire sender and the
+/// credential agreed because mallory chose both.
+///
+/// Asserts through the protocol surface rather than the MLS one because that is
+/// where the plumbing being tested lives: the join must be declined *and* the
+/// refusal must reach the app, since a silently-dropped invite is
+/// indistinguishable from a delivery failure.
+#[test]
+fn test_group_invite_with_an_unprovable_member_is_declined_and_reported() {
+    let storage_m = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
+    let mut mallory = OfflineProtocol::new(create_test_config_for_user("mallory")).unwrap();
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    mallory.initialize_mls_for_test(storage_m).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
+    mallory.start().unwrap();
+    bob.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let collector = events.clone();
+    bob.on_event(move |event| collector.lock().unwrap().push(event));
+
+    let group_info = mallory.create_group("mallory-group").unwrap();
+    let gid = offline_protocol_mls::GroupId::new(group_info.group_id.as_str()).unwrap();
+
+    // Seat a leaf claiming carol, then invite bob into the poisoned room.
+    let bob_kp = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.generate_key_package().unwrap()
+    };
+    let welcome = {
+        let mallory_mls = mallory.mls_manager_for_testing().read().unwrap();
+        mallory_mls
+            .seat_forged_leaf_for_testing(&gid, &id("carol"))
+            .unwrap();
+        mallory_mls
+            .add_group_member(&gid, &id("bob"), &bob_kp.key_package_data)
+            .unwrap()
+            .0
+    };
+
+    let payload = GroupMlsWelcomePayload {
+        member_rich: HashMap::new(),
+        created_by: None,
+        group_id: group_info.group_id.to_string(),
+        group_name: Some("mallory-group".to_string()),
+        welcome_data: base64_encode(&welcome.welcome_data),
+        member_list: vec![id("mallory"), id("carol"), id("bob")],
+        member_roles: HashMap::new(),
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::GROUP_MLS_WELCOME,
+        serde_json::to_string(&payload).unwrap()
+    );
+    bob.process_internal_message(&make_message(&id("mallory"), &id("bob"), &content));
+
+    // The invite was declined: no group, and no roster naming carol.
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        assert!(
+            bob_mls.get_group_info(&gid).unwrap().is_none(),
+            "a Welcome carrying an unprovable member must not install the group"
+        );
+    }
+
+    // And the refusal reached the app, attributed to the peer that sent it.
+    let events = events.lock().unwrap();
+    let reported = events.iter().find_map(|event| match event {
+        Event::SecurityWarning {
+            peer_id,
+            reason_code,
+            ..
+        } if *reason_code == crate::events::SecurityWarningCode::GroupLeafIdentityUnproven => {
+            Some(peer_id.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(
+        reported.as_deref(),
+        Some(id("mallory").as_str()),
+        "expected the declined invite to be reported against its sender; events: {:?}",
+        events
+            .iter()
+            .map(|e| format!("{:?}", e))
+            .collect::<Vec<_>>()
+    );
+}

@@ -18,6 +18,13 @@ description = "MLS (Message Layer Security) integration for end-to-end encryptio
 [lints]
 workspace = true
 
+[features]
+default = []
+# Adversarial fixtures for tests in *other* crates: building a leaf that lies
+# about its identity needs raw OpenMLS, which the protocol crate deliberately
+# does not depend on. Mirrors offline-protocol-transport's `test-utils`.
+test-utils = []
+
 [dependencies]
 # Shared id-validation policy (storage-key safety)
 offline-protocol-core = { workspace = true }

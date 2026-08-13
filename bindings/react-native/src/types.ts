@@ -1909,7 +1909,8 @@ export type SecurityWarningCode =
   | 'NOSTR_KEY_PACKAGE_SLOT_EXHAUSTED'
   | 'PUSH_KEY_PACKAGE_POOL_EXHAUSTED'
   | 'RELAY_ADDRESS_BINDING_MISMATCH'
-  | 'RELAY_ADDRESS_DECLARATION_REFUSED';
+  | 'RELAY_ADDRESS_DECLARATION_REFUSED'
+  | 'GROUP_LEAF_IDENTITY_UNPROVEN';
 
 /**
  * A security-relevant anomaly was detected for a peer.
@@ -1948,6 +1949,19 @@ export type SecurityWarningCode =
  * establishing *new* encrypted sessions over the relay, since the key-package
  * and welcome frames are identity-checked. `peer_id` is this device's own id
  * and `reason` is the relay's text, verbatim and opaque.
+ *
+ * `GROUP_LEAF_IDENTITY_UNPROVEN` has no benign reading, and unlike the others
+ * it accuses someone the user is already in a room with. Every member of a
+ * group carries an identity key whose hash *is* their address, so an honest
+ * member always re-derives their own name; a member that does not was built
+ * around someone else's. The invite or membership change is refused, so
+ * nothing is delivered.
+ *
+ * `peer_id` is the peer that delivered the forgery — the inviter, or the
+ * sender of the membership change — and it is proved: the frames carrying
+ * both are signature-gated against the sender's own address. The identity the
+ * forged leaf claimed appears only in `reason`, which is diagnostic text and
+ * must not be parsed.
  */
 export interface SecurityWarningEvent extends BaseEvent {
   type: 'security_warning';
