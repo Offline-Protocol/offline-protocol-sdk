@@ -423,3 +423,233 @@ pub enum MlsError {
         embedded: String,
     },
 }
+
+impl MlsError {
+    /// A fixed, identifier-free classification of this error, safe to place in
+    /// a field that reaches a [`TelemetrySink`][sink].
+    ///
+    /// [sink]: https://docs.rs/offline-protocol
+    ///
+    /// # Why this exists
+    ///
+    /// The protocol crate's telemetry scrubber hashes the *named* actor fields
+    /// of an event (`peer_id`, `group_id`, `sender`, …) and ships free-text
+    /// `reason`/`detail` fields verbatim — deliberately, since scrubbing
+    /// payload is a separate concern from scrubbing identity. Rendering an
+    /// `MlsError` into one of those fields therefore hands a sink running
+    /// `scrub_ids: true` exactly what the setting exists to withhold, and it
+    /// does so by *two* routes:
+    ///
+    /// - **Identifiers this device holds.** A 1:1 slot id is
+    ///   `session:<a>:<b>`, so a single rendered slot carries two addresses —
+    ///   neither of which is the event's `peer_id`, so neither is hashed, and
+    ///   one of which may be a third party who is not a participant in the
+    ///   exchange at all. Storage keys, group ids and user ids render the same
+    ///   way.
+    /// - **Text the wire chose.** [`Self::WelcomeIdentityMismatch::found`] and
+    ///   [`Self::WelcomeGroupIdMismatch::embedded`] are attacker-controlled by
+    ///   construction — bounding what they may contain is the entire premise of
+    ///   the checks that raise them. The embedded id is the worse of the two:
+    ///   it is `from_utf8_lossy` over raw `GroupContext` bytes, so unlike the
+    ///   wire field it passes through neither charset validation nor
+    ///   [`GroupId::MAX_LEN`][crate::GroupId::MAX_LEN].
+    ///
+    /// # Contract
+    ///
+    /// Two properties are load-bearing and neither is decoration:
+    ///
+    /// 1. The return type is `&'static str`, so a caller *cannot* interpolate a
+    ///    value into it. Widening this to `String` would restore the leak by
+    ///    the front door.
+    /// 2. The match below is **exhaustive**, which is legal despite
+    ///    `#[non_exhaustive]` only because it lives in the defining crate. That
+    ///    is the point: a new variant added above fails to compile *here*,
+    ///    in the same file, forcing the privacy decision at the moment the
+    ///    variant is written. **Do not add a `_ =>` arm** — a wildcard turns
+    ///    this from a guarantee back into the per-site opt-in it replaced.
+    ///
+    /// Callers keep the full error where it is useful and safe: the `warn!`
+    /// or `error!` at the refusal site, which goes to the device log rather
+    /// than to a sink.
+    pub fn privacy_safe_reason(&self) -> &'static str {
+        match self {
+            // Storage keys are raw user ids, group ids and session slots.
+            Self::Storage(_) => "Secure storage operation failed",
+            Self::CryptoGeneration(_) => "Cryptographic key generation failed",
+            Self::CredentialCreation(_) => "MLS credential creation failed",
+            Self::KeyPackageCreation(_) => "Key package creation failed",
+            Self::InvalidKeyPackage(_) => "The peer's key package was malformed or unusable",
+            Self::GroupCreation(_) => "MLS group creation failed",
+            Self::GroupNotFound(_) => "No local MLS group state for the requested conversation",
+            Self::AddMember(_) => "Adding a member to the MLS group failed",
+            Self::RemoveMember(_) => "Removing a member from the MLS group failed",
+            Self::Encryption(_) => "MLS encryption failed",
+            Self::Decryption(_) => "MLS decryption failed",
+            Self::SessionDesync(_) => {
+                "The session is out of sync with the peer's epoch (recoverable by re-keying)"
+            }
+            Self::WelcomeProcessing(_) => "The Welcome message could not be processed",
+            Self::Serialization(_) => "Serialization failed",
+            Self::Deserialization(_) => "Deserialization failed",
+            Self::NotInitialized => "MLS is not initialized on this device",
+            Self::NoKeyPackage(_) => "No key package is available for the peer",
+            Self::SessionNotFound(_) => "No local MLS session with the peer",
+            Self::CommitNotAuthorized { .. } => {
+                "A membership commit was refused: its committer is not an admin of this group"
+            }
+            Self::InvalidMessage(_) => "The MLS message was malformed",
+            Self::UserNotInGroup(_) => "The user is not a member of this group",
+            Self::OpenMls(_) => "The MLS library reported an error",
+            Self::Signing(_) => "Signing failed",
+            Self::VerificationFailed(_) => "Signature verification failed",
+            Self::InvalidPublicKey(_) => "The public key was malformed",
+            Self::IdentityAddressMismatch { .. } => {
+                "The stored identity key does not derive to this device's own address"
+            }
+            Self::InvalidGroupId(_) => "The group id failed validation",
+            Self::InvalidUserId(_) => "The user id failed validation",
+            Self::CredentialIdentityMismatch { .. } => {
+                "A key package's credential names a different identity than the one it was \
+                 claimed for"
+            }
+            Self::KeyPackageAddressMismatch { .. } => {
+                "A key package's signature key does not derive to the address it claims"
+            }
+            Self::LeafAddressMismatch { .. } => {
+                "A ratchet-tree leaf carries an identity its own signature key does not derive to"
+            }
+            Self::UnsupportedSender { .. } => {
+                "The message was authenticated to a sender role this SDK does not accept"
+            }
+            Self::SenderIdentityMismatch { .. } => {
+                "The MLS-authenticated sender does not match the sender the transport attributed \
+                 the message to"
+            }
+            Self::SessionIdentityMismatch { .. } => {
+                "The envelope names a session slot that is not the one shared with the claimed \
+                 sender"
+            }
+            Self::WelcomeIdentityMismatch { .. } => {
+                "The Welcome names a session slot that is not the one shared with its inviter"
+            }
+            Self::ReservedSessionNamespace { .. } => {
+                "A group Welcome targeted the reserved 1:1 session namespace"
+            }
+            Self::WelcomeGroupIdMismatch { .. } => {
+                "The Welcome's embedded group id does not match the slot it was delivered under"
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod privacy_safe_reason_tests {
+    use super::*;
+    use crate::storage::StorageError;
+
+    /// A stand-in for an address the sink must not learn, and for wire-chosen
+    /// text. Both are checked because the two leak routes are different: an
+    /// address is an identifier this device holds, while `MARKER` stands for a
+    /// string an attacker put on the wire — which need not look like an
+    /// address, or like anything at all.
+    const ADDR: &str = "off1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzzz";
+    const MARKER: &str = "ZZ-WIRE-CHOSEN-ZZ";
+
+    /// Every variant that renders an identifier or wire-chosen text must
+    /// classify to a string carrying neither.
+    ///
+    /// The list is deliberately built from *populated* variants rather than
+    /// asserted structurally: the property under test is about what the
+    /// rendering contains, so a variant whose payload is empty would pass
+    /// vacuously.
+    #[test]
+    fn identifier_bearing_variants_classify_without_their_payload() {
+        let slot = format!("session:{ADDR}:{ADDR}");
+        let cases = vec![
+            MlsError::Storage(StorageError::KeyNotFound(slot.clone())),
+            MlsError::GroupNotFound(slot.clone()),
+            MlsError::NoKeyPackage(ADDR.to_string()),
+            MlsError::SessionNotFound(ADDR.to_string()),
+            MlsError::UserNotInGroup(ADDR.to_string()),
+            MlsError::InvalidGroupId(format!("{slot} {MARKER}")),
+            MlsError::InvalidUserId(format!("{ADDR} {MARKER}")),
+            MlsError::CommitNotAuthorized {
+                committer: ADDR.to_string(),
+                added: vec![ADDR.to_string()],
+                removed: vec![ADDR.to_string()],
+            },
+            MlsError::IdentityAddressMismatch {
+                expected: ADDR.to_string(),
+                derived: ADDR.to_string(),
+            },
+            MlsError::CredentialIdentityMismatch {
+                expected: ADDR.to_string(),
+                found: MARKER.to_string(),
+            },
+            MlsError::KeyPackageAddressMismatch {
+                claimed: ADDR.to_string(),
+                derived: ADDR.to_string(),
+            },
+            MlsError::LeafAddressMismatch {
+                claimed: ADDR.to_string(),
+                derived: ADDR.to_string(),
+                context: LeafSource::WelcomeTree,
+            },
+            MlsError::UnsupportedSender {
+                detail: format!("{ADDR} {MARKER}"),
+            },
+            MlsError::SenderIdentityMismatch {
+                claimed: MARKER.to_string(),
+                authenticated: ADDR.to_string(),
+            },
+            MlsError::SessionIdentityMismatch {
+                expected: slot.clone(),
+                found: MARKER.to_string(),
+            },
+            // The two variants issue #346 turns on: reachable from the session
+            // Welcome failure arms, and each rendering both a session slot (two
+            // addresses, one of them possibly a third party's) and a string the
+            // sender chose.
+            MlsError::WelcomeIdentityMismatch {
+                expected: slot.clone(),
+                found: MARKER.to_string(),
+            },
+            MlsError::ReservedSessionNamespace {
+                group_id: format!("{slot} {MARKER}"),
+            },
+            MlsError::WelcomeGroupIdMismatch {
+                expected: slot,
+                embedded: MARKER.to_string(),
+            },
+        ];
+
+        for err in cases {
+            // Premise guard: without this the assertions below could pass
+            // against a variant that never carried the payload in the first
+            // place, which is exactly the vacuous test this is replacing.
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains(ADDR) || rendered.contains(MARKER),
+                "test premise: {err:?} was expected to render its payload, got {rendered:?}"
+            );
+
+            let reason = err.privacy_safe_reason();
+            assert!(
+                !reason.contains(ADDR),
+                "an address reached a privacy-safe reason: {reason:?} (from {err:?})"
+            );
+            assert!(
+                !reason.contains("off1"),
+                "an address prefix reached a privacy-safe reason: {reason:?} (from {err:?})"
+            );
+            assert!(
+                !reason.contains(MARKER),
+                "wire-chosen text reached a privacy-safe reason: {reason:?} (from {err:?})"
+            );
+            assert!(
+                !reason.is_empty(),
+                "a classified reason must still say something: {err:?}"
+            );
+        }
+    }
+}
