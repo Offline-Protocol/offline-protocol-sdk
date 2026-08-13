@@ -814,13 +814,24 @@ jobs:
       #     unpublish window, and its version comes from the tag or falls to
       #     0.0.0-dev); crates.io has no equivalent escape.
       #   - not a dry run, matching the npm job.
-      #   - not a prerelease, because crates.io versions are immutable — a
-      #     version can be yanked but never replaced — so an -rc tag must not
-      #     burn the version its final tag will need.
+      #   - no hyphen anywhere in the tag, because crates.io versions are
+      #     immutable — a version can be yanked but never replaced — so an -rc
+      #     tag must not burn the version its final tag will need.
+      #
+      # That last one is a blanket hyphen test rather than the release job's
+      # `-alpha`/`-beta`/`-rc` list, and the difference matters here in a way it
+      # does not there. A suffix the list misses (`-pre.1`, `-next.1`, a typo
+      # like `-cr.1`) still clears the version gate below, which compares
+      # release cores — so `v0.21.0-pre.1` against a 0.21.0 workspace would
+      # really publish the final, immutable 0.21.0 from prerelease code, and the
+      # eventual v0.21.0 tag would then no-op on crates.io while npm and the
+      # GitHub release ship the real thing. Nothing is lost by the broader test:
+      # a hyphenated *workspace* version can never match a core-compared tag, so
+      # no hyphenated tag can legitimately reach a real publish anyway.
       #
       # Dry runs and prerelease tags still run the version gate and the full
       # packaging verification below; they just stop short of uploading.
-      REAL_PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true && !contains(github.ref, '-alpha') && !contains(github.ref, '-beta') && !contains(github.ref, '-rc') }}
+      REAL_PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true && !contains(github.ref, '-') }}
     steps:
       # Fail in seconds, not after the verify builds: cargo only discovers a
       # missing token at upload time, minutes of packaging work in.
@@ -867,7 +878,14 @@ jobs:
       # step is what makes forgetting it loud. Failing here costs a re-tag;
       # not failing costs a permanent, immutable, wrongly-numbered publish.
       # Runs on prerelease and dry-run tags too, where it is free rehearsal.
-      - name: Verify the workspace version matches the tag
+      #
+      # pyproject.toml is checked alongside it because it tracks this same
+      # number — it followed the Cargo version before this job existed, and
+      # leaving it unchecked is how it quietly becomes a third scheme. A
+      # mismatch there fails the crates job rather than the wheel build, which
+      # is the useful direction: this is the publish that cannot be corrected
+      # afterwards, so it is the one that should refuse an inconsistent release.
+      - name: Verify the release versions match the tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -euo pipefail
@@ -882,11 +900,21 @@ jobs:
             | jq -r '.packages[] | select(.name == "offline-protocol") | .version')"
 
           if [ "$TAG_CORE" != "$CARGO_VERSION" ]; then
-            echo "::error title=Workspace version does not match the tag::Tag v$TAG_VERSION wants crates at $TAG_CORE, but [workspace.package].version is $CARGO_VERSION. Bump it and the seven internal-dependency versions in [workspace.dependencies] together (they must agree or the workspace will not resolve), refresh Cargo.lock, and re-tag."
+            echo "::error title=Workspace version does not match the tag::Tag v$TAG_VERSION wants crates at $TAG_CORE, but [workspace.package].version is $CARGO_VERSION. Bump it together with the seven internal-dependency versions in [workspace.dependencies], refresh Cargo.lock, and re-tag."
             exit 1
           fi
 
-          echo "Workspace version $CARGO_VERSION matches tag v$TAG_VERSION."
+          # `|| true` so a missing or renamed key reports through the annotation
+          # below rather than aborting the step with no explanation.
+          PY_VERSION="$(grep -m1 '^version = ' bindings/python/pyproject.toml \
+            | cut -d'"' -f2 || true)"
+
+          if [ "$TAG_CORE" != "$PY_VERSION" ]; then
+            echo "::error title=Python package version does not match the tag::Tag v$TAG_VERSION wants $TAG_CORE, but bindings/python/pyproject.toml reads '${PY_VERSION}'. It moves with the workspace version — bump it and re-tag."
+            exit 1
+          fi
+
+          echo "Workspace and Python versions ($CARGO_VERSION) match tag v$TAG_VERSION."
 
       # Packages every publishable crate (bench is `publish = false`) and runs
       # the verify builds, resolving workspace siblings from cargo's local
@@ -973,18 +1001,26 @@ jobs:
           VERSION="$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "offline-protocol") | .version')"
 
-          # All workspace crates version in lockstep, and offline-protocol sits
-          # atop the internal dependency graph — so if it is already published
-          # at this version, the whole run is a no-op. Say so as a warning
-          # annotation rather than letting eight "skipping" lines scroll by.
-          # Since the version gate above pins the version to the tag, this can
-          # only mean a re-run of a release that already published, which is
-          # exactly what the skip below exists to make safe — but it is worth
-          # saying out loud, because the run reports success either way.
-          url="https://index.crates.io/of/fl/offline-protocol"
+          # All workspace crates version in lockstep, and offline-protocol-uniffi
+          # sits atop the internal dependency graph — it is what the topological
+          # publish below reaches last — so if it is already published at this
+          # version, every other crate is too and the whole run is a no-op. Say
+          # so as a warning annotation rather than letting eight "skipping"
+          # lines scroll by. Since the version gate above pins the version to
+          # the tag, this can only mean a re-run of a release that already
+          # published, which is exactly what the skip below exists to make safe
+          # — but it is worth saying out loud, because the run reports success
+          # either way.
+          #
+          # Probing the *last* crate rather than offline-protocol is what makes
+          # the annotation true during the incident it is read in: a run that
+          # died partway leaves the lower crates published and the top one not,
+          # and a probe aimed lower would tell the operator resuming it that
+          # nothing was left to do while the resume went on to publish.
+          url="https://index.crates.io/of/fl/offline-protocol-uniffi"
           if curl -fsS --retry 3 "$url" 2>/dev/null \
             | jq -e --arg v "$VERSION" 'select(.vers == $v)' >/dev/null; then
-            echo "::warning title=crates.io publish is a no-op::offline-protocol@$VERSION already exists, so every crate below it does too. This run published nothing — expected when re-running a release that already reached crates.io."
+            echo "::warning title=crates.io publish is a no-op::offline-protocol-uniffi@$VERSION already exists, and it is the last crate this job publishes, so every other crate does too. This run published nothing — expected when re-running a release that already reached crates.io."
           fi
 
           cargo workspaces publish --publish-as-is --no-verify --yes

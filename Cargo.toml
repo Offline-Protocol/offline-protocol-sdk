@@ -22,10 +22,10 @@ members = [
 # nothing else in the project answers to.
 #
 # Bump this as part of the release cut, together with the internal-dependency
-# versions below (the workspace will not resolve if they disagree) and
-# `bindings/python/pyproject.toml`. release.yml refuses to publish a tag whose
-# number does not match this one — crates.io versions are immutable, so
-# discovering the mismatch afterwards means the number is wrong forever.
+# versions below and `bindings/python/pyproject.toml`. release.yml refuses to
+# publish a tag whose number does not match this one — crates.io versions are
+# immutable, so discovering the mismatch afterwards means the number is wrong
+# forever.
 version = "0.20.1"
 edition = "2021"
 authors = ["Offline Protocol, Inc."]

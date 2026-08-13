@@ -250,9 +250,9 @@ Version files to bump together:
 
 | File | How |
 | --- | --- |
-| `Cargo.toml` | `[workspace.package].version` **and** the seven internal-dependency versions in `[workspace.dependencies]` — the workspace will not resolve if they disagree, so a partial bump fails immediately and locally |
+| `Cargo.toml` | `[workspace.package].version` **and** the seven internal-dependency versions in `[workspace.dependencies]`. A partial *minor* bump fails to resolve immediately and locally; a partial *patch* bump resolves silently, because `version = "X.Y.Z"` is a caret requirement that a sibling one patch ahead still satisfies. Harmless if it ships, but move them together |
 | `Cargo.lock` | any `cargo` command refreshes it once the manifests change |
-| `bindings/python/pyproject.toml` | `version` |
+| `bindings/python/pyproject.toml` | `version` — release.yml gates this one against the tag too |
 | `bindings/react-native/package.json` + `package-lock.json` | `npm version X.Y.Z --no-git-tag-version --allow-same-version` from `bindings/react-native/` |
 | `THIRD-PARTY-NOTICES.md` (×3) | `scripts/generate-third-party-notices.sh` — the notices list our own crates by version, and the CI drift gate fails on a stale copy |
 
@@ -262,16 +262,28 @@ Then the prose: `CHANGELOG.md` (replace `## [Unreleased]` with
 and `docs/UPGRADING.md` (the current-line reference, and a labelled subsection
 for anything that compiles fine but behaves differently).
 
-Two failure modes worth naming:
+Three failure modes worth naming:
 
 - **`release.yml` refuses to publish a tag whose number does not match
-  `[workspace.package].version`.** That gate exists because crates.io versions
-  are immutable — a wrong number can be yanked but never corrected, so the
-  release has to fail before it uploads rather than after.
+  `[workspace.package].version`** (and `pyproject.toml`'s). That gate exists
+  because crates.io versions are immutable — a wrong number can be yanked but
+  never corrected, so the release has to fail before it uploads rather than
+  after.
 - **The npm version is written from the tag at release time; the Cargo version
   is not.** Rewriting manifests in CI would invalidate `Cargo.lock` and leave
   the published `.crate` no longer matching the tag it names, so the repo is
   the source of truth and the tag is checked against it.
+- **Never force-move a released tag — that recovery move stopped working when
+  crates.io publishing landed.** It used to be the cheap fix for a failure
+  after the GitHub release (the `v0.20.1` npm-provenance 422, for instance):
+  move the tag, re-run, done. Now it silently splits the release across
+  registries in either direction. If the tag already published crates, the
+  re-run skips them as already-present and crates.io keeps serving the *old*
+  source while npm and the release assets get the new. If the tag predates
+  crates.io publishing — every tag through `v0.20.1` — moving it onto a commit
+  that carries the `publish-crates` job passes every gate and publishes crates
+  built from source that the npm package of the same number never contained.
+  Both are permanent. Recover by cutting the next patch version instead.
 
 ## Architecture Decisions
 

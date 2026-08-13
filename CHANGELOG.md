@@ -314,13 +314,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   tracked the Cargo version and would otherwise have become a third scheme.) And
   because crates.io versions are immutable — yankable, never replaceable — the
   release workflow now *verifies* the version rather than writing it: publishing
-  is refused unless `[workspace.package].version` equals the tag, unless the ref
-  is a tag at all, and unless packaging has already verified cleanly with
+  is refused unless `[workspace.package].version` and `pyproject.toml` both
+  equal the tag, unless the ref is a tag at all, unless the tag is free of any
+  prerelease suffix, and unless packaging has already verified cleanly with
   `--locked` and no credential in the environment. Bumping the version is part
   of the release cut, now written down in
-  [CONTRIBUTING](./CONTRIBUTING.md#cutting-a-release). Consumers of the npm,
-  Python, or binary artifacts see no change; the crates are a new distribution
-  channel, published under the same AGPL-3.0-only terms.
+  [CONTRIBUTING](./CONTRIBUTING.md#cutting-a-release) — which also records why
+  force-moving a released tag, previously the cheap fix for a post-release
+  failure, is no longer one. Consumers of the npm, Python, or binary artifacts
+  see no change; the crates are a new distribution channel, published under the
+  same AGPL-3.0-only terms.
 - `getBleDiagnostics()` (React Native) returns the three BLE degraded-path
   counters — `fragmentFallbacks`, `recipientNotAmongPeers`,
   `undersizedMtuReports` — which previously stopped at the UniFFI layer and
