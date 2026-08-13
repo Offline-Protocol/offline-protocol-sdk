@@ -8,7 +8,7 @@ This guide explains how to integrate MLS (Message Layer Security) end-to-end enc
 > `userId` name, but the value they take is an address — a username reaches
 > nobody. Get one from an invite/QR exchange or the `neighbor_discovered`
 > event, and read your own with `localAddress()`. See
-> [UPGRADING §14](./UPGRADING.md#14-your-identity-is-derived-not-chosen-unreleased).
+> [UPGRADING §14](./UPGRADING.md#14-your-identity-is-derived-not-chosen-v0210).
 
 ## Overview
 

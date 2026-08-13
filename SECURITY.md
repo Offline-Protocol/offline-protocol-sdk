@@ -7,8 +7,8 @@ backports to earlier lines. If you are on an older line, upgrading is the fix.
 
 | Version                          | Supported          |
 | -------------------------------- | ------------------ |
-| Current line (`0.20.x`)          | :white_check_mark: |
-| Any earlier line (`≤ 0.19.x`)    | :x:                |
+| Current line (`0.21.x`)          | :white_check_mark: |
+| Any earlier line (`≤ 0.20.x`)    | :x:                |
 
 Report against the latest published release
 ([releases](https://github.com/Offline-Protocol/offline-protocol-sdk/releases),

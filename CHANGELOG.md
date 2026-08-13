@@ -4,7 +4,7 @@ All notable changes to the Offline Protocol SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). This changelog covers everything after the **v0.7.1** release.
 
-## [Unreleased]
+## [0.21.0] — 2026-08-13
 
 > **Your identity is no longer something your app picks.** `ProtocolConfig.userId`
 > is replaced by `profile`, and a device's identity on the wire becomes the
@@ -24,7 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 > what, and 1:1 session slots are named after the two ids. Old containers are
 > left intact rather than deleted; clean them up by passing the *old* user id to
 > `wipePersistedState`. Full migration guide in
-> [UPGRADING §14](./docs/UPGRADING.md#14-your-identity-is-derived-not-chosen-unreleased).
+> [UPGRADING §14](./docs/UPGRADING.md#14-your-identity-is-derived-not-chosen-v0210).
 
 ### Changed
 
@@ -96,6 +96,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   out in UPGRADING §14.
 - **BREAKING**: the MLS credential is the address, so peers on an older build
   fail cleanly at credential verification instead of interoperating.
+- **BREAKING**: BLE discovery announces the derived address. The advertised
+  `DEVICE_ID` characteristic carries this device's `off1…` address rather than
+  the profile, the central verifies it against the identity key it reads before
+  announcing the peer, and a mismatch drops the link. A peer still advertising
+  a profile is therefore *invisible* over BLE rather than degraded — its
+  control frames were already being rejected. Publication is gated on an
+  identity existing, and the `bleRecipientNotAmongPeers` diagnostic is exposed
+  over UniFFI. Wi-Fi Direct stops announcing or ingesting transport peer ids
+  entirely — nothing on that transport can prove one — and the `wifiDirect*`
+  React Native entry points are deprecated.
 - 1:1 session slots and the both-create tiebreaker order addresses by their hash
   bytes rather than their rendered string. The bech32 charset is not
   ASCII-monotonic, so string order contradicts every other address comparison.
@@ -230,6 +240,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   hex; set `scrub_ids: false` to opt out, as for every other identifier. Group
   and file names are unchanged, and stay raw: they label a shared thing, not an
   individual.
+- **Telemetry event `reason` fields no longer carry identifiers or text a
+  remote party wrote.** These fields ship to sinks verbatim by design — the
+  scrubber hashes identifier fields, not prose — and several producers rendered
+  errors into them that interpolated addresses, session slots, or wire text:
+  session-Welcome failures (`secure_session_failed`), the relay's
+  `__GROUP_ERROR__` wording (`GroupError.reason`), the control-gate and
+  relay-binding `security_warning` arms, and transport/relay send-failure text
+  on `messageDeferred`, `messageUndeliverable`,
+  `connectionRequestUndeliverable` and `welcomeSendFailed`. Each now carries a
+  fixed, locally chosen classification; the full wording stays in the device
+  log, and relay errors remain available verbatim through the raw
+  server-message frame both bridges already emit. `GroupError` gains an
+  additive `group_id` field, hashed by the scrubber like any other identifier.
+  Sinks parsing these strings will see the new vocabulary; the docs have
+  always said `reason` must not be parsed.
 - **Group members were trusted on an identity claim nobody checked.** The
   addressing work made a claim provable — an address is the hash of its
   identity key — and wired that check to the two places a claim was known to
@@ -302,6 +327,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Messages now travel between devices that cannot hear each other.** A frame
+  addressed to a peer out of range is handed to nearby devices, which carry it
+  onward — and the delivery acknowledgement takes the same path back, so a
+  message that arrived across several devices is not retransmitted as though
+  it had been lost. Forwarding is governed: an id travels once, a frame waits
+  briefly so a nearer neighbor can cover it first, the hop budget a frame
+  claims is clamped to local policy, and the rate frames leave at is capped in
+  total and per neighbor. Carried traffic never settles this device's own
+  outbox or clock. Tunable via `ProtocolConfig.mesh_relay`;
+  `mesh_relay_stats()` reports what a device has been carrying. Apps that
+  implemented their own forwarding should remove it — a second forwarder
+  transmits copies the budgets do not account for. See `docs/mesh.md`.
 - **The Rust workspace publishes to crates.io, and its version is now the
   release version.** A `publish-crates` job runs beside the npm publish, behind
   the same build-and-test gates, and ships all eight crates in dependency order.
@@ -359,7 +396,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   reading: the relay verifies that the declared address derives from the key
   that signed the proof, so an echo naming anything else means it bound what it
   did not verify. `RELAY_ADDRESS_DECLARATION_REFUSED` is operational rather than
-  adversarial and carries the relay's own reason text verbatim. Neither is acted
+  adversarial; the relay's own wording stays in the device log, and the event
+  carries a fixed classification (see the telemetry `reason` entry under
+  Security). Neither is acted
   on — the refusal path is deliberately non-fatal on both sides, and against a
   hostile relay a local teardown protects nothing it does not already control —
   so the whole value is that the signal is loud and typed. Worth surfacing in
@@ -418,6 +457,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   to drain and the send-path half of the fix there is forward-looking; the
   send behaviour this changes in a shipped app is Nostr's and Reticulum's. The
   iOS browsing leak above is live now.
+
+- **The BLE path no longer runs protocol calls on the app's main thread.** On
+  iOS, every CoreBluetooth delegate is a main-queue callback and the fragment
+  stores made main-queue readers wait behind UniFFI calls holding the core's
+  global mutex — the top App Hang cluster reported against 0.20.1. Protocol
+  calls now route through the protocol queue and the fragment stores are
+  lock-guarded, so a read never waits behind MLS work. On Android, a peer
+  permanently unable to accept writes kept the fragment drain reposting at
+  20Hz on the main thread, contending with the 100ms process tick for the same
+  mutex — the reported ANR shape. The retry now backs off 50ms→2s and stops
+  re-arming after ~15s of failure (the 2s polling floor still flushes the
+  queue, so no fragment is abandoned), and the process tick runs with a fixed
+  delay rather than a fixed rate, so an overrunning tick no longer holds the
+  mutex back-to-back.
 
 - **The remaining transports no longer run protocol calls on the app's main
   thread.** Completing what the BLE fixes started: on Android all four
@@ -733,6 +786,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   a hyphenated branch name cannot trip it. This matters more than it used to:
   crates.io publishing treats an rc tag as a full rehearsal, which makes cutting
   one a routine thing to do rather than a rarity.
+- **Every third-party action in `release.yml` is pinned to a commit SHA.** The
+  workflow mints the provenance attestations consumers are told to trust, so
+  its supply chain no longer floats on mutable version tags.
 - **`cargo doc` is gated in CI.** A new `Rustdoc` job builds the workspace under
   `RUSTDOCFLAGS: -D warnings`. It caught six broken intra-doc links: four public
   items linking to private ones — which resolve to nothing for every reader not
