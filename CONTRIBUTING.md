@@ -262,13 +262,25 @@ Then the prose: `CHANGELOG.md` (replace `## [Unreleased]` with
 and `docs/UPGRADING.md` (the current-line reference, and a labelled subsection
 for anything that compiles fine but behaves differently).
 
+To rehearse the whole thing, push a `vX.Y.Z-rc.N` tag. Every gate runs, every
+crate is packaged and verify-built, and npm publishes under the `next`
+dist-tag — but crates.io gets nothing, because those versions are immutable and
+an rc must never burn the number the final tag needs. Point the rc at the same
+`X.Y.Z` the workspace already carries; the gate compares release cores and
+ignores the suffix.
+
 Three failure modes worth naming:
 
 - **`release.yml` refuses to publish a tag whose number does not match
   `[workspace.package].version`** (and `pyproject.toml`'s). That gate exists
   because crates.io versions are immutable — a wrong number can be yanked but
   never corrected, so the release has to fail before it uploads rather than
-  after.
+  after. It runs as its own `version-gate` job ahead of *both* publish jobs, so
+  a forgotten bump stops npm as well: caught inside the crates job alone, it
+  would fail there while npm published the number anyway, and that split is one
+  of the permanent ones below. Because it lands before anything ships, deleting
+  and re-pushing the tag is the correct fix here — the one point in the release
+  where re-tagging is still safe.
 - **The npm version is written from the tag at release time; the Cargo version
   is not.** Rewriting manifests in CI would invalidate `Cargo.lock` and leave
   the published `.crate` no longer matching the tag it names, so the repo is

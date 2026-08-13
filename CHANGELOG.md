@@ -316,8 +316,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   release workflow now *verifies* the version rather than writing it: publishing
   is refused unless `[workspace.package].version` and `pyproject.toml` both
   equal the tag, unless the ref is a tag at all, unless the tag is free of any
-  prerelease suffix, and unless packaging has already verified cleanly with
-  `--locked` and no credential in the environment. Bumping the version is part
+  prerelease suffix or build metadata, and unless packaging has already verified
+  cleanly with `--locked` and no credential in the environment. The version
+  check is its own job, ahead of *both* publishes, so a forgotten bump stops npm
+  too — checked inside the crates job alone it would fail there while npm
+  shipped the number regardless, leaving a version that can never be completed
+  on crates.io and can only be abandoned. Bumping the version is part
   of the release cut, now written down in
   [CONTRIBUTING](./CONTRIBUTING.md#cutting-a-release) — which also records why
   force-moving a released tag, previously the cheap fix for a post-release
