@@ -36,11 +36,11 @@ env:
 # ---------------------------------------------------------------------------
 # Third-party action pinning
 #
-# Every non-`actions/*` action below is pinned to an immutable commit SHA, with
-# the human-readable version in the trailing comment. A tag like `@v3` is a
-# mutable pointer the upstream owner can re-point at any commit, so an upstream
-# account compromise lands in the next release build with no change on our side
-# and nothing in the diff to review.
+# Every third-party action below, and every `actions/*` action in the `release`
+# job, is pinned to an immutable commit SHA with the human-readable version in
+# the trailing comment. A tag like `@v3` is a mutable pointer the upstream owner
+# can re-point at any commit, so an upstream account compromise lands in the next
+# release build with no change on our side and nothing in the diff to review.
 #
 # This workflow is where that matters most, and the blast radius is wider than
 # "a bad binary":
@@ -54,19 +54,31 @@ env:
 #     through our provenance rather than around it.
 #
 # `actions/*` is GitHub's own org, served from the same trust root as the runner
-# and the token; it is deliberately left on major tags. cla.yml pins its one
-# third-party action the same way.
+# and the token, so in the credential-free build jobs it is deliberately left on
+# major tags. The `release` job is the exception, because there the argument
+# above turns back on itself: `attest-build-provenance` is the action that
+# *mints* the signature consumers are told to trust, `download-artifact` is what
+# hands it the binaries to sign, and `setup-node` configures the registry the
+# NPM_TOKEN publish authenticates against. Leaving those mutable would reopen
+# exactly the hole the rest of this pinning closes. Org membership does not cover
+# it either — the attack that actually happens is tag re-pointing from a
+# compromised maintainer account (tj-actions/changed-files, March 2025), not a
+# breach of GitHub itself. All of them publish semver tags, so Dependabot keeps
+# these current. cla.yml pins its one third-party action the same way.
 #
 # To bump: replace the SHA and the trailing version comment together. Dependabot
 # does this automatically for actions that publish semver tags (`github-actions`
 # ecosystem in .github/dependabot.yml). Verify a SHA with:
 #   gh api repos/<owner>/<repo>/commits/<sha> --jq .commit.message
 #
-# dtolnay/rust-toolchain is the exception to both halves of that. It publishes no
-# per-release tags — `stable` is a *branch*, so the pin is that branch's head and
-# the trailing comment names the branch rather than a version. It is also on
-# dependabot.yml's ignore list (for ci.yml's MSRV pin), so these SHAs are bumped
-# by hand; re-pin from `gh api repos/dtolnay/rust-toolchain/commits/stable`.
+# dtolnay/rust-toolchain is the exception to both halves of that. Its only tag is
+# a stale major `v1` (e97e2d8, Aug 2025) — it publishes no per-release tags, and
+# `stable` is a *branch*, so the pin is that branch's head and the trailing
+# comment names the branch rather than a version. It is also on dependabot.yml's
+# ignore list, which does double duty: it keeps ci.yml's MSRV pin intact, and it
+# stops Dependabot re-pointing the SHAs below at that year-old `v1`. So these are
+# bumped by hand; re-pin from
+# `gh api repos/dtolnay/rust-toolchain/commits/stable`.
 # Pinning does not freeze the Rust version — rustup still resolves `stable` at
 # run time — but it does freeze which toolchain the action *defaults* to, which
 # the ref used to carry and a SHA does not. Hence the explicit `toolchain:
@@ -565,7 +577,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -578,20 +590,20 @@ jobs:
         run: git-cliff --latest --strip header -o RELEASE_NOTES.md
 
       - name: Download iOS Artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ios-libs
           path: bindings/react-native/ios
 
       - name: Download Android Libraries
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: android-jniLibs-*
           path: bindings/react-native/android/src/main/jniLibs
           merge-multiple: true
 
       - name: Download Android Bindings
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: android-uniffi-bindings
           path: bindings/react-native/android/src/main/java
@@ -600,7 +612,7 @@ jobs:
       # release. Each build-desktop job uploads under desktop-libs/<platform>/,
       # so merging the four is collision-free.
       - name: Download desktop libraries
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: desktop-*
           path: desktop-libs
@@ -610,7 +622,7 @@ jobs:
       # module, because the cdylib alone is not usable: it is what calls into
       # the library, and until now it shipped only inside the Python wheels.
       - name: Download Python bindings
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: python-bindings
           path: bindings/python/offline_protocol_sdk
@@ -655,7 +667,7 @@ jobs:
           echo "All artifacts verified."
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
@@ -716,7 +728,7 @@ jobs:
       # with `gh attestation verify <asset> --repo ${{ github.repository }}`.
       - name: Attest release asset provenance
         if: inputs.dry_run != true
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: 'release-assets/*'
 
