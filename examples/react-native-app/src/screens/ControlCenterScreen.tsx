@@ -26,6 +26,7 @@ import type {
 import type {
   DorsRuntimeConfig,
   FileTransferState,
+  NativeRelayPriority,
   RelayPriorityInput,
 } from '../types/runtime';
 import { labelRelayPriority, mapRelayInputToNative } from '../types/runtime';
@@ -35,7 +36,7 @@ interface ControlCenterScreenProps {
   isStarted: boolean;
   activeTransports: TransportType[];
   forcedTransport: TransportType | null;
-  relayPriority: 'low' | 'medium' | 'high';
+  relayPriority: NativeRelayPriority;
   batteryLevel: number | null;
   dorsConfig: DorsRuntimeConfig;
   fileTransfers: FileTransferState[];
@@ -58,6 +59,8 @@ const TRANSPORT_LABELS: Record<TransportType, string> = {
   ble: 'Bluetooth LE',
   internet: 'Internet',
   wifiDirect: 'Wi-Fi Direct',
+  reticulum: 'Reticulum',
+  nostr: 'Nostr',
 };
 
 const AVAILABLE_RELAYS: RelayPriorityInput[] = ['auto', 'low', 'medium', 'high'];

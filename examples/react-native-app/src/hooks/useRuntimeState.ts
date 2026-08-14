@@ -28,7 +28,7 @@ export function useRuntimeState(
   protocol: OfflineProtocol | null
 ): UseRuntimeStateReturn {
   const [batteryLevel, setBatteryLevelState] = useState<number | null>(null);
-  const [relayPriority, setRelayPriorityState] = useState<NativeRelayPriority>('medium');
+  const [relayPriority, setRelayPriorityState] = useState<NativeRelayPriority>('auto');
   const [dorsConfigState, setDorsConfigState] = useState<DorsRuntimeConfig>(DEFAULT_DORS_CONFIG);
 
   const refreshRuntimeState = useCallback(async () => {

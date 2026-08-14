@@ -140,6 +140,18 @@ impl RelayManager {
         }
     }
 
+    /// Replaces the relay configuration at runtime.
+    ///
+    /// The current role is **kept**, not re-derived: this manager decides
+    /// transitions from live connectivity and battery, which a config setter
+    /// has neither of. The next [`Self::evaluate_transition`] call applies the
+    /// new policy and reports the change exactly once, which is also what
+    /// keeps a config update from emitting a promote/demote event that no
+    /// change in conditions justifies.
+    pub fn set_config(&mut self, config: RelayConfig) {
+        self.config = config;
+    }
+
     /// Checks if this device should be promoted to relay role.
     ///
     /// # Arguments

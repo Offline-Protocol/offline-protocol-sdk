@@ -299,19 +299,27 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         listenerCount.updateAndGet { (it - count.toInt()).coerceAtLeast(0) }
     }
 
+    /**
+     * Accepts both the current vocabulary and the pre-0.22 `low`/`medium`/`high`
+     * spelling of the same three values, so an app that has not migrated its
+     * config keeps working.
+     */
     private fun normalizeRelayPriority(priority: String?): RelayPriority? {
         if (priority.isNullOrBlank()) {
             return null
         }
         return when (priority.lowercase()) {
-            "low" -> RelayPriority.LOW
-            "medium" -> RelayPriority.MEDIUM
-            "high" -> RelayPriority.HIGH
-            "never" -> RelayPriority.LOW
-            "always" -> RelayPriority.HIGH
-            "auto" -> RelayPriority.MEDIUM
+            "never", "low" -> RelayPriority.NEVER
+            "auto", "medium" -> RelayPriority.AUTO
+            "always", "high" -> RelayPriority.ALWAYS
             else -> null
         }
+    }
+
+    private fun relayPriorityName(priority: RelayPriority?): String = when (priority) {
+        RelayPriority.NEVER -> "never"
+        RelayPriority.ALWAYS -> "always"
+        else -> "auto"
     }
 
     private fun applyInitialRuntimeConfig(proto: OfflineProtocol, json: JSONObject) {
@@ -376,7 +384,19 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     queueRecoveryRatio = dorsJson.optDoubleCompat("queueRecoveryRatio", "queue_recovery_ratio")
                         ?.toFloat()
                         ?.coerceIn(0f, 1f)
-                        ?: baseConfig.queueRecoveryRatio
+                        ?: baseConfig.queueRecoveryRatio,
+                    lowBatteryThreshold = dorsJson.optIntCompat("lowBatteryThreshold", "low_battery_threshold")
+                        ?.coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL)
+                        ?.toUByte()
+                        ?: baseConfig.lowBatteryThreshold,
+                    relayMinBatteryLevel = dorsJson.optIntCompat("relayMinBatteryLevel", "relay_min_battery_level")
+                        ?.coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL)
+                        ?.toUByte()
+                        ?: baseConfig.relayMinBatteryLevel,
+                    relayOptimalConnectionCount = dorsJson.optIntCompat("relayOptimalConnectionCount", "relay_optimal_connection_count")
+                        ?.coerceIn(0, UByte.MAX_VALUE.toInt())
+                        ?.toUByte()
+                        ?: baseConfig.relayOptimalConnectionCount
                 )
                 proto.updateDorsConfig(updatedConfig)
                 emitDiagnostic("info", "Applied initial DORS config")
@@ -387,18 +407,31 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
         }
 
+        // The whole relay section, not just the priority: allowRelay,
+        // minBatteryForRelay and relayThreshold used to be parsed by nothing,
+        // leaving `config.relay` on mobile permanently at its defaults.
         json.optJSONObject("relay")?.let { relayJson ->
-            val priorityRaw = relayJson.safeOptString("relayPriority", relayJson.safeOptString("relay_priority"))
-            val priority = normalizeRelayPriority(priorityRaw)
-            if (priority != null) {
-                try {
-                    proto.setRelayPriority(priority)
-                    emitDiagnostic("info", "Applied initial relay priority", mapOf("priority" to priority.name.lowercase()))
-                } catch (e: Exception) {
-                    emitDiagnostic("warning", "Failed to apply initial relay priority", mapOf(
-                        "message" to (e.message ?: "unknown")
-                    ))
-                }
+            try {
+                val current = proto.getRelayConfig()
+                val priorityRaw = relayJson.safeOptString("relayPriority", relayJson.safeOptString("relay_priority"))
+                val priority = normalizeRelayPriority(priorityRaw) ?: current.relayPriority
+                val updated = RelayConfig(
+                    relayThreshold = relayJson.optLongCompat("relayThreshold", "relay_threshold")
+                        ?.coerceAtLeast(0L)?.toULong() ?: current.relayThreshold,
+                    minBatteryForRelay = relayJson.optIntCompat("minBatteryForRelay", "min_battery_for_relay")
+                        ?.coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL)?.toUByte()
+                        ?: current.minBatteryForRelay,
+                    allowRelay = relayJson.optBooleanCompat("allowRelay", "allow_relay") ?: current.allowRelay,
+                    relayPriority = priority
+                )
+                proto.updateRelayConfig(updated)
+                emitDiagnostic("info", "Applied initial relay config", mapOf(
+                    "priority" to relayPriorityName(updated.relayPriority)
+                ))
+            } catch (e: Exception) {
+                emitDiagnostic("warning", "Failed to apply initial relay config", mapOf(
+                    "message" to (e.message ?: "unknown")
+                ))
             }
         }
     }
@@ -2689,7 +2722,20 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.reject("ERROR_BATTERY", "Failed to set battery level: ${e.message}", e)
         }
     }
-    
+
+    @ReactMethod
+    fun setBatteryState(level: Int, isCharging: Boolean, promise: Promise) {
+        try {
+            protocol?.setBatteryState(
+                level.coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL).toUByte(),
+                isCharging
+            )
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_BATTERY", "Failed to set battery state: ${e.message}", e)
+        }
+    }
+
     @ReactMethod
     fun getBatteryLevel(promise: Promise) {
         val level = protocol?.getBatteryLevel()
@@ -2699,16 +2745,21 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.resolve(null)
         }
     }
-    
+
+    @ReactMethod
+    fun getIsCharging(promise: Promise) {
+        promise.resolve(protocol?.getIsCharging() ?: false)
+    }
+
     // MARK: - Relay Management
-    
+
     @ReactMethod
     fun setRelayPriority(priorityString: String, promise: Promise) {
         try {
-            val priority = when (priorityString.lowercase()) {
-                "low" -> RelayPriority.LOW
-                "high" -> RelayPriority.HIGH
-                else -> RelayPriority.MEDIUM
+            val priority = normalizeRelayPriority(priorityString)
+            if (priority == null) {
+                promise.reject("ERROR_RELAY", "Invalid relay priority: $priorityString")
+                return
             }
             protocol?.setRelayPriority(priority)
             promise.resolve(null)
@@ -2716,22 +2767,72 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.reject("ERROR_RELAY", "Failed to set relay priority: ${e.message}", e)
         }
     }
-    
+
     @ReactMethod
     fun getRelayPriority(promise: Promise) {
         try {
-            val priority = protocol?.getRelayPriority()
-            val priorityString = when (priority) {
-                RelayPriority.LOW -> "low"
-                RelayPriority.HIGH -> "high"
-                else -> "medium"
-            }
-            promise.resolve(priorityString)
+            promise.resolve(relayPriorityName(protocol?.getRelayPriority()))
         } catch (e: Exception) {
-            promise.resolve("medium")
+            promise.resolve("auto")
         }
     }
-    
+
+    /**
+     * Applies a partial relay configuration: fields absent from [configJson]
+     * keep their current values, so an app can raise its battery floor without
+     * restating the rest.
+     */
+    @ReactMethod
+    fun updateRelayConfig(configJson: String, promise: Promise) {
+        try {
+            val proto = protocol
+            if (proto == null) {
+                promise.reject("ERROR_RELAY", "Protocol not initialized")
+                return
+            }
+            val json = JSONObject(configJson)
+            val current = proto.getRelayConfig()
+            val priority = normalizeRelayPriority(
+                json.safeOptString("relayPriority", json.safeOptString("relay_priority"))
+            ) ?: current.relayPriority
+            proto.updateRelayConfig(
+                RelayConfig(
+                    relayThreshold = json.optLongCompat("relayThreshold", "relay_threshold")
+                        ?.coerceAtLeast(0L)?.toULong() ?: current.relayThreshold,
+                    minBatteryForRelay = json.optIntCompat("minBatteryForRelay", "min_battery_for_relay")
+                        ?.coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL)?.toUByte()
+                        ?: current.minBatteryForRelay,
+                    allowRelay = json.optBooleanCompat("allowRelay", "allow_relay") ?: current.allowRelay,
+                    relayPriority = priority
+                )
+            )
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_RELAY", "Failed to update relay config: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun getRelayConfig(promise: Promise) {
+        try {
+            val config = protocol?.getRelayConfig()
+            if (config == null) {
+                promise.reject("ERROR_RELAY", "Protocol not initialized")
+                return
+            }
+            promise.resolve(
+                JSONObject().apply {
+                    put("relayThreshold", config.relayThreshold.toLong())
+                    put("minBatteryForRelay", config.minBatteryForRelay.toInt())
+                    put("allowRelay", config.allowRelay)
+                    put("relayPriority", relayPriorityName(config.relayPriority))
+                }.toString()
+            )
+        } catch (e: Exception) {
+            promise.reject("ERROR_RELAY", "Failed to read relay config: ${e.message}", e)
+        }
+    }
+
     @ReactMethod
     fun isRelay(promise: Promise) {
         val isRelay = protocol?.isRelay() ?: false
@@ -2795,29 +2896,53 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     
     // MARK: - DORS Configuration
     
+    /**
+     * Applies a partial DORS configuration: fields absent from [configJson]
+     * keep their **current** values, read back from the live engine rather
+     * than restated as literals here.
+     *
+     * Defaulting to literals is what made `updateDorsConfig` a silent reset —
+     * an update meaning to change one field rewrote every other one to a
+     * hardcoded number, and the three battery/relay fields could not even be
+     * restated because they had no path across the bridge. Sourcing the
+     * fallbacks from `getDorsConfig()` fixes both halves at once and keeps
+     * this method's contract identical to [updateRelayConfig]'s.
+     */
     @ReactMethod
     fun updateDorsConfig(configJson: String, promise: Promise) {
         try {
+            val proto = protocol
+            if (proto == null) {
+                promise.reject("ERROR_CONFIG", "Protocol not initialized")
+                return
+            }
             val json = JSONObject(configJson)
+            val current = proto.getDorsConfig()
             val dorsConfig = DorsConfig(
-                preferOnline = json.optBoolean("preferOnline", false),
-                switchHysteresis = json.optDouble("switchHysteresis", 15.0).toFloat().coerceAtLeast(0f),
-                switchCooldownSecs = json.optLong("switchCooldownSecs", 20).coerceAtLeast(0).toULong(),
-                bleToWifiRetryThreshold = json.optInt("bleToWifiRetryThreshold", 2).toUInt(),
-                minSuccessRateBeforeEscalation = json.optDouble("minSuccessRateBeforeEscalation", 0.3).toFloat().coerceIn(0f, 1f),
-                minBleSamplesBeforeSuccessRateEscalation = json.optLong("minBleSamplesBeforeSuccessRateEscalation", 5).coerceAtLeast(0).toULong(),
-                rssiSwitchThreshold = json.optInt("rssiSwitchThreshold", Constants.DEFAULT_RSSI_THRESHOLD.toInt()).toShort(),
-                congestionQueueThreshold = json.optLong("congestionQueueThreshold", Constants.DEFAULT_CONGESTION_QUEUE).toULong(),
-                stabilityWindowSecs = json.optLong("stabilityWindowSecs", Constants.DEFAULT_STABILITY_WINDOW).toULong(),
-                poorSignalDurationSecs = json.optLong("poorSignalDurationSecs", 10).toULong(),
-                ttlEscalationThreshold = json.optInt("ttlEscalationThreshold", 2).toUByte(),
-                congestionDurationSecs = json.optLong("congestionDurationSecs", 10).coerceAtLeast(0).toULong(),
-                ttlEscalationHoldSecs = json.optLong("ttlEscalationHoldSecs", 20).coerceAtLeast(1).toULong(),
-                historyWindowSize = json.optLong("historyWindowSize", 10).let { max(Constants.MIN_HISTORY_WINDOW, min(Constants.MAX_HISTORY_WINDOW, it)) }.toULong(),
-                queueRecoveryRatio = json.optDouble("queueRecoveryRatio", Constants.DEFAULT_QUEUE_RECOVERY_RATIO.toDouble()).toFloat().coerceIn(0f, 1f)
+                preferOnline = json.optBoolean("preferOnline", current.preferOnline),
+                switchHysteresis = json.optDouble("switchHysteresis", current.switchHysteresis.toDouble()).toFloat().coerceAtLeast(0f),
+                switchCooldownSecs = json.optLong("switchCooldownSecs", current.switchCooldownSecs.toLong()).coerceAtLeast(0).toULong(),
+                bleToWifiRetryThreshold = json.optInt("bleToWifiRetryThreshold", current.bleToWifiRetryThreshold.toInt()).toUInt(),
+                minSuccessRateBeforeEscalation = json.optDouble("minSuccessRateBeforeEscalation", current.minSuccessRateBeforeEscalation.toDouble()).toFloat().coerceIn(0f, 1f),
+                minBleSamplesBeforeSuccessRateEscalation = json.optLong("minBleSamplesBeforeSuccessRateEscalation", current.minBleSamplesBeforeSuccessRateEscalation.toLong()).coerceAtLeast(0).toULong(),
+                rssiSwitchThreshold = json.optInt("rssiSwitchThreshold", current.rssiSwitchThreshold.toInt()).toShort(),
+                congestionQueueThreshold = json.optLong("congestionQueueThreshold", current.congestionQueueThreshold.toLong()).toULong(),
+                stabilityWindowSecs = json.optLong("stabilityWindowSecs", current.stabilityWindowSecs.toLong()).toULong(),
+                poorSignalDurationSecs = json.optLong("poorSignalDurationSecs", current.poorSignalDurationSecs.toLong()).toULong(),
+                ttlEscalationThreshold = json.optInt("ttlEscalationThreshold", current.ttlEscalationThreshold.toInt()).toUByte(),
+                congestionDurationSecs = json.optLong("congestionDurationSecs", current.congestionDurationSecs.toLong()).coerceAtLeast(0).toULong(),
+                ttlEscalationHoldSecs = json.optLong("ttlEscalationHoldSecs", current.ttlEscalationHoldSecs.toLong()).coerceAtLeast(1).toULong(),
+                historyWindowSize = json.optLong("historyWindowSize", current.historyWindowSize.toLong()).let { max(Constants.MIN_HISTORY_WINDOW, min(Constants.MAX_HISTORY_WINDOW, it)) }.toULong(),
+                queueRecoveryRatio = json.optDouble("queueRecoveryRatio", current.queueRecoveryRatio.toDouble()).toFloat().coerceIn(0f, 1f),
+                lowBatteryThreshold = json.optInt("lowBatteryThreshold", current.lowBatteryThreshold.toInt())
+                    .coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL).toUByte(),
+                relayMinBatteryLevel = json.optInt("relayMinBatteryLevel", current.relayMinBatteryLevel.toInt())
+                    .coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL).toUByte(),
+                relayOptimalConnectionCount = json.optInt("relayOptimalConnectionCount", current.relayOptimalConnectionCount.toInt())
+                    .coerceIn(0, UByte.MAX_VALUE.toInt()).toUByte()
             )
-            
-            protocol?.updateDorsConfig(dorsConfig)
+
+            proto.updateDorsConfig(dorsConfig)
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("ERROR_CONFIG", "Failed to update DORS config: ${e.message}", e)
@@ -2846,6 +2971,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 map.putInt("ttlEscalationHoldSecs", config.ttlEscalationHoldSecs.toInt())
                 map.putInt("historyWindowSize", config.historyWindowSize.toInt())
                 map.putDouble("queueRecoveryRatio", config.queueRecoveryRatio.toDouble())
+                map.putInt("lowBatteryThreshold", config.lowBatteryThreshold.toInt())
+                map.putInt("relayMinBatteryLevel", config.relayMinBatteryLevel.toInt())
+                map.putInt("relayOptimalConnectionCount", config.relayOptimalConnectionCount.toInt())
                 promise.resolve(map)
             } else {
                 promise.resolve(null)
@@ -4531,11 +4659,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val transportsArray = JSONArray()
             transportsByNode[node.nodeId]?.forEach { transportsArray.put(it) }
 
+            // Prefer the node's own connection count when the visualizer has
+            // one; fall back to counting the links we can see.
+            val reportedConnections = node.connectionCount.toInt()
             val nodeObj = JSONObject().apply {
                 put("user_id", node.nodeId)
                 put("role", node.role.lowercase())
-                put("connection_count", connectionCounts[node.nodeId] ?: 0)
-                put("battery_level", JSONObject.NULL)
+                put(
+                    "connection_count",
+                    if (reportedConnections > 0) reportedConnections else (connectionCounts[node.nodeId] ?: 0)
+                )
+                put("battery_level", node.batteryLevel?.toInt() ?: JSONObject.NULL)
                 put("last_seen", node.lastSeenMs.toLong() / Constants.MILLISECONDS_PER_SECOND)
                 put("transports", transportsArray)
             }

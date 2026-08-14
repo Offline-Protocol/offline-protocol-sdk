@@ -6,7 +6,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **`setBatteryState(level, isCharging)` — the battery feed the relay and DORS
+  policies were always waiting for.** See Fixed below for why this is the
+  headline change rather than a convenience. `getIsCharging()` reads it back.
+- **`updateRelayConfig(config)` / `getRelayConfig()`.** Whether this device
+  carries other people's traffic — the connection threshold, the battery floor,
+  the outright opt-out, the priority mode — is now settable at runtime rather
+  than only at construction, and omitted fields keep their current values.
+  Applies to the next role evaluation and the next forwarding decision.
+- **Three DORS fields reached the FFI**: `lowBatteryThreshold`,
+  `relayMinBatteryLevel`, `relayOptimalConnectionCount` — including the
+  React Native `updateDorsConfig` / `getDorsConfig` signatures, without which
+  the round trip that keeps a field alive across an update is unexpressible.
+- **`NetworkNode` carries `battery_level` and `connection_count`.**
+
 ### Fixed
+
+- **Battery-aware relaying actually runs now.** Every battery-dependent policy
+  in the SDK reads the device's charge from the per-transport metrics map, and
+  nothing in production ever wrote to it: `setBatteryLevel` stored the number
+  in a field only a small FFI-local helper read, and `updateTransportMetrics`
+  has been a documented no-op for several releases. So on every real device
+  DORS energy scoring skipped its battery term, the relay role was never
+  evaluated at all — `relay_promoted` and `relay_demoted` could not fire, and
+  `QUICKSTART.md` documented events that could never arrive — and message
+  forwarding always took its "unknown battery means willing" branch, meaning
+  the floor that stops a device spending its last few percent carrying other
+  people's traffic was never applied. The host feed now reaches the engine, so
+  a transport that reports no battery of its own inherits the device's; one
+  that reports its own keeps it.
+
+  Apps must call `setBatteryState` (or `setBatteryLevel`) on start and on each
+  platform battery notification — without it these policies stay in their
+  unknown-level branch, exactly as before. Report charging state where the
+  platform provides it: a charging device is deliberately excused the soft
+  `minBatteryForRelay` floor, and reporting only the level strips relay duty
+  from plugged-in devices that should keep it.
+
+- **React Native relay configuration is no longer dropped between JS and
+  native.** `allowRelay`, `minBatteryForRelay` and `relayThreshold` were
+  documented, accepted, carried across the bridge — and then parsed by nothing,
+  because no API to apply them existed; only `relayPriority` was read. Every
+  mobile app therefore ran on the default relay configuration whatever it
+  configured. All four fields now apply, at create time and at runtime.
+
+- **`updateDorsConfig` no longer silently resets three fields.**
+  `lowBatteryThreshold`, `relayMinBatteryLevel` and `relayOptimalConnectionCount`
+  were absent from the FFI shape, so every runtime DORS update quietly reset
+  them to 20/30/4 — including an update that changed something else entirely.
+
+- **Topology nodes no longer report battery level as signal strength.** The
+  FFI `NetworkNode` had no battery field, so `get_topology()` mapped
+  `battery_level` into `rssi` — a battery of 80 surfaced as −80 dBm. Both are
+  now their own field (`rssi` is `null`, since link quality is tracked per
+  link, not per node).
 
 - **Only the recipient can mark a message delivered.** A delivery
   acknowledgement names a message id and nothing else tied it to a delivery, so
@@ -81,6 +136,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 > [UPGRADING §14](./docs/UPGRADING.md#14-your-identity-is-derived-not-chosen-v0210).
 
 ### Changed
+
+- **BREAKING**: `RelayPriority` is spelled `never` / `auto` / `always`
+  everywhere, matching the engine's own vocabulary and the `relayPriority`
+  config field apps already write. The FFI enum previously used an unrelated
+  `low` / `medium` / `high` triple that fed a heuristic disconnected from the
+  real relay policy, so a device could report one priority and behave by
+  another. The old spelling is still **accepted on input** by both bridges and
+  by JS `setRelayPriority`; what changes is what `getRelayPriority` returns —
+  update any code that compares its result against `'medium'`. Direct
+  Swift/Kotlin/Python consumers of the `RelayPriority` enum must use the new
+  case names.
+
+- **BREAKING**: `set_battery_level` is now fallible (`[Throws=ProtocolError]`),
+  because it reaches the engine rather than an FFI-local field. Direct Swift
+  callers need `try`, and Kotlin/Python callers get the same checked error every
+  other engine-touching method raises. React Native callers are unaffected —
+  `setBatteryLevel` was already a promise.
+
+- **`isRelay()` reports the engine's actual relay role** — the one
+  `relay_promoted` / `relay_demoted` announce — instead of a separate FFI-local
+  guess based on BLE peer count. The two could disagree; now they cannot.
+  It stays `false` while no battery level has been reported, because the role
+  policy declines to transition on a level it does not have.
+
+- **`updateDorsConfig` and `updateRelayConfig` are partial updates on both
+  platform bridges**: a field the payload omits keeps its **current** value,
+  read back from the live engine. Both bridges previously rebuilt the whole
+  `DorsConfig` from hardcoded literals, so an update meaning to change one
+  field silently reset every other one — the same defect as the three missing
+  fields above, one layer up and affecting all eighteen. Apps that relied on
+  `updateDorsConfig` to restore defaults must now pass the values explicitly.
 
 - **BREAKING**: `NostrTransport::get_next_message` — the generic
   `Transport` whole-message poll — now returns

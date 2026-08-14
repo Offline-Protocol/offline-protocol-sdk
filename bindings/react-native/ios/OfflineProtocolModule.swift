@@ -419,25 +419,31 @@ class OfflineProtocolModule: RCTEventEmitter {
         return (config, raw)
     }
 
+    /// Accepts both the current vocabulary and the pre-0.22 `low`/`medium`/`high`
+    /// spelling of the same three values, so an app that has not migrated its
+    /// config keeps working.
     private func normalizeRelayPriority(_ priority: String?) -> RelayPriority? {
         guard let value = priority?.lowercased(), !value.isEmpty else {
             return nil
         }
         switch value {
-        case "low":
-            return .low
-        case "medium":
-            return .medium
-        case "high":
-            return .high
-        case "never":
-            return .low
-        case "always":
-            return .high
-        case "auto":
-            return .medium
+        case "never", "low":
+            return .never
+        case "auto", "medium":
+            return .auto
+        case "always", "high":
+            return .always
         default:
             return nil
+        }
+    }
+
+    private func relayPriorityName(_ priority: RelayPriority) -> String {
+        switch priority {
+        case .never: return "never"
+        case .auto: return "auto"
+        case .always: return "always"
+        @unknown default: return "auto"
         }
     }
 
@@ -505,6 +511,15 @@ class OfflineProtocolModule: RCTEventEmitter {
                                      ?? (dorsDict["queue_recovery_ratio"] as? NSNumber)?.floatValue
                                      ?? 0.5)
         let queueRecovery = min(max(rawQueueRecovery, 0.0), 1.0)
+        let lowBattery = UInt8(min(100, max(0, Int((dorsDict["lowBatteryThreshold"] as? NSNumber)?.intValue
+                                                   ?? (dorsDict["low_battery_threshold"] as? NSNumber)?.intValue
+                                                   ?? 20))))
+        let relayMinBattery = UInt8(min(100, max(0, Int((dorsDict["relayMinBatteryLevel"] as? NSNumber)?.intValue
+                                                        ?? (dorsDict["relay_min_battery_level"] as? NSNumber)?.intValue
+                                                        ?? 30))))
+        let relayOptimalConnections = UInt8(min(255, max(0, Int((dorsDict["relayOptimalConnectionCount"] as? NSNumber)?.intValue
+                                                                ?? (dorsDict["relay_optimal_connection_count"] as? NSNumber)?.intValue
+                                                                ?? 4))))
 
             let dorsConfig = DorsConfig(
                 preferOnline: preferOnline,
@@ -521,7 +536,10 @@ class OfflineProtocolModule: RCTEventEmitter {
             congestionDurationSecs: congestionDuration,
             ttlEscalationHoldSecs: ttlHold,
             historyWindowSize: UInt64(historyWindow),
-            queueRecoveryRatio: queueRecovery
+            queueRecoveryRatio: queueRecovery,
+            lowBatteryThreshold: lowBattery,
+            relayMinBatteryLevel: relayMinBattery,
+            relayOptimalConnectionCount: relayOptimalConnections
             )
 
             do {
@@ -534,26 +552,20 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
         }
 
+        // The whole relay section, not just the priority: allowRelay,
+        // minBatteryForRelay and relayThreshold used to be parsed by nothing,
+        // leaving `config.relay` on mobile permanently at its defaults.
         if let relayDict = rawConfig["relay"] as? [String: Any] {
-            let priorityRaw = (relayDict["relayPriority"] as? String) ?? (relayDict["relay_priority"] as? String)
-            if let priority = normalizeRelayPriority(priorityRaw) {
-                do {
-                    try proto.setRelayPriority(priority: priority)
-                    let priorityLabel: String
-                    switch priority {
-                    case .low: priorityLabel = "low"
-                    case .medium: priorityLabel = "medium"
-                    case .high: priorityLabel = "high"
-                    @unknown default: priorityLabel = "medium"
-                    }
-                    emitDiagnostic(level: "info", message: "Applied initial relay priority", context: [
-                        "priority": priorityRaw ?? priorityLabel
-                    ])
-                } catch {
-                    emitDiagnostic(level: "warning", message: "Failed to apply initial relay priority", context: [
-                        "error": error.localizedDescription
-                    ])
-                }
+            do {
+                let updated = mergedRelayConfig(current: proto.getRelayConfig(), from: relayDict)
+                try proto.updateRelayConfig(config: updated)
+                emitDiagnostic(level: "info", message: "Applied initial relay config", context: [
+                    "priority": relayPriorityName(updated.relayPriority)
+                ])
+            } catch {
+                emitDiagnostic(level: "warning", message: "Failed to apply initial relay config", context: [
+                    "error": error.localizedDescription
+                ])
             }
         }
     }
@@ -2435,10 +2447,30 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejecter("ERROR_BATTERY", "Protocol not initialized", nil)
             return
         }
-        proto.setBatteryLevel(level: UInt8(min(100, max(0, level))))
-        resolver(nil)
+        do {
+            try proto.setBatteryLevel(level: UInt8(min(100, max(0, level))))
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_BATTERY", "Failed to set battery level: \(error.localizedDescription)", error)
+        }
     }
-    
+
+    @objc func setBatteryState(_ level: Int,
+                               isCharging: Bool,
+                               resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_BATTERY", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            try proto.setBatteryState(level: UInt8(min(100, max(0, level))), isCharging: isCharging)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_BATTERY", "Failed to set battery state: \(error.localizedDescription)", error)
+        }
+    }
+
     @objc func getBatteryLevel(_ resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {
@@ -2451,9 +2483,18 @@ class OfflineProtocolModule: RCTEventEmitter {
             resolver(NSNull())
         }
     }
-    
+
+    @objc func getIsCharging(_ resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            resolver(NSNumber(value: false))
+            return
+        }
+        resolver(NSNumber(value: proto.getIsCharging()))
+    }
+
     // MARK: - Relay Management
-    
+
     @objc func setRelayPriority(_ priorityString: String,
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
@@ -2461,45 +2502,99 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejecter("ERROR_RELAY", "Protocol not initialized", nil)
             return
         }
+        guard let priority = normalizeRelayPriority(priorityString) else {
+            rejecter("ERROR_RELAY", "Invalid relay priority: \(priorityString)", nil)
+            return
+        }
         do {
-            let priority: RelayPriority
-            switch priorityString.lowercased() {
-            case "low":
-                priority = .low
-            case "high":
-                priority = .high
-            default:
-                priority = .medium
-            }
-            
             try proto.setRelayPriority(priority: priority)
             resolver(nil)
         } catch {
             rejecter("ERROR_RELAY", "Failed to set relay priority: \(error.localizedDescription)", error)
         }
     }
-    
+
     @objc func getRelayPriority(_ resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {
-            resolver("medium")
+            resolver("auto")
             return
         }
-        let priority = proto.getRelayPriority()
-        let priorityString: String
-        switch priority {
-        case .low:
-            priorityString = "low"
-        case .medium:
-            priorityString = "medium"
-        case .high:
-            priorityString = "high"
-        @unknown default:
-            priorityString = "medium"
-        }
-        resolver(priorityString)
+        resolver(relayPriorityName(proto.getRelayPriority()))
     }
-    
+
+    /// Applies a partial relay configuration: fields absent from `configJson`
+    /// keep their current values, so an app can raise its battery floor
+    /// without restating the rest.
+    @objc func updateRelayConfig(_ configJson: String,
+                                 resolver: @escaping RCTPromiseResolveBlock,
+                                 rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_RELAY", "Protocol not initialized", nil)
+            return
+        }
+        guard let data = configJson.data(using: .utf8),
+              let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            rejecter("ERROR_RELAY", "Invalid relay config JSON", nil)
+            return
+        }
+        do {
+            try proto.updateRelayConfig(config: mergedRelayConfig(current: proto.getRelayConfig(), from: dict))
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_RELAY", "Failed to update relay config: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func getRelayConfig(_ resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_RELAY", "Protocol not initialized", nil)
+            return
+        }
+        let config = proto.getRelayConfig()
+        let dict: [String: Any] = [
+            "relayThreshold": config.relayThreshold,
+            "minBatteryForRelay": config.minBatteryForRelay,
+            "allowRelay": config.allowRelay,
+            "relayPriority": relayPriorityName(config.relayPriority)
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: dict),
+              let json = String(data: data, encoding: .utf8) else {
+            rejecter("ERROR_RELAY", "Failed to serialize relay config", nil)
+            return
+        }
+        resolver(json)
+    }
+
+    /// Overlays whatever relay fields `dict` carries onto `current`. Both the
+    /// camelCase and snake_case spellings are accepted, matching every other
+    /// config parser on this bridge.
+    private func mergedRelayConfig(current: RelayConfig, from dict: [String: Any]) -> RelayConfig {
+        func number(_ keys: String...) -> NSNumber? {
+            for key in keys {
+                if let value = dict[key] as? NSNumber { return value }
+            }
+            return nil
+        }
+        func flag(_ keys: String...) -> Bool? {
+            for key in keys {
+                if let value = dict[key] as? Bool { return value }
+                if let value = dict[key] as? NSNumber { return value.boolValue }
+            }
+            return nil
+        }
+        let priorityRaw = (dict["relayPriority"] as? String) ?? (dict["relay_priority"] as? String)
+        return RelayConfig(
+            relayThreshold: number("relayThreshold", "relay_threshold")
+                .map { UInt64(max(0, $0.intValue)) } ?? current.relayThreshold,
+            minBatteryForRelay: number("minBatteryForRelay", "min_battery_for_relay")
+                .map { UInt8(min(100, max(0, $0.intValue))) } ?? current.minBatteryForRelay,
+            allowRelay: flag("allowRelay", "allow_relay") ?? current.allowRelay,
+            relayPriority: normalizeRelayPriority(priorityRaw) ?? current.relayPriority
+        )
+    }
+
     @objc func isRelay(_ resolver: @escaping RCTPromiseResolveBlock,
                       rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {
@@ -2587,6 +2682,16 @@ class OfflineProtocolModule: RCTEventEmitter {
     
     // MARK: - DORS Configuration
     
+    /// Applies a partial DORS configuration: fields absent from `configJson`
+    /// keep their **current** values, read back from the live engine rather
+    /// than restated as literals here.
+    ///
+    /// Defaulting to literals is what made `updateDorsConfig` a silent reset —
+    /// an update meaning to change one field rewrote every other one to a
+    /// hardcoded number, and the three battery/relay fields could not even be
+    /// restated because they had no path across the bridge. Sourcing the
+    /// fallbacks from `getDorsConfig()` fixes both halves at once and keeps
+    /// this method's contract identical to `updateRelayConfig`'s.
     @objc func updateDorsConfig(_ configJson: String,
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
@@ -2601,36 +2706,40 @@ class OfflineProtocolModule: RCTEventEmitter {
                             userInfo: [NSLocalizedDescriptionKey: "Invalid JSON"])
             }
 
-            let poorSignalDuration = (config["poorSignalDurationSecs"] as? NSNumber)?.uint64Value ?? 10
-            let ttlThreshold = (config["ttlEscalationThreshold"] as? NSNumber)?.uint8Value ?? 2
-            let congestionDuration = max((config["congestionDurationSecs"] as? NSNumber)?.uint64Value ?? 10, 0)
-            let ttlHold = max((config["ttlEscalationHoldSecs"] as? NSNumber)?.uint64Value ?? 20, 1)
-            let historyWindowRaw = (config["historyWindowSize"] as? NSNumber)?.uint64Value ?? 10
+            let current = proto.getDorsConfig()
+            let poorSignalDuration = (config["poorSignalDurationSecs"] as? NSNumber)?.uint64Value ?? current.poorSignalDurationSecs
+            let ttlThreshold = (config["ttlEscalationThreshold"] as? NSNumber)?.uint8Value ?? current.ttlEscalationThreshold
+            let congestionDuration = max((config["congestionDurationSecs"] as? NSNumber)?.uint64Value ?? current.congestionDurationSecs, 0)
+            let ttlHold = max((config["ttlEscalationHoldSecs"] as? NSNumber)?.uint64Value ?? current.ttlEscalationHoldSecs, 1)
+            let historyWindowRaw = (config["historyWindowSize"] as? NSNumber)?.uint64Value ?? current.historyWindowSize
             let historyWindow = max(1, min(100, Int(historyWindowRaw)))
-            let rawQueueRecovery = (config["queueRecoveryRatio"] as? NSNumber)?.floatValue ?? 0.5
+            let rawQueueRecovery = (config["queueRecoveryRatio"] as? NSNumber)?.floatValue ?? current.queueRecoveryRatio
             let queueRecovery = min(max(rawQueueRecovery, 0.0), 1.0)
-            
-            let minSuccessRate = (config["minSuccessRateBeforeEscalation"] as? NSNumber)?.floatValue ?? 0.3
+
+            let minSuccessRate = (config["minSuccessRateBeforeEscalation"] as? NSNumber)?.floatValue ?? current.minSuccessRateBeforeEscalation
             let minSuccessRateClamped = min(max(minSuccessRate, 0.0), 1.0)
-            let minBleSamples = (config["minBleSamplesBeforeSuccessRateEscalation"] as? NSNumber)?.uint64Value ?? 5
+            let minBleSamples = (config["minBleSamplesBeforeSuccessRateEscalation"] as? NSNumber)?.uint64Value ?? current.minBleSamplesBeforeSuccessRateEscalation
             let dorsConfig = DorsConfig(
-                preferOnline: config["preferOnline"] as? Bool ?? false,
-                switchHysteresis: max((config["switchHysteresis"] as? NSNumber)?.floatValue ?? 15.0, 0),
-                switchCooldownSecs: max((config["switchCooldownSecs"] as? NSNumber)?.uint64Value ?? 20, 0),
-                bleToWifiRetryThreshold: (config["bleToWifiRetryThreshold"] as? NSNumber)?.uint32Value ?? 2,
+                preferOnline: config["preferOnline"] as? Bool ?? current.preferOnline,
+                switchHysteresis: max((config["switchHysteresis"] as? NSNumber)?.floatValue ?? current.switchHysteresis, 0),
+                switchCooldownSecs: max((config["switchCooldownSecs"] as? NSNumber)?.uint64Value ?? current.switchCooldownSecs, 0),
+                bleToWifiRetryThreshold: (config["bleToWifiRetryThreshold"] as? NSNumber)?.uint32Value ?? current.bleToWifiRetryThreshold,
                 minSuccessRateBeforeEscalation: minSuccessRateClamped,
                 minBleSamplesBeforeSuccessRateEscalation: minBleSamples,
-                rssiSwitchThreshold: (config["rssiSwitchThreshold"] as? NSNumber)?.int16Value ?? -85,
-                congestionQueueThreshold: (config["congestionQueueThreshold"] as? NSNumber)?.uint64Value ?? 50,
-                stabilityWindowSecs: (config["stabilityWindowSecs"] as? NSNumber)?.uint64Value ?? 8,
+                rssiSwitchThreshold: (config["rssiSwitchThreshold"] as? NSNumber)?.int16Value ?? current.rssiSwitchThreshold,
+                congestionQueueThreshold: (config["congestionQueueThreshold"] as? NSNumber)?.uint64Value ?? current.congestionQueueThreshold,
+                stabilityWindowSecs: (config["stabilityWindowSecs"] as? NSNumber)?.uint64Value ?? current.stabilityWindowSecs,
                 poorSignalDurationSecs: poorSignalDuration,
                 ttlEscalationThreshold: ttlThreshold,
                 congestionDurationSecs: UInt64(congestionDuration),
                 ttlEscalationHoldSecs: UInt64(ttlHold),
                 historyWindowSize: UInt64(historyWindow),
-                queueRecoveryRatio: queueRecovery
+                queueRecoveryRatio: queueRecovery,
+                lowBatteryThreshold: UInt8(min(100, max(0, (config["lowBatteryThreshold"] as? NSNumber)?.intValue ?? Int(current.lowBatteryThreshold)))),
+                relayMinBatteryLevel: UInt8(min(100, max(0, (config["relayMinBatteryLevel"] as? NSNumber)?.intValue ?? Int(current.relayMinBatteryLevel)))),
+                relayOptimalConnectionCount: UInt8(min(255, max(0, (config["relayOptimalConnectionCount"] as? NSNumber)?.intValue ?? Int(current.relayOptimalConnectionCount))))
             )
-            
+
             try proto.updateDorsConfig(config: dorsConfig)
             resolver(nil)
         } catch {
@@ -2660,7 +2769,10 @@ class OfflineProtocolModule: RCTEventEmitter {
             "congestionDurationSecs": config.congestionDurationSecs,
             "ttlEscalationHoldSecs": config.ttlEscalationHoldSecs,
             "historyWindowSize": config.historyWindowSize,
-            "queueRecoveryRatio": config.queueRecoveryRatio
+            "queueRecoveryRatio": config.queueRecoveryRatio,
+            "lowBatteryThreshold": config.lowBatteryThreshold,
+            "relayMinBatteryLevel": config.relayMinBatteryLevel,
+            "relayOptimalConnectionCount": config.relayOptimalConnectionCount
         ]
         resolver(configDict)
     }
@@ -4211,11 +4323,16 @@ class OfflineProtocolModule: RCTEventEmitter {
 
         let nodesArray: [[String: Any]] = topology.nodes.map { node in
             let transports = Array(transportsByNode[node.nodeId] ?? [])
+            // Prefer the node's own connection count when the visualizer has
+            // one; fall back to counting the links we can see.
+            let reportedConnections = Int(node.connectionCount)
             return [
                 "user_id": node.nodeId,
                 "role": node.role.lowercased(),
-                "connection_count": connectionCounts[node.nodeId] ?? 0,
-                "battery_level": NSNull(),
+                "connection_count": reportedConnections > 0
+                    ? reportedConnections
+                    : (connectionCounts[node.nodeId] ?? 0),
+                "battery_level": node.batteryLevel.map { Int($0) } ?? NSNull(),
                 "last_seen": Int(node.lastSeenMs / 1000),
                 "transports": transports
             ]

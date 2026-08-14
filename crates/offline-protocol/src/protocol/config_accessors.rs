@@ -14,7 +14,7 @@ use offline_protocol_reliability::{
     AckConfig, AckManager, Deduplicator, DeduplicatorConfig, DeduplicatorStats, RetryConfig,
     RetryQueue,
 };
-use offline_protocol_router::DorsConfig;
+use offline_protocol_router::{DorsConfig, RelayConfig, RelayRole};
 use offline_protocol_services::MeshServices;
 use std::sync::{Arc, RwLock};
 use std::time::Duration as StdDuration;
@@ -74,6 +74,81 @@ impl OfflineProtocol {
     /// This replaces the current DORS selector configuration with the provided config.
     pub fn update_dors_config(&mut self, config: DorsConfig) {
         self.transport_manager.update_selector_config(config);
+    }
+
+    /// Records the host's battery reading for this device.
+    ///
+    /// The platform owns this number — no transport can observe it — and until
+    /// it arrives every battery-dependent policy in the SDK runs in its
+    /// unknown-level branch: DORS energy scoring skips its battery term, the
+    /// relay role is never evaluated (so `relay_promoted`/`relay_demoted` can
+    /// never fire), and message forwarding takes the "unknown means willing"
+    /// path past [`RelayConfig::min_battery_for_relay`]. Feeding it is what
+    /// makes those policies live.
+    ///
+    /// `is_charging` is not cosmetic: a charging device is deliberately
+    /// excused the soft relay minimum and stopped only by the hard
+    /// `CRITICAL_RELAY_BATTERY_LEVEL` floor, so reporting a level without the
+    /// charging state strips relay duty from plugged-in devices that should
+    /// keep it.
+    ///
+    /// `level` is clamped to 0-100.
+    pub fn set_device_battery(&mut self, level: u8, is_charging: bool) {
+        self.transport_manager
+            .set_device_battery(level, is_charging);
+    }
+
+    /// Returns the host-reported `(battery_level, is_charging)` pair, or
+    /// `(None, false)` when no platform reading has been supplied.
+    pub fn device_battery(&self) -> (Option<u8>, bool) {
+        self.transport_manager.device_battery()
+    }
+
+    /// Updates the relay configuration at runtime.
+    ///
+    /// Validated the same way [`Self::update_ack_config`] is — by building the
+    /// candidate configuration and running the real validator — so a
+    /// constraint added to `ProtocolConfig::validate` applies on this path too.
+    ///
+    /// The new configuration takes effect on the next role evaluation (the
+    /// `process()` tick) and on the next forwarding decision. The current
+    /// relay role is **preserved** across the update rather than reset:
+    /// re-deriving it here would emit a promote/demote transition that the
+    /// tick is about to compute properly from live battery and connectivity.
+    ///
+    /// **Writes two copies, and both are load-bearing.** The relay policy is
+    /// read from `self.config.relay` by the message-forwarding gate
+    /// (`battery_allows_relaying`) and from the [`RelayManager`]'s own copy by
+    /// the role policy. They are documented as applying "the same floor", so a
+    /// writer that updates one and not the other silently desyncs two
+    /// decisions that must agree — a device that declines the relay role while
+    /// still carrying other people's traffic, or the reverse.
+    ///
+    /// [`RelayManager`]: offline_protocol_router::RelayManager
+    pub fn update_relay_config(&mut self, config: RelayConfig) -> crate::Result<()> {
+        let mut candidate = self.config.clone();
+        candidate.relay = config.clone();
+        candidate.validate()?;
+        self.path_selector.set_relay_config(config.clone());
+        self.config.relay = config;
+        Ok(())
+    }
+
+    /// Returns the current relay configuration.
+    pub fn relay_config(&self) -> &RelayConfig {
+        &self.config.relay
+    }
+
+    /// Whether this device currently holds the relay role.
+    ///
+    /// This is the role the `relay_promoted` / `relay_demoted` /
+    /// `relay_demoted_battery` events announce, recomputed on each `process()`
+    /// tick from live connectivity, battery and [`RelayConfig`]. It stays
+    /// `false` while the host reports no battery level, because the policy
+    /// declines to transition on a level it does not have — see
+    /// [`Self::set_device_battery`].
+    pub fn is_relay(&self) -> bool {
+        self.path_selector.current_relay_role() == RelayRole::Relay
     }
 
     /// Updates the ACK configuration at runtime.

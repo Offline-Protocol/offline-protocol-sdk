@@ -23626,6 +23626,253 @@ fn test_relay_role_transitions_emit_events() {
     );
 }
 
+/// The same transitions as the test above, driven by the **host** battery feed
+/// instead of by a transport that happens to report a level.
+///
+/// This is the gap that made the whole relay-role machinery runtime-dead: no
+/// platform transport publishes a battery level, so `evaluate_relay_role`
+/// early-returned on every real device and neither event could ever fire.
+/// `set_device_battery` is the only production writer, so this test is what
+/// distinguishes "the policy is implemented" from "the policy runs".
+#[test]
+fn test_host_battery_feed_drives_relay_role_transitions() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.set_status(TransportStatus::Available);
+    // Deliberately no metrics: the transport reports no battery, exactly like
+    // every real one.
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+    protocol.start().unwrap();
+
+    for i in 0..3 {
+        protocol.on_neighbor_discovered(&format!("peer-{i}"));
+    }
+
+    // Without a host feed the role is never evaluated at all.
+    protocol.process().unwrap();
+    let unfed = sink.take();
+    assert!(
+        !unfed.iter().any(|r| matches!(
+            r,
+            TelemetryRecord::Protocol(ev) if matches!(ev.as_ref(), Event::RelayPromoted { .. })
+        )),
+        "with no battery reading the role must not transition, got {unfed:?}",
+    );
+
+    protocol.set_device_battery(80, false);
+    protocol.process().unwrap();
+    let promoted = sink.take();
+    assert!(
+        promoted.iter().any(|r| matches!(
+            r,
+            TelemetryRecord::Protocol(ev) if matches!(ev.as_ref(), Event::RelayPromoted { .. })
+        )),
+        "a host-reported healthy battery must promote, got {promoted:?}",
+    );
+
+    protocol.set_device_battery(20, false);
+    protocol.process().unwrap();
+    let demoted = sink.take();
+    assert!(
+        demoted.iter().any(|r| matches!(
+            r,
+            TelemetryRecord::Protocol(ev)
+                if matches!(
+                    ev.as_ref(),
+                    Event::RelayDemotedBattery { battery_level: 20, min_required: 30 }
+                )
+        )),
+        "a host-reported low battery must demote, got {demoted:?}",
+    );
+
+    // Charging is not cosmetic: plugged in, the same low level is excused the
+    // soft floor and the device is promoted back.
+    protocol.set_device_battery(20, true);
+    protocol.process().unwrap();
+    let repromoted = sink.take();
+    assert!(
+        repromoted.iter().any(|r| matches!(
+            r,
+            TelemetryRecord::Protocol(ev) if matches!(ev.as_ref(), Event::RelayPromoted { .. })
+        )),
+        "a charging device below the soft floor must be promoted again, got {repromoted:?}",
+    );
+}
+
+/// The forwarding battery floor, driven by the host feed rather than by a
+/// transport-reported level. Same gate as
+/// `a_battery_below_the_relay_floor_carries_nothing`, reached the way a real
+/// device reaches it.
+#[test]
+fn a_host_reported_battery_below_the_floor_carries_nothing() {
+    fn neighbors_carried_to_with_host_battery(level: u8, is_charging: bool) -> usize {
+        let mut protocol =
+            OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+        let mock = MockTransport::new(TransportType::BLE);
+        mock.start().unwrap();
+        mock.add_connected_peer("carol", -55);
+        let transport_handle = mock.clone();
+        mock.queue_message(signed_frame(&id("alice"), "bob", "carry me if you can"));
+
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        protocol.set_device_battery(level, is_charging);
+        protocol.start().unwrap();
+
+        assert!(protocol.receive_message().is_none());
+        protocol.process().unwrap();
+
+        transport_handle.peer_sends().len()
+    }
+
+    assert_eq!(
+        neighbors_carried_to_with_host_battery(80, false),
+        1,
+        "a healthy host-reported battery still carries"
+    );
+    assert_eq!(
+        neighbors_carried_to_with_host_battery(20, false),
+        0,
+        "a host-reported battery below the floor must stop carrying"
+    );
+    assert_eq!(
+        neighbors_carried_to_with_host_battery(20, true),
+        1,
+        "charging excuses the soft floor on the host feed too"
+    );
+}
+
+/// `update_relay_config` must reach the live forwarding gate and the live
+/// role policy, not just the stored config — the whole point of the runtime
+/// surface is that an app can raise its floor or opt out of relaying without
+/// a restart.
+#[test]
+fn test_update_relay_config_applies_live() {
+    use offline_protocol_router::relay::{RelayConfig, RelayPriority};
+
+    fn carries_with_config(config: Option<RelayConfig>) -> usize {
+        let mut protocol =
+            OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+        let mock = MockTransport::new(TransportType::BLE);
+        mock.start().unwrap();
+        mock.add_connected_peer("carol", -55);
+        let transport_handle = mock.clone();
+        mock.queue_message(signed_frame(&id("alice"), "bob", "carry me if you can"));
+
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        // Healthy by the default floor of 30.
+        protocol.set_device_battery(50, false);
+        if let Some(config) = config {
+            protocol.update_relay_config(config).unwrap();
+        }
+        protocol.start().unwrap();
+
+        assert!(protocol.receive_message().is_none());
+        protocol.process().unwrap();
+
+        transport_handle.peer_sends().len()
+    }
+
+    assert_eq!(carries_with_config(None), 1, "default config carries");
+
+    // A floor raised above the current level stops the carry.
+    assert_eq!(
+        carries_with_config(Some(RelayConfig {
+            min_battery_for_relay: 70,
+            ..RelayConfig::default()
+        })),
+        0,
+        "a runtime-raised battery floor must reach the forwarding gate"
+    );
+
+    // An explicit opt-out stops it regardless of battery.
+    assert_eq!(
+        carries_with_config(Some(RelayConfig {
+            allow_relay: false,
+            ..RelayConfig::default()
+        })),
+        0,
+        "allow_relay=false must reach the forwarding gate"
+    );
+    assert_eq!(
+        carries_with_config(Some(RelayConfig {
+            relay_priority: RelayPriority::Never,
+            ..RelayConfig::default()
+        })),
+        0,
+        "RelayPriority::Never must reach the forwarding gate"
+    );
+}
+
+/// The role policy reads the updated config too, and the update itself does
+/// not fabricate a transition — the tick computes one from live conditions.
+#[test]
+fn test_update_relay_config_reaches_the_role_policy() {
+    use offline_protocol_router::relay::RelayConfig;
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.set_status(TransportStatus::Available);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+    protocol.start().unwrap();
+
+    for i in 0..3 {
+        protocol.on_neighbor_discovered(&format!("peer-{i}"));
+    }
+    protocol.set_device_battery(80, false);
+    protocol.process().unwrap();
+    let _ = sink.take();
+
+    // Opting out demotes on the next tick, with the configuration reason.
+    protocol
+        .update_relay_config(RelayConfig {
+            allow_relay: false,
+            ..RelayConfig::default()
+        })
+        .unwrap();
+    let after_update = sink.take();
+    assert!(
+        !after_update.iter().any(|r| matches!(
+            r,
+            TelemetryRecord::Protocol(ev) if matches!(
+                ev.as_ref(),
+                Event::RelayPromoted { .. } | Event::RelayDemoted { .. }
+            )
+        )),
+        "the config update itself must not emit a transition, got {after_update:?}",
+    );
+
+    protocol.process().unwrap();
+    let demoted = sink.take();
+    assert!(
+        demoted.iter().any(|r| matches!(
+            r,
+            TelemetryRecord::Protocol(ev) if matches!(ev.as_ref(), Event::RelayDemoted { .. })
+        )),
+        "allow_relay=false must demote on the next tick, got {demoted:?}",
+    );
+    assert!(!protocol.relay_config().allow_relay);
+}
+
 #[test]
 fn test_install_before_start_wires_routing_callback() {
     // Regression guard for the post-review lifecycle fix: the routing-

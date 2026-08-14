@@ -56,6 +56,8 @@ import type {
   TelemetryListener,
   TelemetryRecord,
   TransportMetrics,
+  RelayConfig,
+  RelayPriority,
 } from './types';
 import { ContentType, MessagePriority } from './types';
 import {
@@ -78,7 +80,13 @@ const OfflineProtocolNativeModule = (NativeModules.OfflineProtocolModule
       }
     )) as any; // Type assertion to allow all native module methods including group management
 
-type NativeRelayPriority = 'low' | 'medium' | 'high';
+/**
+ * The vocabulary the native bridges speak. Matches the engine's own
+ * `RelayPriority` since 0.22; the legacy `'low' | 'medium' | 'high'` spelling
+ * is still accepted on input by {@link normalizeRelayPriority} and by both
+ * bridges.
+ */
+type NativeRelayPriority = 'never' | 'auto' | 'always';
 
 /**
  * Membership test for {@link ONE_SHOT_EVENT_TYPES}, built once rather than
@@ -344,6 +352,10 @@ export class OfflineProtocol {
             1,
             Math.max(0, dorsSource.queueRecoveryRatio ?? 0.5)
           ),
+          lowBatteryThreshold: dorsSource.lowBatteryThreshold ?? 20,
+          relayMinBatteryLevel: dorsSource.relayMinBatteryLevel ?? 30,
+          relayOptimalConnectionCount:
+            dorsSource.relayOptimalConnectionCount ?? 4,
         })
       : undefined;
 
@@ -508,16 +520,17 @@ export class OfflineProtocol {
     }
     const normalized = priority.toLowerCase();
     switch (normalized) {
-      case "low":
-      case "medium":
-      case "high":
-        return normalized as NativeRelayPriority;
       case "never":
-        return "low";
-      case "always":
-        return "high";
       case "auto":
-        return "medium";
+      case "always":
+        return normalized as NativeRelayPriority;
+      // Legacy spelling of the same three values, still accepted on input.
+      case "low":
+        return "never";
+      case "medium":
+        return "auto";
+      case "high":
+        return "always";
       default:
         return null;
     }
@@ -548,18 +561,33 @@ export class OfflineProtocol {
       }
     }
 
-    if (relay?.relayPriority) {
+    if (relay) {
+      // The whole relay section, not just the priority: `allowRelay`,
+      // `minBatteryForRelay` and `relayThreshold` used to be dropped here,
+      // which left `config.relay` on mobile permanently at its defaults.
       const normalizedPriority = this.normalizeRelayPriority(
         relay.relayPriority
       );
-      if (normalizedPriority) {
+      const payload = {
+        ...(relay.allowRelay !== undefined
+          ? { allowRelay: relay.allowRelay }
+          : {}),
+        ...(relay.minBatteryForRelay !== undefined
+          ? { minBatteryForRelay: relay.minBatteryForRelay }
+          : {}),
+        ...(relay.relayThreshold !== undefined
+          ? { relayThreshold: relay.relayThreshold }
+          : {}),
+        ...(normalizedPriority ? { relayPriority: normalizedPriority } : {}),
+      };
+      if (Object.keys(payload).length > 0) {
         try {
-          await OfflineProtocolNativeModule.setRelayPriority(
-            normalizedPriority
+          await OfflineProtocolNativeModule.updateRelayConfig(
+            JSON.stringify(payload)
           );
         } catch (error) {
           console.warn(
-            "[OfflineProtocol] Failed to apply relay priority",
+            "[OfflineProtocol] Failed to apply relay configuration",
             error
           );
         }
@@ -1667,7 +1695,19 @@ export class OfflineProtocol {
   }
 
   /**
-   * Sets the battery level for relay decisions
+   * Reports the device's battery level to the protocol engine.
+   *
+   * This is the feed for every battery-dependent policy in the SDK: DORS
+   * energy scoring, relay promotion/demotion (`relay_promoted` /
+   * `relay_demoted`), the message-forwarding battery floor, and the telemetry
+   * device-capability snapshot. No transport can observe the host's battery,
+   * so until this is called each of those policies runs in its unknown-level
+   * branch. Call it on start and on each platform battery notification.
+   *
+   * Prefer {@link setBatteryState} where charging state is available: a
+   * charging device is deliberately excused the soft relay battery floor, so
+   * reporting the level alone strips relay duty from plugged-in devices that
+   * should keep it.
    *
    * @param level - Battery level (0-100)
    */
@@ -1676,31 +1716,98 @@ export class OfflineProtocol {
   }
 
   /**
-   * Gets the current battery level
+   * Reports the device's battery level and charging state to the protocol
+   * engine. See {@link setBatteryLevel} for what depends on it.
    *
-   * @returns Battery level (0-100) or null if not set
+   * @param level - Battery level (0-100)
+   * @param isCharging - Whether the device is currently charging
+   */
+  async setBatteryState(level: number, isCharging: boolean): Promise<void> {
+    return await OfflineProtocolNativeModule.setBatteryState(level, isCharging);
+  }
+
+  /**
+   * Gets the last reported battery level
+   *
+   * @returns Battery level (0-100) or null if the host has not reported one
    */
   async getBatteryLevel(): Promise<number | null> {
     return await OfflineProtocolNativeModule.getBatteryLevel();
   }
 
   /**
-   * Sets the relay priority
+   * Gets the last reported charging state (false if none reported).
+   */
+  async getIsCharging(): Promise<boolean> {
+    return await OfflineProtocolNativeModule.getIsCharging();
+  }
+
+  /**
+   * Sets the relay priority.
    *
-   * @param priority - Relay priority ('low', 'medium', or 'high')
+   * A shorthand for updating only `relayPriority`; see
+   * {@link updateRelayConfig} for the rest. The legacy `'low' | 'medium' |
+   * 'high'` spelling is still accepted and maps to `never` / `auto` /
+   * `always`.
+   *
+   * @param priority - Relay priority
    * @throws Error if setting fails
    */
-  async setRelayPriority(priority: "low" | "medium" | "high"): Promise<void> {
-    return await OfflineProtocolNativeModule.setRelayPriority(priority);
+  async setRelayPriority(
+    priority: RelayPriority | "low" | "medium" | "high"
+  ): Promise<void> {
+    const normalized = this.normalizeRelayPriority(priority);
+    if (!normalized) {
+      throw new Error(`Invalid relay priority: ${priority}`);
+    }
+    return await OfflineProtocolNativeModule.setRelayPriority(normalized);
   }
 
   /**
    * Gets the current relay priority
-   *
-   * @returns Relay priority
    */
-  async getRelayPriority(): Promise<"low" | "medium" | "high"> {
+  async getRelayPriority(): Promise<RelayPriority> {
     return await OfflineProtocolNativeModule.getRelayPriority();
+  }
+
+  /**
+   * Updates the relay configuration at runtime.
+   *
+   * Governs whether this device carries other people's traffic and under what
+   * conditions it takes the relay role. Applies to the next role evaluation
+   * and the next forwarding decision — no restart needed. Omitted fields keep
+   * their current values.
+   *
+   * The battery-dependent parts need a battery feed to do anything — see
+   * {@link setBatteryState}.
+   */
+  async updateRelayConfig(config: RelayConfig): Promise<void> {
+    const normalizedPriority = this.normalizeRelayPriority(
+      config.relayPriority
+    );
+    const payload = {
+      ...(config.allowRelay !== undefined
+        ? { allowRelay: config.allowRelay }
+        : {}),
+      ...(config.minBatteryForRelay !== undefined
+        ? { minBatteryForRelay: config.minBatteryForRelay }
+        : {}),
+      ...(config.relayThreshold !== undefined
+        ? { relayThreshold: config.relayThreshold }
+        : {}),
+      ...(normalizedPriority ? { relayPriority: normalizedPriority } : {}),
+    };
+    return await OfflineProtocolNativeModule.updateRelayConfig(
+      JSON.stringify(payload)
+    );
+  }
+
+  /**
+   * Gets the current relay configuration.
+   */
+  async getRelayConfig(): Promise<Required<RelayConfig>> {
+    const json = await OfflineProtocolNativeModule.getRelayConfig();
+    return typeof json === "string" ? JSON.parse(json) : json;
   }
 
   /**
@@ -1935,7 +2042,13 @@ export class OfflineProtocol {
   }
 
   /**
-   * Updates DORS configuration at runtime
+   * Updates DORS configuration at runtime.
+   *
+   * Omitted fields keep their current values — the same partial-update
+   * contract as {@link updateRelayConfig}. Every field must therefore be
+   * expressible here: a field this signature omits cannot be set, and (before
+   * the bridges merged from the live config) was silently reset by any update
+   * that changed something else.
    *
    * @param config - DORS configuration
    * @throws Error if update fails
@@ -1956,6 +2069,9 @@ export class OfflineProtocol {
     ttlEscalationHoldSecs?: number;
     historyWindowSize?: number;
     queueRecoveryRatio?: number;
+    lowBatteryThreshold?: number;
+    relayMinBatteryLevel?: number;
+    relayOptimalConnectionCount?: number;
   }): Promise<void> {
     const payload = { ...config };
     if (payload.switchHysteresis !== undefined) {
@@ -1988,6 +2104,24 @@ export class OfflineProtocol {
         Math.max(0, payload.queueRecoveryRatio)
       );
     }
+    if (payload.lowBatteryThreshold !== undefined) {
+      payload.lowBatteryThreshold = Math.min(
+        100,
+        Math.max(0, Math.round(payload.lowBatteryThreshold))
+      );
+    }
+    if (payload.relayMinBatteryLevel !== undefined) {
+      payload.relayMinBatteryLevel = Math.min(
+        100,
+        Math.max(0, Math.round(payload.relayMinBatteryLevel))
+      );
+    }
+    if (payload.relayOptimalConnectionCount !== undefined) {
+      payload.relayOptimalConnectionCount = Math.min(
+        255,
+        Math.max(0, Math.round(payload.relayOptimalConnectionCount))
+      );
+    }
     return await OfflineProtocolNativeModule.updateDorsConfig(
       JSON.stringify(payload)
     );
@@ -2014,6 +2148,9 @@ export class OfflineProtocol {
     ttlEscalationHoldSecs: number;
     historyWindowSize: number;
     queueRecoveryRatio: number;
+    lowBatteryThreshold: number;
+    relayMinBatteryLevel: number;
+    relayOptimalConnectionCount: number;
   }> {
     return await OfflineProtocolNativeModule.getDorsConfig();
   }

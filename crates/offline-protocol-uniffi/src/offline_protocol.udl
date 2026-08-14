@@ -215,11 +215,13 @@ enum ProtocolState {
     "Paused",
 };
 
-// Relay priority
+// Relay priority. Mirrors the engine's own vocabulary one-for-one; the
+// pre-0.22 "Low"/"Medium"/"High" spelling of the same three values is still
+// accepted by the platform bridges on input.
 enum RelayPriority {
-    "Low",
-    "Medium",
-    "High",
+    "Never",
+    "Auto",
+    "Always",
 };
 
 // BLE peer device information
@@ -366,7 +368,12 @@ dictionary MessageStats {
 dictionary NetworkNode {
     string node_id;
     string role;
+    // Always null today: link quality is tracked per NetworkLink, not per
+    // node. Kept because it is part of the published shape.
     i16? rssi;
+    // Battery level of this node (0-100), when known.
+    u8? battery_level;
+    u32 connection_count;
     u64 last_seen_ms;
 };
 
@@ -402,6 +409,13 @@ dictionary DorsConfig {
     u64 ttl_escalation_hold_secs;
     u64 history_window_size;
     f32 queue_recovery_ratio;
+    // Battery level at or below which DORS treats the device as low on power.
+    u8 low_battery_threshold;
+    // Battery level below which DORS stops treating BLE as a viable relay
+    // carrier and escalates (charging devices are exempt).
+    u8 relay_min_battery_level;
+    // Connection count DORS scores relay capacity against.
+    u8 relay_optimal_connection_count;
 };
 
 // ACK configuration
@@ -1290,17 +1304,41 @@ interface OfflineProtocol {
     
     u8 get_median_hops();
     
-    // Battery and device management
+    // Battery and device management.
+    //
+    // This is the feed for every battery-dependent policy in the SDK: DORS
+    // energy scoring, relay promotion/demotion, the message-forwarding
+    // battery floor, and the telemetry device-capability snapshot. No
+    // transport can observe the host's battery, so until one of these is
+    // called each of those policies runs in its unknown-level branch.
+    //
+    // Prefer set_battery_state: a charging device is deliberately excused the
+    // soft relay battery floor, so reporting the level alone strips relay
+    // duty from plugged-in devices that should keep it.
+    [Throws=ProtocolError]
     void set_battery_level(u8 level);
-    
+
+    [Throws=ProtocolError]
+    void set_battery_state(u8 level, boolean is_charging);
+
     u8? get_battery_level();
-    
+
+    boolean get_is_charging();
+
     // Relay management
     [Throws=ProtocolError]
     void set_relay_priority(RelayPriority priority);
-    
+
     RelayPriority get_relay_priority();
-    
+
+    // Whether this device carries other people's traffic, and under what
+    // conditions it takes the relay role. Applies to the next role
+    // evaluation and the next forwarding decision — no restart needed.
+    [Throws=ProtocolError]
+    void update_relay_config(RelayConfig config);
+
+    RelayConfig get_relay_config();
+
     boolean is_relay();
     
     // Transport metrics (per-transport detailed stats)

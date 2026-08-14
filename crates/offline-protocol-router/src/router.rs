@@ -5,7 +5,7 @@
 //! based on the number of visible peers to maintain constant message overhead.
 
 use crate::constants::*;
-use crate::relay::{RelayInfo, RelayManager, RelayRole, RelayTransition};
+use crate::relay::{RelayConfig, RelayInfo, RelayManager, RelayRole, RelayTransition};
 use offline_protocol_core::Message;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -490,6 +490,13 @@ impl PathSelector {
     /// to the full [`RelayManager`] API).
     pub fn current_relay_role(&self) -> RelayRole {
         self.relay_manager.current_role()
+    }
+
+    /// Replaces the relay configuration on the internal [`RelayManager`].
+    ///
+    /// The current relay role is preserved — see [`RelayManager::set_config`].
+    pub fn set_relay_config(&mut self, config: RelayConfig) {
+        self.relay_manager.set_config(config);
     }
 
     /// Re-evaluates the local relay role against current connectivity and

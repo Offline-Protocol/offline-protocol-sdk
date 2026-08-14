@@ -61,6 +61,14 @@ pub struct TransportManager {
     /// package). Messages addressed to a listed peer are stamped
     /// [`WireCodec::BinaryV1`] at send; all others stay JSON.
     peer_binary_wire: HashSet<String>,
+
+    /// Host-reported battery level for this device, if the platform publishes
+    /// one. Merged into every transport's metrics that does not report its own
+    /// — see [`TransportManager::set_device_battery`].
+    device_battery: Option<u8>,
+
+    /// Host-reported charging state, applied alongside [`Self::device_battery`].
+    device_is_charging: bool,
 }
 
 /// Carriers whose links are peer-to-peer, in the order a forwarding caller
@@ -211,6 +219,53 @@ impl TransportManager {
             routing_diagnostic: false,
             last_escalation_trigger_emitted: None,
             peer_binary_wire: HashSet::new(),
+            device_battery: None,
+            device_is_charging: false,
+        }
+    }
+
+    /// Records the host's battery reading for this device.
+    ///
+    /// Battery is a property of the *device*, not of any one radio, but every
+    /// consumer inside the SDK reads it from the per-transport
+    /// [`TransportMetrics`] map: DORS energy scoring, the relay
+    /// promote/demote policy, the forwarding battery floor, and the telemetry
+    /// device-capability snapshot all resolve it through
+    /// `device_battery_from_available`. This setter is therefore the single
+    /// host-facing feed, and it is merged into the two snapshot loops that
+    /// build that map.
+    ///
+    /// `level` is clamped to 0-100. A transport that reports its own battery
+    /// level keeps it: the merge fills the field, never overwrites it.
+    pub fn set_device_battery(&mut self, level: u8, is_charging: bool) {
+        self.device_battery = Some(level.min(100));
+        self.device_is_charging = is_charging;
+    }
+
+    /// Returns the host-reported `(battery_level, is_charging)` pair, if the
+    /// platform has published one.
+    pub fn device_battery(&self) -> (Option<u8>, bool) {
+        (self.device_battery, self.device_is_charging)
+    }
+
+    /// Fills the device-level battery fields on one transport's metrics.
+    ///
+    /// **Fill-if-absent, never overwrite.** A transport that publishes its own
+    /// `battery_level` is reporting something the host feed cannot know better
+    /// (a peripheral's own cell, say), so its reading wins; the host value is
+    /// the fallback for the ordinary case where no transport reports one at
+    /// all. `is_charging` is only applied alongside a battery level that came
+    /// from the host, so a transport's own (level, charging) pair is never
+    /// split across two sources — the same coherence rule
+    /// `device_battery_from_available` applies when choosing between
+    /// transports.
+    fn apply_device_battery(&self, metrics: &mut TransportMetrics) {
+        let Some(level) = self.device_battery else {
+            return;
+        };
+        if metrics.battery_level.is_none() {
+            metrics.battery_level = Some(level);
+            metrics.is_charging = self.device_is_charging;
         }
     }
 
@@ -1147,6 +1202,7 @@ impl TransportManager {
                 if let Some(stats) = self.observations.get(transport_type) {
                     stats.apply_to_metrics(&mut metrics);
                 }
+                self.apply_device_battery(&mut metrics);
                 available.insert(*transport_type, metrics);
             }
         }
@@ -1201,6 +1257,7 @@ impl TransportManager {
                 if let Some(stats) = self.observations.get(transport_type) {
                     stats.apply_to_metrics(&mut metrics);
                 }
+                self.apply_device_battery(&mut metrics);
                 available.insert(*transport_type, metrics);
             }
         }
@@ -1300,6 +1357,11 @@ impl TransportManager {
     /// accumulated state (transport history, retry counts, signal tracking).
     pub fn update_selector_config(&mut self, config: DorsConfig) {
         self.selector.update_config(config);
+    }
+
+    /// Returns the DORS configuration transport scoring runs against.
+    pub fn selector_config(&self) -> &DorsConfig {
+        self.selector.config()
     }
 }
 
@@ -1523,5 +1585,74 @@ mod tests {
         assert_eq!(ble_metrics.success_count, 0);
         assert_eq!(ble_metrics.failure_count, 1);
         assert!(ble_metrics.drop_rate.expect("drop ratio") > 0.99);
+    }
+
+    /// Two transports, neither reporting a battery level of its own — the
+    /// ordinary case, since no platform transport publishes one. Both must
+    /// come back carrying the host reading, because every downstream consumer
+    /// (DORS energy scoring, the relay role, the forwarding floor) resolves
+    /// battery through this map and would otherwise take its unknown branch.
+    #[test]
+    fn test_device_battery_fills_transports_that_report_none() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+
+        for transport_type in [TransportType::BLE, TransportType::WiFiDirect] {
+            let transport = MockTransport::new(transport_type);
+            transport.start().unwrap();
+            manager.add_transport(transport_type, Box::new(transport));
+        }
+
+        assert_eq!(manager.device_battery(), (None, false));
+        manager.set_device_battery(42, true);
+        assert_eq!(manager.device_battery(), (Some(42), true));
+
+        let metrics = manager.get_available_transports();
+        for transport_type in [TransportType::BLE, TransportType::WiFiDirect] {
+            let m = metrics.get(&transport_type).expect("metrics");
+            assert_eq!(m.battery_level, Some(42));
+            assert!(m.is_charging);
+        }
+
+        // The one-pass snapshot builds the same map and must agree with it —
+        // the telemetry aggregator and the relay-role evaluation read this one.
+        let (_statuses, available) = manager.snapshot_status_and_available();
+        let m = available.get(&TransportType::BLE).expect("metrics");
+        assert_eq!(m.battery_level, Some(42));
+        assert!(m.is_charging);
+    }
+
+    /// A transport that publishes its own battery reading keeps it, and keeps
+    /// its own charging state with it: mixing a level from one source with a
+    /// charging flag from another is what produces the spurious
+    /// charging-state flips `device_battery_from_available` documents.
+    #[test]
+    fn test_transport_reported_battery_wins_over_device_feed() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+
+        let transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        transport.set_metrics(TransportMetrics {
+            battery_level: Some(7),
+            is_charging: false,
+            ..Default::default()
+        });
+        manager.add_transport(TransportType::BLE, Box::new(transport));
+
+        manager.set_device_battery(90, true);
+
+        let metrics = manager.get_available_transports();
+        let m = metrics.get(&TransportType::BLE).expect("metrics");
+        assert_eq!(m.battery_level, Some(7));
+        assert!(!m.is_charging);
+    }
+
+    #[test]
+    fn test_device_battery_is_clamped() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+        manager.set_device_battery(240, false);
+        assert_eq!(manager.device_battery(), (Some(100), false));
     }
 }

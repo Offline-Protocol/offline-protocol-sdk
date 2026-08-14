@@ -431,11 +431,27 @@ Connection-request failure contract: recipient offline emits `connection_request
 | **getState** | `getState(): Promise<ProtocolState>` | Current state: Stopped, Running, Paused. |
 | **pause** | `pause(): Promise<void>` | Pauses the protocol. |
 | **resume** | `resume(): Promise<void>` | Resumes from pause. |
-| **setBatteryLevel** | `setBatteryLevel(level: number): Promise<void>` | Sets battery level (0–100) for relay decisions. |
-| **getBatteryLevel** | `getBatteryLevel(): Promise<number \| null>` | Current battery level. |
-| **setRelayPriority** | `setRelayPriority(priority: 'low' \| 'medium' \| 'high'): Promise<void>` | Sets relay priority. |
-| **getRelayPriority** | `getRelayPriority(): Promise<'low' \| 'medium' \| 'high'>` | Current relay priority. |
-| **isRelay** | `isRelay(): Promise<boolean>` | Whether this device is acting as a relay. |
+| **setBatteryLevel** | `setBatteryLevel(level: number): Promise<void>` | Reports battery level (0–100). Prefer `setBatteryState`. |
+| **setBatteryState** | `setBatteryState(level: number, isCharging: boolean): Promise<void>` | Reports battery level and charging state. |
+| **getBatteryLevel** | `getBatteryLevel(): Promise<number \| null>` | Last reported battery level, or null if never reported. |
+| **getIsCharging** | `getIsCharging(): Promise<boolean>` | Last reported charging state. |
+| **setRelayPriority** | `setRelayPriority(priority: 'never' \| 'auto' \| 'always'): Promise<void>` | Sets relay priority. |
+| **getRelayPriority** | `getRelayPriority(): Promise<'never' \| 'auto' \| 'always'>` | Current relay priority. |
+| **updateRelayConfig** | `updateRelayConfig(config: RelayConfig): Promise<void>` | Updates relay config at runtime; omitted fields keep their values. |
+| **getRelayConfig** | `getRelayConfig(): Promise<Required<RelayConfig>>` | Current relay configuration. |
+| **isRelay** | `isRelay(): Promise<boolean>` | Whether this device currently holds the relay role. |
+
+> **The battery feed is required for relay behaviour to work at all.** No
+> transport can observe the host's battery, so until `setBatteryState` (or
+> `setBatteryLevel`) is called, DORS energy scoring, the relay
+> promotion/demotion events, and the message-forwarding battery floor all run
+> in their unknown-level branch — the device stays willing to relay at any
+> charge and `relay_promoted` / `relay_demoted` never fire. Call it on start
+> and on each platform battery notification.
+>
+> Report charging state where the platform provides it: a charging device is
+> deliberately excused the soft `minBatteryForRelay` floor, so reporting the
+> level alone strips relay duty from plugged-in devices that should keep it.
 
 ---
 

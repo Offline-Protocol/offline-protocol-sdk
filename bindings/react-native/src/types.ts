@@ -97,16 +97,31 @@ export interface ReliabilityConfig {
   dedup?: DedupConfig;
 }
 
+/**
+ * Relay priority.
+ *
+ * The legacy `'low' | 'medium' | 'high'` spelling of the same three values is
+ * still accepted on input and maps to `never` / `auto` / `always`.
+ */
 export type RelayPriority = 'never' | 'auto' | 'always';
 
+/**
+ * Whether this device carries other people's traffic, and under what
+ * conditions it takes the relay role.
+ *
+ * The battery-dependent parts (`minBatteryForRelay`, and the charging
+ * exemption) need a battery feed to do anything — call `setBatteryState` on
+ * start and on each platform battery notification, or the device runs in the
+ * unknown-level branch and stays willing to relay at any charge.
+ */
 export interface RelayConfig {
-  /** Allow device to act as relay */
+  /** Allow device to act as relay (default: true) */
   allowRelay?: boolean;
-  /** Minimum battery level for relaying */
+  /** Minimum battery level for relaying; charging devices are exempt (default: 30) */
   minBatteryForRelay?: number;
-  /** Connection threshold for relay promotion */
+  /** Connection threshold for relay promotion (default: 3) */
   relayThreshold?: number;
-  /** Preferred relay behavior */
+  /** Preferred relay behavior (default: 'auto') */
   relayPriority?: RelayPriority;
 }
 
@@ -550,6 +565,19 @@ export interface ProtocolConfig {
     historyWindowSize?: number;
     /** Queue depth ratio indicating recovery (default: 0.5) */
     queueRecoveryRatio?: number;
+    /**
+     * Battery level at or below which DORS treats the device as low on power,
+     * penalising high-power transports and favouring low-power ones
+     * (default: 20). Requires a battery feed — see `setBatteryState`.
+     */
+    lowBatteryThreshold?: number;
+    /**
+     * Battery level below which DORS stops treating BLE as a viable relay
+     * carrier and escalates; charging devices are exempt (default: 30).
+     */
+    relayMinBatteryLevel?: number;
+    /** Connection count DORS scores relay capacity against (default: 4) */
+    relayOptimalConnectionCount?: number;
   };
   /** Relay configuration (optional) */
   relay?: RelayConfig;
