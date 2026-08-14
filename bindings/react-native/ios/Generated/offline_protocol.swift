@@ -870,6 +870,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func getIdentityPublicKey() throws  -> [UInt8]
     
+    func getIsCharging()  -> Bool
+    
     func getMedianHops()  -> UInt8
     
     func getMedianLatency()  -> UInt64
@@ -879,6 +881,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func getMessageStats()  -> [MessageStats]
     
     func getPendingAckCount()  -> UInt64
+    
+    func getRelayConfig()  -> RelayConfig
     
     func getRelayPriority()  -> RelayPriority
     
@@ -1062,7 +1066,9 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func sendTypingIndicator(recipient: String, conversationId: String, isTyping: Bool) throws  -> String
     
-    func setBatteryLevel(level: UInt8) 
+    func setBatteryLevel(level: UInt8) throws 
+    
+    func setBatteryState(level: UInt8, isCharging: Bool) throws 
     
     func setBleTransportCallback(callback: BleTransportCallback) 
     
@@ -1097,6 +1103,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func updateDedupConfig(config: DedupConfig) throws 
     
     func updateDorsConfig(config: DorsConfig) throws 
+    
+    func updateRelayConfig(config: RelayConfig) throws 
     
     func updateRetryConfig(config: RetryConfig) throws 
     
@@ -1496,6 +1504,14 @@ open func getIdentityPublicKey()throws  -> [UInt8]  {
 })
 }
     
+open func getIsCharging() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_is_charging(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
 open func getMedianHops() -> UInt8  {
     return try!  FfiConverterUInt8.lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_hops(
@@ -1533,6 +1549,14 @@ open func getMessageStats() -> [MessageStats]  {
 open func getPendingAckCount() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_pending_ack_count(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func getRelayConfig() -> RelayConfig  {
+    return try!  FfiConverterTypeRelayConfig_lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_config(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -2342,10 +2366,19 @@ open func sendTypingIndicator(recipient: String, conversationId: String, isTypin
 })
 }
     
-open func setBatteryLevel(level: UInt8)  {try! rustCall() {
+open func setBatteryLevel(level: UInt8)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level(
             self.uniffiCloneHandle(),
         FfiConverterUInt8.lower(level),$0
+    )
+}
+}
+    
+open func setBatteryState(level: UInt8, isCharging: Bool)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_state(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt8.lower(level),
+        FfiConverterBool.lower(isCharging),$0
     )
 }
 }
@@ -2482,6 +2515,14 @@ open func updateDorsConfig(config: DorsConfig)throws   {try rustCallWithError(Ff
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dors_config(
             self.uniffiCloneHandle(),
         FfiConverterTypeDorsConfig_lower(config),$0
+    )
+}
+}
+    
+open func updateRelayConfig(config: RelayConfig)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_relay_config(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeRelayConfig_lower(config),$0
     )
 }
 }
@@ -2971,10 +3012,13 @@ public struct DorsConfig: Equatable, Hashable {
     public var ttlEscalationHoldSecs: UInt64
     public var historyWindowSize: UInt64
     public var queueRecoveryRatio: Float
+    public var lowBatteryThreshold: UInt8
+    public var relayMinBatteryLevel: UInt8
+    public var relayOptimalConnectionCount: UInt8
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(preferOnline: Bool, switchHysteresis: Float, switchCooldownSecs: UInt64, bleToWifiRetryThreshold: UInt32, minSuccessRateBeforeEscalation: Float, minBleSamplesBeforeSuccessRateEscalation: UInt64, rssiSwitchThreshold: Int16, congestionQueueThreshold: UInt64, stabilityWindowSecs: UInt64, poorSignalDurationSecs: UInt64, ttlEscalationThreshold: UInt8, congestionDurationSecs: UInt64, ttlEscalationHoldSecs: UInt64, historyWindowSize: UInt64, queueRecoveryRatio: Float) {
+    public init(preferOnline: Bool, switchHysteresis: Float, switchCooldownSecs: UInt64, bleToWifiRetryThreshold: UInt32, minSuccessRateBeforeEscalation: Float, minBleSamplesBeforeSuccessRateEscalation: UInt64, rssiSwitchThreshold: Int16, congestionQueueThreshold: UInt64, stabilityWindowSecs: UInt64, poorSignalDurationSecs: UInt64, ttlEscalationThreshold: UInt8, congestionDurationSecs: UInt64, ttlEscalationHoldSecs: UInt64, historyWindowSize: UInt64, queueRecoveryRatio: Float, lowBatteryThreshold: UInt8, relayMinBatteryLevel: UInt8, relayOptimalConnectionCount: UInt8) {
         self.preferOnline = preferOnline
         self.switchHysteresis = switchHysteresis
         self.switchCooldownSecs = switchCooldownSecs
@@ -2990,6 +3034,9 @@ public struct DorsConfig: Equatable, Hashable {
         self.ttlEscalationHoldSecs = ttlEscalationHoldSecs
         self.historyWindowSize = historyWindowSize
         self.queueRecoveryRatio = queueRecoveryRatio
+        self.lowBatteryThreshold = lowBatteryThreshold
+        self.relayMinBatteryLevel = relayMinBatteryLevel
+        self.relayOptimalConnectionCount = relayOptimalConnectionCount
     }
 
     
@@ -3020,7 +3067,10 @@ public struct FfiConverterTypeDorsConfig: FfiConverterRustBuffer {
                 congestionDurationSecs: FfiConverterUInt64.read(from: &buf), 
                 ttlEscalationHoldSecs: FfiConverterUInt64.read(from: &buf), 
                 historyWindowSize: FfiConverterUInt64.read(from: &buf), 
-                queueRecoveryRatio: FfiConverterFloat.read(from: &buf)
+                queueRecoveryRatio: FfiConverterFloat.read(from: &buf), 
+                lowBatteryThreshold: FfiConverterUInt8.read(from: &buf), 
+                relayMinBatteryLevel: FfiConverterUInt8.read(from: &buf), 
+                relayOptimalConnectionCount: FfiConverterUInt8.read(from: &buf)
         )
     }
 
@@ -3040,6 +3090,9 @@ public struct FfiConverterTypeDorsConfig: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.ttlEscalationHoldSecs, into: &buf)
         FfiConverterUInt64.write(value.historyWindowSize, into: &buf)
         FfiConverterFloat.write(value.queueRecoveryRatio, into: &buf)
+        FfiConverterUInt8.write(value.lowBatteryThreshold, into: &buf)
+        FfiConverterUInt8.write(value.relayMinBatteryLevel, into: &buf)
+        FfiConverterUInt8.write(value.relayOptimalConnectionCount, into: &buf)
     }
 }
 
@@ -4123,14 +4176,18 @@ public struct NetworkNode: Equatable, Hashable {
     public var nodeId: String
     public var role: String
     public var rssi: Int16?
+    public var batteryLevel: UInt8?
+    public var connectionCount: UInt32
     public var lastSeenMs: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(nodeId: String, role: String, rssi: Int16?, lastSeenMs: UInt64) {
+    public init(nodeId: String, role: String, rssi: Int16?, batteryLevel: UInt8?, connectionCount: UInt32, lastSeenMs: UInt64) {
         self.nodeId = nodeId
         self.role = role
         self.rssi = rssi
+        self.batteryLevel = batteryLevel
+        self.connectionCount = connectionCount
         self.lastSeenMs = lastSeenMs
     }
 
@@ -4151,6 +4208,8 @@ public struct FfiConverterTypeNetworkNode: FfiConverterRustBuffer {
                 nodeId: FfiConverterString.read(from: &buf), 
                 role: FfiConverterString.read(from: &buf), 
                 rssi: FfiConverterOptionInt16.read(from: &buf), 
+                batteryLevel: FfiConverterOptionUInt8.read(from: &buf), 
+                connectionCount: FfiConverterUInt32.read(from: &buf), 
                 lastSeenMs: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -4159,6 +4218,8 @@ public struct FfiConverterTypeNetworkNode: FfiConverterRustBuffer {
         FfiConverterString.write(value.nodeId, into: &buf)
         FfiConverterString.write(value.role, into: &buf)
         FfiConverterOptionInt16.write(value.rssi, into: &buf)
+        FfiConverterOptionUInt8.write(value.batteryLevel, into: &buf)
+        FfiConverterUInt32.write(value.connectionCount, into: &buf)
         FfiConverterUInt64.write(value.lastSeenMs, into: &buf)
     }
 }
@@ -6816,9 +6877,9 @@ public func FfiConverterTypeProtocolState_lower(_ value: ProtocolState) -> RustB
 
 public enum RelayPriority: Equatable, Hashable {
     
-    case low
-    case medium
-    case high
+    case never
+    case auto
+    case always
 
 
 
@@ -6838,11 +6899,11 @@ public struct FfiConverterTypeRelayPriority: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
         
-        case 1: return .low
+        case 1: return .never
         
-        case 2: return .medium
+        case 2: return .auto
         
-        case 3: return .high
+        case 3: return .always
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -6852,15 +6913,15 @@ public struct FfiConverterTypeRelayPriority: FfiConverterRustBuffer {
         switch value {
         
         
-        case .low:
+        case .never:
             writeInt(&buf, Int32(1))
         
         
-        case .medium:
+        case .auto:
             writeInt(&buf, Int32(2))
         
         
-        case .high:
+        case .always:
             writeInt(&buf, Int32(3))
         
         }
@@ -9860,6 +9921,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key() != 21794) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging() != 59743) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops() != 22077) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -9873,6 +9937,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count() != 9023) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config() != 18410) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority() != 38001) {
@@ -10148,7 +10215,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator() != 47532) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 65320) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 45763) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state() != 62177) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback() != 28420) {
@@ -10200,6 +10270,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config() != 2649) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config() != 19698) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config() != 27543) {

@@ -601,6 +601,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key() != 47713:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging() != 22403:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops() != 52969:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency() != 14890:
@@ -610,6 +612,8 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats() != 35293:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count() != 5451:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config() != 42805:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority() != 56391:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -793,7 +797,9 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator() != 21160:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 18843:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 16092:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state() != 16070:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback() != 61444:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -828,6 +834,8 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config() != 26270:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config() != 50236:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config() != 11465:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config() != 45701:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1590,6 +1598,11 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_identity
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_identity_public_key.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_is_charging.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_is_charging.restype = ctypes.c_int8
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_hops.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -1617,6 +1630,11 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_pending_
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_pending_ack_count.restype = ctypes.c_uint64
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_config.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_config.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_priority.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2195,6 +2213,13 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_state.argtypes = (
+    ctypes.c_uint64,
+    ctypes.c_uint8,
+    ctypes.c_int8,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_state.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_ble_transport_callback.argtypes = (
     ctypes.c_uint64,
     ctypes.c_uint64,
@@ -2294,6 +2319,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dors_
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dors_config.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_relay_config.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_relay_config.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_retry_config.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2492,6 +2523,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_gr
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops.restype = ctypes.c_uint16
@@ -2507,6 +2541,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_me
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority.restype = ctypes.c_uint16
@@ -2783,6 +2820,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_t
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback.restype = ctypes.c_uint16
@@ -2834,6 +2874,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config.restype = ctypes.c_uint16
@@ -3385,7 +3428,7 @@ class _UniffiFfiConverterInt16(_UniffiConverterPrimitiveInt):
 
 @dataclass
 class DorsConfig:
-    def __init__(self, *, prefer_online:bool, switch_hysteresis:float, switch_cooldown_secs:int, ble_to_wifi_retry_threshold:int, min_success_rate_before_escalation:float, min_ble_samples_before_success_rate_escalation:int, rssi_switch_threshold:int, congestion_queue_threshold:int, stability_window_secs:int, poor_signal_duration_secs:int, ttl_escalation_threshold:int, congestion_duration_secs:int, ttl_escalation_hold_secs:int, history_window_size:int, queue_recovery_ratio:float):
+    def __init__(self, *, prefer_online:bool, switch_hysteresis:float, switch_cooldown_secs:int, ble_to_wifi_retry_threshold:int, min_success_rate_before_escalation:float, min_ble_samples_before_success_rate_escalation:int, rssi_switch_threshold:int, congestion_queue_threshold:int, stability_window_secs:int, poor_signal_duration_secs:int, ttl_escalation_threshold:int, congestion_duration_secs:int, ttl_escalation_hold_secs:int, history_window_size:int, queue_recovery_ratio:float, low_battery_threshold:int, relay_min_battery_level:int, relay_optimal_connection_count:int):
         self.prefer_online = prefer_online
         self.switch_hysteresis = switch_hysteresis
         self.switch_cooldown_secs = switch_cooldown_secs
@@ -3401,12 +3444,15 @@ class DorsConfig:
         self.ttl_escalation_hold_secs = ttl_escalation_hold_secs
         self.history_window_size = history_window_size
         self.queue_recovery_ratio = queue_recovery_ratio
+        self.low_battery_threshold = low_battery_threshold
+        self.relay_min_battery_level = relay_min_battery_level
+        self.relay_optimal_connection_count = relay_optimal_connection_count
         
         
 
     
     def __str__(self):
-        return "DorsConfig(prefer_online={}, switch_hysteresis={}, switch_cooldown_secs={}, ble_to_wifi_retry_threshold={}, min_success_rate_before_escalation={}, min_ble_samples_before_success_rate_escalation={}, rssi_switch_threshold={}, congestion_queue_threshold={}, stability_window_secs={}, poor_signal_duration_secs={}, ttl_escalation_threshold={}, congestion_duration_secs={}, ttl_escalation_hold_secs={}, history_window_size={}, queue_recovery_ratio={})".format(self.prefer_online, self.switch_hysteresis, self.switch_cooldown_secs, self.ble_to_wifi_retry_threshold, self.min_success_rate_before_escalation, self.min_ble_samples_before_success_rate_escalation, self.rssi_switch_threshold, self.congestion_queue_threshold, self.stability_window_secs, self.poor_signal_duration_secs, self.ttl_escalation_threshold, self.congestion_duration_secs, self.ttl_escalation_hold_secs, self.history_window_size, self.queue_recovery_ratio)
+        return "DorsConfig(prefer_online={}, switch_hysteresis={}, switch_cooldown_secs={}, ble_to_wifi_retry_threshold={}, min_success_rate_before_escalation={}, min_ble_samples_before_success_rate_escalation={}, rssi_switch_threshold={}, congestion_queue_threshold={}, stability_window_secs={}, poor_signal_duration_secs={}, ttl_escalation_threshold={}, congestion_duration_secs={}, ttl_escalation_hold_secs={}, history_window_size={}, queue_recovery_ratio={}, low_battery_threshold={}, relay_min_battery_level={}, relay_optimal_connection_count={})".format(self.prefer_online, self.switch_hysteresis, self.switch_cooldown_secs, self.ble_to_wifi_retry_threshold, self.min_success_rate_before_escalation, self.min_ble_samples_before_success_rate_escalation, self.rssi_switch_threshold, self.congestion_queue_threshold, self.stability_window_secs, self.poor_signal_duration_secs, self.ttl_escalation_threshold, self.congestion_duration_secs, self.ttl_escalation_hold_secs, self.history_window_size, self.queue_recovery_ratio, self.low_battery_threshold, self.relay_min_battery_level, self.relay_optimal_connection_count)
     def __eq__(self, other):
         if self.prefer_online != other.prefer_online:
             return False
@@ -3438,6 +3484,12 @@ class DorsConfig:
             return False
         if self.queue_recovery_ratio != other.queue_recovery_ratio:
             return False
+        if self.low_battery_threshold != other.low_battery_threshold:
+            return False
+        if self.relay_min_battery_level != other.relay_min_battery_level:
+            return False
+        if self.relay_optimal_connection_count != other.relay_optimal_connection_count:
+            return False
         return True
 
 class _UniffiFfiConverterTypeDorsConfig(_UniffiConverterRustBuffer):
@@ -3459,6 +3511,9 @@ class _UniffiFfiConverterTypeDorsConfig(_UniffiConverterRustBuffer):
             ttl_escalation_hold_secs=_UniffiFfiConverterUInt64.read(buf),
             history_window_size=_UniffiFfiConverterUInt64.read(buf),
             queue_recovery_ratio=_UniffiFfiConverterFloat32.read(buf),
+            low_battery_threshold=_UniffiFfiConverterUInt8.read(buf),
+            relay_min_battery_level=_UniffiFfiConverterUInt8.read(buf),
+            relay_optimal_connection_count=_UniffiFfiConverterUInt8.read(buf),
         )
 
     @staticmethod
@@ -3478,6 +3533,9 @@ class _UniffiFfiConverterTypeDorsConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt64.check_lower(value.ttl_escalation_hold_secs)
         _UniffiFfiConverterUInt64.check_lower(value.history_window_size)
         _UniffiFfiConverterFloat32.check_lower(value.queue_recovery_ratio)
+        _UniffiFfiConverterUInt8.check_lower(value.low_battery_threshold)
+        _UniffiFfiConverterUInt8.check_lower(value.relay_min_battery_level)
+        _UniffiFfiConverterUInt8.check_lower(value.relay_optimal_connection_count)
 
     @staticmethod
     def write(value, buf):
@@ -3496,6 +3554,9 @@ class _UniffiFfiConverterTypeDorsConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt64.write(value.ttl_escalation_hold_secs, buf)
         _UniffiFfiConverterUInt64.write(value.history_window_size, buf)
         _UniffiFfiConverterFloat32.write(value.queue_recovery_ratio, buf)
+        _UniffiFfiConverterUInt8.write(value.low_battery_threshold, buf)
+        _UniffiFfiConverterUInt8.write(value.relay_min_battery_level, buf)
+        _UniffiFfiConverterUInt8.write(value.relay_optimal_connection_count, buf)
 
 
 
@@ -5226,23 +5287,29 @@ class _UniffiFfiConverterTypeNetworkLink(_UniffiConverterRustBuffer):
 
 @dataclass
 class NetworkNode:
-    def __init__(self, *, node_id:str, role:str, rssi:typing.Optional[int], last_seen_ms:int):
+    def __init__(self, *, node_id:str, role:str, rssi:typing.Optional[int], battery_level:typing.Optional[int], connection_count:int, last_seen_ms:int):
         self.node_id = node_id
         self.role = role
         self.rssi = rssi
+        self.battery_level = battery_level
+        self.connection_count = connection_count
         self.last_seen_ms = last_seen_ms
         
         
 
     
     def __str__(self):
-        return "NetworkNode(node_id={}, role={}, rssi={}, last_seen_ms={})".format(self.node_id, self.role, self.rssi, self.last_seen_ms)
+        return "NetworkNode(node_id={}, role={}, rssi={}, battery_level={}, connection_count={}, last_seen_ms={})".format(self.node_id, self.role, self.rssi, self.battery_level, self.connection_count, self.last_seen_ms)
     def __eq__(self, other):
         if self.node_id != other.node_id:
             return False
         if self.role != other.role:
             return False
         if self.rssi != other.rssi:
+            return False
+        if self.battery_level != other.battery_level:
+            return False
+        if self.connection_count != other.connection_count:
             return False
         if self.last_seen_ms != other.last_seen_ms:
             return False
@@ -5255,6 +5322,8 @@ class _UniffiFfiConverterTypeNetworkNode(_UniffiConverterRustBuffer):
             node_id=_UniffiFfiConverterString.read(buf),
             role=_UniffiFfiConverterString.read(buf),
             rssi=_UniffiFfiConverterOptionalInt16.read(buf),
+            battery_level=_UniffiFfiConverterOptionalUInt8.read(buf),
+            connection_count=_UniffiFfiConverterUInt32.read(buf),
             last_seen_ms=_UniffiFfiConverterUInt64.read(buf),
         )
 
@@ -5263,6 +5332,8 @@ class _UniffiFfiConverterTypeNetworkNode(_UniffiConverterRustBuffer):
         _UniffiFfiConverterString.check_lower(value.node_id)
         _UniffiFfiConverterString.check_lower(value.role)
         _UniffiFfiConverterOptionalInt16.check_lower(value.rssi)
+        _UniffiFfiConverterOptionalUInt8.check_lower(value.battery_level)
+        _UniffiFfiConverterUInt32.check_lower(value.connection_count)
         _UniffiFfiConverterUInt64.check_lower(value.last_seen_ms)
 
     @staticmethod
@@ -5270,6 +5341,8 @@ class _UniffiFfiConverterTypeNetworkNode(_UniffiConverterRustBuffer):
         _UniffiFfiConverterString.write(value.node_id, buf)
         _UniffiFfiConverterString.write(value.role, buf)
         _UniffiFfiConverterOptionalInt16.write(value.rssi, buf)
+        _UniffiFfiConverterOptionalUInt8.write(value.battery_level, buf)
+        _UniffiFfiConverterUInt32.write(value.connection_count, buf)
         _UniffiFfiConverterUInt64.write(value.last_seen_ms, buf)
 
 class _UniffiFfiConverterSequenceTypeNetworkNode(_UniffiConverterRustBuffer):
@@ -5804,11 +5877,11 @@ class _UniffiFfiConverterTypeTransportConfig(_UniffiConverterRustBuffer):
 
 class RelayPriority(enum.Enum):
     
-    LOW = 0
+    NEVER = 0
     
-    MEDIUM = 1
+    AUTO = 1
     
-    HIGH = 2
+    ALWAYS = 2
     
 
 
@@ -5817,30 +5890,30 @@ class _UniffiFfiConverterTypeRelayPriority(_UniffiConverterRustBuffer):
     def read(buf):
         variant = buf.read_i32()
         if variant == 1:
-            return RelayPriority.LOW
+            return RelayPriority.NEVER
         if variant == 2:
-            return RelayPriority.MEDIUM
+            return RelayPriority.AUTO
         if variant == 3:
-            return RelayPriority.HIGH
+            return RelayPriority.ALWAYS
         raise InternalError("Raw enum value doesn't match any cases")
 
     @staticmethod
     def check_lower(value):
-        if value == RelayPriority.LOW:
+        if value == RelayPriority.NEVER:
             return
-        if value == RelayPriority.MEDIUM:
+        if value == RelayPriority.AUTO:
             return
-        if value == RelayPriority.HIGH:
+        if value == RelayPriority.ALWAYS:
             return
         raise ValueError(value)
 
     @staticmethod
     def write(value, buf):
-        if value == RelayPriority.LOW:
+        if value == RelayPriority.NEVER:
             buf.write_i32(1)
-        if value == RelayPriority.MEDIUM:
+        if value == RelayPriority.AUTO:
             buf.write_i32(2)
-        if value == RelayPriority.HIGH:
+        if value == RelayPriority.ALWAYS:
             buf.write_i32(3)
 
 
@@ -9127,6 +9200,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def get_identity_public_key(self, ) -> typing.List[int]:
         raise NotImplementedError
+    def get_is_charging(self, ) -> bool:
+        raise NotImplementedError
     def get_median_hops(self, ) -> int:
         raise NotImplementedError
     def get_median_latency(self, ) -> int:
@@ -9136,6 +9211,8 @@ class OfflineProtocolProtocol(typing.Protocol):
     def get_message_stats(self, ) -> typing.List[MessageStats]:
         raise NotImplementedError
     def get_pending_ack_count(self, ) -> int:
+        raise NotImplementedError
+    def get_relay_config(self, ) -> RelayConfig:
         raise NotImplementedError
     def get_relay_priority(self, ) -> RelayPriority:
         raise NotImplementedError
@@ -9321,6 +9398,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def set_battery_level(self, level: int) -> None:
         raise NotImplementedError
+    def set_battery_state(self, level: int,is_charging: bool) -> None:
+        raise NotImplementedError
     def set_ble_transport_callback(self, callback: BleTransportCallback) -> None:
         raise NotImplementedError
     def set_event_callback(self, callback: EventCallback) -> None:
@@ -9354,6 +9433,8 @@ class OfflineProtocolProtocol(typing.Protocol):
     def update_dedup_config(self, config: DedupConfig) -> None:
         raise NotImplementedError
     def update_dors_config(self, config: DorsConfig) -> None:
+        raise NotImplementedError
+    def update_relay_config(self, config: RelayConfig) -> None:
         raise NotImplementedError
     def update_retry_config(self, config: RetryConfig) -> None:
         raise NotImplementedError
@@ -9961,6 +10042,18 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def get_is_charging(self, ) -> bool:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterBoolean.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_is_charging,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def get_median_hops(self, ) -> int:
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -10024,6 +10117,18 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_pending_ack_count,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def get_relay_config(self, ) -> RelayConfig:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterTypeRelayConfig.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_config,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -11478,10 +11583,28 @@ class OfflineProtocol(OfflineProtocolProtocol):
             _UniffiFfiConverterUInt8.lower(level),
         )
         _uniffi_lift_return = lambda val: None
-        _uniffi_error_converter = None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def set_battery_state(self, level: int,is_charging: bool) -> None:
+        
+        _UniffiFfiConverterUInt8.check_lower(level)
+        
+        _UniffiFfiConverterBoolean.check_lower(is_charging)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterUInt8.lower(level),
+            _UniffiFfiConverterBoolean.lower(is_charging),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_state,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -11728,6 +11851,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dors_config,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def update_relay_config(self, config: RelayConfig) -> None:
+        
+        _UniffiFfiConverterTypeRelayConfig.check_lower(config)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterTypeRelayConfig.lower(config),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_relay_config,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)

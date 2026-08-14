@@ -970,6 +970,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency(
@@ -979,6 +981,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority(
 ): Short
@@ -1164,6 +1168,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback(
@@ -1197,6 +1203,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_upda
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config(
 ): Short
@@ -1384,6 +1392,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_group_
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_identity_public_key(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_is_charging(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_hops(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_latency(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1394,6 +1404,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_messag
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_pending_ack_count(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_config(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_priority(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_retry_queue_size(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1578,6 +1590,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_typin
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level(`ptr`: Long,`level`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_state(`ptr`: Long,`level`: Byte,`isCharging`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_ble_transport_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_event_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1611,6 +1625,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_ack
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dedup_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dors_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_relay_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_retry_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1899,6 +1915,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key() != 21794.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging() != 59743.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops() != 22077.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1912,6 +1931,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count() != 9023.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config() != 18410.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority() != 38001.toShort()) {
@@ -2187,7 +2209,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator() != 47532.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 65320.toShort()) {
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 45763.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state() != 62177.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback() != 28420.toShort()) {
@@ -2239,6 +2264,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config() != 2649.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config() != 19698.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config() != 27543.toShort()) {
@@ -3280,6 +3308,8 @@ public interface OfflineProtocolInterface {
     
     fun `getIdentityPublicKey`(): List<kotlin.UByte>
     
+    fun `getIsCharging`(): kotlin.Boolean
+    
     fun `getMedianHops`(): kotlin.UByte
     
     fun `getMedianLatency`(): kotlin.ULong
@@ -3289,6 +3319,8 @@ public interface OfflineProtocolInterface {
     fun `getMessageStats`(): List<MessageStats>
     
     fun `getPendingAckCount`(): kotlin.ULong
+    
+    fun `getRelayConfig`(): RelayConfig
     
     fun `getRelayPriority`(): RelayPriority
     
@@ -3474,6 +3506,8 @@ public interface OfflineProtocolInterface {
     
     fun `setBatteryLevel`(`level`: kotlin.UByte)
     
+    fun `setBatteryState`(`level`: kotlin.UByte, `isCharging`: kotlin.Boolean)
+    
     fun `setBleTransportCallback`(`callback`: BleTransportCallback)
     
     fun `setEventCallback`(`callback`: EventCallback)
@@ -3507,6 +3541,8 @@ public interface OfflineProtocolInterface {
     fun `updateDedupConfig`(`config`: DedupConfig)
     
     fun `updateDorsConfig`(`config`: DorsConfig)
+    
+    fun `updateRelayConfig`(`config`: RelayConfig)
     
     fun `updateRetryConfig`(`config`: RetryConfig)
     
@@ -4135,6 +4171,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
+    override fun `getIsCharging`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_is_charging(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
     override fun `getMedianHops`(): kotlin.UByte {
             return FfiConverterUByte.lift(
     callWithHandle {
@@ -4193,6 +4242,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_pending_ack_count(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `getRelayConfig`(): RelayConfig {
+            return FfiConverterTypeRelayConfig.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_config(
         it,
         _status)
 }
@@ -5393,13 +5455,27 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
-    override fun `setBatteryLevel`(`level`: kotlin.UByte)
+    
+    @Throws(ProtocolException::class)override fun `setBatteryLevel`(`level`: kotlin.UByte)
         = 
     callWithHandle {
-    uniffiRustCall() { _status ->
+    uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level(
         it,
         FfiConverterUByte.lower(`level`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `setBatteryState`(`level`: kotlin.UByte, `isCharging`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_state(
+        it,
+        FfiConverterUByte.lower(`level`),FfiConverterBoolean.lower(`isCharging`),_status)
 }
     }
     
@@ -5617,6 +5693,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dors_config(
         it,
         FfiConverterTypeDorsConfig.lower(`config`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `updateRelayConfig`(`config`: RelayConfig)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_relay_config(
+        it,
+        FfiConverterTypeRelayConfig.lower(`config`),_status)
 }
     }
     
@@ -6065,6 +6154,12 @@ data class DorsConfig (
     var `historyWindowSize`: kotlin.ULong
     , 
     var `queueRecoveryRatio`: kotlin.Float
+    , 
+    var `lowBatteryThreshold`: kotlin.UByte
+    , 
+    var `relayMinBatteryLevel`: kotlin.UByte
+    , 
+    var `relayOptimalConnectionCount`: kotlin.UByte
     
 ){
     
@@ -6094,6 +6189,9 @@ public object FfiConverterTypeDorsConfig: FfiConverterRustBuffer<DorsConfig> {
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterFloat.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
         )
     }
 
@@ -6112,7 +6210,10 @@ public object FfiConverterTypeDorsConfig: FfiConverterRustBuffer<DorsConfig> {
             FfiConverterULong.allocationSize(value.`congestionDurationSecs`) +
             FfiConverterULong.allocationSize(value.`ttlEscalationHoldSecs`) +
             FfiConverterULong.allocationSize(value.`historyWindowSize`) +
-            FfiConverterFloat.allocationSize(value.`queueRecoveryRatio`)
+            FfiConverterFloat.allocationSize(value.`queueRecoveryRatio`) +
+            FfiConverterUByte.allocationSize(value.`lowBatteryThreshold`) +
+            FfiConverterUByte.allocationSize(value.`relayMinBatteryLevel`) +
+            FfiConverterUByte.allocationSize(value.`relayOptimalConnectionCount`)
     )
 
     override fun write(value: DorsConfig, buf: ByteBuffer) {
@@ -6131,6 +6232,9 @@ public object FfiConverterTypeDorsConfig: FfiConverterRustBuffer<DorsConfig> {
             FfiConverterULong.write(value.`ttlEscalationHoldSecs`, buf)
             FfiConverterULong.write(value.`historyWindowSize`, buf)
             FfiConverterFloat.write(value.`queueRecoveryRatio`, buf)
+            FfiConverterUByte.write(value.`lowBatteryThreshold`, buf)
+            FfiConverterUByte.write(value.`relayMinBatteryLevel`, buf)
+            FfiConverterUByte.write(value.`relayOptimalConnectionCount`, buf)
     }
 }
 
@@ -7004,6 +7108,10 @@ data class NetworkNode (
     , 
     var `rssi`: kotlin.Short?
     , 
+    var `batteryLevel`: kotlin.UByte?
+    , 
+    var `connectionCount`: kotlin.UInt
+    , 
     var `lastSeenMs`: kotlin.ULong
     
 ){
@@ -7022,6 +7130,8 @@ public object FfiConverterTypeNetworkNode: FfiConverterRustBuffer<NetworkNode> {
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterOptionalShort.read(buf),
+            FfiConverterOptionalUByte.read(buf),
+            FfiConverterUInt.read(buf),
             FfiConverterULong.read(buf),
         )
     }
@@ -7030,6 +7140,8 @@ public object FfiConverterTypeNetworkNode: FfiConverterRustBuffer<NetworkNode> {
             FfiConverterString.allocationSize(value.`nodeId`) +
             FfiConverterString.allocationSize(value.`role`) +
             FfiConverterOptionalShort.allocationSize(value.`rssi`) +
+            FfiConverterOptionalUByte.allocationSize(value.`batteryLevel`) +
+            FfiConverterUInt.allocationSize(value.`connectionCount`) +
             FfiConverterULong.allocationSize(value.`lastSeenMs`)
     )
 
@@ -7037,6 +7149,8 @@ public object FfiConverterTypeNetworkNode: FfiConverterRustBuffer<NetworkNode> {
             FfiConverterString.write(value.`nodeId`, buf)
             FfiConverterString.write(value.`role`, buf)
             FfiConverterOptionalShort.write(value.`rssi`, buf)
+            FfiConverterOptionalUByte.write(value.`batteryLevel`, buf)
+            FfiConverterUInt.write(value.`connectionCount`, buf)
             FfiConverterULong.write(value.`lastSeenMs`, buf)
     }
 }
@@ -8951,9 +9065,9 @@ public object FfiConverterTypeProtocolState: FfiConverterRustBuffer<ProtocolStat
 
 enum class RelayPriority {
     
-    LOW,
-    MEDIUM,
-    HIGH;
+    NEVER,
+    AUTO,
+    ALWAYS;
     companion object
 }
 

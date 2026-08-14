@@ -1569,6 +1569,15 @@ impl TransportSelector {
         self.config = config;
     }
 
+    /// Returns the configuration scoring actually runs against.
+    ///
+    /// This selector — not `ProtocolConfig::dors`, which is read once at
+    /// construction — is the live consumer, so this is the honest place to
+    /// confirm a runtime update landed.
+    pub fn config(&self) -> &DorsConfig {
+        &self.config
+    }
+
     /// Gets the current transport.
     pub fn current_transport(&self) -> Option<TransportType> {
         self.current_transport

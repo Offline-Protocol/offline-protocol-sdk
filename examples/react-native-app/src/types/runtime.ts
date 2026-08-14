@@ -3,7 +3,8 @@ import type { OfflineProtocol } from '@offline-protocol/mesh-sdk';
 export type DorsRuntimeConfig = Awaited<ReturnType<OfflineProtocol['getDorsConfig']>>;
 export type TransportMetricsSnapshot = Awaited<ReturnType<OfflineProtocol['getTransportMetrics']>>;
 export type RelayPriorityInput = 'low' | 'medium' | 'high' | 'never' | 'always' | 'auto';
-export type NativeRelayPriority = 'low' | 'medium' | 'high';
+/** The vocabulary the SDK speaks since 0.22 (was 'low' | 'medium' | 'high'). */
+export type NativeRelayPriority = 'never' | 'auto' | 'always';
 
 export interface FileTransferState {
   fileId: string;
@@ -35,38 +36,32 @@ export const DEFAULT_DORS_CONFIG: DorsRuntimeConfig = {
   ttlEscalationHoldSecs: 20,
   historyWindowSize: 10,
   queueRecoveryRatio: 0.5,
+  lowBatteryThreshold: 20,
+  relayMinBatteryLevel: 30,
+  relayOptimalConnectionCount: 4,
 };
 
 export const normalizeRelayPriority = (priority: string): NativeRelayPriority | null => {
   const normalized = priority.toLowerCase();
   switch (normalized) {
-    case 'low':
-    case 'medium':
-    case 'high':
-      return normalized as NativeRelayPriority;
     case 'never':
-      return 'low';
-    case 'always':
-      return 'high';
     case 'auto':
-      return 'medium';
+    case 'always':
+      return normalized as NativeRelayPriority;
+    // Legacy spelling of the same three values.
+    case 'low':
+      return 'never';
+    case 'medium':
+      return 'auto';
+    case 'high':
+      return 'always';
     default:
       return null;
   }
 };
 
-export const mapRelayInputToNative = (priority: RelayPriorityInput): NativeRelayPriority => {
-  switch (priority) {
-    case 'auto':
-      return 'medium';
-    case 'never':
-      return 'low';
-    case 'always':
-      return 'high';
-    default:
-      return priority;
-  }
-};
+export const mapRelayInputToNative = (priority: RelayPriorityInput): NativeRelayPriority =>
+  normalizeRelayPriority(priority) ?? 'auto';
 
 export const labelRelayPriority = (priority: RelayPriorityInput): string => {
   switch (priority) {

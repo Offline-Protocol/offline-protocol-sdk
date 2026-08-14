@@ -36,6 +36,7 @@ use offline_protocol_mls::{
 use offline_protocol_router::RelayRole as CoreRelayRole;
 use offline_protocol_router::{
     DorsConfig as CoreDorsConfig, GradientRoutingConfig as CoreGradientRoutingConfig, PathSelector,
+    RelayConfig as CoreRelayConfig, RelayPriority as CoreRelayPriority,
 };
 use offline_protocol_transport::{
     ble::BleTransport, internet::InternetTransport, nostr::NostrTransport,
@@ -786,12 +787,42 @@ pub enum ProtocolState {
     Paused,
 }
 
-/// Relay priority
+/// Relay priority.
+///
+/// Mirrors the engine's own vocabulary (`offline_protocol_router::RelayPriority`)
+/// one-for-one. The pre-0.22 `Low`/`Medium`/`High` spelling of the same three
+/// values is accepted by the platform bridges on input for compatibility, but
+/// this is the vocabulary the SDK reports back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayPriority {
-    Low,
-    Medium,
-    High,
+    /// Never take the relay role or carry other people's traffic.
+    Never,
+    /// Decide from live connectivity and battery (the default).
+    Auto,
+    /// Take the relay role whenever the connection threshold is met, and stay
+    /// willing below the soft battery floor — but never below the hard
+    /// critical floor.
+    Always,
+}
+
+impl From<RelayPriority> for CoreRelayPriority {
+    fn from(priority: RelayPriority) -> Self {
+        match priority {
+            RelayPriority::Never => CoreRelayPriority::Never,
+            RelayPriority::Auto => CoreRelayPriority::Auto,
+            RelayPriority::Always => CoreRelayPriority::Always,
+        }
+    }
+}
+
+impl From<CoreRelayPriority> for RelayPriority {
+    fn from(priority: CoreRelayPriority) -> Self {
+        match priority {
+            CoreRelayPriority::Never => RelayPriority::Never,
+            CoreRelayPriority::Auto => RelayPriority::Auto,
+            CoreRelayPriority::Always => RelayPriority::Always,
+        }
+    }
 }
 
 /// BLE peer device information
@@ -1747,7 +1778,15 @@ pub struct MessageStats {
 pub struct NetworkNode {
     pub node_id: String,
     pub role: String,
+    /// Signal strength toward this node, when known.
+    ///
+    /// Always `None` today: the visualizer tracks link quality on the
+    /// [`NetworkLink`] between two nodes, not an RSSI per node. The field is
+    /// kept because it is part of the published shape.
     pub rssi: Option<i16>,
+    /// Battery level of this node (0-100), when known.
+    pub battery_level: Option<u8>,
+    pub connection_count: u32,
     pub last_seen_ms: u64,
 }
 
@@ -1966,6 +2005,14 @@ pub struct DorsConfig {
     pub ttl_escalation_hold_secs: u64,
     pub history_window_size: u64,
     pub queue_recovery_ratio: f32,
+    /// Battery level at or below which DORS treats the device as low on
+    /// power, penalising high-power transports and favouring low-power ones.
+    pub low_battery_threshold: u8,
+    /// Battery level below which DORS stops treating BLE as a viable relay
+    /// carrier and escalates (charging devices are exempt).
+    pub relay_min_battery_level: u8,
+    /// Connection count DORS scores relay capacity against.
+    pub relay_optimal_connection_count: u8,
 }
 
 /// ACK configuration
@@ -2048,6 +2095,28 @@ pub struct RelayConfig {
     pub min_battery_for_relay: u8,
     pub allow_relay: bool,
     pub relay_priority: RelayPriority,
+}
+
+impl From<RelayConfig> for CoreRelayConfig {
+    fn from(config: RelayConfig) -> Self {
+        CoreRelayConfig {
+            relay_threshold: config.relay_threshold as usize,
+            min_battery_for_relay: config.min_battery_for_relay,
+            allow_relay: config.allow_relay,
+            relay_priority: config.relay_priority.into(),
+        }
+    }
+}
+
+impl From<&CoreRelayConfig> for RelayConfig {
+    fn from(config: &CoreRelayConfig) -> Self {
+        RelayConfig {
+            relay_threshold: config.relay_threshold as u64,
+            min_battery_for_relay: config.min_battery_for_relay,
+            allow_relay: config.allow_relay,
+            relay_priority: config.relay_priority.into(),
+        }
+    }
 }
 
 /// Transport configuration
@@ -2448,8 +2517,6 @@ pub struct OfflineProtocol {
     nostr_state: Mutex<NostrState>,
     visualizer: Mutex<NetworkVisualizer>,
     path_selector: Mutex<PathSelector>,
-    battery_level: RwLock<Option<u8>>,
-    relay_priority: RwLock<RelayPriority>,
     forced_transport: RwLock<Option<TransportType>>,
     dors_config: RwLock<Option<DorsConfig>>,
     /// Which transports this instance was configured with, so they can be
@@ -2617,8 +2684,6 @@ impl OfflineProtocol {
             }),
             visualizer: Mutex::new(NetworkVisualizer::new(user_id.clone())),
             path_selector: Mutex::new(PathSelector::new()),
-            battery_level: RwLock::new(None),
-            relay_priority: RwLock::new(RelayPriority::Medium),
             forced_transport: RwLock::new(None),
             dors_config: RwLock::new(None),
             enabled_transports: EnabledTransports {
@@ -2902,15 +2967,6 @@ impl OfflineProtocol {
         self.state
             .write()
             .map_err(|e| ProtocolError::LockPoisoned(format!("state: {}", e)))
-    }
-
-    /// Write-lock the relay priority, converting poison errors.
-    fn write_relay_priority(
-        &self,
-    ) -> Result<std::sync::RwLockWriteGuard<'_, RelayPriority>, ProtocolError> {
-        self.relay_priority
-            .write()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("relay_priority: {}", e)))
     }
 
     /// Read-lock the forced transport, converting poison errors.
@@ -5131,7 +5187,9 @@ impl OfflineProtocol {
             .map(|n| NetworkNode {
                 node_id: n.user_id.clone(),
                 role: format!("{:?}", n.role),
-                rssi: n.battery_level.map(|b| b as i16),
+                rssi: None,
+                battery_level: n.battery_level,
+                connection_count: n.connection_count as u32,
                 last_seen_ms: n.last_seen as u64,
             })
             .collect();
@@ -5200,49 +5258,102 @@ impl OfflineProtocol {
     // BATTERY AND DEVICE MANAGEMENT
     // ========================================================================
 
-    /// Sets the battery level for relay decisions
-    pub fn set_battery_level(&self, level: u8) {
-        *recover_rwlock_write(&self.battery_level, "battery_level") = Some(level.min(100));
+    /// Reports the device's battery level to the protocol engine.
+    ///
+    /// Equivalent to `set_battery_state(level, false)`. Prefer
+    /// [`Self::set_battery_state`] on any platform that can also report
+    /// charging: a charging device is deliberately excused the soft relay
+    /// battery floor, so reporting the level alone strips relay duty from
+    /// plugged-in devices that should keep it.
+    pub fn set_battery_level(&self, level: u8) -> Result<(), ProtocolError> {
+        self.set_battery_state(level, false)
     }
 
-    /// Gets the current battery level
+    /// Reports the device's battery level and charging state to the protocol
+    /// engine.
+    ///
+    /// This is the feed for every battery-dependent policy in the SDK — DORS
+    /// energy scoring, relay promotion/demotion (`relay_promoted` /
+    /// `relay_demoted` / `relay_demoted_battery`), the message-forwarding
+    /// battery floor, and the telemetry device-capability snapshot. No
+    /// transport can observe the host's battery, so until this is called each
+    /// of those policies runs in its unknown-level branch.
+    ///
+    /// Call it on start and on each platform battery notification. `level` is
+    /// clamped to 0-100.
+    pub fn set_battery_state(&self, level: u8, is_charging: bool) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol.set_device_battery(level, is_charging);
+        Ok(())
+    }
+
+    /// Gets the last reported battery level, or `None` if the host has not
+    /// reported one.
     pub fn get_battery_level(&self) -> Option<u8> {
-        *recover_rwlock_read(&self.battery_level, "battery_level")
+        let protocol = self.lock_inner().ok()?;
+        protocol.device_battery().0
+    }
+
+    /// Gets the last reported charging state (`false` when the host has
+    /// reported nothing).
+    pub fn get_is_charging(&self) -> bool {
+        match self.lock_inner() {
+            Ok(protocol) => protocol.device_battery().1,
+            Err(_) => false,
+        }
     }
 
     // ========================================================================
     // RELAY MANAGEMENT
     // ========================================================================
 
-    /// Sets the relay priority
+    /// Sets the relay priority.
+    ///
+    /// A shorthand for updating only [`RelayConfig::relay_priority`]; the rest
+    /// of the relay configuration is left as it is. Takes effect on the next
+    /// role evaluation and the next forwarding decision.
     pub fn set_relay_priority(&self, priority: RelayPriority) -> Result<(), ProtocolError> {
-        *self.write_relay_priority()? = priority;
-        Ok(())
+        let mut config = self.get_relay_config();
+        config.relay_priority = priority;
+        self.update_relay_config(config)
     }
 
-    /// Gets the current relay priority
+    /// Gets the current relay priority.
     pub fn get_relay_priority(&self) -> RelayPriority {
-        *recover_rwlock_read(&self.relay_priority, "relay_priority")
+        self.get_relay_config().relay_priority
     }
 
-    /// Checks if this device is currently acting as a relay
-    pub fn is_relay(&self) -> bool {
-        // Check if we have enough connections and battery to be a relay
-        let battery = self.get_battery_level();
-        let ble_state = recover_mutex(&self.ble_state, "ble_state");
-        let peer_count = ble_state.peer_count;
-        drop(ble_state);
+    /// Updates the relay configuration at runtime.
+    ///
+    /// Governs whether this device carries other people's traffic and under
+    /// what conditions it takes the relay role: the connection threshold, the
+    /// battery floor (with the charging exemption), the outright opt-out, and
+    /// the priority mode. Applies to the next role evaluation and the next
+    /// forwarding decision — no restart needed.
+    pub fn update_relay_config(&self, config: RelayConfig) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .update_relay_config(config.into())
+            .map_err(ProtocolError::from)
+    }
 
-        match self.get_relay_priority() {
-            RelayPriority::Low => false,
-            RelayPriority::High => {
-                // High priority: be a relay if we have at least one connection
-                peer_count > 0 && battery.unwrap_or(100) > 20
-            }
-            RelayPriority::Medium => {
-                // Medium priority: default threshold
-                peer_count >= 3 && battery.unwrap_or(100) > 30
-            }
+    /// Gets the current relay configuration.
+    pub fn get_relay_config(&self) -> RelayConfig {
+        match self.lock_inner() {
+            Ok(protocol) => RelayConfig::from(protocol.relay_config()),
+            Err(_) => RelayConfig::from(&CoreRelayConfig::default()),
+        }
+    }
+
+    /// Checks if this device is currently acting as a relay.
+    ///
+    /// Reports the engine's own relay role — the one
+    /// `relay_promoted`/`relay_demoted` transitions announce — so this answer
+    /// and those events can no longer disagree.
+    pub fn is_relay(&self) -> bool {
+        match self.lock_inner() {
+            Ok(protocol) => protocol.is_relay(),
+            Err(_) => false,
         }
     }
 
@@ -5304,10 +5415,9 @@ impl OfflineProtocol {
             ttl_escalation_hold_secs: config.ttl_escalation_hold_secs,
             history_window_size: config.history_window_size as usize,
             queue_recovery_ratio: config.queue_recovery_ratio,
-            // Use defaults for fields not exposed via uniffi
-            low_battery_threshold: 20,
-            relay_min_battery_level: 30,
-            relay_optimal_connection_count: 4,
+            low_battery_threshold: config.low_battery_threshold,
+            relay_min_battery_level: config.relay_min_battery_level,
+            relay_optimal_connection_count: config.relay_optimal_connection_count,
         };
 
         let mut protocol = self.lock_inner()?;
@@ -5341,6 +5451,9 @@ impl OfflineProtocol {
             ttl_escalation_hold_secs: core.ttl_escalation_hold_secs,
             history_window_size: core.history_window_size as u64,
             queue_recovery_ratio: core.queue_recovery_ratio,
+            low_battery_threshold: core.low_battery_threshold,
+            relay_min_battery_level: core.relay_min_battery_level,
+            relay_optimal_connection_count: core.relay_optimal_connection_count,
         }
     }
 
@@ -12819,6 +12932,153 @@ mod tests {
             local_id, "topology-profile",
             "the profile is a local storage selector and must not be handed out"
         );
+    }
+
+    /// A topology node's battery level must arrive as a battery level. It used
+    /// to be written into `rssi`, so a device at 80% surfaced as -80 dBm to
+    /// every consumer of `get_topology()`.
+    #[test]
+    fn test_topology_node_reports_battery_not_rssi() {
+        use offline_protocol::visualization::{NetworkNode as CoreNetworkNode, NodeRole};
+
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        recover_mutex(&protocol.visualizer, "visualizer").update_node(CoreNetworkNode {
+            user_id: "peer-1".to_string(),
+            role: NodeRole::Relay,
+            connection_count: 3,
+            battery_level: Some(80),
+            last_seen: 1_700_000,
+            transports: vec![],
+        });
+
+        let topology = protocol.get_topology().unwrap();
+        let node = topology
+            .nodes
+            .iter()
+            .find(|n| n.node_id == "peer-1")
+            .expect("node present");
+
+        assert_eq!(node.battery_level, Some(80));
+        assert_eq!(node.connection_count, 3);
+        assert_eq!(
+            node.rssi, None,
+            "battery must not be smuggled through the signal-strength field"
+        );
+    }
+
+    /// Every DORS field the FFI accepts must survive a round trip. The three
+    /// battery/relay fields used to be missing from the FFI shape, so *any*
+    /// runtime DORS update silently reset them to 20/30/4 — including one that
+    /// meant to change something else.
+    #[test]
+    fn test_update_dors_config_preserves_every_field() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut config = protocol.get_dors_config();
+        config.low_battery_threshold = 11;
+        config.relay_min_battery_level = 44;
+        config.relay_optimal_connection_count = 7;
+        config.stability_window_secs = 33;
+        protocol.update_dors_config(config).unwrap();
+
+        let read_back = protocol.get_dors_config();
+        assert_eq!(read_back.low_battery_threshold, 11);
+        assert_eq!(read_back.relay_min_battery_level, 44);
+        assert_eq!(read_back.relay_optimal_connection_count, 7);
+        assert_eq!(read_back.stability_window_secs, 33);
+
+        // ...and reached the DORS selector, which is what actually scores
+        // transports. Reading back through `get_dors_config` alone would be
+        // vacuous: it returns the FFI's own stored copy.
+        let inner = protocol.lock_inner().unwrap();
+        let core = inner.transport_manager().selector_config().clone();
+        drop(inner);
+        assert_eq!(core.low_battery_threshold, 11);
+        assert_eq!(core.relay_min_battery_level, 44);
+        assert_eq!(core.relay_optimal_connection_count, 7);
+        assert_eq!(core.stability_window_secs, 33);
+    }
+
+    /// The battery feed must reach the engine, where the relay and DORS
+    /// policies read it — not an FFI-local field nothing consults.
+    #[test]
+    fn test_battery_state_reaches_the_engine() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        assert_eq!(protocol.get_battery_level(), None);
+        assert!(!protocol.get_is_charging());
+
+        protocol.set_battery_state(64, true).unwrap();
+
+        assert_eq!(protocol.get_battery_level(), Some(64));
+        assert!(protocol.get_is_charging());
+        let inner = protocol.lock_inner().unwrap();
+        assert_eq!(inner.device_battery(), (Some(64), true));
+        drop(inner);
+
+        // The level-only entry point keeps working and reports not-charging.
+        protocol.set_battery_level(30).unwrap();
+        assert_eq!(protocol.get_battery_level(), Some(30));
+        assert!(!protocol.get_is_charging());
+    }
+
+    /// The whole relay configuration must reach the engine's own
+    /// `RelayConfig`, which is what the forwarding gate and the role policy
+    /// read. Only `relay_priority` used to have any path at all, and it went
+    /// to an FFI-local field.
+    #[test]
+    fn test_relay_config_reaches_the_engine() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let defaults = protocol.get_relay_config();
+        assert!(defaults.allow_relay);
+        assert_eq!(defaults.relay_priority, RelayPriority::Auto);
+
+        protocol
+            .update_relay_config(RelayConfig {
+                relay_threshold: 9,
+                min_battery_for_relay: 55,
+                allow_relay: false,
+                relay_priority: RelayPriority::Always,
+            })
+            .unwrap();
+
+        let read_back = protocol.get_relay_config();
+        assert_eq!(read_back.relay_threshold, 9);
+        assert_eq!(read_back.min_battery_for_relay, 55);
+        assert!(!read_back.allow_relay);
+        assert_eq!(read_back.relay_priority, RelayPriority::Always);
+
+        let inner = protocol.lock_inner().unwrap();
+        let core = inner.relay_config().clone();
+        drop(inner);
+        assert_eq!(core.relay_threshold, 9);
+        assert_eq!(core.min_battery_for_relay, 55);
+        assert!(!core.allow_relay);
+        assert_eq!(core.relay_priority, CoreRelayPriority::Always);
+    }
+
+    /// `set_relay_priority` is a shorthand for one field, and must leave the
+    /// rest of the relay configuration alone.
+    #[test]
+    fn test_set_relay_priority_preserves_the_other_relay_fields() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol
+            .update_relay_config(RelayConfig {
+                relay_threshold: 6,
+                min_battery_for_relay: 41,
+                allow_relay: true,
+                relay_priority: RelayPriority::Auto,
+            })
+            .unwrap();
+
+        protocol.set_relay_priority(RelayPriority::Never).unwrap();
+
+        let config = protocol.get_relay_config();
+        assert_eq!(config.relay_priority, RelayPriority::Never);
+        assert_eq!(protocol.get_relay_priority(), RelayPriority::Never);
+        assert_eq!(config.relay_threshold, 6, "threshold must survive");
+        assert_eq!(config.min_battery_for_relay, 41, "floor must survive");
+        assert!(config.allow_relay);
     }
 
     /// The transport refuses an id that is not an address, rather than hashing
