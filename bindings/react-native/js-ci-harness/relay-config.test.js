@@ -7,8 +7,8 @@
  * module and asserts on the payloads it hands over, because every failure in
  * this layer is silent: a field dropped between JS and native leaves the
  * engine on its default with no error anywhere, which is exactly how
- * `allowRelay`, `minBatteryForRelay` and `relayThreshold` came to be
- * documented, accepted, carried across the bridge — and parsed by nothing.
+ * `allowRelay` and `minBatteryForRelay` came to be documented, accepted,
+ * carried across the bridge — and parsed by nothing.
  *
  * The sibling Rust guard `react_native_bridges_merge_dors_updates_from_the_live_config`
  * pins that the two native bridges merge a partial update onto the live
@@ -135,7 +135,6 @@ test('every relay field configured at create time reaches native', async () => {
     relay: {
       allowRelay: false,
       minBatteryForRelay: 55,
-      relayThreshold: 9,
       relayPriority: 'never',
     },
   });
@@ -144,7 +143,6 @@ test('every relay field configured at create time reaches native', async () => {
   assert.deepEqual(payloadOf('updateRelayConfig'), {
     allowRelay: false,
     minBatteryForRelay: 55,
-    relayThreshold: 9,
     relayPriority: 'never',
   });
 });
@@ -201,6 +199,23 @@ test('updateRelayConfig sends only the fields it was given', async () => {
   assert.deepEqual(payloadOf('updateRelayConfig'), { minBatteryForRelay: 41 });
 });
 
+test('updateRelayConfig rejects an unknown priority instead of dropping it', async () => {
+  // `setRelayPriority` throws on this input, so the whole-config path must
+  // too. Dropping it silently applied the rest of the update and left the
+  // priority untouched, which from the call site is indistinguishable from
+  // having set it.
+  const sdk = newSdk({});
+  await assert.rejects(
+    () => sdk.updateRelayConfig({ minBatteryForRelay: 41, relayPriority: 'turbo' }),
+    /Invalid relay priority: turbo/
+  );
+  assert.equal(
+    nativeCalls.filter((c) => c.method === 'updateRelayConfig').length,
+    0,
+    'the rest of the update must not be applied either'
+  );
+});
+
 test('setRelayPriority normalises legacy input before it reaches native', async () => {
   const sdk = newSdk({});
   await sdk.setRelayPriority('high');
@@ -222,7 +237,6 @@ test('getRelayConfig parses the JSON string both bridges return', async () => {
   nativeOverrides.getRelayConfig = () =>
     Promise.resolve(
       JSON.stringify({
-        relayThreshold: 6,
         minBatteryForRelay: 41,
         allowRelay: true,
         relayPriority: 'auto',
@@ -231,7 +245,6 @@ test('getRelayConfig parses the JSON string both bridges return', async () => {
   const sdk = newSdk({});
 
   assert.deepEqual(await sdk.getRelayConfig(), {
-    relayThreshold: 6,
     minBatteryForRelay: 41,
     allowRelay: true,
     relayPriority: 'auto',

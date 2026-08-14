@@ -231,7 +231,6 @@ Relay management configuration.
 
 ```rust
 pub struct RelayConfig {
-    pub relay_threshold: usize,        // Min connections to be relay (default: 3)
     pub min_battery_for_relay: u8,     // Min battery % (default: 30)
     pub allow_relay: bool,             // Allow relay role (default: true)
     pub relay_priority: RelayPriority, // Auto/Always/Never (default: Auto)

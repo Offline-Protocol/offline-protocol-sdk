@@ -576,12 +576,18 @@ pub enum Event {
         reason: String,
     },
 
-    /// This device was promoted to relay role.
+    /// This device started acting as a relay — carrying traffic for other
+    /// devices that cannot reach each other directly.
+    ///
+    /// Reports observed behaviour, not capability: it fires because this
+    /// device has been forwarding, so it needs no battery feed and can fire on
+    /// a device that has never reported a level.
     RelayPromoted {
-        /// Number of connections when promoted.
+        /// Neighbors held when this device started relaying.
         connection_count: usize,
-        /// Battery level when promoted.
-        battery_level: u8,
+        /// Battery level at the time, or `None` when the host has reported
+        /// none — the standing does not depend on it.
+        battery_level: Option<u8>,
     },
 
     /// This device was demoted from relay role.
@@ -1671,7 +1677,7 @@ impl Event {
     }
 
     /// Creates a RelayPromoted event.
-    pub fn relay_promoted(connection_count: usize, battery_level: u8) -> Self {
+    pub fn relay_promoted(connection_count: usize, battery_level: Option<u8>) -> Self {
         Self::RelayPromoted {
             connection_count,
             battery_level,
@@ -3457,7 +3463,7 @@ mod tests {
 
     #[test]
     fn test_relay_promoted_event() {
-        let event = Event::relay_promoted(5, 80);
+        let event = Event::relay_promoted(5, Some(80));
 
         match event {
             Event::RelayPromoted {
@@ -3465,7 +3471,7 @@ mod tests {
                 battery_level,
             } => {
                 assert_eq!(connection_count, 5);
-                assert_eq!(battery_level, 80);
+                assert_eq!(battery_level, Some(80));
             }
             _ => panic!("Wrong event type"),
         }
@@ -3493,7 +3499,7 @@ mod tests {
 
     #[test]
     fn test_event_serialization() {
-        let event = Event::relay_promoted(5, 80);
+        let event = Event::relay_promoted(5, Some(80));
         let json = event.to_json().unwrap();
         let deserialized = Event::from_json(&json).unwrap();
 
@@ -3503,7 +3509,7 @@ mod tests {
                 battery_level,
             } => {
                 assert_eq!(connection_count, 5);
-                assert_eq!(battery_level, 80);
+                assert_eq!(battery_level, Some(80));
             }
             _ => panic!("Wrong event type after deserialization"),
         }

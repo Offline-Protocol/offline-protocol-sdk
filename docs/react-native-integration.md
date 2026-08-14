@@ -66,7 +66,6 @@ const protocol = new OfflineProtocol({
   relay: {
     allowRelay: true,
     minBatteryForRelay: 35,
-    relayThreshold: 3,
     relayPriority: 'auto',
   },
 });
@@ -439,15 +438,19 @@ Connection-request failure contract: recipient offline emits `connection_request
 | **getRelayPriority** | `getRelayPriority(): Promise<'never' \| 'auto' \| 'always'>` | Current relay priority. |
 | **updateRelayConfig** | `updateRelayConfig(config: RelayConfig): Promise<void>` | Updates relay config at runtime; omitted fields keep their values. |
 | **getRelayConfig** | `getRelayConfig(): Promise<Required<RelayConfig>>` | Current relay configuration. |
-| **isRelay** | `isRelay(): Promise<boolean>` | Whether this device currently holds the relay role. |
+| **isRelay** | `isRelay(): Promise<boolean>` | Whether this device is currently carrying traffic for other devices. Reports observed forwarding, not capability, so it stays `false` on a device whose peers can all reach each other — and on any device with a working internet relay, since the mesh is only offered frames nothing else can deliver. |
 
 > **The battery feed is required for relay behaviour to work at all.** No
 > transport can observe the host's battery, so until `setBatteryState` (or
-> `setBatteryLevel`) is called, DORS energy scoring, the relay
-> promotion/demotion events, and the message-forwarding battery floor all run
-> in their unknown-level branch — the device stays willing to relay at any
-> charge and `relay_promoted` / `relay_demoted` never fire. Call it on start
-> and on each platform battery notification.
+> `setBatteryLevel`) is called, DORS energy scoring, the message-forwarding
+> battery floor, and the capability bias that makes a healthier device carry
+> more of the mesh's traffic all run in their unknown-level branch — the
+> device stays willing to relay at any charge, and at full effort. Call it on
+> start and on each platform battery notification.
+>
+> The relay events are not affected: `relay_promoted` / `relay_demoted` report
+> traffic this device has actually carried, so they fire with or without a
+> reading.
 >
 > Report charging state where the platform provides it: a charging device is
 > deliberately excused the soft `minBatteryForRelay` floor, so reporting the

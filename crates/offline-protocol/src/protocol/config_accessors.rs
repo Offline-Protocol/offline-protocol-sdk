@@ -14,7 +14,7 @@ use offline_protocol_reliability::{
     AckConfig, AckManager, Deduplicator, DeduplicatorConfig, DeduplicatorStats, RetryConfig,
     RetryQueue,
 };
-use offline_protocol_router::{DorsConfig, RelayConfig, RelayRole};
+use offline_protocol_router::{DorsConfig, RelayConfig};
 use offline_protocol_services::MeshServices;
 use std::sync::{Arc, RwLock};
 use std::time::Duration as StdDuration;
@@ -110,26 +110,17 @@ impl OfflineProtocol {
     /// candidate configuration and running the real validator — so a
     /// constraint added to `ProtocolConfig::validate` applies on this path too.
     ///
-    /// The new configuration takes effect on the next role evaluation (the
-    /// `process()` tick) and on the next forwarding decision. The current
-    /// relay role is **preserved** across the update rather than reset:
-    /// re-deriving it here would emit a promote/demote transition that the
-    /// tick is about to compute properly from live battery and connectivity.
-    ///
-    /// **Writes two copies, and both are load-bearing.** The relay policy is
-    /// read from `self.config.relay` by the message-forwarding gate
-    /// (`battery_allows_relaying`) and from the [`RelayManager`]'s own copy by
-    /// the role policy. They are documented as applying "the same floor", so a
-    /// writer that updates one and not the other silently desyncs two
-    /// decisions that must agree — a device that declines the relay role while
-    /// still carrying other people's traffic, or the reverse.
-    ///
-    /// [`RelayManager`]: offline_protocol_router::RelayManager
+    /// Takes effect on the next forwarding decision and the next `process()`
+    /// tick, which is where the relay standing is re-derived. One copy, read by
+    /// every relay decision: the forwarding gate, the capability bias pushed
+    /// into the governor, and the battery floor the demotion event reports. An
+    /// earlier shape kept a second copy on the router's relay manager and had
+    /// to write both, which is exactly the split that lets a device decline the
+    /// relay role while still carrying other people's traffic.
     pub fn update_relay_config(&mut self, config: RelayConfig) -> crate::Result<()> {
         let mut candidate = self.config.clone();
         candidate.relay = config.clone();
         candidate.validate()?;
-        self.path_selector.set_relay_config(config.clone());
         self.config.relay = config;
         Ok(())
     }
@@ -139,16 +130,24 @@ impl OfflineProtocol {
         &self.config.relay
     }
 
-    /// Whether this device currently holds the relay role.
+    /// Whether this device is currently acting as a relay.
     ///
-    /// This is the role the `relay_promoted` / `relay_demoted` /
-    /// `relay_demoted_battery` events announce, recomputed on each `process()`
-    /// tick from live connectivity, battery and [`RelayConfig`]. It stays
-    /// `false` while the host reports no battery level, because the policy
-    /// declines to transition on a level it does not have — see
-    /// [`Self::set_device_battery`].
+    /// Reports what this device has been *doing* — carrying traffic for other
+    /// devices — not what its battery and neighbor count suggest it could. It
+    /// is the standing the `relay_promoted` / `relay_demoted` /
+    /// `relay_demoted_battery` events announce, re-derived on each `process()`
+    /// tick from the forwarding governor's own record of frames carried.
+    ///
+    /// Consequently it answers `false` on a device that has every capability to
+    /// relay but has had no third-party traffic to carry — including any device
+    /// whose peers all have their own route to each other, and any device on
+    /// which an infrastructure carrier is up, since the mesh is offered frames
+    /// only when nothing else can reach the recipient.
+    ///
+    /// Needs no battery feed. The feed scales *how much* this device forwards
+    /// (see [`Self::set_device_battery`]); forwarding is observable either way.
     pub fn is_relay(&self) -> bool {
-        self.path_selector.current_relay_role() == RelayRole::Relay
+        self.mesh_relay.is_active_relay()
     }
 
     /// Updates the ACK configuration at runtime.

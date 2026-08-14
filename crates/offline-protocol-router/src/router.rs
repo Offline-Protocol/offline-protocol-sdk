@@ -5,7 +5,7 @@
 //! based on the number of visible peers to maintain constant message overhead.
 
 use crate::constants::*;
-use crate::relay::{RelayConfig, RelayInfo, RelayManager, RelayRole, RelayTransition};
+use crate::relay::{RelayInfo, RelayManager};
 use offline_protocol_core::Message;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -481,37 +481,6 @@ impl PathSelector {
     /// Sets the local device ID for deterministic gossip decisions.
     pub fn set_local_device_id(&mut self, device_id: impl Into<String>) {
         self.local_device_id = device_id.into();
-    }
-
-    /// Returns the current [`RelayRole`] from the internal [`RelayManager`].
-    ///
-    /// Exposed for read-only callers (e.g., the telemetry aggregator that
-    /// needs to know the current relay role without widening the surface
-    /// to the full [`RelayManager`] API).
-    pub fn current_relay_role(&self) -> RelayRole {
-        self.relay_manager.current_role()
-    }
-
-    /// Replaces the relay configuration on the internal [`RelayManager`].
-    ///
-    /// The current relay role is preserved — see [`RelayManager::set_config`].
-    pub fn set_relay_config(&mut self, config: RelayConfig) {
-        self.relay_manager.set_config(config);
-    }
-
-    /// Re-evaluates the local relay role against current connectivity and
-    /// battery, applying any change to the internal [`RelayManager`].
-    ///
-    /// Returns `Some(transition)` only when the role actually changes, so the
-    /// caller can emit a role-transition event exactly once per transition.
-    pub fn evaluate_relay_transition(
-        &mut self,
-        connection_count: usize,
-        battery_level: u8,
-        is_charging: bool,
-    ) -> Option<RelayTransition> {
-        self.relay_manager
-            .evaluate_transition(connection_count, battery_level, is_charging)
     }
 
     /// Computes the forwarding probability based on visible peer count.

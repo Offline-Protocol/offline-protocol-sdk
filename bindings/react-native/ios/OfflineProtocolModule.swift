@@ -552,9 +552,9 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
         }
 
-        // The whole relay section, not just the priority: allowRelay,
-        // minBatteryForRelay and relayThreshold used to be parsed by nothing,
-        // leaving `config.relay` on mobile permanently at its defaults.
+        // The whole relay section, not just the priority: allowRelay and
+        // minBatteryForRelay used to be parsed by nothing, leaving
+        // `config.relay` on mobile permanently at its defaults.
         if let relayDict = rawConfig["relay"] as? [String: Any] {
             do {
                 let updated = mergedRelayConfig(current: proto.getRelayConfig(), from: relayDict)
@@ -2554,7 +2554,6 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
         let config = proto.getRelayConfig()
         let dict: [String: Any] = [
-            "relayThreshold": config.relayThreshold,
             "minBatteryForRelay": config.minBatteryForRelay,
             "allowRelay": config.allowRelay,
             "relayPriority": relayPriorityName(config.relayPriority)
@@ -2586,8 +2585,6 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
         let priorityRaw = (dict["relayPriority"] as? String) ?? (dict["relay_priority"] as? String)
         return RelayConfig(
-            relayThreshold: number("relayThreshold", "relay_threshold")
-                .map { UInt64(max(0, $0.intValue)) } ?? current.relayThreshold,
             minBatteryForRelay: number("minBatteryForRelay", "min_battery_for_relay")
                 .map { UInt8(min(100, max(0, $0.intValue))) } ?? current.minBatteryForRelay,
             allowRelay: flag("allowRelay", "allow_relay") ?? current.allowRelay,

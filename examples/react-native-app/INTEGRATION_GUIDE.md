@@ -412,7 +412,6 @@ const config: ProtocolConfig = {
   relay: {
     allowRelay: true,          // Allow device to act as relay
     minBatteryForRelay: 20,    // Minimum battery % to be relay
-    relayThreshold: 3,         // Connection count threshold
   },
 
   // Network configuration

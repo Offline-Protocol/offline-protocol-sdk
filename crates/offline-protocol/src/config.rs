@@ -819,6 +819,37 @@ impl ProtocolConfig {
             ));
         }
 
+        // Capability bias scales forwarding effort; it must never be able to
+        // scale it to nothing. Zero would make a low-battery device stop
+        // forwarding by the back door, which is the partition the bias design
+        // exists to avoid — refusing to relay is `relay.allow_relay`'s job.
+        if !self.mesh_relay.bias_min_scale.is_finite()
+            || self.mesh_relay.bias_min_scale <= 0.0
+            || self.mesh_relay.bias_min_scale > 1.0
+        {
+            return Err(crate::Error::InvalidConfiguration(
+                "mesh_relay.bias_min_scale must be finite and in (0.0, 1.0]".to_string(),
+            ));
+        }
+
+        if self.mesh_relay.activity_window.is_zero() {
+            return Err(crate::Error::InvalidConfiguration(
+                "mesh_relay.activity_window must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.mesh_relay.activity_min_forwards == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "mesh_relay.activity_min_forwards must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.mesh_relay.activity_idle_windows == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "mesh_relay.activity_idle_windows must be greater than 0".to_string(),
+            ));
+        }
+
         Ok(())
     }
 }

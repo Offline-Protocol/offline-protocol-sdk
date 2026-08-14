@@ -7564,72 +7564,6 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
 
 
 
-data class ProtocolConfigExtended (
-    var `appId`: kotlin.String
-    , 
-    var `profile`: kotlin.String
-    , 
-    var `transport`: TransportConfig
-    , 
-    var `dors`: DorsConfig
-    , 
-    var `relay`: RelayConfig
-    , 
-    var `path`: PathConfig
-    , 
-    var `reliability`: ReliabilityConfig
-    , 
-    var `initialTtl`: kotlin.UByte
-    
-){
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeProtocolConfigExtended: FfiConverterRustBuffer<ProtocolConfigExtended> {
-    override fun read(buf: ByteBuffer): ProtocolConfigExtended {
-        return ProtocolConfigExtended(
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterTypeTransportConfig.read(buf),
-            FfiConverterTypeDorsConfig.read(buf),
-            FfiConverterTypeRelayConfig.read(buf),
-            FfiConverterTypePathConfig.read(buf),
-            FfiConverterTypeReliabilityConfig.read(buf),
-            FfiConverterUByte.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: ProtocolConfigExtended) = (
-            FfiConverterString.allocationSize(value.`appId`) +
-            FfiConverterString.allocationSize(value.`profile`) +
-            FfiConverterTypeTransportConfig.allocationSize(value.`transport`) +
-            FfiConverterTypeDorsConfig.allocationSize(value.`dors`) +
-            FfiConverterTypeRelayConfig.allocationSize(value.`relay`) +
-            FfiConverterTypePathConfig.allocationSize(value.`path`) +
-            FfiConverterTypeReliabilityConfig.allocationSize(value.`reliability`) +
-            FfiConverterUByte.allocationSize(value.`initialTtl`)
-    )
-
-    override fun write(value: ProtocolConfigExtended, buf: ByteBuffer) {
-            FfiConverterString.write(value.`appId`, buf)
-            FfiConverterString.write(value.`profile`, buf)
-            FfiConverterTypeTransportConfig.write(value.`transport`, buf)
-            FfiConverterTypeDorsConfig.write(value.`dors`, buf)
-            FfiConverterTypeRelayConfig.write(value.`relay`, buf)
-            FfiConverterTypePathConfig.write(value.`path`, buf)
-            FfiConverterTypeReliabilityConfig.write(value.`reliability`, buf)
-            FfiConverterUByte.write(value.`initialTtl`, buf)
-    }
-}
-
-
-
 data class ProtocolLockDiagnostics (
     var `held`: kotlin.Boolean
     , 
@@ -7677,8 +7611,6 @@ public object FfiConverterTypeProtocolLockDiagnostics: FfiConverterRustBuffer<Pr
 
 
 data class RelayConfig (
-    var `relayThreshold`: kotlin.ULong
-    , 
     var `minBatteryForRelay`: kotlin.UByte
     , 
     var `allowRelay`: kotlin.Boolean
@@ -7698,7 +7630,6 @@ data class RelayConfig (
 public object FfiConverterTypeRelayConfig: FfiConverterRustBuffer<RelayConfig> {
     override fun read(buf: ByteBuffer): RelayConfig {
         return RelayConfig(
-            FfiConverterULong.read(buf),
             FfiConverterUByte.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterTypeRelayPriority.read(buf),
@@ -7706,14 +7637,12 @@ public object FfiConverterTypeRelayConfig: FfiConverterRustBuffer<RelayConfig> {
     }
 
     override fun allocationSize(value: RelayConfig) = (
-            FfiConverterULong.allocationSize(value.`relayThreshold`) +
             FfiConverterUByte.allocationSize(value.`minBatteryForRelay`) +
             FfiConverterBoolean.allocationSize(value.`allowRelay`) +
             FfiConverterTypeRelayPriority.allocationSize(value.`relayPriority`)
     )
 
     override fun write(value: RelayConfig, buf: ByteBuffer) {
-            FfiConverterULong.write(value.`relayThreshold`, buf)
             FfiConverterUByte.write(value.`minBatteryForRelay`, buf)
             FfiConverterBoolean.write(value.`allowRelay`, buf)
             FfiConverterTypeRelayPriority.write(value.`relayPriority`, buf)

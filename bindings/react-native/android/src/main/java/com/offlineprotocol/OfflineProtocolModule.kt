@@ -407,17 +407,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        // The whole relay section, not just the priority: allowRelay,
-        // minBatteryForRelay and relayThreshold used to be parsed by nothing,
-        // leaving `config.relay` on mobile permanently at its defaults.
+        // The whole relay section, not just the priority: allowRelay and
+        // minBatteryForRelay used to be parsed by nothing, leaving
+        // `config.relay` on mobile permanently at its defaults.
         json.optJSONObject("relay")?.let { relayJson ->
             try {
                 val current = proto.getRelayConfig()
                 val priorityRaw = relayJson.safeOptString("relayPriority", relayJson.safeOptString("relay_priority"))
                 val priority = normalizeRelayPriority(priorityRaw) ?: current.relayPriority
                 val updated = RelayConfig(
-                    relayThreshold = relayJson.optLongCompat("relayThreshold", "relay_threshold")
-                        ?.coerceAtLeast(0L)?.toULong() ?: current.relayThreshold,
                     minBatteryForRelay = relayJson.optIntCompat("minBatteryForRelay", "min_battery_for_relay")
                         ?.coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL)?.toUByte()
                         ?: current.minBatteryForRelay,
@@ -2797,8 +2795,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             ) ?: current.relayPriority
             proto.updateRelayConfig(
                 RelayConfig(
-                    relayThreshold = json.optLongCompat("relayThreshold", "relay_threshold")
-                        ?.coerceAtLeast(0L)?.toULong() ?: current.relayThreshold,
                     minBatteryForRelay = json.optIntCompat("minBatteryForRelay", "min_battery_for_relay")
                         ?.coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL)?.toUByte()
                         ?: current.minBatteryForRelay,
@@ -2822,7 +2818,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             promise.resolve(
                 JSONObject().apply {
-                    put("relayThreshold", config.relayThreshold.toLong())
                     put("minBatteryForRelay", config.minBatteryForRelay.toInt())
                     put("allowRelay", config.allowRelay)
                     put("relayPriority", relayPriorityName(config.relayPriority))

@@ -5805,70 +5805,52 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.write(value.crypto_recovery_enabled, buf)
 
 @dataclass
-class TransportConfig:
-    def __init__(self, *, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, nostr_sealing_enabled:bool = True, nostr_cold_contact_enabled:bool = True):
-        self.ble_enabled = ble_enabled
-        self.wifi_direct_enabled = wifi_direct_enabled
-        self.internet_enabled = internet_enabled
-        self.reticulum_enabled = reticulum_enabled
-        self.nostr_enabled = nostr_enabled
-        self.nostr_sealing_enabled = nostr_sealing_enabled
-        self.nostr_cold_contact_enabled = nostr_cold_contact_enabled
+class ProtocolLockDiagnostics:
+    def __init__(self, *, held:bool, holder_location:str, holder_thread:str, held_for_ms:int):
+        self.held = held
+        self.holder_location = holder_location
+        self.holder_thread = holder_thread
+        self.held_for_ms = held_for_ms
         
         
 
     
     def __str__(self):
-        return "TransportConfig(ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, nostr_sealing_enabled={}, nostr_cold_contact_enabled={})".format(self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.nostr_sealing_enabled, self.nostr_cold_contact_enabled)
+        return "ProtocolLockDiagnostics(held={}, holder_location={}, holder_thread={}, held_for_ms={})".format(self.held, self.holder_location, self.holder_thread, self.held_for_ms)
     def __eq__(self, other):
-        if self.ble_enabled != other.ble_enabled:
+        if self.held != other.held:
             return False
-        if self.wifi_direct_enabled != other.wifi_direct_enabled:
+        if self.holder_location != other.holder_location:
             return False
-        if self.internet_enabled != other.internet_enabled:
+        if self.holder_thread != other.holder_thread:
             return False
-        if self.reticulum_enabled != other.reticulum_enabled:
-            return False
-        if self.nostr_enabled != other.nostr_enabled:
-            return False
-        if self.nostr_sealing_enabled != other.nostr_sealing_enabled:
-            return False
-        if self.nostr_cold_contact_enabled != other.nostr_cold_contact_enabled:
+        if self.held_for_ms != other.held_for_ms:
             return False
         return True
 
-class _UniffiFfiConverterTypeTransportConfig(_UniffiConverterRustBuffer):
+class _UniffiFfiConverterTypeProtocolLockDiagnostics(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
-        return TransportConfig(
-            ble_enabled=_UniffiFfiConverterBoolean.read(buf),
-            wifi_direct_enabled=_UniffiFfiConverterBoolean.read(buf),
-            internet_enabled=_UniffiFfiConverterBoolean.read(buf),
-            reticulum_enabled=_UniffiFfiConverterBoolean.read(buf),
-            nostr_enabled=_UniffiFfiConverterBoolean.read(buf),
-            nostr_sealing_enabled=_UniffiFfiConverterBoolean.read(buf),
-            nostr_cold_contact_enabled=_UniffiFfiConverterBoolean.read(buf),
+        return ProtocolLockDiagnostics(
+            held=_UniffiFfiConverterBoolean.read(buf),
+            holder_location=_UniffiFfiConverterString.read(buf),
+            holder_thread=_UniffiFfiConverterString.read(buf),
+            held_for_ms=_UniffiFfiConverterUInt64.read(buf),
         )
 
     @staticmethod
     def check_lower(value):
-        _UniffiFfiConverterBoolean.check_lower(value.ble_enabled)
-        _UniffiFfiConverterBoolean.check_lower(value.wifi_direct_enabled)
-        _UniffiFfiConverterBoolean.check_lower(value.internet_enabled)
-        _UniffiFfiConverterBoolean.check_lower(value.reticulum_enabled)
-        _UniffiFfiConverterBoolean.check_lower(value.nostr_enabled)
-        _UniffiFfiConverterBoolean.check_lower(value.nostr_sealing_enabled)
-        _UniffiFfiConverterBoolean.check_lower(value.nostr_cold_contact_enabled)
+        _UniffiFfiConverterBoolean.check_lower(value.held)
+        _UniffiFfiConverterString.check_lower(value.holder_location)
+        _UniffiFfiConverterString.check_lower(value.holder_thread)
+        _UniffiFfiConverterUInt64.check_lower(value.held_for_ms)
 
     @staticmethod
     def write(value, buf):
-        _UniffiFfiConverterBoolean.write(value.ble_enabled, buf)
-        _UniffiFfiConverterBoolean.write(value.wifi_direct_enabled, buf)
-        _UniffiFfiConverterBoolean.write(value.internet_enabled, buf)
-        _UniffiFfiConverterBoolean.write(value.reticulum_enabled, buf)
-        _UniffiFfiConverterBoolean.write(value.nostr_enabled, buf)
-        _UniffiFfiConverterBoolean.write(value.nostr_sealing_enabled, buf)
-        _UniffiFfiConverterBoolean.write(value.nostr_cold_contact_enabled, buf)
+        _UniffiFfiConverterBoolean.write(value.held, buf)
+        _UniffiFfiConverterString.write(value.holder_location, buf)
+        _UniffiFfiConverterString.write(value.holder_thread, buf)
+        _UniffiFfiConverterUInt64.write(value.held_for_ms, buf)
 
 
 
@@ -5920,8 +5902,7 @@ class _UniffiFfiConverterTypeRelayPriority(_UniffiConverterRustBuffer):
 
 @dataclass
 class RelayConfig:
-    def __init__(self, *, relay_threshold:int, min_battery_for_relay:int, allow_relay:bool, relay_priority:RelayPriority):
-        self.relay_threshold = relay_threshold
+    def __init__(self, *, min_battery_for_relay:int, allow_relay:bool, relay_priority:RelayPriority):
         self.min_battery_for_relay = min_battery_for_relay
         self.allow_relay = allow_relay
         self.relay_priority = relay_priority
@@ -5930,10 +5911,8 @@ class RelayConfig:
 
     
     def __str__(self):
-        return "RelayConfig(relay_threshold={}, min_battery_for_relay={}, allow_relay={}, relay_priority={})".format(self.relay_threshold, self.min_battery_for_relay, self.allow_relay, self.relay_priority)
+        return "RelayConfig(min_battery_for_relay={}, allow_relay={}, relay_priority={})".format(self.min_battery_for_relay, self.allow_relay, self.relay_priority)
     def __eq__(self, other):
-        if self.relay_threshold != other.relay_threshold:
-            return False
         if self.min_battery_for_relay != other.min_battery_for_relay:
             return False
         if self.allow_relay != other.allow_relay:
@@ -5946,7 +5925,6 @@ class _UniffiFfiConverterTypeRelayConfig(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
         return RelayConfig(
-            relay_threshold=_UniffiFfiConverterUInt64.read(buf),
             min_battery_for_relay=_UniffiFfiConverterUInt8.read(buf),
             allow_relay=_UniffiFfiConverterBoolean.read(buf),
             relay_priority=_UniffiFfiConverterTypeRelayPriority.read(buf),
@@ -5954,14 +5932,12 @@ class _UniffiFfiConverterTypeRelayConfig(_UniffiConverterRustBuffer):
 
     @staticmethod
     def check_lower(value):
-        _UniffiFfiConverterUInt64.check_lower(value.relay_threshold)
         _UniffiFfiConverterUInt8.check_lower(value.min_battery_for_relay)
         _UniffiFfiConverterBoolean.check_lower(value.allow_relay)
         _UniffiFfiConverterTypeRelayPriority.check_lower(value.relay_priority)
 
     @staticmethod
     def write(value, buf):
-        _UniffiFfiConverterUInt64.write(value.relay_threshold, buf)
         _UniffiFfiConverterUInt8.write(value.min_battery_for_relay, buf)
         _UniffiFfiConverterBoolean.write(value.allow_relay, buf)
         _UniffiFfiConverterTypeRelayPriority.write(value.relay_priority, buf)
@@ -6067,126 +6043,6 @@ class _UniffiFfiConverterTypeReliabilityConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterTypeAckConfig.write(value.ack, buf)
         _UniffiFfiConverterTypeRetryConfig.write(value.retry, buf)
         _UniffiFfiConverterTypeDedupConfig.write(value.dedup, buf)
-
-@dataclass
-class ProtocolConfigExtended:
-    def __init__(self, *, app_id:str, profile:str, transport:TransportConfig, dors:DorsConfig, relay:RelayConfig, path:PathConfig, reliability:ReliabilityConfig, initial_ttl:int):
-        self.app_id = app_id
-        self.profile = profile
-        self.transport = transport
-        self.dors = dors
-        self.relay = relay
-        self.path = path
-        self.reliability = reliability
-        self.initial_ttl = initial_ttl
-        
-        
-
-    
-    def __str__(self):
-        return "ProtocolConfigExtended(app_id={}, profile={}, transport={}, dors={}, relay={}, path={}, reliability={}, initial_ttl={})".format(self.app_id, self.profile, self.transport, self.dors, self.relay, self.path, self.reliability, self.initial_ttl)
-    def __eq__(self, other):
-        if self.app_id != other.app_id:
-            return False
-        if self.profile != other.profile:
-            return False
-        if self.transport != other.transport:
-            return False
-        if self.dors != other.dors:
-            return False
-        if self.relay != other.relay:
-            return False
-        if self.path != other.path:
-            return False
-        if self.reliability != other.reliability:
-            return False
-        if self.initial_ttl != other.initial_ttl:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeProtocolConfigExtended(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return ProtocolConfigExtended(
-            app_id=_UniffiFfiConverterString.read(buf),
-            profile=_UniffiFfiConverterString.read(buf),
-            transport=_UniffiFfiConverterTypeTransportConfig.read(buf),
-            dors=_UniffiFfiConverterTypeDorsConfig.read(buf),
-            relay=_UniffiFfiConverterTypeRelayConfig.read(buf),
-            path=_UniffiFfiConverterTypePathConfig.read(buf),
-            reliability=_UniffiFfiConverterTypeReliabilityConfig.read(buf),
-            initial_ttl=_UniffiFfiConverterUInt8.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterString.check_lower(value.app_id)
-        _UniffiFfiConverterString.check_lower(value.profile)
-        _UniffiFfiConverterTypeTransportConfig.check_lower(value.transport)
-        _UniffiFfiConverterTypeDorsConfig.check_lower(value.dors)
-        _UniffiFfiConverterTypeRelayConfig.check_lower(value.relay)
-        _UniffiFfiConverterTypePathConfig.check_lower(value.path)
-        _UniffiFfiConverterTypeReliabilityConfig.check_lower(value.reliability)
-        _UniffiFfiConverterUInt8.check_lower(value.initial_ttl)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterString.write(value.app_id, buf)
-        _UniffiFfiConverterString.write(value.profile, buf)
-        _UniffiFfiConverterTypeTransportConfig.write(value.transport, buf)
-        _UniffiFfiConverterTypeDorsConfig.write(value.dors, buf)
-        _UniffiFfiConverterTypeRelayConfig.write(value.relay, buf)
-        _UniffiFfiConverterTypePathConfig.write(value.path, buf)
-        _UniffiFfiConverterTypeReliabilityConfig.write(value.reliability, buf)
-        _UniffiFfiConverterUInt8.write(value.initial_ttl, buf)
-
-@dataclass
-class ProtocolLockDiagnostics:
-    def __init__(self, *, held:bool, holder_location:str, holder_thread:str, held_for_ms:int):
-        self.held = held
-        self.holder_location = holder_location
-        self.holder_thread = holder_thread
-        self.held_for_ms = held_for_ms
-        
-        
-
-    
-    def __str__(self):
-        return "ProtocolLockDiagnostics(held={}, holder_location={}, holder_thread={}, held_for_ms={})".format(self.held, self.holder_location, self.holder_thread, self.held_for_ms)
-    def __eq__(self, other):
-        if self.held != other.held:
-            return False
-        if self.holder_location != other.holder_location:
-            return False
-        if self.holder_thread != other.holder_thread:
-            return False
-        if self.held_for_ms != other.held_for_ms:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeProtocolLockDiagnostics(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return ProtocolLockDiagnostics(
-            held=_UniffiFfiConverterBoolean.read(buf),
-            holder_location=_UniffiFfiConverterString.read(buf),
-            holder_thread=_UniffiFfiConverterString.read(buf),
-            held_for_ms=_UniffiFfiConverterUInt64.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterBoolean.check_lower(value.held)
-        _UniffiFfiConverterString.check_lower(value.holder_location)
-        _UniffiFfiConverterString.check_lower(value.holder_thread)
-        _UniffiFfiConverterUInt64.check_lower(value.held_for_ms)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterBoolean.write(value.held, buf)
-        _UniffiFfiConverterString.write(value.holder_location, buf)
-        _UniffiFfiConverterString.write(value.holder_thread, buf)
-        _UniffiFfiConverterUInt64.write(value.held_for_ms, buf)
 
 @dataclass
 class ReticulumMessage:
@@ -7108,6 +6964,72 @@ class _UniffiFfiConverterTypeTelemetryConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalBoolean.write(value.routing_diagnostic, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.enable_poll_queue, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.mls_sampling_bypass, buf)
+
+@dataclass
+class TransportConfig:
+    def __init__(self, *, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, nostr_sealing_enabled:bool = True, nostr_cold_contact_enabled:bool = True):
+        self.ble_enabled = ble_enabled
+        self.wifi_direct_enabled = wifi_direct_enabled
+        self.internet_enabled = internet_enabled
+        self.reticulum_enabled = reticulum_enabled
+        self.nostr_enabled = nostr_enabled
+        self.nostr_sealing_enabled = nostr_sealing_enabled
+        self.nostr_cold_contact_enabled = nostr_cold_contact_enabled
+        
+        
+
+    
+    def __str__(self):
+        return "TransportConfig(ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, nostr_sealing_enabled={}, nostr_cold_contact_enabled={})".format(self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.nostr_sealing_enabled, self.nostr_cold_contact_enabled)
+    def __eq__(self, other):
+        if self.ble_enabled != other.ble_enabled:
+            return False
+        if self.wifi_direct_enabled != other.wifi_direct_enabled:
+            return False
+        if self.internet_enabled != other.internet_enabled:
+            return False
+        if self.reticulum_enabled != other.reticulum_enabled:
+            return False
+        if self.nostr_enabled != other.nostr_enabled:
+            return False
+        if self.nostr_sealing_enabled != other.nostr_sealing_enabled:
+            return False
+        if self.nostr_cold_contact_enabled != other.nostr_cold_contact_enabled:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeTransportConfig(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return TransportConfig(
+            ble_enabled=_UniffiFfiConverterBoolean.read(buf),
+            wifi_direct_enabled=_UniffiFfiConverterBoolean.read(buf),
+            internet_enabled=_UniffiFfiConverterBoolean.read(buf),
+            reticulum_enabled=_UniffiFfiConverterBoolean.read(buf),
+            nostr_enabled=_UniffiFfiConverterBoolean.read(buf),
+            nostr_sealing_enabled=_UniffiFfiConverterBoolean.read(buf),
+            nostr_cold_contact_enabled=_UniffiFfiConverterBoolean.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterBoolean.check_lower(value.ble_enabled)
+        _UniffiFfiConverterBoolean.check_lower(value.wifi_direct_enabled)
+        _UniffiFfiConverterBoolean.check_lower(value.internet_enabled)
+        _UniffiFfiConverterBoolean.check_lower(value.reticulum_enabled)
+        _UniffiFfiConverterBoolean.check_lower(value.nostr_enabled)
+        _UniffiFfiConverterBoolean.check_lower(value.nostr_sealing_enabled)
+        _UniffiFfiConverterBoolean.check_lower(value.nostr_cold_contact_enabled)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterBoolean.write(value.ble_enabled, buf)
+        _UniffiFfiConverterBoolean.write(value.wifi_direct_enabled, buf)
+        _UniffiFfiConverterBoolean.write(value.internet_enabled, buf)
+        _UniffiFfiConverterBoolean.write(value.reticulum_enabled, buf)
+        _UniffiFfiConverterBoolean.write(value.nostr_enabled, buf)
+        _UniffiFfiConverterBoolean.write(value.nostr_sealing_enabled, buf)
+        _UniffiFfiConverterBoolean.write(value.nostr_cold_contact_enabled, buf)
 
 
 
@@ -12110,12 +12032,10 @@ __all__ = [
     "PathConfig",
     "PeerDevice",
     "ProtocolConfig",
-    "TransportConfig",
+    "ProtocolLockDiagnostics",
     "RelayConfig",
     "RetryConfig",
     "ReliabilityConfig",
-    "ProtocolConfigExtended",
-    "ProtocolLockDiagnostics",
     "ReticulumMessage",
     "RouteEntry",
     "RoutingScoreEntry",
@@ -12123,6 +12043,7 @@ __all__ = [
     "RoutingStats",
     "SendMessageOptions",
     "TelemetryConfig",
+    "TransportConfig",
     "TransportStateEvent",
     "WifiDirectMessage",
     "derive_address",

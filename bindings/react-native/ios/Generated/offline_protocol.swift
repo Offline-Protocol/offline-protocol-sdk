@@ -4728,82 +4728,6 @@ public func FfiConverterTypeProtocolConfig_lower(_ value: ProtocolConfig) -> Rus
 }
 
 
-public struct ProtocolConfigExtended: Equatable, Hashable {
-    public var appId: String
-    public var profile: String
-    public var transport: TransportConfig
-    public var dors: DorsConfig
-    public var relay: RelayConfig
-    public var path: PathConfig
-    public var reliability: ReliabilityConfig
-    public var initialTtl: UInt8
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(appId: String, profile: String, transport: TransportConfig, dors: DorsConfig, relay: RelayConfig, path: PathConfig, reliability: ReliabilityConfig, initialTtl: UInt8) {
-        self.appId = appId
-        self.profile = profile
-        self.transport = transport
-        self.dors = dors
-        self.relay = relay
-        self.path = path
-        self.reliability = reliability
-        self.initialTtl = initialTtl
-    }
-
-    
-}
-
-#if compiler(>=6)
-extension ProtocolConfigExtended: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeProtocolConfigExtended: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProtocolConfigExtended {
-        return
-            try ProtocolConfigExtended(
-                appId: FfiConverterString.read(from: &buf), 
-                profile: FfiConverterString.read(from: &buf), 
-                transport: FfiConverterTypeTransportConfig.read(from: &buf), 
-                dors: FfiConverterTypeDorsConfig.read(from: &buf), 
-                relay: FfiConverterTypeRelayConfig.read(from: &buf), 
-                path: FfiConverterTypePathConfig.read(from: &buf), 
-                reliability: FfiConverterTypeReliabilityConfig.read(from: &buf), 
-                initialTtl: FfiConverterUInt8.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: ProtocolConfigExtended, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.appId, into: &buf)
-        FfiConverterString.write(value.profile, into: &buf)
-        FfiConverterTypeTransportConfig.write(value.transport, into: &buf)
-        FfiConverterTypeDorsConfig.write(value.dors, into: &buf)
-        FfiConverterTypeRelayConfig.write(value.relay, into: &buf)
-        FfiConverterTypePathConfig.write(value.path, into: &buf)
-        FfiConverterTypeReliabilityConfig.write(value.reliability, into: &buf)
-        FfiConverterUInt8.write(value.initialTtl, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeProtocolConfigExtended_lift(_ buf: RustBuffer) throws -> ProtocolConfigExtended {
-    return try FfiConverterTypeProtocolConfigExtended.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeProtocolConfigExtended_lower(_ value: ProtocolConfigExtended) -> RustBuffer {
-    return FfiConverterTypeProtocolConfigExtended.lower(value)
-}
-
-
 public struct ProtocolLockDiagnostics: Equatable, Hashable {
     public var held: Bool
     public var holderLocation: String
@@ -4865,15 +4789,13 @@ public func FfiConverterTypeProtocolLockDiagnostics_lower(_ value: ProtocolLockD
 
 
 public struct RelayConfig: Equatable, Hashable {
-    public var relayThreshold: UInt64
     public var minBatteryForRelay: UInt8
     public var allowRelay: Bool
     public var relayPriority: RelayPriority
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(relayThreshold: UInt64, minBatteryForRelay: UInt8, allowRelay: Bool, relayPriority: RelayPriority) {
-        self.relayThreshold = relayThreshold
+    public init(minBatteryForRelay: UInt8, allowRelay: Bool, relayPriority: RelayPriority) {
         self.minBatteryForRelay = minBatteryForRelay
         self.allowRelay = allowRelay
         self.relayPriority = relayPriority
@@ -4893,7 +4815,6 @@ public struct FfiConverterTypeRelayConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RelayConfig {
         return
             try RelayConfig(
-                relayThreshold: FfiConverterUInt64.read(from: &buf), 
                 minBatteryForRelay: FfiConverterUInt8.read(from: &buf), 
                 allowRelay: FfiConverterBool.read(from: &buf), 
                 relayPriority: FfiConverterTypeRelayPriority.read(from: &buf)
@@ -4901,7 +4822,6 @@ public struct FfiConverterTypeRelayConfig: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: RelayConfig, into buf: inout [UInt8]) {
-        FfiConverterUInt64.write(value.relayThreshold, into: &buf)
         FfiConverterUInt8.write(value.minBatteryForRelay, into: &buf)
         FfiConverterBool.write(value.allowRelay, into: &buf)
         FfiConverterTypeRelayPriority.write(value.relayPriority, into: &buf)
