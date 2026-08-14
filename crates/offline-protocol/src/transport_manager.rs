@@ -946,15 +946,38 @@ impl TransportManager {
     ///
     /// Checked in that order so the common online case costs a status scan and
     /// never enumerates links.
+    ///
+    /// **This answer is deliberately peer-blind on its first arm**, and that is
+    /// a real limit rather than an oversight: an infrastructure carrier being up
+    /// says nothing about whether *this* recipient is on it. Callers that hold a
+    /// peer-specific fact must not settle for this answer — the relay's own
+    /// `recipient_unreachable` verdict is exactly such a fact, and the park it
+    /// drives offers the frame to the mesh regardless of what this returns (see
+    /// `park_unreachable_dm`).
     pub fn can_reach_without_carrying(&self, peer_id: &str) -> bool {
-        let has_infrastructure = self.transports.iter().any(|(transport_type, transport)| {
+        self.has_infrastructure_carrier() || self.mesh_can_address(peer_id)
+    }
+
+    /// Whether any carrier that does its own routing is available.
+    ///
+    /// Peer-blind by nature: these carriers reach peers we hold no radio link
+    /// to, so there is no per-peer link to consult. Note the status is
+    /// bridge-reported and means "the platform says this carrier is up", not
+    /// "the relay connection is authenticated" — a distinction that matters
+    /// wherever this stands in for reachability.
+    pub fn has_infrastructure_carrier(&self) -> bool {
+        self.transports.iter().any(|(transport_type, transport)| {
             !MESH_TRANSPORTS.contains(transport_type)
                 && transport.status() == TransportStatus::Available
-        });
-        if has_infrastructure {
-            return true;
-        }
+        })
+    }
 
+    /// Whether a mesh carrier holds a live link straight to `peer_id`.
+    ///
+    /// The peer-specific half of [`Self::can_reach_without_carrying`], split out
+    /// because callers that already know infrastructure is up still need to ask
+    /// whether the mesh can hand a frame over without anyone carrying it.
+    pub fn mesh_can_address(&self, peer_id: &str) -> bool {
         MESH_TRANSPORTS.iter().any(|transport_type| {
             self.transports
                 .get(transport_type)
@@ -966,6 +989,16 @@ impl TransportManager {
                         .any(|link| link.peer_id == peer_id)
                 })
         })
+    }
+
+    /// Whether `transport_type` is a short-range carrier that can only address
+    /// peers it holds a live link to — as opposed to an infrastructure carrier
+    /// that does its own routing.
+    ///
+    /// A frame that arrived over one of these travelled either from a neighbor
+    /// or through them, which is what makes it evidence about the route back.
+    pub fn is_mesh_transport(transport_type: TransportType) -> bool {
+        MESH_TRANSPORTS.contains(&transport_type)
     }
 
     /// Whether `transport_type` can actually put a frame in front of `peer_id`.
