@@ -14,10 +14,11 @@
 //!   Reach alone is easy to get by repeating everything endlessly; the counts in
 //!   these tests are what separate a working mesh from one that floods.
 
-use offline_protocol::{OfflineProtocol, ProtocolConfig};
+use offline_protocol::{Event, OfflineProtocol, ProtocolConfig};
 use offline_protocol_core::{AppId, Message, UserId};
 use offline_protocol_transport::{mock::MockTransport, Transport, TransportType};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// A simulated neighborhood of devices.
 ///
@@ -56,6 +57,20 @@ impl Neighborhood {
     /// Adds one device, which may be configured differently from the rest —
     /// a device that declines to carry traffic, for instance.
     fn add_node(&mut self, id: &str, config: ProtocolConfig) {
+        self.add_node_inner(id, config, false);
+    }
+
+    /// Adds a device that also has a working relay connection.
+    ///
+    /// Its relay is a hole in the ground: frames written to it leave the
+    /// simulation, because the whole point of the case this exists for is a
+    /// recipient the relay cannot deliver to. What comes back instead is the
+    /// relay's verdict, delivered by [`Self::relay_says_unreachable`].
+    fn add_online_node(&mut self, id: &str) {
+        self.add_node_inner(id, default_config(id), true);
+    }
+
+    fn add_node_inner(&mut self, id: &str, config: ProtocolConfig, online: bool) {
         let radio = MockTransport::new(TransportType::BLE);
         radio.start().unwrap();
         // A device can only put a frame on a link it actually has.
@@ -65,12 +80,32 @@ impl Neighborhood {
         let mut node = OfflineProtocol::new(config).unwrap();
         node.transport_manager_mut()
             .add_transport(TransportType::BLE, Box::new(radio));
+        if online {
+            let relay = MockTransport::new(TransportType::Internet);
+            relay.start().unwrap();
+            node.transport_manager_mut()
+                .add_transport(TransportType::Internet, Box::new(relay));
+        }
         node.start().unwrap();
 
         self.nodes.insert(id.to_string(), node);
         self.radios.insert(id.to_string(), handle);
         self.links.insert(id.to_string(), Vec::new());
         self.inboxes.insert(id.to_string(), Vec::new());
+    }
+
+    /// The relay answering that it cannot reach the recipient of `message_id` —
+    /// the one thing a device learns about a *particular* peer, as opposed to
+    /// whether its own carriers are up.
+    fn relay_says_unreachable(&mut self, id: &str, message_id: &str) {
+        self.nodes
+            .get_mut(id)
+            .unwrap()
+            .on_transport_send_failed(
+                message_id,
+                Some("recipient_unreachable: peer offline".to_string()),
+            )
+            .unwrap();
     }
 
     /// Puts two devices in range of each other.
@@ -279,6 +314,58 @@ fn the_answer_finds_its_way_back() {
     assert!(
         acked_back,
         "carol's answer must be carried back toward alice"
+    );
+}
+
+#[test]
+fn an_online_sender_reaches_a_recipient_only_the_mesh_can_see() {
+    // The mixed neighborhood, end to end. Alice has internet; carol does not
+    // and is two links away. Having a relay connection says nothing about
+    // whether carol is on it — and when the relay says she is not, the devices
+    // standing next to alice are the only way there.
+    let mut net = Neighborhood::new(&["bob", "carol"]);
+    net.add_online_node("alice");
+    net.link("alice", "bob");
+    net.link("bob", "carol");
+
+    let delivered: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let delivered_handle = Arc::clone(&delivered);
+    net.node("alice").on_event(move |event| {
+        if let Event::MessageDelivered { message_id, .. } = event {
+            delivered_handle.lock().unwrap().push(message_id);
+        }
+    });
+
+    let msg_id = net.send("alice", "carol", "meet at the north gate");
+
+    // With the relay up the frame goes to the relay, and the neighbors are not
+    // asked. (Without this the test would pass on the pre-existing failure
+    // path, which offers to the mesh when no transport accepts the send.)
+    net.step();
+    assert_eq!(
+        net.transmission_count(&msg_id),
+        0,
+        "an online device must not spend the mesh before the relay has spoken"
+    );
+
+    net.relay_says_unreachable("alice", &msg_id);
+    net.run_until_quiet(12);
+
+    assert_eq!(
+        net.inbox("carol"),
+        vec!["meet at the north gate".to_string()],
+        "the relay's verdict must send the message to the neighbors instead"
+    );
+    assert_eq!(
+        net.deliveries_to("carol", &msg_id),
+        1,
+        "and it must arrive exactly once"
+    );
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        vec![msg_id.clone()],
+        "alice must learn it was delivered — parking removed the pending ACK, \
+         so a delivery she cannot settle would be probed until it expired"
     );
 }
 

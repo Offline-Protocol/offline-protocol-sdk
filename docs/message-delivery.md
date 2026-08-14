@@ -217,6 +217,9 @@ When the internet relay reports a recipient unreachable for an in-flight regular
 1. A non-terminal `MessageUndeliverable` event fires (`message_id`, `recipient`, `reason`, and `file_id` when the message is a media chunk)
 2. The pending ACK and the retry-queue entry are dropped — the retry machinery goes quiet
 3. The outbox entry stays put, so the message remains "in flight" and subject only to the outbox lifetime
+4. The message is offered to any mesh neighbors, who may be able to reach a recipient the relay cannot — see [An online device in a mixed neighborhood](./mesh.md#an-online-device-in-a-mixed-neighborhood)
+
+The mesh offer repeats on each subsequent park, so a recipient who was out of range when the message was first parked is still reached later. Handing a copy to a neighbor is not proof of arrival, so the park and its probe stand regardless; what settles the message is the acknowledgement coming back. Since parking removed the pending ACK, that acknowledgement settles the parked entry on its own and fires the ordinary `MessageDelivered`.
 
 A parked message is re-driven with a fresh ACK budget on every reachability edge:
 
@@ -237,8 +240,8 @@ The outbox lifetime bounds the entry itself, with one caveat worth knowing: each
 
 | Message kind | Behavior on `recipient_unreachable` |
 |--------------|-------------------------------------|
-| Regular DM | Parked (as above) |
-| Media chunk | Not parked — normal retry exhaustion → transfer abort → `media_resend_required` |
+| Regular DM | Parked (as above), and offered to mesh neighbors |
+| Media chunk | Not parked — normal retry exhaustion → transfer abort → `media_resend_required` — but offered to mesh neighbors, and it keeps its pending ACK, so an answer carried back settles it the ordinary way |
 | Connection request | Not parked — settles immediately via `connection_request_undeliverable` |
 
 **Contract**: `MessageUndeliverable` is the "recipient is offline" signal and may fire repeatedly for the same message while the peer stays offline. Terminal settlement happens only at delivery (`MessageDelivered`) or outbox-lifetime expiry (`MessageFailed`). Apps that previously keyed "recipient offline" UX off the ~15-minute terminal `message_failed` should key it off `message_undeliverable` instead.

@@ -1,5 +1,5 @@
 use super::*;
-use crate::constants::ACK_FOR_KEY;
+use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY};
 use crate::events::{DecryptionFailureCode, PresenceSource, PresenceStatus, SecurityWarningCode};
 use crate::mls_observability::{
     DecryptionFailureKind, MlsErrorCategory, MlsLifecycleEvent, MlsOperationContext,
@@ -8734,6 +8734,342 @@ fn test_unreachable_media_chunk_is_not_parked() {
         "Media chunk must keep its pending ACK (not parked)"
     );
     assert!(protocol.media_outbox.contains_key(&chunk_id));
+    assert!(protocol.dm_unreachable_parks.is_empty());
+}
+
+// ============================================================================
+// MESH FALLBACK ON THE RELAY'S UNREACHABLE VERDICT
+//
+// An infrastructure carrier being up says nothing about whether a particular
+// recipient is on it, but it is what the send-time reachability check asks —
+// so an online device used to keep every frame to itself, whatever the relay
+// then said about the peer. These cover the one per-peer reachability fact
+// that does arrive, the relay's `recipient_unreachable` verdict, driving the
+// mesh hand-off the check cannot.
+// ============================================================================
+
+/// A device with a working relay connection and one neighbor standing next to
+/// it — `carol`, who is not the recipient of anything here and can only carry.
+///
+/// The radio refuses recipients it holds no link to, the way BLE does, so a
+/// frame for a distant peer really does leave over the relay rather than being
+/// swallowed by the mesh carrier.
+fn online_device_with_a_neighbor() -> (OfflineProtocol, MockTransport, MockTransport) {
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    ble.set_reject_unknown_recipients(true);
+    ble.add_connected_peer("carol", -55);
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet.clone()));
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble.clone()));
+    protocol.start().unwrap();
+
+    (protocol, internet, ble)
+}
+
+/// The acknowledgement a recipient sends back, as it looks arriving here.
+fn delivery_ack_frame(from: &str, to: &str, acked: &MessageId) -> Message {
+    Message::builder(
+        UserId::new(from).unwrap(),
+        UserId::new(to).unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(String::new())
+    .requires_ack(false)
+    .metadata(ACK_FOR_KEY, acked.as_str())
+    .metadata(ACK_HOP_COUNT_KEY, "2")
+    .metadata(ACK_TRANSPORT_KEY, "ble")
+    .build()
+}
+
+#[test]
+fn test_unreachable_verdict_offers_a_parked_dm_to_the_mesh() {
+    // The mixed neighborhood: this device is online, the recipient is not on
+    // the relay, and somebody who might reach them is standing right here.
+    let (mut protocol, internet, ble) = online_device_with_a_neighbor();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    assert_eq!(
+        internet.sent_messages().len(),
+        1,
+        "with the relay up the frame goes to the relay"
+    );
+    assert!(
+        ble.peer_sends().is_empty(),
+        "and the mesh is not spent before the relay has said anything about this peer"
+    );
+
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+
+    let handed = ble.peer_sends();
+    assert_eq!(
+        handed.len(),
+        1,
+        "the relay declaring this peer unreachable is the per-peer fact the \
+         send-time check cannot have; the neighbors must be asked"
+    );
+    assert_eq!(handed[0].0, "carol");
+    assert_eq!(handed[0].1.id, message_id);
+
+    // A neighbor taking a copy is not proof of arrival, so the park stands.
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&1));
+    assert!(protocol.outbox.contains_key(&message_id));
+    assert!(
+        !protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "parking still drops the pending ACK"
+    );
+}
+
+#[test]
+fn test_a_later_park_offers_the_dm_to_whoever_is_around_then() {
+    // Neighbors come and go. A DM parked while nobody was in range must be
+    // offered again to whoever turns up, not only on the first park — the
+    // offer belongs to the park action, not to the first verdict.
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    ble.set_reject_unknown_recipients(true);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble.clone()));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert!(
+        ble.peer_sends().is_empty(),
+        "nobody is around to carry it yet"
+    );
+
+    // Someone walks up, and the probe earns a second verdict.
+    ble.add_connected_peer("carol", -55);
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+
+    let handed = ble.peer_sends();
+    assert_eq!(handed.len(), 1, "the second park must ask the new neighbor");
+    assert_eq!(handed[0].1.id, message_id);
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&2),
+        "and the escalation continues as before"
+    );
+}
+
+#[test]
+fn test_a_parked_dm_is_settled_by_an_acknowledgement_carried_back() {
+    // The other half of the offer. Parking removed the pending ACK, so the
+    // answer to a mesh-carried delivery lands on the branch that used to drop
+    // it — leaving a delivered, read message being probed until its outbox
+    // lifetime ran out. Without this the offer would be worse than useless.
+    let (mut protocol, _internet, ble) = online_device_with_a_neighbor();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert!(protocol.outbox.contains_key(&message_id));
+
+    // Bob answers, and the answer is carried back to us by carol.
+    ble.queue_message_from(
+        delivery_ack_frame("bob", "user123", &message_id),
+        "carol".to_string(),
+    );
+    assert!(
+        protocol.receive_message().is_none(),
+        "an acknowledgement is not app traffic"
+    );
+
+    assert!(
+        !protocol.outbox.contains_key(&message_id),
+        "the message was delivered; it must not keep being probed"
+    );
+    assert!(
+        !protocol.retry_queue.contains(&message_id.as_str()),
+        "and its reachability probe must be gone with it"
+    );
+    let captured = events.lock().unwrap();
+    assert!(
+        captured.iter().any(|event| matches!(
+            event,
+            Event::MessageDelivered { message_id: delivered, .. } if *delivered == message_id.as_str()
+        )),
+        "the app must be told it was delivered: {:?}",
+        *captured
+    );
+}
+
+#[test]
+fn test_a_parked_dm_is_not_settled_by_anyone_elses_acknowledgement() {
+    // An acknowledgement carries no signature, so the settle path is gated on
+    // what it cannot choose: the message must be parked, and the answer must
+    // come from the peer it was addressed to.
+    let (mut protocol, _internet, ble) = online_device_with_a_neighbor();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+
+    ble.queue_message_from(
+        delivery_ack_frame("mallory", "user123", &message_id),
+        "carol".to_string(),
+    );
+    assert!(protocol.receive_message().is_none());
+    assert!(
+        protocol.outbox.contains_key(&message_id),
+        "only the recipient's own answer settles a parked message"
+    );
+
+    // With no park counter this is an ordinary late or duplicate answer, and
+    // the outbox entry is not this path's to remove: a reachability edge that
+    // cleared the counter also re-drove the message, which registers a fresh
+    // pending ACK for the ordinary path to settle.
+    protocol.dm_unreachable_parks.remove("bob");
+    ble.queue_message_from(
+        delivery_ack_frame("bob", "user123", &message_id),
+        "carol".to_string(),
+    );
+    assert!(protocol.receive_message().is_none());
+    assert!(
+        protocol.outbox.contains_key(&message_id),
+        "without a live park this is a late answer, not a park settlement"
+    );
+}
+
+#[test]
+fn test_an_answer_to_a_carried_message_goes_back_over_the_mesh_even_when_online() {
+    // The half that bites: a message reached us across the mesh, so its sender
+    // is somewhere the mesh goes. Answering over the relay because our own
+    // internet happens to be up leaves an offline sender retransmitting a
+    // message we have already read.
+    let (mut protocol, internet, ble) = online_device_with_a_neighbor();
+
+    let inbound = signed_frame(&id("alice"), "user123", "carried to you");
+    let inbound_id = inbound.id.as_str();
+    ble.queue_message_from(inbound, "carol".to_string());
+
+    assert!(
+        protocol.receive_message().is_some(),
+        "the message is for us and must be delivered"
+    );
+
+    let handed = ble.peer_sends();
+    assert_eq!(
+        handed.len(),
+        1,
+        "the answer must travel back the way the message came"
+    );
+    assert_eq!(handed[0].0, "carol");
+    assert_eq!(
+        handed[0].1.metadata.get(ACK_FOR_KEY).map(String::as_str),
+        Some(inbound_id.as_str())
+    );
+    assert_eq!(handed[0].1.recipient.as_str(), id("alice"));
+
+    assert!(
+        internet
+            .sent_messages()
+            .iter()
+            .any(|m| m.metadata.get(ACK_FOR_KEY).map(String::as_str) == Some(inbound_id.as_str())),
+        "and also over the relay: an online sender is equally plausible, and a \
+         duplicate acknowledgement costs one frame"
+    );
+}
+
+#[test]
+fn test_unreachable_media_chunk_is_offered_to_the_mesh() {
+    // Media is never parked — a chunk keeps its pending ACK, so an answer
+    // carried back settles it through the ordinary path — but the relay's
+    // verdict says the same thing about the recipient either way, and a
+    // transfer that can complete across the room should.
+    let (mut protocol, _internet, ble) = online_device_with_a_neighbor();
+
+    let chunk_message = signed_frame(&id("user123"), "bob", "chunk-bytes");
+    let chunk_id = chunk_message.id.clone();
+    protocol.media_outbox.insert(
+        chunk_id.clone(),
+        OutboxEntry {
+            message: chunk_message,
+            attempt_count: 1,
+            first_sent_at: chrono::Utc::now(),
+            last_sent_at: chrono::Utc::now(),
+            last_transport: Some(TransportType::Internet),
+            reseal: None,
+        },
+    );
+    protocol
+        .ack_manager
+        .register_pending_ack(chunk_id.clone(), None)
+        .unwrap();
+
+    protocol
+        .on_transport_send_failed(
+            &chunk_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+
+    let handed = ble.peer_sends();
+    assert_eq!(
+        handed.len(),
+        1,
+        "the chunk must be offered to the neighbors"
+    );
+    assert_eq!(handed[0].1.id, chunk_id);
+    assert!(
+        protocol.ack_manager.is_waiting_for_ack(&chunk_id),
+        "and it must still be the ordinary ACK machinery that settles it"
+    );
     assert!(protocol.dm_unreachable_parks.is_empty());
 }
 
