@@ -38,6 +38,8 @@ send_message()
 3. When the recipient sends an ACK, a `MessageDelivered` event fires
 4. The message is removed from outbox and retry queue
 
+Only the recipient settles a message. An acknowledgement naming a message sent to somebody else is ignored, whichever carrier it arrives on — every device that carried a frame knows its id, and settling on the id alone would let any of them drop the outbox entry and report a delivery that never happened. This is an attribution check, not authentication: acknowledgements are not signed, so it removes the unattributed answer rather than a determined forgery by someone who saw the frame — and who therefore also saw the recipient's name.
+
 ### Deferred Send
 
 1. `send_message()` returns `Ok(message_id)` even when the transport send fails
