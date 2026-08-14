@@ -9074,6 +9074,118 @@ fn test_unreachable_media_chunk_is_offered_to_the_mesh() {
 }
 
 #[test]
+fn test_an_acknowledgement_from_a_third_party_does_not_settle_an_in_flight_dm() {
+    // An acknowledgement names a message id and nothing else binds it to a
+    // delivery. Everyone who carried the frame knows that id, so answering for
+    // someone else must not settle the message: doing so drops the outbox
+    // entry and reports `message_delivered` for a message that arrived nowhere,
+    // which is the one failure the sender never finds out about.
+    let (mut protocol, _internet, ble) = online_device_with_a_neighbor();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    assert!(protocol.ack_manager.is_waiting_for_ack(&message_id));
+
+    // Carol carried it, so carol knows the id. That is not permission to
+    // answer for bob.
+    ble.queue_message_from(
+        delivery_ack_frame("carol", "user123", &message_id),
+        "carol".to_string(),
+    );
+    assert!(protocol.receive_message().is_none());
+
+    assert!(
+        protocol.outbox.contains_key(&message_id),
+        "only the peer it was sent to can settle it"
+    );
+    assert!(
+        protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "and the refusal must not cost the message its retry record — a frame \
+         rejected after the pending ACK was taken would stop being retried, \
+         which is the silent loss this check exists to prevent"
+    );
+    assert!(
+        !events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            Event::MessageDelivered { message_id: delivered, .. }
+                if *delivered == message_id.as_str()
+        )),
+        "and the app must not be told it was delivered"
+    );
+
+    // The real recipient's answer still settles it the ordinary way.
+    ble.queue_message_from(
+        delivery_ack_frame("bob", "user123", &message_id),
+        "carol".to_string(),
+    );
+    assert!(protocol.receive_message().is_none());
+    assert!(
+        !protocol.outbox.contains_key(&message_id),
+        "the recipient's own acknowledgement must still settle the message"
+    );
+    assert!(
+        events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            Event::MessageDelivered { message_id: delivered, .. }
+                if *delivered == message_id.as_str()
+        )),
+        "and it must still be reported delivered"
+    );
+}
+
+#[test]
+fn test_settling_a_parked_dm_redrives_the_recipients_other_parked_dms() {
+    // The park counter is per-peer while the probes are per-message, so a
+    // burst to an offline peer leaves the later messages sitting on an
+    // escalated timer. An acknowledgement for any one of them proves the rest
+    // can go now — the same edge the pending-ACK branch acts on, which the
+    // parked branch has to reproduce because parking left it no pending ACK.
+    let (mut protocol, internet, ble) = online_device_with_a_neighbor();
+
+    let first = protocol
+        .send_message("bob", "first", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let second = protocol
+        .send_message("bob", "second", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    for id in [&first, &second] {
+        protocol
+            .on_transport_send_failed(
+                &id.as_str(),
+                Some("recipient_unreachable: peer offline".to_string()),
+            )
+            .unwrap();
+    }
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&2));
+    internet.clear_sent_messages();
+
+    // Bob answers the first one, carried back by carol.
+    ble.queue_message_from(
+        delivery_ack_frame("bob", "user123", &first),
+        "carol".to_string(),
+    );
+    assert!(protocol.receive_message().is_none());
+
+    assert!(
+        internet.sent_messages().iter().any(|m| m.id == second),
+        "the peer answered, so their other parked traffic must go now rather \
+         than waiting out its own escalated probe timer"
+    );
+    assert!(
+        !protocol.dm_unreachable_parks.contains_key("bob"),
+        "and the escalation starts over, the flush owning that reset"
+    );
+}
+
+#[test]
 fn test_parked_dm_redriven_with_fresh_ack_budget() {
     // Every re-drive registers a fresh pending ACK, so the retry budget
     // only ever burns against a peer believed reachable — attempts spent

@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Only the recipient can mark a message delivered.** A delivery
+  acknowledgement names a message id and nothing else tied it to a delivery, so
+  an acknowledgement from any party that had merely seen the frame settled it:
+  the outbox entry was dropped, the retries stopped, and the app was told
+  `message_delivered` for a message that arrived nowhere. Every device that
+  carries a frame across the mesh knows its id, and the mesh fall-back below
+  hands frames to exactly those devices — so the two belong together.
+  Acknowledgements naming a message sent to somebody else are now ignored on
+  both settlement paths, and a rejected one leaves the message's retry record
+  untouched so it keeps being retried. This is an attribution check rather than
+  authentication: acknowledgements carry no signature, so it removes the
+  unattributed answer, not a determined forgery by someone who saw the frame.
+
 - **A device with internet no longer keeps messages from the mesh standing
   next to it.** Reachability was decided from local carrier status alone: any
   carrier that does its own routing being up — Internet, Nostr, Reticulum —

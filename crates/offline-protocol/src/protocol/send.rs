@@ -4003,6 +4003,50 @@ impl OfflineProtocol {
     pub(super) fn handle_ack_message(&mut self, message: &Message) {
         if let Some(ack_for) = message.metadata.get(ACK_FOR_KEY) {
             if let Ok(message_id) = MessageId::from_str(ack_for) {
+                // Whoever answers has to be whoever we sent it to. An
+                // acknowledgement names a message id and nothing else ties it
+                // to a delivery, so without this any third party that merely
+                // saw the frame — a mesh carrier that took a copy, the relay —
+                // settles it: the outbox entry is dropped, the retries stop and
+                // the app is told `message_delivered` for a message that
+                // arrived nowhere. Refusing delivery is something those parties
+                // could always do; a false confirmation is the strictly worse
+                // one, because it is the version the sender never finds out
+                // about.
+                //
+                // Checked before anything is removed. The settle work below
+                // starts by taking the pending ACK, and a frame rejected after
+                // that point would have already cost the message its retry
+                // record — turning a refused acknowledgement into the silent
+                // loss this exists to prevent.
+                //
+                // Safe on this path — which every delivery passes through —
+                // because delivery already implies the equality: a device
+                // processes a frame only when its own `local_id` equals the
+                // frame's recipient (`receive_message` forwards anything else),
+                // and the acknowledgement it builds carries that same
+                // `local_id` as its sender. A genuine confirmation therefore
+                // matches whatever identifier namespace the app addresses peers
+                // in — the profile before MLS initialization, the `off1…`
+                // address after it.
+                //
+                // It is **not** authentication and must not be read as one: an
+                // acknowledgement carries no signature (empty content is not a
+                // security-gated prefix, and the receive loop handles it before
+                // the gate would run anyway), so a forger who saw the frame saw
+                // its recipient too and can simply write that name. What this
+                // removes is the unattributed forgery, and the divergence
+                // between the two settle paths below. Binding an
+                // acknowledgement to its sender for real needs signed acks.
+                if !self.ack_is_from_the_message_recipient(&message_id, message) {
+                    debug!(
+                        message_id = %message_id,
+                        claimed_sender = %message.sender,
+                        "Ignoring an acknowledgement from someone this message was not sent to"
+                    );
+                    return;
+                }
+
                 // A delivery ack settles an outbound connection request:
                 // the recipient provably received it, so a later stale
                 // recipient_unreachable signal must not fire a false
@@ -4101,6 +4145,31 @@ impl OfflineProtocol {
         }
     }
 
+    /// Whether `ack` comes from the peer the message it answers was addressed
+    /// to — the one thing about an acknowledgement that is not simply asserted
+    /// by whoever sent it. See [`Self::handle_ack_message`] for what that does
+    /// and does not buy.
+    ///
+    /// Both outboxes are consulted because both hold ack-bearing sends: plain
+    /// DMs and control frames in `outbox`, media chunks in `media_outbox`.
+    ///
+    /// Answers `true` when neither holds the id, which is the ordinary shape of
+    /// a duplicate answer arriving after the message already settled — there is
+    /// no record left to judge against, and inventing a verdict would start
+    /// dropping the answers this device has always accepted. The fail-open is
+    /// not reachable by an attacker: it needs our own outbox entry to be gone,
+    /// which nothing a peer sends can arrange.
+    fn ack_is_from_the_message_recipient(&self, message_id: &MessageId, ack: &Message) -> bool {
+        let Some(entry) = self
+            .outbox
+            .get(message_id)
+            .or_else(|| self.media_outbox.get(message_id))
+        else {
+            return true;
+        };
+        ack.sender.as_str() == entry.message.recipient.as_str()
+    }
+
     /// Settles a parked DM whose acknowledgement arrived with no pending ACK to
     /// match it — the delivery a park can otherwise never learn about.
     ///
@@ -4113,23 +4182,37 @@ impl OfflineProtocol {
     /// being probed until its lifetime expired, delivered and read the whole
     /// time. The offer and this arm are one change; neither is correct alone.
     ///
-    /// Gated four ways, because an acknowledgement is unauthenticated (it
+    /// Gated three ways, because an acknowledgement is unauthenticated (it
     /// carries no internal prefix, so it never reaches the control gate, and it
     /// is handled before the security gate runs on the receive path):
     ///
-    /// 1. the id is a parkable plain DM — connection requests keep their typed
-    ///    terminal path, welcomes their own lifecycle, media chunks are never
-    ///    parked and keep their pending ACK;
+    /// 1. the id is a parkable plain DM — welcomes keep their own lifecycle,
+    ///    and media chunks are never parked, so they keep their pending ACK and
+    ///    settle on the branch above. This gate does **not** exclude connection
+    ///    requests, whatever [`Self::is_parkable_plain_dm`] looks like it
+    ///    promises: the caller retires their typed tracking a few lines earlier
+    ///    and unconditionally, so by the time that check runs the map no longer
+    ///    holds the id. The outcome is the wanted one — a request whose typed
+    ///    window has already lapsed, carried to its recipient and answered, was
+    ///    delivered, and settling it is the same proof the pending-ACK branch
+    ///    acts on for an already-untracked request — but it is the caller's
+    ///    ordering that decides it, not this gate;
     /// 2. it is still in the outbox;
     /// 3. its recipient holds a live park counter, so the relay did declare this
-    ///    peer unreachable and no edge has cleared it since;
-    /// 4. the acknowledgement comes from that recipient.
+    ///    peer unreachable and no edge has cleared it since.
     ///
-    /// Those bound the forgery to someone who saw the frame *and* knows the
-    /// relay refused it — the carriers and the relay, parties who can already
-    /// deny delivery outright. What they gain is making a parked message look
-    /// delivered rather than staying parked, which is the same class as forging
-    /// an acknowledgement for an in-flight message, already possible today.
+    /// Attribution — that the answer comes from the recipient rather than from
+    /// any party that handled the frame — is deliberately *not* a fourth gate
+    /// here. [`Self::handle_ack_message`] now applies it to every
+    /// acknowledgement it accepts, so both settle paths judge by one rule
+    /// against one record; a copy of it here would be unreachable, and the kind
+    /// of unreachable that reads as load-bearing to the next person.
+    ///
+    /// What remains after all of them is a forgery by someone who saw the frame
+    /// *and* knows the relay refused it — the carriers and the relay, parties
+    /// who can already deny delivery outright. What they gain is making a
+    /// parked message look delivered rather than staying parked, which is the
+    /// same class as forging an acknowledgement for an in-flight message.
     ///
     /// Reports latency end to end (from the first send) rather than per attempt:
     /// there is no pending record to measure the last attempt against, and for a
@@ -4146,9 +4229,6 @@ impl OfflineProtocol {
         };
         let recipient = entry.message.recipient.as_str().to_string();
         if !self.dm_unreachable_parks.contains_key(&recipient) {
-            return;
-        }
-        if ack.sender.as_str() != recipient {
             return;
         }
 
