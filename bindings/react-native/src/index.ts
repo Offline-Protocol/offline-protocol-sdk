@@ -2042,7 +2042,13 @@ export class OfflineProtocol {
   }
 
   /**
-   * Updates DORS configuration at runtime
+   * Updates DORS configuration at runtime.
+   *
+   * Omitted fields keep their current values — the same partial-update
+   * contract as {@link updateRelayConfig}. Every field must therefore be
+   * expressible here: a field this signature omits cannot be set, and (before
+   * the bridges merged from the live config) was silently reset by any update
+   * that changed something else.
    *
    * @param config - DORS configuration
    * @throws Error if update fails
@@ -2063,6 +2069,9 @@ export class OfflineProtocol {
     ttlEscalationHoldSecs?: number;
     historyWindowSize?: number;
     queueRecoveryRatio?: number;
+    lowBatteryThreshold?: number;
+    relayMinBatteryLevel?: number;
+    relayOptimalConnectionCount?: number;
   }): Promise<void> {
     const payload = { ...config };
     if (payload.switchHysteresis !== undefined) {
@@ -2095,6 +2104,24 @@ export class OfflineProtocol {
         Math.max(0, payload.queueRecoveryRatio)
       );
     }
+    if (payload.lowBatteryThreshold !== undefined) {
+      payload.lowBatteryThreshold = Math.min(
+        100,
+        Math.max(0, Math.round(payload.lowBatteryThreshold))
+      );
+    }
+    if (payload.relayMinBatteryLevel !== undefined) {
+      payload.relayMinBatteryLevel = Math.min(
+        100,
+        Math.max(0, Math.round(payload.relayMinBatteryLevel))
+      );
+    }
+    if (payload.relayOptimalConnectionCount !== undefined) {
+      payload.relayOptimalConnectionCount = Math.min(
+        255,
+        Math.max(0, Math.round(payload.relayOptimalConnectionCount))
+      );
+    }
     return await OfflineProtocolNativeModule.updateDorsConfig(
       JSON.stringify(payload)
     );
@@ -2121,6 +2148,9 @@ export class OfflineProtocol {
     ttlEscalationHoldSecs: number;
     historyWindowSize: number;
     queueRecoveryRatio: number;
+    lowBatteryThreshold: number;
+    relayMinBatteryLevel: number;
+    relayOptimalConnectionCount: number;
   }> {
     return await OfflineProtocolNativeModule.getDorsConfig();
   }

@@ -17,7 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   than only at construction, and omitted fields keep their current values.
   Applies to the next role evaluation and the next forwarding decision.
 - **Three DORS fields reached the FFI**: `lowBatteryThreshold`,
-  `relayMinBatteryLevel`, `relayOptimalConnectionCount`.
+  `relayMinBatteryLevel`, `relayOptimalConnectionCount` — including the
+  React Native `updateDorsConfig` / `getDorsConfig` signatures, without which
+  the round trip that keeps a field alive across an update is unexpressible.
 - **`NetworkNode` carries `battery_level` and `connection_count`.**
 
 ### Fixed
@@ -146,11 +148,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Swift/Kotlin/Python consumers of the `RelayPriority` enum must use the new
   case names.
 
+- **BREAKING**: `set_battery_level` is now fallible (`[Throws=ProtocolError]`),
+  because it reaches the engine rather than an FFI-local field. Direct Swift
+  callers need `try`, and Kotlin/Python callers get the same checked error every
+  other engine-touching method raises. React Native callers are unaffected —
+  `setBatteryLevel` was already a promise.
+
 - **`isRelay()` reports the engine's actual relay role** — the one
   `relay_promoted` / `relay_demoted` announce — instead of a separate FFI-local
   guess based on BLE peer count. The two could disagree; now they cannot.
   It stays `false` while no battery level has been reported, because the role
   policy declines to transition on a level it does not have.
+
+- **`updateDorsConfig` and `updateRelayConfig` are partial updates on both
+  platform bridges**: a field the payload omits keeps its **current** value,
+  read back from the live engine. Both bridges previously rebuilt the whole
+  `DorsConfig` from hardcoded literals, so an update meaning to change one
+  field silently reset every other one — the same defect as the three missing
+  fields above, one layer up and affecting all eighteen. Apps that relied on
+  `updateDorsConfig` to restore defaults must now pass the values explicitly.
 
 - **BREAKING**: `NostrTransport::get_next_message` — the generic
   `Transport` whole-message poll — now returns

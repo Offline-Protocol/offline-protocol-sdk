@@ -28,7 +28,7 @@
   "scripts": {
     "prepare": "tsc",
     "build": "tsc",
-    "test:js": "node js-ci-harness/one-shot-hold.test.js && node js-ci-harness/local-address.test.js",
+    "test:js": "node js-ci-harness/one-shot-hold.test.js && node js-ci-harness/local-address.test.js && node js-ci-harness/relay-config.test.js",
     "build:ios": "bash scripts/build-ios.sh",
     "build:android": "bash scripts/build-android.sh",
     "build:all": "bash scripts/build-all.sh",

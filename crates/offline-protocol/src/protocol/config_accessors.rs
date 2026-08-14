@@ -115,6 +115,16 @@ impl OfflineProtocol {
     /// relay role is **preserved** across the update rather than reset:
     /// re-deriving it here would emit a promote/demote transition that the
     /// tick is about to compute properly from live battery and connectivity.
+    ///
+    /// **Writes two copies, and both are load-bearing.** The relay policy is
+    /// read from `self.config.relay` by the message-forwarding gate
+    /// (`battery_allows_relaying`) and from the [`RelayManager`]'s own copy by
+    /// the role policy. They are documented as applying "the same floor", so a
+    /// writer that updates one and not the other silently desyncs two
+    /// decisions that must agree — a device that declines the relay role while
+    /// still carrying other people's traffic, or the reverse.
+    ///
+    /// [`RelayManager`]: offline_protocol_router::RelayManager
     pub fn update_relay_config(&mut self, config: RelayConfig) -> crate::Result<()> {
         let mut candidate = self.config.clone();
         candidate.relay = config.clone();

@@ -5312,10 +5312,18 @@ impl OfflineProtocol {
     /// A shorthand for updating only [`RelayConfig::relay_priority`]; the rest
     /// of the relay configuration is left as it is. Takes effect on the next
     /// role evaluation and the next forwarding decision.
+    ///
+    /// Read-modify-write under a **single** lock acquisition: going through
+    /// the public `get_relay_config` / `update_relay_config` pair would drop
+    /// the lock in between, so a concurrent full-config update landing in that
+    /// window would be clobbered by the sibling fields read before it.
     pub fn set_relay_priority(&self, priority: RelayPriority) -> Result<(), ProtocolError> {
-        let mut config = self.get_relay_config();
-        config.relay_priority = priority;
-        self.update_relay_config(config)
+        let mut protocol = self.lock_inner()?;
+        let mut config = protocol.relay_config().clone();
+        config.relay_priority = priority.into();
+        protocol
+            .update_relay_config(config)
+            .map_err(ProtocolError::from)
     }
 
     /// Gets the current relay priority.
@@ -5364,6 +5372,12 @@ impl OfflineProtocol {
     /// Gets detailed metrics for a specific transport. Pulls directly from
     /// the underlying `Transport::metrics()`; the same `TransportMetrics`
     /// shape also flows through the push path inside `MetricsFrame`.
+    ///
+    /// Reads the transport's **own** reading, so `battery_level` stays `None`
+    /// for every transport that reports none — the host feed from
+    /// [`Self::set_battery_state`] is merged into the map the SDK's own
+    /// policies score against, not into this per-transport passthrough. Use
+    /// [`Self::get_battery_level`] for the device's battery.
     pub fn get_transport_metrics(&self, transport_type: TransportType) -> Option<TransportMetrics> {
         let protocol = self.lock_inner().ok()?;
         let core_type: CoreTransportType = transport_type.into();
@@ -12997,6 +13011,184 @@ mod tests {
         assert_eq!(core.relay_min_battery_level, 44);
         assert_eq!(core.relay_optimal_connection_count, 7);
         assert_eq!(core.stability_window_secs, 33);
+    }
+
+    /// The FFI round trip above is only half the contract: an RN app reaches
+    /// `updateDorsConfig` through a platform bridge that rebuilds the whole
+    /// `DorsConfig` from a partial JSON payload. While those bridges defaulted
+    /// each absent field to a **literal**, the fix above was invisible from
+    /// JS — an update meaning to change one field silently rewrote every other
+    /// one, which is the same silent-reset bug one layer up. Neither bridge is
+    /// compiled by any Rust job, and the RN typecheck job cannot see inside
+    /// them, so this is the only gate.
+    #[test]
+    fn react_native_bridges_merge_dors_updates_from_the_live_config() {
+        /// Drops comment lines and collapses whitespace, so an assertion
+        /// matches code rather than the prose describing it — the doc comments
+        /// on both methods name the very literals this test forbids.
+        fn code_only(source: &str) -> String {
+            source
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with("//") && !l.starts_with('*') && !l.starts_with("/*"))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        /// The region between two anchors, so an assertion cannot satisfy
+        /// itself from the create-time config path, which merges correctly and
+        /// has always done so.
+        fn slice_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            let after = source
+                .split_once(start)
+                .unwrap_or_else(|| panic!("expected {start:?} in source"))
+                .1;
+            after
+                .split_once(end)
+                .unwrap_or_else(|| panic!("expected {end:?} after {start:?}"))
+                .0
+        }
+
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            let path = rn_dir.join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+
+        // Every field of the FFI `DorsConfig`, in the camelCase spelling both
+        // generated bindings use. A field missing from this list is a field
+        // that can silently regress, so it is derived from the UDL below
+        // rather than trusted to stay in sync by hand.
+        const FIELDS: &[&str] = &[
+            "preferOnline",
+            "switchHysteresis",
+            "switchCooldownSecs",
+            "bleToWifiRetryThreshold",
+            "minSuccessRateBeforeEscalation",
+            "minBleSamplesBeforeSuccessRateEscalation",
+            "rssiSwitchThreshold",
+            "congestionQueueThreshold",
+            "stabilityWindowSecs",
+            "poorSignalDurationSecs",
+            "ttlEscalationThreshold",
+            "congestionDurationSecs",
+            "ttlEscalationHoldSecs",
+            "historyWindowSize",
+            "queueRecoveryRatio",
+            "lowBatteryThreshold",
+            "relayMinBatteryLevel",
+            "relayOptimalConnectionCount",
+        ];
+
+        // Guard the guard: if a field joins the UDL dictionary and not FIELDS,
+        // the loop below would pass while leaving the newcomer unchecked —
+        // exactly how the three battery/relay fields went unnoticed.
+        let udl = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/offline_protocol.udl"),
+        )
+        .expect("read udl");
+        let udl_fields: Vec<String> = slice_between(&udl, "dictionary DorsConfig {", "};")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .filter_map(|l| l.trim_end_matches(';').split_whitespace().nth(1))
+            .map(|snake| {
+                let mut out = String::new();
+                let mut upper = false;
+                for c in snake.chars() {
+                    if c == '_' {
+                        upper = true;
+                    } else if upper {
+                        out.extend(c.to_uppercase());
+                        upper = false;
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out
+            })
+            .collect();
+        assert_eq!(
+            udl_fields, FIELDS,
+            "DorsConfig gained or lost a field in the UDL. Add it to FIELDS *and* to both \
+             bridges' updateDorsConfig merge, or a runtime update silently resets it"
+        );
+
+        let swift = code_only(slice_between(
+            &read("ios/OfflineProtocolModule.swift"),
+            "func updateDorsConfig(",
+            "try proto.updateDorsConfig(config: dorsConfig)",
+        ));
+        let kotlin = code_only(slice_between(
+            &read("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"),
+            "fun updateDorsConfig(",
+            "proto.updateDorsConfig(dorsConfig)",
+        ));
+
+        assert!(
+            swift.contains("let current = proto.getDorsConfig()"),
+            "OfflineProtocolModule.swift updateDorsConfig must read the live config to merge onto"
+        );
+        assert!(
+            kotlin.contains("val current = proto.getDorsConfig()"),
+            "OfflineProtocolModule.kt updateDorsConfig must read the live config to merge onto"
+        );
+
+        for field in FIELDS {
+            let needle = format!("current.{field}");
+            assert!(
+                swift.contains(&needle),
+                "OfflineProtocolModule.swift updateDorsConfig must fall back to `{needle}` for \
+                 an absent `{field}`. A literal fallback there resets the field on every update \
+                 that does not restate it"
+            );
+            assert!(
+                kotlin.contains(&needle),
+                "OfflineProtocolModule.kt updateDorsConfig must fall back to `{needle}` for an \
+                 absent `{field}`. A literal fallback there resets the field on every update \
+                 that does not restate it"
+            );
+        }
+
+        // --- The JS surface, which is where the gap actually opened ---------
+        //
+        // A merge is only reachable for fields a caller can name. When these
+        // signatures omitted the three battery/relay fields, typed JS could
+        // neither set them nor restate them to survive an update — so the
+        // merge above would have been necessary but not sufficient. tsc cannot
+        // catch this: an omitted optional field is a valid signature, and no
+        // shipped code has to reference it.
+        let ts = read("src/index.ts");
+        let update_params = code_only(slice_between(
+            &ts,
+            "async updateDorsConfig(config: {",
+            "}): Promise<void> {",
+        ));
+        let get_returns = code_only(slice_between(
+            &ts,
+            "async getDorsConfig(): Promise<{",
+            "}> {",
+        ));
+
+        for field in FIELDS {
+            assert!(
+                update_params.contains(&format!("{field}?:")),
+                "src/index.ts updateDorsConfig must accept `{field}` — a field absent from this \
+                 signature cannot be set from typed JS, and cannot be restated to survive an \
+                 update that changes something else"
+            );
+            assert!(
+                get_returns.contains(&format!("{field}:")),
+                "src/index.ts getDorsConfig must return `{field}` — a field absent from this \
+                 signature makes the read-modify-write round trip unexpressible, which is how \
+                 the three battery/relay fields stayed invisible to every RN app"
+            );
+        }
     }
 
     /// The battery feed must reach the engine, where the relay and DORS

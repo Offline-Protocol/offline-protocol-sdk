@@ -57,6 +57,23 @@ protocol.on('relay_promoted', () => {
 });
 ```
 
+### 6. Report the Battery
+
+No transport can observe the host's battery, so the SDK only learns it from
+you. Until it does, the relay role is never evaluated — `relay_promoted` and
+`relay_demoted` never fire — DORS energy scoring skips its battery term, and
+the floor that stops a dying phone carrying other people's traffic never
+applies.
+
+```typescript
+// On start, and again on each platform battery notification.
+await protocol.setBatteryState(level, isCharging);
+```
+
+Report `isCharging` where the platform provides it: a charging device is
+deliberately excused the soft `minBatteryForRelay` floor, so sending the level
+alone strips relay duty from plugged-in devices that should keep it.
+
 **That's it!** Your app now works offline with automatic transport switching.
 
 ---

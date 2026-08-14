@@ -2896,35 +2896,53 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     
     // MARK: - DORS Configuration
     
+    /**
+     * Applies a partial DORS configuration: fields absent from [configJson]
+     * keep their **current** values, read back from the live engine rather
+     * than restated as literals here.
+     *
+     * Defaulting to literals is what made `updateDorsConfig` a silent reset —
+     * an update meaning to change one field rewrote every other one to a
+     * hardcoded number, and the three battery/relay fields could not even be
+     * restated because they had no path across the bridge. Sourcing the
+     * fallbacks from `getDorsConfig()` fixes both halves at once and keeps
+     * this method's contract identical to [updateRelayConfig]'s.
+     */
     @ReactMethod
     fun updateDorsConfig(configJson: String, promise: Promise) {
         try {
+            val proto = protocol
+            if (proto == null) {
+                promise.reject("ERROR_CONFIG", "Protocol not initialized")
+                return
+            }
             val json = JSONObject(configJson)
+            val current = proto.getDorsConfig()
             val dorsConfig = DorsConfig(
-                preferOnline = json.optBoolean("preferOnline", false),
-                switchHysteresis = json.optDouble("switchHysteresis", 15.0).toFloat().coerceAtLeast(0f),
-                switchCooldownSecs = json.optLong("switchCooldownSecs", 20).coerceAtLeast(0).toULong(),
-                bleToWifiRetryThreshold = json.optInt("bleToWifiRetryThreshold", 2).toUInt(),
-                minSuccessRateBeforeEscalation = json.optDouble("minSuccessRateBeforeEscalation", 0.3).toFloat().coerceIn(0f, 1f),
-                minBleSamplesBeforeSuccessRateEscalation = json.optLong("minBleSamplesBeforeSuccessRateEscalation", 5).coerceAtLeast(0).toULong(),
-                rssiSwitchThreshold = json.optInt("rssiSwitchThreshold", Constants.DEFAULT_RSSI_THRESHOLD.toInt()).toShort(),
-                congestionQueueThreshold = json.optLong("congestionQueueThreshold", Constants.DEFAULT_CONGESTION_QUEUE).toULong(),
-                stabilityWindowSecs = json.optLong("stabilityWindowSecs", Constants.DEFAULT_STABILITY_WINDOW).toULong(),
-                poorSignalDurationSecs = json.optLong("poorSignalDurationSecs", 10).toULong(),
-                ttlEscalationThreshold = json.optInt("ttlEscalationThreshold", 2).toUByte(),
-                congestionDurationSecs = json.optLong("congestionDurationSecs", 10).coerceAtLeast(0).toULong(),
-                ttlEscalationHoldSecs = json.optLong("ttlEscalationHoldSecs", 20).coerceAtLeast(1).toULong(),
-                historyWindowSize = json.optLong("historyWindowSize", 10).let { max(Constants.MIN_HISTORY_WINDOW, min(Constants.MAX_HISTORY_WINDOW, it)) }.toULong(),
-                queueRecoveryRatio = json.optDouble("queueRecoveryRatio", Constants.DEFAULT_QUEUE_RECOVERY_RATIO.toDouble()).toFloat().coerceIn(0f, 1f),
-                lowBatteryThreshold = json.optInt("lowBatteryThreshold", 20)
+                preferOnline = json.optBoolean("preferOnline", current.preferOnline),
+                switchHysteresis = json.optDouble("switchHysteresis", current.switchHysteresis.toDouble()).toFloat().coerceAtLeast(0f),
+                switchCooldownSecs = json.optLong("switchCooldownSecs", current.switchCooldownSecs.toLong()).coerceAtLeast(0).toULong(),
+                bleToWifiRetryThreshold = json.optInt("bleToWifiRetryThreshold", current.bleToWifiRetryThreshold.toInt()).toUInt(),
+                minSuccessRateBeforeEscalation = json.optDouble("minSuccessRateBeforeEscalation", current.minSuccessRateBeforeEscalation.toDouble()).toFloat().coerceIn(0f, 1f),
+                minBleSamplesBeforeSuccessRateEscalation = json.optLong("minBleSamplesBeforeSuccessRateEscalation", current.minBleSamplesBeforeSuccessRateEscalation.toLong()).coerceAtLeast(0).toULong(),
+                rssiSwitchThreshold = json.optInt("rssiSwitchThreshold", current.rssiSwitchThreshold.toInt()).toShort(),
+                congestionQueueThreshold = json.optLong("congestionQueueThreshold", current.congestionQueueThreshold.toLong()).toULong(),
+                stabilityWindowSecs = json.optLong("stabilityWindowSecs", current.stabilityWindowSecs.toLong()).toULong(),
+                poorSignalDurationSecs = json.optLong("poorSignalDurationSecs", current.poorSignalDurationSecs.toLong()).toULong(),
+                ttlEscalationThreshold = json.optInt("ttlEscalationThreshold", current.ttlEscalationThreshold.toInt()).toUByte(),
+                congestionDurationSecs = json.optLong("congestionDurationSecs", current.congestionDurationSecs.toLong()).coerceAtLeast(0).toULong(),
+                ttlEscalationHoldSecs = json.optLong("ttlEscalationHoldSecs", current.ttlEscalationHoldSecs.toLong()).coerceAtLeast(1).toULong(),
+                historyWindowSize = json.optLong("historyWindowSize", current.historyWindowSize.toLong()).let { max(Constants.MIN_HISTORY_WINDOW, min(Constants.MAX_HISTORY_WINDOW, it)) }.toULong(),
+                queueRecoveryRatio = json.optDouble("queueRecoveryRatio", current.queueRecoveryRatio.toDouble()).toFloat().coerceIn(0f, 1f),
+                lowBatteryThreshold = json.optInt("lowBatteryThreshold", current.lowBatteryThreshold.toInt())
                     .coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL).toUByte(),
-                relayMinBatteryLevel = json.optInt("relayMinBatteryLevel", 30)
+                relayMinBatteryLevel = json.optInt("relayMinBatteryLevel", current.relayMinBatteryLevel.toInt())
                     .coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL).toUByte(),
-                relayOptimalConnectionCount = json.optInt("relayOptimalConnectionCount", 4)
+                relayOptimalConnectionCount = json.optInt("relayOptimalConnectionCount", current.relayOptimalConnectionCount.toInt())
                     .coerceIn(0, UByte.MAX_VALUE.toInt()).toUByte()
             )
-            
-            protocol?.updateDorsConfig(dorsConfig)
+
+            proto.updateDorsConfig(dorsConfig)
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("ERROR_CONFIG", "Failed to update DORS config: ${e.message}", e)
