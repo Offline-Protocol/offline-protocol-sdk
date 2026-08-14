@@ -23701,6 +23701,50 @@ fn test_battery_below_the_floor_demotes_immediately() {
     assert!(!protocol.is_relay());
 }
 
+/// A low battery must not narrow the mesh hand-off of this device's **own**
+/// message.
+///
+/// Capability bias narrows the fan-out for *forwarded* frames, where neighbors
+/// hold copies and the sender is still retrying, so the cost is redundancy.
+/// This frame is ours and nobody else holds it — the fan-out is the delivery
+/// attempt. Worse, targets are chosen stably per message id, so a narrowed set
+/// would be the *same* narrowed set on every retransmission: one dead-end
+/// neighbor forever rather than three chances at a route.
+///
+/// Asserted through `offer_to_mesh` rather than at the governor, because the
+/// governor cannot tell which of its two selectors the send path calls — and
+/// that wiring is the whole defect.
+#[test]
+fn test_a_weak_device_offers_its_own_message_to_every_neighbor() {
+    use crate::protocol::mesh_relay::DEFAULT_RELAY_FANOUT;
+
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    for peer in ["n1", "n2", "n3", "n4"] {
+        mock.add_connected_peer(peer, -55);
+    }
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    // Well below the soft floor and not charging: the bias scale bottoms out.
+    // The tick is what pushes the reading into the governor.
+    protocol.set_device_battery(5, false);
+    protocol.process().unwrap();
+
+    // Addressed to someone who is not a neighbor, so it takes the fan-out path
+    // rather than the hand-it-straight-over shortcut.
+    let message = signed_frame(&id("user123"), "far-away", "carry this for me");
+    let handed_to = protocol.offer_to_mesh(&message);
+
+    assert_eq!(
+        handed_to, DEFAULT_RELAY_FANOUT,
+        "a device's own message must reach the full fan-out whatever its battery",
+    );
+}
+
 /// Turning relaying off in configuration surrenders the standing on the next
 /// tick, for the same reason the battery floor does.
 #[test]

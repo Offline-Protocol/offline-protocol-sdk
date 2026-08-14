@@ -132,7 +132,11 @@ pub const MAX_RELAY_RATE_PEERS: usize = 256;
 /// If a node is so far over budget that a frame waits this long, the frame's
 /// usefulness has passed — other paths have carried it or the sender has
 /// retransmitted — and holding it only displaces newer traffic.
-const RELAY_QUEUE_MAX_OVERDUE: Duration = Duration::from_secs(5);
+///
+/// Public because it bounds what the delay tunables may be set to: a jitter
+/// window plus a bias handicap that could exceed it would turn every biased
+/// forward into an abandoned one, which `ProtocolConfig::validate` refuses.
+pub const RELAY_QUEUE_MAX_OVERDUE: Duration = Duration::from_secs(5);
 
 /// Smallest share of the full forwarding effort a device is scaled down to by
 /// capability bias.
@@ -452,6 +456,21 @@ impl TokenBucket {
             false
         }
     }
+
+    /// Whether a token could be spent right now leaving `floor` untouched,
+    /// without spending it.
+    ///
+    /// For a caller that must satisfy two meters at once and may spend neither
+    /// unless both allow it.
+    fn has_above(&mut self, floor: f32, now: Instant) -> bool {
+        self.refill(now);
+        self.tokens >= 1.0 + floor
+    }
+
+    /// Spends a token already confirmed available by [`Self::has_above`].
+    fn spend(&mut self) {
+        self.tokens = (self.tokens - 1.0).max(0.0);
+    }
 }
 
 /// Decides what gets forwarded, when, and how fast.
@@ -465,7 +484,21 @@ pub struct MeshRelayGovernor {
     seen: RelaySeenCache,
     /// Forwards awaiting their delay, in the order they were queued.
     pending: Vec<PendingRelay>,
+    /// This device's whole airtime ceiling — every frame it transmits, its own
+    /// included. Never scaled by capability bias: it is what the device is
+    /// allowed to say, and bias is about how much of that it spends on other
+    /// people.
     send_budget: TokenBucket,
+    /// The share of [`Self::send_budget`] capability bias leaves for forwarding.
+    ///
+    /// A second meter rather than a smaller shared bucket, and the distinction
+    /// is the whole point: scaling the shared bucket would throttle this
+    /// device's *own* messages and acknowledgements in step with its battery,
+    /// which is delivery rather than redundancy. Forwarding must satisfy both
+    /// meters; own traffic answers only to the shared one. At full capability
+    /// this one matches the shared bucket and never binds first, so a capable
+    /// device behaves exactly as it did before bias existed.
+    forward_budget: TokenBucket,
     /// Tokens of [`Self::send_budget`] that only this device's own frames may
     /// spend. Clamped to half the burst so a small configured burst cannot
     /// reserve the whole bucket and stop forwarding outright.
@@ -494,6 +527,7 @@ impl MeshRelayGovernor {
         let seen = RelaySeenCache::with_config(config.seen.clone());
         Self {
             send_budget: TokenBucket::new(config.burst, config.rate_per_sec, now),
+            forward_budget: TokenBucket::new(config.burst, config.rate_per_sec, now),
             own_reserve: RELAY_OWN_TRAFFIC_RESERVE.min(config.burst.max(0.0) / 2.0),
             seen,
             pending: Vec::new(),
@@ -541,9 +575,14 @@ impl MeshRelayGovernor {
     /// it as willing: most platforms report a level, and penalising the ones
     /// that do not would quietly thin the network on those devices.
     ///
-    /// Applied to the send budget immediately rather than on next use, so a
-    /// device that has just been unplugged stops refilling at the plugged-in
+    /// Applied to the forwarding budget immediately rather than on next use, so
+    /// a device that has just been unplugged stops refilling at the plugged-in
     /// rate this tick.
+    ///
+    /// Only the *forwarding* share is scaled. This device's own airtime ceiling
+    /// is left alone, so its messages and acknowledgements go out at the same
+    /// rate on a dying phone as on a charging laptop — bias decides how much of
+    /// the room's traffic it carries, never how well it can speak for itself.
     pub fn set_conditions(
         &mut self,
         battery: Option<u8>,
@@ -558,16 +597,11 @@ impl MeshRelayGovernor {
             soft_floor,
         };
         let scale = self.bias_scale();
-        self.send_budget.resize(
+        self.forward_budget.resize(
             self.config.burst * scale,
             self.config.rate_per_sec * scale,
             Instant::now(),
         );
-        // Recomputed from the scaled burst by the same rule as construction:
-        // a device forwarding out of a smaller bucket holds back the same
-        // proportion of it for its own traffic.
-        self.own_reserve =
-            RELAY_OWN_TRAFFIC_RESERVE.min((self.config.burst * scale).max(0.0) / 2.0);
     }
 
     /// How much of the full forwarding effort this device is currently willing
@@ -836,20 +870,33 @@ impl MeshRelayGovernor {
 
     /// Whether any budget remains to forward right now.
     ///
-    /// Measured against the same reserve [`Self::take_send_token`] respects, so
+    /// Measured against both meters [`Self::take_send_token`] must satisfy, so
     /// `take_due` does not release a batch the flush is about to refuse.
     fn has_send_budget(&mut self, now: Instant) -> bool {
-        self.send_budget.refill(now);
-        self.send_budget.tokens >= 1.0 + self.own_reserve
+        self.send_budget.has_above(self.own_reserve, now) && self.forward_budget.has_above(0.0, now)
     }
 
     /// Claims budget for putting one **forwarded** frame on one link.
     ///
-    /// Stops short of the own-traffic reserve: at the ceiling, other people's
-    /// traffic waits so this device can still send its own. See
-    /// [`RELAY_OWN_TRAFFIC_RESERVE`] and [`Self::take_own_send_token`].
+    /// Satisfies two meters. The shared ceiling, stopping short of the
+    /// own-traffic reserve so this device can still send its own frames while
+    /// forwarding at its limit (see [`RELAY_OWN_TRAFFIC_RESERVE`] and
+    /// [`Self::take_own_send_token`]); and the capability-scaled forwarding
+    /// share, which is how bias reduces what a weak device carries without
+    /// touching what it can say for itself.
+    ///
+    /// Neither is spent unless both allow it, so a refusal by one cannot leak
+    /// a token out of the other.
     pub fn take_send_token(&mut self) -> bool {
-        self.claim_transmission(self.own_reserve)
+        let now = Instant::now();
+        if !self.has_send_budget(now) {
+            self.counters.rate_deferred = self.counters.rate_deferred.saturating_add(1);
+            return false;
+        }
+        self.send_budget.spend();
+        self.forward_budget.spend();
+        self.counters.transmissions = self.counters.transmissions.saturating_add(1);
+        true
     }
 
     /// Claims budget for putting one of **this device's own** frames on one
@@ -858,6 +905,11 @@ impl MeshRelayGovernor {
     /// Metered against the same ceiling — it is the same radio — but allowed
     /// into the reserve, so a device forwarding at its limit can still get its
     /// own messages and acknowledgements out.
+    ///
+    /// Untouched by capability bias, which lives on the forwarding meter alone:
+    /// a device at 10% battery hands its own messages to the mesh exactly as
+    /// fast as a charging one, and only its share of everyone else's traffic
+    /// shrinks.
     pub fn take_own_send_token(&mut self) -> bool {
         self.claim_transmission(0.0)
     }
@@ -960,27 +1012,70 @@ impl MeshRelayGovernor {
         true
     }
 
-    /// Neighbors a frame should be forwarded to, given the current neighbor
-    /// set and the peers it must not go back to.
+    /// Neighbors a **forwarded** frame should be carried to, given the current
+    /// neighbor set and the peers it must not go back to.
     ///
     /// Excludes the neighbor it arrived from and the peer that wrote it —
     /// both already have it, and returning it is how a frame ends up bouncing
     /// between two nodes.
+    ///
+    /// Capability-biased: a weaker device spends fewer of its neighbors on
+    /// other people's traffic. That is safe here precisely because the frame is
+    /// someone else's — neighbors hold copies of it and its sender is still
+    /// retrying, so a narrower fan-out costs redundancy. Frames this device
+    /// originated have neither, and go through
+    /// [`Self::select_origination_targets`] instead.
     pub fn select_targets<'a>(
         &self,
         neighbors: impl IntoIterator<Item = (&'a str, u8)>,
         exclude: &[&str],
         message_id: &str,
     ) -> Vec<String> {
+        self.select_within_fanout(neighbors, exclude, message_id, self.biased_fanout())
+    }
+
+    /// Neighbors one of **this device's own** frames should be handed to when
+    /// no transport reaches the recipient directly.
+    ///
+    /// Deliberately *not* capability-biased, for the same reason the jitter
+    /// handicap skips this path (see [`Self::jitter_for`]): nobody else is
+    /// holding this frame. For a forward, a narrower fan-out drops paths that
+    /// neighbors' copies duplicate; here the fan-out *is* the delivery attempt,
+    /// so narrowing it would cost delivery rather than redundancy — and because
+    /// target choice is stable per message id, every retransmission would funnel
+    /// into the same reduced set rather than eventually trying another.
+    ///
+    /// Bias still reaches this device's own traffic through the send budget's
+    /// forwarding share, which is the one dial that cannot mistake the two: see
+    /// [`Self::take_own_send_token`].
+    pub fn select_origination_targets<'a>(
+        &self,
+        neighbors: impl IntoIterator<Item = (&'a str, u8)>,
+        exclude: &[&str],
+        message_id: &str,
+    ) -> Vec<String> {
+        self.select_within_fanout(neighbors, exclude, message_id, self.config.fanout.max(1))
+    }
+
+    /// The fan-out width for other people's traffic.
+    ///
+    /// Never fewer than one: a fan-out of zero is not a cheaper forward, it is
+    /// a silent drop, and this device has already taken the frame on.
+    fn biased_fanout(&self) -> usize {
+        ((self.config.fanout as f32 * self.bias_scale()).round() as usize).max(1)
+    }
+
+    fn select_within_fanout<'a>(
+        &self,
+        neighbors: impl IntoIterator<Item = (&'a str, u8)>,
+        exclude: &[&str],
+        message_id: &str,
+        fanout: usize,
+    ) -> Vec<String> {
         let mut candidates: Vec<(&str, u8)> = neighbors
             .into_iter()
             .filter(|(peer, _)| !exclude.contains(peer))
             .collect();
-
-        // A weaker device spends fewer of its neighbors on each frame. Never
-        // fewer than one: a fan-out of zero is not a cheaper forward, it is a
-        // silent drop, and this device has already taken the frame on.
-        let fanout = ((self.config.fanout as f32 * self.bias_scale()).round() as usize).max(1);
 
         if candidates.len() <= fanout {
             return candidates
@@ -1146,12 +1241,28 @@ impl MeshRelayGovernor {
     /// the same frame wait different amounts and one of them gets to cancel.
     /// The spread widens with density, because that is where the contention is.
     ///
-    /// Capability shifts the whole window later rather than widening it: a
-    /// weaker device's earliest possible delay is still later than a fully
-    /// capable one's latest, so between two neighbors holding the same frame
-    /// the capable one transmits and the weaker one stands down having spent
-    /// nothing. That is the point — the saving is the forward that never
-    /// happens, not a cheaper one.
+    /// Capability shifts the whole window later rather than widening it, so
+    /// between two neighbors holding the same frame the capable one usually
+    /// transmits and the weaker one stands down having spent nothing. That is
+    /// the point — the saving is the forward that never happens, not a cheaper
+    /// one.
+    ///
+    /// How reliably it wins depends on density, and the handicap is a fixed
+    /// constant precisely so it cannot chase it. Below [`dense_degree`] the
+    /// span is narrower than the handicap, so the weak device's earliest delay
+    /// is later than the capable one's latest and the ordering is absolute.
+    /// Past that the span grows and the two windows overlap, leaving a
+    /// probabilistic bias — the capable device still wins most frames, and the
+    /// weak one's wait stays bounded by one handicap rather than growing with
+    /// the room. Widening the handicap to restore the absolute ordering is
+    /// exactly the shape that would push a weak device in a crowded room past
+    /// [`RELAY_QUEUE_MAX_OVERDUE`], where forwards are abandoned rather than
+    /// merely late.
+    ///
+    /// Frames this device originated are not delayed at all — see
+    /// [`Self::select_origination_targets`] and the caller in `send.rs`.
+    ///
+    /// [`dense_degree`]: MeshRelayConfig::dense_degree
     fn jitter_for(&self, message_id: &str, degree: usize) -> Duration {
         let min_ms = self.config.jitter_min.as_millis() as u64;
         let max_ms = (self.config.jitter_max.as_millis() as u64).max(min_ms);
@@ -2117,6 +2228,64 @@ mod tests {
             weak_targets.len(),
             capable_targets.len()
         );
+    }
+
+    #[test]
+    fn a_weak_device_offers_its_own_frames_to_every_neighbor_it_would_have() {
+        // Bias narrows the fan-out for other people's traffic, where neighbors
+        // hold copies and the sender is still retrying, so the cost is
+        // redundancy. A frame this device originated has neither: the fan-out
+        // *is* the delivery attempt, and because targets are chosen stably per
+        // message id, a narrowed set would be the same narrowed set on every
+        // retransmission — one dead-end neighbor forever instead of three
+        // chances.
+        let neighbors: Vec<(&str, u8)> = vec![("a", 90), ("b", 80), ("c", 70), ("d", 60)];
+
+        let mut weak = biased_governor();
+        weak.set_conditions(Some(0), false, false, 30);
+
+        assert!(
+            weak.select_targets(neighbors.clone(), &[], "msg-1").len() < DEFAULT_RELAY_FANOUT,
+            "the forwarding path must still be biased",
+        );
+        assert_eq!(
+            weak.select_origination_targets(neighbors.clone(), &[], "msg-1")
+                .len(),
+            DEFAULT_RELAY_FANOUT,
+            "this device's own frame must reach as many neighbors as a capable device's",
+        );
+
+        // And identical to what a fully capable device would have picked, not
+        // merely as many: same neighbors, same order.
+        let mut capable = biased_governor();
+        capable.set_conditions(Some(100), false, false, 30);
+        assert_eq!(
+            weak.select_origination_targets(neighbors.clone(), &[], "msg-1"),
+            capable.select_origination_targets(neighbors, &[], "msg-1"),
+        );
+    }
+
+    #[test]
+    fn bias_does_not_throttle_this_devices_own_traffic() {
+        // Bias scales the *forwarding* share of the airtime ceiling, not the
+        // ceiling. Scaling the shared bucket would slow a low-battery device's
+        // own messages and acknowledgements in step with its battery, which is
+        // delivery rather than redundancy — and an absent acknowledgement is
+        // what makes a delivered message look lost to its sender.
+        let mut capable = MeshRelayGovernor::with_config("relay-node", immediate_config());
+        capable.set_conditions(Some(100), false, false, 30);
+        let capable_own = (0..1000).filter(|_| capable.take_own_send_token()).count();
+
+        let mut weak = MeshRelayGovernor::with_config("relay-node", immediate_config());
+        weak.set_conditions(Some(0), false, false, 30);
+        let weak_own = (0..1000).filter(|_| weak.take_own_send_token()).count();
+
+        assert_eq!(
+            weak_own, capable_own,
+            "a weak device got {weak_own} of its own transmissions against a capable \
+             device's {capable_own}",
+        );
+        assert!(capable_own > 0, "the fixture must actually grant something");
     }
 
     #[test]

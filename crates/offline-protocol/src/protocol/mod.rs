@@ -2498,14 +2498,16 @@ impl OfflineProtocol {
         let (battery_level, is_charging) =
             device_battery_from_available(self.transport_manager.current_transport(), &available);
 
+        let eager = matches!(self.config.relay.relay_priority, RelayPriority::Always);
+        // The bias ramp is measured from the level at which forwarding actually
+        // stops, which is the configured minimum raised to the hard critical
+        // floor — not the raw configured value, which may be set below it.
+        // Passing the unclamped one would start the ramp under the gate and
+        // scale a device that is about to stop forwarding altogether.
+        let forwarding_floor = self.relay_battery_floor(is_charging);
+        self.mesh_relay
+            .set_conditions(battery_level, is_charging, eager, forwarding_floor);
         let relay = &self.config.relay;
-        let eager = matches!(relay.relay_priority, RelayPriority::Always);
-        self.mesh_relay.set_conditions(
-            battery_level,
-            is_charging,
-            eager,
-            relay.min_battery_for_relay,
-        );
 
         // Relaying switched off in configuration.
         if !relay.allow_relay || matches!(relay.relay_priority, RelayPriority::Never) {

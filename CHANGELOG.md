@@ -21,6 +21,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `1.0` disables bias entirely). Unfed devices are unaffected — an unknown
   battery level means full effort, as it already did for the forwarding gate.
 
+  The scaling reaches **only traffic carried for other devices**. A device's
+  own messages and acknowledgements keep the full fan-out and the full send
+  rate at any battery level: for a forward a narrower fan-out costs redundancy
+  because neighbors hold copies and the sender is still retrying, but for a
+  frame this device originated the fan-out *is* the delivery attempt. The
+  forwarding share is metered separately from the device's own airtime ceiling
+  so the two cannot be confused.
+
+  `ProtocolConfig::validate` now also refuses a `mesh_relay.jitter_max +
+  mesh_relay.bias_max_handicap` that reaches the 5s overdue cut-off, past which
+  a biased forward would be abandoned on release rather than merely delayed.
+
 - **`setBatteryState(level, isCharging)` — the battery feed the relay and DORS
   policies were always waiting for.** See Fixed below for why this is the
   headline change rather than a convenience. `getIsCharging()` reads it back.

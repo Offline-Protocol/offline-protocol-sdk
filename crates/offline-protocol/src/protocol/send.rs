@@ -3092,7 +3092,14 @@ impl OfflineProtocol {
         let targets = if neighbors.iter().any(|n| n.peer_id == recipient) {
             vec![recipient.to_string()]
         } else {
-            self.mesh_relay.select_targets(
+            // Full width regardless of this device's battery. Capability bias
+            // narrows the fan-out for *forwarded* frames, where neighbors hold
+            // copies and the sender is still retrying so the cost is
+            // redundancy. This frame is ours and nobody else is holding it, so
+            // the fan-out is the delivery attempt itself — and since targets
+            // are chosen stably per message id, a narrowed set would be the
+            // same narrowed set on every retransmission.
+            self.mesh_relay.select_origination_targets(
                 neighbors
                     .iter()
                     .map(|n| (n.peer_id.as_str(), n.link_quality())),
