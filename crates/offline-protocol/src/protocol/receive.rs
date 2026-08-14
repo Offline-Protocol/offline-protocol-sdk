@@ -510,10 +510,8 @@ impl OfflineProtocol {
 
     /// Whether the battery is healthy enough to carry other people's traffic.
     ///
-    /// Applies [`RelayConfig::min_battery_for_relay`], the same floor the relay
-    /// role uses, with the same exemption for a charging device: plugged in,
-    /// only a critical level stops it. An unknown level means yes — see the
-    /// caller.
+    /// Takes its own battery reading; the per-tick caller already holds one and
+    /// uses [`Self::battery_allows_relaying_with`] instead.
     fn battery_allows_relaying(&self) -> bool {
         let (_statuses, available) = self.transport_manager.snapshot_status_and_available();
         let (battery_level, is_charging) =
@@ -521,16 +519,44 @@ impl OfflineProtocol {
                 self.transport_manager.current_transport(),
                 &available,
             );
+        self.battery_allows_relaying_with(battery_level, is_charging)
+    }
 
+    /// [`Self::battery_allows_relaying`] against a reading the caller already
+    /// has.
+    ///
+    /// An unknown level means yes — see [`Self::try_relay_message`].
+    pub(super) fn battery_allows_relaying_with(
+        &self,
+        battery_level: Option<u8>,
+        is_charging: bool,
+    ) -> bool {
         let Some(level) = battery_level else {
             return true;
         };
+        level >= self.relay_battery_floor(is_charging)
+    }
 
-        if level < CRITICAL_RELAY_BATTERY_LEVEL {
-            return false;
+    /// The battery level below which this device stops carrying other people's
+    /// traffic.
+    ///
+    /// [`RelayConfig::min_battery_for_relay`] is the floor in the ordinary
+    /// case, relaxed to the hard [`CRITICAL_RELAY_BATTERY_LEVEL`] for a device
+    /// that is either charging or configured [`RelayPriority::Always`] — the
+    /// two ways of saying "keep relaying anyway". The hard floor is never
+    /// crossed: it applies even to a configured minimum set below it, because
+    /// spending the last few percent on strangers' traffic leaves a device
+    /// unable to send its own.
+    pub(super) fn relay_battery_floor(&self, is_charging: bool) -> u8 {
+        let eager = matches!(self.config.relay.relay_priority, RelayPriority::Always);
+        if is_charging || eager {
+            CRITICAL_RELAY_BATTERY_LEVEL
+        } else {
+            self.config
+                .relay
+                .min_battery_for_relay
+                .max(CRITICAL_RELAY_BATTERY_LEVEL)
         }
-
-        is_charging || level >= self.config.relay.min_battery_for_relay
     }
 
     /// Transmits the forwards whose delay has elapsed.

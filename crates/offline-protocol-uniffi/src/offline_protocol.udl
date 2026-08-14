@@ -484,7 +484,6 @@ dictionary RoutingStats {
 
 // Relay configuration
 dictionary RelayConfig {
-    u64 relay_threshold;
     u8 min_battery_for_relay;
     boolean allow_relay;
     RelayPriority relay_priority;
@@ -642,19 +641,6 @@ dictionary ProtocolConfig {
     // SESSION_REKEY_TRIGGERED. Disabling reverts to the legacy drop-and-ACK
     // behavior. Defaulted so existing callers keep compiling.
     boolean crypto_recovery_enabled = true;
-};
-
-// Extended protocol configuration with all options
-dictionary ProtocolConfigExtended {
-    string app_id;
-    // See ProtocolConfig.profile.
-    string profile;
-    TransportConfig transport;
-    DorsConfig dors;
-    RelayConfig relay;
-    PathConfig path;
-    ReliabilityConfig reliability;
-    u8 initial_ttl;
 };
 
 // ========================================================================

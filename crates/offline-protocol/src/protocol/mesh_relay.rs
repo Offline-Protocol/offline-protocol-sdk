@@ -33,6 +33,26 @@
 //! Ordering matters. Suppression runs before anything expensive, admission
 //! before queueing (so a flood cannot grow the queue), and pacing at the moment
 //! of transmission (so a forward cancelled while waiting costs no budget).
+//!
+//! On top of those four sits **capability bias**: how willing this particular
+//! device is, right now, to spend itself on other people's traffic. A charging
+//! laptop and a phone at 20% are both allowed to forward, and the mechanisms
+//! above treat them identically — so the phone pays the same share as the
+//! laptop. Bias tilts three of the existing dials by battery and charging
+//! state, continuously: a weaker device waits longer before transmitting (so a
+//! stronger neighbor holding the same frame wins the cancellation race and it
+//! stands down having spent nothing), forwards to fewer neighbors, and refills
+//! its send budget more slowly.
+//!
+//! This is deliberately a *bias* and not a role. A threshold that switches
+//! forwarding on and off makes the network's shape depend on a state machine,
+//! and the failure mode of getting that wrong is a partition — devices that
+//! could carry a frame declining to. Scaling instead means every device
+//! forwards, capable ones simply forward first and more, and the worst a
+//! misjudged scale costs is some redundancy. The relay *role* reported to apps
+//! is derived the other way round, from what this device has actually carried
+//! ([`MeshRelayGovernor::observe_activity`]), so it describes behaviour rather
+//! than predicting it.
 
 use offline_protocol_core::{Message, MessagePriority};
 use offline_protocol_reliability::{RelaySeenCache, RelaySeenConfig};
@@ -112,7 +132,52 @@ pub const MAX_RELAY_RATE_PEERS: usize = 256;
 /// If a node is so far over budget that a frame waits this long, the frame's
 /// usefulness has passed — other paths have carried it or the sender has
 /// retransmitted — and holding it only displaces newer traffic.
-const RELAY_QUEUE_MAX_OVERDUE: Duration = Duration::from_secs(5);
+///
+/// Public because it bounds what the delay tunables may be set to: a jitter
+/// window plus a bias handicap that could exceed it would turn every biased
+/// forward into an abandoned one, which `ProtocolConfig::validate` refuses.
+pub const RELAY_QUEUE_MAX_OVERDUE: Duration = Duration::from_secs(5);
+
+/// Smallest share of the full forwarding effort a device is scaled down to by
+/// capability bias.
+///
+/// A floor rather than zero, because bias must never become an off switch:
+/// a device at 1% battery that is still allowed to forward at all (the
+/// [`RelayConfig::min_battery_for_relay`] gate is what decides that, not this)
+/// keeps a usable share, so a network of uniformly low devices still carries
+/// traffic instead of quietly ceasing to be a network.
+///
+/// [`RelayConfig::min_battery_for_relay`]: offline_protocol_router::RelayConfig::min_battery_for_relay
+pub const DEFAULT_RELAY_BIAS_MIN_SCALE: f32 = 0.25;
+
+/// Longest extra delay capability bias adds before a weaker device transmits.
+///
+/// This is the whole mechanism by which a stronger neighbor gets to cover a
+/// frame first: the weaker device's delay window opens later, so in the common
+/// case it is still holding the frame when the neighbor's copy arrives and it
+/// stands down having spent no airtime at all.
+///
+/// A fixed ceiling rather than a multiple of the jitter span, and that matters:
+/// the span already widens with density, and compounding the two would push a
+/// weak device in a crowded room past [`RELAY_QUEUE_MAX_OVERDUE`], where its
+/// forwards are abandoned rather than merely late. Bias must cost redundancy,
+/// never delivery.
+pub const DEFAULT_RELAY_BIAS_MAX_HANDICAP_MS: u64 = 400;
+
+/// How long a stretch of forwarding activity is measured over.
+pub const DEFAULT_RELAY_ACTIVITY_WINDOW_SECS: u64 = 60;
+
+/// Frames carried for other people within one window at or above which this
+/// device reads as an active relay.
+pub const DEFAULT_RELAY_ACTIVITY_MIN_FORWARDS: u64 = 3;
+
+/// Consecutive quiet windows before an active relay reads as inactive again.
+///
+/// Asymmetric with promotion on purpose: becoming a relay takes one busy
+/// window, ceasing to be one takes several quiet ones. A relay in a mesh that
+/// simply has nothing to say for a minute has not stopped being a relay, and
+/// reporting that it has would produce churn no app can act on.
+pub const DEFAULT_RELAY_ACTIVITY_IDLE_WINDOWS: u32 = 2;
 
 /// Tunables for mesh forwarding.
 #[derive(Debug, Clone)]
@@ -141,6 +206,19 @@ pub struct MeshRelayConfig {
     pub queue_capacity: usize,
     /// Suppression cache sizing.
     pub seen: RelaySeenConfig,
+    /// Smallest share of the full forwarding effort capability bias scales a
+    /// device down to. `1.0` disables bias: every device forwards as eagerly
+    /// as every other, whatever its battery.
+    pub bias_min_scale: f32,
+    /// Longest extra pre-transmit delay bias adds to a weaker device.
+    pub bias_max_handicap: Duration,
+    /// How long a stretch of forwarding activity is measured over.
+    pub activity_window: Duration,
+    /// Frames carried within one window at or above which this device reads as
+    /// an active relay.
+    pub activity_min_forwards: u64,
+    /// Consecutive quiet windows before an active relay reads as inactive.
+    pub activity_idle_windows: u32,
 }
 
 impl Default for MeshRelayConfig {
@@ -158,8 +236,48 @@ impl Default for MeshRelayConfig {
             peer_burst: DEFAULT_RELAY_PEER_BURST,
             queue_capacity: DEFAULT_RELAY_QUEUE_CAPACITY,
             seen: RelaySeenConfig::default(),
+            bias_min_scale: DEFAULT_RELAY_BIAS_MIN_SCALE,
+            bias_max_handicap: Duration::from_millis(DEFAULT_RELAY_BIAS_MAX_HANDICAP_MS),
+            activity_window: Duration::from_secs(DEFAULT_RELAY_ACTIVITY_WINDOW_SECS),
+            activity_min_forwards: DEFAULT_RELAY_ACTIVITY_MIN_FORWARDS,
+            activity_idle_windows: DEFAULT_RELAY_ACTIVITY_IDLE_WINDOWS,
         }
     }
+}
+
+/// This device's own condition, as far as forwarding is concerned.
+///
+/// Pushed in from the engine each tick rather than read here, because the
+/// battery reading belongs to the host and reaches the SDK through
+/// `set_battery_state` — the governor holds no transports and asks nothing.
+#[derive(Debug, Clone, Copy, Default)]
+struct RelayConditions {
+    /// Host-reported battery percentage, or `None` while nothing has reported
+    /// one.
+    battery: Option<u8>,
+    /// Whether the device is plugged in.
+    is_charging: bool,
+    /// Whether the configuration asks this device to relay eagerly
+    /// (`RelayPriority::Always`).
+    eager: bool,
+    /// The soft battery floor forwarding is gated on, which is also where the
+    /// bias ramp starts.
+    soft_floor: u8,
+}
+
+/// A change in whether this device is carrying traffic for other people.
+///
+/// Returned by [`MeshRelayGovernor::observe_activity`] only at the tick the
+/// answer changes, so a caller can announce it exactly once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayActivity {
+    /// This device started carrying third-party traffic.
+    Began {
+        /// Frames carried in the window that triggered this.
+        forwarded: u64,
+    },
+    /// This device stopped carrying third-party traffic.
+    Ceased,
 }
 
 /// Why a frame was not queued for forwarding.
@@ -311,6 +429,22 @@ impl TokenBucket {
         }
     }
 
+    /// Re-sizes the allowance in place, keeping what has been spent spent.
+    ///
+    /// Refills against the *old* rate first, so the time already elapsed is
+    /// credited at the terms that applied to it, then clamps the level to the
+    /// new capacity. Clamping is what makes this safe to call every tick: a
+    /// device whose bias improves gets a larger bucket to refill into, and one
+    /// whose bias worsens gets a smaller one immediately, but neither is handed
+    /// tokens it did not earn — otherwise a value oscillating around a
+    /// threshold would mint a fresh burst on every crossing.
+    fn resize(&mut self, capacity: f32, refill_per_sec: f32, now: Instant) {
+        self.refill(now);
+        self.capacity = capacity.max(0.0);
+        self.refill_per_sec = refill_per_sec.max(0.0);
+        self.tokens = self.tokens.min(self.capacity);
+    }
+
     /// Spends a token, but only while more than `floor` would remain
     /// untouched. A `floor` of zero spends down to empty.
     fn try_take_above(&mut self, floor: f32, now: Instant) -> bool {
@@ -321,6 +455,21 @@ impl TokenBucket {
         } else {
             false
         }
+    }
+
+    /// Whether a token could be spent right now leaving `floor` untouched,
+    /// without spending it.
+    ///
+    /// For a caller that must satisfy two meters at once and may spend neither
+    /// unless both allow it.
+    fn has_above(&mut self, floor: f32, now: Instant) -> bool {
+        self.refill(now);
+        self.tokens >= 1.0 + floor
+    }
+
+    /// Spends a token already confirmed available by [`Self::has_above`].
+    fn spend(&mut self) {
+        self.tokens = (self.tokens - 1.0).max(0.0);
     }
 }
 
@@ -335,7 +484,21 @@ pub struct MeshRelayGovernor {
     seen: RelaySeenCache,
     /// Forwards awaiting their delay, in the order they were queued.
     pending: Vec<PendingRelay>,
+    /// This device's whole airtime ceiling — every frame it transmits, its own
+    /// included. Never scaled by capability bias: it is what the device is
+    /// allowed to say, and bias is about how much of that it spends on other
+    /// people.
     send_budget: TokenBucket,
+    /// The share of [`Self::send_budget`] capability bias leaves for forwarding.
+    ///
+    /// A second meter rather than a smaller shared bucket, and the distinction
+    /// is the whole point: scaling the shared bucket would throttle this
+    /// device's *own* messages and acknowledgements in step with its battery,
+    /// which is delivery rather than redundancy. Forwarding must satisfy both
+    /// meters; own traffic answers only to the shared one. At full capability
+    /// this one matches the shared bucket and never binds first, so a capable
+    /// device behaves exactly as it did before bias existed.
+    forward_budget: TokenBucket,
     /// Tokens of [`Self::send_budget`] that only this device's own frames may
     /// spend. Clamped to half the burst so a small configured burst cannot
     /// reserve the whole bucket and stop forwarding outright.
@@ -345,6 +508,16 @@ pub struct MeshRelayGovernor {
     /// Seeds the per-frame delay so two nodes holding the same frame pick
     /// different delays.
     local_id: String,
+    /// This device's condition, as last reported by the host.
+    conditions: RelayConditions,
+    /// Whether this device currently reads as carrying traffic for others.
+    active_relay: bool,
+    /// Start of the activity window in progress.
+    window_started_at: Instant,
+    /// Frames carried for other people within the window in progress.
+    window_forwards: u64,
+    /// Consecutive completed windows in which nothing was carried.
+    idle_windows: u32,
 }
 
 impl MeshRelayGovernor {
@@ -354,12 +527,18 @@ impl MeshRelayGovernor {
         let seen = RelaySeenCache::with_config(config.seen.clone());
         Self {
             send_budget: TokenBucket::new(config.burst, config.rate_per_sec, now),
+            forward_budget: TokenBucket::new(config.burst, config.rate_per_sec, now),
             own_reserve: RELAY_OWN_TRAFFIC_RESERVE.min(config.burst.max(0.0) / 2.0),
             seen,
             pending: Vec::new(),
             peer_budgets: HashMap::new(),
             counters: MeshRelayCounters::default(),
             local_id: local_id.into(),
+            conditions: RelayConditions::default(),
+            active_relay: false,
+            window_started_at: now,
+            window_forwards: 0,
+            idle_windows: 0,
             config,
         }
     }
@@ -380,6 +559,139 @@ impl MeshRelayGovernor {
     #[cfg(test)]
     pub fn config(&self) -> &MeshRelayConfig {
         &self.config
+    }
+
+    /// Reports this device's condition, which scales how eagerly it forwards.
+    ///
+    /// Called from the process tick with the host's battery feed. Everything it
+    /// changes is continuous — delay, fan-out, refill rate — so there is no
+    /// value of any argument that stops this device forwarding. Whether it may
+    /// forward at all is the caller's gate (`RelayConfig::allow_relay` and the
+    /// battery floor), deliberately kept out of here so the two decisions
+    /// cannot half-apply.
+    ///
+    /// `battery` of `None` means the host has reported nothing, which is
+    /// treated as fully capable for the same reason the forwarding gate treats
+    /// it as willing: most platforms report a level, and penalising the ones
+    /// that do not would quietly thin the network on those devices.
+    ///
+    /// Applied to the forwarding budget immediately rather than on next use, so
+    /// a device that has just been unplugged stops refilling at the plugged-in
+    /// rate this tick.
+    ///
+    /// Only the *forwarding* share is scaled. This device's own airtime ceiling
+    /// is left alone, so its messages and acknowledgements go out at the same
+    /// rate on a dying phone as on a charging laptop — bias decides how much of
+    /// the room's traffic it carries, never how well it can speak for itself.
+    pub fn set_conditions(
+        &mut self,
+        battery: Option<u8>,
+        is_charging: bool,
+        eager: bool,
+        soft_floor: u8,
+    ) {
+        self.conditions = RelayConditions {
+            battery,
+            is_charging,
+            eager,
+            soft_floor,
+        };
+        let scale = self.bias_scale();
+        self.forward_budget.resize(
+            self.config.burst * scale,
+            self.config.rate_per_sec * scale,
+            Instant::now(),
+        );
+    }
+
+    /// How much of the full forwarding effort this device is currently willing
+    /// to spend, in `[bias_min_scale, 1.0]`.
+    ///
+    /// Fully capable when charging, when configured to relay eagerly, or when
+    /// no battery reading exists. Otherwise it ramps linearly from the soft
+    /// floor — the level at which forwarding would stop altogether — up to a
+    /// full battery, so the scale is a measure of headroom above the floor
+    /// rather than of the raw percentage.
+    fn bias_scale(&self) -> f32 {
+        let min_scale = self.config.bias_min_scale.clamp(0.0, 1.0);
+        if self.conditions.is_charging || self.conditions.eager {
+            return 1.0;
+        }
+        let Some(level) = self.conditions.battery else {
+            return 1.0;
+        };
+        let floor = self.conditions.soft_floor.min(100);
+        if level >= 100 {
+            return 1.0;
+        }
+        if level <= floor {
+            return min_scale;
+        }
+        let headroom = (level - floor) as f32 / (100 - floor).max(1) as f32;
+        min_scale + headroom * (1.0 - min_scale)
+    }
+
+    /// Whether this device currently reads as carrying traffic for other
+    /// people.
+    ///
+    /// Derived from what it has actually forwarded, not from what its battery
+    /// and neighbor count suggest it could — see [`Self::observe_activity`].
+    pub fn is_active_relay(&self) -> bool {
+        self.active_relay
+    }
+
+    /// Rolls the activity window and reports a change in relay activity.
+    ///
+    /// Answers "is this device carrying other people's traffic" from the only
+    /// evidence that cannot be wrong about it: whether it has. A device becomes
+    /// a relay by having carried [`MeshRelayConfig::activity_min_forwards`]
+    /// frames within one window, and stops being one after
+    /// [`MeshRelayConfig::activity_idle_windows`] consecutive windows carrying
+    /// none.
+    ///
+    /// Returns `Some` only at the tick the answer changes, so the caller emits
+    /// one event per transition. Cheap enough for every tick: it does nothing
+    /// at all until a window has elapsed.
+    pub fn observe_activity(&mut self, now: Instant) -> Option<RelayActivity> {
+        if now.saturating_duration_since(self.window_started_at) < self.config.activity_window {
+            return None;
+        }
+
+        let forwarded = std::mem::take(&mut self.window_forwards);
+        self.window_started_at = now;
+
+        if forwarded >= self.config.activity_min_forwards.max(1) {
+            self.idle_windows = 0;
+            if !self.active_relay {
+                self.active_relay = true;
+                return Some(RelayActivity::Began { forwarded });
+            }
+            return None;
+        }
+
+        if !self.active_relay {
+            return None;
+        }
+
+        self.idle_windows = self.idle_windows.saturating_add(1);
+        if self.idle_windows >= self.config.activity_idle_windows.max(1) {
+            self.active_relay = false;
+            return Some(RelayActivity::Ceased);
+        }
+        None
+    }
+
+    /// Drops the relay standing immediately, reporting whether it was held.
+    ///
+    /// For the caller's own gates closing — relaying switched off in
+    /// configuration, or the battery falling through the forwarding floor.
+    /// Those stop forwarding outright, so waiting out the idle windows would
+    /// leave this device reported as a relay for a minute after it had stopped
+    /// being one; the activity window is a measure of quiet, not of refusal.
+    pub fn force_inactive(&mut self) -> bool {
+        self.window_forwards = 0;
+        self.idle_windows = 0;
+        std::mem::replace(&mut self.active_relay, false)
     }
 
     /// Running totals.
@@ -558,20 +870,33 @@ impl MeshRelayGovernor {
 
     /// Whether any budget remains to forward right now.
     ///
-    /// Measured against the same reserve [`Self::take_send_token`] respects, so
+    /// Measured against both meters [`Self::take_send_token`] must satisfy, so
     /// `take_due` does not release a batch the flush is about to refuse.
     fn has_send_budget(&mut self, now: Instant) -> bool {
-        self.send_budget.refill(now);
-        self.send_budget.tokens >= 1.0 + self.own_reserve
+        self.send_budget.has_above(self.own_reserve, now) && self.forward_budget.has_above(0.0, now)
     }
 
     /// Claims budget for putting one **forwarded** frame on one link.
     ///
-    /// Stops short of the own-traffic reserve: at the ceiling, other people's
-    /// traffic waits so this device can still send its own. See
-    /// [`RELAY_OWN_TRAFFIC_RESERVE`] and [`Self::take_own_send_token`].
+    /// Satisfies two meters. The shared ceiling, stopping short of the
+    /// own-traffic reserve so this device can still send its own frames while
+    /// forwarding at its limit (see [`RELAY_OWN_TRAFFIC_RESERVE`] and
+    /// [`Self::take_own_send_token`]); and the capability-scaled forwarding
+    /// share, which is how bias reduces what a weak device carries without
+    /// touching what it can say for itself.
+    ///
+    /// Neither is spent unless both allow it, so a refusal by one cannot leak
+    /// a token out of the other.
     pub fn take_send_token(&mut self) -> bool {
-        self.claim_transmission(self.own_reserve)
+        let now = Instant::now();
+        if !self.has_send_budget(now) {
+            self.counters.rate_deferred = self.counters.rate_deferred.saturating_add(1);
+            return false;
+        }
+        self.send_budget.spend();
+        self.forward_budget.spend();
+        self.counters.transmissions = self.counters.transmissions.saturating_add(1);
+        true
     }
 
     /// Claims budget for putting one of **this device's own** frames on one
@@ -580,6 +905,11 @@ impl MeshRelayGovernor {
     /// Metered against the same ceiling — it is the same radio — but allowed
     /// into the reserve, so a device forwarding at its limit can still get its
     /// own messages and acknowledgements out.
+    ///
+    /// Untouched by capability bias, which lives on the forwarding meter alone:
+    /// a device at 10% battery hands its own messages to the mesh exactly as
+    /// fast as a charging one, and only its share of everyone else's traffic
+    /// shrinks.
     pub fn take_own_send_token(&mut self) -> bool {
         self.claim_transmission(0.0)
     }
@@ -602,6 +932,7 @@ impl MeshRelayGovernor {
     /// other people".
     pub fn record_forwarded(&mut self) {
         self.counters.forwarded = self.counters.forwarded.saturating_add(1);
+        self.window_forwards = self.window_forwards.saturating_add(1);
     }
 
     /// Puts a released forward back on the queue, keeping its original due
@@ -681,24 +1012,72 @@ impl MeshRelayGovernor {
         true
     }
 
-    /// Neighbors a frame should be forwarded to, given the current neighbor
-    /// set and the peers it must not go back to.
+    /// Neighbors a **forwarded** frame should be carried to, given the current
+    /// neighbor set and the peers it must not go back to.
     ///
     /// Excludes the neighbor it arrived from and the peer that wrote it —
     /// both already have it, and returning it is how a frame ends up bouncing
     /// between two nodes.
+    ///
+    /// Capability-biased: a weaker device spends fewer of its neighbors on
+    /// other people's traffic. That is safe here precisely because the frame is
+    /// someone else's — neighbors hold copies of it and its sender is still
+    /// retrying, so a narrower fan-out costs redundancy. Frames this device
+    /// originated have neither, and go through
+    /// [`Self::select_origination_targets`] instead.
     pub fn select_targets<'a>(
         &self,
         neighbors: impl IntoIterator<Item = (&'a str, u8)>,
         exclude: &[&str],
         message_id: &str,
     ) -> Vec<String> {
+        self.select_within_fanout(neighbors, exclude, message_id, self.biased_fanout())
+    }
+
+    /// Neighbors one of **this device's own** frames should be handed to when
+    /// no transport reaches the recipient directly.
+    ///
+    /// Deliberately *not* capability-biased, for the same reason the jitter
+    /// handicap skips this path (see [`Self::jitter_for`]): nobody else is
+    /// holding this frame. For a forward, a narrower fan-out drops paths that
+    /// neighbors' copies duplicate; here the fan-out *is* the delivery attempt,
+    /// so narrowing it would cost delivery rather than redundancy — and because
+    /// target choice is stable per message id, every retransmission would funnel
+    /// into the same reduced set rather than eventually trying another.
+    ///
+    /// Bias still reaches this device's own traffic through the send budget's
+    /// forwarding share, which is the one dial that cannot mistake the two: see
+    /// [`Self::take_own_send_token`].
+    pub fn select_origination_targets<'a>(
+        &self,
+        neighbors: impl IntoIterator<Item = (&'a str, u8)>,
+        exclude: &[&str],
+        message_id: &str,
+    ) -> Vec<String> {
+        self.select_within_fanout(neighbors, exclude, message_id, self.config.fanout.max(1))
+    }
+
+    /// The fan-out width for other people's traffic.
+    ///
+    /// Never fewer than one: a fan-out of zero is not a cheaper forward, it is
+    /// a silent drop, and this device has already taken the frame on.
+    fn biased_fanout(&self) -> usize {
+        ((self.config.fanout as f32 * self.bias_scale()).round() as usize).max(1)
+    }
+
+    fn select_within_fanout<'a>(
+        &self,
+        neighbors: impl IntoIterator<Item = (&'a str, u8)>,
+        exclude: &[&str],
+        message_id: &str,
+        fanout: usize,
+    ) -> Vec<String> {
         let mut candidates: Vec<(&str, u8)> = neighbors
             .into_iter()
             .filter(|(peer, _)| !exclude.contains(peer))
             .collect();
 
-        if candidates.len() <= self.config.fanout {
+        if candidates.len() <= fanout {
             return candidates
                 .into_iter()
                 .map(|(peer, _)| peer.to_string())
@@ -726,7 +1105,7 @@ impl MeshRelayGovernor {
         });
         candidates
             .into_iter()
-            .take(self.config.fanout)
+            .take(fanout)
             .map(|(peer, _)| peer.to_string())
             .collect()
     }
@@ -861,6 +1240,29 @@ impl MeshRelayGovernor {
     /// Derived from the frame and this node's identity, so two nodes holding
     /// the same frame wait different amounts and one of them gets to cancel.
     /// The spread widens with density, because that is where the contention is.
+    ///
+    /// Capability shifts the whole window later rather than widening it, so
+    /// between two neighbors holding the same frame the capable one usually
+    /// transmits and the weaker one stands down having spent nothing. That is
+    /// the point — the saving is the forward that never happens, not a cheaper
+    /// one.
+    ///
+    /// How reliably it wins depends on density, and the handicap is a fixed
+    /// constant precisely so it cannot chase it. Below [`dense_degree`] the
+    /// span is narrower than the handicap, so the weak device's earliest delay
+    /// is later than the capable one's latest and the ordering is absolute.
+    /// Past that the span grows and the two windows overlap, leaving a
+    /// probabilistic bias — the capable device still wins most frames, and the
+    /// weak one's wait stays bounded by one handicap rather than growing with
+    /// the room. Widening the handicap to restore the absolute ordering is
+    /// exactly the shape that would push a weak device in a crowded room past
+    /// [`RELAY_QUEUE_MAX_OVERDUE`], where forwards are abandoned rather than
+    /// merely late.
+    ///
+    /// Frames this device originated are not delayed at all — see
+    /// [`Self::select_origination_targets`] and the caller in `send.rs`.
+    ///
+    /// [`dense_degree`]: MeshRelayConfig::dense_degree
     fn jitter_for(&self, message_id: &str, degree: usize) -> Duration {
         let min_ms = self.config.jitter_min.as_millis() as u64;
         let max_ms = (self.config.jitter_max.as_millis() as u64).max(min_ms);
@@ -870,8 +1272,15 @@ impl MeshRelayGovernor {
         let density_scale = 1 + (degree / self.config.dense_degree.max(1)) as u64;
         let span = (max_ms - min_ms).saturating_mul(density_scale).max(1);
 
+        // Bounded by a constant rather than by the span, which already grows
+        // with density: compounding the two would push a weak device in a
+        // crowded room past the overdue cut-off, turning late forwards into
+        // abandoned ones.
+        let handicap_ms = ((1.0 - self.bias_scale()).clamp(0.0, 1.0)
+            * self.config.bias_max_handicap.as_millis() as f32) as u64;
+
         let hash = Self::hash_of(&[message_id, &self.local_id]);
-        Duration::from_millis(min_ms + (hash % span))
+        Duration::from_millis(min_ms + handicap_ms + (hash % span))
     }
 
     /// Stable hash used to spread delays and fan-out choices.
@@ -1675,5 +2084,396 @@ mod tests {
             gov.config().seen.capacity,
             ids_in_window
         );
+    }
+
+    // ====================================================================
+    // Capability bias
+    // ====================================================================
+
+    /// A governor with a real jitter window, so bias has something to shift.
+    fn biased_governor() -> MeshRelayGovernor {
+        MeshRelayGovernor::with_config("relay-node", MeshRelayConfig::default())
+    }
+
+    #[test]
+    fn a_weak_device_always_waits_longer_than_a_capable_one() {
+        // The whole mechanism: the weak device's earliest delay must be later
+        // than the capable device's latest, or the two windows overlap and the
+        // weak one sometimes transmits first — spending the airtime the bias
+        // exists to save.
+        let msg = frame();
+
+        let mut capable = biased_governor();
+        capable.set_conditions(Some(100), false, false, 30);
+
+        let mut weak = biased_governor();
+        weak.set_conditions(Some(30), false, false, 30);
+
+        let capable_delay = capable.jitter_for(&msg.id.as_str(), 3);
+        let weak_delay = weak.jitter_for(&msg.id.as_str(), 3);
+        assert!(
+            weak_delay > capable_delay,
+            "weak waited {weak_delay:?}, capable {capable_delay:?}"
+        );
+
+        // Independent of which frame it is: the handicap shifts the window, so
+        // the worst case for the weak device beats the best case for the
+        // capable one on every id.
+        let span = DEFAULT_RELAY_JITTER_MAX_MS - DEFAULT_RELAY_JITTER_MIN_MS;
+        assert!(
+            DEFAULT_RELAY_BIAS_MAX_HANDICAP_MS >= span,
+            "the handicap ({DEFAULT_RELAY_BIAS_MAX_HANDICAP_MS}ms) must exceed the jitter span \
+             ({span}ms) or the two windows overlap"
+        );
+    }
+
+    #[test]
+    fn bias_adds_a_bounded_delay_rather_than_a_multiplied_one() {
+        // Bias must cost redundancy, never delivery. The jitter span already
+        // grows with density, so the one shape that must not exist is a
+        // handicap that grows with it too: at every density the biased device
+        // waits at most one fixed handicap longer than the capable one.
+        let msg = frame();
+        let cap = Duration::from_millis(DEFAULT_RELAY_BIAS_MAX_HANDICAP_MS);
+
+        for degree in [0usize, 3, 6, 30, 100, MAX_RELAY_RATE_PEERS] {
+            let mut capable = biased_governor();
+            capable.set_conditions(Some(100), false, false, 30);
+            let mut weak = biased_governor();
+            weak.set_conditions(Some(0), false, false, 30);
+
+            let capable_delay = capable.jitter_for(&msg.id.as_str(), degree);
+            let weak_delay = weak.jitter_for(&msg.id.as_str(), degree);
+            assert!(weak_delay >= capable_delay, "degree {degree}");
+            assert!(
+                weak_delay - capable_delay <= cap,
+                "at degree {degree} bias added {:?}, past its {cap:?} ceiling",
+                weak_delay - capable_delay
+            );
+        }
+    }
+
+    #[test]
+    fn a_biased_forward_still_transmits_inside_the_overdue_cutoff() {
+        // Asserted over *every* possible message id by computing the worst
+        // case, not by sampling one: the delay is `min + handicap + hash %
+        // span`, so a sampled id passes or fails on its hash and would make
+        // this a coin toss rather than a guarantee.
+        //
+        // Bounded to the venue-sized neighborhood this design targets (~100
+        // nodes). Past roughly 155 neighbors the delay does outrun the
+        // cut-off — but the density scaling alone does that at ~167 with bias
+        // switched off entirely, so it is a property of the pre-existing
+        // density term rather than of bias, and out of scope here.
+        let config = MeshRelayConfig::default();
+        let min_ms = config.jitter_min.as_millis() as u64;
+        let max_ms = config.jitter_max.as_millis() as u64;
+        let degree = 100usize;
+
+        let density_scale = 1 + (degree / config.dense_degree.max(1)) as u64;
+        let span = (max_ms - min_ms).saturating_mul(density_scale).max(1);
+        // The full handicap, which only a device biased to the floor pays.
+        let worst = Duration::from_millis(
+            min_ms + config.bias_max_handicap.as_millis() as u64 + (span - 1),
+        );
+
+        assert!(
+            worst < RELAY_QUEUE_MAX_OVERDUE,
+            "the worst biased wait at degree {degree} is {worst:?}, past the \
+             {RELAY_QUEUE_MAX_OVERDUE:?} cut-off"
+        );
+    }
+
+    #[test]
+    fn charging_and_eager_devices_are_not_biased_down() {
+        let msg = frame();
+        let mut unfed = biased_governor();
+        let baseline = unfed.jitter_for(&msg.id.as_str(), 3);
+
+        // Charging at a level that would otherwise be heavily penalised.
+        let mut charging = biased_governor();
+        charging.set_conditions(Some(20), true, false, 30);
+        assert_eq!(charging.jitter_for(&msg.id.as_str(), 3), baseline);
+
+        // Configured to relay eagerly, on battery.
+        let mut eager = biased_governor();
+        eager.set_conditions(Some(20), false, true, 30);
+        assert_eq!(eager.jitter_for(&msg.id.as_str(), 3), baseline);
+
+        // And an unfed device is treated as fully capable, matching the
+        // forwarding gate's "unknown means willing".
+        unfed.set_conditions(None, false, false, 30);
+        assert_eq!(unfed.jitter_for(&msg.id.as_str(), 3), baseline);
+    }
+
+    #[test]
+    fn a_weak_device_forwards_to_fewer_neighbors_but_never_none() {
+        let neighbors: Vec<(&str, u8)> = vec![("a", 90), ("b", 80), ("c", 70), ("d", 60)];
+
+        let mut capable = biased_governor();
+        capable.set_conditions(Some(100), false, false, 30);
+        let capable_targets = capable.select_targets(neighbors.clone(), &[], "msg-1");
+        assert_eq!(capable_targets.len(), DEFAULT_RELAY_FANOUT);
+
+        let mut weak = biased_governor();
+        weak.set_conditions(Some(0), false, false, 30);
+        let weak_targets = weak.select_targets(neighbors, &[], "msg-1");
+        assert!(
+            !weak_targets.is_empty(),
+            "a fan-out of zero is a silent drop, not a cheaper forward"
+        );
+        assert!(
+            weak_targets.len() < capable_targets.len(),
+            "weak fanned out to {} neighbors, capable to {}",
+            weak_targets.len(),
+            capable_targets.len()
+        );
+    }
+
+    #[test]
+    fn a_weak_device_offers_its_own_frames_to_every_neighbor_it_would_have() {
+        // Bias narrows the fan-out for other people's traffic, where neighbors
+        // hold copies and the sender is still retrying, so the cost is
+        // redundancy. A frame this device originated has neither: the fan-out
+        // *is* the delivery attempt, and because targets are chosen stably per
+        // message id, a narrowed set would be the same narrowed set on every
+        // retransmission — one dead-end neighbor forever instead of three
+        // chances.
+        let neighbors: Vec<(&str, u8)> = vec![("a", 90), ("b", 80), ("c", 70), ("d", 60)];
+
+        let mut weak = biased_governor();
+        weak.set_conditions(Some(0), false, false, 30);
+
+        assert!(
+            weak.select_targets(neighbors.clone(), &[], "msg-1").len() < DEFAULT_RELAY_FANOUT,
+            "the forwarding path must still be biased",
+        );
+        assert_eq!(
+            weak.select_origination_targets(neighbors.clone(), &[], "msg-1")
+                .len(),
+            DEFAULT_RELAY_FANOUT,
+            "this device's own frame must reach as many neighbors as a capable device's",
+        );
+
+        // And identical to what a fully capable device would have picked, not
+        // merely as many: same neighbors, same order.
+        let mut capable = biased_governor();
+        capable.set_conditions(Some(100), false, false, 30);
+        assert_eq!(
+            weak.select_origination_targets(neighbors.clone(), &[], "msg-1"),
+            capable.select_origination_targets(neighbors, &[], "msg-1"),
+        );
+    }
+
+    #[test]
+    fn bias_does_not_throttle_this_devices_own_traffic() {
+        // Bias scales the *forwarding* share of the airtime ceiling, not the
+        // ceiling. Scaling the shared bucket would slow a low-battery device's
+        // own messages and acknowledgements in step with its battery, which is
+        // delivery rather than redundancy — and an absent acknowledgement is
+        // what makes a delivered message look lost to its sender.
+        let mut capable = MeshRelayGovernor::with_config("relay-node", immediate_config());
+        capable.set_conditions(Some(100), false, false, 30);
+        let capable_own = (0..1000).filter(|_| capable.take_own_send_token()).count();
+
+        let mut weak = MeshRelayGovernor::with_config("relay-node", immediate_config());
+        weak.set_conditions(Some(0), false, false, 30);
+        let weak_own = (0..1000).filter(|_| weak.take_own_send_token()).count();
+
+        assert_eq!(
+            weak_own, capable_own,
+            "a weak device got {weak_own} of its own transmissions against a capable \
+             device's {capable_own}",
+        );
+        assert!(capable_own > 0, "the fixture must actually grant something");
+    }
+
+    #[test]
+    fn a_weak_device_transmits_less_before_hitting_its_ceiling() {
+        let mut capable = MeshRelayGovernor::with_config("relay-node", immediate_config());
+        capable.set_conditions(Some(100), false, false, 30);
+        let capable_grants = (0..1000).filter(|_| capable.take_send_token()).count();
+
+        let mut weak = MeshRelayGovernor::with_config("relay-node", immediate_config());
+        weak.set_conditions(Some(0), false, false, 30);
+        let weak_grants = (0..1000).filter(|_| weak.take_send_token()).count();
+
+        assert!(
+            weak_grants < capable_grants,
+            "weak got {weak_grants} transmissions, capable {capable_grants}"
+        );
+        assert!(
+            weak_grants > 0,
+            "bias scales the budget down, it does not switch forwarding off"
+        );
+    }
+
+    #[test]
+    fn a_worsening_battery_does_not_mint_a_fresh_burst() {
+        // `set_conditions` runs every tick, so re-sizing the bucket must keep
+        // what has been spent spent. If it refilled, a device whose battery
+        // oscillates around any point in the ramp would transmit without limit.
+        let mut gov = MeshRelayGovernor::with_config("relay-node", immediate_config());
+        gov.set_conditions(Some(100), false, false, 30);
+
+        let first = (0..1000).filter(|_| gov.take_send_token()).count();
+        assert!(first > 0);
+        assert!(!gov.take_send_token(), "the budget must be spent");
+
+        for level in [90, 100, 90, 100] {
+            gov.set_conditions(Some(level), false, false, 30);
+            assert!(
+                !gov.take_send_token(),
+                "re-sizing the budget handed back tokens that were already spent"
+            );
+        }
+    }
+
+    // ====================================================================
+    // Activity-derived relay standing
+    // ====================================================================
+
+    /// Short windows so activity transitions are reachable without waiting a
+    /// real minute; `observe_activity` takes `now`, so the clock is explicit.
+    fn activity_config() -> MeshRelayConfig {
+        MeshRelayConfig {
+            activity_window: Duration::from_secs(10),
+            activity_min_forwards: 2,
+            activity_idle_windows: 2,
+            ..immediate_config()
+        }
+    }
+
+    #[test]
+    fn carrying_traffic_is_what_makes_a_device_a_relay() {
+        let mut gov = MeshRelayGovernor::with_config("relay-node", activity_config());
+        let start = Instant::now();
+        assert!(!gov.is_active_relay());
+
+        // A window that carried nothing changes nothing.
+        assert_eq!(gov.observe_activity(start + Duration::from_secs(11)), None);
+        assert!(!gov.is_active_relay());
+
+        // Carrying enough in one window promotes, exactly once.
+        gov.record_forwarded();
+        gov.record_forwarded();
+        assert_eq!(
+            gov.observe_activity(start + Duration::from_secs(22)),
+            Some(RelayActivity::Began { forwarded: 2 })
+        );
+        assert!(gov.is_active_relay());
+
+        gov.record_forwarded();
+        gov.record_forwarded();
+        assert_eq!(
+            gov.observe_activity(start + Duration::from_secs(33)),
+            None,
+            "a relay that keeps carrying traffic must not re-announce"
+        );
+        assert!(gov.is_active_relay());
+    }
+
+    #[test]
+    fn a_relay_stops_being_one_only_after_sustained_quiet() {
+        // Asymmetric on purpose: one busy window promotes, several quiet ones
+        // demote. A mesh with nothing to say for a window has not stopped
+        // having a relay in it.
+        let mut gov = MeshRelayGovernor::with_config("relay-node", activity_config());
+        let start = Instant::now();
+
+        gov.record_forwarded();
+        gov.record_forwarded();
+        assert!(matches!(
+            gov.observe_activity(start + Duration::from_secs(11)),
+            Some(RelayActivity::Began { .. })
+        ));
+
+        // One quiet window is not enough.
+        assert_eq!(gov.observe_activity(start + Duration::from_secs(22)), None);
+        assert!(gov.is_active_relay());
+
+        assert_eq!(
+            gov.observe_activity(start + Duration::from_secs(33)),
+            Some(RelayActivity::Ceased)
+        );
+        assert!(!gov.is_active_relay());
+
+        // And it stays ceased rather than re-announcing every window.
+        assert_eq!(gov.observe_activity(start + Duration::from_secs(44)), None);
+    }
+
+    #[test]
+    fn traffic_within_a_window_resets_the_run_of_quiet_ones() {
+        let mut gov = MeshRelayGovernor::with_config("relay-node", activity_config());
+        let start = Instant::now();
+
+        gov.record_forwarded();
+        gov.record_forwarded();
+        assert!(matches!(
+            gov.observe_activity(start + Duration::from_secs(11)),
+            Some(RelayActivity::Began { .. })
+        ));
+
+        // Quiet, then busy again, then quiet: the run restarts, so the second
+        // quiet window must not be the one that demotes.
+        assert_eq!(gov.observe_activity(start + Duration::from_secs(22)), None);
+        gov.record_forwarded();
+        gov.record_forwarded();
+        assert_eq!(gov.observe_activity(start + Duration::from_secs(33)), None);
+        assert_eq!(gov.observe_activity(start + Duration::from_secs(44)), None);
+        assert!(gov.is_active_relay(), "the quiet run restarted");
+
+        assert_eq!(
+            gov.observe_activity(start + Duration::from_secs(55)),
+            Some(RelayActivity::Ceased)
+        );
+    }
+
+    #[test]
+    fn observing_before_a_window_has_elapsed_does_nothing() {
+        let mut gov = MeshRelayGovernor::with_config("relay-node", activity_config());
+        let start = Instant::now();
+
+        gov.record_forwarded();
+        gov.record_forwarded();
+        assert_eq!(gov.observe_activity(start + Duration::from_secs(5)), None);
+        assert!(
+            !gov.is_active_relay(),
+            "the window must complete before it counts"
+        );
+
+        // And the frames carried are still counted toward it.
+        assert!(matches!(
+            gov.observe_activity(start + Duration::from_secs(11)),
+            Some(RelayActivity::Began { forwarded: 2 })
+        ));
+    }
+
+    #[test]
+    fn a_closing_gate_drops_the_relay_standing_at_once() {
+        // Configuration or battery closing the forwarding gate stops traffic
+        // immediately, so waiting out the idle windows would report a relay
+        // that had already stopped being one.
+        let mut gov = MeshRelayGovernor::with_config("relay-node", activity_config());
+        let start = Instant::now();
+
+        gov.record_forwarded();
+        gov.record_forwarded();
+        assert!(matches!(
+            gov.observe_activity(start + Duration::from_secs(11)),
+            Some(RelayActivity::Began { .. })
+        ));
+
+        assert!(gov.force_inactive(), "reports that the standing was held");
+        assert!(!gov.is_active_relay());
+        assert!(
+            !gov.force_inactive(),
+            "a device that was not a relay must not report a demotion"
+        );
+
+        // The window's tally went with it, so re-opening the gate starts from
+        // scratch rather than promoting on stale traffic.
+        assert_eq!(gov.observe_activity(start + Duration::from_secs(22)), None);
+        assert!(!gov.is_active_relay());
     }
 }

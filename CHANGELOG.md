@@ -8,19 +8,87 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Capability bias in mesh forwarding.** Battery level and charging state now
+  continuously scale how much of the mesh's traffic a device carries: the delay
+  before it transmits a forward, the number of neighbors it fans out to, and
+  the refill rate of its forwarding budget. A device on mains power usually
+  transmits first, and its neighbors holding the same frame stand down having
+  spent no airtime — so the saving is the forward that never happens. Nothing
+  switches off at a threshold: a misjudged scale costs redundancy, where a
+  misjudged threshold would remove a link the network needed. Devices that are
+  charging or configured `relayPriority: 'always'` are exempt. Tunable via
+  `mesh_relay.bias_min_scale` and `mesh_relay.bias_max_handicap` (Rust config;
+  `1.0` disables bias entirely). Unfed devices are unaffected — an unknown
+  battery level means full effort, as it already did for the forwarding gate.
+
+  The scaling reaches **only traffic carried for other devices**. A device's
+  own messages and acknowledgements keep the full fan-out and the full send
+  rate at any battery level: for a forward a narrower fan-out costs redundancy
+  because neighbors hold copies and the sender is still retrying, but for a
+  frame this device originated the fan-out *is* the delivery attempt. The
+  forwarding share is metered separately from the device's own airtime ceiling
+  so the two cannot be confused.
+
+  `ProtocolConfig::validate` now also refuses a `mesh_relay.jitter_max +
+  mesh_relay.bias_max_handicap` that reaches the 5s overdue cut-off, past which
+  a biased forward would be abandoned on release rather than merely delayed.
+
 - **`setBatteryState(level, isCharging)` — the battery feed the relay and DORS
   policies were always waiting for.** See Fixed below for why this is the
   headline change rather than a convenience. `getIsCharging()` reads it back.
 - **`updateRelayConfig(config)` / `getRelayConfig()`.** Whether this device
-  carries other people's traffic — the connection threshold, the battery floor,
-  the outright opt-out, the priority mode — is now settable at runtime rather
-  than only at construction, and omitted fields keep their current values.
-  Applies to the next role evaluation and the next forwarding decision.
+  carries other people's traffic — the battery floor, the outright opt-out, the
+  priority mode — is now settable at runtime rather than only at construction,
+  and omitted fields keep their current values. Applies to the next forwarding
+  decision and the next `process()` tick.
 - **Three DORS fields reached the FFI**: `lowBatteryThreshold`,
   `relayMinBatteryLevel`, `relayOptimalConnectionCount` — including the
   React Native `updateDorsConfig` / `getDorsConfig` signatures, without which
   the round trip that keeps a field alive across an update is unexpressible.
 - **`NetworkNode` carries `battery_level` and `connection_count`.**
+
+### Changed
+
+- **BREAKING: `relay_promoted` / `relay_demoted` / `isRelay()` report observed
+  forwarding, not predicted capability.** They previously fired from a
+  threshold on connection count and battery, which meant a device surrounded by
+  peers that never needed it announced itself a relay having forwarded nothing,
+  while a device carrying the whole room's traffic over two links announced
+  nothing at all. They now report frames this device has actually carried
+  within a rolling window (default: 3 frames per 60s to begin; 2 consecutive
+  quiet windows to end). Consequences for apps:
+  - They **no longer require a battery feed**. Forwarding is observable without
+    one, so `relay_promoted` can now fire on a device that has never reported a
+    level — inverting the previous "no feed, no events" behaviour.
+  - `relay_promoted.battery_level` is now **nullable** (`number | null` in
+    React Native), being `null` on such a device.
+  - `isRelay()` answers `false` on a capable device that has had nothing to
+    carry — including any device with a working internet relay, since the mesh
+    is only offered frames nothing else can deliver.
+  - `relay_demoted` no longer reports `"connections below relay threshold"`;
+    sustained quiet reports `"no traffic carried for other devices recently"`.
+    Demotion for `allowRelay: false` and for the battery floor is unchanged and
+    still immediate.
+- **BREAKING: `relayThreshold` removed** from `RelayConfig` across the Rust
+  config, UniFFI/UDL, Swift, Kotlin, Python and React Native. It configured the
+  connection threshold of the promotion state machine above, which no longer
+  exists; nothing else read it. (This also removes a `relay_threshold as usize`
+  cast that wrapped on 32-bit targets, where an absurd configured value became
+  an aggressive promotion threshold rather than an unreachable one.)
+- **BREAKING: `ProtocolConfigExtended` removed** from the UDL and FFI. It
+  carried `relay` and `dors` sections but no constructor ever accepted it, so
+  no caller on any binding could supply one — a create-time configuration
+  surface that looked real and did nothing.
+- **`relayPriority: 'always'` now also exempts a device from the *forwarding*
+  battery floor**, relaxing it to the hard 15% floor exactly as charging does.
+  It previously affected only the relay-role label while the 30% soft floor
+  still stopped the device forwarding, which is weaker than the setting's
+  documentation implied.
+- **React Native `updateRelayConfig` now throws on an unrecognised
+  `relayPriority`** instead of silently dropping it, matching
+  `setRelayPriority`. Dropping it applied the rest of the update and left the
+  priority at its old value, which from the call site is indistinguishable from
+  having set it. Unreachable from typed TypeScript; reachable from JavaScript.
 
 ### Fixed
 

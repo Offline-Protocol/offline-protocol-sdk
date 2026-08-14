@@ -2091,7 +2091,6 @@ pub struct RoutingStats {
 /// Relay configuration
 #[derive(Debug, Clone)]
 pub struct RelayConfig {
-    pub relay_threshold: u64,
     pub min_battery_for_relay: u8,
     pub allow_relay: bool,
     pub relay_priority: RelayPriority,
@@ -2100,7 +2099,6 @@ pub struct RelayConfig {
 impl From<RelayConfig> for CoreRelayConfig {
     fn from(config: RelayConfig) -> Self {
         CoreRelayConfig {
-            relay_threshold: config.relay_threshold as usize,
             min_battery_for_relay: config.min_battery_for_relay,
             allow_relay: config.allow_relay,
             relay_priority: config.relay_priority.into(),
@@ -2111,7 +2109,6 @@ impl From<RelayConfig> for CoreRelayConfig {
 impl From<&CoreRelayConfig> for RelayConfig {
     fn from(config: &CoreRelayConfig) -> Self {
         RelayConfig {
-            relay_threshold: config.relay_threshold as u64,
             min_battery_for_relay: config.min_battery_for_relay,
             allow_relay: config.allow_relay,
             relay_priority: config.relay_priority.into(),
@@ -2249,20 +2246,6 @@ pub struct ProtocolConfig {
     /// Kill switch for 1:1 MLS crypto-failure recovery (default on). See the UDL
     /// dictionary and `EncryptionConfig::crypto_recovery_enabled` for semantics.
     pub crypto_recovery_enabled: bool,
-}
-
-/// Extended protocol configuration with all options
-#[derive(Debug, Clone)]
-pub struct ProtocolConfigExtended {
-    pub app_id: String,
-    /// See [`ProtocolConfig::profile`].
-    pub profile: String,
-    pub transport: TransportConfig,
-    pub dors: DorsConfig,
-    pub relay: RelayConfig,
-    pub path: PathConfig,
-    pub reliability: ReliabilityConfig,
-    pub initial_ttl: u8,
 }
 
 impl From<ProtocolConfig> for CoreConfig {
@@ -13227,7 +13210,6 @@ mod tests {
 
         protocol
             .update_relay_config(RelayConfig {
-                relay_threshold: 9,
                 min_battery_for_relay: 55,
                 allow_relay: false,
                 relay_priority: RelayPriority::Always,
@@ -13235,7 +13217,6 @@ mod tests {
             .unwrap();
 
         let read_back = protocol.get_relay_config();
-        assert_eq!(read_back.relay_threshold, 9);
         assert_eq!(read_back.min_battery_for_relay, 55);
         assert!(!read_back.allow_relay);
         assert_eq!(read_back.relay_priority, RelayPriority::Always);
@@ -13243,7 +13224,6 @@ mod tests {
         let inner = protocol.lock_inner().unwrap();
         let core = inner.relay_config().clone();
         drop(inner);
-        assert_eq!(core.relay_threshold, 9);
         assert_eq!(core.min_battery_for_relay, 55);
         assert!(!core.allow_relay);
         assert_eq!(core.relay_priority, CoreRelayPriority::Always);
@@ -13256,7 +13236,6 @@ mod tests {
         let protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol
             .update_relay_config(RelayConfig {
-                relay_threshold: 6,
                 min_battery_for_relay: 41,
                 allow_relay: true,
                 relay_priority: RelayPriority::Auto,
@@ -13268,7 +13247,6 @@ mod tests {
         let config = protocol.get_relay_config();
         assert_eq!(config.relay_priority, RelayPriority::Never);
         assert_eq!(protocol.get_relay_priority(), RelayPriority::Never);
-        assert_eq!(config.relay_threshold, 6, "threshold must survive");
         assert_eq!(config.min_battery_for_relay, 41, "floor must survive");
         assert!(config.allow_relay);
     }

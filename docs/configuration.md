@@ -56,7 +56,6 @@ macOS, Linux, and Windows can use the Python binding's snake_case
     allowRelay: true,
     relayPriority: 'always',  // Always try to be relay
     minBatteryForRelay: 15,   // Lower threshold for emergencies
-    relayThreshold: 2,        // More relays
   },
   
   network: {
@@ -243,7 +242,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
   },
   
   relay: {
-    relayThreshold: 5,  // Higher threshold (reduce relay count)
+    minBatteryForRelay: 50,  // Carry for others only well above half charge
   },
   
   reliability: {
@@ -455,7 +454,6 @@ mechanism.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `allowRelay` | boolean | true | Allow device to act as relay |
-| `relayThreshold` | number | 3 | Min connections to be relay |
 | `minBatteryForRelay` | number | 30 | Min battery % for relay |
 | `relayPriority` | string | 'auto' | 'auto', 'always', or 'never' |
 
@@ -651,8 +649,8 @@ work. Nothing is partially applied.
 16. `maxGroupMembers` must be > 0
 
 Note what is *not* validated: `minBatteryForRelay` is a `u8` and is clamped by
-its type rather than range-checked, and `relayThreshold` has no floor. Earlier
-versions of this guide claimed both were validated; they never were.
+its type rather than range-checked. Earlier versions of this guide claimed it
+was validated; it never was.
 
 ### Runtime updates are validated the same way
 

@@ -23552,95 +23552,28 @@ fn test_metrics_frame_is_local_relay_matches_role() {
     );
 }
 
-/// Drives a real `process()` tick with enough connections and healthy
-/// battery and asserts the engine emits `RelayPromoted` on the role
-/// transition, then `RelayDemotedBattery` once the battery falls below the
-/// relay minimum. Guards the OQ #12 wiring: the three relay-role events must
-/// fire on actual transitions, not just exist as unreachable variants.
-#[test]
-fn test_relay_role_transitions_emit_events() {
-    fn battery_metrics(level: u8) -> TransportMetrics {
-        TransportMetrics {
-            battery_level: Some(level),
-            is_charging: false,
-            ..TransportMetrics::default()
-        }
-    }
-
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    let mock = MockTransport::new(TransportType::BLE);
-    mock.set_status(TransportStatus::Available);
-    mock.set_metrics(battery_metrics(80));
-    protocol
-        .transport_manager_mut()
-        .add_transport(TransportType::BLE, Box::new(mock.clone()));
-
-    let sink = RecordingTelemetrySink::default();
-    protocol
-        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
-        .unwrap();
-    protocol.start().unwrap();
-
-    // Default relay_threshold is 3; give it enough neighbors to promote.
-    for i in 0..3 {
-        protocol.on_neighbor_discovered(&format!("peer-{i}"));
-    }
-
-    protocol.process().unwrap();
-    let promoted = sink.take();
-    assert!(
-        promoted.iter().any(|r| matches!(
-            r,
-            TelemetryRecord::Protocol(ev)
-                if matches!(ev.as_ref(), Event::RelayPromoted { .. })
-        )),
-        "healthy battery + enough connections must emit RelayPromoted, got {promoted:?}",
-    );
-
-    // A second stable tick must NOT re-emit (transition fired once).
-    protocol.process().unwrap();
-    let stable = sink.take();
-    assert!(
-        !stable.iter().any(|r| matches!(
-            r,
-            TelemetryRecord::Protocol(ev) if matches!(ev.as_ref(), Event::RelayPromoted { .. })
-        )),
-        "a stable relay role must not re-emit RelayPromoted, got {stable:?}",
-    );
-
-    // Drop the battery below the relay minimum (default 30, not charging):
-    // the next tick must demote with the battery-specific event.
-    mock.set_metrics(battery_metrics(20));
-    protocol.process().unwrap();
-    let demoted = sink.take();
-    assert!(
-        demoted.iter().any(|r| matches!(
-            r,
-            TelemetryRecord::Protocol(ev)
-                if matches!(
-                    ev.as_ref(),
-                    Event::RelayDemotedBattery { battery_level: 20, min_required: 30 }
-                )
-        )),
-        "battery below minimum must emit RelayDemotedBattery{{20, 30}}, got {demoted:?}",
-    );
+/// A config whose activity windows are short enough to roll inside a test.
+///
+/// `observe_activity` is driven by the real clock through `process()`, so the
+/// window has to be small rather than mocked; one millisecond is longer than
+/// zero (which the validator refuses) and shorter than any tick.
+pub(crate) fn create_relay_activity_test_config(user_id: &str) -> ProtocolConfig {
+    let mut config = create_relay_test_config_for_user(user_id);
+    config.mesh_relay.activity_window = std::time::Duration::from_millis(1);
+    config.mesh_relay.activity_min_forwards = 1;
+    config.mesh_relay.activity_idle_windows = 1;
+    config
 }
 
-/// The same transitions as the test above, driven by the **host** battery feed
-/// instead of by a transport that happens to report a level.
-///
-/// This is the gap that made the whole relay-role machinery runtime-dead: no
-/// platform transport publishes a battery level, so `evaluate_relay_role`
-/// early-returned on every real device and neither event could ever fire.
-/// `set_device_battery` is the only production writer, so this test is what
-/// distinguishes "the policy is implemented" from "the policy runs".
-#[test]
-fn test_host_battery_feed_drives_relay_role_transitions() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+/// Builds a protocol that is about to carry one third-party frame: a neighbor
+/// to forward to, and a frame addressed to someone else waiting on the wire.
+fn relay_carrying_one_frame(user_id: &str) -> (OfflineProtocol, RecordingTelemetrySink) {
+    let mut protocol = OfflineProtocol::new(create_relay_activity_test_config(user_id)).unwrap();
+
     let mock = MockTransport::new(TransportType::BLE);
-    mock.set_status(TransportStatus::Available);
-    // Deliberately no metrics: the transport reports no battery, exactly like
-    // every real one.
+    mock.start().unwrap();
+    mock.add_connected_peer("carol", -55);
+    mock.queue_message(signed_frame(&id("alice"), "bob", "carry me if you can"));
     protocol
         .transport_manager_mut()
         .add_transport(TransportType::BLE, Box::new(mock));
@@ -23651,32 +23584,106 @@ fn test_host_battery_feed_drives_relay_role_transitions() {
         .unwrap();
     protocol.start().unwrap();
 
-    for i in 0..3 {
-        protocol.on_neighbor_discovered(&format!("peer-{i}"));
-    }
+    // The activity window is measured from the governor's construction, and a
+    // warm parallel test run reaches the first tick in well under a
+    // millisecond. Sleeping guarantees *at least* the requested time, so this
+    // makes the window's expiry a fact rather than a race the test usually
+    // wins.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    (protocol, sink)
+}
 
-    // Without a host feed the role is never evaluated at all.
-    protocol.process().unwrap();
-    let unfed = sink.take();
-    assert!(
-        !unfed.iter().any(|r| matches!(
+fn emitted_relay_promotion(sink: &RecordingTelemetrySink) -> bool {
+    sink.take().iter().any(|r| {
+        matches!(
             r,
             TelemetryRecord::Protocol(ev) if matches!(ev.as_ref(), Event::RelayPromoted { .. })
-        )),
-        "with no battery reading the role must not transition, got {unfed:?}",
-    );
+        )
+    })
+}
 
+/// The relay standing reports what this device has *carried*, not what its
+/// battery and neighbor count suggest it could carry.
+///
+/// This is the whole inversion behind B2. The threshold policy this replaces
+/// promoted on connection count and battery, so a device surrounded by peers
+/// that never needed it announced itself a relay having forwarded nothing —
+/// and one carrying the whole room's traffic on two links announced nothing at
+/// all. An app showing "you are relaying for this network" was showing a
+/// prediction, and frequently a wrong one.
+#[test]
+fn test_relay_standing_follows_traffic_actually_carried() {
+    let (mut protocol, sink) = relay_carrying_one_frame("user123");
+    assert!(!protocol.is_relay(), "nothing carried yet");
+
+    // The frame is addressed to someone else, so it goes to the forwarding
+    // path rather than to us; the tick carries it and then observes that.
+    assert!(protocol.receive_message().is_none());
+    protocol.process().unwrap();
+
+    assert!(
+        emitted_relay_promotion(&sink),
+        "carrying a frame for another device is what makes this a relay",
+    );
+    assert!(protocol.is_relay());
+
+    // Nothing further to carry: the standing lapses once the quiet windows
+    // run out, and says so exactly once.
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    protocol.process().unwrap();
+    let ceased = sink.take();
+    assert!(
+        ceased.iter().any(|r| matches!(
+            r,
+            TelemetryRecord::Protocol(ev) if matches!(ev.as_ref(), Event::RelayDemoted { .. })
+        )),
+        "a relay carrying nothing must stop reporting itself as one, got {ceased:?}",
+    );
+    assert!(!protocol.is_relay());
+}
+
+/// The standing needs no battery feed, which is the exact inversion of the
+/// policy this replaces.
+///
+/// Under the threshold policy the role was battery-dependent, so a device
+/// whose host never reported a level could not transition at all and
+/// `relay_promoted` was unreachable — the gap that made the whole surface
+/// runtime-dead. Forwarding is observable whether or not a level exists, so
+/// the standing is too. The feed still matters, but for a different job: it
+/// scales *how much* this device forwards.
+#[test]
+fn test_relay_standing_is_reported_without_a_battery_feed() {
+    let (mut protocol, sink) = relay_carrying_one_frame("user123");
+
+    // Deliberately no `set_device_battery`, and the mock reports no metrics —
+    // exactly like every real transport.
+    assert!(protocol.receive_message().is_none());
+    protocol.process().unwrap();
+
+    assert!(
+        emitted_relay_promotion(&sink),
+        "an unfed device that carries traffic is still a relay",
+    );
+    assert!(protocol.is_relay());
+}
+
+/// A battery falling through the forwarding floor surrenders the standing at
+/// once, rather than letting it decay over the activity windows.
+///
+/// The window measures quiet; this is refusal. Between the two the device has
+/// stopped forwarding outright, so a standing that lingered would report a
+/// relay that had already stopped being one.
+#[test]
+fn test_battery_below_the_floor_demotes_immediately() {
+    let (mut protocol, sink) = relay_carrying_one_frame("user123");
     protocol.set_device_battery(80, false);
-    protocol.process().unwrap();
-    let promoted = sink.take();
-    assert!(
-        promoted.iter().any(|r| matches!(
-            r,
-            TelemetryRecord::Protocol(ev) if matches!(ev.as_ref(), Event::RelayPromoted { .. })
-        )),
-        "a host-reported healthy battery must promote, got {promoted:?}",
-    );
 
+    assert!(protocol.receive_message().is_none());
+    protocol.process().unwrap();
+    assert!(emitted_relay_promotion(&sink));
+
+    // Below the default floor of 30, not charging: the next tick demotes with
+    // the battery-specific event, without waiting out a quiet window.
     protocol.set_device_battery(20, false);
     protocol.process().unwrap();
     let demoted = sink.take();
@@ -23689,21 +23696,97 @@ fn test_host_battery_feed_drives_relay_role_transitions() {
                     Event::RelayDemotedBattery { battery_level: 20, min_required: 30 }
                 )
         )),
-        "a host-reported low battery must demote, got {demoted:?}",
+        "battery below the floor must emit RelayDemotedBattery{{20, 30}}, got {demoted:?}",
+    );
+    assert!(!protocol.is_relay());
+}
+
+/// A low battery must not narrow the mesh hand-off of this device's **own**
+/// message.
+///
+/// Capability bias narrows the fan-out for *forwarded* frames, where neighbors
+/// hold copies and the sender is still retrying, so the cost is redundancy.
+/// This frame is ours and nobody else holds it — the fan-out is the delivery
+/// attempt. Worse, targets are chosen stably per message id, so a narrowed set
+/// would be the *same* narrowed set on every retransmission: one dead-end
+/// neighbor forever rather than three chances at a route.
+///
+/// Asserted through `offer_to_mesh` rather than at the governor, because the
+/// governor cannot tell which of its two selectors the send path calls — and
+/// that wiring is the whole defect.
+#[test]
+fn test_a_weak_device_offers_its_own_message_to_every_neighbor() {
+    use crate::protocol::mesh_relay::DEFAULT_RELAY_FANOUT;
+
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    for peer in ["n1", "n2", "n3", "n4"] {
+        mock.add_connected_peer(peer, -55);
+    }
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    // Well below the soft floor and not charging: the bias scale bottoms out.
+    // The tick is what pushes the reading into the governor.
+    protocol.set_device_battery(5, false);
+    protocol.process().unwrap();
+
+    // Addressed to someone who is not a neighbor, so it takes the fan-out path
+    // rather than the hand-it-straight-over shortcut.
+    let message = signed_frame(&id("user123"), "far-away", "carry this for me");
+    let handed_to = protocol.offer_to_mesh(&message);
+
+    assert_eq!(
+        handed_to, DEFAULT_RELAY_FANOUT,
+        "a device's own message must reach the full fan-out whatever its battery",
+    );
+}
+
+/// Turning relaying off in configuration surrenders the standing on the next
+/// tick, for the same reason the battery floor does.
+#[test]
+fn test_disabling_relaying_demotes_immediately() {
+    use offline_protocol_router::relay::RelayConfig;
+
+    let (mut protocol, sink) = relay_carrying_one_frame("user123");
+    assert!(protocol.receive_message().is_none());
+    protocol.process().unwrap();
+    assert!(emitted_relay_promotion(&sink));
+
+    protocol
+        .update_relay_config(RelayConfig {
+            allow_relay: false,
+            ..RelayConfig::default()
+        })
+        .unwrap();
+
+    // The update itself must not fabricate a transition: the tick is what
+    // computes one, from live conditions.
+    let after_update = sink.take();
+    assert!(
+        !after_update.iter().any(|r| matches!(
+            r,
+            TelemetryRecord::Protocol(ev) if matches!(
+                ev.as_ref(),
+                Event::RelayPromoted { .. } | Event::RelayDemoted { .. }
+            )
+        )),
+        "the config update itself must not emit a transition, got {after_update:?}",
     );
 
-    // Charging is not cosmetic: plugged in, the same low level is excused the
-    // soft floor and the device is promoted back.
-    protocol.set_device_battery(20, true);
     protocol.process().unwrap();
-    let repromoted = sink.take();
+    let demoted = sink.take();
     assert!(
-        repromoted.iter().any(|r| matches!(
+        demoted.iter().any(|r| matches!(
             r,
-            TelemetryRecord::Protocol(ev) if matches!(ev.as_ref(), Event::RelayPromoted { .. })
+            TelemetryRecord::Protocol(ev) if matches!(ev.as_ref(), Event::RelayDemoted { .. })
         )),
-        "a charging device below the soft floor must be promoted again, got {repromoted:?}",
+        "opting out of relaying must surrender the standing, got {demoted:?}",
     );
+    assert!(!protocol.is_relay());
 }
 
 /// The forwarding battery floor, driven by the host feed rather than by a
@@ -23814,63 +23897,6 @@ fn test_update_relay_config_applies_live() {
         0,
         "RelayPriority::Never must reach the forwarding gate"
     );
-}
-
-/// The role policy reads the updated config too, and the update itself does
-/// not fabricate a transition — the tick computes one from live conditions.
-#[test]
-fn test_update_relay_config_reaches_the_role_policy() {
-    use offline_protocol_router::relay::RelayConfig;
-
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    let mock = MockTransport::new(TransportType::BLE);
-    mock.set_status(TransportStatus::Available);
-    protocol
-        .transport_manager_mut()
-        .add_transport(TransportType::BLE, Box::new(mock));
-
-    let sink = RecordingTelemetrySink::default();
-    protocol
-        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
-        .unwrap();
-    protocol.start().unwrap();
-
-    for i in 0..3 {
-        protocol.on_neighbor_discovered(&format!("peer-{i}"));
-    }
-    protocol.set_device_battery(80, false);
-    protocol.process().unwrap();
-    let _ = sink.take();
-
-    // Opting out demotes on the next tick, with the configuration reason.
-    protocol
-        .update_relay_config(RelayConfig {
-            allow_relay: false,
-            ..RelayConfig::default()
-        })
-        .unwrap();
-    let after_update = sink.take();
-    assert!(
-        !after_update.iter().any(|r| matches!(
-            r,
-            TelemetryRecord::Protocol(ev) if matches!(
-                ev.as_ref(),
-                Event::RelayPromoted { .. } | Event::RelayDemoted { .. }
-            )
-        )),
-        "the config update itself must not emit a transition, got {after_update:?}",
-    );
-
-    protocol.process().unwrap();
-    let demoted = sink.take();
-    assert!(
-        demoted.iter().any(|r| matches!(
-            r,
-            TelemetryRecord::Protocol(ev) if matches!(ev.as_ref(), Event::RelayDemoted { .. })
-        )),
-        "allow_relay=false must demote on the next tick, got {demoted:?}",
-    );
-    assert!(!protocol.relay_config().allow_relay);
 }
 
 #[test]

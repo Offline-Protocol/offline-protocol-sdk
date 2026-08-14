@@ -424,7 +424,7 @@ mod tests {
             },
             Event::RelayPromoted {
                 connection_count: 0,
-                battery_level: 0,
+                battery_level: None,
             },
             Event::RelayDemoted {
                 reason: String::new(),

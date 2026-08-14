@@ -38,12 +38,12 @@ use crate::{
     TransportManager,
 };
 use chrono::{DateTime, Utc};
-use mesh_relay::MeshRelayGovernor;
+use mesh_relay::{MeshRelayGovernor, RelayActivity};
 use offline_protocol_core::{LamportClock, Message, MessageId, MutexExt};
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
 use offline_protocol_router::{
-    PathSelector, RelayDemotionReason, RelayManager, RelayRole, RelayTransition, TransportSelector,
+    PathSelector, RelayManager, RelayPriority, RelayRole, TransportSelector,
 };
 use offline_protocol_services::MeshServices;
 use offline_protocol_transport::{BleTransport, TransportStatus, TransportType};
@@ -671,10 +671,7 @@ impl OfflineProtocol {
 
         Ok(Self {
             transport_manager,
-            path_selector: PathSelector::with_config(
-                config.path.clone(),
-                RelayManager::with_config(config.relay.clone()),
-            ),
+            path_selector: PathSelector::with_config(config.path.clone(), RelayManager::new()),
             ack_manager: AckManager::with_config(config.reliability.ack.clone()),
             retry_queue: RetryQueue::with_config(config.reliability.retry.clone()),
             deduplicator: Deduplicator::with_config(config.reliability.dedup.clone()),
@@ -1300,7 +1297,7 @@ impl OfflineProtocol {
         self.transport_status_snapshot = statuses;
         let (battery_level, is_charging) =
             device_battery_from_available(self.transport_manager.current_transport(), &available);
-        let relay_role = self.path_selector.current_relay_role();
+        let relay_role = self.relay_role();
         self.device_capability_snapshot = Some(DeviceSnap::from_parts(
             battery_level,
             is_charging,
@@ -2469,51 +2466,92 @@ impl OfflineProtocol {
         Ok(())
     }
 
-    /// Re-evaluates the local relay role against current connectivity and
-    /// battery and emits the corresponding transition event when the role
-    /// actually changes (`RelayPromoted`, `RelayDemoted`, or
-    /// `RelayDemotedBattery`).
+    /// Reports this device's condition to the forwarding governor and announces
+    /// any change in whether it is acting as a relay (`RelayPromoted`,
+    /// `RelayDemoted`, `RelayDemotedBattery`).
     ///
-    /// Runs every tick independently of telemetry: these are app-facing
-    /// events delivered through the `EventCallback` channel, which is live
-    /// whether or not a telemetry sink is installed. Mutating the role here
-    /// also keeps the `DeviceCapabilitySnapshot.relay_role` signal honest,
-    /// since `tick_telemetry_categories` reads the role immediately after.
+    /// Runs every tick independently of telemetry: these are app-facing events
+    /// delivered through the `EventCallback` channel, which is live whether or
+    /// not a telemetry sink is installed. It also keeps the
+    /// `DeviceCapabilitySnapshot.relay_role` signal honest, since
+    /// `tick_telemetry_categories` reads the standing immediately after.
     ///
-    /// Skipped when the battery level is unknown: the promote/demote policy
-    /// is battery-dependent, and transitioning on a phantom level would emit
-    /// dishonest churn.
+    /// **The relay standing is observed, not predicted.** It says this device
+    /// has been carrying other people's traffic, not that its battery and
+    /// neighbor count suggest it could — those only bias *how much* it carries
+    /// (`set_conditions`), continuously and with no threshold to cross. So the
+    /// promotion here is a report about the mesh, and an app can trust
+    /// `is_relay()` to mean the device is doing the work.
+    ///
+    /// Two things still transition on policy rather than on observation, and
+    /// both are gates rather than predictions: relaying switched off in
+    /// configuration, and the battery falling through the forwarding floor.
+    /// Each stops forwarding outright, so the standing is surrendered at once
+    /// instead of decaying over the activity windows — the window measures
+    /// quiet, and this is refusal.
+    ///
+    /// Unlike the threshold policy this replaces, a device with no battery
+    /// reading still participates: forwarding is what is being observed, and
+    /// it happens whether or not the host has reported a level.
     fn evaluate_relay_role(&mut self) {
         let (_statuses, available) = self.transport_manager.snapshot_status_and_available();
         let (battery_level, is_charging) =
             device_battery_from_available(self.transport_manager.current_transport(), &available);
-        let Some(battery_level) = battery_level else {
+
+        let eager = matches!(self.config.relay.relay_priority, RelayPriority::Always);
+        // The bias ramp is measured from the level at which forwarding actually
+        // stops, which is the configured minimum raised to the hard critical
+        // floor — not the raw configured value, which may be set below it.
+        // Passing the unclamped one would start the ramp under the gate and
+        // scale a device that is about to stop forwarding altogether.
+        let forwarding_floor = self.relay_battery_floor(is_charging);
+        self.mesh_relay
+            .set_conditions(battery_level, is_charging, eager, forwarding_floor);
+        let relay = &self.config.relay;
+
+        // Relaying switched off in configuration.
+        if !relay.allow_relay || matches!(relay.relay_priority, RelayPriority::Never) {
+            if self.mesh_relay.force_inactive() {
+                self.emit_event(Event::relay_demoted(
+                    "relaying disabled by configuration".to_string(),
+                ));
+            }
             return;
-        };
-        let connection_count = self.known_peers.len();
-        let Some(transition) = self.path_selector.evaluate_relay_transition(
-            connection_count,
-            battery_level,
-            is_charging,
-        ) else {
+        }
+
+        // Battery through the forwarding floor. Same gate `try_relay_message`
+        // applies to each frame, evaluated from the reading already in hand.
+        if !self.battery_allows_relaying_with(battery_level, is_charging) {
+            if self.mesh_relay.force_inactive() {
+                self.emit_event(Event::relay_demoted_battery(
+                    battery_level.unwrap_or(0),
+                    self.relay_battery_floor(is_charging),
+                ));
+            }
             return;
-        };
-        let event = match transition {
-            RelayTransition::Promoted {
-                connection_count,
-                battery_level,
-            } => Event::relay_promoted(connection_count, battery_level),
-            RelayTransition::Demoted(RelayDemotionReason::LowConnections) => {
-                Event::relay_demoted("connections below relay threshold".to_string())
+        }
+
+        match self.mesh_relay.observe_activity(Instant::now()) {
+            Some(RelayActivity::Began { .. }) => {
+                let connection_count = self.known_peers.len();
+                self.emit_event(Event::relay_promoted(connection_count, battery_level));
             }
-            RelayTransition::Demoted(RelayDemotionReason::LowBattery { min_required }) => {
-                Event::relay_demoted_battery(battery_level, min_required)
+            Some(RelayActivity::Ceased) => {
+                self.emit_event(Event::relay_demoted(
+                    "no traffic carried for other devices recently".to_string(),
+                ));
             }
-            RelayTransition::Demoted(RelayDemotionReason::RelayDisallowed) => {
-                Event::relay_demoted("relaying disabled by configuration".to_string())
-            }
-        };
-        self.emit_event(event);
+            None => {}
+        }
+    }
+
+    /// The relay standing this device currently holds, for telemetry.
+    fn relay_role(&self) -> RelayRole {
+        if self.mesh_relay.is_active_relay() {
+            RelayRole::Relay
+        } else {
+            RelayRole::Regular
+        }
     }
 
     /// Per-tick telemetry work: diff transport statuses, diff device
@@ -2581,7 +2619,7 @@ impl OfflineProtocol {
         // simple advance-before-emit pattern preserves at-most-once.
         let (battery_level, is_charging) =
             device_battery_from_available(self.transport_manager.current_transport(), &available);
-        let relay_role = self.path_selector.current_relay_role();
+        let relay_role = self.relay_role();
         let device_now = DeviceSnap::from_parts(battery_level, is_charging, relay_role);
         let device_change =
             diff_device_capability(now_ms, self.device_capability_snapshot, device_now);

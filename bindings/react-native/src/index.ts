@@ -110,7 +110,6 @@ interface InitialRuntimeConfig {
   relay?: {
     allowRelay?: boolean;
     minBatteryForRelay?: number;
-    relayThreshold?: number;
     relayPriority?: string;
   };
   reliability?: {
@@ -189,7 +188,6 @@ interface NativeConfig {
   relay?: {
     allowRelay?: boolean;
     minBatteryForRelay?: number;
-    relayThreshold?: number;
     relayPriority?: string;
   };
   transports?: {
@@ -363,7 +361,6 @@ export class OfflineProtocol {
       ? sanitize({
           allowRelay: relaySource.allowRelay,
           minBatteryForRelay: relaySource.minBatteryForRelay,
-          relayThreshold: relaySource.relayThreshold,
           relayPriority: relaySource.relayPriority,
         })
       : undefined;
@@ -562,9 +559,9 @@ export class OfflineProtocol {
     }
 
     if (relay) {
-      // The whole relay section, not just the priority: `allowRelay`,
-      // `minBatteryForRelay` and `relayThreshold` used to be dropped here,
-      // which left `config.relay` on mobile permanently at its defaults.
+      // The whole relay section, not just the priority: `allowRelay` and
+      // `minBatteryForRelay` used to be dropped here, which left
+      // `config.relay` on mobile permanently at its defaults.
       const normalizedPriority = this.normalizeRelayPriority(
         relay.relayPriority
       );
@@ -574,9 +571,6 @@ export class OfflineProtocol {
           : {}),
         ...(relay.minBatteryForRelay !== undefined
           ? { minBatteryForRelay: relay.minBatteryForRelay }
-          : {}),
-        ...(relay.relayThreshold !== undefined
-          ? { relayThreshold: relay.relayThreshold }
           : {}),
         ...(normalizedPriority ? { relayPriority: normalizedPriority } : {}),
       };
@@ -1782,6 +1776,16 @@ export class OfflineProtocol {
    * {@link setBatteryState}.
    */
   async updateRelayConfig(config: RelayConfig): Promise<void> {
+    // Rejected rather than dropped, matching `setRelayPriority`. Silently
+    // discarding it would apply the rest of the update and leave the priority
+    // at its old value, which reads from the call site as though it had been
+    // set.
+    if (
+      config.relayPriority !== undefined &&
+      !this.normalizeRelayPriority(config.relayPriority)
+    ) {
+      throw new Error(`Invalid relay priority: ${config.relayPriority}`);
+    }
     const normalizedPriority = this.normalizeRelayPriority(
       config.relayPriority
     );
@@ -1791,9 +1795,6 @@ export class OfflineProtocol {
         : {}),
       ...(config.minBatteryForRelay !== undefined
         ? { minBatteryForRelay: config.minBatteryForRelay }
-        : {}),
-      ...(config.relayThreshold !== undefined
-        ? { relayThreshold: config.relayThreshold }
         : {}),
       ...(normalizedPriority ? { relayPriority: normalizedPriority } : {}),
     };

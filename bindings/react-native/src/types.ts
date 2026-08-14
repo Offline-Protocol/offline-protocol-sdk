@@ -119,8 +119,6 @@ export interface RelayConfig {
   allowRelay?: boolean;
   /** Minimum battery level for relaying; charging devices are exempt (default: 30) */
   minBatteryForRelay?: number;
-  /** Connection threshold for relay promotion (default: 3) */
-  relayThreshold?: number;
   /** Preferred relay behavior (default: 'auto') */
   relayPriority?: RelayPriority;
 }
@@ -934,10 +932,18 @@ export interface TransportSwitchedEvent extends BaseEvent {
 /**
  * Relay promoted event
  */
+/**
+ * This device started acting as a relay — carrying traffic for other devices
+ * that cannot reach each other directly.
+ *
+ * Reports observed behaviour, not capability: it fires because the device has
+ * been forwarding, so it needs no battery feed and `battery_level` is null on
+ * a device that has never reported one.
+ */
 export interface RelayPromotedEvent extends BaseEvent {
   type: 'relay_promoted';
   connection_count: number;
-  battery_level: number;
+  battery_level: number | null;
 }
 
 /**

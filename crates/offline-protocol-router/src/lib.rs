@@ -21,8 +21,7 @@ pub use dors::{
 };
 pub use error::{Error, Result};
 pub use relay::{
-    RelayConfig, RelayDemotionReason, RelayManager, RelayPriority, RelayRole, RelayTransition,
-    CRITICAL_RELAY_BATTERY_LEVEL,
+    RelayConfig, RelayManager, RelayPriority, RelayRole, CRITICAL_RELAY_BATTERY_LEVEL,
 };
 pub use router::{
     ForwardingDecision, GossipConfig, GradientRoutingConfig, GradientRoutingTable, PathConfig,

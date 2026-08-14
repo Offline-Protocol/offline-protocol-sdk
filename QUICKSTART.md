@@ -52,18 +52,23 @@ protocol.on('transport_switched', (event) => {
   console.log(`Now using ${event.to}`);
 });
 
+// Fires once this device has actually been carrying traffic for other
+// devices — it reports what happened, not what the device is capable of.
 protocol.on('relay_promoted', () => {
-  console.log('This device is now a relay!');
+  console.log('This device is now relaying for the mesh!');
 });
 ```
 
 ### 6. Report the Battery
 
 No transport can observe the host's battery, so the SDK only learns it from
-you. Until it does, the relay role is never evaluated — `relay_promoted` and
-`relay_demoted` never fire — DORS energy scoring skips its battery term, and
-the floor that stops a dying phone carrying other people's traffic never
-applies.
+you. Until it does, DORS energy scoring skips its battery term, the floor that
+stops a dying phone carrying other people's traffic never applies, and mesh
+forwarding runs at full effort on every device — a healthy laptop and a phone
+at 20% carry an equal share, rather than the laptop carrying more.
+
+(The relay events are the exception: they report traffic this device has
+actually carried, so they fire with or without a battery reading.)
 
 ```typescript
 // On start, and again on each platform battery notification.
