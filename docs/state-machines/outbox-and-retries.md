@@ -1,0 +1,155 @@
+# Outbox and retries
+
+This is the send-side state machine. It governs a message from the moment the
+application hands it over until it reaches a terminal state.
+
+## Invariants
+
+**S1. Every message with acknowledgement enabled reaches exactly one terminal
+state**: delivered, or failed. There is no third outcome and no indefinite
+pending state.
+
+**S2. Expiry is terminal, including across restarts.** A restart may refresh a
+relative delivery window, but an absolute cap bounds the total lifetime, or an
+application used briefly once per window would re-grant a fresh window forever.
+
+**S3. A resend is re-sealed, never replayed.** The ciphertext is regenerated
+against the recipient's current session; the message identifier is preserved so
+deduplication and acknowledgement still match.
+
+**S4. Frames that cannot be acknowledged never enter the ladder.** See relay
+hint frames below.
+
+## States
+
+```mermaid
+stateDiagram-v2
+    [*] --> Queued: send()
+    Queued --> Pending: transport accepted
+    Queued --> Parked: recipient unreachable verdict
+    Queued --> Failed: no transport, terminal
+
+    Pending --> Delivered: ACK received
+    Pending --> Pending: retry (backoff), re-sealed
+    Pending --> Failed: retry budget exhausted
+    Pending --> Failed: lifetime expired
+
+    Parked --> Queued: probe succeeds / peer returns
+    Parked --> Failed: lifetime expired
+
+    Delivered --> [*]
+    Failed --> [*]
+```
+
+## Timing
+
+| Parameter | Default | Notes |
+|-----------|---------|-------|
+| Acknowledgement timeout | 10 s | Starts at **local enqueue**, not at wire write |
+| Maximum retries | 10 | |
+| Backoff multiplier | 2.0 | Exponential |
+| Maximum backoff delay | 300 s | Caps the exponential |
+| Maximum pending acknowledgements | 1000 | |
+| Outbox capacity | 500 entries | |
+| Outbox lifetime | 7 days | Per entry, carrier-relative |
+| Absolute lifetime cap | 4 × lifetime (28 days) | Measured from first send, bounds restart refreshes |
+
+### The timer starts at enqueue
+
+The acknowledgement timer starts when the message is enqueued locally, not when
+it reaches the wire. Transport send confirmation advances the Welcome lifecycle
+but does **not** re-stamp the acknowledgement timer.
+
+This is the mechanism behind the group fan-out scaling cliff. When a rate
+limiter defers frames, a frame late in a large fan-out can time out and be
+retransmitted before it was ever written. Deduplication absorbs the duplicates,
+so the cost is wasted work rather than loss, but the effect is real past roughly
+118 members.
+
+## Retry re-sealing
+
+A retry does not replay stored bytes. Before each retransmission the payload is
+re-sealed against the recipient's **current** session state, preserving the
+message identifier.
+
+### Why
+
+An MLS session that has forked leaves stored ciphertext sealed to a dead epoch.
+Replaying it fails forever. Re-sealing means the resend that follows a
+receiver-side heal actually delivers.
+
+This is the sender-side half of the desync recovery documented in
+[Session lifecycle](session-lifecycle.md). Together with the receiver-side
+withheld acknowledgement, it is what makes a session fork recoverable without
+message loss.
+
+### Provenance handling
+
+Re-seal provenance holds **plaintext**, so it is memory-only and never
+persisted. Two rules follow:
+
+1. Staging is strictly transient. Taking a staged re-seal always removes it, and
+   removing an outbox entry clears any staged re-seal as well, so a
+   staged-but-dropped send never strands plaintext.
+2. Re-sealing is gated on the session being confirmed. Re-sealing against an
+   unconfirmed session would produce ciphertext the peer cannot open either.
+
+Media has no equivalent. Chunks are re-encoded rather than replayed, and media
+recovers through a descriptor-based resend request.
+
+## Parking
+
+When the relay reports a recipient unreachable, a direct message is **parked**
+rather than retried into a void.
+
+A parked message is probed periodically with a backoff that widens from 15
+seconds toward 10 minutes. When the peer returns, parked messages re-enter the
+queue.
+
+**Parking removes the pending acknowledgement.** That is what makes it different
+from a long retry, and it has a consequence worth stating: a parked message
+cannot settle on its own. Any mechanism that offers a parked message to another
+path must also arrange for it to settle, or offering it is worse than leaving it
+parked.
+
+## Frames that never enter the ladder
+
+Relay hint frames (`__GRP_RELAY_REG__`, `__GRP_RELAY_BCAST__`) are self-addressed
+and replaced by the local bridge before transmission. No acknowledgement can
+ever return for them.
+
+They MUST be sent with acknowledgement disabled: no outbox entry, no pending
+acknowledgement, no retry entry. On the ordinary ladder such a frame is
+retransmitted 10 times over roughly 800 seconds, each resend costing another
+full relay fan-out under a fresh relay-minted identifier that receiver
+deduplication does not catch, ending in a delivery failure for an identifier the
+application never saw plus a transport-selector penalty for a transport that did
+nothing wrong.
+
+They MUST also be pinned to the internet transport rather than routed by the
+selector, for the reason given in
+[Control messages](../spec/control-messages.md#relay-hint-frames).
+
+Their retry policy lives at the application layer: bounded, explicit trackers
+with their own timeouts and their own downgrade paths.
+
+## Offline push
+
+When the recipient is not reachable and a push channel exists, the ciphertext
+travels in the push payload. The message stays in the outbox: a push is a wake
+signal plus an opportunistic delivery, not an acknowledgement.
+
+## Restart behaviour
+
+On restore:
+
+1. Entries past the absolute lifetime cap are dropped with a terminal failure
+   event.
+2. Surviving entries get a refreshed carrier-relative window, because a restart
+   means a fresh delivery opportunity.
+3. Restoration of per-peer end-to-end capabilities MUST complete **before** the
+   queued sends flush, or the flush emits downgraded envelopes to every
+   established peer.
+
+Ordering rule 3 is easy to get wrong because both steps happen during startup
+and neither obviously depends on the other. It is a real ordering constraint.

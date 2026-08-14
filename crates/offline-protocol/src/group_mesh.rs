@@ -839,7 +839,8 @@ pub(crate) struct PendingGroupMessage {
     pub(crate) buffered_at: Instant,
     /// Transport the frame arrived on, recorded so the drain can send the
     /// deferred delivery ACK directly on it once the message finally decrypts
-    /// (see the deferred-ACK atom in CLAUDE.md). `None` for the relay path
+    /// (see the deferred-acknowledgement atom in
+    /// `docs/state-machines/delivery-and-acks.md`). `None` for the relay path
     /// (the relay sender is not ACK-gated) and for transport-less test enqueue
     /// — in both cases the drain ACK is a correct no-op.
     pub(crate) received_via: Option<TransportType>,

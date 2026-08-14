@@ -27,8 +27,8 @@ impl OfflineProtocol {
     /// [`Self::enqueue_pending_decryption`] with the transport the frame arrived
     /// on, when the caller knows it. The transport is recorded on the pending
     /// entry so the drain can send the deferred delivery ACK directly instead of
-    /// relying on the sender's next resend (see the deferred-ACK design in
-    /// CLAUDE.md).
+    /// relying on the sender's next resend (see the deferred-acknowledgement
+    /// atom in `docs/state-machines/delivery-and-acks.md`).
     pub(super) fn enqueue_pending_decryption_via(
         &mut self,
         sender: &str,
