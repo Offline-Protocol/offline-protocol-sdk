@@ -4,6 +4,47 @@ All notable changes to the Offline Protocol SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). This changelog covers everything after the **v0.7.1** release.
 
+## [Unreleased]
+
+### Fixed
+
+- **A device with internet no longer keeps messages from the mesh standing
+  next to it.** Reachability was decided from local carrier status alone: any
+  carrier that does its own routing being up — Internet, Nostr, Reticulum —
+  counted as reachable for *every* recipient, so nothing was ever handed to
+  the neighbors. That is right in the case forwarding was built for, where
+  nobody has infrastructure, and wrong in a mixed neighborhood. Two halves,
+  and the second was the one that bit: a message to a peer reachable only
+  across the mesh went to the relay, earned the "recipient unreachable"
+  verdict, and parked waiting for someone who was never going to come online;
+  and an online *recipient* answered a mesh-delivered message over the relay,
+  where an offline sender could not see it — so the sender retransmitted a
+  message that had been delivered and read, and eventually reported it failed.
+
+  The initial send is unchanged, so an online device still does not spend its
+  neighbors' battery on traffic the relay serves. What changed is what happens
+  after the relay contradicts it:
+
+  - The relay's `recipient_unreachable` verdict — the one per-peer
+    reachability fact a device receives — now hands the message to the mesh as
+    well as parking it, on every park rather than only the first, so a
+    recipient who was out of range at the first park is still reached later.
+    Media chunks are offered the same way.
+  - An acknowledgement for a message that arrived across the mesh travels back
+    the way it came, whatever the answering device's own carriers say. When
+    that device is also online the answer goes both ways; the duplicate costs
+    one frame, which the sender's ack handling already absorbs.
+  - Because parking removes the pending ACK, a parked message delivered across
+    the mesh is now settled from the acknowledgement alone, firing the ordinary
+    `message_delivered`. Without this the mesh hand-off would have delivered
+    messages the sender never learned about.
+
+  Still not covered: a device whose only infrastructure is Nostr or Reticulum
+  gets no unreachable verdict from either, so nothing contradicts the initial
+  answer and no fallback fires. Carrier status is also platform-reported and
+  means "this carrier is up", not "the relay connection is authenticated".
+  (#326)
+
 ## [0.21.0] — 2026-08-13
 
 > **Your identity is no longer something your app picks.** `ProtocolConfig.userId`

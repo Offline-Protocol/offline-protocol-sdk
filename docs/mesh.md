@@ -547,11 +547,18 @@ The device's own sends draw on the same per-second budget — it is one radio �
 
 Tunables live in `ProtocolConfig::mesh_relay`. Both the tunables and these counters are **Rust-core surfaces today**: neither is mirrored over UniFFI or React Native yet, so apps get the defaults and cannot read the counters from JS or native.
 
-#### What forwarding does not cover
+#### An online device in a mixed neighborhood
 
-A device offers frames to its neighbors only when it holds no other way to reach the recipient. If any carrier that does its own routing is up — Internet, Nostr, Reticulum — that counts as reachable for **every** recipient, and nothing is handed to the mesh.
+At the moment of sending, a device offers frames to its neighbors only when it holds no other way to reach the recipient. If any carrier that does its own routing is up — Internet, Nostr, Reticulum — that counts as reachable for **every** recipient, and nothing is handed to the mesh. That keeps the ordinary online case free: a device with a working relay connection does not spend its neighbors' battery on traffic the relay serves perfectly well.
 
-That is right for the case this is built for, where nobody has infrastructure, but it leaves a gap in a mixed neighborhood: a device with internet will send to the relay rather than across the mesh, even when the recipient is reachable only by a multi-hop mesh path. It applies to acknowledgements too, so an online recipient answers a mesh-delivered message over the relay, where an offline sender cannot see it. Closing this means letting the relay's own "recipient unreachable" verdict fall back to the mesh, which is future work.
+The catch is that the question being asked there is about this device's own carriers, not about the recipient. So a mixed neighborhood — someone online standing next to someone who is not — needs a second answer, and two things provide it:
+
+- **The relay's verdict.** When the relay reports it cannot reach the recipient, that is the one per-peer reachability fact a device ever receives, and it contradicts what the carrier status implied. The message is parked as before *and* handed to the neighbors, who may well be able to reach someone the relay cannot. Re-offered on each subsequent park, so a recipient who was out of range when the message was first parked is still reached later. Media chunks are offered the same way.
+- **How the message arrived.** An acknowledgement for a message that reached this device across the mesh goes back the way it came, whatever this device's own carriers say. Otherwise an online recipient answers over the relay, where an offline sender cannot see it — and that sender retransmits a message that was delivered and read, eventually reporting it failed. When this device is also online, the answer goes both ways; the duplicate costs one frame.
+
+Because parking removes the pending acknowledgement, a parked message that is then delivered across the mesh is settled from the acknowledgement alone. Apps see the ordinary `message_delivered` event.
+
+What is still not covered: a device whose only infrastructure is **Nostr or Reticulum** never receives an unreachable verdict at all — neither reports per-recipient delivery — so nothing contradicts the initial "reachable" answer and no mesh fallback fires for it. Note also that carrier status is reported by the platform bridge and means "this carrier is up", not "the relay connection is authenticated"; a bridge that reports a connection it never authenticates produces no verdicts either, and its messages settle by acknowledgement timeout as they always did.
 
 ### Path Scoring
 
