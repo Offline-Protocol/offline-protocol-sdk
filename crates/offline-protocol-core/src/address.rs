@@ -93,9 +93,18 @@ pub enum AddressError {
 /// The two orders differ: the bech32 charset (`qpzry9x8gf2tvdw0s3jn54khce6mua7l`)
 /// is not monotonic in ASCII — value 4 renders as `y` (0x79) and value 5 as
 /// `9` (0x39) — and a string comparison would also weigh the checksum
-/// characters. Protocol tiebreakers (both-create session ownership, leave
-/// election, admin auto-promotion, fork leader) must therefore compare
-/// `Address` values, never their `Display` output.
+/// characters.
+///
+/// **Which order a tiebreaker uses is fixed per site, and the sites disagree.**
+/// Both-create session ownership compares `Address` values (hash bytes); group
+/// leave election, admin auto-promotion and fork leader election sort rendered
+/// strings. Each converges on its own, because every peer running that
+/// tiebreaker sorts the same way.
+///
+/// Do not "harmonize" one site onto the other order. Peers that changed and
+/// peers that did not would then elect different winners from identical input,
+/// with no way to detect the disagreement locally. Prefer hash-byte order for
+/// anything new. See `docs/adr/0003-self-certifying-addresses.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Address {
     hash: [u8; Address::HASH_LEN],

@@ -868,7 +868,7 @@ impl TransportSelector {
         //
         // The Internet baseline intentionally exceeds the 0–100 range of
         // offline transports so that the gap comfortably exceeds the default
-        // switch hysteresis (10). Increasing hysteresis beyond ~20 may
+        // switch hysteresis (15.0). Increasing hysteresis beyond ~20 may
         // prevent DORS from switching *to* Internet even when prefer_online
         // is set.
         //

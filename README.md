@@ -213,6 +213,20 @@ See the [docs/](docs/) directory for detailed guides:
 - [Telemetry](docs/telemetry.md)
 - [iOS Integration](docs/ios-integration.md) / [Android Integration](docs/android-integration.md)
 
+Reference material for anyone implementing against the protocol or changing its
+behaviour:
+
+- [Protocol Specification](docs/spec/README.md), the wire and behaviour contract,
+  independent of this implementation
+- [Threat Model](docs/security/threat-model.md), including the residual risks
+  stated plainly
+- [State Machines](docs/state-machines/README.md) for delivery, retries,
+  sessions, groups, and transports
+- [Architecture Decision Records](docs/adr/README.md), why the non-obvious
+  choices are what they are
+- [Bridge Contracts](docs/bridges/README.md) for Swift, Kotlin, Python, and
+  TypeScript
+
 ## Development
 
 ```bash

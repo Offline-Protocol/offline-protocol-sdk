@@ -116,7 +116,7 @@ object MeshWakePolicy {
      * A drift here fails silently in the worst way: React Native logs "No task
      * registered for key" to the device log and resolves nothing, the app sees
      * an opt-in that does nothing, and both sides still compile. Pinned by
-     * `react_native_mesh_wake_task_key_matches_native` in the uniffi crate.
+     * `react_native_mesh_wake_wiring_is_present` in the uniffi crate.
      */
     const val TASK_KEY = "OfflineProtocolMeshWake"
 

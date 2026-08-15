@@ -632,7 +632,8 @@ impl OfflineProtocol {
     /// (delayed delivery, never lost). Closing that needs a signed
     /// epoch-corroboration exchange before teardown; a liveness-only probe does
     /// not work, since a healthy peer answers and we would tear down anyway.
-    /// Also see the CLAUDE.md "Crypto-failure recovery" note.
+    /// Also see `docs/state-machines/session-lifecycle.md` ("Desync and heal")
+    /// and `docs/security/threat-model.md` (residual risk R2).
     pub(super) fn schedule_session_rekey(&mut self, peer_id: &str) {
         let now = Utc::now();
         if let Some(due_at) = self.rekey_due_at.get(peer_id) {

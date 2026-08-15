@@ -22,8 +22,10 @@ pub(crate) struct PendingDecryptMessage {
     pub(crate) sequence: u64,
     pub(crate) message: Message,
     /// Transport the frame arrived on, when the caller knew it. Recorded so the
-    /// drain can send the deferred delivery ACK directly (see the deferred-ACK
-    /// design in CLAUDE.md) instead of waiting for the sender's next resend to
+    /// drain can send the deferred delivery ACK directly (see the
+    /// deferred-acknowledgement atom in
+    /// `docs/state-machines/delivery-and-acks.md`) instead of waiting for the
+    /// sender's next resend to
     /// hit the duplicate re-ACK path. `None` when the message was enqueued from
     /// a context with no transport (tests, or a re-queue by the handler during a
     /// drain, which re-processes with no live arrival transport) — the drain

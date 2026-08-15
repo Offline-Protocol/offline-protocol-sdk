@@ -1273,8 +1273,9 @@ pub(crate) enum InternalMessageResult {
     /// In the latter three, recovery is the sender's *resend* rather than this
     /// frame: Tier 2 re-seals each resend of an encrypted DM against a live
     /// generation, and a message that stays undeliverable settles as an honest
-    /// `MessageFailed` instead of a lying "delivered". See the deferred-ACK and
-    /// crypto-failure-recovery designs in CLAUDE.md.
+    /// `MessageFailed` instead of a lying "delivered". See
+    /// `docs/state-machines/delivery-and-acks.md` for the deferred-acknowledgement
+    /// atom and the decrypt-failure classification.
     Deferred,
     /// Message was decrypted, here's the plaintext.
     Decrypted(String),
