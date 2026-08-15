@@ -143,9 +143,17 @@ acknowledgement is a correct no-op.
 
 ### The drain
 
+The drain fires when the **group's** state advances: a Welcome joins the group, a
+commit merges and moves the epoch, or a commit or proposal arrives on the message
+channel. It does not fire on a successful application decrypt, because decrypting
+a message changes nothing about whether the rest of the batch can decrypt. That
+differs from the 1:1 machine, where any successful decrypt drains the pending
+queue, and the difference is worth holding on to: here the unblocking event is
+always an epoch change.
+
 ```mermaid
 flowchart TD
-    D[Drain fires: any successful decrypt] --> B[Take the whole buffered batch]
+    D[Drain fires: group state advanced] --> B[Take the whole buffered batch]
     B --> E{Entry expired?}
     E -->|yes| X[Release replay protection, drop]
     E -->|no| S{Sibling of one already<br/>delivered in THIS batch?}

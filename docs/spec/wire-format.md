@@ -101,7 +101,10 @@ It is the sole encoding used for:
 - the internet relay path.
 
 Field names are the abstract field names above. Optional fields are omitted
-rather than encoded as null where the field is absent.
+rather than encoded as null where the field is absent, with one exception:
+`reply_to_msg` is always present and is `null` when there is no reply. A
+receiver MUST accept both spellings for every optional field, since the
+distinction carries no meaning.
 
 Validation on decode is not optional. Identifier length caps and the Lamport
 clock clamp are security checks, not conveniences, and the binary path is
@@ -217,8 +220,9 @@ The encoding choice interacts with this directly. Measured on one encrypted
 direct message, the JSON floor with the legacy envelope takes 1342 bytes; the
 compact envelope alone brings that to 808 (the envelope is responsible for
 roughly a 2.7 times reduction on the payload it replaces); adding the binary
-codec brings it to 472, **about 2.8 times smaller** end to end. That is often
-the difference between one Bluetooth LE fragment and three.
+codec brings it to 472, **about 2.8 times smaller** end to end. At the 185-byte
+Bluetooth LE fragment size that is the difference between ten fragments and
+four.
 
 ## Reserved metadata keys
 

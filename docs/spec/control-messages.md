@@ -4,7 +4,10 @@
 
 Protocol-internal messages are ordinary messages whose `content` begins with a
 reserved prefix. The prefix names the frame type; the rest of `content` is the
-frame body, usually JSON, sometimes base64.
+frame body, usually JSON. Base64 appears in two places only: an `__MLS_ENC__`
+body, and the `welcome_data` field inside the JSON payload of
+`__GRP_MLS_WELCOME__`. A frame body is not base64 unless this document says it
+is, and in particular the 1:1 `__MLS_WELCOME__` body is not.
 
 This is a deliberately low-tech multiplexing scheme. It costs prefix bytes on
 every control frame, and it buys the ability to carry control traffic over any
@@ -23,7 +26,7 @@ vector.
 | Prefix | Direction | Body |
 |--------|-----------|------|
 | `__MLS_KEY_PKG__` | peer to peer | Key package payload, JSON |
-| `__MLS_WELCOME__` | peer to peer | MLS Welcome, base64 |
+| `__MLS_WELCOME__` | peer to peer | JSON `WelcomeMessage`; the MLS Welcome bytes are a JSON byte array inside it, not base64 |
 | `__MLS_ENC__` | peer to peer | Encrypted envelope, see [Encryption envelopes](encryption-envelopes.md) |
 | `__MLS_CONFIRM_PROBE__` | peer to peer | Session confirmation probe |
 | `__MLS_CONFIRM_ACK__` | peer to peer | Session confirmation acknowledgement |

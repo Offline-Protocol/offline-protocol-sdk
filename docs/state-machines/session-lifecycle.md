@@ -11,9 +11,11 @@ without exchanging it, and so can anyone else.
 **E2. An envelope must name the slot shared with its claimed sender.** Checked
 before decryption is attempted.
 
-**E3. A session reset destroys session state, never queued plaintext.** The
+**E3. A desync re-key destroys session state, never queued plaintext.** The
 outbound pending queue holds plaintext and is sealed against the rebuilt session
-at flush time.
+at flush time. This is a property of the re-key, not of every reset: the
+post-unblock reset deliberately drops the queue. See
+[Session reset semantics](#session-reset-semantics).
 
 **E4. One init key per peer.** An MLS init key is single-use.
 
@@ -189,11 +191,15 @@ trusted:**
 | Slot binding (E2) | One derivable identifier cannot be aimed at arbitrary peers, and the re-key tracking map cannot be grown with attacker-chosen keys |
 | Bounded tracking map | Memory is bounded regardless |
 | Per-peer rate limit | Churn is bounded |
-| Reset preserves the pending queue (E3) | Nothing is destroyed |
-| Sender-side re-sealing | Resends deliver after the heal |
+| The re-key preserves the pending queue (E3) | Nothing is destroyed |
+| Sender-side re-sealing | Resends deliver after the heal, for entries whose re-seal provenance survives in memory |
 | A security warning per re-key | A sustained rate, meaning injection rather than a real fork, is visible |
 
-**Residual:** bounded re-key churn on a pair. Delivery delayed, never lost.
+**Residual:** bounded re-key churn on a pair. Delivery delayed, never silently
+lost. A fork that spans a sender restart is the one case where the resend cannot
+recover, because the re-seal provenance did not survive
+([outbox S3](outbox-and-retries.md#invariants)); those messages settle as an
+honest failure rather than a false delivery.
 
 **What would close it:** a signed epoch-corroboration exchange before teardown. A
 liveness-only probe does not work, because a healthy peer answers and the
@@ -201,13 +207,24 @@ teardown happens anyway.
 
 ## Session reset semantics
 
-A session reset:
+Two paths advertise a key package with the reset flag set, and they differ in
+exactly one respect that matters: what happens to queued outbound plaintext.
+
+**The desync re-key**, described above, is a repair. It:
 
 - deletes local session state,
 - **keeps** the outbound pending queue, which holds plaintext and is sealed
   against the rebuilt session at flush,
 - advertises a fresh key package with the reset flag set.
 
-The other use of the reset flag is post-unblock convergence: when one side
-unblocks the other, it deletes its session and advertises a reset so both sides
-converge on a single fresh group rather than one orphaned session each.
+**The post-unblock reset** is a clean slate, not a repair. When one side unblocks
+the other, it deletes its session and advertises a reset so both sides converge
+on a single fresh group rather than one orphaned session each. It additionally
+**drops** the peer's pending queue, failing each queued message terminally, and
+discards the held key package and learned capabilities.
+
+The difference is deliberate. A re-key repairs a session the user still wants,
+so destroying their unsent messages would be the bug. A block severed the
+relationship, and delivering messages queued before the block, on the strength of
+an unblock, is not what the user asked for. A reader reasoning about queued
+plaintext must therefore ask which reset they are looking at.

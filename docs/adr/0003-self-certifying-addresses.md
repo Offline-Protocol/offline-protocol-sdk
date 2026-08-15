@@ -77,10 +77,17 @@ The protocol's tiebreakers do not all use it:
 
 | Tiebreaker | Compares |
 |------------|----------|
-| Session slot ownership (both-create) | `Address` values, so hash bytes |
+| Session slot ownership (both-create) | `Address` values, so hash bytes, falling back to string order when either identifier does not parse as an address |
 | Group leave election | rendered address strings |
 | Admin auto-promotion | rendered address strings |
 | Fork leader election | rendered address strings |
+
+The fallback in the first row is part of the contract, not an implementation
+detail: identifiers predate addresses, and a peer still carrying a legacy
+identifier has no hash bytes to compare. Both sides apply the same fallback, so
+it converges, but a second implementation that omits it diverges on exactly
+those pairs. The session slot identifier derives its ordering the same way, with
+the same fallback.
 
 Both orders are deterministic and total, so each of these converges: every peer
 running a given tiebreaker sorts the same way and reaches the same winner.

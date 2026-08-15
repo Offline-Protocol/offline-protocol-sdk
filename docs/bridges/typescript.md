@@ -25,11 +25,19 @@ Events cross as opaque JSON ([C3](README.md#c3-events-cross-as-opaque-json)), so
 the TypeScript event interfaces have no compile-time link to the core.
 
 The core holds guard tests that read `bindings/react-native/src/types.ts` and
-pin the event JSON shape against the declarations there. That test, not the
-TypeScript compiler, is what keeps them in step.
+pin the event **tag** strings, the security-warning codes, and the protocol-state
+member names against the declarations there. Those tests, not the TypeScript
+compiler, are what keep the two vocabularies in step.
 
-Adding an event field means updating `types.ts` in the same change. When
-`types.ts` lags, nothing fails loudly: the event simply arrives untyped.
+Know what they do not cover. They check that every event variant has a
+declaration carrying the right `type` discriminant; they do **not** check the
+field set inside it. The tests that pin event field shapes assert against Rust
+literals and never read `types.ts`. So a renamed or removed event **field**
+passes every guard in the repository and arrives mistyped at runtime.
+
+Adding an event field means updating `types.ts` in the same change, and nothing
+will remind you. When `types.ts` lags, nothing fails loudly: the event simply
+arrives untyped.
 
 ## T3. Cross-language constant sets are pinned by Rust guards
 

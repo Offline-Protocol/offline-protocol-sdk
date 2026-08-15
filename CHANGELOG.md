@@ -77,7 +77,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   Kotlin, Python and TypeScript contract, every rule of which fails *silently*
   when violated. `CLAUDE.md` is now repository instructions plus a pointer
   table. Five Rust doc comments that said "see CLAUDE.md" now name the specific
-  document. No behavioural change.
+  document, and two more are corrected rather than redirected: `Address`'s
+  ordering note told readers to compare `Address` values at all four protocol
+  tiebreakers, which is true of one of them and is the exact change
+  [ADR 0003](docs/adr/0003-self-certifying-addresses.md) warns breaks
+  convergence; a DORS comment named a default switch hysteresis of 10 when it is
+  15.0. No behavioural change.
 
 - **`CHANGELOG.md` is archived by release series.** The working file was 2,425
   lines and growing without bound; it now holds unreleased changes plus the

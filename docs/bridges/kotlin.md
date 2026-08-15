@@ -71,8 +71,18 @@ JavaScript. It must:
 - accept both camelCase and snake_case spellings where the surface historically
   did.
 
-All three are pinned in `ProtocolConfigParserTest.kt`. Add a case there for
+The last two are pinned in `ProtocolConfigParserTest.kt`. Add a case there for
 every new field rather than trusting the parser's shape.
+
+The first is pinned elsewhere, and the split is not arbitrary. Preserving an
+absent field is a property of the **update** path, which reads the live config
+and merges, so it cannot be exercised against the parser alone: the module that
+performs the merge cannot be instantiated in a plain unit test (see
+[Running them locally](#running-them-locally)). The Rust guard
+`react_native_bridges_merge_dors_updates_from_the_live_config` pins it instead,
+by reading the bridge source. Note the consequence: `ProtocolConfigParserTest.kt`
+pins literal defaults at **initial** parse, which is the opposite mechanism, so a
+green run there says nothing about partial updates.
 
 ## K6. Sticky and one-shot events
 

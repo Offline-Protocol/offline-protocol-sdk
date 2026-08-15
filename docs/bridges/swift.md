@@ -42,8 +42,12 @@ JavaScript. There is no error at build time.
 A new Swift source file in the React Native iOS package must be registered in
 four places, and missing any one produces a different, unhelpful symptom:
 
-1. The podspec's source file list, which enumerates files explicitly rather than
-   globbing them, so a new file is invisible to CocoaPods until it is added.
+1. The podspec's source file list, which enumerates top-level files one by one
+   (only `ios/ble/**` and `ios/mesh/**` are globbed), so a new top-level file is
+   invisible to CocoaPods until it is added. This one is not silent: the Rust
+   guard `react_native_podspec_ships_every_hand_written_ios_source` fails
+   `cargo test` on an unlisted top-level source. A file added under `ble/` or
+   `mesh/` needs no podspec edit at all.
 2. The Swift package manifest's target sources, for the typecheck harness.
 3. Any exclusion list it must **not** be in.
 4. The test target, if it has tests.
@@ -59,6 +63,11 @@ that, so the bridge must check.
 **An optional `@objc` protocol member accessed through an existential is a double
 optional.** Testing it against nil is therefore always true, and the guard
 silently passes. This has shipped as a bug. Unwrap both levels explicitly.
+
+The precondition is pinned by the Rust guard
+`react_native_ios_emit_gate_has_live_instance_precondition`, which reads the
+bridge source, so removing the check fails `cargo test` rather than only failing
+on a device.
 
 ## S4. Never hold a strong reference during deallocation
 
@@ -105,9 +114,12 @@ swift test
 
 Roughly one second. There is no reason to skip it.
 
-The test target covers the policy and translation types that carry real logic:
-config reading, relay control-op translation, fragment buffering, rate limiting,
-presence policy, identity binding, and the pinned prefix list.
+The test target covers the policy and translation types that carry real logic,
+21 suites at the time of writing, including config reading, relay control-op
+translation, fragment buffering, rate limiting, presence policy, identity
+binding, address declaration, legacy store adoption, the write-stall watchdog,
+the superseded latch, and the pinned prefix list. Read `Package.swift` for the
+current set rather than trusting this sentence.
 
 **Error mapping is not in that list.** `ProtocolErrorBridge` depends on the
 generated UniFFI module, so both it and its test suite are excluded from the

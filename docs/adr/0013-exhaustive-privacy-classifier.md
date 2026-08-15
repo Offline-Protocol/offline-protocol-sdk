@@ -57,9 +57,10 @@ deciding".
 a class, not a detail, and must reach for the device log for the rest. That is
 the intended trade.
 
-**Cost.** Three classifiers to keep in step, one per error family.
+**Cost.** A family of classification functions to keep in step, one per error
+family, each returning a static string.
 
-## Never add a catch-all arm
+## Never add a catch-all arm over an error enum
 
 A catch-all restores the per-site opt-in this replaced, and every leak in this
 class was a per-site omission. The exhaustiveness **is** the mechanism; without
@@ -67,6 +68,14 @@ it the return type alone only stops interpolation, not omission.
 
 Exhaustive matching on a non-exhaustive type is legal within its defining crate,
 which is exactly why the classifier lives there.
+
+The rule is about matching on an **enum**, where exhaustiveness is available and
+therefore obligatory. Some members of the family classify a wire **string**
+instead, typically a code that crossed a crate or transport boundary, and there
+a final arm is unavoidable because the input set is open. Those are still
+conforming, on one condition: the fallback returns a fixed token and never the
+input. A fallback that echoes what it did not recognize is the leak this ADR
+exists to prevent, wearing a default's clothing.
 
 ## Testing note
 

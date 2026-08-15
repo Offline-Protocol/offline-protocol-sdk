@@ -13,9 +13,12 @@ pending state.
 relative delivery window, but an absolute cap bounds the total lifetime, or an
 application used briefly once per window would re-grant a fresh window forever.
 
-**S3. A resend is re-sealed, never replayed.** The ciphertext is regenerated
-against the recipient's current session; the message identifier is preserved so
-deduplication and acknowledgement still match.
+**S3. A resend within a process lifetime is re-sealed, never replayed.** The
+ciphertext is regenerated against the recipient's current session; the message
+identifier is preserved so deduplication and acknowledgement still match. The
+qualifier is load-bearing: re-seal provenance holds plaintext, so it is never
+persisted, and an entry restored after a restart replays verbatim. See
+[Provenance handling](#provenance-handling).
 
 **S4. Frames that cannot be acknowledged never enter the ladder.** See relay
 hint frames below.
@@ -81,7 +84,8 @@ so the cost is wasted work rather than loss, but the effect is real past roughly
 
 ## Retry re-sealing
 
-A retry does not replay stored bytes. Before each retransmission the payload is
+A retry does not replay stored bytes, as long as the re-seal provenance staged
+at send time is still in memory. Before each retransmission the payload is
 re-sealed against the recipient's **current** session state, preserving the
 message identifier.
 
@@ -94,18 +98,24 @@ receiver-side heal actually delivers.
 This is the sender-side half of the desync recovery documented in
 [Session lifecycle](session-lifecycle.md). Together with the receiver-side
 withheld acknowledgement, it is what makes a session fork recoverable without
-message loss.
+message loss, for entries whose provenance is still in memory.
 
 ### Provenance handling
 
 Re-seal provenance holds **plaintext**, so it is memory-only and never
-persisted. Two rules follow:
+persisted. Three rules follow:
 
 1. Staging is strictly transient. Taking a staged re-seal always removes it, and
    removing an outbox entry clears any staged re-seal as well, so a
    staged-but-dropped send never strands plaintext.
 2. Re-sealing is gated on the session being confirmed. Re-sealing against an
    unconfirmed session would produce ciphertext the peer cannot open either.
+3. **An outbox entry restored after a restart has no provenance, so it replays
+   verbatim.** This is the deliberate cost of not writing plaintext to disk, and
+   it bounds the no-loss claim above: a fork that begins before a restart is not
+   recovered by the resends that follow it, and those messages settle as an
+   honest failure rather than delivering late. Persisting the plaintext would
+   close the gap and is rejected for that reason.
 
 Media has no equivalent. Chunks are re-encoded rather than replayed, and media
 recovers through a descriptor-based resend request.

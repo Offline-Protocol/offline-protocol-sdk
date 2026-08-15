@@ -57,6 +57,14 @@ intercepted before this classification runs so it cannot inherit the policy
 row's acknowledgement. See
 [ADR 0005](0005-defer-instead-of-drop-and-ack.md).
 
+**The desync and crypto-failure rows describe the table with crypto recovery
+enabled**, which is the default and is off only in the low-power preset. With it
+disabled, both rows collapse into drop-and-acknowledge with no re-key: the
+receiver treats an undecryptable frame as permanently undeliverable rather than
+paying for the heal. The security refusal row is **not** gated on the switch, and
+must never become so. Turning off a recovery optimization must not turn off an
+interception whose purpose is to withhold a liveness signal from an attacker.
+
 ## A subtlety worth pinning in a test
 
 **Malformed** input never reaches MLS framing validation and correctly stays out
