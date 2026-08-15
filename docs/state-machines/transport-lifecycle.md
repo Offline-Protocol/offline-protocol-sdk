@@ -178,4 +178,6 @@ This is a recurring source of confusion for application teams:
 Only the last one is delivery. Unconditional-enqueue transports are the reason
 relay hint frames must be pinned rather than routed: such a transport swallows a
 self-addressed frame and reports success. Wi-Fi Direct and Reticulum behave this
-way; Bluetooth LE fails closed, because self is never a connected peer.
+way. Bluetooth LE fails closed, because self is never a connected peer, but that
+only helps on a BLE-only device: the transport manager treats a synchronous
+refusal as a fallback trigger and hands the frame to one of the others anyway.

@@ -108,3 +108,22 @@ delivered it, so it names **this device** as the subject, and the remedy it
 implies is to abandon the group rather than to evict a member. The leaf cannot
 speak, but it holds live group secrets and reads everything, which no later
 refusal undoes.
+
+The adopt path's ordering carries the same weight as the checks themselves: the
+forged-tree test MUST run **before** the duplicate-session check. The adopt is
+stage-then-replace and refuses non-destructively (`join_group_replacing`), so an
+existing session survives the refusal; in the other order the forgery is
+swallowed as a harmless retransmit. It is the opposite of harmless, and reaching
+it needs only that a session with the peer already exists, which is either half
+of a both-create race or any re-invite.
+
+## What would undo this
+
+Deleting an arm that looks redundant. Each of the four commit-walk sources and
+each seam was individually proven load-bearing by mutation testing: the binding
+is checked against ten named sabotages, each removing one arm and expecting the
+suite to fail. The adversarial fixture that seats a forged leaf directly into a
+key store, bypassing both entry gates, is
+`MlsManager::seat_forged_leaf_for_testing`, behind the mls crate's `test-utils`
+feature. Without it the use-time seam cannot be tested at all, because no honest
+code path produces the state it defends against.

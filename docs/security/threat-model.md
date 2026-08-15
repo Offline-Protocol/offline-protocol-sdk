@@ -152,15 +152,21 @@ The rule the protocol settled on:
 
 - A frame refused on **security** grounds gets **no acknowledgement**, and its
   identifier is unmarked. That covers the signature gate, inbound plaintext
-  refused by encryption policy, and the post-decrypt identity bindings (sender,
-  session and leaf address mismatch), which are intercepted *before*
-  classification precisely so they cannot inherit the policy disposition below.
+  refused by encryption policy, and all four identity bindings (sender identity,
+  session slot, leaf address, unsupported sender), which are intercepted
+  *before* classification precisely so they cannot inherit the policy
+  disposition below. The session slot binding runs before any AEAD, since every
+  failure the MLS library raises below it happens before it authenticates
+  anything; the credential comparisons run once decryption has succeeded.
   Acknowledging would confirm to an attacker that this device is online and
   processing, and unmarking is what stops an exact replay from reaching the
   duplicate re-acknowledgement path and leaking the same fact anyway.
-- A frame refused on **policy** grounds keeps its acknowledgement. A membership
-  commit refused by opt-in enforcement is the case in point: the refusal is
-  permanent, so a resend could only waste work.
+- A frame refused on **policy** grounds keeps its acknowledgement **when the
+  refusal happens on the arrival path**. A membership commit refused by opt-in
+  enforcement is the case in point: the refusal is permanent, so a resend could
+  only waste work. A frame already deferred into the group buffer that later
+  resolves as a policy refusal is never acknowledged, because the arrival path
+  withheld the acknowledgement already.
 - A frame that failed for a **recoverable** reason gets no acknowledgement, so
   the sender's resend is the recovery path.
 
@@ -194,8 +200,13 @@ answers corrupt the members cache, which is **not** the MLS roster and is never
 read by roster-derived logic, but is read verbatim as the group fan-out send
 cache: an accepted forgery therefore makes this device address every subsequent
 group ciphertext to an attacker-chosen identifier, or stop addressing a real
-member. Adds are gated on internet arrival and removes on an administrator
-check, which is what bounds this.
+member. The same list feeds the sealed rich payload gate, which requires every
+non-self member to be known rich-capable, so an unknown spliced identifier
+closes it: reply context and forward attribution move from inside the MLS AEAD
+to hop-visible cleartext and media secrets are dropped, until the next commit
+refreshes the cache. That defeats a control this document lists by name, reached
+by the adversary that control names. Adds are gated on internet arrival and
+removes on an administrator check, which is what bounds all of this.
 
 **Why it stands:** these frames have no signer. Closing it means moving relay
 answers onto dedicated entry points.
@@ -315,7 +326,7 @@ is the one application-supplied payload that boundary 5 does **not** cover, so
 
 **Why it stands:** discovery is a broadcast to peers with whom no session
 necessarily exists, so there is no established group to encrypt to; encrypting
-request and response bodies is designed but not implemented.
+request and response bodies is not implemented.
 
 **What application teams must do today:** treat a service body as public, and
 encrypt anything sensitive above the SDK before handing it over.

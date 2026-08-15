@@ -132,7 +132,9 @@ These fail silently if broken. Each is documented in full where it is linked.
 - **Adding a control-message prefix** means adding it to the registry that
   drives injection prevention
   ([spec](docs/spec/control-messages.md#reserved-prefix-registry)).
-- **Never add a catch-all arm to a telemetry reason classifier**
+- **Never add a catch-all arm to a telemetry reason classifier that matches on
+  an enum** (a classifier over an open wire string may, if the fallback returns
+  a fixed token and never the input)
   ([ADR 0013](docs/adr/0013-exhaustive-privacy-classifier.md)).
 
 ### Safety rules

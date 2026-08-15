@@ -202,13 +202,21 @@ Roster change events carry a three-valued authorization field:
 An implementation MUST NOT emit "authorized" from a path that ran no check. The
 third state exists precisely so that path has something honest to say.
 
-Relay-reconciled **removes** are the asymmetry in that last row, and they are
-not "not evaluated": the remove path MUST check the authenticated wire sender
-against the administrative set and drop the frame when the sender is not an
-administrator, then report a real verdict. Adds cannot do this, because the
-frame authenticates the *path* rather than the actor, so `added_by` may be the
-relay itself. Omitting the remove-side check lets any peer evict members from
-the fan-out send cache and silently deny them group traffic.
+**Removes** are the asymmetry in that last row. The remove handler MUST check
+the authenticated wire sender against the administrative set, drop the frame
+when that sender is not an administrator, and only then report a real verdict.
+Adds cannot do this, because the frame authenticates the *path* rather than the
+actor, so `added_by` may be the relay itself. Omitting the remove-side check
+lets any peer evict members from the fan-out send cache and silently deny them
+group traffic.
+
+Note what that check implies for genuinely relay-originated removes: the relay's
+answer is injected unattributed, so its sender is a placeholder that can never
+be an administrator and the frame is always dropped. **Relay-native remove
+reconciliation is therefore inert**, and the path that actually removes a member
+is the removing administrator's own signed notification. This is a consequence
+of the rule, not a gap in it: restoring relay-native reconciliation means moving
+relay answers onto a dedicated entry point rather than weakening the check.
 
 ### The delta is derived only when both roster reads succeed
 
