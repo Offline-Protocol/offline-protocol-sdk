@@ -150,22 +150,26 @@ only a reliability one.
 
 The rule the protocol settled on:
 
-- A frame refused by the **signature gate** gets **no acknowledgement**, and its
-  identifier is unmarked. Acknowledging would confirm to an unauthenticated
-  injector that this device is online and processing, and unmarking is what stops
-  an exact replay from reaching the duplicate re-acknowledgement path and leaking
-  the same fact. Inbound plaintext refused by encryption policy is handled
-  identically, for the same reason.
-- A frame whose sender was **authenticated** and which is then permanently
-  refused keeps its acknowledgement. A membership commit refused by opt-in
-  enforcement is the case in point: the sender is a proven member rather than an
-  injector, so there is no oracle to protect, and a permanent refusal should not
-  be retransmitted.
+- A frame refused on **security** grounds gets **no acknowledgement**, and its
+  identifier is unmarked. That covers the signature gate, inbound plaintext
+  refused by encryption policy, and the post-decrypt identity bindings (sender,
+  session and leaf address mismatch), which are intercepted *before*
+  classification precisely so they cannot inherit the policy disposition below.
+  Acknowledging would confirm to an attacker that this device is online and
+  processing, and unmarking is what stops an exact replay from reaching the
+  duplicate re-acknowledgement path and leaking the same fact anyway.
+- A frame refused on **policy** grounds keeps its acknowledgement. A membership
+  commit refused by opt-in enforcement is the case in point: the refusal is
+  permanent, so a resend could only waste work.
 - A frame that failed for a **recoverable** reason gets no acknowledgement, so
   the sender's resend is the recovery path.
 
-"Refused on policy grounds" therefore names two opposite dispositions, and which
-one applies depends on whether the sender was authenticated first.
+Both refusals are permanent, so what separates them is neither authentication
+nor recoverability: a **policy** refusal is a statement about a *frame*, while a
+**security** refusal is a statement about an *attacker*, and answering the second
+at all is the leak. Being authenticated does not move a frame into the policy
+row. A group message is signature-gated, so its wire sender is proven, and a
+leaf credential that fails to bind still refuses it silently.
 
 Consequences for application teams are in
 [Delivery and ACKs](../state-machines/delivery-and-acks.md). The headline: **a
@@ -186,8 +190,12 @@ group list, and error reports.
 on, but only inside an armed window: the flag is set only for a frame that
 arrives on the internet transport, names a group this device already tracks, and
 correlates with a registration this device has outstanding. Forged membership
-answers corrupt the members cache (though **not** the MLS roster, and
-roster-derived logic never reads that cache).
+answers corrupt the members cache, which is **not** the MLS roster and is never
+read by roster-derived logic, but is read verbatim as the group fan-out send
+cache: an accepted forgery therefore makes this device address every subsequent
+group ciphertext to an attacker-chosen identifier, or stop addressing a real
+member. Adds are gated on internet arrival and removes on an administrator
+check, which is what bounds this.
 
 **Why it stands:** these frames have no signer. Closing it means moving relay
 answers onto dedicated entry points.
@@ -215,11 +223,19 @@ once decryption **succeeds**.
 - Slot binding means one derivable identifier cannot be aimed at arbitrary
   peers, and the tracking map cannot be grown with attacker-chosen keys.
 - A per-peer rate limit bounds the churn.
-- The heal destroys nothing: a session reset keeps the outbound pending queue,
-  which holds plaintext and is sealed against the rebuilt session at flush time.
+- The heal destroys nothing: the **desync re-key** reset keeps the outbound
+  pending queue, which holds plaintext and is sealed against the rebuilt session
+  at flush time. (The post-unblock reset is the other kind and deliberately
+  drops that queue, failing each entry terminally. See
+  [Session lifecycle](../state-machines/session-lifecycle.md).)
 - Every re-key emits a security warning, so a sustained rate is visible.
+- Each resend of an encrypted direct message is re-sealed against a live
+  generation, **for entries whose re-seal provenance survives in memory**. That
+  provenance is deliberately not persisted, so a restart drops it.
 
-**Residual:** bounded re-key churn on a pair. Delivery delayed, never lost.
+**Residual:** bounded re-key churn on a pair. Delivery delayed, never *silently*
+lost: a fork that spans a sender restart settles as an honest failure rather
+than a false delivery.
 
 **What would close it:** a signed epoch-corroboration exchange before teardown.
 A liveness-only probe does **not** work, because a healthy peer answers and the
@@ -241,9 +257,10 @@ budget is the binding constraint. Widening is a version bump and a migration.
 ### R4. Divergent administrative views
 
 Opt-in commit enforcement acts only on a **present** administrative set that
-positively excludes a principal; every absent input fails open. It cannot detect
-a **divergent** view: two honest members with different role snapshots each hold
-a non-empty set, so they reject each other's commits and partition.
+positively excludes a principal; absent knowledge of that set fails open. It
+cannot detect a **divergent** view: two honest members with different role
+snapshots each hold a non-empty set, so they reject each other's commits and
+partition.
 
 **Why it stands:** the administrative overlay replicates best-effort by design,
 and rejecting a commit forks you permanently from everyone who accepted it.
@@ -284,6 +301,25 @@ timeout and frames are retransmitted before they were ever written. Duplicates
 are absorbed by deduplication, so this is wasted work rather than loss, but it
 is a real scaling cliff.
 
+### R9. Service discovery and service bodies are signed, not encrypted
+
+The service prefix family (`__SVC_DISC_Q__`, `__SVC_DISC_R__`, `__SVC_REQ__`,
+`__SVC_RESP__`, and the generic service message) is control-plane: every frame
+is signature-gated, so its sender is proven, and every frame is **exempt from
+the encryption requirement**. Discovery gossip and the application-supplied
+request and response bodies therefore travel in cleartext.
+
+**Impact:** A1 and A3 read service bodies and the full discovery pattern. This
+is the one application-supplied payload that boundary 5 does **not** cover, so
+"MLS protects application content" does not hold here.
+
+**Why it stands:** discovery is a broadcast to peers with whom no session
+necessarily exists, so there is no established group to encrypt to; encrypting
+request and response bodies is designed but not implemented.
+
+**What application teams must do today:** treat a service body as public, and
+encrypt anything sensitive above the SDK before handing it over.
+
 ## The telemetry producer rule
 
 Telemetry ships some string fields verbatim by design. The scrubber hashes
@@ -308,9 +344,16 @@ Two habits follow, and both are structural rather than advisory:
    type.** A newly added variant then fails to compile *there*, forcing the
    privacy decision to be made where variants are written.
 
-**Never add a catch-all arm to a classifier.** A catch-all restores the per-site
-opt-in that the exhaustive match replaced, and the leaks this rule exists to
-stop were all per-site omissions.
+**Never add a catch-all arm to a classifier that matches on an enum.** A
+catch-all restores the per-site opt-in that the exhaustive match replaced, and
+the leaks this rule exists to stop were all per-site omissions.
+
+A classifier over an open wire **string** is the one exception, because the
+input set is unbounded and a final arm is unavoidable. It conforms on one
+condition: **the fallback returns a fixed token and never the input.** A
+fallback that echoes what it did not recognize is this leak wearing a default's
+clothing. See
+[ADR 0013](../adr/0013-exhaustive-privacy-classifier.md).
 
 When the dropped prose carried real structure, add it back as a **typed field**
 the scrubber can hash, not as prose.

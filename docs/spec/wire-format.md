@@ -75,11 +75,14 @@ or absent value rejects the whole message. A new priority is therefore a
 breaking change on the JSON floor, which is where a future addition has to be
 designed around.
 
-Encoders emit the **lowercase** form. Decoders MUST also accept the
-**capitalized** spelling of each name (`Low`, `Medium`, `High`, `Critical`): the
-UniFFI `receive_message` JSON has always emitted the capitalized form, and that
-JSON has to round-trip back through `forward_message`, so a decoder built to the
-lowercase set alone rejects frames the reference implementation itself produces.
+On the wire the value is always **lowercase**, so a wire decoder built to the
+four lowercase names alone is conforming. The reference implementation's decoder
+additionally accepts the **capitalized** spelling of each name (`Low`, `Medium`,
+`High`, `Critical`), but that tolerance exists for its **FFI boundary** rather
+than for the wire: the UniFFI `receive_message` JSON renders priority
+Debug-cased, and that JSON has to round-trip back in through `forward_message`.
+Anything re-parsing SDK-emitted FFI JSON needs the capitalized spellings; a peer
+implementation does not.
 
 ## Encodings
 

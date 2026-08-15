@@ -147,10 +147,9 @@ The roster is not cosmetic. It addresses per-member fan-out, feeds the rich
 payload gate, and supplies the membership lists the group tiebreakers sort.
 Those tiebreakers sort **rendered** identifiers rather than `Address` byte
 order; see [Ordering](identity.md#ordering) for why the two orders differ and
-must not be harmonized. A non-zero unbound
-count is reported as a security warning, because this is the only seam at which
-a leaf already seated in local state surfaces, and a log line reaches no
-application.
+must not be harmonized. A non-zero unbound count is reported as a security
+warning, because this is the only seam at which a leaf already seated in local
+state surfaces, and a log line reaches no application.
 
 That report differs in kind from the others: no frame was refused and no peer
 delivered it, so it names **this device** as the subject rather than a
@@ -198,10 +197,18 @@ Roster change events carry a three-valued authorization field:
 |-------|---------|
 | checked and authorized | A check ran and passed |
 | checked and unauthorized | A check ran and failed |
-| not evaluated | No check ran: own Welcome join, relay reconciliation |
+| not evaluated | No check ran: own Welcome join, relay-reconciled **adds** |
 
 An implementation MUST NOT emit "authorized" from a path that ran no check. The
 third state exists precisely so that path has something honest to say.
+
+Relay-reconciled **removes** are the asymmetry in that last row, and they are
+not "not evaluated": the remove path MUST check the authenticated wire sender
+against the administrative set and drop the frame when the sender is not an
+administrator, then report a real verdict. Adds cannot do this, because the
+frame authenticates the *path* rather than the actor, so `added_by` may be the
+relay itself. Omitting the remove-side check lets any peer evict members from
+the fan-out send cache and silently deny them group traffic.
 
 ### The delta is derived only when both roster reads succeed
 
@@ -243,7 +250,7 @@ The creator of record is deliberately **not** consulted here. One
 unauthenticated claim is too thin a basis to fork over.
 
 Enforcement acts only on a **present** administrative set that positively
-excludes a principal; every absent input fails open. It therefore cannot detect
+excludes a principal; absent knowledge of that set fails open. It therefore cannot detect
 a **divergent** view, where two members each hold a non-empty administrative set
 and disagree. That is why it is opt-in, and why it belongs only in a closed
 deployment that controls role distribution, never on part of a fleet: a member

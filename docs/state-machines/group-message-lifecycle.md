@@ -168,7 +168,7 @@ flowchart TD
     S -->|no| C[Decrypt]
     C -->|security rejected / not MLS / failed| R[Release replay protection, no ack]
     C -->|plaintext| DL[Deliver, emit logical id, ack envelope id]
-    C -->|policy refused| P[Drop, KEEP replay protection]
+    C -->|policy refused| P[Drop, KEEP replay protection, no ack<br/>the arrival path already withheld it]
     C -->|retriable| RB[Re-buffer, wait for the next drain or expiry]
     C -->|commit or other non-application| NA[Consume the commit, drain<br/>pending commits, run another pass]
 ```

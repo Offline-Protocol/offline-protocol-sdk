@@ -58,7 +58,7 @@ The system has two distinct retry mechanisms that serve different purposes:
 **Transport Retries** (retry queue):
 - Fires when no transport can deliver the message right now
 - The retry queue is a pure scheduling mechanism with no attempt limit
-- Uses exponential backoff: 1s → 2s → 4s → 8s → ... → 30s (capped)
+- Uses exponential backoff: 1s → 2s → 4s → 8s → ... → 300s (capped)
 - Messages stay in the queue indefinitely as long as the process runs
 - Processed in batches of 20 during each `process()` tick
 
@@ -177,7 +177,7 @@ the bridges hand both answers to the SDK, which checks them and reports through
 |---|---|---|
 | `AddressDeclared` | echoed address == `local_address()` | none — this is the expected outcome |
 | `AddressDeclared` | echoed address is anything else | `RELAY_ADDRESS_BINDING_MISMATCH`, `peer_id` = the address the relay bound |
-| `AddressError` | — | `RELAY_ADDRESS_DECLARATION_REFUSED`, `peer_id` = this device, `reason` = the relay's text |
+| `AddressError` | — | `RELAY_ADDRESS_DECLARATION_REFUSED`, `peer_id` = this device, `reason` = a fixed local classification (the relay's own wording never travels onto the event) |
 
 Both are reported and neither is acted on. A mismatch has no benign reading —
 the relay verifies that the declared address derives from the key that signed

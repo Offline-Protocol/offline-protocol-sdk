@@ -44,8 +44,11 @@ asymmetry is permanent and is why media and text differ in the recovery tables.
 ## What would undo this
 
 Persisting the re-seal provenance "so resends survive a restart". It holds
-plaintext. A restart already re-derives what it needs from the outbox entry plus
-the current session.
+plaintext, and that is the whole reason it is memory-only. The cost is real and
+should be stated rather than argued away: a restored entry carries no
+provenance, so it replays verbatim, and a fork that spans a sender restart
+settles as an honest failure instead of being re-sealed. That is the price of
+not writing plaintext to disk, not an absence of consequences.
 
 Storing the sealed bytes in the outbox and reusing them, which is the default
 shape of every retry queue and is the thing this ADR exists to prevent.

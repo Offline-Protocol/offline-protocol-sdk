@@ -34,7 +34,8 @@ stateDiagram-v2
     Pending --> Delivered: ACK received
     Pending --> Pending: retry (backoff), re-sealed
     Pending --> Parked: relay reports recipient unreachable
-    Pending --> Failed: retry budget exhausted
+    Pending --> Failed: retry budget exhausted, no live park counter
+    Pending --> Parked: probe budget exhausted, park counter live
 
     Queued --> Failed: lifetime expired
     Parked --> Delivered: ACK arrives, carried back over the mesh

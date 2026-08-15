@@ -53,10 +53,10 @@ application cannot detect.
 reports; it does not prevent.
 
 **Cost.** Enforcement acts only on a **present** administrative set that
-positively excludes a principal; every absent input fails open. It cannot detect
-a **divergent** view. Two honest members with different snapshots each hold a
-non-empty set, so they reject each other and partition. That is why it stays
-opt-in.
+positively excludes a principal; absent knowledge of that set fails open. It
+cannot detect a **divergent** view. Two honest members with different snapshots
+each hold a non-empty set, so they reject each other and partition. That is why
+it stays opt-in.
 
 ## The fail-open rule is load-bearing
 

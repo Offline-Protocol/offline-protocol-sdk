@@ -124,9 +124,10 @@ These fail silently if broken. Each is documented in full where it is linked.
   ([C1](docs/bridges/README.md#c1-regenerate-every-binding-together)).
 - **The FFI error enum is append-only**; discriminants are positional
   ([C2](docs/bridges/README.md#c2-the-error-enum-is-append-only)).
-- **Hand-mirrored constant lists** (relay-answer prefixes, one-shot event tags,
-  the mesh wake task key) exist in up to four places across three languages and
-  must be pinned against literals in each
+- **Hand-mirrored constants** (relay-answer prefixes, one-shot event tags, the
+  mesh wake task key, the protocol-state record ceiling) exist in up to four
+  places across three languages, pinned either by per-language literal tests or
+  by a Rust guard that reads the binding sources
   ([C5](docs/bridges/README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language)).
 - **Adding a control-message prefix** means adding it to the registry that
   drives injection prevention

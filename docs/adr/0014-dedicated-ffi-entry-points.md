@@ -53,7 +53,7 @@ Ask: **if an attacker could forge this, what would happen?**
 | Answer | Forged consequence | Path |
 |--------|-------------------|------|
 | Group delivery report | Suppressed re-issue, or arbitrary fan-out | **Dedicated entry point** |
-| Group registration confirmation | Flips the sync gate broadcast rides on | Message plane, and this is residual risk R1 |
+| Group registration confirmation | Flips the sync gate broadcast rides on, but only inside the outstanding-registration window | Message plane, and this is residual risk R1 |
 | Group info, member lists | Corrupts the members cache | Message plane |
 | Relay error report | Surfaces a false error | Message plane |
 

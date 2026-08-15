@@ -71,7 +71,8 @@ flowchart TD
 ### The demoted-fallback bypass
 
 The internet transport is scored with a deliberate demotion so the mesh is
-preferred. That demotion interacts badly with the ordinary gating, and the
+preferred, when `prefer_online` is off and the message does not ask for the
+internet. That demotion interacts badly with the ordinary gating, and the
 bypass is the fix.
 
 The sequence that makes it necessary:

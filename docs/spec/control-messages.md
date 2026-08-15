@@ -137,6 +137,11 @@ Service messages use their own prefix family: `__SVC_DISC_Q__`,
 `__SVC_DISC_R__`, `__SVC_REQ__`, `__SVC_RESP__`, plus a generic service message
 prefix. They are reserved on the same terms.
 
+They are signature-gated like any control frame, but they are **exempt from the
+encryption requirement**, so discovery gossip and the application-supplied
+request and response bodies are sent in cleartext. See
+[residual risk R9](../security/threat-model.md#r9-service-discovery-and-service-bodies-are-signed-not-encrypted).
+
 ## The control-plane signature gate
 
 Control frames are authenticated with an Ed25519 signature over a canonical

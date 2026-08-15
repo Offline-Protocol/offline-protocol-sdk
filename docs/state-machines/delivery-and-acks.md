@@ -43,7 +43,8 @@ Every inbound frame resolves to exactly one:
 stateDiagram-v2
     [*] --> Received
     Received --> Duplicate: identifier already seen
-    Duplicate --> [*]: re-ACK, no delivery
+    Duplicate --> [*]: re-ACK if requested<br/>and sender not blocked, no delivery
+    Duplicate --> Deferred: original still pending
 
     Received --> Gate: new identifier, marked
     Gate --> SecurityRejected: signature / identity refusal

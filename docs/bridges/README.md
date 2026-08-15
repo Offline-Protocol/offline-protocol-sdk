@@ -117,10 +117,10 @@ Each copy of that list is pinned against **literals** in its own language's test
 suite. A test that recomputes the list from the constant it is checking agrees
 with any edit, which is precisely the failure mode.
 
-**The protocol-state record ceiling** is the second set, and it is wider: four
-sites across three binding languages, Python included
-(`ProtocolStateStorage.swift`, `ProtocolStateStorage.kt`, `state_storage.py`,
-and the Rust constant they mirror). It is pinned the other way round, by a
+**The protocol-state record ceiling** is the second set, and it is wider: three
+binding sites across three languages, Python included
+(`ProtocolStateStorage.swift`, `ProtocolStateStorage.kt`, `state_storage.py`),
+plus the Rust constant they mirror. It is pinned the other way round, by a
 single **Rust** guard that reads all three binding sources and asserts the
 literal `8 * 1024 * 1024` in each. There is no per-language test for it, so a
 binding edited alone fails the Rust suite rather than its own. See

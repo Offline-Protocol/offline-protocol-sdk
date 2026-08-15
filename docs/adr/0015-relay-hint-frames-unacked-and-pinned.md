@@ -41,8 +41,10 @@ self-addressed frame under ordinary routing goes to a mesh transport.
 
 Wi-Fi Direct and Reticulum enqueue any recipient and return success. The caller
 therefore believes the broadcast succeeded, skips its per-member fallback, and
-delivers to **nobody**. BLE is the exception that proves the rule matters: it
-refuses a recipient that is not a connected peer, so it fails loudly instead.
+delivers to **nobody**. BLE refuses a recipient that is not a connected peer,
+but that only helps on a BLE-only device: the transport manager treats a
+synchronous refusal as a fallback trigger and hands the frame to Wi-Fi Direct or
+Reticulum anyway. Pinning, not BLE's strictness, is what closes this.
 
 Pinning also means transport errors propagate to the caller rather than being
 deferred, which is what lets the fallback trigger correctly.
