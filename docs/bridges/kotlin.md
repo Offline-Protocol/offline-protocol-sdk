@@ -50,11 +50,14 @@ tolerates a lost race rather than holding a lock across a platform call.
 
 ## K4. Secure storage
 
-The Kotlin binding implements the storage interface against Keystore. The same
-two rules as Swift apply:
-
-- the provider's per-record size limit stays **above** the core's,
-- adoption of an existing store is read-through plus claim, never a copy.
+The same split as Swift applies, with the same two rules. `MlsSecureStorage.kt`
+implements secure storage against Keystore, where adoption of an existing store
+is read-through plus claim, never a copy. `ProtocolStateStorage.kt` is the
+file-backed protocol-state provider, and its `MAX_VALUE_BYTES` must spell
+`8 * 1024 * 1024` exactly, matching
+`MAX_PROTOCOL_STATE_RECORD_TRANSFER_BYTES` rather than merely exceeding
+anything. See [S6](swift.md#s6-secure-storage) for why that distinction matters
+and which Rust guard reads this file.
 
 A logout wipe must clear every namespace the SDK wrote, which is a
 bindings-level concern because only the binding knows the platform store layout.
@@ -106,30 +109,37 @@ See [C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language).
 Unit tests live in
 `bindings/react-native/android/src/test/java/com/offlineprotocol/`.
 
-Robolectric is used where a platform type is unavoidable. It needs an explicit
-SDK level in the test configuration; without one it picks a level the project
-does not target and fails for unrelated reasons.
+Robolectric is used where a platform type is unavoidable. Each suite that needs
+it carries its own `@Config(sdk = [...])` annotation; there is no
+`robolectric.properties` and no Robolectric block in `build.gradle`. Without the
+annotation Robolectric picks a level the project does not target and fails for
+unrelated reasons.
 
 ### Running them locally
 
 CI runs them through the standalone harness in
-`bindings/react-native/android-ci-harness`. Following that harness's README
-verbatim on a development machine **fails**, and the reason is worth knowing
-before you debug your own change for it.
+`bindings/react-native/android-ci-harness`, and following that harness's README
+on a development machine works with the currently pinned React Native.
 
-`android/build.gradle` decides how to depend on React Native by testing whether
-`node_modules/react-native` exists:
+It is worth knowing why, because the mechanism is one dependency bump away from
+biting again. `android/build.gradle` chooses how to depend on React Native by
+testing for `node_modules/react-native/**android**`, a legacy local Maven
+repository:
 
-| `node_modules` | Dependency | Result |
-|----------------|-----------|--------|
-| Absent (CI) | `compileOnly` on a pinned version from Maven Central | Resolves |
-| Present (local dev) | `implementation` with **no version**, from the local React Native Maven directory | Resolves to an empty version and fails |
+| `node_modules/react-native/android` | Dependency | Result |
+|-------------------------------------|-----------|--------|
+| Absent (CI, and local dev on the currently pinned React Native) | `compileOnly` on a pinned version from Maven Central | Resolves |
+| Present (React Native versions that still shipped that directory) | `implementation` with **no version**, from that local Maven directory | Resolves to an empty version and fails |
 
-So the failure is caused by having installed the package's own dependencies,
-which is why it looks unrelated to whatever you changed.
+The directory test is deliberately on `android`, not on the package directory.
+Newer React Native keeps its sources under `ReactAndroid/` and publishes no
+`android/` Maven repo, so testing only for the package would produce an
+unversioned `react-android` dependency and fail in the harness for a reason that
+looks unrelated to whatever you changed.
 
-Reproduce CI without touching the working tree by copying the module somewhere
-with no sibling `node_modules` and pointing a copy of the harness at it:
+If a future bump reintroduces that layout, or you need to reproduce CI exactly,
+copy the module somewhere with no sibling `node_modules` and point a copy of the
+harness at it:
 
 ```bash
 rsync -a --exclude build/ --exclude .gradle/ bindings/react-native/android /tmp/rn-android-ci/

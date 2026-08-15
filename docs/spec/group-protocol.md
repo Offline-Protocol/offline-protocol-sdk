@@ -103,9 +103,19 @@ and it is why this check is unconditional while that one is opt-in.
 
 | Frame | Disposition | Why |
 |-------|-------------|-----|
-| `__GRP_MLS_MSG__` | No acknowledgement, never buffered, identifier unmarked | An acknowledgement confirms to an injector that the target is live |
-| `__GRP_MLS_WELCOME__` | Consumed, so acknowledged and dedup-marked | Signature-gated, so the acknowledgement tells an unauthenticated injector nothing, and a permanent refusal should not be retransmitted |
+| `__GRP_MLS_MSG__` | No acknowledgement, never buffered, identifier unmarked | The refusal is an **attribution failure**: the wire sender and the MLS-authenticated author disagree, or a leaf does not prove the identity it claims. There is no party the acknowledgement is owed to, and sending one hands a liveness oracle to whoever forged the attribution |
+| `__GRP_MLS_WELCOME__` | Consumed, so acknowledged and dedup-marked | The refusal is a **verdict on an attributable frame**, and it is permanent. Acknowledging stops a sender retransmitting something that can never be accepted; withholding would buy nothing, because the frame is refused on every copy |
 | `__GRP_MLS_COMMIT__` | Consumed, as above | Same |
+
+**Signature gating is not what separates these rows.** All three prefixes are
+control-plane frames and all three pass the signature gate before any of this
+runs. The data-plane exemption covers only `__MLS_ENC__` and `__GROUP_MSG__`,
+and the other exemption class, relay answers, covers frames the relay
+originates rather than any of these (see
+[Control messages](control-messages.md#exemption-class-1-the-data-plane)). The
+row 1 refusals happen at the MLS layer, *after* the outer sender was proved,
+which is exactly what makes them attribution failures: the proved outer sender
+is contradicting the authenticated inner author.
 
 The unmark obligation in row 1 spans **both** deduplication layers, and the two
 group paths do not currently discharge it alike. The relay path removes its
@@ -170,7 +180,12 @@ snapshot. A merely lagging member would therefore partition itself with no
 attacker involved.
 
 Unauthorized changes are **reported** instead. Reports are rate-limited per
-group and committer.
+group, committer, **and enforcement mode**. The third component is load-bearing,
+not incidental: a report emitted while enforcement was off says the change was
+merged anyway, and a report emitted while it was on says the change was
+declined. Keying the limit on only the first two collapses those into one
+window, so whichever arrives first suppresses the other and the application
+never hears about the outcome it was told to act on.
 
 ### The tri-state authorization field
 

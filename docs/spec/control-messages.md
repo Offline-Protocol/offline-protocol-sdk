@@ -4,10 +4,30 @@
 
 Protocol-internal messages are ordinary messages whose `content` begins with a
 reserved prefix. The prefix names the frame type; the rest of `content` is the
-frame body, usually JSON. Base64 appears in two places only: an `__MLS_ENC__`
-body, and the `welcome_data` field inside the JSON payload of
-`__GRP_MLS_WELCOME__`. A frame body is not base64 unless this document says it
-is, and in particular the 1:1 `__MLS_WELCOME__` body is not.
+frame body, usually JSON.
+
+**Where base64 appears in a frame body.** It carries MLS bytes, and within the
+body only in these places (message metadata is separate; see the reserved keys
+in [Message model and wire format](wire-format.md#reserved-metadata-keys)):
+
+| Carrier | Shape |
+|---------|-------|
+| `__MLS_ENC__` body | base64 of the compact binary envelope, **only** when the compact envelope is negotiated for that recipient; the JSON floor carries `ciphertext` as a JSON byte array instead |
+| `__GRP_MLS_MSG__` body | JSON payload whose `ciphertext` field is base64 |
+| `__GRP_MLS_COMMIT__` body | JSON payload whose `ciphertext` field is base64 |
+| `__GRP_RELAY_BCAST__` body | JSON payload whose `ciphertext` field is base64 |
+| `__GRP_MLS_WELCOME__` body | JSON payload whose `welcome_data` field is base64 |
+| `__GROUP_MSG__` body | base64 of the MLS ciphertext directly, with no JSON wrapper; a decode failure is treated as legacy plaintext, which is then refused for any group the receiver secures with MLS |
+
+Two consequences are worth stating, because both have been read the wrong way:
+
+- The 1:1 `__MLS_WELCOME__` body is **not** base64. It is a JSON
+  `WelcomeMessage` whose MLS bytes are a JSON byte array.
+- `__MLS_ENC__` is the only prefix whose body shape depends on negotiation.
+  Receivers sniff the byte after the prefix (`{` means the JSON floor), so no
+  per-message signalling is needed.
+
+A frame body outside this table is not base64.
 
 This is a deliberately low-tech multiplexing scheme. It costs prefix bytes on
 every control frame, and it buys the ability to carry control traffic over any

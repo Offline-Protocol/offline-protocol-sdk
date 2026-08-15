@@ -28,17 +28,16 @@ restarts its own time-to-live.
 frame that this device is live and processing. Refusals on security grounds
 therefore stay silent.
 
-## The five outcomes
+## The four outcomes
 
 Every inbound frame resolves to exactly one:
 
 | Outcome | Delivered | Acknowledged | Identifier stays marked | Queued |
 |---------|-----------|--------------|------------------------|--------|
-| **Consumed** | yes, or permanently refused | yes | yes | no |
+| **Consumed** | yes, **or permanently refused** | yes | yes | no |
 | **Deferred** | not yet | **no** | **no** | sometimes, see below |
 | **SecurityRejected** | no | **no** | **no** | no |
-| **PolicyRejected** | no | yes | yes | no |
-| **Duplicate** | no | yes | yes | no |
+| **Duplicate** | no | usually, see below | yes | no |
 
 ```mermaid
 stateDiagram-v2
@@ -56,12 +55,39 @@ stateDiagram-v2
     Decrypt --> Deferred: recoverable crypto failure
     Decrypt --> Deferred: envelope parse failure
     Decrypt --> Consumed: terminal post-decrypt failure
-    Decrypt --> PolicyRejected: permanent policy refusal
+    Decrypt --> Consumed: commit refused by enforcement
 
     Deferred --> [*]: unmark, NO ack, sender retains custody
     Consumed --> [*]: ack
-    PolicyRejected --> [*]: ack, stays marked
 ```
+
+**A refused commit is not a fifth outcome.** A commit refused by membership
+enforcement resolves to `Consumed`, which is what the "or permanently refused"
+column entry means: no delivery, but an acknowledgement and a mark that stays.
+That is deliberate, and it is the half of the refusal rule that is easy to lose.
+Its opposite, the **security** refusal, is a separate outcome precisely because
+it must not be acknowledged. Collapsing the two, in either direction, is the
+failure both this document and
+[ADR 0005](../adr/0005-defer-instead-of-drop-and-ack.md) exist to prevent.
+
+Read "policy refusal" carefully in this codebase, because it names two
+dispositions that are opposites. The commit-enforcement refusal above is
+acknowledged. An inbound **plaintext** message refused by encryption policy is
+not: it withholds the acknowledgement and unmarks the identifier, exactly like a
+security refusal, because an attacker choosing to send plaintext must not learn
+anything from the answer. See the media section below, where the same pairing
+appears.
+
+`Duplicate` is a receive-loop disposition rather than a decrypt outcome, and its
+acknowledgement is conditional: a duplicate is re-acknowledged only when the
+frame asked for an acknowledgement and the sender is not blocked. A duplicate of
+a group message that is **still pending** in the buffer resolves to `Deferred`
+instead, because the original has not been delivered either.
+
+These four are the observable dispositions, not a mirror of any one type. The
+implementation's decrypt-result type also has four cases, but they are not the
+same four: it splits a delivered message out as its own case and does not model
+duplicates at all, because the duplicate check runs before it.
 
 ## The deferred-acknowledgement atom
 
@@ -85,13 +111,17 @@ from failed. Without a third outcome the receive loop has nothing to branch on.
 The time-to-live is measured from **first** receipt, so a peer resending every
 few seconds cannot hold an entry alive indefinitely.
 
-**3. Drain on any successful decrypt.** Not only on an explicit session
-establishment event.
+**3. A successful decrypt is a session-confirmation source, and confirmation
+drains.** Not only an explicit session establishment event.
 
 This is what fixes the both-create case. When two peers create a session
 simultaneously, the **owner** side never receives a Welcome, so a
 Welcome-triggered drain never fires there. A successful decrypt is the general
 proof that the session works.
+
+Precisely, the drain hangs off the **confirmation**, and a successful decrypt is
+one of the things that can confirm. Confirmation is a state transition, so a
+decrypt on a session that is already confirmed does not re-run the drain.
 
 **4. Re-mark the identifier when the drain surfaces the message.** The receive
 loop unmarked it. Once the message is genuinely delivered, the deduplicator must
@@ -247,13 +277,21 @@ Media chunks follow the same outcome set, with media-specific names.
 **Difference 1: no sender-side re-seal.** Chunks are re-encoded, not replayed.
 Media recovers through a descriptor-based resend request instead.
 
-**Difference 2: two shapes of security rejection.** A media security rejection
-covers both a plaintext chunk refused by encryption policy **and** an encrypted
-chunk that fails its identity binding.
+**Difference 2: the two shapes of security rejection are expressed in one
+place.** A media security rejection covers both a plaintext chunk refused by
+encryption policy **and** an encrypted chunk that fails its identity binding,
+and both are reported through the chunk outcome.
 
-The second shape is the media half of the two classes the text path has always
-answered with silence: an envelope naming another pair's session slot, and a
-credential authenticating someone other than the wire sender.
+The disposition itself is not media-specific. The text path answers an inbound
+plaintext message refused by encryption policy exactly the same way, withholding
+the acknowledgement and unmarking the identifier, but it does so inline in the
+receive loop rather than through an outcome value. What differs is where the
+rule lives, which matters only because a reader auditing one path will not find
+the other by following types.
+
+The identity-binding shape covers **four** classes, the same four the text path
+intercepts: sender identity mismatch, session identity mismatch, leaf address
+mismatch, and unsupported sender.
 
 Both MUST be intercepted **before** the ordinary session-state classification,
 for the same reason the text path intercepts them inline: both otherwise
@@ -281,7 +319,24 @@ terminal media signal is the receive-failure event.
 
 ## Configuration
 
-The whole recoverable-failure family is gated by a crypto-recovery switch,
-default on. Disabled, the recoverable classes fall back to legacy
+A crypto-recovery switch, default on, gates **part** of the recoverable-failure
+family. Disabled, the classes it covers fall back to legacy
 drop-and-acknowledge. It exists as an escape hatch, not as a supported operating
 mode.
+
+It does not cover all of them, and the boundary matters to anyone auditing what
+the switch can turn off:
+
+| Class | Gated by the switch |
+|-------|---------------------|
+| Session desync (epoch fork) | yes |
+| Crypto failure (AEAD, corrupt, ratchet generation) | yes |
+| Transport failure | yes |
+| Envelope parse failure | yes |
+| Session not ready | **no**, always defers and enqueues |
+| Security refusal | **no**, see above |
+
+Session-not-ready deferral is unconditional because it is the atom's own bug
+fix, not a recovery heuristic: the frame is known to be deliverable once the
+session arrives, so acknowledging it would reintroduce exactly the silent loss
+described at the top of this document.

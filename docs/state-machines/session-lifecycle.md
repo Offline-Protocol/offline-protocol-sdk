@@ -52,7 +52,8 @@ mechanism that keys off Welcome receipt therefore silently skips the owner. This
 is why:
 
 - session confirmation also triggers on **any successful decrypt**, and
-- the pending-decryption drain triggers on **any successful decrypt** as well.
+- the pending-decryption drain hangs off that confirmation, so a decrypt reaches
+  it too.
 
 "Also" is the operative word. Confirmation is not decrypt-only: the joiner
 confirms while processing the Welcome itself, and a plaintext confirmation probe
@@ -60,6 +61,9 @@ or its acknowledgement confirms too. Successful decrypt is the trigger added on
 top so that the one side no other trigger can reach, the both-create owner, is
 still covered. Only that owner, waiting on the adopt path, depends on decrypt
 alone.
+
+The drain is downstream of the confirmation **transition**, not of decryption as
+such: a decrypt on a session that is already confirmed does not re-run it.
 
 An encrypted confirmation frame travels inside the envelope on the adopt path
 precisely so the owner gets a group-aware decrypt to converge on. It is consumed

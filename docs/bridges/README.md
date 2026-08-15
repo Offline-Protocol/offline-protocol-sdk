@@ -102,18 +102,32 @@ See [ADR 0014](../adr/0014-dedicated-ffi-entry-points.md).
 
 ## C5. Hand-mirrored constants must be pinned in every language
 
-Some constant lists exist in three places no single compiler sees together. The
-relay-answer prefix exemption list is the canonical example: the core, the Swift
-bridge, and the Kotlin bridge each hold a copy.
+Some constants exist in several places no single compiler sees together. Two
+sets do today, and they are pinned by **different** mechanisms, so knowing which
+one you are touching matters.
 
-A prefix present in one copy and absent from another **fails silently**: the
-bridge injects the answer unattributed, the core's gate declines to exempt it,
-and the frame is dropped as unsigned with no peer at fault. The visible symptom
-is a relay feature quietly not working.
+**The relay-answer prefix exemption list** is the canonical example: the core,
+the Swift bridge, and the Kotlin bridge each hold a copy. A prefix present in one
+copy and absent from another **fails silently**: the bridge injects the answer
+unattributed, the core's gate declines to exempt it, and the frame is dropped as
+unsigned with no peer at fault. The visible symptom is a relay feature quietly
+not working.
 
-Each copy is pinned against **literals** in its own language's test suite. A test
-that recomputes the list from the constant it is checking agrees with any edit,
-which is precisely the failure mode.
+Each copy of that list is pinned against **literals** in its own language's test
+suite. A test that recomputes the list from the constant it is checking agrees
+with any edit, which is precisely the failure mode.
+
+**The protocol-state record ceiling** is the second set, and it is wider: four
+sites across three binding languages, Python included
+(`ProtocolStateStorage.swift`, `ProtocolStateStorage.kt`, `state_storage.py`,
+and the Rust constant they mirror). It is pinned the other way round, by a
+single **Rust** guard that reads all three binding sources and asserts the
+literal `8 * 1024 * 1024` in each. There is no per-language test for it, so a
+binding edited alone fails the Rust suite rather than its own. See
+[S6](swift.md#s6-secure-storage).
+
+The one-shot event tag list and the mesh wake task key are pinned the same way,
+by Rust guards that read the binding sources.
 
 ## C6. Config parsers must not default to literals
 

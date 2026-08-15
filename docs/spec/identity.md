@@ -78,18 +78,33 @@ uniqueness.
 
 ## Ordering
 
-Protocol tiebreakers order addresses by their **hash bytes**, never by the
-rendered string.
+**Two orderings exist and they are different orders.** The bech32 charset
+`qpzry9x8gf2tvdw0s3jn54khce6mua7l` is not monotonic in ASCII: value 4 renders as
+`y` (0x79) and value 5 as `9` (0x39). A string comparison would also weigh the
+checksum characters, which carry no identity information at all. Hash-byte order
+is the identity-bearing comparison; rendered-string order is a comparison of an
+encoding.
 
-The two orders differ. The bech32 charset `qpzry9x8gf2tvdw0s3jn54khce6mua7l` is
-not monotonic in ASCII: value 4 renders as `y` (0x79) and value 5 as `9`
-(0x39). A string comparison would also weigh the checksum characters, which
-carry no identity information at all.
+**Which order applies is fixed per tiebreaker, and the tiebreakers disagree.**
 
-Every tiebreaker in the protocol is affected: both-create session ownership,
-leave election, admin auto-promotion, and fork leader selection. An
-implementation that sorts rendered strings will disagree with a conforming peer
-about who wins, and the two will not converge.
+| Tiebreaker | Compares |
+|------------|----------|
+| Session slot ownership (both-create) | hash bytes, falling back to string order when either identifier does not parse as an address |
+| Group leave election | rendered address strings |
+| Admin auto-promotion | rendered address strings |
+| Fork leader election | rendered address strings |
+
+Both orders are deterministic and total, so each of these converges on its own:
+every peer running a given tiebreaker sorts the same way and reaches the same
+winner. An implementation MUST use, for each tiebreaker, the order named in this
+table.
+
+A change MUST NOT "harmonize" one site onto the other order. That is the move
+that breaks convergence: peers that changed and peers that did not would elect
+different winners from identical input, with no way to detect the disagreement
+locally. Prefer hash-byte order for anything new, because it compares identity
+rather than encoding. See
+[ADR 0003](../adr/0003-self-certifying-addresses.md#two-orderings-exist-and-a-tiebreaker-must-not-mix-them).
 
 ## Session identifiers
 

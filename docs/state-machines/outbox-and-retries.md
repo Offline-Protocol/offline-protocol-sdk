@@ -35,8 +35,8 @@ stateDiagram-v2
     Pending --> Pending: retry (backoff), re-sealed
     Pending --> Parked: relay reports recipient unreachable
     Pending --> Failed: retry budget exhausted
-    Pending --> Failed: lifetime expired
 
+    Queued --> Failed: lifetime expired
     Parked --> Delivered: ACK arrives, carried back over the mesh
     Parked --> Queued: probe succeeds / peer returns
     Parked --> Failed: lifetime expired
@@ -44,6 +44,19 @@ stateDiagram-v2
     Delivered --> [*]
     Failed --> [*]
 ```
+
+**Lifetime expiry cannot settle an entry that has a live pending
+acknowledgement.** The sweep skips those, so while a message is genuinely
+in flight its bound is the retry ladder, not the 7-day lifetime. Expiry reaches
+an entry once it is no longer waiting on an acknowledgement, which is the normal
+condition of a `Queued` or `Parked` entry.
+
+The gate is on the acknowledgement, not on the state name, and the two can come
+apart: an entry that never asked for an acknowledgement is never skipped, and a
+pending acknowledgement can leave the tracker on its own through capacity
+eviction or the timed-out-entry prune. So the `Pending --> Failed: lifetime
+expired` edge is absent from the diagram because it is not the designed path,
+not because it is unreachable in every accounting.
 
 Two edges that are **not** there are worth naming, because both look like they
 should be:
@@ -183,13 +196,24 @@ signal plus an opportunistic delivery, not an acknowledgement.
 
 On restore:
 
-1. Entries past the absolute lifetime cap are dropped with a terminal failure
-   event.
-2. Surviving entries get a refreshed carrier-relative window, because a restart
-   means a fresh delivery opportunity.
+1. Lifetime drops an entry, with a terminal failure event, only when it is past
+   **both** windows: the carrier-relative lifetime *and* the absolute cap.
+   Capacity overflow and unreadable records drop entries too, on their own
+   rules.
+2. An entry that survives and is past its carrier-relative window gets that
+   window refreshed, because a restart means a fresh delivery opportunity.
+   Entries still inside their window keep their original stamp.
 3. Restoration of per-peer end-to-end capabilities MUST complete **before** the
    queued sends flush, or the flush emits downgraded envelopes to every
    established peer.
+
+Rules 1 and 2 read as one rule and are not. The restore drop requires both
+windows to have lapsed, while the in-process sweep drops on **either**. The
+difference is deliberate and it is visible: an entry past the absolute cap whose
+carrier-relative window was refreshed by a park probe survives restore, and is
+then dropped by the first in-process sweep instead. An implementation that
+harmonizes the two operators loses the refresh in one direction, or the cap in
+the other.
 
 Ordering rule 3 is easy to get wrong because both steps happen during startup
 and neither obviously depends on the other. It is a real ordering constraint.

@@ -45,15 +45,23 @@ consistent with the buffer size.
 
 ## The `__MLS_ENC__` envelope
 
-The prefix is followed by one of two forms. A receiver distinguishes them by the
-**byte immediately after the prefix**:
+The prefix is followed by one of three forms. A receiver distinguishes the first
+by the **byte immediately after the prefix**, and the other two by attempting
+them in order:
 
 | First byte after prefix | Form |
 |-------------------------|------|
-| `{` | Legacy JSON |
-| anything else | Base64 of the compact binary encoding |
+| `{` | Legacy JSON, parsed directly |
+| anything else | Base64. Decode, then try the compact binary encoding, and fall back to JSON inside the base64 |
 
-Base64 output never begins with `{`, so the discrimination is total.
+Base64 output never begins with `{`, so separating the first row is total. The
+two base64 forms are separated by trying the compact encoding first, which is
+safe rather than merely conventional: base64-wrapped JSON decodes to bytes
+starting `{"`, which read as a group identifier length far above the compact
+decoder's 4 KB cap, so it is rejected deterministically and falls through.
+
+A conforming receiver MUST accept all three. Emitting the base64-wrapped JSON
+form is not required.
 
 **Parsing is unconditional.** A receiver accepts every historical form
 regardless of what it advertised. Capability negotiation governs only what a

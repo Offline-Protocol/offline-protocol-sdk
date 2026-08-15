@@ -236,5 +236,12 @@ observed on the wire:
 | `ack_transport` | Transport the acknowledged message arrived on |
 | `transport_preference` | Requested transport for this message |
 | `original_content_type` | Pre-chunking content type of a file transfer |
+| `__ctrl_sig` | Base64 Ed25519 signature over the control-message canonical payload |
+| `__ctrl_pk` | Base64 Ed25519 public key of the signer, 32 raw bytes |
 
 Applications MUST NOT write these keys.
+
+The last two are the control-plane signature and its verification key, described
+in [Control messages](control-messages.md#the-control-plane-signature-gate). They are
+security-relevant rather than merely reserved: an implementation that lets
+application input reach them lets an application forge the control plane.

@@ -73,9 +73,20 @@ is already down, so there is no later event carrying the same news.
 | native to JavaScript | Sticky buffer | Kotlin |
 | JavaScript to app listener | Held one-shot | TypeScript |
 
-They are not interchangeable and neither covers the other's gap. The JS-side
-hold must be cleared **behind a microtask yield**, or a listener registered
-synchronously in the same tick misses it.
+They are not interchangeable and neither covers the other's gap.
+
+The JS-side hold has two operations and they have **opposite** timing rules.
+Getting them the wrong way round reintroduces the bug the other one fixes:
+
+| Operation | Timing | Why |
+|-----------|--------|-----|
+| Replay: removing an entry from the hold | **synchronously**, when the replay is scheduled | Several `on(...)` calls in the same tick would otherwise each schedule a replay of the same entry, and the app would see it once per registration. This is safe only because replay goes back through the emitter, which re-holds the event if the listeners vanished in the interim |
+| Replay: delivering the entry | behind a **microtask yield** | So a listener never fires before the `on(...)` that registered it returns, and every same-tick registration is served |
+| Teardown: clearing the hold in `destroy()` | behind a **microtask yield** | The re-hold above defeats a synchronous clear: an `on(...)` plus `destroy()` in the same tick leaves a replay microtask that runs after `destroy()`'s synchronous body, finds the listener map empty, and re-holds behind the clear. Instances are reusable, so the next session's first listener would receive the previous session's event |
+
+The yield in the teardown row must be unconditional. Guarding it behind an
+"is this instance created" check makes the method fully synchronous for an
+uncreated instance, which is exactly the case that skips the only other await.
 
 **Never assert inside a listener** in a test for this. An assertion that throws
 inside a listener is swallowed by the emitter and the test passes.
@@ -105,7 +116,8 @@ what shipped. Check the published tarball, or do a clean rebuild.
 
 A gitignore rule for a bare `lib/` matches at any depth, which has already eaten
 a `scripts/lib` directory once. Note that the rule here is **still** unanchored:
-that collision was resolved by renaming the victim to `scripts/shared`, not by
+that collision was resolved by renaming the victim to
+`bindings/react-native/scripts/shared`, not by
 fixing the pattern. Anchor it as `/lib/` before adding any nested `lib/`
 directory, or expect the same silent disappearance.
 

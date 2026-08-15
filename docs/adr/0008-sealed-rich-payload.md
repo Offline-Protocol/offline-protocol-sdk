@@ -1,7 +1,7 @@
 # 0008. Rich extras travel inside the MLS plaintext or not at all
 
 **Status:** Accepted
-**Shipped in:** 0.16.0 (direct messages), 0.18.0 (groups)
+**Shipped in:** 0.16.0 (direct messages and groups)
 
 ## Context
 

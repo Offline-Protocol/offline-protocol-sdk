@@ -37,20 +37,26 @@ Type mapping:
 A method present in Swift and absent from the bridge is simply not callable from
 JavaScript. There is no error at build time.
 
-## S2. Four registration points per new Swift file
+## S2. Five registration points per new Swift file
 
 A new Swift source file in the React Native iOS package must be registered in
-four places, and missing any one produces a different, unhelpful symptom:
+five places, and missing any one produces a different, unhelpful symptom:
 
 1. The podspec's source file list, which enumerates top-level files one by one
-   (only `ios/ble/**` and `ios/mesh/**` are globbed), so a new top-level file is
-   invisible to CocoaPods until it is added. This one is not silent: the Rust
-   guard `react_native_podspec_ships_every_hand_written_ios_source` fails
-   `cargo test` on an unlisted top-level source. A file added under `ble/` or
-   `mesh/` needs no podspec edit at all.
+   (`ios/ble/**`, `ios/mesh/**` and `ios/Generated/*.h` are the only globs), so
+   a new top-level file is invisible to CocoaPods until it is added. This one is
+   not silent: the Rust guard
+   `react_native_podspec_ships_every_hand_written_ios_source` fails `cargo test`
+   on an unlisted top-level source. A file added under `ble/` or `mesh/` needs
+   no podspec edit at all.
 2. The Swift package manifest's target sources, for the typecheck harness.
 3. Any exclusion list it must **not** be in.
 4. The test target, if it has tests.
+5. **The `.github/workflows/ci.yml` "iOS bridge typecheck" file list**, if the
+   file is one the package manifest excludes. This is the one most often
+   forgotten, because the local recipe globs the directory while CI enumerates
+   explicitly: the local harness stays green and CI fails with `cannot find
+   'YourNewType' in scope`.
 
 The typecheck harness is only meaningful if the file is actually in it. Verify by
 negative control: break the file deliberately and confirm the harness fails.
@@ -91,12 +97,29 @@ where it fires.
 
 ## S6. Secure storage
 
-The Swift binding implements the storage interface against Keychain. Two rules:
+There are two storage surfaces and they have different rules.
 
-- The provider's per-record size limit must stay **above** the core's, or a
-  record the core accepts fails to persist.
-- Adoption of an existing store is read-through plus claim, not copy. A copy
-  leaves two sources of truth.
+**Secure storage** (`MlsSecureStorage.swift`, backed by Keychain) holds MLS key
+material. Adoption of an existing store is read-through plus claim, not copy. A
+copy leaves two sources of truth.
+
+**Protocol-state storage** (`ProtocolStateStorage.swift`, file-backed) holds
+restartable protocol state and carries a per-record ceiling of `8 * 1024 * 1024`
+that it must spell **exactly**. That value is not a local choice: it mirrors
+`MAX_PROTOCOL_STATE_RECORD_TRANSFER_BYTES`, and
+`built_in_providers_mirror_the_transfer_ceiling` reads this source and asserts
+the literal, so drift in **either** direction fails the Rust suite.
+
+The relationship is easy to state backwards. The ceiling is a deliberate
+superset of the core's own record cap plus its seal envelope, so a provider
+enforcing it never rejects a record the SDK legitimately wrote. That
+superset relation is what "above" refers to, and it is pinned separately by
+`bounded_load_ceiling_is_a_superset_of_the_record_cap`. The provider's job is
+not to stay above anything, it is to match the ceiling exactly.
+
+This ceiling is a hand-mirrored constant across **four** sites in three binding
+languages, Python included. See
+[C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language).
 
 ## S7. Pinned constant lists
 
@@ -127,7 +150,23 @@ package manifest; they ride the app build only. The same holds for the mesh
 controller and the Bluetooth discovery bootstrap policy: suites exist, `swift
 test` does not run them.
 
-The bridge module itself and the Bluetooth manager are excluded from the package
-manifest's typecheck target for the same reason, dependencies on CoreBluetooth
-and the generated bindings. A separate harness with a symlink farm typechecks
-those; if you touch them, run it, and negative-control it.
+**Excluded from `swift test` does not mean unchecked.** A separate CI step,
+"iOS bridge typecheck (files excluded from the SwiftPM harness)", runs `swiftc
+-typecheck` over the sources the package manifest leaves out, including
+`BleManager.swift`, the Wi-Fi Direct and Reticulum managers, and their `mesh/`
+and `ble/` collaborators. They are typechecked on every run, just not
+unit-tested.
+
+**Two files are covered by neither**, and both ride the app build alone:
+
+- `OfflineProtocolModule.swift`, which needs real React headers. The
+  symlink-farm harness in `ios/BRIDGE_MAINTENANCE.md` exists for this one. If
+  you touch it, run the harness, and negative-control it: a shell slip produces
+  a clean exit that proves nothing.
+- `ProtocolErrorBridge.swift`, which depends on the generated UniFFI module. It
+  is on the package manifest's exclusion list and absent from the CI typecheck
+  list, and its suite is excluded too, so nothing in CI compiles it.
+
+Note that the comment above the CI step claims `OfflineProtocolModule.swift` is
+the only uncovered file. That comment is stale; the exclusion list in
+`Package.swift` is the source of truth.

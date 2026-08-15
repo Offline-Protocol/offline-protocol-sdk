@@ -57,13 +57,24 @@ intercepted before this classification runs so it cannot inherit the policy
 row's acknowledgement. See
 [ADR 0005](0005-defer-instead-of-drop-and-ack.md).
 
-**The desync and crypto-failure rows describe the table with crypto recovery
-enabled**, which is the default and is off only in the low-power preset. With it
-disabled, both rows collapse into drop-and-acknowledge with no re-key: the
-receiver treats an undecryptable frame as permanently undeliverable rather than
-paying for the heal. The security refusal row is **not** gated on the switch, and
-must never become so. Turning off a recovery optimization must not turn off an
-interception whose purpose is to withhold a liveness signal from an attacker.
+**Four rows describe the table with crypto recovery enabled**: epoch desync,
+AEAD / corrupt / spent generation, transport failure, and envelope parse
+failure. Enabled is the default; it is off only when an application sets it off
+explicitly, or when encryption is disabled outright. With it disabled, those
+four collapse into drop-and-acknowledge with no re-key: the receiver treats an
+undecryptable frame as permanently undeliverable rather than paying for the
+heal.
+
+The other four rows do not move with the switch, and for two of them that is a
+rule rather than an accident. The security refusal must never become gated:
+turning off a recovery optimization must not turn off an interception whose
+purpose is to withhold a liveness signal from an attacker. Session-not-ready
+must not either, because it is the deferred atom's own fix rather than a
+recovery heuristic, and acknowledging a frame that is known to become
+deliverable once the session arrives is exactly the silent loss
+[ADR 0005](0005-defer-instead-of-drop-and-ack.md) closes. The remaining two, the
+policy refusal and the post-decrypt failure, already acknowledge in both
+configurations, so there is nothing for the switch to change.
 
 ## A subtlety worth pinning in a test
 

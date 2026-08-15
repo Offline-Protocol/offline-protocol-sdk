@@ -84,7 +84,7 @@ stateDiagram-v2
 
     Buffered --> Deferred: no ack, unmark transport dedup
     Deferred --> [*]
-    SecurityRejected --> [*]: no ack, unmark
+    SecurityRejected --> [*]: no ack, unmark transport dedup only
     PolicyRejected --> [*]: ack, stays marked
     Delivered --> [*]: ack
 ```
@@ -126,6 +126,12 @@ plaintext-spoof drop (whose identifier is attacker-chosen wire input).
 
 Permanent policy refusals deliberately do **not** unmark, on either path. A
 later copy could only waste work.
+
+`SecurityRejected` and `PolicyRejected` in the diagrams above are group-decrypt
+verdicts, one layer below the receive loop. At the boundary the first stays
+`SecurityRejected` and the second becomes `Consumed`, which is why it is
+acknowledged. See
+[the four outcomes](delivery-and-acks.md#the-four-outcomes).
 
 **The obligation extends to the drain, and that half is not optional.** A relay
 copy can outrun its Welcome, so it buffers **before** any decrypt and its

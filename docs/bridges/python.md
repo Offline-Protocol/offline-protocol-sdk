@@ -33,6 +33,13 @@ The Python package does not implement secure storage against a platform keystore
 Do not copy its storage handling into a mobile binding, and do not treat its
 behaviour as the contract for one.
 
+It does carry one shared constant, which is easy to miss precisely because the
+rest of the binding is platform-free: `state_storage.py` holds one of the four
+copies of the protocol-state record ceiling, and it must spell
+`8 * 1024 * 1024` exactly. A Rust guard reads this file, so editing the ceiling
+in the mobile bindings and not here fails the **Rust** suite, not `pytest`. See
+[C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language).
+
 ## P3. Packaging
 
 The package is versioned in lockstep with the workspace. A release cut touches
