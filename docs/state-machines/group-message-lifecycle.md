@@ -51,11 +51,21 @@ to be safe to default on. Details and the capability-token reasoning are in
 
 ## Receive: the three inbound paths
 
-| Path | Frame | Marks logical id | Buffers before decrypt |
+| Path | Frame | Marks logical id | Releases it on refusal |
 |------|-------|------------------|------------------------|
-| Mesh | `__GRP_MLS_MSG__` | After successful decrypt | No |
-| Buffered drain | replayed from the buffer | After successful decrypt | n/a |
-| Relay | `__GROUP_MSG__` | **At arrival, pre-decrypt** | **Yes** |
+| Mesh | `__GRP_MLS_MSG__` | After successful decrypt | Envelope id: **no**, see below |
+| Buffered drain | replayed from the buffer | After successful decrypt | Yes |
+| Relay | `__GROUP_MSG__` | **At arrival, pre-decrypt** | Yes |
+
+Both live paths buffer the same way, so buffering is not what distinguishes
+them: each attempts the decrypt, and each buffers only when the attempt comes
+back retriable (a copy that outran its Welcome, most often). The inversion that
+does distinguish them is **when the logical identifier is marked**, and its
+consequence is **who has to release it**.
+
+The mesh path's non-release on a security refusal is a known defect rather than
+a design choice; see
+[Group protocol](../spec/group-protocol.md#refusal-dispositions).
 
 ### Mesh path
 
@@ -143,7 +153,15 @@ flowchart TD
     S -->|no| C[Decrypt]
     C -->|plaintext| DL[Deliver, emit logical id, ack envelope id]
     C -->|rejected / failed| R[Release replay protection, no ack]
+    C -->|retriable| RB[Re-buffer, wait for the next drain or expiry]
+    C -->|commit or other non-application| NA[Consume the commit, drain<br/>pending commits, run another pass]
 ```
+
+The last two arms are what make the drain converge rather than stall. A
+retriable entry stays buffered until it decrypts or expires, and a
+non-application frame is consumed as a commit and triggers a further pass,
+because applying it may be exactly what makes the rest of the batch
+decryptable.
 
 **Never add an "already delivered elsewhere?" check to the plaintext branch.**
 
@@ -202,5 +220,9 @@ The full reasoning for report-by-default and the fail-open enforcement rule is i
 | Pending broadcast trackers | 64, oldest downgraded to per-member on overflow |
 | Broadcast attempts under one logical identifier | 3 |
 | Broadcast report timeout | 60 s |
-| Unauthorized-change report suppression | 300 s per (group, committer) |
+| Unauthorized-change report suppression | 300 s per (group, committer, enforced) |
 | Unproven-leaf report suppression | 300 s per (group, sender, site) |
+
+The `enforced` component of the first key is load-bearing. Dropping it lets an
+earlier report-only event suppress the refusal alarm for the same committer,
+which is the one report that must always reach the application.

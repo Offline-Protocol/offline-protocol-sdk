@@ -65,10 +65,32 @@ address splits every set, map, and deduplicator keyed by the rendered form.
 Implementations must re-encode and compare, or refuse every non-canonical form
 explicitly. Uppercase input is refused even though BIP-173 permits it.
 
-## Ordering is by hash bytes, never by rendered string
+## Two orderings exist, and a tiebreaker must not mix them
 
 The bech32 charset is not monotonic in ASCII, and the rendering includes
-checksum characters that carry no identity. Every protocol tiebreaker (session
-ownership, leave election, admin promotion, fork leader) compares hash bytes.
-Sorting rendered strings makes two conforming peers disagree about who wins, and
-they do not converge.
+checksum characters that carry no identity, so **hash-byte order and rendered
+string order are different orders**. `Address` implements `Ord` over the hash
+bytes for exactly that reason: the identity-bearing comparison is the one on the
+bytes.
+
+The protocol's tiebreakers do not all use it:
+
+| Tiebreaker | Compares |
+|------------|----------|
+| Session slot ownership (both-create) | `Address` values, so hash bytes |
+| Group leave election | rendered address strings |
+| Admin auto-promotion | rendered address strings |
+| Fork leader election | rendered address strings |
+
+Both orders are deterministic and total, so each of these converges: every peer
+running a given tiebreaker sorts the same way and reaches the same winner.
+
+**The invariant is per tiebreaker, not global.** A second implementation MUST
+use, for each tiebreaker, the order named above, and a change MUST NOT
+"harmonize" one site onto the other order. That is the move that breaks
+convergence, because the peers that changed and the peers that did not now elect
+different winners from identical input, and neither side can detect the
+disagreement locally.
+
+Prefer hash-byte order for anything new: it compares identity rather than
+encoding.

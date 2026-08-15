@@ -67,7 +67,7 @@ export const ONE_SHOT_EVENT_TYPES = [
  * silently and in the worst possible way — React Native logs "No task
  * registered for key" to the device log, the app sees an opt-in that does
  * nothing, and both sides still compile — so it is pinned by a Rust guard
- * (`react_native_mesh_wake_task_key_matches_native` in
+ * (`react_native_mesh_wake_wiring_is_present` in
  * `crates/offline-protocol-uniffi`).
  */
 export const MESH_WAKE_TASK_KEY = 'OfflineProtocolMeshWake';

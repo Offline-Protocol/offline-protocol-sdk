@@ -33,13 +33,14 @@ Adding an event field means updating `types.ts` in the same change. When
 
 ## T3. Cross-language constant sets are pinned by Rust guards
 
-Two constant sets in `constants.ts` exist in four definitions across three
-languages, and drift fails silently while everything still compiles:
+Two constant sets in `constants.ts` are mirrored by hand into other languages,
+up to four definitions across up to three languages, and drift fails silently
+while everything still compiles:
 
-| Constant | Also defined in | Guard |
-|----------|----------------|-------|
-| `ONE_SHOT_EVENT_TYPES` | Kotlin module event constant, Kotlin and Swift superseded-latch policy | `react_native_one_shot_event_set_matches_native` |
-| `MESH_WAKE_TASK_KEY` | Kotlin mesh wake policy | `react_native_mesh_wake_task_key_matches_native` |
+| Constant | Definitions | Also defined in | Guard |
+|----------|-------------|-----------------|-------|
+| `ONE_SHOT_EVENT_TYPES` | 4, across 3 languages | Kotlin module event constant, Kotlin and Swift superseded-latch policy | `react_native_one_shot_event_set_matches_native` |
+| `MESH_WAKE_TASK_KEY` | 2, across 2 languages | Kotlin mesh wake policy | `react_native_mesh_wake_wiring_is_present` |
 
 The wake task key is the worse of the two to break: React Native logs "No task
 registered for key" to the device log, the app sees an opt-in that does nothing,
@@ -95,7 +96,10 @@ The `lib/` directory is gitignored and goes stale. Never read it to determine
 what shipped. Check the published tarball, or do a clean rebuild.
 
 A gitignore rule for a bare `lib/` matches at any depth, which has already eaten
-a `scripts/lib` directory. Anchor such rules.
+a `scripts/lib` directory once. Note that the rule here is **still** unanchored:
+that collision was resolved by renaming the victim to `scripts/shared`, not by
+fixing the pattern. Anchor it as `/lib/` before adding any nested `lib/`
+directory, or expect the same silent disappearance.
 
 ## Testing
 

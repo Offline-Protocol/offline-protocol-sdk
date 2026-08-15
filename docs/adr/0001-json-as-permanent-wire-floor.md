@@ -24,13 +24,22 @@ Compact encodings are **additive**. JSON remains a permanent obligation:
 
 - every receiver decodes JSON, unconditionally and forever,
 - a compact encoding is emitted only to a peer that advertised it,
-- persistence and the relay path stay JSON,
+- persistence and the internet relay transport stay JSON unconditionally (the
+  Nostr transport is relay-mediated but uses the negotiated codec like any other
+  peer-to-peer path),
 - decoding of compact encodings is always on, independent of whether emitting
   them is.
 
-The same shape is used at each layer that gained a compact form: the hop-local
-wire codec, the end-to-end MLS envelope, and the media envelope. Each has its own
-switch and its own capability, because they are independent.
+Three layers carry this full shape, each with its own switch and its own
+capability, because they are independent: the hop-local wire codec
+(`binary_wire_enabled` / `wire_versions`), the end-to-end MLS envelope
+(`compact_envelope_enabled` / `env_versions`), and the sealed rich payload
+(`rich_payload_enabled` / `rich_versions`).
+
+The media chunk envelope is **not** a fourth instance and should not be
+described as one. It has no JSON form to fall back to and no switch: its payload
+is always the compact encoding, and only the choice between its v1 and v2 forms
+is negotiated, riding the rich-payload capability rather than one of its own.
 
 ## Consequences
 
@@ -43,8 +52,9 @@ never be deleted, so it must stay tested. Size wins only materialize once both
 ends have upgraded.
 
 **Cost.** Detection is by first byte, which constrains the magic byte to a range
-that cannot begin valid JSON or valid UTF-8. Eleven values are available. That is
-plenty, but it is finite.
+that cannot begin valid JSON or valid UTF-8. That range holds eleven values, of
+which v1 spends one, leaving ten for future versions. That is plenty, but it is
+finite.
 
 ## What would undo this
 

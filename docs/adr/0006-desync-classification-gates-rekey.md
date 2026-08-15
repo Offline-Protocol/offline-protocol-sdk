@@ -48,8 +48,14 @@ must keep them separate at every site.
 | AEAD / corrupt / spent generation | no | no | no |
 | Transport failure | no | no | no |
 | Envelope parse failure | no | no | no |
-| Refusal that can never become decryptable | **yes** | no | no |
+| Policy refusal that can never become decryptable | **yes** | no | no |
+| Security refusal (identity mismatch, foreign session slot) | **no**, identifier unmarked | no | no |
 | Failure after a successful decrypt | **yes** | no | no |
+
+The two refusal rows are opposite on purpose, and the security row is
+intercepted before this classification runs so it cannot inherit the policy
+row's acknowledgement. See
+[ADR 0005](0005-defer-instead-of-drop-and-ack.md).
 
 ## A subtlety worth pinning in a test
 

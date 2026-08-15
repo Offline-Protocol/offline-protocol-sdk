@@ -26,20 +26,33 @@ hint frames below.
 stateDiagram-v2
     [*] --> Queued: send()
     Queued --> Pending: transport accepted
-    Queued --> Parked: recipient unreachable verdict
-    Queued --> Failed: no transport, terminal
+    Queued --> Queued: no transport, deferred and retried
 
     Pending --> Delivered: ACK received
     Pending --> Pending: retry (backoff), re-sealed
+    Pending --> Parked: relay reports recipient unreachable
     Pending --> Failed: retry budget exhausted
     Pending --> Failed: lifetime expired
 
+    Parked --> Delivered: ACK arrives, carried back over the mesh
     Parked --> Queued: probe succeeds / peer returns
     Parked --> Failed: lifetime expired
 
     Delivered --> [*]
     Failed --> [*]
 ```
+
+Two edges that are **not** there are worth naming, because both look like they
+should be:
+
+- **No transport is not terminal.** A send with nowhere to go persists to the
+  outbox, offers the frame to the mesh, schedules a retry, and emits a
+  non-terminal deferral event. Terminal failure comes only from retry-budget
+  exhaustion or expiry.
+- **Parking is entered from `Pending`, not from `Queued`.** The unreachable
+  verdict is an asynchronous relay report about a message the transport already
+  accepted, which is why there is a pending acknowledgement for the park to
+  remove.
 
 ## Timing
 
@@ -106,11 +119,28 @@ A parked message is probed periodically with a backoff that widens from 15
 seconds toward 10 minutes. When the peer returns, parked messages re-enter the
 queue.
 
-**Parking removes the pending acknowledgement.** That is what makes it different
-from a long retry, and it has a consequence worth stating: a parked message
-cannot settle on its own. Any mechanism that offers a parked message to another
-path must also arrange for it to settle, or offering it is worse than leaving it
-parked.
+**Parking removes the pending acknowledgement**, which is what makes it
+different from a long retry: nothing is counting down against the message any
+more.
+
+Removing it is only half the change. The park also **offers the frame to the
+mesh**, because the relay has just supplied a fact no local transport status
+can, that this specific peer is not on the relay, and a neighbour may still be
+able to carry it. An offered copy can therefore arrive and be acknowledged while
+no pending acknowledgement exists to match it against, so parked messages are
+**settleable without one**: an arriving acknowledgement settles a parked message
+`Delivered` directly, emits the delivery event, and flushes the rest of that
+peer's parked traffic.
+
+**The offer and the settle arm are one change; neither is correct alone.** An
+offer without the settle arm delivers messages the sender never learns about,
+which is worse than leaving the message parked. Any future path that hands a
+parked message to another carrier inherits this obligation.
+
+The probe itself re-enters the acknowledgement machinery but may never earn a
+relay verdict, since a mesh carrier cannot produce one. A probe that exhausts
+its budget with a live park counter therefore **re-parks** rather than settling
+terminally; settlement is reserved for delivery or outbox expiry.
 
 ## Frames that never enter the ladder
 

@@ -24,12 +24,13 @@ stateDiagram-v2
     [*] --> None
     None --> KeyPackageSent: push our key package
     None --> Establishing: peer's key package received
+    KeyPackageSent --> Joined: peer built a Welcome against it
 
     Establishing --> Owner: we created the group
     Establishing --> Joined: we processed a Welcome
 
-    Owner --> Confirmed: any successful decrypt
-    Joined --> Confirmed: any successful decrypt
+    Owner --> Confirmed: successful decrypt
+    Joined --> Confirmed: Welcome processed, probe/ack, or decrypt
 
     Confirmed --> Desynced: WrongEpoch / NoPastEpochData
     Desynced --> None: session_reset, tear down + advertise
@@ -48,8 +49,15 @@ The **owner** side, whose session survives, never receives a Welcome. Any
 mechanism that keys off Welcome receipt therefore silently skips the owner. This
 is why:
 
-- session confirmation triggers on **any successful decrypt**, not on a Welcome,
+- session confirmation also triggers on **any successful decrypt**, and
 - the pending-decryption drain triggers on **any successful decrypt** as well.
+
+"Also" is the operative word. Confirmation is not decrypt-only: the joiner
+confirms while processing the Welcome itself, and a plaintext confirmation probe
+or its acknowledgement confirms too. Successful decrypt is the trigger added on
+top so that the one side no other trigger can reach, the both-create owner, is
+still covered. Only that owner, waiting on the adopt path, depends on decrypt
+alone.
 
 An encrypted confirmation frame travels inside the envelope on the adopt path
 precisely so the owner gets a group-aware decrypt to converge on. It is consumed

@@ -89,10 +89,13 @@ two mandatory properties, and both are load-bearing:
    application never saw plus a transport-selector penalty for a transport that
    did nothing wrong.
 2. They MUST be pinned to the internet transport rather than routed by the
-   transport selector. The selector demotes the internet transport by design, and
-   a mesh transport handed a self-addressed frame enqueues it unconditionally
-   and reports success. The caller then believes the broadcast succeeded and
-   skips its per-member fallback, delivering to nobody.
+   transport selector. The selector demotes the internet transport by design,
+   and some mesh transports swallow a self-addressed frame: Wi-Fi Direct and
+   Reticulum enqueue it unconditionally and report success (Bluetooth LE fails
+   closed instead, because self is never a connected peer). The caller then
+   believes the broadcast succeeded and skips its per-member fallback,
+   delivering to nobody. One such transport is enough to lose the frame, which
+   is why the rule is a pin rather than a preference.
 
 Retry policy for these frames lives at the application layer instead, with
 explicit trackers and bounded attempts.

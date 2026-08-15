@@ -58,8 +58,15 @@ in every language, silently, by shifting every variant after the edit.
 
 New variants are appended. Never inserted, never removed, never reordered.
 
-The core maps its internal errors to this enum through an **exhaustive** match,
-so a new internal error cannot reach the boundary as an unclassified fallback.
+The core maps its internal errors to this enum by classifying every variant
+explicitly. That match is **no longer compiler-enforced**: the engine error
+types are `#[non_exhaustive]`, which forces a wildcard arm, so a newly added
+internal variant compiles cleanly and reaches the boundary as `Other`, logging a
+warning at runtime.
+
+Treat the wildcard as a tripwire, not a destination. After adding an internal
+error variant, classify it here as well, and watch for that warning: the compile
+error that used to catch the omission is gone.
 
 ## C3. Events cross as opaque JSON
 

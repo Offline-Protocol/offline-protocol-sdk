@@ -112,10 +112,13 @@ message is delivered locally and the sender is still retransmitting.
 
 Piece 6 degrades gracefully, and application teams need to know how:
 
-- If the arrival transport was not recorded, or that transport is gone, the
-  acknowledgement falls back to ordinary transport selection.
-- If that also fails, the sender's next resend triggers the duplicate re-acknowledge
-  path.
+- If the arrival transport was recorded but is **gone**, the acknowledgement
+  falls back to ordinary routing: the mesh, then transport selection.
+- If the arrival transport was **not recorded at all**, no acknowledgement is
+  attempted on the drain. There is nothing to route it against and no reason to
+  guess.
+- In both cases, if nothing lands, the sender's next resend triggers the
+  duplicate re-acknowledge path.
 
 So a late or absent acknowledgement during the not-yet-confirmed window is
 **not** loss. The receiver may already hold the message.
@@ -134,7 +137,9 @@ re-key becomes a denial-of-service amplifier.
 
 ```mermaid
 flowchart TD
-    F[Decrypt failed] --> P{Failed before<br/>any MLS involvement?}
+    F[Decrypt failed] --> S{Identity or slot<br/>refusal?}
+    S -->|yes| SR[SecurityRejected: no ack,<br/>unmark, drop. Intercepted<br/>before classification]
+    S -->|no| P{Failed before<br/>any MLS involvement?}
     P -->|envelope unparseable| D1[Deferred: no ack, no enqueue]
     P -->|no| E{Epoch disagreement?<br/>WrongEpoch / NoPastEpochData}
     E -->|yes| SD[SessionDesync]
@@ -142,7 +147,7 @@ flowchart TD
     E -->|no| C{Session established<br/>but decrypt failed?}
     C -->|AEAD / corrupt / ratchet| D3[Deferred: no ack, no enqueue,<br/>NO re-key]
     C -->|session not ready| D4[Deferred: no ack, ENQUEUE]
-    C -->|refusal that can never<br/>become decryptable| K[Consumed: ack, drop]
+    C -->|policy refusal that can never<br/>become decryptable| K[Consumed: ack, drop]
 ```
 
 ### The classes
@@ -154,8 +159,22 @@ flowchart TD
 | Crypto failure (AEAD, corrupt, ratchet generation) | no | no | **no** | The attempt spent the generation; a queued copy could never drain |
 | Transport failure | no | no | no | Recoverable by resend |
 | Envelope parse failure | no | no | no | Unparseable now is unparseable forever; the resend is the fix |
-| Unknown (commit not authorized, identity mismatch) | **yes** | no | no | Can never become decryptable, so retries are pure waste |
+| Policy refusal (commit not authorized) | **yes** | no | no | Can never become decryptable, so retries are pure waste |
+| Security refusal (identity mismatch, foreign session slot) | **no**, identifier unmarked | no | no | An acknowledgement confirms to an injector that the target is live |
 | Post-decrypt failure (empty, non-UTF-8, malformed plaintext) | **yes** | no | no | The generation is spent and a re-seal would produce the same malformed plaintext |
+
+The policy-refusal and security-refusal rows are the two halves of "can never
+become decryptable", and they are deliberately opposite. Both refusals are
+permanent, but a policy refusal is a statement about a **frame** while a
+security refusal is a statement about an **attacker**, and answering the second
+one at all is the leak.
+
+The security shapes (sender identity mismatch, session identity mismatch, leaf
+address mismatch, unsupported sender) are therefore intercepted **before**
+classification. Without that interception they would classify as ordinary
+unknown-session failures and inherit the policy row's drop-and-acknowledge
+disposition, which is the bug the interception exists to prevent. See
+[ADR 0005](../adr/0005-defer-instead-of-drop-and-ack.md).
 
 ### Why the desync split gates the re-key, not the acknowledgement
 
@@ -213,8 +232,13 @@ Nothing is lost by dropping it. The withheld acknowledgement already makes the
 sender's resend the recovery path. The one case that genuinely wants a queued
 copy, session-not-ready, re-enqueues itself before returning `Deferred`.
 
-Neither the desync arm nor the parse-failure arm is reachable from the drain: a
-queued frame parsed at receipt, and parsing is deterministic.
+The **parse-failure** arm is not reachable from the drain: a queued frame parsed
+at receipt, and parsing is deterministic.
+
+The **desync** arm is, and routinely. A queued frame whose session forks while
+it waits classifies as desync on the drain attempt and schedules the same
+rate-limited re-key it would have from the receive loop. An audit of what can
+trigger a re-key must include the drain.
 
 ## Media mirrors this, with two differences
 

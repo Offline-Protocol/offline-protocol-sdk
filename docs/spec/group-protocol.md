@@ -103,9 +103,23 @@ and it is why this check is unconditional while that one is opt-in.
 
 | Frame | Disposition | Why |
 |-------|-------------|-----|
-| `__GRP_MLS_MSG__` | No acknowledgement, identifier unmarked, never buffered | An acknowledgement confirms to an injector that the target is live |
+| `__GRP_MLS_MSG__` | No acknowledgement, never buffered, identifier unmarked | An acknowledgement confirms to an injector that the target is live |
 | `__GRP_MLS_WELCOME__` | Consumed, so acknowledged and dedup-marked | Signature-gated, so the acknowledgement tells an unauthenticated injector nothing, and a permanent refusal should not be retransmitted |
 | `__GRP_MLS_COMMIT__` | Consumed, as above | Same |
+
+The unmark obligation in row 1 spans **both** deduplication layers, and the two
+group paths do not currently discharge it alike. The relay path removes its
+group-level entry on a security refusal. The mesh path does not: it marks the
+envelope identifier before decrypting (to bound replay amplification to one
+crypto operation per identifier) and never releases it on refusal, so a verbatim
+replay is absorbed by the duplicate branch, which treats a marked-but-not-pending
+identifier as already delivered and **acknowledges** it.
+
+The mesh behaviour is a defect against this specification, not the specification
+describing itself. A conforming implementation MUST release the identifier on
+the refusal path, in the mesh handler as well as the relay handler; the
+replay-amplification bound survives, at a cost of one crypto operation per
+replayed copy, which is the same trade the relay path already accepts.
 
 A refused commit MUST be classified **permanently** refused. An implementation
 that treats it as retriable buffers it, re-decrypts it on every drain, and,

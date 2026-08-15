@@ -42,7 +42,8 @@ JavaScript. There is no error at build time.
 A new Swift source file in the React Native iOS package must be registered in
 four places, and missing any one produces a different, unhelpful symptom:
 
-1. The podspec's source file globs.
+1. The podspec's source file list, which enumerates files explicitly rather than
+   globbing them, so a new file is invisible to CocoaPods until it is added.
 2. The Swift package manifest's target sources, for the typecheck harness.
 3. Any exclusion list it must **not** be in.
 4. The test target, if it has tests.
@@ -105,10 +106,16 @@ swift test
 Roughly one second. There is no reason to skip it.
 
 The test target covers the policy and translation types that carry real logic:
-error mapping, config reading, relay control-op translation, fragment buffering,
-rate limiting, presence policy, identity binding, and the pinned prefix list.
+config reading, relay control-op translation, fragment buffering, rate limiting,
+presence policy, identity binding, and the pinned prefix list.
+
+**Error mapping is not in that list.** `ProtocolErrorBridge` depends on the
+generated UniFFI module, so both it and its test suite are excluded from the
+package manifest; they ride the app build only. The same holds for the mesh
+controller and the Bluetooth discovery bootstrap policy: suites exist, `swift
+test` does not run them.
 
 The bridge module itself and the Bluetooth manager are excluded from the package
-manifest's typecheck target because they depend on CoreBluetooth and the
-generated bindings. A separate harness with a symlink farm typechecks those; if
-you touch them, run it, and negative-control it.
+manifest's typecheck target for the same reason, dependencies on CoreBluetooth
+and the generated bindings. A separate harness with a symlink farm typechecks
+those; if you touch them, run it, and negative-control it.

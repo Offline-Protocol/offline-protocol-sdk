@@ -25,21 +25,35 @@ sample and clears on the next produces exactly the flapping T1 forbids.
 
 ## Transport states
 
+Two vocabularies overlap here and are worth separating before the diagram.
+
+A transport reports its own **status**, one of five values: `Available`,
+`Unavailable`, `Connecting`, `Disconnected`, `Error`. Stopping a transport
+leaves it `Disconnected`, not `Unavailable`.
+
+**Current** is not one of them. It is a selection-level overlay owned by DORS,
+and the diagram below is drawn at that level: it collapses every non-available
+status into one node to show when selection changes.
+
 ```mermaid
 stateDiagram-v2
-    [*] --> Unavailable
-    Unavailable --> Available: transport reports up
+    [*] --> NotAvailable
+    NotAvailable --> Available: transport reports up
     Available --> Current: selected by DORS
     Current --> Available: another transport selected
-    Available --> Unavailable: transport reports down
-    Current --> Unavailable: transport reports down
-    Unavailable --> [*]
+    Available --> NotAvailable: reports down, stopped, or errored
+    Current --> NotAvailable: reports down, stopped, or errored
+    NotAvailable --> [*]
 
     note right of Current
-        Only one transport is Current
-        per peer at a time.
+        One transport is Current per
+        device, not per peer.
     end note
 ```
+
+**Current is device-global, not per-peer.** The selector holds a single current
+transport for the whole device. Nothing keyed by peer exists, so a change to
+make selection peer-specific is a new data structure, not a tweak.
 
 ## Selection
 
@@ -111,8 +125,8 @@ Three details in that table are load-bearing and easy to lose in a refactor:
 
 ## Metrics feeding the score
 
-Scoring is multi-factor: signal strength, congestion, bandwidth, battery,
-reliability, and capacity.
+Scoring is multi-factor, over seven factors: signal strength, proximity,
+bandwidth, congestion, energy, reliability, and load.
 
 Two observations about the feed that are worth writing down because they were
 learned the hard way:
@@ -160,7 +174,7 @@ This is a recurring source of confusion for application teams:
 | Relay write acknowledgement | The relay accepted the frame |
 | Delivery acknowledgement | The **recipient** processed it |
 
-Only the last one is delivery. The mesh transports that enqueue unconditionally
-and return success are the reason relay hint frames must be pinned rather than
-routed: an unconditional-enqueue transport swallows a self-addressed frame and
-reports success.
+Only the last one is delivery. Unconditional-enqueue transports are the reason
+relay hint frames must be pinned rather than routed: such a transport swallows a
+self-addressed frame and reports success. Wi-Fi Direct and Reticulum behave this
+way; Bluetooth LE fails closed, because self is never a connected peer.

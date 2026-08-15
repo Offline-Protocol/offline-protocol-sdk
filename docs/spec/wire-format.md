@@ -68,7 +68,12 @@ variants and therefore does not conform; the fallback has to be written by hand.
 | 2 | High |
 | 3 | Critical |
 
-An unrecognised value degrades to `Medium`.
+An unrecognised **numeric** value degrades to `Medium`. Unlike content type,
+that tolerance does not extend to the JSON encoding: priority is carried there
+as a lowercase string against a closed set, with no fallback and no default, so
+an unknown or absent value rejects the whole message. A new priority is
+therefore a breaking change on the JSON floor, which is where a future addition
+has to be designed around.
 
 ## Encodings
 
@@ -208,10 +213,12 @@ and duty cycle, not the protocol:
 | Default | 32 KiB | 4 |
 | Internet | 256 KiB | 8 |
 
-The encoding choice interacts with this directly. An encrypted direct message
-under the compact envelope and the binary codec is roughly 2.7 times smaller
-than the same message under the JSON floor with the legacy envelope, which is
-often the difference between one Bluetooth LE fragment and three.
+The encoding choice interacts with this directly. Measured on one encrypted
+direct message, the JSON floor with the legacy envelope takes 1342 bytes; the
+compact envelope alone brings that to 808 (the envelope is responsible for
+roughly a 2.7 times reduction on the payload it replaces); adding the binary
+codec brings it to 472, **about 2.8 times smaller** end to end. That is often
+the difference between one Bluetooth LE fragment and three.
 
 ## Reserved metadata keys
 

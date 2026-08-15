@@ -18,8 +18,11 @@ therefore partition itself from the group with no attacker involved.
 
 ## Decision
 
-**Report by default.** Emit an unauthorized-change event, rate-limited per group
-and committer, and apply the commit.
+**Report by default.** Emit an unauthorized-change event, rate-limited per
+group, committer, **and whether enforcement was on**, and apply the commit. The
+enforcement flag belongs in the key: without it an earlier report-only event
+suppresses the refusal alarm for the same committer, which is the one event that
+must always reach the application.
 
 Carry a **three-valued** authorization field on roster events:
 
@@ -27,7 +30,11 @@ Carry a **three-valued** authorization field on roster events:
 |-------|---------|
 | checked and authorized | A check ran and passed |
 | checked and unauthorized | A check ran and failed |
-| **not evaluated** | No check ran: own Welcome join, relay reconciliation |
+| **not evaluated** | No check ran: own Welcome join, relay-reconciled **adds** |
+
+Relay-reconciled **removes** are the asymmetry in that last row: the remove path
+does run an administrator check against the authenticated wire sender and
+reports a real verdict. Adds do not, so they report "not evaluated".
 
 Offer rejection as an explicit opt-in, default off, documented as unsuitable for
 fleet-wide enablement.

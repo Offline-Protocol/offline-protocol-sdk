@@ -83,6 +83,22 @@ Deletion also purges legacy records predating the bundle format: an unparseable
 record is read as the serialized key package so its provider reference is
 derivable. A record-only delete there is the exact stranding this rule removes.
 
+### The one record-only delete that survives
+
+`mark_key_package_synced` is an exception, and an unresolved one. It deletes the
+record and leaves the provider key in place. No engine path calls it; it exists
+only on the FFI surface, for an application that publishes a package itself and
+wants it out of the pending list.
+
+Retaining the provider key there is not obviously wrong. A published package
+must stay openable, and only the peer's Welcome consumes the key. But the record
+is what carries expiry, so a published-but-never-claimed package's key has no
+path to destruction at all, which is the stranding this section otherwise
+forbids.
+
+Treat it as a known gap rather than a pattern to copy: a caller that wants the
+package withdrawn should expire it, not mark it synced.
+
 ## What would undo this
 
 Adding a "get a key package" convenience that does not take a peer and does not

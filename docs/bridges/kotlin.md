@@ -100,6 +100,45 @@ Robolectric is used where a platform type is unavoidable. It needs an explicit
 SDK level in the test configuration; without one it picks a level the project
 does not target and fails for unrelated reasons.
 
-Running the Android unit tests locally has a known gotcha with the React Native
-Android artifact; the workaround is to copy into a clean directory. See
-[the Android integration guide](../android-integration.md).
+### Running them locally
+
+CI runs them through the standalone harness in
+`bindings/react-native/android-ci-harness`. Following that harness's README
+verbatim on a development machine **fails**, and the reason is worth knowing
+before you debug your own change for it.
+
+`android/build.gradle` decides how to depend on React Native by testing whether
+`node_modules/react-native` exists:
+
+| `node_modules` | Dependency | Result |
+|----------------|-----------|--------|
+| Absent (CI) | `compileOnly` on a pinned version from Maven Central | Resolves |
+| Present (local dev) | `implementation` with **no version**, from the local React Native Maven directory | Resolves to an empty version and fails |
+
+So the failure is caused by having installed the package's own dependencies,
+which is why it looks unrelated to whatever you changed.
+
+Reproduce CI without touching the working tree by copying the module somewhere
+with no sibling `node_modules` and pointing a copy of the harness at it:
+
+```bash
+rsync -a --exclude build/ --exclude .gradle/ bindings/react-native/android /tmp/rn-android-ci/
+rsync -a bindings/react-native/android-ci-harness/ /tmp/rn-android-ci/harness/
+cd /tmp/rn-android-ci/harness
+ANDROID_HOME=~/Library/Android/sdk gradle :offlineprotocol:testDebugUnitTest
+```
+
+Needs JDK 17 and the Android SDK. The console prints only `BUILD SUCCESSFUL`;
+for counts, read the `tests=` and `failures=` attributes in
+`android/build/test-results/testDebugUnitTest/*.xml`.
+
+Two consequences of the `compileOnly` path that shape what you can test:
+
+- Anything React Native pulls in **transitively** is absent at test runtime.
+  Production code compiles, then the test dies with `NoClassDefFoundError`. Add
+  the specific androidx artifact as a test dependency when a new test reaches
+  one.
+- `OfflineProtocolModule` extends a React base class, so it cannot be
+  instantiated at unit-test runtime **at all**. That is a design constraint, not
+  only a testing one: put an invariant that needs coverage in a collaborator,
+  not in the module.

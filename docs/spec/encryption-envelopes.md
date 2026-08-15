@@ -1,14 +1,18 @@
 # Encryption envelopes
 
-Three envelope formats carry ciphertext, at three different layers. They are
-independent: a message may take any combination, and each is negotiated
-separately.
+Three envelope formats carry ciphertext, at three different layers. A message
+may take any combination of them.
 
 | Envelope | Layer | Carried in | Negotiated by |
 |----------|-------|-----------|---------------|
 | `__MLS_ENC__` | End to end, 1:1 and group | `content` | `env_versions` |
 | Media chunk envelope | End to end, media | `binary_content` | `rich_versions` for the v2 form |
 | `__RICH_V1__` sealed body | Inside the MLS plaintext | The decrypted plaintext | `rich_versions` |
+
+They are not independently negotiated. Only `__MLS_ENC__` has a capability of
+its own; the media envelope's v2 form and the sealed rich body **share
+`rich_versions`**, so advertising it enables both, and a change to what that
+token means moves two envelopes at once.
 
 ## The MLS encrypted message
 
@@ -148,15 +152,21 @@ sender). None of that belongs on a relay-visible field.
 
 ### Restore rules
 
-On receipt, the sealed body is **authoritative** and the outer copies are wiped.
+On receipt, a sealed body is **authoritative** over the outer copies.
 Specifically:
 
-1. Strip the outer rich fields.
-2. If the plaintext carries a `__RICH_V1__` body, parse it and restore its
-   fields wholesale.
-3. The sealed `content_type` hint, when present, overrides the outer value.
+1. Strip the outer reply context unconditionally, sealed body or not. A
+   relay-visible quoted-reply preview is never trusted and never rendered.
+2. If the plaintext carries a `__RICH_V1__` body, parse it and replace the rich
+   fields **wholesale**, absent values included, so a sealed body that omits a
+   field clears the outer copy rather than letting it show through.
+3. Absent a sealed body, the remaining outer fields (media metadata, forward
+   attribution) **survive**. That is the deliberate fallback for senders that
+   predate sealing, and it is why rule 2 is scoped to the sealed branch rather
+   than applied as an unconditional wipe.
+4. The sealed `content_type` hint, when present, overrides the outer value.
 
-Rule 3 closes a specific attack: without it a relay could restamp the rendering
+Rule 4 closes a specific attack: without it a relay could restamp the rendering
 hint in transit, and restamping it to `FileChunk` routes the decrypted message
 into the file-transfer manager where it is dropped. A sealed `FileChunk` claim
 is therefore **refused** on restore, mirroring the send boundary which refuses
