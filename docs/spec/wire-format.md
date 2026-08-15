@@ -70,10 +70,16 @@ variants and therefore does not conform; the fallback has to be written by hand.
 
 An unrecognised **numeric** value degrades to `Medium`. Unlike content type,
 that tolerance does not extend to the JSON encoding: priority is carried there
-as a lowercase string against a closed set, with no fallback and no default, so
-an unknown or absent value rejects the whole message. A new priority is
-therefore a breaking change on the JSON floor, which is where a future addition
-has to be designed around.
+as a string against a closed set, with no fallback and no default, so an unknown
+or absent value rejects the whole message. A new priority is therefore a
+breaking change on the JSON floor, which is where a future addition has to be
+designed around.
+
+Encoders emit the **lowercase** form. Decoders MUST also accept the
+**capitalized** spelling of each name (`Low`, `Medium`, `High`, `Critical`): the
+UniFFI `receive_message` JSON has always emitted the capitalized form, and that
+JSON has to round-trip back through `forward_message`, so a decoder built to the
+lowercase set alone rejects frames the reference implementation itself produces.
 
 ## Encodings
 

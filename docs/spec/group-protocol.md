@@ -144,7 +144,10 @@ the claimed identities are not, because handing an attacker-chosen string back
 through a second field returns it by another door.
 
 The roster is not cosmetic. It addresses per-member fan-out, feeds the rich
-payload gate, and supplies the address-ordered tiebreakers. A non-zero unbound
+payload gate, and supplies the membership lists the group tiebreakers sort.
+Those tiebreakers sort **rendered** identifiers rather than `Address` byte
+order; see [Ordering](identity.md#ordering) for why the two orders differ and
+must not be harmonized. A non-zero unbound
 count is reported as a security warning, because this is the only seam at which
 a leaf already seated in local state surfaces, and a log line reaches no
 application.
@@ -228,14 +231,23 @@ identifier.
 - group metadata is unreadable or absent,
 - **the administrative set is not known to be non-empty.**
 
-Reject only when the administrative set is known non-empty and a principal (the
-committer, plus every proposal's sender) is positively not in it.
+Reject only when the administrative set is known non-empty and a principal is
+positively not in it. The principals are the committer and the sender of each
+**Add or Remove** proposal, since MLS lets a member commit a proposal another
+member made. Update and PSK proposal senders are deliberately excluded: an
+Update is legitimate self-service that needs no administrator, so rejecting an
+admin's Add because it batched a member's key update would fork the group over
+a proposal that changes no membership.
 
 The creator of record is deliberately **not** consulted here. One
 unauthenticated claim is too thin a basis to fork over.
 
-Enforcement can detect an **absent** administrative view, never a **divergent**
-one. That is why it is opt-in and never a fleet-wide default.
+Enforcement acts only on a **present** administrative set that positively
+excludes a principal; every absent input fails open. It therefore cannot detect
+a **divergent** view, where two members each hold a non-empty administrative set
+and disagree. That is why it is opt-in, and why it belongs only in a closed
+deployment that controls role distribution, never on part of a fleet: a member
+with it off applies the commit a member with it on refuses.
 
 ## Group message delivery
 

@@ -102,9 +102,9 @@ See [ADR 0014](../adr/0014-dedicated-ffi-entry-points.md).
 
 ## C5. Hand-mirrored constants must be pinned in every language
 
-Some constants exist in several places no single compiler sees together. Two
-sets do today, and they are pinned by **different** mechanisms, so knowing which
-one you are touching matters.
+Some constants exist in several places no single compiler sees together. Four
+sets do today, and they are pinned by **two different** mechanisms, so knowing
+which one you are touching matters.
 
 **The relay-answer prefix exemption list** is the canonical example: the core,
 the Swift bridge, and the Kotlin bridge each hold a copy. A prefix present in one

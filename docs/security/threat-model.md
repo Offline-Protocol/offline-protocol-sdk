@@ -150,13 +150,22 @@ only a reliability one.
 
 The rule the protocol settled on:
 
-- A frame that **cannot become deliverable** and was refused on security grounds
-  gets **no acknowledgement**, and its identifier is unmarked.
-- A frame that is **signature-gated** may be acknowledged even when refused,
-  because the acknowledgement tells an unauthenticated injector nothing and a
-  permanent refusal should not be retransmitted.
+- A frame refused by the **signature gate** gets **no acknowledgement**, and its
+  identifier is unmarked. Acknowledging would confirm to an unauthenticated
+  injector that this device is online and processing, and unmarking is what stops
+  an exact replay from reaching the duplicate re-acknowledgement path and leaking
+  the same fact. Inbound plaintext refused by encryption policy is handled
+  identically, for the same reason.
+- A frame whose sender was **authenticated** and which is then permanently
+  refused keeps its acknowledgement. A membership commit refused by opt-in
+  enforcement is the case in point: the sender is a proven member rather than an
+  injector, so there is no oracle to protect, and a permanent refusal should not
+  be retransmitted.
 - A frame that failed for a **recoverable** reason gets no acknowledgement, so
   the sender's resend is the recovery path.
+
+"Refused on policy grounds" therefore names two opposite dispositions, and which
+one applies depends on whether the sender was authenticated first.
 
 Consequences for application teams are in
 [Delivery and ACKs](../state-machines/delivery-and-acks.md). The headline: **a
@@ -174,8 +183,11 @@ prefixes: group registration, membership add and remove, group info, the user's
 group list, and error reports.
 
 **Impact:** a forged registration flips the sync gate that group broadcast rides
-on; forged membership answers corrupt the members cache (though **not** the MLS
-roster, and roster-derived logic never reads that cache).
+on, but only inside an armed window: the flag is set only for a frame that
+arrives on the internet transport, names a group this device already tracks, and
+correlates with a registration this device has outstanding. Forged membership
+answers corrupt the members cache (though **not** the MLS roster, and
+roster-derived logic never reads that cache).
 
 **Why it stands:** these frames have no signer. Closing it means moving relay
 answers onto dedicated entry points.
@@ -228,15 +240,17 @@ budget is the binding constraint. Widening is a version bump and a migration.
 
 ### R4. Divergent administrative views
 
-Opt-in commit enforcement detects an **absent** administrative view, never a
-**divergent** one. Two honest members with different role snapshots can reject
-each other's commits and partition.
+Opt-in commit enforcement acts only on a **present** administrative set that
+positively excludes a principal; every absent input fails open. It cannot detect
+a **divergent** view: two honest members with different role snapshots each hold
+a non-empty set, so they reject each other's commits and partition.
 
 **Why it stands:** the administrative overlay replicates best-effort by design,
 and rejecting a commit forks you permanently from everyone who accepted it.
 
-**Mitigation:** enforcement is opt-in and documented as unsuitable for
-fleet-wide enablement.
+**Mitigation:** enforcement is opt-in, and is documented as suitable only for a
+closed deployment that controls role distribution, never for part of a fleet:
+a member with it off applies the commit a member with it on refuses.
 
 ### R5. Unauthenticated plaintext in MLS-free groups
 

@@ -115,9 +115,10 @@ few seconds cannot hold an entry alive indefinitely.
 drains.** Not only an explicit session establishment event.
 
 This is what fixes the both-create case. When two peers create a session
-simultaneously, the **owner** side never receives a Welcome, so a
-Welcome-triggered drain never fires there. A successful decrypt is the general
-proof that the session works.
+simultaneously, the **owner** side never *adopts* a Welcome (it receives the
+peer's, but the tiebreaker keeps the local session), so a Welcome-triggered
+drain never fires there. A successful decrypt is the general proof that the
+session works.
 
 Precisely, the drain hangs off the **confirmation**, and a successful decrypt is
 one of the things that can confirm. Confirmation is a state transition, so a

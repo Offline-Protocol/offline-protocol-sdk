@@ -39,9 +39,10 @@ So: no outbox entry, no pending acknowledgement, no retry entry.
 The transport selector demotes the internet transport by design, so a
 self-addressed frame under ordinary routing goes to a mesh transport.
 
-Mesh transports enqueue unconditionally and return success. The caller therefore
-believes the broadcast succeeded, skips its per-member fallback, and delivers to
-**nobody**.
+Wi-Fi Direct and Reticulum enqueue any recipient and return success. The caller
+therefore believes the broadcast succeeded, skips its per-member fallback, and
+delivers to **nobody**. BLE is the exception that proves the rule matters: it
+refuses a recipient that is not a connected peer, so it fails loudly instead.
 
 Pinning also means transport errors propagate to the caller rather than being
 deferred, which is what lets the fallback trigger correctly.

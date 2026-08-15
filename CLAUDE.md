@@ -112,8 +112,9 @@ offline-protocol-bench         Criterion benchmarks
   `OfflineProtocol::install_telemetry_sink(sink, config)`.
   `TelemetryConfig::mls_verbosity` gates MLS lifecycle emission at runtime;
   identifier scrubbing is on by default.
-- **`EventCallback`**: the engine emits events (MessageReceived, PeerDiscovered,
-  TransportChanged, and so on). Events cross UniFFI as opaque JSON.
+- **`EventCallback`**: the engine emits events (MessageReceived,
+  NeighborDiscovered, TransportSwitched, and so on). Events cross UniFFI as
+  opaque JSON.
 
 ### Rules that are enforced by tests, not by the compiler
 

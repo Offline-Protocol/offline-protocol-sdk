@@ -66,9 +66,10 @@ messages:
 1. A distinct not-ready outcome, so the receive loop has something to branch on.
 2. Idempotent enqueue keyed by message identifier, so resends do not stack and
    the time-to-live measures from **first** receipt.
-3. Drain on **any successful decrypt**, not on a session-established event. The
-   both-create **owner** never receives a Welcome, so a Welcome-triggered drain
-   silently skips it.
+3. Drain on **any successful decrypt**, not on a session-established event. In
+   the both-create race the **owner** keeps its local session and never *adopts*
+   the Welcome it receives, confirming only once a decrypt succeeds, so a
+   Welcome-triggered drain silently skips it.
 4. Re-mark the identifier when the drain surfaces the message.
 5. A time-to-live long enough to cover mesh session establishment (30 minutes,
    not 2).

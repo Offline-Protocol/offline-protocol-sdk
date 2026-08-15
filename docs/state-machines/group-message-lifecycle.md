@@ -34,7 +34,8 @@ flowchart TD
     T --> R{Settled report?}
     R -->|yes| RI[Re-issue per-member to<br/>roster − delivered − pushed − self]
     R -->|timeout| RB{Attempts < 3<br/>and gate still holds?}
-    RB -->|yes| B
+    RB -->|yes| RS[Re-send the same frame:<br/>same logical id, attempts + 1]
+    RS --> T
     RB -->|no| F
     R -->|internet dropped| F
     F --> L[Inherits the full DM ladder]
@@ -165,8 +166,9 @@ flowchart TD
     E -->|no| S{Sibling of one already<br/>delivered in THIS batch?}
     S -->|yes| Y[Drop without decrypting]
     S -->|no| C[Decrypt]
+    C -->|security rejected / not MLS / failed| R[Release replay protection, no ack]
     C -->|plaintext| DL[Deliver, emit logical id, ack envelope id]
-    C -->|rejected / failed| R[Release replay protection, no ack]
+    C -->|policy refused| P[Drop, KEEP replay protection]
     C -->|retriable| RB[Re-buffer, wait for the next drain or expiry]
     C -->|commit or other non-application| NA[Consume the commit, drain<br/>pending commits, run another pass]
 ```

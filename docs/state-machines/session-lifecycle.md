@@ -47,9 +47,10 @@ Both peers can create a session simultaneously. The tiebreaker orders the two
 addresses by **hash bytes** (see [Identity](../spec/identity.md#ordering)) and
 one side adopts the other's Welcome.
 
-The **owner** side, whose session survives, never receives a Welcome. Any
-mechanism that keys off Welcome receipt therefore silently skips the owner. This
-is why:
+The **owner** side, whose session survives, never *adopts* a Welcome. It may
+well receive the peer's Welcome, but the tiebreaker keeps the local session and
+the Welcome is not processed into one, so any mechanism that keys off Welcome
+adoption silently skips the owner. This is why:
 
 - session confirmation also triggers on **any successful decrypt**, and
 - the pending-decryption drain hangs off that confirmation, so a decrypt reaches

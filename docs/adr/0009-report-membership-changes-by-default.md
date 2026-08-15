@@ -36,8 +36,9 @@ Relay-reconciled **removes** are the asymmetry in that last row: the remove path
 does run an administrator check against the authenticated wire sender and
 reports a real verdict. Adds do not, so they report "not evaluated".
 
-Offer rejection as an explicit opt-in, default off, documented as unsuitable for
-fleet-wide enablement.
+Offer rejection as an explicit opt-in, default off, documented as suitable only
+for a closed deployment that controls role distribution, never for part of a
+fleet.
 
 ## Consequences
 
@@ -51,9 +52,11 @@ application cannot detect.
 **Cost.** By default an unauthorized change **takes effect**. The protocol
 reports; it does not prevent.
 
-**Cost.** Enforcement detects an **absent** administrative view, never a
-**divergent** one. Two honest members with different snapshots can reject each
-other and partition. That is why it stays opt-in.
+**Cost.** Enforcement acts only on a **present** administrative set that
+positively excludes a principal; every absent input fails open. It cannot detect
+a **divergent** view. Two honest members with different snapshots each hold a
+non-empty set, so they reject each other and partition. That is why it stays
+opt-in.
 
 ## The fail-open rule is load-bearing
 
@@ -65,7 +68,12 @@ When enforcement is on, merge anyway when:
 - **the administrative set is not known to be non-empty.**
 
 Reject only when the administrative set is known non-empty **and** a principal
-(the committer, plus every proposal's sender) is positively not in it.
+is positively not in it. The principals are the committer and the sender of each
+**Add or Remove** proposal, since MLS lets a member commit a proposal another
+member made. Update and PSK proposal senders are deliberately excluded: an
+Update is legitimate self-service that needs no administrator, so rejecting an
+admin's Add because it batched a member's key update would fork the group over a
+proposal that changes no membership.
 
 The creator of record is deliberately **not** consulted here. One unauthenticated
 claim is too thin a basis to fork over.
