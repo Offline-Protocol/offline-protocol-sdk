@@ -53,7 +53,25 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `resolveUsername()` resolves `true` if it started the lookup and `false` if
   it joined one already in flight; **both mean the event is coming.** Every
   case where no event will ever arrive rejects instead, so awaiting the
-  resolution can never hang on a lookup that was never started.
+  resolution can never hang on a lookup that was never started. The rejection
+  code says which case, because they need different handling:
+  `InvalidConfiguration` (discovery is off, so retrying cannot help),
+  `InvalidState` (too many lookups in flight, retry shortly), and
+  `InvalidArgument` (not a claimable name).
+
+  The event also reports `truncated`, the number of *verified* claims dropped
+  at the accumulator's ceiling. It is the opposite statement to `rejected`:
+  those records passed every check and are missing anyway. Non-zero means
+  `claims` is a sample, so an absence from it proves nothing, and it is the
+  only signal that a name is being squatted at volume, which would otherwise
+  render as a clean set.
+
+  A resolution completes when **every** relay it asked has answered rather than
+  when the first one has. That is a correctness property, not a latency choice:
+  a claim needs only one honest relay to survive, so finishing early would let
+  whichever relay answered fastest decide the whole answer, including a relay
+  that holds nothing. A relay that never answers is bounded by a timeout, and
+  one that disconnects stops being waited on.
 
   Each record binds the Nostr key it is published under, which the key-package
   record does not. Without that binding a third party could unseal a claim,
