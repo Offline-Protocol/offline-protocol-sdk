@@ -441,6 +441,24 @@ impl TransportManager {
             .unwrap_or_default()
     }
 
+    /// Drains the discovery tags whose publication a relay acknowledged.
+    pub fn take_confirmed_nostr_discovery_publications(&self) -> Vec<String> {
+        self.nostr_transport()
+            .map(|nostr| nostr.take_confirmed_discovery_publications())
+            .unwrap_or_default()
+    }
+
+    /// Whether a Nostr transport is installed at all.
+    ///
+    /// Distinct from [`Self::nostr_discovery_active`]: a retraction is owed
+    /// whether or not discovery is still switched on, so the engine has to be
+    /// able to tell "the feature is off" from "there is nothing here that could
+    /// carry a tombstone". Without the second, queueing a retraction silently
+    /// does nothing while the engine records it as done.
+    pub fn has_nostr_transport(&self) -> bool {
+        self.nostr_transport().is_some()
+    }
+
     /// Requests resolution of the devices claiming `username`.
     ///
     /// A missing Nostr transport reports `Disabled`, which is what it is from

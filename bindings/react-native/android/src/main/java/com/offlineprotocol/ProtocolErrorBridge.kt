@@ -43,6 +43,16 @@ internal fun mapProtocolBridgeError(error: Throwable): BridgeProtocolError? {
             code = "InvalidState",
             message = error.message ?: "Operation rejected by current state"
         )
+        // Distinct from InvalidState on purpose: this one says the
+        // *configuration* forbids the call, so retrying it unchanged can never
+        // succeed, while InvalidState is transient and a retry is exactly
+        // right. resolveUsername raises both, and an app that cannot tell them
+        // apart either spins forever on a config error or gives up on a queue
+        // that was about to drain.
+        is ProtocolException.InvalidConfiguration -> BridgeProtocolError(
+            code = "InvalidConfiguration",
+            message = error.message ?: "Operation rejected by current configuration"
+        )
         is ProtocolException.MlsNotInitialized -> BridgeProtocolError(
             code = "MlsNotInitialized",
             message = error.message ?: "MLS not initialized"

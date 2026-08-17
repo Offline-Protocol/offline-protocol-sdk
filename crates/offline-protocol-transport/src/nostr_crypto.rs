@@ -725,6 +725,11 @@ impl NostrEvent {
     /// Names the record by its `a` coordinate (`kind:pubkey:d`) rather than by
     /// event id, so it covers whichever event currently occupies the slot
     /// without the caller having to have kept the id.
+    ///
+    /// The `k` tag names the kind being deleted. NIP-09 says a deletion request
+    /// SHOULD carry it, and a relay that indexes or validates on it drops a
+    /// request without one. Cheap to send and this half of a retraction is
+    /// best-effort already, so the failure it avoids is the silent kind.
     pub fn create_discovery_deletion(keypair: &NostrKeypair, discovery_tag: &str) -> Result<Self> {
         let coordinate = format!(
             "{}:{}:{}",
@@ -732,7 +737,10 @@ impl NostrEvent {
             keypair.public_key_hex(),
             discovery_tag
         );
-        let tags = vec![vec!["a".to_string(), coordinate]];
+        let tags = vec![
+            vec!["a".to_string(), coordinate],
+            vec!["k".to_string(), NOSTR_DISCOVERY_KIND.to_string()],
+        ];
         Self::sign_with_tags(keypair, NOSTR_DELETION_KIND, tags, "", now_unix_secs())
     }
 
@@ -758,20 +766,10 @@ impl NostrEvent {
     ) -> Result<Self> {
         let pubkey = keypair.public_key_hex().to_string();
 
-        // NIP-01 canonical serialization for event ID computation:
-        // [0, <pubkey>, <created_at>, <kind>, <tags_json>, <content>]
         let tags_json =
             serde_json::to_string(&tags).map_err(|e| Error::SerializationError(e.to_string()))?;
-        let content_escaped =
-            serde_json::to_string(content).map_err(|e| Error::SerializationError(e.to_string()))?;
-        let serialized = format!(
-            "[0,\"{}\",{},{},{},{}]",
-            pubkey, created_at, kind, tags_json, content_escaped
-        );
-
-        // Event ID = SHA-256 of the serialized event
-        let event_id_bytes = Sha256::digest(serialized.as_bytes());
-        let event_id = hex::encode(event_id_bytes);
+        let event_id_bytes = nip01_event_id(&pubkey, created_at, kind as u64, &tags_json, content)?;
+        let event_id = hex::encode(&event_id_bytes);
 
         // BIP-340 Schnorr signature of the event ID
         let sig = sign_event_id(&keypair.signing_key, &event_id_bytes)?;
@@ -1035,19 +1033,16 @@ pub(crate) fn event_is_authentic(event: &serde_json::Value) -> bool {
         return false;
     }
 
-    let (Ok(tags_json), Ok(content_escaped)) =
-        (serde_json::to_string(tags), serde_json::to_string(content))
-    else {
+    let Ok(tags_json) = serde_json::to_string(tags) else {
         return false;
     };
-    // The same NIP-01 canonical serialization `sign_with_tags` produces, which
-    // is what keeps a record this build published verifiable by this build.
-    let serialized = format!(
-        "[0,\"{}\",{},{},{},{}]",
-        pubkey, created_at, kind, tags_json, content_escaped
-    );
-    let recomputed = Sha256::digest(serialized.as_bytes());
-    if !id.eq_ignore_ascii_case(&hex::encode(recomputed)) {
+    // The same NIP-01 serialization `sign_with_tags` produces, from the same
+    // function, which is what keeps a record this build published verifiable by
+    // this build.
+    let Ok(recomputed) = nip01_event_id(pubkey, created_at, kind, &tags_json, content) else {
+        return false;
+    };
+    if !id.eq_ignore_ascii_case(&hex::encode(&recomputed)) {
         return false;
     }
 
@@ -1094,6 +1089,30 @@ pub(crate) fn is_sealed_payload(data: &[u8]) -> bool {
 }
 
 /// BIP-340 Schnorr signature of a 32-byte event ID hash.
+/// The NIP-01 event id: SHA-256 over the canonical serialization
+/// `[0, pubkey, created_at, kind, tags, content]`.
+///
+/// One function for signing and for verification, because the two must agree
+/// byte for byte and nothing else would make them. A divergence fails in the
+/// worst available direction: this build's own records stop passing its own
+/// authenticity check, and a refused record is indistinguishable from a
+/// squatted one, so the directory simply goes quiet.
+pub(crate) fn nip01_event_id(
+    pubkey: &str,
+    created_at: i64,
+    kind: u64,
+    tags_json: &str,
+    content: &str,
+) -> Result<Vec<u8>> {
+    let content_escaped =
+        serde_json::to_string(content).map_err(|e| Error::SerializationError(e.to_string()))?;
+    let serialized = format!(
+        "[0,\"{}\",{},{},{},{}]",
+        pubkey, created_at, kind, tags_json, content_escaped
+    );
+    Ok(Sha256::digest(serialized.as_bytes()).to_vec())
+}
+
 fn sign_event_id(signing_key: &SigningKey, event_id_hash: &[u8]) -> Result<String> {
     use k256::ecdsa::signature::hazmat::PrehashSigner;
     let signature: k256::schnorr::Signature = signing_key
@@ -1891,5 +1910,153 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
         assert_eq!(parsed[2]["since"].as_i64(), Some(0));
+    }
+
+    /// Renders an event as the JSON `event_is_authentic` receives.
+    fn event_value(event: &NostrEvent) -> serde_json::Value {
+        serde_json::from_str(&event.to_event_json().expect("event json")).expect("value")
+    }
+
+    /// Re-stamps an event's id over its *current* fields.
+    ///
+    /// This is what makes a forgery in these tests a real one. An id is a hash
+    /// of public fields, so an attacker recomputes it for free; a test that
+    /// leaves the id stale is refused by the id check and never reaches the
+    /// signature at all.
+    fn restamp_id(event: &mut serde_json::Value) {
+        let tags_json = serde_json::to_string(&event["tags"]).expect("tags");
+        let id = hex::encode(
+            nip01_event_id(
+                event["pubkey"].as_str().expect("pubkey"),
+                event["created_at"].as_i64().expect("created_at"),
+                event["kind"].as_u64().expect("kind"),
+                &tags_json,
+                event["content"].as_str().expect("content"),
+            )
+            .expect("id"),
+        );
+        event["id"] = serde_json::Value::String(id);
+    }
+
+    fn discovery_event(keypair: &NostrKeypair, content: &[u8]) -> NostrEvent {
+        let username = user("alice");
+        let tag = discovery_tag_for_username(&username).expect("tag");
+        let seal = discovery_seal_keypair_for_username(&username).expect("seal");
+        NostrEvent::create_discovery_publication(keypair, &tag, seal.public_key_hex(), content)
+            .expect("event")
+    }
+
+    /// The positive control. Without it every negative below is satisfied by a
+    /// function that returns `false` unconditionally.
+    #[test]
+    fn test_event_is_authentic_accepts_a_genuine_event() {
+        let keypair = NostrKeypair::generate_ephemeral().expect("keypair");
+        let event = discovery_event(&keypair, b"{}");
+        assert!(event_is_authentic(&event_value(&event)));
+    }
+
+    /// **The check the forged-tombstone defence actually rests on.**
+    ///
+    /// The attacker holds every public field, so they recompute the id and the
+    /// cheap check passes. What they cannot produce is a BIP-340 signature
+    /// under the key they are claiming to be, and this is the only test that
+    /// reaches that step: an implementation that stopped after the id check
+    /// would pass every other case here and hand a forged retraction straight
+    /// to the resolver.
+    ///
+    /// The signature is a *genuine* one by the attacker's own key over their
+    /// own event, which is the strongest form available: it parses, it is
+    /// well-formed, and it verifies under nobody but its author.
+    #[test]
+    fn test_event_is_authentic_refuses_a_well_formed_signature_by_another_key() {
+        let attacker = NostrKeypair::generate_ephemeral().expect("attacker");
+        let victim = NostrKeypair::generate_ephemeral().expect("victim");
+
+        let mut forged = event_value(&discovery_event(&attacker, b"{\"v\":1,\"retracted\":true}"));
+        forged["pubkey"] = serde_json::Value::String(victim.public_key_hex().to_string());
+        restamp_id(&mut forged);
+
+        assert!(
+            !event_is_authentic(&forged),
+            "an event standing under a key that did not sign it must be refused, \
+             or one hostile relay can retract any name it knows"
+        );
+    }
+
+    /// The same attack with a signature that does not even parse, which exits
+    /// one step earlier. Both paths must refuse.
+    #[test]
+    fn test_event_is_authentic_refuses_an_unparseable_signature() {
+        let keypair = NostrKeypair::generate_ephemeral().expect("keypair");
+        let mut forged = event_value(&discovery_event(&keypair, b"{}"));
+        forged["sig"] = serde_json::Value::String("0".repeat(128));
+        restamp_id(&mut forged);
+        assert!(!event_is_authentic(&forged));
+    }
+
+    /// A genuine event with one field edited and the id left alone: refused by
+    /// the id check, before any curve arithmetic.
+    #[test]
+    fn test_event_is_authentic_refuses_a_stale_id() {
+        let keypair = NostrKeypair::generate_ephemeral().expect("keypair");
+        let mut forged = event_value(&discovery_event(&keypair, b"{}"));
+        forged["created_at"] = serde_json::Value::from(forged["created_at"].as_i64().unwrap() + 1);
+        assert!(!event_is_authentic(&forged));
+    }
+
+    /// A genuine event whose content is swapped and id re-stamped: the id now
+    /// matches the new fields, so only the signature catches it.
+    #[test]
+    fn test_event_is_authentic_refuses_swapped_content_under_a_restamped_id() {
+        let keypair = NostrKeypair::generate_ephemeral().expect("keypair");
+        let mut forged = event_value(&discovery_event(&keypair, b"{}"));
+        forged["content"] = serde_json::Value::String("substituted".to_string());
+        restamp_id(&mut forged);
+        assert!(!event_is_authentic(&forged));
+    }
+
+    /// The length screen in front of `VerifyingKey::from_bytes`, which panics
+    /// rather than erroring on a key of the wrong size. The value arrives off a
+    /// public tag, so this is reachable by anyone.
+    #[test]
+    fn test_event_is_authentic_refuses_malformed_pubkeys_without_panicking() {
+        let keypair = NostrKeypair::generate_ephemeral().expect("keypair");
+        for pubkey in ["", "zz", &"ab".repeat(31), &"ab".repeat(33)] {
+            let mut forged = event_value(&discovery_event(&keypair, b"{}"));
+            forged["pubkey"] = serde_json::Value::String(pubkey.to_string());
+            restamp_id(&mut forged);
+            assert!(
+                !event_is_authentic(&forged),
+                "a {}-character pubkey must be refused",
+                pubkey.len()
+            );
+        }
+    }
+
+    /// A missing field is not a partially-valid event.
+    #[test]
+    fn test_event_is_authentic_refuses_events_missing_fields() {
+        let keypair = NostrKeypair::generate_ephemeral().expect("keypair");
+        for field in [
+            "id",
+            "pubkey",
+            "created_at",
+            "kind",
+            "tags",
+            "content",
+            "sig",
+        ] {
+            let mut forged = event_value(&discovery_event(&keypair, b"{}"));
+            forged
+                .as_object_mut()
+                .expect("object")
+                .remove(field)
+                .expect("field present");
+            assert!(
+                !event_is_authentic(&forged),
+                "an event with no {} must be refused",
+                field
+            );
+        }
     }
 }

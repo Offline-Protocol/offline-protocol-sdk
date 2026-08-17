@@ -47,6 +47,7 @@ Pod::Spec.new do |s|
     "ios/WriteStallWatchdog.swift",
     "ios/WifiDirectManager.swift",
     "ios/NostrManager.swift",
+    "ios/NostrQueryTracker.swift",
     "ios/ReticulumManager.swift",
     "ios/MlsSecureStorage.swift",
     "ios/ProtocolStateStorage.swift",

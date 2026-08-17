@@ -34600,6 +34600,7 @@ fn resolved_claims(
             username,
             claims,
             rejected,
+            truncated: _,
         } => Some((username.clone(), claims.clone(), *rejected)),
         _ => None,
     })
@@ -34633,12 +34634,7 @@ fn test_username_resolution_returns_every_claimant_including_two_devices_of_one_
     ] {
         let record = discovery_record_for(seed, "alice", &author, 1_700_000_000_000);
         let body = serde_json::to_vec(&record).unwrap();
-        protocol.handle_resolved_discovery_record(
-            &query_id,
-            &username,
-            &hex::encode(author),
-            &body,
-        );
+        protocol.handle_resolved_discovery_record(&query_id, &hex::encode(author), &body);
     }
 
     protocol.flush_username_resolution(&query_id);
@@ -34675,12 +34671,7 @@ fn test_username_resolution_emits_exactly_one_event() {
     for (seed, author) in [(1u8, [0x11u8; 32]), (2u8, [0x22u8; 32])] {
         let record = discovery_record_for(seed, "alice", &author, 1_700_000_000_000);
         let body = serde_json::to_vec(&record).unwrap();
-        protocol.handle_resolved_discovery_record(
-            &query_id,
-            &username,
-            &hex::encode(author),
-            &body,
-        );
+        protocol.handle_resolved_discovery_record(&query_id, &hex::encode(author), &body);
     }
 
     assert!(
@@ -34757,12 +34748,7 @@ fn test_username_resolution_refuses_a_re_authored_record() {
 
     // Untouched record, delivered under the squatter's author key.
     let squatter_author = [0x99u8; 32];
-    protocol.handle_resolved_discovery_record(
-        &query_id,
-        &username,
-        &hex::encode(squatter_author),
-        &body,
-    );
+    protocol.handle_resolved_discovery_record(&query_id, &hex::encode(squatter_author), &body);
 
     protocol.flush_username_resolution(&query_id);
 
@@ -34789,7 +34775,7 @@ fn test_username_resolution_refuses_a_record_for_another_name() {
     let author = [0x11u8; 32];
     let record = discovery_record_for(1, "bob", &author, 1_700_000_000_000);
     let body = serde_json::to_vec(&record).unwrap();
-    protocol.handle_resolved_discovery_record(&query_id, &queried, &hex::encode(author), &body);
+    protocol.handle_resolved_discovery_record(&query_id, &hex::encode(author), &body);
 
     protocol.flush_username_resolution(&query_id);
 
@@ -34812,12 +34798,7 @@ fn test_username_resolution_keeps_the_newest_record_per_device() {
     for issued_at in [1_700_000_000_000i64, 1_700_000_500_000, 1_700_000_200_000] {
         let record = discovery_record_for(1, "alice", &author, issued_at);
         let body = serde_json::to_vec(&record).unwrap();
-        protocol.handle_resolved_discovery_record(
-            &query_id,
-            &username,
-            &hex::encode(author),
-            &body,
-        );
+        protocol.handle_resolved_discovery_record(&query_id, &hex::encode(author), &body);
     }
 
     protocol.flush_username_resolution(&query_id);
@@ -34876,12 +34857,7 @@ fn test_username_resolution_honours_a_tombstone_in_either_arrival_order() {
             [&record, &tombstone]
         };
         for body in bodies {
-            protocol.handle_resolved_discovery_record(
-                &query_id,
-                &username,
-                &hex::encode(author),
-                body,
-            );
+            protocol.handle_resolved_discovery_record(&query_id, &hex::encode(author), body);
         }
 
         protocol.flush_username_resolution(&query_id);
@@ -34925,7 +34901,6 @@ fn test_username_resolution_tombstone_only_withdraws_its_own_author() {
     // One device retracts...
     protocol.handle_resolved_discovery_record(
         &query_id,
-        &username,
         &hex::encode(retracting_author),
         &serde_json::to_vec(&DiscoveryTombstoneV1::new()).unwrap(),
     );
@@ -34934,7 +34909,6 @@ fn test_username_resolution_tombstone_only_withdraws_its_own_author() {
     let record = discovery_record_for(2, "alice", &standing_author, 1_700_000_000_000);
     protocol.handle_resolved_discovery_record(
         &query_id,
-        &username,
         &hex::encode(standing_author),
         &serde_json::to_vec(&record).unwrap(),
     );
@@ -34970,12 +34944,7 @@ fn test_username_resolution_keys_claims_by_publisher_not_by_address() {
     for author in [[0x11u8; 32], [0x22u8; 32]] {
         let record = discovery_record_for(1, "alice", &author, 1_700_000_000_000);
         let body = serde_json::to_vec(&record).unwrap();
-        protocol.handle_resolved_discovery_record(
-            &query_id,
-            &username,
-            &hex::encode(author),
-            &body,
-        );
+        protocol.handle_resolved_discovery_record(&query_id, &hex::encode(author), &body);
     }
 
     protocol.flush_username_resolution(&query_id);
@@ -35154,7 +35123,6 @@ fn test_a_query_minted_after_its_lookup_was_swept_emits_nothing_further() {
     let record = discovery_record_for(1, "alice", &author, 1_700_000_000_000);
     protocol.handle_resolved_discovery_record(
         &query_id,
-        &username,
         &hex::encode(author),
         &serde_json::to_vec(&record).unwrap(),
     );
@@ -35170,5 +35138,475 @@ fn test_a_query_minted_after_its_lookup_was_swept_emits_nothing_further() {
         count, 1,
         "one lookup owes one event: a late mint must not contradict the answer \
          the app was already given"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Username discovery: the publication half
+//
+// The resolution half above is well covered. These exercise the other one,
+// where the expensive mistakes are: a claim that stands in a public directory
+// after the profile that justified it is gone.
+// ---------------------------------------------------------------------------
+
+/// Enables username discovery (and the cold contact it requires) on an engine
+/// built by `protocol_with_nostr`.
+///
+/// Set on the *config*, not on the transport, and therefore before `start()`:
+/// start applies the config to the transport, so a flag poked straight into the
+/// transport is overwritten by the default on the way up.
+#[cfg(test)]
+fn enable_discovery(protocol: &mut OfflineProtocol) {
+    protocol.config.transport.nostr_cold_contact_enabled = true;
+    protocol.config.transport.nostr_username_discovery_enabled = true;
+}
+
+/// Runs the claim refresh, bypassing its once-a-minute throttle.
+#[cfg(test)]
+fn tick_discovery(protocol: &mut OfflineProtocol) {
+    protocol.last_nostr_discovery_refresh = None;
+    protocol.refresh_nostr_discovery_claim();
+}
+
+/// Drains every event the transport has queued, returning their message ids.
+#[cfg(test)]
+fn drain_nostr_message_ids(protocol: &OfflineProtocol) -> Vec<String> {
+    let transport = nostr_transport_of(protocol);
+    let nostr = as_nostr(&transport);
+    let mut ids = Vec::new();
+    while let Ok(Some(event)) = nostr.get_next_signed_event() {
+        ids.push(event.message_id);
+    }
+    ids
+}
+
+#[cfg(test)]
+fn discovery_message_id(username: &str) -> String {
+    let username: offline_protocol_core::Username = username.parse().unwrap();
+    format!(
+        "{}{}",
+        offline_protocol_transport::nostr::NOSTR_DISCOVERY_ID_PREFIX,
+        offline_protocol_transport::nostr_crypto::discovery_tag_for_username(&username).unwrap()
+    )
+}
+
+/// A claim is published once discovery is on, and recorded so it can be
+/// retracted later.
+#[test]
+fn test_discovery_claim_is_published_and_recorded() {
+    let mut protocol = protocol_with_nostr("alice");
+    enable_discovery(&mut protocol);
+    protocol.start().unwrap();
+
+    tick_discovery(&mut protocol);
+
+    assert_eq!(
+        protocol.nostr_discovery_claim.as_ref().map(|u| u.as_str()),
+        Some("alice")
+    );
+    assert!(protocol.nostr_discovery_retracting.is_empty());
+    assert!(
+        drain_nostr_message_ids(&protocol).contains(&discovery_message_id("alice")),
+        "the claim must reach the transport queue"
+    );
+}
+
+/// **The stranding case, with nothing to carry the tombstone.**
+///
+/// Turning discovery off is the single most likely reason to retract, and an
+/// engine whose Nostr transport is gone accepts the queue call and does
+/// nothing with it. Forgetting the name there is unrecoverable: the profile
+/// has moved on, so nothing else knows what to retract, and the claim keeps
+/// resolving because the address behind it is still live.
+#[test]
+fn test_retraction_survives_having_no_transport_to_queue_it() {
+    let mut protocol = protocol_with_nostr("alice");
+    enable_discovery(&mut protocol);
+    protocol.start().unwrap();
+    tick_discovery(&mut protocol);
+    assert!(protocol.nostr_discovery_claim.is_some());
+    drain_nostr_message_ids(&protocol);
+
+    // The transport goes away entirely, and the claim should come down.
+    protocol
+        .transport_manager
+        .remove_transport(TransportType::Nostr);
+    tick_discovery(&mut protocol);
+
+    assert!(
+        protocol.nostr_discovery_claim.is_none(),
+        "the claim must stop standing"
+    );
+    assert_eq!(
+        protocol
+            .nostr_discovery_retracting
+            .iter()
+            .map(|u| u.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alice"],
+        "the name must be kept: with no transport nothing was queued, and \
+         nothing else remembers which name to withdraw"
+    );
+}
+
+/// A retraction whose publication never reached a relay is queued again.
+#[test]
+fn test_retraction_is_requeued_after_a_failed_publication() {
+    let mut protocol = protocol_with_nostr("alice");
+    enable_discovery(&mut protocol);
+    protocol.start().unwrap();
+    tick_discovery(&mut protocol);
+    drain_nostr_message_ids(&protocol);
+
+    // Discovery off: the tombstone is queued, and then fails to send.
+    {
+        let transport = nostr_transport_of(&protocol);
+        as_nostr(&transport).set_discovery_enabled(false);
+    }
+    tick_discovery(&mut protocol);
+    let queued = drain_nostr_message_ids(&protocol);
+    assert!(queued.contains(&discovery_message_id("alice")));
+
+    {
+        let transport = nostr_transport_of(&protocol);
+        as_nostr(&transport).report_send_failure(&discovery_message_id("alice"));
+    }
+
+    // The next refresh must try again rather than treat it as done.
+    tick_discovery(&mut protocol);
+    assert_eq!(
+        protocol
+            .nostr_discovery_retracting
+            .iter()
+            .map(|u| u.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alice"],
+        "a failed tombstone is still owed"
+    );
+    assert!(
+        drain_nostr_message_ids(&protocol).contains(&discovery_message_id("alice")),
+        "and must be queued again"
+    );
+}
+
+/// A retraction a relay acknowledged is retired, so it is not republished for
+/// the life of the process.
+#[test]
+fn test_retraction_is_retired_once_a_relay_confirms_it() {
+    let mut protocol = protocol_with_nostr("alice");
+    enable_discovery(&mut protocol);
+    protocol.start().unwrap();
+    tick_discovery(&mut protocol);
+    drain_nostr_message_ids(&protocol);
+
+    {
+        let transport = nostr_transport_of(&protocol);
+        as_nostr(&transport).set_discovery_enabled(false);
+    }
+    tick_discovery(&mut protocol);
+    drain_nostr_message_ids(&protocol);
+
+    {
+        let transport = nostr_transport_of(&protocol);
+        as_nostr(&transport).confirm_sent(&discovery_message_id("alice"));
+    }
+
+    tick_discovery(&mut protocol);
+    assert!(
+        protocol.nostr_discovery_retracting.is_empty(),
+        "an acknowledged tombstone is no longer owed"
+    );
+    assert!(
+        !drain_nostr_message_ids(&protocol).contains(&discovery_message_id("alice")),
+        "and must not be published again"
+    );
+}
+
+/// A rename retracts the old name and publishes the new one.
+#[test]
+fn test_rename_retracts_the_old_claim_and_publishes_the_new() {
+    let mut protocol = protocol_with_nostr("alice");
+    enable_discovery(&mut protocol);
+    protocol.start().unwrap();
+    tick_discovery(&mut protocol);
+    drain_nostr_message_ids(&protocol);
+
+    protocol.config.profile = "bob".to_string();
+    tick_discovery(&mut protocol);
+
+    let queued = drain_nostr_message_ids(&protocol);
+    assert!(
+        queued.contains(&discovery_message_id("alice")),
+        "the old name must be retracted: its claim otherwise stands in a \
+         public directory pointing at an address that is still live"
+    );
+    assert!(
+        queued.contains(&discovery_message_id("bob")),
+        "and the new one published"
+    );
+    assert_eq!(
+        protocol.nostr_discovery_claim.as_ref().map(|u| u.as_str()),
+        Some("bob")
+    );
+}
+
+/// Re-claiming a name that is still owed a tombstone cancels the tombstone.
+///
+/// The two are contradictory statements about one addressable slot, and
+/// publishing both would leave whichever landed last standing.
+#[test]
+fn test_reclaiming_a_name_cancels_its_pending_retraction() {
+    let mut protocol = protocol_with_nostr("alice");
+    enable_discovery(&mut protocol);
+    protocol.start().unwrap();
+    tick_discovery(&mut protocol);
+
+    protocol.config.profile = "bob".to_string();
+    tick_discovery(&mut protocol);
+    assert!(protocol
+        .nostr_discovery_retracting
+        .iter()
+        .any(|u| u.as_str() == "alice"));
+
+    // Back to the original name before the tombstone was ever acknowledged.
+    protocol.config.profile = "alice".to_string();
+    tick_discovery(&mut protocol);
+
+    assert_eq!(
+        protocol.nostr_discovery_claim.as_ref().map(|u| u.as_str()),
+        Some("alice")
+    );
+    assert!(
+        !protocol
+            .nostr_discovery_retracting
+            .iter()
+            .any(|u| u.as_str() == "alice"),
+        "a name being claimed again must not also be owed a tombstone"
+    );
+}
+
+/// A failed publication for a name this install no longer claims must not
+/// mark the *current* claim unpublished.
+#[test]
+fn test_a_failed_retraction_does_not_republish_the_current_claim() {
+    let mut protocol = protocol_with_nostr("alice");
+    enable_discovery(&mut protocol);
+    protocol.start().unwrap();
+    tick_discovery(&mut protocol);
+    protocol.config.profile = "bob".to_string();
+    tick_discovery(&mut protocol);
+    drain_nostr_message_ids(&protocol);
+    assert!(protocol.nostr_discovery_published);
+
+    {
+        let transport = nostr_transport_of(&protocol);
+        as_nostr(&transport).report_send_failure(&discovery_message_id("alice"));
+    }
+    tick_discovery(&mut protocol);
+
+    assert!(
+        protocol.nostr_discovery_published,
+        "the current claim is unaffected by an old name's failed tombstone"
+    );
+    assert!(
+        !drain_nostr_message_ids(&protocol).contains(&discovery_message_id("bob")),
+        "so it must not be republished"
+    );
+}
+
+/// The claim and everything still owed survive a restart.
+#[test]
+fn test_discovery_claim_and_owed_retractions_round_trip_through_storage() {
+    // Shared storage stands in for an app's store across two launches.
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+
+    {
+        let mut protocol = protocol_with_nostr("alice");
+        protocol
+            .enable_message_persistence_for_test(storage.clone())
+            .unwrap();
+        protocol.nostr_discovery_claim = Some("alice".parse().unwrap());
+        protocol.nostr_discovery_retracting = vec!["carol".parse().unwrap()];
+        protocol.persist_nostr_discovery_claim();
+    }
+
+    let mut restored = protocol_with_nostr("alice");
+    restored
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+
+    assert_eq!(
+        restored.nostr_discovery_claim.as_ref().map(|u| u.as_str()),
+        Some("alice")
+    );
+    assert_eq!(
+        restored
+            .nostr_discovery_retracting
+            .iter()
+            .map(|u| u.as_str())
+            .collect::<Vec<_>>(),
+        vec!["carol"],
+        "a tombstone owed at shutdown is still owed at launch: the name it \
+         names exists nowhere else"
+    );
+    assert!(
+        !restored.nostr_discovery_published,
+        "a restored claim has not been published this process"
+    );
+}
+
+/// The pre-retraction persisted shape was a bare `Option<Username>`. An
+/// install upgrading across it must keep its claim rather than publish a
+/// second one under a slot it no longer tracks.
+#[test]
+fn test_legacy_discovery_claim_record_still_restores() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+
+    let mut writer = protocol_with_nostr("alice");
+    writer
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+    let state_storage = writer.protocol_state_storage.clone().unwrap();
+    let legacy = serde_json::to_vec(&Some("alice".to_string())).unwrap();
+    writer
+        .write_state_record(
+            state_storage.as_ref(),
+            storage_keys::NOSTR_DISCOVERY_CLAIM,
+            storage_keys::NOSTR_DISCOVERY_CLAIM_ID,
+            &legacy,
+        )
+        .unwrap();
+
+    let mut restored = protocol_with_nostr("alice");
+    restored
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+
+    assert_eq!(
+        restored.nostr_discovery_claim.as_ref().map(|u| u.as_str()),
+        Some("alice"),
+        "an upgrade must not lose the standing claim: the next tick would \
+         publish a second one and leave the first untracked"
+    );
+    assert!(restored.nostr_discovery_retracting.is_empty());
+}
+
+/// Reads the full resolution event, including the two counters.
+#[cfg(test)]
+fn resolved_counters(events: &Arc<Mutex<Vec<Event>>>) -> Option<(usize, u32, u32)> {
+    events.lock().unwrap().iter().find_map(|event| match event {
+        Event::UsernameResolved {
+            claims,
+            rejected,
+            truncated,
+            ..
+        } => Some((claims.len(), *rejected, *truncated)),
+        _ => None,
+    })
+}
+
+/// Verified claims dropped at the ceiling are reported, and not as refusals.
+///
+/// Without this an app cannot tell a crowded name from an uncrowded one: the
+/// set looks clean and nothing was refused, which is exactly what a name being
+/// squatted at volume would look like.
+#[test]
+fn test_username_resolution_reports_claims_dropped_at_the_ceiling() {
+    let mut protocol = protocol_with_nostr("resolver");
+    let events = capture_events(&mut protocol);
+
+    let username: offline_protocol_core::Username = "alice".parse().unwrap();
+    let query_id = "query-1".to_string();
+    begin_resolution(&mut protocol, &query_id, &username);
+
+    // Two more claimants than the accumulator will hold, each a genuine
+    // record under its own Nostr key.
+    for i in 0..34u8 {
+        let author = [i.wrapping_add(1); 32];
+        let record = discovery_record_for(1, "alice", &author, 1_700_000_000_000);
+        let body = serde_json::to_vec(&record).unwrap();
+        protocol.handle_resolved_discovery_record(&query_id, &hex::encode(author), &body);
+    }
+    protocol.flush_username_resolution(&query_id);
+
+    let (claims, rejected, truncated) = resolved_counters(&events).expect("event");
+    assert_eq!(claims, 32, "the ceiling still bounds what is accumulated");
+    assert_eq!(
+        rejected, 0,
+        "a dropped-but-verified claim is not junk, and reporting it as junk \
+         would describe a squatted name as a broken one"
+    );
+    assert_eq!(
+        truncated, 2,
+        "the count of good claims that are missing anyway must be surfaced"
+    );
+}
+
+/// A resolution displaced by a query-id collision is still answered.
+///
+/// Ids collide only when the transport's RNG has failed and every query falls
+/// back to one fixed id. Overwriting the incumbent silently would leave its
+/// caller waiting forever, because the request record the sweep would have
+/// answered it from is already consumed.
+#[test]
+fn test_a_query_id_collision_answers_the_resolution_it_displaces() {
+    let mut protocol = protocol_with_nostr("resolver");
+    let events = capture_events(&mut protocol);
+
+    let first: offline_protocol_core::Username = "alice".parse().unwrap();
+    let second: offline_protocol_core::Username = "bob".parse().unwrap();
+    begin_resolution(&mut protocol, "duplicate-id", &first);
+    begin_resolution(&mut protocol, "duplicate-id", &second);
+
+    let answered: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::UsernameResolved { username, .. } => Some(username.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        answered,
+        vec!["alice".to_string()],
+        "the displaced lookup owes its caller an answer"
+    );
+}
+
+/// The directory is off unless an app asks for it.
+///
+/// Pinned as a literal rather than derived from the config, because the whole
+/// point is that the default is a *decision*: publishing binds a human-readable
+/// name to an address in a public place.
+#[test]
+fn test_username_discovery_is_off_by_default() {
+    let config = crate::config::TransportConfig::default();
+    assert!(!config.nostr_username_discovery_enabled);
+    // Cold contact is the one that defaults on; discovery additionally
+    // requires it, so a build that flipped this pair would be publishing a
+    // directory entry nobody asked for.
+    assert!(config.nostr_cold_contact_enabled);
+}
+
+/// Discovery needs cold contact, and the coupling is enforced rather than
+/// documented: a claim points at an address whose key packages a resolver
+/// fetches next.
+#[test]
+fn test_username_discovery_requires_cold_contact() {
+    let mut protocol = protocol_with_nostr("alice");
+    protocol.config.transport.nostr_cold_contact_enabled = false;
+    protocol.config.transport.nostr_username_discovery_enabled = true;
+    protocol.start().unwrap();
+
+    assert!(
+        !protocol.transport_manager.nostr_discovery_active(),
+        "discovery without cold contact resolves names that dead-end one hop later"
+    );
+
+    tick_discovery(&mut protocol);
+    assert!(
+        protocol.nostr_discovery_claim.is_none(),
+        "and nothing may be published under it"
     );
 }

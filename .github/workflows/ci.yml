@@ -461,6 +461,7 @@ jobs:
             PeerIdentityBinding.swift RelayAnswerPrefixes.swift \
             RelayControlOpTranslator.swift RelayGroupSnapshotBridge.swift \
             RelayRateLimiter.swift LegacyRelayMessage.swift MonotonicClock.swift \
+            NostrQueryTracker.swift \
             PresenceWatchPolicy.swift RecipientInFlightTracker.swift \
             SocketGenerationTracker.swift SupersededLatchPolicy.swift \
             RelayTimestamps.swift WriteStallWatchdog.swift

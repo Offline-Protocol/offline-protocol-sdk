@@ -27,6 +27,8 @@ use offline_protocol_mls::discovery::{
     DiscoveryTombstoneV1,
 };
 use offline_protocol_transport::nostr::ResolveRequest;
+use offline_protocol_transport::nostr_crypto::discovery_tag_for_username;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use super::{storage_keys, OfflineProtocol};
@@ -56,7 +58,23 @@ const RESOLUTION_TIMEOUT: Duration = Duration::from_secs(30);
 /// would otherwise grow this without limit. At capacity the *oldest* is
 /// flushed with whatever it has rather than dropped silently, so its caller
 /// still receives an answer.
-const MAX_PENDING_RESOLUTIONS: usize = 32;
+///
+/// Deliberately *not* the transport's queue ceiling, and named differently to
+/// keep the two from being read as one number: that one bounds lookups waiting
+/// to be minted into queries, this one bounds accumulators waiting for answers.
+/// A lookup passes through both, so the smaller of the two is what a caller
+/// actually gets, and equalizing them would only hide which limit was reached.
+const MAX_CONCURRENT_RESOLUTIONS: usize = 32;
+
+/// Maximum names for which a tombstone may be owed at once.
+///
+/// One rename owes one retraction, and each is retired as soon as a relay
+/// acknowledges it, so reaching this means retractions have been failing across
+/// several renames. The oldest is dropped, because an unbounded list persisted
+/// across restarts is worse than an old claim this install can no longer
+/// withdraw: hop 2 still arbitrates the stale claim, and nothing arbitrates a
+/// record that grows forever.
+const MAX_PENDING_RETRACTIONS: usize = 8;
 
 /// Maximum claims accumulated for one username.
 ///
@@ -66,6 +84,32 @@ const MAX_PENDING_RESOLUTIONS: usize = 32;
 /// may be among the ones displaced, which is why the invite path exists and
 /// why a user confirms out of band.
 const MAX_CLAIMS_PER_RESOLUTION: usize = 32;
+
+/// What this install claims, and what it still owes a tombstone for.
+///
+/// # Why the owed retractions are persisted beside the claim
+///
+/// A retraction is the one operation here that cannot be reconstructed from
+/// anything else. The claim can: it is `config.profile`, so a lost record costs
+/// one redundant publish. The *old* name is gone the moment the profile
+/// changes, so a record that forgets it before the tombstone lands leaves a
+/// human-readable name standing in a public directory, pointing at an address
+/// this install is still publishing key packages for. Nothing expires it,
+/// because the second hop it dead-ends at is exactly the hop that still works.
+///
+/// So a name moves from [`Self::claim`] to [`Self::retracting`] and stays there
+/// until a relay acknowledges the tombstone. That survives a failed send, a
+/// process restart, and the case that has no failure to report at all: no Nostr
+/// transport installed, where queueing a retraction is a silent no-op.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub(crate) struct DiscoveryClaimState {
+    /// The name currently claimed, if any.
+    #[serde(default)]
+    pub(crate) claim: Option<Username>,
+    /// Names whose tombstone has not yet reached a relay, oldest first.
+    #[serde(default)]
+    pub(crate) retracting: Vec<Username>,
+}
 
 /// A username resolution in flight.
 ///
@@ -113,6 +157,13 @@ pub(crate) struct PendingResolution {
     /// Records seen and refused. Reported so an app can tell "nobody claims
     /// this name" apart from "everything claiming it was junk".
     rejected: u32,
+    /// Verified claims dropped at [`MAX_CLAIMS_PER_RESOLUTION`].
+    ///
+    /// Counted separately from [`Self::rejected`] because it is the opposite
+    /// statement: these records passed every check and are missing anyway.
+    /// Folding them into the refusal count would report a squatted name as a
+    /// junk-filled one, and reporting neither would render it as a clean set.
+    truncated: u32,
     /// When the resolution began, driving the timeout sweep.
     started: Instant,
 }
@@ -128,12 +179,21 @@ impl OfflineProtocol {
     /// 2. discovery is off and a claim stands: retract it;
     /// 3. discovery is on and the standing claim names a different username
     ///    than the current profile: retract the old one, then publish the new;
-    /// 4. discovery is on and the claim is current: republish once per process.
+    /// 4. discovery is on and the claim is current: republish once per process;
+    /// 5. a tombstone is owed, from this run or a previous one: queue it again,
+    ///    until a relay acknowledges it.
     ///
     /// State 3 is the one that is easy to omit and expensive to omit. A user
     /// who renames leaves their old name standing in a public directory,
     /// pointing at an address that is still live, with nothing to ever remove
     /// it — and the *new* owner of that name looks like a squatter next to it.
+    ///
+    /// State 5 is why states 2 and 3 record the debt rather than discharging
+    /// it. Queueing a tombstone is not the same as landing one: the send can
+    /// fail, the process can exit first, and with no Nostr transport installed
+    /// the queue call is a silent no-op. Each of those leaves the same stale
+    /// claim as omitting state 3 entirely, and the name is unrecoverable by
+    /// then because the profile has already moved on.
     pub(crate) fn refresh_nostr_discovery_claim(&mut self) {
         if !self.nostr_discovery_refresh_due() {
             return;
@@ -143,11 +203,28 @@ impl OfflineProtocol {
 
         // Drained after the throttle check, like the slot reports: draining is
         // destructive and a throttled tick that dropped them would lose them.
+        //
+        // Confirmations before failures, so a tag reported both ways inside one
+        // interval settles as landed. The other order would leave a retraction
+        // that reached a relay owed forever, re-queued on every tick.
+        let confirmed = self
+            .transport_manager
+            .take_confirmed_nostr_discovery_publications();
+        self.retire_confirmed_retractions(&confirmed);
+
         for tag in self
             .transport_manager
             .take_failed_nostr_discovery_publications()
         {
-            self.nostr_discovery_published = false;
+            // Scoped to the standing claim's own tag. A failed *retraction* of
+            // a name this install no longer claims says nothing about whether
+            // the current claim is on the relays, and clearing the flag for it
+            // republishes a healthy claim on every such failure while the
+            // backoff ladder, which is keyed by the failing tag, does not
+            // apply.
+            if self.discovery_tag_is_claimed(&tag) {
+                self.nostr_discovery_published = false;
+            }
             self.note_discovery_failure(&tag, now);
         }
 
@@ -172,12 +249,17 @@ impl OfflineProtocol {
             None
         };
 
-        // Retract whatever stands that should not.
+        // Retract whatever stands that should not. This only *records* the
+        // debt; queueing it is the next step, and is retried from the record
+        // until a relay acknowledges it.
         if let Some(standing) = self.nostr_discovery_claim.clone() {
             if desired.as_ref() != Some(&standing) {
-                self.retract_discovery_claim(standing);
+                self.owe_retraction(standing);
             }
         }
+
+        self.queue_owed_retractions(desired.as_ref(), now);
+        self.prune_discovery_backoff(desired.as_ref());
 
         let Some(username) = desired else {
             return;
@@ -252,31 +334,148 @@ impl OfflineProtocol {
             .publish_nostr_discovery_record(username.clone(), payload);
 
         self.nostr_discovery_published = true;
-        if self.nostr_discovery_claim.as_ref() != Some(&username) {
+
+        // Claiming a name cancels any tombstone still owed for it. The two are
+        // contradictory statements about one addressable slot and the claim is
+        // the newer one, which is also why the transport collapses a queued
+        // tombstone for this name into this publication rather than sending
+        // both.
+        let claim_changed = self.nostr_discovery_claim.as_ref() != Some(&username);
+        let debt_cleared = self.remove_owed_retraction(&username);
+        if claim_changed {
             self.nostr_discovery_claim = Some(username);
+        }
+        if claim_changed || debt_cleared {
             self.persist_nostr_discovery_claim();
         }
         Ok(())
     }
 
-    /// Queues a tombstone and a best-effort deletion for a standing claim.
+    /// Records that a name is owed a tombstone, and stops claiming it.
     ///
-    /// The persisted record is cleared *before* the queue call rather than
-    /// after: a retraction that fails to reach a relay leaves a claim we no
-    /// longer track, which is the recoverable direction (the claim expires when
-    /// its second hop fails). Keeping the record and failing to clear it would
-    /// instead have the next tick retract again forever.
-    fn retract_discovery_claim(&mut self, username: Username) {
-        match serde_json::to_vec(&DiscoveryTombstoneV1::new()) {
-            Ok(payload) => {
-                self.transport_manager
-                    .retract_nostr_discovery_record(username, payload);
+    /// Recording is separate from queueing because the two can fail
+    /// independently, and only one of them is recoverable from anything else.
+    /// The debt is written down first, so every later attempt has a name to
+    /// retract: without it the sole record of the old name is gone the moment
+    /// the profile changes.
+    fn owe_retraction(&mut self, username: Username) {
+        if !self.nostr_discovery_retracting.contains(&username) {
+            if self.nostr_discovery_retracting.len() >= MAX_PENDING_RETRACTIONS {
+                self.nostr_discovery_retracting.remove(0);
+                // The name itself is not logged. It is the most personal
+                // identifier this module handles, and a device log is not the
+                // place to write one down; the count is what a reader needs.
+                warn!(
+                    cap = MAX_PENDING_RETRACTIONS,
+                    "Too many un-landed username retractions; giving up on the \
+                     oldest. Its claim may stand until its key packages expire"
+                );
             }
-            Err(e) => warn!(error = %e, "Failed to build a discovery tombstone"),
+            self.nostr_discovery_retracting.push(username);
         }
         self.nostr_discovery_claim = None;
         self.nostr_discovery_published = false;
         self.persist_nostr_discovery_claim();
+    }
+
+    /// Drops a name from the owed set, reporting whether it was there.
+    fn remove_owed_retraction(&mut self, username: &Username) -> bool {
+        let before = self.nostr_discovery_retracting.len();
+        self.nostr_discovery_retracting
+            .retain(|owed| owed != username);
+        self.nostr_discovery_retracting.len() != before
+    }
+
+    /// Retires the retractions whose tombstones a relay acknowledged.
+    fn retire_confirmed_retractions(&mut self, tags: &[String]) {
+        if tags.is_empty() || self.nostr_discovery_retracting.is_empty() {
+            return;
+        }
+        let before = self.nostr_discovery_retracting.len();
+        self.nostr_discovery_retracting.retain(|username| {
+            // A name whose tag will not derive can never be confirmed either,
+            // so keeping it would owe a tombstone forever. It cannot arise from
+            // a parsed `Username`, and dropping it is the terminating choice.
+            match discovery_tag_for_username(username) {
+                Ok(tag) => !tags.contains(&tag),
+                Err(_) => false,
+            }
+        });
+        if self.nostr_discovery_retracting.len() != before {
+            debug!("A username retraction reached a relay; no longer owed");
+            self.persist_nostr_discovery_claim();
+        }
+    }
+
+    /// Queues a tombstone, and a best-effort deletion, for every name still
+    /// owed one.
+    ///
+    /// Re-queued on every refresh until a relay acknowledges it, which is what
+    /// carries a retraction across a failed send, a restart, and a run with no
+    /// Nostr transport installed. Idempotent at the relay: a tombstone
+    /// republished into its own addressable slot replaces itself.
+    fn queue_owed_retractions(&mut self, desired: Option<&Username>, now: Instant) {
+        if self.nostr_discovery_retracting.is_empty() {
+            return;
+        }
+        // Nothing here can carry a tombstone, and `retract_nostr_discovery_record`
+        // would accept it silently. Keeping the debt is the entire point: it is
+        // queued once a transport exists.
+        if !self.transport_manager.has_nostr_transport() {
+            debug!("No Nostr transport; username retractions stay owed");
+            return;
+        }
+
+        let owed: Vec<Username> = self
+            .nostr_discovery_retracting
+            .iter()
+            .filter(|username| Some(*username) != desired)
+            .filter(|username| !self.discovery_backoff_active(username, now))
+            .cloned()
+            .collect();
+
+        for username in owed {
+            match serde_json::to_vec(&DiscoveryTombstoneV1::new()) {
+                Ok(payload) => {
+                    self.transport_manager
+                        .retract_nostr_discovery_record(username, payload);
+                }
+                Err(e) => warn!(error = %e, "Failed to build a discovery tombstone"),
+            }
+        }
+    }
+
+    /// Whether `tag` is the tag of the name this install currently claims.
+    fn discovery_tag_is_claimed(&self, tag: &str) -> bool {
+        self.nostr_discovery_claim
+            .as_ref()
+            .and_then(|username| discovery_tag_for_username(username).ok())
+            .is_some_and(|claimed| claimed == tag)
+    }
+
+    /// Drops backoff entries for tags nothing will consult again.
+    ///
+    /// The ladder is keyed by tag, and a tag becomes unreachable as soon as its
+    /// name is neither claimed nor owed a retraction: a rename leaves one
+    /// behind on every failure. Unlike the key-package ladder, whose keys are a
+    /// fixed slot set, this one would otherwise grow for the life of the
+    /// process.
+    fn prune_discovery_backoff(&mut self, desired: Option<&Username>) {
+        if self.nostr_discovery_backoff.is_empty() {
+            return;
+        }
+        let mut live: HashSet<String> = self
+            .nostr_discovery_retracting
+            .iter()
+            .filter_map(|username| discovery_tag_for_username(username).ok())
+            .collect();
+        for username in desired.into_iter().chain(self.nostr_discovery_claim.iter()) {
+            if let Ok(tag) = discovery_tag_for_username(username) {
+                live.insert(tag);
+            }
+        }
+        self.nostr_discovery_backoff
+            .retain(|tag, _| live.contains(tag));
     }
 
     /// Whether enough time has passed to re-examine the claim.
@@ -432,7 +631,7 @@ impl OfflineProtocol {
             return;
         }
 
-        if self.nostr_resolutions.len() >= MAX_PENDING_RESOLUTIONS {
+        if self.nostr_resolutions.len() >= MAX_CONCURRENT_RESOLUTIONS {
             // Flush the oldest rather than refusing the newest: its caller is
             // still owed an answer, and an answer with fewer claims beats a
             // silence that never resolves.
@@ -446,6 +645,19 @@ impl OfflineProtocol {
             }
         }
 
+        // Two live resolutions share an id only when the transport's RNG failed
+        // and every query fell back to one fixed id. Flushing the incumbent
+        // keeps the promise made to *its* caller: overwriting it silently would
+        // leave that lookup waiting forever, because the request record it
+        // would have been swept from is already consumed.
+        if self.nostr_resolutions.contains_key(&query_id) {
+            warn!(
+                query_id = %query_id,
+                "Discovery query id collision; flushing the resolution it displaces"
+            );
+            self.flush_username_resolution(&query_id);
+        }
+
         self.nostr_resolutions.insert(
             query_id,
             PendingResolution {
@@ -453,6 +665,7 @@ impl OfflineProtocol {
                 claims: HashMap::new(),
                 tombstoned: HashSet::new(),
                 rejected: 0,
+                truncated: 0,
                 started: Instant::now(),
             },
         );
@@ -465,13 +678,13 @@ impl OfflineProtocol {
     /// holds. A refused record is counted and dropped, never surfaced as an
     /// error — a resolver that reported junk as a failure would make an
     /// unremarkable directory look broken.
-    pub fn handle_resolved_discovery_record(
-        &mut self,
-        query_id: &str,
-        username: &Username,
-        author: &str,
-        data: &[u8],
-    ) {
+    /// The name a record is checked against is the *resolution's* own, not one
+    /// passed in beside the query id. The two agree today because the transport
+    /// hands back the subject it stored, but taking both would let a caller
+    /// seed one query's claim set with records verified for another name, and
+    /// the username check is what catches a genuine record copied onto a
+    /// foreign tag.
+    pub fn handle_resolved_discovery_record(&mut self, query_id: &str, author: &str, data: &[u8]) {
         let Some(resolution) = self.nostr_resolutions.get_mut(query_id) else {
             debug!(query_id = %query_id, "Discovery record for an unknown resolution");
             return;
@@ -516,7 +729,9 @@ impl OfflineProtocol {
             }
         };
 
-        if let Err(rejection) = verify_discovery_record(&record, username, &author_bytes) {
+        if let Err(rejection) =
+            verify_discovery_record(&record, &resolution.username, &author_bytes)
+        {
             debug!(reason = %rejection, "Discovery record refused");
             resolution.rejected = resolution.rejected.saturating_add(1);
             return;
@@ -529,6 +744,7 @@ impl OfflineProtocol {
                 cap = MAX_CLAIMS_PER_RESOLUTION,
                 "Username resolution at its claim ceiling; ignoring the rest"
             );
+            resolution.truncated = resolution.truncated.saturating_add(1);
             return;
         }
 
@@ -566,6 +782,7 @@ impl OfflineProtocol {
             username: resolution.username.into_string(),
             claims,
             rejected: resolution.rejected,
+            truncated: resolution.truncated,
         });
     }
 
@@ -632,16 +849,22 @@ impl OfflineProtocol {
                 username: username.into_string(),
                 claims: Vec::new(),
                 rejected: 0,
+                truncated: 0,
             });
         }
     }
 
-    /// Persists which username this install currently claims.
+    /// Persists which username this install claims, and which it owes a
+    /// tombstone for.
     pub(crate) fn persist_nostr_discovery_claim(&mut self) {
         let Some(storage) = self.protocol_state_storage.clone() else {
             return;
         };
-        let bytes = match serde_json::to_vec(&self.nostr_discovery_claim) {
+        let state = DiscoveryClaimState {
+            claim: self.nostr_discovery_claim.clone(),
+            retracting: self.nostr_discovery_retracting.clone(),
+        };
+        let bytes = match serde_json::to_vec(&state) {
             Ok(bytes) => bytes,
             Err(e) => {
                 warn!(error = %e, "Failed to serialize the Nostr discovery claim");
@@ -658,13 +881,18 @@ impl OfflineProtocol {
         }
     }
 
-    /// Restores the standing claim.
+    /// Restores the standing claim and any retraction still owed.
     ///
-    /// Every failure lands on `None`, which means the next tick publishes the
-    /// current profile's claim and *does not* retract whatever was standing.
-    /// That is the benign direction: an unretracted claim expires when its
-    /// second hop fails, whereas guessing at a name to retract would publish a
-    /// tombstone at a tag this install may never have claimed.
+    /// Every failure lands on an empty state, which means the next tick
+    /// publishes the current profile's claim and *does not* retract whatever
+    /// was standing. That is the benign direction: guessing at a name to
+    /// retract would publish a tombstone at a tag this install may never have
+    /// claimed.
+    ///
+    /// Reads the pre-retraction shape too, which was a bare `Option<Username>`.
+    /// The two are distinguishable on sight (an object against a string or
+    /// `null`) and an install that upgrades mid-life would otherwise lose its
+    /// standing claim and republish it under a second addressable slot.
     pub(crate) fn restore_nostr_discovery_claim(&mut self) {
         let Some(storage) = self.protocol_state_storage.clone() else {
             return;
@@ -683,9 +911,17 @@ impl OfflineProtocol {
             }
         };
 
-        match serde_json::from_slice::<Option<Username>>(&data) {
-            Ok(claim) => {
-                self.nostr_discovery_claim = claim;
+        let restored = serde_json::from_slice::<DiscoveryClaimState>(&data).or_else(|_| {
+            serde_json::from_slice::<Option<Username>>(&data).map(|claim| DiscoveryClaimState {
+                claim,
+                retracting: Vec::new(),
+            })
+        });
+
+        match restored {
+            Ok(state) => {
+                self.nostr_discovery_claim = state.claim;
+                self.nostr_discovery_retracting = state.retracting;
                 // A restored claim has not been published *this* process, and
                 // an addressable record lives on the relays rather than here.
                 self.nostr_discovery_published = false;

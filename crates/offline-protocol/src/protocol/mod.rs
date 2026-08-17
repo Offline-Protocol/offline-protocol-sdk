@@ -582,6 +582,16 @@ pub struct OfflineProtocol {
     /// `storage_keys::NOSTR_DISCOVERY_CLAIM`.
     nostr_discovery_claim: Option<Username>,
 
+    /// Names whose tombstone has not yet reached a relay, oldest first.
+    ///
+    /// Persisted beside the claim, and for a stronger reason than the claim
+    /// is: the claim can be rebuilt from `config.profile`, while a retracted
+    /// name has no other record anywhere once the profile has moved on.
+    /// Dropping it before the tombstone lands strands a human-readable name in
+    /// a public directory pointing at an address whose key packages are still
+    /// being published, so nothing downstream expires it.
+    nostr_discovery_retracting: Vec<Username>,
+
     /// Whether the standing claim has been published during *this* process.
     ///
     /// Not persisted, for the same reason `nostr_published_slots` is not: an
@@ -801,6 +811,7 @@ impl OfflineProtocol {
             nostr_publication_backoff: HashMap::new(),
             last_nostr_slot_warning: None,
             nostr_discovery_claim: None,
+            nostr_discovery_retracting: Vec::new(),
             nostr_discovery_published: false,
             nostr_discovery_backoff: HashMap::new(),
             last_nostr_discovery_refresh: None,

@@ -3590,7 +3590,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
             promise.resolve(proto.resolveUsername(username))
         } catch (e: Exception) {
-            promise.reject("ERROR_INVALID_ARGUMENT", "Failed to resolve username: ${e.message}", e)
+            // Mapped rather than flattened: the three refusals mean different
+            // things to a caller. InvalidConfiguration is "discovery is off",
+            // InvalidState is "too many lookups in flight, retry", and
+            // InvalidArgument is "that is not a claimable name". Reporting them
+            // all as one code leaves an app either retrying forever or giving
+            // up on a lookup that was one drain away from working.
+            rejectWithProtocolError(promise, e, "ERROR_INVALID_ARGUMENT", "Failed to resolve username")
         }
     }
 

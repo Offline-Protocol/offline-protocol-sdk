@@ -30,6 +30,13 @@ func mapProtocolBridgeError(_ error: Error) -> (code: String, message: String)? 
         return ("SendFailed", message)
     case let .InvalidState(message):
         return ("InvalidState", message)
+    // Distinct from InvalidState on purpose: this one says the *configuration*
+    // forbids the call, so retrying it unchanged can never succeed, while
+    // InvalidState is transient and a retry is exactly right. `resolveUsername`
+    // raises both, and an app that cannot tell them apart either spins forever
+    // on a config error or gives up on a queue that was about to drain.
+    case let .InvalidConfiguration(message):
+        return ("InvalidConfiguration", message)
     case let .MlsNotInitialized(message):
         return ("MlsNotInitialized", message)
     case let .TransportError(message):

@@ -56,6 +56,7 @@ class NostrManager(
         private const val CONNECTION_TIMEOUT_SECONDS = 30L
         private const val PING_INTERVAL_MS = 30000L  // OkHttp WebSocket ping interval
         private const val MAX_CONSECUTIVE_FAILURES = 2
+
         // Name of the private looper this manager confines itself to. Shared
         // process-wide under this key, so a manager rebuilt after stop()
         // inherits the same ordered queue.
@@ -97,6 +98,7 @@ class NostrManager(
             if (isPaused) return
             pollAndSendMessages()
             pollAndSendQueries()
+            expireStaleQueries()
             if (state == TransportState.RUNNING && isConnected.get()) {
                 transportHandler.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
             }
@@ -158,11 +160,16 @@ class NostrManager(
     // Populated when a WebSocket send succeeds; removed on relay ["OK", ...].
     private val pendingEventConfirmations = mutableMapOf<String, String>()
 
-    // Subscription ids belonging to in-flight key-package resolution queries,
-    // as opposed to the standing message subscription. Events arriving under
-    // one of these are records fetched on the transport's behalf, not inbound
-    // messages, and go to a different entry point.
-    private val activeQueryIds = mutableSetOf<String>()
+    // In-flight resolution queries, as opposed to the standing message
+    // subscription. Events arriving under one of these are records fetched on
+    // the transport's behalf, not inbound messages, and go to a different entry
+    // point.
+    //
+    // The state machine lives in NostrQueryTracker, which holds its own lock
+    // (so this is deliberately not guarded by relayLock) and, having no I/O, is
+    // the half that unit tests can reach. See that file for why a query
+    // completes only once every relay it was sent to has answered.
+    private val queryTracker = NostrQueryTracker()
     private val pendingEventLock = Object()
 
     // Failure tracking for DORS
@@ -421,7 +428,7 @@ class NostrManager(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                processNostrMessage(text)
+                processNostrMessage(text, relayUrl)
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -486,6 +493,11 @@ class NostrManager(
             relayWebSockets.remove(relayUrl)
             subscriptionIds.remove(relayUrl)
         }
+
+        // This relay owes no more end-of-stored-events, so stop waiting on it.
+        // A query whose every other relay has already answered finishes here
+        // rather than waiting out the timeout.
+        dropRelayFromQueries(relayUrl)
 
         emitDiagnostic("warning", "Nostr relay disconnected", mapOf(
             "relayUrl" to relayUrl,
@@ -638,7 +650,13 @@ class NostrManager(
         ))
     }
 
-    private fun processNostrMessage(text: String) {
+    /**
+     * Handles one relay frame.
+     *
+     * Takes the relay it arrived from, because an EOSE is a statement by *that
+     * relay* about a broadcast query rather than about the query as a whole.
+     */
+    private fun processNostrMessage(text: String, relayUrl: String) {
         val json: JSONArray
         try {
             json = JSONArray(text)
@@ -759,11 +777,12 @@ class NostrManager(
             "EOSE" -> {
                 // End of stored events. For the standing message subscription
                 // this just means "live from here"; for a resolution query it
-                // means the relay has given us everything it holds, so the
-                // query is done and its subscription should not stay open.
+                // means *this relay* has given us everything it holds. The
+                // query is done when every relay it was sent to has said so,
+                // not when the first one has.
                 val eoseSubId = if (json.length() >= 2) json.optString(1, "") else ""
                 if (eoseSubId.isNotEmpty() && isActiveQuery(eoseSubId)) {
-                    finishQuery(eoseSubId)
+                    noteEndOfStoredEvents(eoseSubId, relayUrl)
                 } else {
                     emitDiagnostic("debug", "End of stored events received")
                 }
@@ -825,7 +844,7 @@ class NostrManager(
     // MARK: - Key-Package Resolution Queries
 
     private fun isActiveQuery(subscriptionId: String): Boolean =
-        synchronized(relayLock) { activeQueryIds.contains(subscriptionId) }
+        queryTracker.isActive(subscriptionId)
 
     /**
      * Drains queries the transport wants issued and sends each REQ to every
@@ -861,7 +880,10 @@ class NostrManager(
                     break
                 }
 
-                synchronized(relayLock) { activeQueryIds.add(query.queryId) }
+                // Recorded against the relays this REQ actually goes to, so a
+                // relay that connects later is not waited on for an answer it
+                // was never asked for.
+                queryTracker.issue(query.queryId, connectedRelays.keys, monotonicNowMs())
 
                 for ((_, socket) in connectedRelays) {
                     socket.send(query.reqJson)
@@ -889,16 +911,9 @@ class NostrManager(
         }
     }
 
-    /**
-     * Closes a finished query on every relay and releases it in the transport.
-     *
-     * A query is broadcast, so more than one relay answers it and each sends
-     * its own EOSE. The first one closes it: leaving the subscription open for
-     * the stragglers would keep a live filter on a peer's routing tag for the
-     * life of the connection, which is precisely the standing signal this
-     * design avoids elsewhere. A later relay's records are simply missed, and
-     * the next send to that peer re-queues the lookup.
-     */
+    /** Monotonic clock, unaffected by wall-clock jumps. */
+    private fun monotonicNowMs(): Long = android.os.SystemClock.elapsedRealtime()
+
     /**
      * Releases every in-flight resolution query after the relays drop.
      *
@@ -910,38 +925,81 @@ class NostrManager(
      * resolution rate limit lapses.
      */
     private fun releaseActiveQueries() {
-        val queryIds = synchronized(relayLock) {
-            val ids = activeQueryIds.toList()
-            activeQueryIds.clear()
-            ids
-        }
+        val queryIds = queryTracker.clear()
         if (queryIds.isEmpty()) return
 
         for (queryId in queryIds) {
-            try {
-                protocol.nostrQueryCompleted(queryId)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to release Nostr query $queryId", e)
-            }
+            releaseQuery(queryId)
         }
 
-        emitDiagnostic("debug", "Released in-flight Nostr key-package queries", mapOf(
+        emitDiagnostic("debug", "Released in-flight Nostr resolution queries", mapOf(
             "count" to queryIds.size
         ))
     }
 
+    /**
+     * Records one relay's end-of-stored-events for a query.
+     *
+     * Closes *that relay's* subscription immediately, because it has nothing
+     * further to send and a filter left open on a routing tag is the standing
+     * signal this design avoids. The query itself finishes only once every
+     * relay it was sent to has answered: ending it on the first EOSE would
+     * discard the records the slower relays are still sending, and for a
+     * username resolution those records are the answer.
+     */
+    private fun noteEndOfStoredEvents(subscriptionId: String, relayUrl: String) {
+        val closeMessage = JSONArray().put("CLOSE").put(subscriptionId).toString()
+        synchronized(relayLock) { relayWebSockets[relayUrl] }?.send(closeMessage)
+
+        if (queryTracker.noteEndOfStoredEvents(subscriptionId, relayUrl)) {
+            releaseQuery(subscriptionId)
+        }
+    }
+
+    /**
+     * Stops waiting on a relay that went away, for every query it owed.
+     *
+     * A disconnected relay will never send its EOSE, so without this the last
+     * query it was asked would wait out the timeout instead of finishing as
+     * soon as the relays that *can* answer have.
+     */
+    private fun dropRelayFromQueries(relayUrl: String) {
+        for (subscriptionId in queryTracker.dropRelay(relayUrl)) releaseQuery(subscriptionId)
+    }
+
+    /**
+     * Finishes queries whose relays never sent end-of-stored-events.
+     *
+     * Runs on the poll loop. A relay is free never to send EOSE, and without a
+     * deadline such a query holds its subscription for the life of the
+     * connection while its caller waits on the engine's much later sweep.
+     */
+    private fun expireStaleQueries() {
+        for (subscriptionId in queryTracker.staleQueries(monotonicNowMs())) {
+            emitDiagnostic("debug", "Nostr query timed out waiting for end-of-stored-events", mapOf(
+                "queryId" to subscriptionId
+            ))
+            finishQuery(subscriptionId)
+        }
+    }
+
+    /** Ends a query now, whatever the relays have or have not sent. */
     private fun finishQuery(subscriptionId: String) {
-        val wasActive = synchronized(relayLock) { activeQueryIds.remove(subscriptionId) }
-        if (!wasActive) return
+        val awaiting = queryTracker.finish(subscriptionId) ?: return
 
         val closeMessage = JSONArray().put("CLOSE").put(subscriptionId).toString()
-        val connectedRelays = synchronized(relayLock) {
-            relayWebSockets.filter { relayConnected[it.key] == true }
+        val sockets = synchronized(relayLock) {
+            awaiting.mapNotNull { relayWebSockets[it] }
         }
-        for ((_, socket) in connectedRelays) {
+        for (socket in sockets) {
             socket.send(closeMessage)
         }
 
+        releaseQuery(subscriptionId)
+    }
+
+    /** Hands a finished query back to the transport. */
+    private fun releaseQuery(subscriptionId: String) {
         try {
             protocol.nostrQueryCompleted(subscriptionId)
         } catch (e: Exception) {

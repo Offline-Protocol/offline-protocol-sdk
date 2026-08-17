@@ -2289,14 +2289,17 @@ pub struct ProtocolConfig {
     pub nostr_sealing_enabled: bool,
     /// Kill switch for Nostr key-package publication and peer resolution
     /// (default on). See the UDL dictionary and
-    /// `TransportConfig::nostr_username_discovery_enabled` — off by default.
-    /// Publishing binds a human-readable name to an address in a public place,
-    /// which is more disclosure than the key-package record's "an install with
-    /// this tag exists", and it needs cold contact on to be useful at all.
-    pub nostr_username_discovery_enabled: bool,
     /// `TransportConfig::nostr_cold_contact_enabled` for what it buys and what
     /// it costs.
     pub nostr_cold_contact_enabled: bool,
+    /// Switch for the username directory (default **off**). See the UDL
+    /// dictionary and `TransportConfig::nostr_username_discovery_enabled`.
+    ///
+    /// Off by default because publishing binds a human-readable name to an
+    /// address in a public place, which is materially more disclosure than the
+    /// key-package record's "an install with this tag exists". It also requires
+    /// cold contact, since a resolved claim dead-ends one hop later without it.
+    pub nostr_username_discovery_enabled: bool,
     /// Kill switch for the compact MLS envelope (default on). See the UDL
     /// dictionary and `EncryptionConfig::compact_envelope_enabled` for
     /// semantics.
@@ -4913,9 +4916,11 @@ impl OfflineProtocol {
     /// one already in flight. **Both mean an answer is coming**: exactly one
     /// `username_resolved` event follows either way. Every case where no event
     /// will ever arrive throws instead — `InvalidConfiguration` when discovery
-    /// is off, `InvalidState` when too many lookups are in flight — so a caller
-    /// that awaits the event can never be left waiting on one that has no
-    /// trigger.
+    /// is off, `InvalidState` when too many lookups are in flight, and
+    /// `InvalidArgument` when the string is not a claimable username — so a
+    /// caller that awaits the event can never be left waiting on one that has
+    /// no trigger. The three are distinct because they call for different
+    /// handling: never, later, and not with that name.
     ///
     /// The answer carries **every** verified claim. There is deliberately no
     /// "best" claim and no ordering: anyone may publish any name, so what comes
@@ -4954,7 +4959,11 @@ impl OfflineProtocol {
                 .handle_resolved_key_package(&plaintext)
                 .map_err(ProtocolError::from),
             ResolvedRecord::Discovery {
-                username,
+                // The name is not forwarded: the engine checks the record
+                // against the resolution's own username, so that passing a
+                // second copy of it through here cannot disagree with the one
+                // the claims are being accumulated under.
+                username: _,
                 author,
                 plaintext,
             } => {
@@ -4962,8 +4971,7 @@ impl OfflineProtocol {
                 // one event when the query completes. See
                 // `PendingResolution` for why a per-claim event would be the
                 // wrong shape.
-                protocol
-                    .handle_resolved_discovery_record(&query_id, &username, &author, &plaintext);
+                protocol.handle_resolved_discovery_record(&query_id, &author, &plaintext);
                 Ok(())
             }
         }
@@ -12471,7 +12479,8 @@ mod tests {
                 "ios/NostrManager.swift",
                 "the poll handler's re-read",
                 "guard let self = self, !self.isPaused else { return } \
-                 self.pollAndSendMessages() self.pollAndSendQueries() } timer.resume()",
+                 self.pollAndSendMessages() self.pollAndSendQueries() \
+                 self.expireStaleQueries() } timer.resume()",
             ),
             (
                 "ios/ReticulumManager.swift",
@@ -13762,6 +13771,62 @@ mod tests {
         assert!(
             kotlin.contains(&format!("PROOF_DOMAIN = \"{EXPECTED}\"")),
             "AddressDeclarationPolicy.kt must declare PROOF_DOMAIN = \"{EXPECTED}\""
+        );
+    }
+
+    /// Pins the resolution-query completion deadline across the two bridges
+    /// that hand-mirror it.
+    ///
+    /// A discovery query is broadcast and completes only once every relay it
+    /// was sent to has answered, because a claim is meant to need one honest
+    /// relay to survive. End-of-stored-events is the only completion signal
+    /// there is and a relay is free never to send one, so the wait needs a
+    /// deadline. That deadline is a bridge-side constant with no Rust
+    /// counterpart, copied by hand into `NostrQueryTracker.swift` and
+    /// `NostrQueryTracker.kt`.
+    ///
+    /// It is pinned because it is not free to choose: it has to stay *below*
+    /// the engine's `RESOLUTION_TIMEOUT` sweep. Above it, the engine answers
+    /// first and every silent-relay resolution is decided by the sweep instead
+    /// of by the bridge that knows which relays actually replied, which is a
+    /// behaviour change no test on either side of the boundary would show. One
+    /// bridge edited and the other left alone is the same drift in half the
+    /// fleet.
+    #[test]
+    fn nostr_query_completion_timeout_matches_across_both_bridges() {
+        const EXPECTED_MS: u64 = 10_000;
+
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rn_dir = manifest.join("../../bindings/react-native");
+        let read_abs = |path: std::path::PathBuf| -> String {
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+        let read = |rel: &str| -> String { read_abs(rn_dir.join(rel)) };
+
+        // The engine's own sweep, read rather than restated. The bridge
+        // deadline is only meaningful if it lands first, and that relationship
+        // is invisible from either side alone: shortening the sweep below the
+        // bridge's wait would hand every silent-relay resolution back to the
+        // sweep with nothing failing.
+        let engine = read_abs(manifest.join("../offline-protocol/src/protocol/nostr_discovery.rs"));
+        assert!(
+            engine.contains("const RESOLUTION_TIMEOUT: Duration = Duration::from_secs(30);"),
+            "the engine's resolution sweep is no longer 30s; the bridge deadline pinned here \
+             ({EXPECTED_MS} ms) has to stay under it, so re-derive both rather than editing \
+             this literal"
+        );
+
+        let swift = read("ios/NostrQueryTracker.swift");
+        assert!(
+            swift.contains("COMPLETION_TIMEOUT_MS: Int64 = 10_000"),
+            "NostrQueryTracker.swift must declare COMPLETION_TIMEOUT_MS = {EXPECTED_MS} ms"
+        );
+
+        let kotlin = read("android/src/main/java/com/offlineprotocol/NostrQueryTracker.kt");
+        assert!(
+            kotlin.contains("COMPLETION_TIMEOUT_MS = 10_000L"),
+            "NostrQueryTracker.kt must declare COMPLETION_TIMEOUT_MS = {EXPECTED_MS} ms"
         );
     }
 }
