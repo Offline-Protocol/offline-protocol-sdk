@@ -75,6 +75,68 @@ pub enum UsernameError {
     ControlCharacter,
 }
 
+/// Whether `c` is a Unicode format (`Cf`) character.
+///
+/// [`char::is_control`] tests `Cc` only, which misses every character whose
+/// entire function is to change how the text around it renders: the bidi
+/// overrides, the zero-width joiners, the word joiner, the byte-order mark. A
+/// name containing one displays as something other than its own bytes, which is
+/// the failure [`UsernameError::ControlCharacter`] exists to prevent, so `Cf`
+/// has to be screened alongside `Cc`.
+///
+/// Hand-rolled rather than taken from a general-category crate on purpose. The
+/// alternative is a second Unicode table in the dependency graph, and this
+/// crate is already carrying `unicode-normalization` into a workspace with a
+/// binary-size profile (`minisize`) that cares. `Cf` is 21 ranges and it grows
+/// by a handful per Unicode release.
+///
+/// Snapshot of `Cf` as of **Unicode 16.0**, generated from the character
+/// database rather than transcribed. Regenerate it the same way; a range
+/// missing here is a name that renders as something else, not a crash.
+/// `username_rejects_every_format_character_range` pins one member of every
+/// range so a bad edit fails rather than silently narrowing the screen.
+fn is_format_character(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}'                      // SOFT HYPHEN
+        | '\u{0600}'..='\u{0605}'
+        | '\u{061C}'                    // ARABIC LETTER MARK
+        | '\u{06DD}'                    // ARABIC END OF AYAH
+        | '\u{070F}'                    // SYRIAC ABBREVIATION MARK
+        | '\u{0890}'..='\u{0891}'
+        | '\u{08E2}'                    // ARABIC DISPUTED END OF AYAH
+        | '\u{180E}'                    // MONGOLIAN VOWEL SEPARATOR
+        | '\u{200B}'..='\u{200F}'       // ZWSP, ZWNJ, ZWJ, LRM, RLM
+        | '\u{202A}'..='\u{202E}'       // bidi embedding and overrides
+        | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{206F}'       // bidi isolates and deprecated formats
+        | '\u{FEFF}'                    // ZERO WIDTH NO-BREAK SPACE
+        | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{110BD}'
+        | '\u{110CD}'
+        | '\u{13430}'..='\u{1343F}'
+        | '\u{1BCA0}'..='\u{1BCA3}'
+        | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0001}'                   // LANGUAGE TAG
+        | '\u{E0020}'..='\u{E007F}'     // tag characters
+    )
+}
+
+/// Whether `s` contains a character that renders as something other than
+/// itself: Unicode `Cc` (control) or `Cf` (format).
+///
+/// Public because a username is not the only display string this protocol
+/// signs. An invite's petname is the other one, and it is the *more* exposed of
+/// the two: it is what an app renders in the confirmation dialog after a scan,
+/// and when the invite is signed the deceptive rendering arrives carrying a
+/// valid signature. One screen serves both, so the two cannot drift into
+/// disagreeing about what a displayable name is.
+///
+/// `Cf` is the half that matters and the half [`char::is_control`] misses; see
+/// the `is_format_character` table below it.
+pub fn contains_control_or_format(s: &str) -> bool {
+    s.chars().any(|c| c.is_control() || is_format_character(c))
+}
+
 /// A normalized username claim: NFC, lowercase, bounded, never address-shaped.
 ///
 /// Construct with [`Username::from_str`]. The stored form **is** the normalized
@@ -138,52 +200,6 @@ impl Username {
         raw.to_lowercase().nfc().collect()
     }
 
-    /// Whether `c` is a Unicode format (`Cf`) character.
-    ///
-    /// [`char::is_control`] tests `Cc` only, which misses every character whose
-    /// entire function is to change how the text around it renders: the bidi
-    /// overrides, the zero-width joiners, the word joiner, the byte-order mark.
-    /// A name containing one displays as something other than its own bytes,
-    /// which is the failure [`UsernameError::ControlCharacter`] exists to
-    /// prevent, so `Cf` has to be screened alongside `Cc`.
-    ///
-    /// Hand-rolled rather than taken from a general-category crate on purpose.
-    /// The alternative is a second Unicode table in the dependency graph, and
-    /// this crate is already carrying `unicode-normalization` into a workspace
-    /// with a binary-size profile (`minisize`) that cares. `Cf` is 21 ranges
-    /// and it grows by a handful per Unicode release.
-    ///
-    /// Snapshot of `Cf` as of **Unicode 16.0**, generated from the character
-    /// database rather than transcribed. Regenerate it the same way; a range
-    /// missing here is a name that renders as something else, not a crash.
-    /// `username_rejects_every_format_character_range` pins one member of every
-    /// range so a bad edit fails rather than silently narrowing the screen.
-    fn is_format_character(c: char) -> bool {
-        matches!(c,
-            '\u{00AD}'                      // SOFT HYPHEN
-            | '\u{0600}'..='\u{0605}'
-            | '\u{061C}'                    // ARABIC LETTER MARK
-            | '\u{06DD}'                    // ARABIC END OF AYAH
-            | '\u{070F}'                    // SYRIAC ABBREVIATION MARK
-            | '\u{0890}'..='\u{0891}'
-            | '\u{08E2}'                    // ARABIC DISPUTED END OF AYAH
-            | '\u{180E}'                    // MONGOLIAN VOWEL SEPARATOR
-            | '\u{200B}'..='\u{200F}'       // ZWSP, ZWNJ, ZWJ, LRM, RLM
-            | '\u{202A}'..='\u{202E}'       // bidi embedding and overrides
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{206F}'       // bidi isolates and deprecated formats
-            | '\u{FEFF}'                    // ZERO WIDTH NO-BREAK SPACE
-            | '\u{FFF9}'..='\u{FFFB}'
-            | '\u{110BD}'
-            | '\u{110CD}'
-            | '\u{13430}'..='\u{1343F}'
-            | '\u{1BCA0}'..='\u{1BCA3}'
-            | '\u{1D173}'..='\u{1D17A}'
-            | '\u{E0001}'                   // LANGUAGE TAG
-            | '\u{E0020}'..='\u{E007F}'     // tag characters
-        )
-    }
-
     /// Whether `candidate` has the shape of an address.
     ///
     /// A shape test, not a parse: an address with a corrupted checksum is not
@@ -233,10 +249,7 @@ impl FromStr for Username {
         }
         // Checked on the normalized form: a name that only becomes a control
         // character after normalization would otherwise slip the screen.
-        if normalized
-            .chars()
-            .any(|c| c.is_control() || Self::is_format_character(c))
-        {
+        if contains_control_or_format(&normalized) {
             return Err(UsernameError::ControlCharacter);
         }
         if Self::looks_like_address(&normalized) {
@@ -472,7 +485,7 @@ mod tests {
             '\u{E0020}',
         ] {
             assert!(
-                Username::is_format_character(c),
+                is_format_character(c),
                 "U+{:04X} must be screened as a format character",
                 c as u32
             );

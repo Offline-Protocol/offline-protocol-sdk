@@ -1574,9 +1574,13 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     string create_invite(string? petname, boolean sign);
 
-    // Resolve a username to the set of devices claiming it. Returns whether a
-    // lookup started; false means username discovery is off or a lookup for
-    // this name is already in flight (which answers for both callers).
+    // Resolve a username to the set of devices claiming it. Returns true if
+    // this call started the lookup, false if it joined one already in flight.
+    // BOTH mean an answer is coming: exactly one username_resolved event
+    // follows either way. Every case where no event will ever arrive throws
+    // instead -- InvalidConfiguration when discovery is off, InvalidState when
+    // too many lookups are in flight -- so a caller awaiting the event is never
+    // left waiting on one that has no trigger.
     //
     // The answer arrives as ONE username_resolved event carrying EVERY
     // verified claim. There is deliberately no "best" claim and no ordering:

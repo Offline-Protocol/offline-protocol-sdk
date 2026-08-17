@@ -940,19 +940,127 @@ pub(crate) fn create_key_package_query_message(
 
 /// Opens a sealed discovery record.
 ///
-/// Like [`open_key_package_publication`], the event's own BIP-340 signature is
-/// never checked: it would prove only that the publisher holds the key the
-/// event names, which is not the claim anything rests on. The record's
-/// authenticity comes from the Ed25519 signature inside it, and the *binding*
-/// of that record to this publisher comes from comparing the record's
-/// `nostr_author` field against the event's author — a check that belongs to
-/// the verifier, not to the unsealing.
+/// Like [`open_key_package_publication`], the *unsealing* does not authenticate
+/// the publisher: it proves only that the content was sealed to the discovery
+/// key, which is public by construction. Authenticity of a claim comes from the
+/// Ed25519 signature inside it, and the binding of that claim to this publisher
+/// from comparing the record's `nostr_author` against the event's author.
+///
+/// A **tombstone has no inside**, which is why discovery events must
+/// additionally pass [`event_is_authentic`] before reaching here. See that
+/// function.
 pub(crate) fn open_discovery_record(
     discovery_seal_key: &NostrKeypair,
     author_pubkey_hex: &str,
     sealed: &[u8],
 ) -> Result<Vec<u8>> {
     unwrap_gift_wrap(discovery_seal_key, author_pubkey_hex, sealed)
+}
+
+/// Whether an inbound event is genuinely from the key it names: its `id` is the
+/// NIP-01 hash of its own fields, and its `sig` is a BIP-340 signature over
+/// that id under its `pubkey`.
+///
+/// # Why a discovery record needs this and a key package does not
+///
+/// Everywhere else in this transport the event signature is worthless: it
+/// proves only that the publisher holds the key the event names, which is a
+/// claim nothing rests on, because every record carries its own inner Ed25519
+/// signature and that is what is verified.
+///
+/// A **tombstone breaks that symmetry**. Its whole body is
+/// `{"v":1,"retracted":true}` — there is nothing inside to sign, and its entire
+/// meaning comes from *who published it*. The discovery seal key is public by
+/// construction ([`discovery_seal_keypair_for_username`]), so anyone who knows
+/// the username can derive the conversation key for **any** author and seal a
+/// tombstone attributed to them. Without this check, a single hostile relay
+/// could serve a forged tombstone for an honest claimant and suppress their
+/// claim from the resolved set — even while every other relay served the
+/// genuine record. Resolution is order-independent and a tombstone is sticky
+/// for the life of the resolution (deliberately, so a stale copy cannot stand a
+/// retracted claim back up), which is exactly what makes the forgery total
+/// rather than racy.
+///
+/// That inverts what multiple relays are for. A claim needs *one* honest relay
+/// to survive; without this check a retraction needed only *one* hostile relay
+/// to succeed. A squatter running a popular relay could then make their own
+/// claim the only one a user ever sees, which is the authoritative-looking
+/// directory the whole set-shaped API exists to prevent.
+///
+/// # The id is recomputed, never trusted
+///
+/// The `id` field is re-derived from the event's own fields and compared before
+/// the signature is checked. Trusting the claimed id would leave a second hole:
+/// the resolver takes each event id once per query, so an event claiming a
+/// genuine record's id could consume its dedup slot and have the real record
+/// dropped as a duplicate.
+///
+/// Returns `false` for anything malformed. Junk at a public tag is ordinary,
+/// not exceptional.
+pub(crate) fn event_is_authentic(event: &serde_json::Value) -> bool {
+    use k256::ecdsa::signature::hazmat::PrehashVerifier;
+    use k256::schnorr::VerifyingKey;
+
+    let (
+        Some(id),
+        Some(pubkey),
+        Some(created_at),
+        Some(kind),
+        Some(tags),
+        Some(content),
+        Some(sig),
+    ) = (
+        event.get("id").and_then(|v| v.as_str()),
+        event.get("pubkey").and_then(|v| v.as_str()),
+        event.get("created_at").and_then(|v| v.as_i64()),
+        event.get("kind").and_then(|v| v.as_u64()),
+        event.get("tags"),
+        event.get("content").and_then(|v| v.as_str()),
+        event.get("sig").and_then(|v| v.as_str()),
+    )
+    else {
+        return false;
+    };
+
+    // Decoded before it is interpolated below: this both rejects a key no
+    // curve can accept and guarantees the string is pure hex, so it cannot
+    // carry a quote into the canonical serialization. The length check is
+    // load-bearing for a second reason — `VerifyingKey::from_bytes` *panics*
+    // on any other length rather than erroring, and this value comes straight
+    // off a public tag. See `ConversationKey::derive`.
+    let Ok(pubkey_bytes) = hex::decode(pubkey) else {
+        return false;
+    };
+    if pubkey_bytes.len() != 32 {
+        return false;
+    }
+
+    let (Ok(tags_json), Ok(content_escaped)) =
+        (serde_json::to_string(tags), serde_json::to_string(content))
+    else {
+        return false;
+    };
+    // The same NIP-01 canonical serialization `sign_with_tags` produces, which
+    // is what keeps a record this build published verifiable by this build.
+    let serialized = format!(
+        "[0,\"{}\",{},{},{},{}]",
+        pubkey, created_at, kind, tags_json, content_escaped
+    );
+    let recomputed = Sha256::digest(serialized.as_bytes());
+    if !id.eq_ignore_ascii_case(&hex::encode(recomputed)) {
+        return false;
+    }
+
+    let Ok(vk) = VerifyingKey::from_bytes(&pubkey_bytes) else {
+        return false;
+    };
+    let Ok(sig_bytes) = hex::decode(sig) else {
+        return false;
+    };
+    let Ok(signature) = k256::schnorr::Signature::try_from(sig_bytes.as_slice()) else {
+        return false;
+    };
+    vk.verify_prehash(&recomputed, &signature).is_ok()
 }
 
 /// Builds the REQ that fetches the records claiming a username.

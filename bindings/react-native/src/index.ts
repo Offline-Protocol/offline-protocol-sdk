@@ -2675,14 +2675,19 @@ export class OfflineProtocol {
   /**
    * Resolves a username to the set of devices claiming it.
    *
-   * Requires `transports.nostr.usernameDiscoveryEnabled`. Returns whether a
-   * lookup started; `false` means discovery is off or a lookup for this name
-   * is already in flight (which answers for both callers).
+   * Requires `transports.nostr.usernameDiscoveryEnabled`. Resolves `true` if
+   * this call started the lookup and `false` if it joined one already in
+   * flight. **Both mean an answer is coming**: exactly one
+   * `username_resolved` event follows either way, so awaiting that event after
+   * either result is safe.
    *
-   * The answer arrives as one `username_resolved` event carrying **every**
-   * verified claim. There is deliberately no "best" claim and no ordering:
-   * anyone may publish any name, so what comes back is a set of assertions for
-   * a human to arbitrate, not a lookup result.
+   * Every case where no event will ever arrive **rejects** instead — discovery
+   * disabled, or too many lookups in flight — so a `false` can never leave a
+   * spinner running forever.
+   *
+   * The answer carries **every** verified claim. There is deliberately no
+   * "best" claim and no ordering: anyone may publish any name, so what comes
+   * back is a set of assertions for a human to arbitrate, not a lookup result.
    *
    * **Do not auto-select.** Taking the first entry turns a non-authoritative
    * directory into an authoritative-looking one — the user then believes the
@@ -2691,7 +2696,8 @@ export class OfflineProtocol {
    * can be re-claimed by anyone tomorrow, an address is self-certifying.
    *
    * @param username - The name to look up; normalized to NFC and lowercase
-   * @returns Whether a lookup was started
+   * @returns `true` if this call started the lookup, `false` if it joined one
+   * @throws If discovery is disabled, or too many lookups are in flight
    */
   async resolveUsername(username: string): Promise<boolean> {
     return await OfflineProtocolNativeModule.resolveUsername(username);

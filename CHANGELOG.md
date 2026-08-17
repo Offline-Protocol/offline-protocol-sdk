@@ -50,12 +50,32 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   the name. Note that even a single user resolves to a set: a phone and a
   laptop are two genuine claims, and collapsing them hides the second device.
 
+  `resolveUsername()` resolves `true` if it started the lookup and `false` if
+  it joined one already in flight; **both mean the event is coming.** Every
+  case where no event will ever arrive rejects instead, so awaiting the
+  resolution can never hang on a lookup that was never started.
+
   Each record binds the Nostr key it is published under, which the key-package
   record does not. Without that binding a third party could unseal a claim,
   re-seal the genuinely signed payload under their own key, and republish it,
   and because addressable replacement is per-author the owner's retraction
   would never displace the copy. Renaming or switching the feature off retracts
   the standing claim.
+
+  Discovery events are additionally checked against their own BIP-340
+  signature, with the event id recomputed rather than trusted. This is the one
+  record kind that needs it: a retraction's body is a constant, so nothing
+  inside it is signed and its whole meaning is *who published it*, while the
+  seal key is public by construction. Without the check a single hostile relay
+  could forge a retraction for an honest claimant and erase them from the
+  resolved set even while every other relay served their genuine record —
+  inverting what querying many relays is for, since a claim needs only one
+  honest relay to survive.
+
+  Invite petnames are screened for the control and format characters a
+  username already refuses. A petname is what an app renders in the
+  confirmation dialog after a scan, and on a signed invite a bidi override
+  would otherwise arrive bound to a valid signature.
 
   Wire format, verification order and threat model:
   [docs/spec/username-discovery.md](docs/spec/username-discovery.md).

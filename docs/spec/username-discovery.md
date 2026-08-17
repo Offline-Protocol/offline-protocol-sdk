@@ -153,10 +153,19 @@ A verifier MUST, in order:
 1. decode the blob and confirm it is structurally complete;
 2. confirm `v == 1` and that no unknown flag bits are set;
 3. parse the address in canonical form;
-4. confirm `derive_address(pubkey) == address`;
-5. if a signature is present, confirm it verifies under `pubkey`.
+4. confirm the petname, if present, contains no Unicode `Cc` or `Cf`;
+5. confirm `derive_address(pubkey) == address`;
+6. if a signature is present, confirm it verifies under `pubkey`.
 
 Any failure means **refuse**, not warn.
+
+Step 4 is the same screen [normalization](#normalization) applies to a
+username, and it matters more here. A petname is what an application renders in
+the confirmation dialog after a scan, so a bidi override or a zero-width joiner
+makes the name display as something other than the bytes that were signed. When
+the invite *is* signed, that deceptive rendering arrives carrying a valid
+signature, so an application trusting the signature flag would be trusting the
+wrong half. An encoder MUST NOT mint such a petname either.
 
 ### What a signature does and does not defend
 
@@ -302,7 +311,14 @@ tag, the tag requires the username, and the username reconstructs the key.
 
 ### Verification
 
-A resolver MUST check, in order:
+A resolver MUST first confirm that the **carrying event** is authentic: that
+its `id` is the NIP-01 hash of its own fields, and that its `sig` is a valid
+BIP-340 signature over that id under its `pubkey`. This applies to every event
+returned by a discovery query, claim and tombstone alike. See
+[Event authenticity](#event-authenticity-is-required-here-and-nowhere-else) for
+why this record kind needs it when no other does.
+
+It MUST then check the record body, in order:
 
 1. `v == 1`, and every fixed-length field is the right size;
 2. the username matches the queried name exactly;
@@ -324,6 +340,34 @@ directory indefinitely.
 Every verification failure is **ordinary**, not exceptional. The tag is public,
 anyone may publish to it, and a query returns whatever the relay holds. A
 resolver drops the record and continues.
+
+### Event authenticity is required here, and nowhere else
+
+Everywhere else in this protocol the carrying Nostr event's signature is worth
+nothing: it proves only that the publisher holds the key the event names, and
+every record carries its own inner signature, which is what is checked.
+
+A **tombstone breaks that symmetry**. Its body is a constant, so there is
+nothing inside it to sign, and its entire meaning is *who published it*. The
+seal key is public by construction, so anyone who knows the username can derive
+the conversation key for **any** author and seal a tombstone attributed to
+them. A resolver that honoured it on decryption alone could be fed a forged
+retraction by a single hostile relay, suppressing an honest claimant from the
+resolved set even while every other relay served that claimant's genuine
+record. Retraction is deliberately sticky for the life of a resolution (see
+[Resolution](#resolution)), which is what would make such a forgery total
+rather than racy.
+
+That inverts what querying many relays is for: a claim needs *one* honest relay
+to survive, and without this check a retraction would need only *one* hostile
+relay to succeed. A squatter operating a popular relay could then make their
+own claim the only one a user ever sees, which is precisely the
+authoritative-looking directory this chapter exists to prevent.
+
+A resolver MUST **recompute** the event id rather than trust the `id` field.
+Resolvers take each event id once per query, so an event claiming a genuine
+record's id could otherwise consume its slot and have the real record dropped
+as a duplicate.
 
 ### Staleness is advisory
 
@@ -409,10 +453,22 @@ Residuals, stated plainly:
   is that the preimage is a name the guesser already knew, and the payload is
   sealed so a scrape by kind returns nothing.
 - **Retraction is best effort.** A relay may ignore both halves. The
-  `nostr_author` binding stops a third party keeping a retracted claim alive;
-  the owner's own stale copies on unreachable relays persist. Hop 2 arbitrates.
+  `nostr_author` binding stops a third party keeping a retracted claim alive,
+  and event-signature verification stops one forging a retraction for someone
+  else; what remains is the owner's own stale copies on relays they can no
+  longer reach. Hop 2 arbitrates.
 - **Liveness signal.** Publishing is unprompted traffic. Record existence and
   refresh timing are visible to every relay. Default-off is the answer.
+- **The publishing key is a linkable identifier.** A device publishes under its
+  persistent Nostr key, which both the `nostr_author` binding and addressable
+  replacement require. That key sits in cleartext on a public tag, so anyone
+  who knows *one* username can read it without unsealing anything and then
+  recognise that device's other public activity — including a second username
+  claimed by the same device, since one device may hold one record per `d`. Two
+  names a person considers unrelated are therefore publicly linkable as one
+  device. Unsealing does not help, because the author key is event metadata,
+  not payload. An application whose users need unlinkable names must not claim
+  them from one install.
 - **No revocation of a compromised device's claim by anyone but that device.**
   A compromised key can re-sign its own claim indefinitely. This is inherent to
   a non-authoritative directory.

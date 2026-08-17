@@ -26,6 +26,7 @@ use offline_protocol_mls::discovery::{
     parse_discovery_body, verify_discovery_record, DiscoveryBody, DiscoveryRecordV1,
     DiscoveryTombstoneV1,
 };
+use offline_protocol_transport::nostr::ResolveRequest;
 use tracing::{debug, warn};
 
 use super::{storage_keys, OfflineProtocol};
@@ -336,24 +337,73 @@ impl OfflineProtocol {
 
     /// Starts a username resolution.
     ///
-    /// Returns whether a query was queued. `false` means discovery is off, the
-    /// name is already being resolved, or the queue is full — all of which are
-    /// ordinary, and none of which an app needs to distinguish: the resolution
-    /// already in flight will emit for both callers.
+    /// # The return value means exactly one thing: an answer is coming
+    ///
+    /// `Ok(true)` started a lookup and `Ok(false)` joined one already in
+    /// flight, and **both** are followed by exactly one
+    /// [`Event::UsernameResolved`] for the name. Every case where no event will
+    /// ever arrive is an error instead.
+    ///
+    /// That split is the whole point. A caller awaits the event, so folding
+    /// "discovery is off" into `false` alongside "already in flight" leaves an
+    /// app unable to tell waiting from hanging — and the failure mode is a
+    /// spinner that never stops, on the path a user reaches by typing a name
+    /// and pressing search.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] if the string is not a claimable username.
+    /// - [`Error::InvalidConfiguration`] if username discovery is off. It also
+    ///   requires cold contact, so this covers a claim that could only
+    ///   dead-end one hop later.
+    /// - [`Error::InvalidState`] if too many lookups are already in flight.
+    ///   Transient: retry once earlier ones drain.
     pub fn resolve_username(&mut self, username: &str) -> Result<bool> {
         let username: Username = username
             .parse()
             .map_err(|e| Error::InvalidArgument(format!("Not a resolvable username: {}", e)))?;
 
         if !self.transport_manager.nostr_discovery_active() {
+            return Err(Error::InvalidConfiguration(
+                "Username discovery is disabled; enable nostr_username_discovery_enabled \
+                 (which also requires nostr_cold_contact_enabled)"
+                    .to_string(),
+            ));
+        }
+
+        // Deduplicated against both halves of "in flight", because the transport
+        // can only see the first. A lookup lives in its queue until the platform
+        // mints a query, and from then on it exists solely as a resolution here.
+        // Checking only the transport would let the second request for a name
+        // mint a duplicate REQ and emit a second event for one lookup, breaking
+        // the exactly-one-event contract the whole API shape rests on.
+        if self.nostr_resolution_requests.contains_key(&username)
+            || self
+                .nostr_resolutions
+                .values()
+                .any(|resolution| resolution.username == username)
+        {
             return Ok(false);
         }
 
-        if !self
+        match self
             .transport_manager
             .resolve_nostr_username(username.clone())
         {
-            return Ok(false);
+            ResolveRequest::Queued => {}
+            // Reachable despite the check above only if the two fell out of
+            // step; the in-flight lookup still answers this caller.
+            ResolveRequest::AlreadyQueued => return Ok(false),
+            ResolveRequest::Disabled => {
+                return Err(Error::InvalidConfiguration(
+                    "Username discovery is disabled".to_string(),
+                ))
+            }
+            ResolveRequest::QueueFull => {
+                return Err(Error::InvalidState(
+                    "Too many username lookups in flight; retry shortly".to_string(),
+                ))
+            }
         }
 
         // The deadline starts here, not at query mint, because minting is what

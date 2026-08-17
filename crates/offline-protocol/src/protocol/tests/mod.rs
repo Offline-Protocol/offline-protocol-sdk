@@ -35030,6 +35030,61 @@ fn test_username_lookup_that_never_reached_a_relay_still_answers() {
     );
 }
 
+/// A lookup that will never be answered is an **error**, not `false`.
+///
+/// The distinction is the whole contract. A caller awaits the resolution
+/// event, so folding "discovery is off" in with "already in flight" leaves an
+/// app unable to tell waiting from hanging — and the symptom is a spinner that
+/// never stops, on the path a user reaches by typing a name and pressing
+/// search. `false` must mean an answer is still coming, always.
+#[test]
+fn test_resolving_with_discovery_disabled_is_an_error_not_a_false() {
+    let mut protocol = protocol_with_nostr("resolver");
+    // Deliberately left off, which is the default.
+    assert!(matches!(
+        protocol.resolve_username("alice"),
+        Err(Error::InvalidConfiguration(_))
+    ));
+
+    // And nothing was recorded, so no sweep later invents an answer for a
+    // lookup that was never started.
+    assert!(protocol.nostr_resolution_requests.is_empty());
+}
+
+/// Deduplication must cover a lookup that has already been minted into a
+/// query, not only one still sitting in the transport's queue.
+///
+/// After the mint the transport has forgotten the name — the lookup exists
+/// solely as a resolution here — so a check that consulted only the transport
+/// would let the second request mint a *duplicate* relay query and emit a
+/// second event for one lookup. Exactly one event per resolution is the
+/// property the whole set-shaped API rests on.
+#[test]
+fn test_a_second_lookup_joins_an_already_minted_resolution() {
+    let mut protocol = protocol_with_nostr("resolver");
+    protocol
+        .transport_manager_mut()
+        .set_nostr_username_discovery_enabled(true);
+
+    let name = "alice";
+    assert!(
+        protocol.resolve_username(name).expect("resolve"),
+        "precondition: the first lookup is accepted"
+    );
+
+    // The platform mints the query, which clears the request and opens the
+    // accumulator. The transport's queue no longer holds the name.
+    let username: offline_protocol_core::Username = name.parse().unwrap();
+    protocol.begin_username_resolution("query-1".to_string(), username);
+    assert!(protocol.nostr_resolution_requests.is_empty());
+
+    assert!(
+        !protocol.resolve_username(name).expect("resolve"),
+        "a second lookup must join the in-flight resolution, not mint a \
+         duplicate query that would emit a second event"
+    );
+}
+
 /// Giving up on a lookup must not make that name unlookupable for the rest of
 /// the process.
 ///

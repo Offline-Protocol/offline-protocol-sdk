@@ -197,6 +197,27 @@ enum QuerySubject {
     Discovery(Username),
 }
 
+/// What a username-resolution request did.
+///
+/// Exists because "no query was queued" is three different promises to the
+/// caller, and only one of them means an answer is still coming. A bare `false`
+/// makes an app that awaits the resolution event indistinguishable from an app
+/// that hangs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveRequest {
+    /// Newly queued. A resolution event will follow.
+    Queued,
+    /// A lookup for this name is already queued. Its event answers both
+    /// callers, so this is a success from the caller's point of view.
+    AlreadyQueued,
+    /// Username discovery is off. Nothing was sent to a relay, and no event
+    /// will ever arrive for this name.
+    Disabled,
+    /// The resolve queue is at its ceiling. Nothing will arrive for this name;
+    /// the caller may retry once earlier lookups drain.
+    QueueFull,
+}
+
 /// What opening a query event produced.
 #[derive(Debug, Clone)]
 pub enum ResolvedRecord {
@@ -1010,6 +1031,16 @@ impl NostrTransport {
     /// placed at this peer's tag by somebody else therefore registers under
     /// *that* signer's identity, not under the peer we asked about.
     ///
+    /// # The one asymmetry: discovery events are authenticated here
+    ///
+    /// A key-package record needs no event-level check, for the reason above:
+    /// whatever it carries is authenticated downstream by its own signature. A
+    /// discovery *tombstone* has nothing downstream — its body is a constant
+    /// and its meaning is entirely "who published this" — so discovery events
+    /// are checked against their own BIP-340 signature before they are opened.
+    /// See `nostr_crypto::event_is_authentic` for what a forged tombstone would
+    /// otherwise buy.
+    ///
     /// # What squatting a tag does buy
     ///
     /// Two things, both bounded, neither a loss:
@@ -1098,6 +1129,22 @@ impl NostrTransport {
             return Ok(None);
         };
 
+        // A discovery event must genuinely be from the key it names, and this
+        // is the only record kind for which that matters. A tombstone's whole
+        // meaning is *who published it* — there is nothing inside it to sign —
+        // and the discovery seal key is public, so without this one hostile
+        // relay could forge a retraction for an honest claimant and erase them
+        // from the resolved set. See `nostr_crypto::event_is_authentic`.
+        //
+        // Checked before the dedup mark below, so an unauthentic event never
+        // consumes a genuine record's slot.
+        if matches!(subject, QuerySubject::Discovery(_))
+            && !nostr_crypto::event_is_authentic(&event)
+        {
+            tracing::debug!("Discovery event failed its own signature check; ignoring");
+            return Ok(None);
+        }
+
         // The query is broadcast, so every connected relay answers it and the
         // same record arrives once per relay. Take each event id once: behind
         // this call the key-package handler performs two durable
@@ -1152,7 +1199,13 @@ impl NostrTransport {
                 match nostr_crypto::open_discovery_record(&seal_key, author, &sealed) {
                     Ok(plaintext) => Ok(Some(ResolvedRecord::Discovery {
                         username,
-                        author: author.to_string(),
+                        // Lower-cased because the resolver *keys* claims and
+                        // retractions by this string while verification
+                        // compares decoded bytes. Two spellings of one key
+                        // would otherwise be two devices to the accumulator
+                        // and one to the verifier, so a retraction in one
+                        // spelling would not suppress a claim in the other.
+                        author: author.to_ascii_lowercase(),
                         plaintext,
                     })),
                     Err(e) => {
@@ -1181,8 +1234,13 @@ impl NostrTransport {
 
     /// Requests resolution of the devices claiming `username`.
     ///
-    /// Returns whether a query was newly queued. `false` means discovery is
-    /// disabled, the username was already queued, or the queue is full.
+    /// Returns *why* it did what it did rather than a bare boolean. The three
+    /// refusals mean materially different things to a caller: after
+    /// [`ResolveRequest::AlreadyQueued`] an answer is still coming, while after
+    /// the other two nothing will ever arrive. Collapsing them into `false`
+    /// leaves an app that waits on the resolution event unable to tell "wait"
+    /// from "hang". See `OfflineProtocol::resolve_username`, which is what
+    /// turns that distinction into an error.
     ///
     /// Deliberately *not* rate-limited the way key-package resolution is. That
     /// limiter exists because a send to an unpublished peer would otherwise
@@ -1190,24 +1248,24 @@ impl NostrTransport {
     /// lookup is user-initiated — someone typed a name and pressed search — so
     /// throttling it would make the second attempt at a mistyped name silently
     /// do nothing. The queue bound is what keeps it finite.
-    pub fn resolve_username(&self, username: Username) -> bool {
+    pub fn resolve_username(&self, username: Username) -> ResolveRequest {
         if !self.discovery_enabled() {
-            return false;
+            return ResolveRequest::Disabled;
         }
 
         {
             let mut queue = self.discovery_resolve_queue.lock_or_recover();
             if queue.iter().any(|queued| *queued == username) {
-                return false;
+                return ResolveRequest::AlreadyQueued;
             }
             if queue.len() >= MAX_PENDING_RESOLUTIONS {
-                return false;
+                return ResolveRequest::QueueFull;
             }
             queue.push_back(username);
         }
 
         self.notify_messages_available();
-        true
+        ResolveRequest::Queued
     }
 
     /// Removes a queued username lookup that has not been minted into a query.
@@ -3991,7 +4049,10 @@ mod tests {
         let transport = NostrTransport::new(addr("alice")).unwrap();
         transport.set_discovery_enabled(true);
 
-        assert!(transport.resolve_username(user("bob")));
+        assert_eq!(
+            transport.resolve_username(user("bob")),
+            ResolveRequest::Queued
+        );
         let query = transport.next_query().unwrap().unwrap();
         assert_eq!(query.discovery_username, Some(user("bob")));
 
@@ -4014,11 +4075,174 @@ mod tests {
     /// Resolution is refused outright while discovery is disabled: no query is
     /// minted, so nothing is published to a relay about what this install is
     /// looking up.
+    ///
+    /// Reported as `Disabled` rather than as a bare refusal, because the
+    /// engine turns that into an error: nothing will ever answer this lookup,
+    /// and a caller awaiting the resolution event must not be left waiting.
     #[test]
     fn test_resolution_is_refused_while_discovery_is_disabled() {
         let transport = NostrTransport::new(addr("alice")).unwrap();
-        assert!(!transport.resolve_username(user("bob")));
+        assert_eq!(
+            transport.resolve_username(user("bob")),
+            ResolveRequest::Disabled
+        );
         assert!(transport.next_query().unwrap().is_none());
+    }
+
+    /// **The attack the event-signature check exists to stop.**
+    ///
+    /// A tombstone body is a constant, so nothing inside it is signed and its
+    /// entire meaning is "who published this". The discovery seal key is
+    /// public, so an attacker who knows the username can derive the
+    /// conversation key for the *victim's* author key and seal a retraction
+    /// attributed to them. Every layer above this one would then honour it:
+    /// the resolver keys retractions by author and keeps them sticky for the
+    /// life of the resolution, precisely so a stale copy cannot stand a
+    /// retracted claim back up.
+    ///
+    /// One hostile relay would therefore erase an honest claimant from the
+    /// answer even while every other relay served their genuine record. The
+    /// forgery is built here exactly as an attacker would build it — only the
+    /// event signature is beyond reach, because that needs the victim's key.
+    #[test]
+    fn test_a_forged_tombstone_for_another_author_is_refused() {
+        let alice = NostrTransport::new(addr("alice")).unwrap();
+        alice.set_discovery_enabled(true);
+
+        // The victim's install, whose author key the attacker will impersonate.
+        let victim = NostrTransport::new(addr("bob")).unwrap();
+        victim.install_signing_secret(&[9u8; 32]).unwrap();
+        let victim_author = victim.public_key_hex();
+
+        // The attacker seals a tombstone to the victim's author key, which the
+        // public discovery-seal key lets anyone do.
+        let username = user("bob");
+        let seal = nostr_crypto::discovery_seal_keypair_for_username(&username).unwrap();
+        let tombstone = br#"{"v":1,"retracted":true}"#;
+        let forged_content = {
+            let event = nostr_crypto::NostrEvent::create_discovery_publication(
+                &seal,
+                &nostr_crypto::discovery_tag_for_username(&username).unwrap(),
+                &victim_author,
+                tombstone,
+            )
+            .unwrap();
+            event.content
+        };
+
+        // Stood up as an event *claiming* the victim's author key. Every field
+        // an honest event has is present; only `sig` cannot be produced.
+        let forged = serde_json::json!({
+            "id": "0".repeat(64),
+            "pubkey": victim_author,
+            "created_at": 1_700_000_000,
+            "kind": nostr_crypto::NOSTR_DISCOVERY_KIND,
+            "tags": [["d", "x"], ["p", "x"]],
+            "content": forged_content,
+            "sig": "0".repeat(128),
+        });
+
+        alice.resolve_username(username);
+        let query = alice.next_query().unwrap().unwrap();
+        assert!(
+            alice
+                .open_query_event(&query.query_id, &forged.to_string())
+                .unwrap()
+                .is_none(),
+            "a tombstone attributed to an author who did not sign the event \
+             must never reach the resolver: one hostile relay would otherwise \
+             erase an honest claimant from the answer"
+        );
+    }
+
+    /// The id is recomputed, not trusted. An event claiming a genuine record's
+    /// id would otherwise consume its per-query dedup slot and have the real
+    /// record dropped behind it as a duplicate.
+    #[test]
+    fn test_a_discovery_event_with_a_forged_id_is_refused() {
+        let alice = NostrTransport::new(addr("alice")).unwrap();
+        alice.set_discovery_enabled(true);
+
+        let publisher = NostrTransport::new(addr("bob")).unwrap();
+        publisher.install_signing_secret(&[9u8; 32]).unwrap();
+        publisher.set_discovery_enabled(true);
+        publisher.start().unwrap();
+        publisher.on_status_changed(TransportStatus::Available);
+        publisher.publish_discovery_record(user("bob"), b"{\"v\":1}".to_vec());
+        let published = publisher.get_next_signed_event().unwrap().unwrap();
+
+        let mut event = event_object(&published);
+        // Genuine event, genuine signature, one field edited. The signature is
+        // over the *recomputed* id, so any edit anywhere breaks it.
+        event["created_at"] = serde_json::json!(1_700_000_001);
+
+        alice.resolve_username(user("bob"));
+        let query = alice.next_query().unwrap().unwrap();
+        assert!(
+            alice
+                .open_query_event(&query.query_id, &event.to_string())
+                .unwrap()
+                .is_none(),
+            "an event whose id does not hash its own fields must be refused"
+        );
+    }
+
+    /// The negative control for the two tests above: a genuine discovery event
+    /// must still open. A verifier that refused everything would pass both.
+    #[test]
+    fn test_a_genuine_discovery_event_still_opens() {
+        let alice = NostrTransport::new(addr("alice")).unwrap();
+        alice.set_discovery_enabled(true);
+
+        let publisher = NostrTransport::new(addr("bob")).unwrap();
+        publisher.install_signing_secret(&[9u8; 32]).unwrap();
+        publisher.set_discovery_enabled(true);
+        publisher.start().unwrap();
+        publisher.on_status_changed(TransportStatus::Available);
+        publisher.publish_discovery_record(user("bob"), b"{\"v\":1}".to_vec());
+        let published = publisher.get_next_signed_event().unwrap().unwrap();
+        let event_json = serde_json::to_string(&event_object(&published)).unwrap();
+
+        alice.resolve_username(user("bob"));
+        let query = alice.next_query().unwrap().unwrap();
+        match alice
+            .open_query_event(&query.query_id, &event_json)
+            .unwrap()
+            .expect("a genuine discovery event must open")
+        {
+            ResolvedRecord::Discovery {
+                author, plaintext, ..
+            } => {
+                assert_eq!(plaintext, b"{\"v\":1}");
+                assert_eq!(
+                    author,
+                    publisher.public_key_hex(),
+                    "the author is reported lower-cased, since the resolver keys on it"
+                );
+            }
+            ResolvedRecord::KeyPackage { .. } => {
+                panic!("a discovery query must not yield a key-package record")
+            }
+        }
+    }
+
+    /// A second request for a name already queued reports `AlreadyQueued`,
+    /// which is a *success* from the caller's side — the queued lookup answers
+    /// both — and must stay distinguishable from the two refusals that answer
+    /// nobody.
+    #[test]
+    fn test_a_duplicate_lookup_is_reported_as_already_queued() {
+        let transport = NostrTransport::new(addr("alice")).unwrap();
+        transport.set_discovery_enabled(true);
+
+        assert_eq!(
+            transport.resolve_username(user("bob")),
+            ResolveRequest::Queued
+        );
+        assert_eq!(
+            transport.resolve_username(user("bob")),
+            ResolveRequest::AlreadyQueued
+        );
     }
 
     /// The same rule in the other direction: a successful publication must not

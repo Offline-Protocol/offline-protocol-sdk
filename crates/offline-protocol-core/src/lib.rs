@@ -31,5 +31,5 @@ pub use types::{
     validate_id_chars, AppId, HopCount, IdValidationError, LamportClock, LocalInstant, Timestamp,
     UserId, WallClockTimestamp, MAX_ID_LEN, TTL,
 };
-pub use username::{Username, UsernameError};
+pub use username::{contains_control_or_format, Username, UsernameError};
 pub use wire::{WIRE_V1_MAGIC, WIRE_VERSION_V1};

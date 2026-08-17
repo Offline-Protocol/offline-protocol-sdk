@@ -501,6 +501,12 @@ protocol.on('username_resolved', ({ username, claims, rejected }) => {
 await protocol.resolveUsername('alice');
 ```
 
+`resolveUsername()` resolves `true` if it started the lookup and `false` if it
+joined one already in flight. **Both mean the event above is coming**, so it is
+safe to await it after either. Every case where no event will ever arrive
+rejects instead (discovery disabled, or too many lookups in flight), so a
+`false` can never leave a spinner running forever.
+
 ### Renames and retraction
 
 The claim tracks `config.profile`. Changing the profile retracts the old claim
@@ -512,6 +518,15 @@ Retraction is best effort by nature: a relay may honour neither half. The
 record that remembers *which* name to retract is persisted and sealed, because
 it is the only thing that knows — losing it leaves an old name standing in a
 public directory pointing at a live address.
+
+A retraction someone *else* published is a different matter, and it is refused.
+Discovery events are checked against their own BIP-340 signature before they
+are opened, with the event id recomputed rather than trusted. This is the only
+record kind that needs it: a tombstone's body is a constant, so nothing inside
+it is signed and its entire meaning is *who published it*, while the seal key
+is public by construction. Without the check one hostile relay could serve a
+forged retraction and erase an honest claimant from the resolved set even while
+every other relay served their genuine record.
 
 ### Invites are the primary path, and permanent
 

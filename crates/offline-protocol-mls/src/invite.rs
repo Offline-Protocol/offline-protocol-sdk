@@ -52,7 +52,7 @@ use std::str::FromStr;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use offline_protocol_core::Address;
+use offline_protocol_core::{contains_control_or_format, Address};
 
 use crate::canonical::canonical_payload;
 use crate::error::{MlsError, Result};
@@ -124,7 +124,8 @@ pub struct Invite {
 /// # Errors
 ///
 /// Returns [`MlsError::InvalidPublicKey`] if `public_key` is not 32 bytes,
-/// [`MlsError::Serialization`] if the petname or signature is out of bounds.
+/// [`MlsError::Serialization`] if the petname is over-long or carries a control
+/// or format character, or if the signature is the wrong length.
 pub fn encode_invite(
     address: &Address,
     public_key: &[u8],
@@ -159,6 +160,14 @@ pub fn encode_invite(
                     name.len(),
                     MAX_PETNAME_BYTES
                 )));
+            }
+            // The same screen a username gets, for a stronger reason. See
+            // [`parse_invite`]: refusing at mint means an honest app cannot
+            // build one of these by accident from a pasted display name.
+            if contains_control_or_format(name) {
+                return Err(MlsError::Serialization(
+                    "Invite petname contains a control or format character".to_string(),
+                ));
             }
             Some(name.as_bytes())
         }
@@ -244,8 +253,9 @@ pub fn invite_signing_payload(
 /// 1. base64url decodes, and the blob is structurally complete;
 /// 2. `v == 1` and no unknown flag bits;
 /// 3. the address parses in canonical form;
-/// 4. `derive_address(public_key) == address`;
-/// 5. the signature, when present, verifies under `public_key`.
+/// 4. the petname, when present, is displayable (no `Cc`, no `Cf`);
+/// 5. `derive_address(public_key) == address`;
+/// 6. the signature, when present, verifies under `public_key`.
 ///
 /// # Errors
 ///
@@ -300,11 +310,21 @@ pub fn parse_invite(blob: &str) -> Result<Invite> {
             )));
         }
         let bytes = cursor.take("petname", len)?;
-        Some(
-            std::str::from_utf8(bytes)
-                .map_err(|_| MlsError::InvalidMessage("Invite petname is not UTF-8".to_string()))?
-                .to_string(),
-        )
+        let name = std::str::from_utf8(bytes)
+            .map_err(|_| MlsError::InvalidMessage("Invite petname is not UTF-8".to_string()))?;
+        // A petname carrying a bidi override or a zero-width joiner renders as
+        // something other than its own bytes, and this is the string an app
+        // shows in the confirmation dialog after a scan. Worse than for a
+        // username: when the invite is signed, the deceptive rendering arrives
+        // bound to a *valid* signature, so an app that trusts `signed` is
+        // trusting the wrong half. Refused here rather than left to every
+        // caller to sanitize.
+        if contains_control_or_format(name) {
+            return Err(MlsError::InvalidMessage(
+                "Invite petname contains a control or format character".to_string(),
+            ));
+        }
+        Some(name.to_string())
     } else {
         None
     };
@@ -577,6 +597,69 @@ mod tests {
         let (_, public, address) = identity(14);
         let long = "a".repeat(MAX_PETNAME_BYTES + 1);
         assert!(encode_invite(&address, &public, Some(&long), None).is_err());
+    }
+
+    /// A petname that renders as something other than its own bytes is refused
+    /// at both ends, and the parse side is the one that matters: an attacker
+    /// does not use our encoder.
+    ///
+    /// The characters here are `Cf`, so [`char::is_control`] does not see any
+    /// of them — a screen built on it alone would pass every one. This is the
+    /// string an app shows in the dialog after a scan, so a right-to-left
+    /// override here reads as a different name than the bytes that were
+    /// signed.
+    #[test]
+    fn invite_refuses_a_petname_that_renders_as_another_name() {
+        let (signing, public, address) = identity(15);
+
+        for (label, name) in [
+            ("right-to-left override", "ali\u{202E}ce"),
+            ("zero-width joiner", "ali\u{200D}ce"),
+            ("soft hyphen", "ali\u{00AD}ce"),
+            ("byte-order mark", "ali\u{FEFF}ce"),
+            ("newline", "ali\nce"),
+        ] {
+            assert!(
+                encode_invite(&address, &public, Some(name), None).is_err(),
+                "a {label} petname must not be mintable"
+            );
+
+            // Hand-built, since the encoder now refuses to produce one — and
+            // signed, which is the case that matters: without this screen the
+            // deceptive rendering would arrive carrying a *valid* signature,
+            // so an app trusting `signed` would be trusting the wrong half.
+            let payload = invite_signing_payload(&address, &public, Some(name)).expect("payload");
+            let signature = sign(&signing, &payload);
+            let address_bytes = address.to_string();
+            let mut blob = vec![INVITE_VERSION, FLAG_PETNAME | FLAG_SIGNATURE];
+            blob.extend_from_slice(&public);
+            blob.push(address_bytes.len() as u8);
+            blob.extend_from_slice(address_bytes.as_bytes());
+            blob.push(name.len() as u8);
+            blob.extend_from_slice(name.as_bytes());
+            blob.extend_from_slice(&signature);
+
+            assert!(
+                matches!(
+                    parse_invite(&URL_SAFE_NO_PAD.encode(&blob)),
+                    Err(MlsError::InvalidMessage(_))
+                ),
+                "a {label} petname must be refused at parse even when signed"
+            );
+        }
+    }
+
+    /// The screen must not swallow ordinary names, or it is useless.
+    #[test]
+    fn invite_allows_ordinary_international_petnames() {
+        let (_, public, address) = identity(16);
+        for name in ["Alice", "José", "上田", "أحمد", "Ann Lee"] {
+            let blob = encode_invite(&address, &public, Some(name), None).expect("encode");
+            assert_eq!(
+                parse_invite(&blob).expect("parse").petname.as_deref(),
+                Some(name)
+            );
+        }
     }
 
     /// Golden vectors. These strings are the invite wire format: an

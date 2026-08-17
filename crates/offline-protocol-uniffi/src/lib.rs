@@ -4888,6 +4888,14 @@ impl OfflineProtocol {
         // A discovery query opens its accumulator here, at mint time rather
         // than on the first answer, so a name nobody claims still emits an
         // empty result. "No such name" is an answer.
+        //
+        // The inner lock is what serializes this against `resolve_username`,
+        // which registers its request while holding the same lock. Without
+        // that ordering a mint could land between the transport accepting a
+        // lookup and the engine recording it, and `begin_username_resolution`
+        // would discard the query as one the sweep had already answered — the
+        // lookup would then never accumulate anything. Keep the acquisition
+        // here, after the mint.
         if let Some(username) = query.discovery_username.clone() {
             let mut protocol = self.lock_inner_recovering();
             protocol.begin_username_resolution(query.query_id.clone(), username);
@@ -4901,16 +4909,19 @@ impl OfflineProtocol {
 
     /// Resolves a username to the set of devices claiming it.
     ///
-    /// Returns whether a lookup was started. `false` means username discovery
-    /// is disabled or a lookup for this name is already in flight — in the
-    /// latter case the in-flight one answers for both callers.
+    /// Returns `true` if this call started the lookup and `false` if it joined
+    /// one already in flight. **Both mean an answer is coming**: exactly one
+    /// `username_resolved` event follows either way. Every case where no event
+    /// will ever arrive throws instead — `InvalidConfiguration` when discovery
+    /// is off, `InvalidState` when too many lookups are in flight — so a caller
+    /// that awaits the event can never be left waiting on one that has no
+    /// trigger.
     ///
-    /// The answer arrives as a single `username_resolved` event carrying
-    /// **every** verified claim. There is deliberately no "best" claim and no
-    /// ordering: anyone may publish any name, so what comes back is a set of
-    /// assertions for a human to arbitrate, not a lookup result. An app that
-    /// silently takes the first entry has turned a non-authoritative directory
-    /// into an authoritative-looking one.
+    /// The answer carries **every** verified claim. There is deliberately no
+    /// "best" claim and no ordering: anyone may publish any name, so what comes
+    /// back is a set of assertions for a human to arbitrate, not a lookup
+    /// result. An app that silently takes the first entry has turned a
+    /// non-authoritative directory into an authoritative-looking one.
     pub fn resolve_username(&self, username: String) -> Result<bool, ProtocolError> {
         let mut protocol = self.lock_inner()?;
         protocol.resolve_username(&username).map_err(Into::into)

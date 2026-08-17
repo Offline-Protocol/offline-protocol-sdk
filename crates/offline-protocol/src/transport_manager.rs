@@ -14,7 +14,8 @@ use offline_protocol_router::{
     display_routing_score, DorsConfig, EscalationTriggerReason, TransportScore, TransportSelector,
 };
 use offline_protocol_transport::{
-    Error as TransportError, Transport, TransportMetrics, TransportStatus, TransportType,
+    nostr::ResolveRequest, Error as TransportError, Transport, TransportMetrics, TransportStatus,
+    TransportType,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -441,10 +442,13 @@ impl TransportManager {
     }
 
     /// Requests resolution of the devices claiming `username`.
-    pub fn resolve_nostr_username(&self, username: Username) -> bool {
+    ///
+    /// A missing Nostr transport reports `Disabled`, which is what it is from
+    /// the caller's side: no query was sent and no event will follow.
+    pub fn resolve_nostr_username(&self, username: Username) -> ResolveRequest {
         self.nostr_transport()
             .map(|nostr| nostr.resolve_username(username))
-            .unwrap_or(false)
+            .unwrap_or(ResolveRequest::Disabled)
     }
 
     /// Withdraws a queued username lookup that was never issued to a relay.
