@@ -3424,8 +3424,14 @@ class OfflineProtocolModule: RCTEventEmitter {
     ///
     /// Sign it when the invite may travel without its issuer; leave it
     /// unsigned for a QR shown phone to phone. See the JS `createInvite` doc.
+    ///
+    /// The argument label is `sign`, never `signed`: this method's selector
+    /// reaches Objective-C through `OfflineProtocolModule.m`, where a
+    /// parameter named `signed` is a C type specifier rather than an
+    /// identifier and does not compile. The JS-facing name is unaffected —
+    /// React Native bridges positionally.
     @objc func createInvite(_ petname: String?,
-                            signed: NSNumber,
+                            sign: NSNumber,
                             resolver: @escaping RCTPromiseResolveBlock,
                             rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {
@@ -3433,7 +3439,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            resolver(try proto.createInvite(petname: petname, signed: signed.boolValue))
+            resolver(try proto.createInvite(petname: petname, sign: sign.boolValue))
         } catch {
             rejecter("ERROR_CRYPTO",
                      "Failed to create invite: \(error.localizedDescription)",

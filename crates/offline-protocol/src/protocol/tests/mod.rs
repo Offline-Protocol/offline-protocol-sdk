@@ -34562,6 +34562,27 @@ fn discovery_record_for(
     .unwrap()
 }
 
+/// Registers a lookup and then hands the engine the query the transport would
+/// have minted for it.
+///
+/// Both halves are needed because they are both real: `resolve_username`
+/// records the request (which is what the timeout runs against), and the
+/// platform's query pump is what later mints a query and calls
+/// `begin_username_resolution`. A mint with no request behind it is
+/// deliberately ignored as one the sweep already answered, so a test that
+/// skipped the first half would be exercising that path rather than the
+/// ordinary one, and would see no claims at all.
+fn begin_resolution(
+    protocol: &mut OfflineProtocol,
+    query_id: &str,
+    username: &offline_protocol_core::Username,
+) {
+    protocol
+        .nostr_resolution_requests
+        .insert(username.clone(), std::time::Instant::now());
+    protocol.begin_username_resolution(query_id.to_string(), username.clone());
+}
+
 fn capture_events(protocol: &mut OfflineProtocol) -> Arc<Mutex<Vec<Event>>> {
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
     let handle = Arc::clone(&events);
@@ -34597,7 +34618,7 @@ fn test_username_resolution_returns_every_claimant_including_two_devices_of_one_
 
     let username: offline_protocol_core::Username = "alice".parse().unwrap();
     let query_id = "query-1".to_string();
-    protocol.begin_username_resolution(query_id.clone(), username.clone());
+    begin_resolution(&mut protocol, &query_id, &username);
 
     // Alice's phone and Alice's laptop: different identity keys, different
     // Nostr author keys, same claimed name. Plus a squatter.
@@ -34649,7 +34670,7 @@ fn test_username_resolution_emits_exactly_one_event() {
 
     let username: offline_protocol_core::Username = "alice".parse().unwrap();
     let query_id = "query-1".to_string();
-    protocol.begin_username_resolution(query_id.clone(), username.clone());
+    begin_resolution(&mut protocol, &query_id, &username);
 
     for (seed, author) in [(1u8, [0x11u8; 32]), (2u8, [0x22u8; 32])] {
         let record = discovery_record_for(seed, "alice", &author, 1_700_000_000_000);
@@ -34686,7 +34707,7 @@ fn test_username_resolution_emits_an_empty_set_for_an_unclaimed_name() {
     let events = capture_events(&mut protocol);
 
     let username: offline_protocol_core::Username = "nobody".parse().unwrap();
-    protocol.begin_username_resolution("query-1".to_string(), username);
+    begin_resolution(&mut protocol, "query-1", &username);
     protocol.flush_username_resolution("query-1");
 
     let (name, claims, rejected) = resolved_claims(&events).expect("an empty answer is an answer");
@@ -34704,7 +34725,7 @@ fn test_username_resolution_flush_is_idempotent() {
     let events = capture_events(&mut protocol);
 
     let username: offline_protocol_core::Username = "alice".parse().unwrap();
-    protocol.begin_username_resolution("query-1".to_string(), username);
+    begin_resolution(&mut protocol, "query-1", &username);
     protocol.flush_username_resolution("query-1");
     protocol.flush_username_resolution("query-1");
 
@@ -34728,7 +34749,7 @@ fn test_username_resolution_refuses_a_re_authored_record() {
 
     let username: offline_protocol_core::Username = "alice".parse().unwrap();
     let query_id = "query-1".to_string();
-    protocol.begin_username_resolution(query_id.clone(), username.clone());
+    begin_resolution(&mut protocol, &query_id, &username);
 
     let genuine_author = [0x11u8; 32];
     let record = discovery_record_for(1, "alice", &genuine_author, 1_700_000_000_000);
@@ -34763,7 +34784,7 @@ fn test_username_resolution_refuses_a_record_for_another_name() {
 
     let queried: offline_protocol_core::Username = "alice".parse().unwrap();
     let query_id = "query-1".to_string();
-    protocol.begin_username_resolution(query_id.clone(), queried.clone());
+    begin_resolution(&mut protocol, &query_id, &queried);
 
     let author = [0x11u8; 32];
     let record = discovery_record_for(1, "bob", &author, 1_700_000_000_000);
@@ -34785,7 +34806,7 @@ fn test_username_resolution_keeps_the_newest_record_per_device() {
 
     let username: offline_protocol_core::Username = "alice".parse().unwrap();
     let query_id = "query-1".to_string();
-    protocol.begin_username_resolution(query_id.clone(), username.clone());
+    begin_resolution(&mut protocol, &query_id, &username);
 
     let author = [0x11u8; 32];
     for issued_at in [1_700_000_000_000i64, 1_700_000_500_000, 1_700_000_200_000] {
@@ -34809,10 +34830,86 @@ fn test_username_resolution_keeps_the_newest_record_per_device() {
     );
 }
 
-/// A tombstone withdraws that device's claim, even when a stale copy of the
-/// live record arrives from another relay afterwards.
+/// A tombstone withdraws that device's claim **whichever order the two arrive
+/// in**, which is the only version of this property worth having.
+///
+/// A query is broadcast to every connected relay, and a retraction reaches them
+/// at different times: the tombstone occupies the addressable slot on the
+/// relays that took it, while any relay that missed the replacement keeps
+/// serving the old record. So both bodies arrive, in an order nothing controls.
+///
+/// Removing the claim when the tombstone lands is therefore only half the job.
+/// A stale copy arriving afterwards is *genuinely signed* and passes every
+/// check, so it would stand the retracted claim straight back up — leaving a
+/// rotated-away or compromised address in front of the user, which is precisely
+/// what retraction exists to prevent. The tombstone has to be sticky for the
+/// life of the resolution.
 #[test]
-fn test_username_resolution_honours_a_tombstone() {
+fn test_username_resolution_honours_a_tombstone_in_either_arrival_order() {
+    use offline_protocol_mls::discovery::DiscoveryTombstoneV1;
+
+    // (label, tombstone arrives first)
+    for (label, tombstone_first) in [
+        ("record then tombstone", false),
+        ("tombstone then record", true),
+    ] {
+        let mut protocol = protocol_with_nostr("resolver");
+        let events = capture_events(&mut protocol);
+
+        let username: offline_protocol_core::Username = "alice".parse().unwrap();
+        let query_id = "query-1".to_string();
+        begin_resolution(&mut protocol, &query_id, &username);
+
+        let author = [0x11u8; 32];
+        let record = serde_json::to_vec(&discovery_record_for(
+            1,
+            "alice",
+            &author,
+            1_700_000_000_000,
+        ))
+        .unwrap();
+        let tombstone = serde_json::to_vec(&DiscoveryTombstoneV1::new()).unwrap();
+
+        let bodies: [&[u8]; 2] = if tombstone_first {
+            [&tombstone, &record]
+        } else {
+            [&record, &tombstone]
+        };
+        for body in bodies {
+            protocol.handle_resolved_discovery_record(
+                &query_id,
+                &username,
+                &hex::encode(author),
+                body,
+            );
+        }
+
+        protocol.flush_username_resolution(&query_id);
+
+        let (_, claims, rejected) = resolved_claims(&events).expect("event");
+        assert!(
+            claims.is_empty(),
+            "{label}: a retraction must withdraw the claim, and a stale copy \
+             arriving afterwards must not stand it back up"
+        );
+        // The counter must be order-independent too. Counting the suppressed
+        // record as junk would move the order-dependence from the claim set
+        // into `rejected` rather than removing it: the same two events would
+        // report differently depending on which relay answered first.
+        assert_eq!(
+            rejected, 0,
+            "{label}: a record superseded by a retraction is not junk"
+        );
+    }
+}
+
+/// A tombstone from one device must not withdraw another device's claim.
+///
+/// The suppression is keyed by publishing author, so the obvious way to get
+/// this wrong — a per-resolution "retracted" flag — would let one device of a
+/// multi-device user, or any passing squatter, retract everyone at the tag.
+#[test]
+fn test_username_resolution_tombstone_only_withdraws_its_own_author() {
     use offline_protocol_mls::discovery::DiscoveryTombstoneV1;
 
     let mut protocol = protocol_with_nostr("resolver");
@@ -34820,31 +34917,35 @@ fn test_username_resolution_honours_a_tombstone() {
 
     let username: offline_protocol_core::Username = "alice".parse().unwrap();
     let query_id = "query-1".to_string();
-    protocol.begin_username_resolution(query_id.clone(), username.clone());
+    begin_resolution(&mut protocol, &query_id, &username);
 
-    let author = [0x11u8; 32];
-    let record = discovery_record_for(1, "alice", &author, 1_700_000_000_000);
+    let retracting_author = [0x11u8; 32];
+    let standing_author = [0x22u8; 32];
+
+    // One device retracts...
     protocol.handle_resolved_discovery_record(
         &query_id,
         &username,
-        &hex::encode(author),
-        &serde_json::to_vec(&record).unwrap(),
+        &hex::encode(retracting_author),
+        &serde_json::to_vec(&DiscoveryTombstoneV1::new()).unwrap(),
     );
 
-    let tombstone = serde_json::to_vec(&DiscoveryTombstoneV1::new()).unwrap();
+    // ...the other's claim, arriving after it, must survive.
+    let record = discovery_record_for(2, "alice", &standing_author, 1_700_000_000_000);
     protocol.handle_resolved_discovery_record(
         &query_id,
         &username,
-        &hex::encode(author),
-        &tombstone,
+        &hex::encode(standing_author),
+        &serde_json::to_vec(&record).unwrap(),
     );
 
     protocol.flush_username_resolution(&query_id);
 
     let (_, claims, _) = resolved_claims(&events).expect("event");
-    assert!(
-        claims.is_empty(),
-        "a retraction must withdraw the claim: the tombstone is the newer statement"
+    assert_eq!(
+        claims.len(),
+        1,
+        "a retraction is per-device: it must not withdraw a sibling's claim"
     );
 }
 
@@ -34863,7 +34964,7 @@ fn test_username_resolution_keys_claims_by_publisher_not_by_address() {
 
     let username: offline_protocol_core::Username = "alice".parse().unwrap();
     let query_id = "query-1".to_string();
-    protocol.begin_username_resolution(query_id.clone(), username.clone());
+    begin_resolution(&mut protocol, &query_id, &username);
 
     // One identity (seed 1), two different Nostr publishers.
     for author in [[0x11u8; 32], [0x22u8; 32]] {
@@ -34889,5 +34990,130 @@ fn test_username_resolution_keys_claims_by_publisher_not_by_address() {
     assert_eq!(
         claims[0].address, claims[1].address,
         "precondition: both claims name the same address"
+    );
+}
+
+/// A lookup requested while the relay socket is down must still answer.
+///
+/// The platform pumps queries only while connected, so such a lookup sits in
+/// the transport's queue and never reaches `begin_username_resolution`: there
+/// is no resolution accumulating, and therefore nothing for the ordinary
+/// end-of-stored-events sweep to find. Without a deadline running from the
+/// *request*, the app waits forever on an event with no trigger — the API
+/// promised a lookup had started and then never finished one.
+#[test]
+fn test_username_lookup_that_never_reached_a_relay_still_answers() {
+    let mut protocol = protocol_with_nostr("resolver");
+    let events = capture_events(&mut protocol);
+
+    let username: offline_protocol_core::Username = "alice".parse().unwrap();
+    let stale = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(120))
+        .expect("monotonic clock must be at least two minutes past boot");
+    protocol
+        .nostr_resolution_requests
+        .insert(username.clone(), stale);
+
+    protocol.sweep_username_resolutions();
+
+    let (name, claims, rejected) =
+        resolved_claims(&events).expect("a lookup that never reached a relay must still answer");
+    assert_eq!(name, "alice");
+    assert!(
+        claims.is_empty(),
+        "nothing was ever asked, so nothing verified"
+    );
+    assert_eq!(rejected, 0);
+    assert!(
+        protocol.nostr_resolution_requests.is_empty(),
+        "the request must be cleared, or the sweep answers it again every tick"
+    );
+}
+
+/// Giving up on a lookup must not make that name unlookupable for the rest of
+/// the process.
+///
+/// The transport refuses a name already in its resolve queue, so a request the
+/// engine abandoned while leaving the queue entry behind would make every
+/// later `resolve_username` for it return `false` without ever emitting —
+/// turning a transient offline moment into a permanent one.
+#[test]
+fn test_a_swept_lookup_can_be_requested_again() {
+    let mut protocol = protocol_with_nostr("resolver");
+    protocol
+        .transport_manager_mut()
+        .set_nostr_username_discovery_enabled(true);
+
+    let name = "alice";
+    assert!(
+        protocol.resolve_username(name).expect("resolve"),
+        "precondition: the first lookup is accepted"
+    );
+    assert!(
+        !protocol.resolve_username(name).expect("resolve"),
+        "precondition: a duplicate is refused while the first is queued"
+    );
+
+    let username: offline_protocol_core::Username = name.parse().unwrap();
+    let stale = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(120))
+        .expect("monotonic clock must be at least two minutes past boot");
+    protocol
+        .nostr_resolution_requests
+        .insert(username.clone(), stale);
+
+    protocol.sweep_username_resolutions();
+
+    assert!(
+        protocol.resolve_username(name).expect("resolve"),
+        "after giving up, the name must be lookupable again"
+    );
+}
+
+/// A query minted after the sweep already answered its request must not emit a
+/// second, contradictory set.
+///
+/// This is the race the request record closes: the transport can pop a name
+/// into a query moments before the sweep gives up on it, so the mint and the
+/// abandonment cross. One `resolveUsername` call owes exactly one event.
+#[test]
+fn test_a_query_minted_after_its_lookup_was_swept_emits_nothing_further() {
+    let mut protocol = protocol_with_nostr("resolver");
+    let events = capture_events(&mut protocol);
+
+    let username: offline_protocol_core::Username = "alice".parse().unwrap();
+    let stale = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(120))
+        .expect("monotonic clock must be at least two minutes past boot");
+    protocol
+        .nostr_resolution_requests
+        .insert(username.clone(), stale);
+
+    protocol.sweep_username_resolutions();
+
+    // The query the transport had already popped arrives late, with a
+    // perfectly good record behind it.
+    let query_id = "query-1".to_string();
+    protocol.begin_username_resolution(query_id.clone(), username.clone());
+    let author = [0x11u8; 32];
+    let record = discovery_record_for(1, "alice", &author, 1_700_000_000_000);
+    protocol.handle_resolved_discovery_record(
+        &query_id,
+        &username,
+        &hex::encode(author),
+        &serde_json::to_vec(&record).unwrap(),
+    );
+    protocol.flush_username_resolution(&query_id);
+
+    let count = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, Event::UsernameResolved { .. }))
+        .count();
+    assert_eq!(
+        count, 1,
+        "one lookup owes one event: a late mint must not contradict the answer \
+         the app was already given"
     );
 }

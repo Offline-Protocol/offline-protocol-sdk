@@ -608,6 +608,17 @@ pub struct OfflineProtocol {
     /// that is ever emitted.
     nostr_resolutions: HashMap<String, nostr_discovery::PendingResolution>,
 
+    /// Username lookups requested but not yet minted into a relay query, with
+    /// the time each was asked for.
+    ///
+    /// The transport holds the queue; this holds the *deadline*. They are
+    /// separate because minting is what may never happen: the platform pumps
+    /// queries only while the relay socket is up, so a lookup requested offline
+    /// would otherwise have no clock running behind it and no event to arrive.
+    /// Bounded by the transport's own resolve-queue ceiling, since an entry is
+    /// recorded only when the transport accepts the lookup.
+    nostr_resolution_requests: HashMap<Username, Instant>,
+
     /// When the push key-package pool-exhaustion warning was last emitted.
     ///
     /// Suppressed for the same reason the slot warning is: the condition is a
@@ -794,6 +805,7 @@ impl OfflineProtocol {
             nostr_discovery_backoff: HashMap::new(),
             last_nostr_discovery_refresh: None,
             nostr_resolutions: HashMap::new(),
+            nostr_resolution_requests: HashMap::new(),
             last_push_key_package_warning: None,
             config,
         })

@@ -1551,7 +1551,7 @@ interface OfflineProtocol {
     // Apps own the container; the recommended form is one parameter,
     // <app-scheme>://connect?c=<blob>, so it composes with an existing route.
     //
-    // Sign it (signed = true) when the invite may travel WITHOUT its issuer --
+    // Sign it (sign = true) when the invite may travel WITHOUT its issuer --
     // a link forwarded through a third party -- because the signature binds
     // the petname to the key, so a forwarded invite cannot save Alice's key
     // under the name "Bob". Leave it unsigned for a QR shown phone to phone:
@@ -1563,8 +1563,16 @@ interface OfflineProtocol {
     // code is static, so pairing them guarantees a collision the moment two
     // people scan the same code. Carries no expiry either -- a printed QR that
     // stops working is a bug.
+    //
+    // The parameter is `sign` and NOT `signed` because a UDL parameter name is
+    // emitted verbatim as a C parameter name in the generated FFI header, and
+    // `signed` is a C type specifier: `int8_t signed` fails to compile and
+    // takes the whole offline_protocolFFI module down with it, so every iOS
+    // consumer of the generated bindings breaks, not just this call. Rust,
+    // Kotlin, Swift and Python all accept the name, so only the iOS bridge
+    // typecheck catches it. Do not rename it back.
     [Throws=ProtocolError]
-    string create_invite(string? petname, boolean signed);
+    string create_invite(string? petname, boolean sign);
 
     // Resolve a username to the set of devices claiming it. Returns whether a
     // lookup started; false means username discovery is off or a lookup for

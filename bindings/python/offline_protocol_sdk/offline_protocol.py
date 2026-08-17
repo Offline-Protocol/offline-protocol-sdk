@@ -563,7 +563,7 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 15087:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite() != 29145:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite() != 60286:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 2562:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -9175,7 +9175,7 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def create_group(self, group_name: str) -> MlsGroupInfo:
         raise NotImplementedError
-    def create_invite(self, petname: typing.Optional[str],signed: bool) -> str:
+    def create_invite(self, petname: typing.Optional[str],sign: bool) -> str:
         raise NotImplementedError
     def derive_user_id_from_public_key(self, public_key: typing.List[int]) -> str:
         raise NotImplementedError
@@ -9773,15 +9773,15 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
-    def create_invite(self, petname: typing.Optional[str],signed: bool) -> str:
+    def create_invite(self, petname: typing.Optional[str],sign: bool) -> str:
         
         _UniffiFfiConverterOptionalString.check_lower(petname)
         
-        _UniffiFfiConverterBoolean.check_lower(signed)
+        _UniffiFfiConverterBoolean.check_lower(sign)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
             _UniffiFfiConverterOptionalString.lower(petname),
-            _UniffiFfiConverterBoolean.lower(signed),
+            _UniffiFfiConverterBoolean.lower(sign),
         )
         _uniffi_lift_return = _UniffiFfiConverterString.lift
         _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError

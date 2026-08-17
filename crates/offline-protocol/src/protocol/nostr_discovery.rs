@@ -17,7 +17,7 @@
 //! resolves to a set, and the set is the only thing ever emitted.** See
 //! [`PendingResolution`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -92,6 +92,23 @@ pub(crate) struct PendingResolution {
     /// be unusual (it needs the same identity key on two installs) and are
     /// kept separate, since collapsing them would hide a real anomaly.
     claims: HashMap<String, DiscoveryRecordV1>,
+    /// Authors that have retracted, so a retraction survives whatever order the
+    /// relays answer in.
+    ///
+    /// A tombstone and the record it replaces both live on the relays for a
+    /// while: the tombstone occupies the addressable slot, and a relay that
+    /// missed the replacement still serves the old record. Removing the claim
+    /// on arrival is therefore not enough — a stale copy landing afterwards
+    /// would verify (it is genuinely signed) and stand the retracted claim back
+    /// up, which is precisely the outcome retraction exists to prevent.
+    ///
+    /// A suppressed record is **not** counted in [`Self::rejected`]. It is not
+    /// junk, and counting it would make the same two events report differently
+    /// depending on which arrived first, reintroducing the order-dependence in
+    /// the counter after removing it from the set.
+    ///
+    /// Bounded by the transport's per-query delivery ceiling, like `claims`.
+    tombstoned: HashSet<String>,
     /// Records seen and refused. Reported so an app can tell "nobody claims
     /// this name" apart from "everything claiming it was junk".
     rejected: u32,
@@ -332,11 +349,39 @@ impl OfflineProtocol {
             return Ok(false);
         }
 
-        Ok(self.transport_manager.resolve_nostr_username(username))
+        if !self
+            .transport_manager
+            .resolve_nostr_username(username.clone())
+        {
+            return Ok(false);
+        }
+
+        // The deadline starts here, not at query mint, because minting is what
+        // may never happen: the platform pumps queries only while the relay
+        // socket is up, so a lookup requested offline sits in the transport
+        // queue with no resolution behind it and no clock running. Timing from
+        // the request is what makes "a lookup was started" a promise this
+        // engine can keep.
+        self.nostr_resolution_requests
+            .entry(username)
+            .or_insert_with(Instant::now);
+        Ok(true)
     }
 
     /// Registers a query the transport just minted, so its answers accumulate.
+    ///
+    /// A mint whose request has already been answered by the timeout sweep is
+    /// dropped rather than accumulated. That is what keeps the one-event
+    /// contract when a relay reconnects after the sweep gave up: the query
+    /// still goes out, its answers land on an unknown resolution and are
+    /// discarded, and no second, contradictory set is emitted for a lookup the
+    /// app has already been told the answer to.
     pub fn begin_username_resolution(&mut self, query_id: String, username: Username) {
+        if self.nostr_resolution_requests.remove(&username).is_none() {
+            debug!("Discovery query minted for an already-answered request; not accumulating");
+            return;
+        }
+
         if self.nostr_resolutions.len() >= MAX_PENDING_RESOLUTIONS {
             // Flush the oldest rather than refusing the newest: its caller is
             // still owed an answer, and an answer with fewer claims beats a
@@ -356,6 +401,7 @@ impl OfflineProtocol {
             PendingResolution {
                 username,
                 claims: HashMap::new(),
+                tombstoned: HashSet::new(),
                 rejected: 0,
                 started: Instant::now(),
             },
@@ -393,14 +439,24 @@ impl OfflineProtocol {
         let record = match body {
             DiscoveryBody::Record(record) => *record,
             DiscoveryBody::Tombstone => {
-                // A retraction. Drop any claim this author had made: the
-                // tombstone replaced their record at the relay, so seeing both
-                // means we read a stale copy from one relay and the retraction
-                // from another. The retraction is the newer statement.
+                // A retraction. Drop any claim this author had made and refuse
+                // any that arrives later: the tombstone replaced their record
+                // at the relay, so seeing both means we read a stale copy from
+                // one relay and the retraction from another. The retraction is
+                // the newer statement whichever order they land in.
                 resolution.claims.remove(author);
+                resolution.tombstoned.insert(author.to_string());
                 return;
             }
         };
+
+        // Checked before the signature verify, both because it is cheaper and
+        // because a retracted author's record is refused on the strength of the
+        // retraction rather than on anything about the record.
+        if resolution.tombstoned.contains(author) {
+            debug!("Discovery record from an author that has retracted; ignoring");
+            return;
+        }
 
         let author_bytes = match hex::decode(author) {
             Ok(bytes) => bytes,
@@ -463,25 +519,70 @@ impl OfflineProtocol {
         });
     }
 
-    /// Flushes resolutions whose relays never sent end-of-stored-events.
+    /// Flushes resolutions whose relays never sent end-of-stored-events, and
+    /// answers lookups whose query was never minted at all.
     ///
-    /// Runs on the process tick. Without it a quiet relay turns a resolution
-    /// into a hang: the app is waiting on an event that has no other trigger.
+    /// Runs on the process tick. Two distinct hangs, one deadline:
+    ///
+    /// - a relay that answers and then goes quiet leaves a resolution
+    ///   accumulating with no completion signal, since end-of-stored-events is
+    ///   the only one a Nostr query has;
+    /// - a lookup requested while the relay socket is down never reaches
+    ///   [`Self::begin_username_resolution`] at all, because the platform pumps
+    ///   queries only while connected. Nothing is accumulating, so there is
+    ///   nothing for the first sweep to find, and the app waits forever on an
+    ///   event with no trigger.
+    ///
+    /// The second case also **cancels** the queued lookup. Leaving it in the
+    /// transport queue would make every later `resolve_username` for that name
+    /// return `false` ("already queued") without ever emitting, so a name that
+    /// timed out once could never be looked up again for the life of the
+    /// process.
     pub(crate) fn sweep_username_resolutions(&mut self) {
-        if self.nostr_resolutions.is_empty() {
+        let now = Instant::now();
+
+        if !self.nostr_resolutions.is_empty() {
+            let expired: Vec<String> = self
+                .nostr_resolutions
+                .iter()
+                .filter(|(_, resolution)| {
+                    now.duration_since(resolution.started) > RESOLUTION_TIMEOUT
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+
+            for query_id in expired {
+                debug!(query_id = %query_id, "Username resolution timed out; emitting what it has");
+                self.flush_username_resolution(&query_id);
+            }
+        }
+
+        if self.nostr_resolution_requests.is_empty() {
             return;
         }
-        let now = Instant::now();
-        let expired: Vec<String> = self
-            .nostr_resolutions
+
+        let unminted: Vec<Username> = self
+            .nostr_resolution_requests
             .iter()
-            .filter(|(_, resolution)| now.duration_since(resolution.started) > RESOLUTION_TIMEOUT)
-            .map(|(id, _)| id.clone())
+            .filter(|(_, requested_at)| now.duration_since(**requested_at) > RESOLUTION_TIMEOUT)
+            .map(|(username, _)| username.clone())
             .collect();
 
-        for query_id in expired {
-            debug!(query_id = %query_id, "Username resolution timed out; emitting what it has");
-            self.flush_username_resolution(&query_id);
+        for username in unminted {
+            debug!("Username lookup never reached a relay; emitting an empty answer");
+            self.nostr_resolution_requests.remove(&username);
+            self.transport_manager
+                .cancel_nostr_username_resolution(&username);
+            // An empty set, on the same terms as a query that reached a relay
+            // and found nothing. That is already what this engine emits when
+            // the platform releases a query with no relay connected, so the
+            // two unreachable paths report identically rather than one of them
+            // being silent.
+            self.emit_event(Event::UsernameResolved {
+                username: username.into_string(),
+                claims: Vec::new(),
+                rejected: 0,
+            });
         }
     }
 

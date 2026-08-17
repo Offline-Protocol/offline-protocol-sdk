@@ -447,6 +447,17 @@ impl TransportManager {
             .unwrap_or(false)
     }
 
+    /// Withdraws a queued username lookup that was never issued to a relay.
+    ///
+    /// Returns whether one was removed. Called when the engine gives up on a
+    /// lookup, so the name does not sit in the queue making every later request
+    /// for it return "already queued" without ever answering.
+    pub fn cancel_nostr_username_resolution(&self, username: &Username) -> bool {
+        self.nostr_transport()
+            .map(|nostr| nostr.cancel_username_resolution(username))
+            .unwrap_or(false)
+    }
+
     fn nostr_transport(&self) -> Option<&offline_protocol_transport::nostr::NostrTransport> {
         self.transports.get(&TransportType::Nostr).and_then(|t| {
             t.as_any()

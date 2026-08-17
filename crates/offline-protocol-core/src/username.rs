@@ -32,11 +32,13 @@ use unicode_normalization::UnicodeNormalization;
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum UsernameError {
-    /// The username normalized to an empty string.
+    /// The username is empty, or is nothing but whitespace.
     ///
-    /// Reachable from input that is not itself empty: a string of only
-    /// whitespace or of characters that NFC discards normalizes away.
-    #[error("username is empty after normalization")]
+    /// Whitespace-only is refused here rather than treated as a name: a claim
+    /// nobody can type back, and that renders as nothing at all in every UI,
+    /// is not a name. Note that normalization does not remove it — NFC
+    /// discards nothing — so this is a screen, not a consequence of one.
+    #[error("username is empty or whitespace after normalization")]
     Empty,
     /// The normalized username exceeds [`Username::MAX_BYTES`].
     ///
@@ -57,11 +59,19 @@ pub enum UsernameError {
     /// name has no legitimate use.
     #[error("username has the shape of an address, which is not claimable")]
     AddressShaped,
-    /// The username contains a control character.
+    /// The username contains a control or format character.
     ///
     /// A name that can contain a newline or a bidi override is a name that
     /// renders as something other than itself in every UI that displays it.
-    #[error("username contains a control character")]
+    ///
+    /// Both Unicode `Cc` (control) and `Cf` (format) are refused, and the
+    /// second is the one that matters: `char::is_control` covers only `Cc`, so
+    /// a screen built on it alone lets through U+202E RIGHT-TO-LEFT OVERRIDE
+    /// and the zero-width joiners — exactly the characters that make a name
+    /// display as something other than its own bytes. Confusables between
+    /// *scripts* remain out of scope (see the module docs); characters whose
+    /// entire function is to alter rendering are not.
+    #[error("username contains a control or format character")]
     ControlCharacter,
 }
 
@@ -112,8 +122,66 @@ impl Username {
     /// makes the operation idempotent, which
     /// [`username_normalization_is_idempotent`] pins — a non-idempotent
     /// normalizer would derive one tag on publish and another on resolve.
+    ///
+    /// The lowercase step is [`str::to_lowercase`], which is the **full**,
+    /// language-insensitive Unicode mapping. That choice is part of the wire
+    /// format, not an implementation detail: the full and simple mappings
+    /// disagree wherever one character lowercases to several (`İ` becomes
+    /// `i` + U+0307 under full, a bare `i` under simple), so a second
+    /// implementation that picks the other one derives a different tag and the
+    /// two silently never find each other. Language-insensitive matters for
+    /// the same reason — the Turkish tailoring maps `I` to `ı`, which would
+    /// make a name's tag depend on its publisher's locale.
+    /// [`username_lowercases_with_the_full_language_insensitive_mapping`] pins
+    /// both halves.
     fn normalize(raw: &str) -> String {
         raw.to_lowercase().nfc().collect()
+    }
+
+    /// Whether `c` is a Unicode format (`Cf`) character.
+    ///
+    /// [`char::is_control`] tests `Cc` only, which misses every character whose
+    /// entire function is to change how the text around it renders: the bidi
+    /// overrides, the zero-width joiners, the word joiner, the byte-order mark.
+    /// A name containing one displays as something other than its own bytes,
+    /// which is the failure [`UsernameError::ControlCharacter`] exists to
+    /// prevent, so `Cf` has to be screened alongside `Cc`.
+    ///
+    /// Hand-rolled rather than taken from a general-category crate on purpose.
+    /// The alternative is a second Unicode table in the dependency graph, and
+    /// this crate is already carrying `unicode-normalization` into a workspace
+    /// with a binary-size profile (`minisize`) that cares. `Cf` is 21 ranges
+    /// and it grows by a handful per Unicode release.
+    ///
+    /// Snapshot of `Cf` as of **Unicode 16.0**, generated from the character
+    /// database rather than transcribed. Regenerate it the same way; a range
+    /// missing here is a name that renders as something else, not a crash.
+    /// `username_rejects_every_format_character_range` pins one member of every
+    /// range so a bad edit fails rather than silently narrowing the screen.
+    fn is_format_character(c: char) -> bool {
+        matches!(c,
+            '\u{00AD}'                      // SOFT HYPHEN
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'                    // ARABIC LETTER MARK
+            | '\u{06DD}'                    // ARABIC END OF AYAH
+            | '\u{070F}'                    // SYRIAC ABBREVIATION MARK
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'                    // ARABIC DISPUTED END OF AYAH
+            | '\u{180E}'                    // MONGOLIAN VOWEL SEPARATOR
+            | '\u{200B}'..='\u{200F}'       // ZWSP, ZWNJ, ZWJ, LRM, RLM
+            | '\u{202A}'..='\u{202E}'       // bidi embedding and overrides
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'       // bidi isolates and deprecated formats
+            | '\u{FEFF}'                    // ZERO WIDTH NO-BREAK SPACE
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'                   // LANGUAGE TAG
+            | '\u{E0020}'..='\u{E007F}'     // tag characters
+        )
     }
 
     /// Whether `candidate` has the shape of an address.
@@ -150,7 +218,11 @@ impl FromStr for Username {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let normalized = Self::normalize(s);
 
-        if normalized.is_empty() {
+        // Whitespace-only is refused with the empty case rather than accepted:
+        // NFC discards nothing, so a name of three spaces survives
+        // normalization intact and would otherwise become a claim that renders
+        // as nothing and cannot be typed back.
+        if normalized.is_empty() || normalized.chars().all(char::is_whitespace) {
             return Err(UsernameError::Empty);
         }
         if normalized.len() > Self::MAX_BYTES {
@@ -161,7 +233,10 @@ impl FromStr for Username {
         }
         // Checked on the normalized form: a name that only becomes a control
         // character after normalization would otherwise slip the screen.
-        if normalized.chars().any(char::is_control) {
+        if normalized
+            .chars()
+            .any(|c| c.is_control() || Self::is_format_character(c))
+        {
             return Err(UsernameError::ControlCharacter);
         }
         if Self::looks_like_address(&normalized) {
@@ -222,6 +297,32 @@ mod tests {
         assert_eq!(parse("ALICE").as_str(), "alice");
     }
 
+    /// The case mapping is part of the wire format, so it is pinned here.
+    ///
+    /// `İ` is the character the full and simple mappings disagree on: full
+    /// gives `i` + U+0307, simple gives a bare `i`. An implementation that
+    /// chose simple would derive a different discovery tag for the same name
+    /// and silently never find the other's records — no error, just an empty
+    /// result. The ASCII golden vectors elsewhere cannot catch that, because
+    /// the two mappings agree on ASCII.
+    #[test]
+    fn username_lowercases_with_the_full_language_insensitive_mapping() {
+        let parsed = parse("\u{0130}");
+        assert_eq!(
+            parsed.as_str(),
+            "i\u{0307}",
+            "the full mapping expands İ to i + COMBINING DOT ABOVE; a bare 'i' \
+             means the simple mapping was used and every tag for such a name \
+             will disagree with a conforming implementation"
+        );
+        assert_eq!(parsed.as_str().len(), 3, "i + U+0307 is 3 UTF-8 bytes");
+
+        // Language-insensitive: the Turkish tailoring would lowercase 'I' to
+        // 'ı' (U+0131), which would make a tag depend on the publisher's
+        // locale.
+        assert_eq!(parse("I").as_str(), "i");
+    }
+
     #[test]
     fn username_applies_nfc() {
         // "é" as e + U+0301 COMBINING ACUTE ACCENT normalizes to U+00E9.
@@ -258,6 +359,17 @@ mod tests {
     #[test]
     fn username_rejects_empty_and_whitespace_only() {
         assert_eq!("".parse::<Username>(), Err(UsernameError::Empty));
+        // Not a consequence of normalization: NFC discards none of these, so
+        // without the explicit screen each one is a claimable name that renders
+        // as nothing.
+        for blank in [" ", "   ", "\u{00A0}", "\u{3000}", " \u{2009}"] {
+            assert_eq!(
+                blank.parse::<Username>(),
+                Err(UsernameError::Empty),
+                "whitespace-only {:?} must not be a claimable name",
+                blank
+            );
+        }
     }
 
     #[test]
@@ -292,6 +404,105 @@ mod tests {
             "ali\nce".parse::<Username>(),
             Err(UsernameError::ControlCharacter)
         );
+    }
+
+    /// The characters that make a name render as something other than itself.
+    ///
+    /// These are `Cf`, not `Cc`, so [`char::is_control`] does not see any of
+    /// them: a screen built on it alone accepts a claim carrying a
+    /// right-to-left override, which a UI renders as a different name than the
+    /// bytes that were signed. That is the exact failure
+    /// [`UsernameError::ControlCharacter`] documents, and it went unscreened
+    /// until this test existed.
+    #[test]
+    fn username_rejects_format_characters_that_control_check_alone_misses() {
+        for (label, raw) in [
+            ("right-to-left override", "ali\u{202E}ce"),
+            ("zero-width joiner", "ali\u{200D}ce"),
+            ("zero-width non-joiner", "ali\u{200C}ce"),
+            ("zero-width space", "ali\u{200B}ce"),
+            ("left-to-right mark", "ali\u{200E}ce"),
+            ("soft hyphen", "ali\u{00AD}ce"),
+            ("word joiner", "ali\u{2060}ce"),
+            ("byte-order mark", "ali\u{FEFF}ce"),
+            ("tag character", "alice\u{E0041}"),
+        ] {
+            let parsed = raw.parse::<Username>();
+            assert!(
+                !raw.chars().any(char::is_control),
+                "{label} must not be Cc, or this test proves nothing new"
+            );
+            assert_eq!(
+                parsed,
+                Err(UsernameError::ControlCharacter),
+                "a username carrying a {label} must be refused"
+            );
+        }
+    }
+
+    /// Every range of the hand-rolled `Cf` table is live.
+    ///
+    /// The table is a snapshot maintained by hand, so the failure to guard
+    /// against is an edit that narrows a range and silently reopens the hole.
+    /// One member per range is enough to catch that; completeness against the
+    /// character database is a regeneration concern, not a runtime one.
+    #[test]
+    fn username_rejects_every_format_character_range() {
+        for c in [
+            '\u{00AD}',
+            '\u{0600}',
+            '\u{061C}',
+            '\u{06DD}',
+            '\u{070F}',
+            '\u{0890}',
+            '\u{08E2}',
+            '\u{180E}',
+            '\u{200B}',
+            '\u{202A}',
+            '\u{2060}',
+            '\u{2066}',
+            '\u{FEFF}',
+            '\u{FFF9}',
+            '\u{110BD}',
+            '\u{110CD}',
+            '\u{13430}',
+            '\u{1BCA0}',
+            '\u{1D173}',
+            '\u{E0001}',
+            '\u{E0020}',
+        ] {
+            assert!(
+                Username::is_format_character(c),
+                "U+{:04X} must be screened as a format character",
+                c as u32
+            );
+            assert_eq!(
+                format!("ali{c}ce").parse::<Username>(),
+                Err(UsernameError::ControlCharacter),
+                "U+{:04X} must be refused in a username",
+                c as u32
+            );
+        }
+    }
+
+    /// The screen must not swallow ordinary international names. A rule that
+    /// rejects everything passes every negative test above and is useless.
+    #[test]
+    fn username_allows_ordinary_international_names() {
+        for raw in [
+            "alice",
+            "josé",
+            "мария",
+            "上田",
+            "أحمد",
+            "ali ce",
+            "a_b-c.d",
+        ] {
+            assert!(
+                raw.parse::<Username>().is_ok(),
+                "{raw:?} is a legitimate name and must parse"
+            );
+        }
     }
 
     /// D3's publish-time refusal, enforced at the type so no call site can

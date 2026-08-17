@@ -1358,7 +1358,7 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cleanup_ex
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group(`ptr`: Long,`groupName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_invite(`ptr`: Long,`petname`: RustBuffer.ByValue,`signed`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_invite(`ptr`: Long,`petname`: RustBuffer.ByValue,`sign`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_derive_user_id_from_public_key(`ptr`: Long,`publicKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1870,7 +1870,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 8723.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite() != 9631.toShort()) {
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite() != 26172.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 23152.toShort()) {
@@ -3289,7 +3289,7 @@ public interface OfflineProtocolInterface {
     
     fun `createGroup`(`groupName`: kotlin.String): MlsGroupInfo
     
-    fun `createInvite`(`petname`: kotlin.String?, `signed`: kotlin.Boolean): kotlin.String
+    fun `createInvite`(`petname`: kotlin.String?, `sign`: kotlin.Boolean): kotlin.String
     
     fun `deriveUserIdFromPublicKey`(`publicKey`: List<kotlin.UByte>): kotlin.String
     
@@ -3930,13 +3930,13 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
-    @Throws(ProtocolException::class)override fun `createInvite`(`petname`: kotlin.String?, `signed`: kotlin.Boolean): kotlin.String {
+    @Throws(ProtocolException::class)override fun `createInvite`(`petname`: kotlin.String?, `sign`: kotlin.Boolean): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_invite(
         it,
-        FfiConverterOptionalString.lower(`petname`),FfiConverterBoolean.lower(`signed`),_status)
+        FfiConverterOptionalString.lower(`petname`),FfiConverterBoolean.lower(`sign`),_status)
 }
     }
     )

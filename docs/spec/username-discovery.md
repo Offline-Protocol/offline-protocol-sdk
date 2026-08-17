@@ -30,8 +30,19 @@ re-claimed by someone else tomorrow; an address is a function of a key.
 
 A username is normalized before it is hashed, signed, or compared:
 
-1. lowercase, using Unicode simple lowercase mapping;
+1. lowercase, using the Unicode **full** lowercase mapping (Default Case
+   Conversion, `toLowercase`, the language-insensitive form);
 2. then normalize to NFC.
+
+**Full, not simple, and the difference is a wire incompatibility rather than a
+detail.** The two mappings disagree wherever one character lowercases to
+several: U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE becomes `i` + U+0307 under
+the full mapping and a bare `i` under the simple one. Two implementations that
+choose differently derive different tags for the same name and silently never
+find each other, which is the failure this whole section exists to prevent. The
+mapping must also be language-insensitive: the Turkish tailoring maps `I` to
+`ı`, and a directory whose tags depend on the publisher's locale is not a
+directory.
 
 The order is normative. Unicode lowercasing can emit a decomposed sequence, so
 normalizing first would leave a form that is not NFC, and the operation would
@@ -41,11 +52,18 @@ for a name that exists.
 
 A conforming implementation MUST refuse a username that, after normalization:
 
-- is empty,
+- is empty, or consists only of whitespace,
 - exceeds 64 bytes,
-- contains a Unicode control character, or
+- contains a Unicode control (`Cc`) or format (`Cf`) character, or
 - has the shape of an address (exactly 44 characters, `off1` prefix, all
   lowercase ASCII alphanumerics).
+
+`Cf` is refused alongside `Cc` because it is the category that actually carries
+the rendering attacks: the bidi overrides, the zero-width joiners and the
+byte-order mark are all `Cf`, and a name containing one displays as something
+other than the bytes that were signed. A screen written against a
+"control character" predicate typically tests `Cc` only and lets every one of
+them through.
 
 The address-shape refusal is a shape test, not a parse: an address-looking
 string with a corrupted checksum is refused too, because it reads exactly as

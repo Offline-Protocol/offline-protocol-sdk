@@ -949,10 +949,8 @@ impl NostrTransport {
             }
         };
 
-        let subject_for_caller = subject;
-        let subject = &subject_for_caller;
         let query_id = new_query_id();
-        let req_json = match subject {
+        let req_json = match &subject {
             QuerySubject::KeyPackage(address) => {
                 let routing_tag = nostr_crypto::routing_tag_for_address(address)?;
                 nostr_crypto::create_key_package_query_message(&routing_tag, &query_id)?
@@ -978,14 +976,14 @@ impl NostrTransport {
             active.insert(
                 query_id.clone(),
                 ActiveQuery {
-                    subject: subject_for_caller.clone(),
+                    subject: subject.clone(),
                     seen_events: HashSet::new(),
                     delivered: 0,
                 },
             );
         }
 
-        let discovery_username = match &subject_for_caller {
+        let discovery_username = match &subject {
             QuerySubject::Discovery(username) => Some(username.clone()),
             QuerySubject::KeyPackage(_) => None,
         };
@@ -1210,6 +1208,21 @@ impl NostrTransport {
 
         self.notify_messages_available();
         true
+    }
+
+    /// Removes a queued username lookup that has not been minted into a query.
+    ///
+    /// Returns whether one was removed. The engine calls this when it gives up
+    /// on a lookup that never reached a relay — queries are pumped only while
+    /// the socket is up, so a lookup made offline can sit here indefinitely.
+    /// Without the removal, [`Self::resolve_username`] would keep refusing that
+    /// name as "already queued" while nothing was ever going to answer it, so a
+    /// name that timed out once could not be looked up again.
+    pub fn cancel_username_resolution(&self, username: &Username) -> bool {
+        let mut queue = self.discovery_resolve_queue.lock_or_recover();
+        let before = queue.len();
+        queue.retain(|queued| queued != username);
+        before != queue.len()
     }
 
     /// Records a peer's real per-install Nostr public key, learned from the

@@ -6175,7 +6175,7 @@ impl OfflineProtocol {
     ///
     /// # When to sign
     ///
-    /// Pass `signed = true` when the invite may travel **without its issuer** —
+    /// Pass `sign = true` when the invite may travel **without its issuer** —
     /// a link forwarded through a third party. The signature binds the petname
     /// to the key, so a forwarded invite cannot save Alice's key under the name
     /// "Bob".
@@ -6187,10 +6187,19 @@ impl OfflineProtocol {
     ///
     /// A signature does **not** defend against substitution. See
     /// [`parse_invite`].
+    ///
+    /// # Why the parameter is `sign` and not `signed`
+    ///
+    /// A UDL parameter name is emitted verbatim as a C parameter name in the
+    /// generated FFI header, and `signed` is a C type specifier: `int8_t
+    /// signed` fails to compile and takes the whole `offline_protocolFFI`
+    /// module with it, breaking every iOS consumer of the generated bindings
+    /// rather than only this call. Rust, Kotlin, Swift and Python all accept
+    /// the name, so only the iOS bridge typecheck catches it.
     pub fn create_invite(
         &self,
         petname: Option<String>,
-        signed: bool,
+        sign: bool,
     ) -> Result<String, ProtocolError> {
         let manager = self.get_mls_manager()?;
         let guard = manager
@@ -6203,7 +6212,7 @@ impl OfflineProtocol {
         let address = CoreMlsManager::derive_address(&public_key)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))?;
 
-        let signature = if signed {
+        let signature = if sign {
             let payload = offline_protocol_mls::invite::invite_signing_payload(
                 &address,
                 &public_key,

@@ -830,7 +830,7 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func createGroup(groupName: String) throws  -> MlsGroupInfo
     
-    func createInvite(petname: String?, signed: Bool) throws  -> String
+    func createInvite(petname: String?, sign: Bool) throws  -> String
     
     func deriveUserIdFromPublicKey(publicKey: [UInt8])  -> String
     
@@ -1335,12 +1335,12 @@ open func createGroup(groupName: String)throws  -> MlsGroupInfo  {
 })
 }
     
-open func createInvite(petname: String?, signed: Bool)throws  -> String  {
+open func createInvite(petname: String?, sign: Bool)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_invite(
             self.uniffiCloneHandle(),
         FfiConverterOptionString.lower(petname),
-        FfiConverterBool.lower(signed),$0
+        FfiConverterBool.lower(sign),$0
     )
 })
 }
@@ -9882,7 +9882,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 8723) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite() != 9631) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite() != 26172) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 23152) {
