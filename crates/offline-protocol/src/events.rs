@@ -449,6 +449,33 @@ impl From<&offline_protocol_core::ReplyContext> for ReplyContextEvent {
     }
 }
 
+/// One device's verified claim to a username.
+///
+/// Every field here has already passed verification: the address derives from
+/// the public key, the record's signature verifies under that key, and the
+/// record was published under the Nostr key it names. What that proves is
+/// narrow and worth stating exactly — **this key asserts this name**. It does
+/// not prove the name belongs to the claimant, because nothing can: the
+/// directory is non-authoritative by design.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UsernameClaim {
+    /// The claimed address, in canonical `off1…` form.
+    ///
+    /// This is the value to keep. An app that stores the *name* has stored
+    /// something anyone can re-claim tomorrow; the address is self-certifying.
+    pub address: String,
+    /// The Ed25519 identity key the address derives from, base64.
+    pub public_key: String,
+    /// When the claimant signed the record, in milliseconds since the epoch.
+    ///
+    /// **Advisory.** A record is not a liveness signal — the key-package fetch
+    /// that follows it is. An old claim from a peer who has been offline for a
+    /// month is still perfectly valid, and rejecting it here would make them
+    /// unreachable by name while their key packages sit live on a relay. Sort
+    /// by it if that helps a user choose; do not filter on it.
+    pub issued_at_ms: i64,
+}
+
 /// Events that can occur in the protocol.
 ///
 /// Note: This type implements a custom Debug that redacts sensitive fields
@@ -1204,6 +1231,42 @@ pub enum Event {
         /// `ack_timeout` (relay never answered the registration — likely a
         /// relay without group support).
         reason: String,
+    },
+
+    /// A username resolution finished, carrying **every** claim found.
+    ///
+    /// # The set is the whole point, and there is deliberately no "best" claim
+    ///
+    /// Anyone may publish any username claim, so a name resolves to a set of
+    /// assertions, never to an answer. Even a single-device user is a set of
+    /// one. This event is emitted exactly once per resolution and carries the
+    /// complete set precisely so an app cannot accidentally treat the first
+    /// arrival as the winner: there is no per-claim event to race, and no
+    /// ordering field to mistake for a ranking.
+    ///
+    /// **An app MUST let the user choose.** Silently picking one claim converts
+    /// a non-authoritative directory into an authoritative-looking one, which
+    /// is worse than not shipping the feature: the user believes they are
+    /// talking to the name, and the protocol only ever promised them a key.
+    /// Present the claims, let a human confirm out of band (a QR code, a
+    /// shared secret, a voice), and remember the address rather than the name.
+    ///
+    /// An empty `claims` list is an ordinary outcome: the name may be
+    /// unclaimed, the claimant offline-published to relays we do not use, or
+    /// every claim we saw failed verification.
+    UsernameResolved {
+        /// The normalized username that was resolved.
+        username: String,
+        /// Every claim that verified, in no meaningful order.
+        claims: Vec<UsernameClaim>,
+        /// How many records were seen but rejected.
+        ///
+        /// Non-zero is *normal*, not an error: the tag is public, anyone may
+        /// publish to it, and junk arrives. Surfaced because a resolution that
+        /// returns nothing while rejecting many records means something
+        /// different from one that returns nothing having seen nothing, and an
+        /// app showing "not found" may want to distinguish them.
+        rejected: u32,
     },
 
     /// A group message was sent to all members via mesh (MLS-encrypted fan-out).
@@ -2541,6 +2604,7 @@ impl Event {
             Self::UserGroups { .. } => "protocol.group.user_groups",
             Self::GroupError { .. } => "protocol.group.error",
             Self::GroupRelaySyncChanged { .. } => "protocol.group.relay_sync_changed",
+            Self::UsernameResolved { .. } => "protocol.username.resolved",
             Self::GroupMessageSent { .. } => "protocol.group.message_sent",
             Self::GroupMessagePartialFailure { .. } => "protocol.group.message_partial_failure",
             Self::GroupMessageDeliveryReport { .. } => "protocol.group.delivery_report",
@@ -3156,6 +3220,20 @@ impl fmt::Debug for Event {
                 .field("group_id", group_id)
                 .field("synced", synced)
                 .field("reason", reason)
+                .finish(),
+            // The username is redacted: it is a human-readable name for a
+            // person, which is exactly the class of identifier this Debug
+            // exists to keep out of logs. The counts say everything a reader
+            // debugging a resolution needs.
+            Self::UsernameResolved {
+                username: _,
+                claims,
+                rejected,
+            } => f
+                .debug_struct("UsernameResolved")
+                .field("username", &"<redacted>")
+                .field("claim_count", &claims.len())
+                .field("rejected", rejected)
                 .finish(),
             Self::GroupMessageSent {
                 group_id,

@@ -603,6 +603,23 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
         } => {
             hash_string(group_id, scrubber);
         }
+        // A username is the most directly personal identifier this SDK emits:
+        // unlike an address it is chosen to be human-readable and is often the
+        // same handle the person uses elsewhere. Both it and every address it
+        // resolved to are hashed. The public keys inside the claims are hashed
+        // too — a raw identity key is an address in all but rendering, since
+        // anyone can derive one from the other.
+        Event::UsernameResolved {
+            username,
+            claims,
+            rejected: _,
+        } => {
+            hash_string(username, scrubber);
+            for claim in claims.iter_mut() {
+                hash_string(&mut claim.address, scrubber);
+                hash_string(&mut claim.public_key, scrubber);
+            }
+        }
         Event::GroupMessageSent {
             group_id,
             message_ids: _,
@@ -830,6 +847,7 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::UserGroups { .. }
         | Event::GroupError { .. }
         | Event::GroupRelaySyncChanged { .. }
+        | Event::UsernameResolved { .. }
         | Event::GroupMessageSent { .. }
         | Event::GroupMessagePartialFailure { .. }
         | Event::GroupMessageDeliveryReport { .. }

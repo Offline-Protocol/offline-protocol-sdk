@@ -1311,12 +1311,27 @@ The general rule: **if a string was doing double duty as "who I am" and "which
 storage is mine", the second job stays with `profile`.** Only the first job
 moves to the address.
 
-### Cold contact by username is gone for now
+### Cold contact by username
 
 Reaching someone by typing their username was only ever possible because
-usernames were addresses. Until a signed username-discovery layer lands, first
-contact is invite/QR only: exchange `{address, publicKey}` and verify it on the
-spot with `deriveAddress(publicKey) === address`.
+usernames were addresses. Two paths give it back, and they are not equivalent.
+
+**Invite/QR is the primary path, and permanent.** `createInvite()` produces a
+compact blob carrying `{address, pubkey, petname?, sig?}`, and `parseInvite()`
+verifies it offline: `derive_address(pubkey) == address` is checked at scan,
+before `create()`. Nothing about this is transitional — the out-of-band
+confirmation a scanned code represents is what makes the directory below safe.
+
+**A signed username directory is additive, and off by default.** Setting
+`transports.nostr.usernameDiscoveryEnabled` publishes a record binding this
+install's profile to its address and enables `resolveUsername()`. It is
+deliberately opt-in: publishing binds a human-readable name to an address in a
+public place, where the mapping *is* the payload.
+
+The directory is **not authoritative** — anyone may claim any name — so a
+resolution returns the whole set of claimants in one `username_resolved` event
+and a human must choose. Do not auto-select, and store the address rather than
+the name. See [docs/spec/username-discovery.md](spec/username-discovery.md).
 
 **If you already run an account system, do not wait for that layer.** A serverless
 discovery record is the right design for peers with no infrastructure, and the
@@ -1331,8 +1346,10 @@ four primitives already ship:
 4. Server stores the address on the account row and serves it from its existing
    user lookup.
 
-That gives reach-by-username back immediately, with your own uniqueness
-guarantees, and it stays correct after the discovery layer ships.
+That gives reach-by-username with your own uniqueness guarantees, and it stays
+the better answer now that the discovery layer has shipped: yours is
+authoritative and unsquattable, and the serverless directory by design is
+neither.
 
 ### There is no in-place migration, and that is deliberate
 

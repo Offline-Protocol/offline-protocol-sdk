@@ -39,7 +39,7 @@ use offline_protocol_router::{
     RelayConfig as CoreRelayConfig, RelayPriority as CoreRelayPriority,
 };
 use offline_protocol_transport::{
-    ble::BleTransport, internet::InternetTransport, nostr::NostrTransport,
+    ble::BleTransport, internet::InternetTransport, nostr::NostrTransport, nostr::ResolvedRecord,
     reticulum::ReticulumTransport, Transport, TransportMetrics as CoreTransportMetrics,
     TransportStatus as CoreTransportStatus, TransportType as CoreTransportType,
 };
@@ -70,6 +70,61 @@ uniffi::include_scaffolding!("offline_protocol");
 pub fn derive_address(public_key: Vec<u8>) -> Result<String, ProtocolError> {
     CoreMlsManager::derive_address(&public_key)
         .map(|address| address.to_string())
+        .map_err(|e| ProtocolError::MlsError(e.to_string()))
+}
+
+/// A decoded and verified invite.
+///
+/// Every field has passed verification: the address is the one its public key
+/// derives to, and when `signed` is true the petname is bound to that key by
+/// the key's owner.
+pub struct InviteInfo {
+    /// The address this invite reaches, canonical `off1…`.
+    pub address: String,
+    /// The Ed25519 identity key the address derives from.
+    pub public_key: Vec<u8>,
+    /// The suggested display name, if the invite carried one.
+    ///
+    /// Suggested, never authoritative: a petname is a *locally assigned* name,
+    /// and an app is right to let the user edit it.
+    pub petname: Option<String>,
+    /// Whether a valid signature accompanied the invite.
+    ///
+    /// `false` does not mean the invite is untrustworthy — an unsigned invite
+    /// is the ordinary shape for a QR shown phone to phone, where the physical
+    /// channel is the authentication. It means only that the *petname* is
+    /// unbound.
+    pub signed: bool,
+}
+
+/// Decodes and verifies an invite blob.
+///
+/// Instance-less on purpose, like [`derive_address`]: a scanner can verify a QR
+/// code before `create()`, which is the whole reason the invite format is
+/// self-certifying.
+///
+/// # What this proves, and what it does not
+///
+/// It proves the address belongs to the public key, and that any signature
+/// present was made by that key. It does **not** prove the invite came from
+/// who you think: an attacker handing you their own correctly-signed invite is
+/// indistinguishable from a legitimate stranger, and no payload format can fix
+/// that. Only the out-of-band context — that this QR code was on *this*
+/// person's screen — carries that.
+///
+/// # Errors
+///
+/// Returns [`ProtocolError::MlsError`] for a malformed blob, an address that is
+/// not the key's, or a signature that does not verify. Every one of these means
+/// the invite must be refused, not shown with a warning.
+pub fn parse_invite(blob: String) -> Result<InviteInfo, ProtocolError> {
+    offline_protocol_mls::invite::parse_invite(&blob)
+        .map(|invite| InviteInfo {
+            address: invite.address.to_string(),
+            public_key: invite.public_key,
+            petname: invite.petname,
+            signed: invite.signed,
+        })
         .map_err(|e| ProtocolError::MlsError(e.to_string()))
 }
 
@@ -2128,6 +2183,8 @@ pub struct TransportConfig {
     pub nostr_sealing_enabled: bool,
     /// See [`ProtocolConfig::nostr_cold_contact_enabled`].
     pub nostr_cold_contact_enabled: bool,
+    /// See [`ProtocolConfig::nostr_username_discovery_enabled`].
+    pub nostr_username_discovery_enabled: bool,
 }
 
 /// Encryption configuration for automatic MLS handling
@@ -2232,6 +2289,11 @@ pub struct ProtocolConfig {
     pub nostr_sealing_enabled: bool,
     /// Kill switch for Nostr key-package publication and peer resolution
     /// (default on). See the UDL dictionary and
+    /// `TransportConfig::nostr_username_discovery_enabled` — off by default.
+    /// Publishing binds a human-readable name to an address in a public place,
+    /// which is more disclosure than the key-package record's "an install with
+    /// this tag exists", and it needs cold contact on to be useful at all.
+    pub nostr_username_discovery_enabled: bool,
     /// `TransportConfig::nostr_cold_contact_enabled` for what it buys and what
     /// it costs.
     pub nostr_cold_contact_enabled: bool,
@@ -2258,6 +2320,8 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.transport.nostr_enabled = config.nostr_enabled;
         core_config.transport.nostr_sealing_enabled = config.nostr_sealing_enabled;
         core_config.transport.nostr_cold_contact_enabled = config.nostr_cold_contact_enabled;
+        core_config.transport.nostr_username_discovery_enabled =
+            config.nostr_username_discovery_enabled;
         core_config.transport.binary_wire_enabled = config.binary_wire_enabled;
         core_config.encryption.compact_envelope_enabled = config.compact_envelope_enabled;
         core_config.encryption.rich_payload_enabled = config.rich_payload_enabled;
@@ -4810,18 +4874,57 @@ impl OfflineProtocol {
     /// during a brief status flap, leaving the peer on the bootstrap leg until
     /// the rate limit lapses.
     pub fn nostr_get_next_query(&self) -> Option<NostrQuery> {
-        self.with_nostr_transport(|nostr| match nostr.next_query() {
-            Ok(Some(query)) => Some(NostrQuery {
-                query_id: query.query_id,
-                req_json: query.req_json,
-            }),
-            Ok(None) => None,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to build a Nostr resolution query");
-                None
-            }
+        let query = self
+            .with_nostr_transport(|nostr| match nostr.next_query() {
+                Ok(Some(query)) => Some(query),
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to build a Nostr resolution query");
+                    None
+                }
+            })
+            .flatten()?;
+
+        // A discovery query opens its accumulator here, at mint time rather
+        // than on the first answer, so a name nobody claims still emits an
+        // empty result. "No such name" is an answer.
+        //
+        // The inner lock is what serializes this against `resolve_username`,
+        // which registers its request while holding the same lock. Without
+        // that ordering a mint could land between the transport accepting a
+        // lookup and the engine recording it, and `begin_username_resolution`
+        // would discard the query as one the sweep had already answered — the
+        // lookup would then never accumulate anything. Keep the acquisition
+        // here, after the mint.
+        if let Some(username) = query.discovery_username.clone() {
+            let mut protocol = self.lock_inner_recovering();
+            protocol.begin_username_resolution(query.query_id.clone(), username);
+        }
+
+        Some(NostrQuery {
+            query_id: query.query_id,
+            req_json: query.req_json,
         })
-        .flatten()
+    }
+
+    /// Resolves a username to the set of devices claiming it.
+    ///
+    /// Returns `true` if this call started the lookup and `false` if it joined
+    /// one already in flight. **Both mean an answer is coming**: exactly one
+    /// `username_resolved` event follows either way. Every case where no event
+    /// will ever arrive throws instead — `InvalidConfiguration` when discovery
+    /// is off, `InvalidState` when too many lookups are in flight — so a caller
+    /// that awaits the event can never be left waiting on one that has no
+    /// trigger.
+    ///
+    /// The answer carries **every** verified claim. There is deliberately no
+    /// "best" claim and no ordering: anyone may publish any name, so what comes
+    /// back is a set of assertions for a human to arbitrate, not a lookup
+    /// result. An app that silently takes the first entry has turned a
+    /// non-authoritative directory into an authoritative-looking one.
+    pub fn resolve_username(&self, username: String) -> Result<bool, ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol.resolve_username(&username).map_err(Into::into)
     }
 
     /// Delivers one event received on a resolution query's subscription.
@@ -4841,19 +4944,44 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::TransportError(e.to_string()))?
             .flatten();
 
-        let Some((_author_pubkey, plaintext)) = opened else {
+        let Some(record) = opened else {
             return Ok(());
         };
 
         let mut protocol = self.lock_inner()?;
-        protocol
-            .handle_resolved_key_package(&plaintext)
-            .map_err(ProtocolError::from)
+        match record {
+            ResolvedRecord::KeyPackage { plaintext, .. } => protocol
+                .handle_resolved_key_package(&plaintext)
+                .map_err(ProtocolError::from),
+            ResolvedRecord::Discovery {
+                username,
+                author,
+                plaintext,
+            } => {
+                // Accumulates rather than emits: the whole claim set leaves as
+                // one event when the query completes. See
+                // `PendingResolution` for why a per-claim event would be the
+                // wrong shape.
+                protocol
+                    .handle_resolved_discovery_record(&query_id, &username, &author, &plaintext);
+                Ok(())
+            }
+        }
     }
 
     /// Releases a resolution query after the relay's end-of-stored-events.
+    ///
+    /// For a username resolution this is also what *emits* the answer: the
+    /// accumulated claim set is flushed as a single `username_resolved` event.
+    /// The engine additionally sweeps on its tick, so a relay that never sends
+    /// end-of-stored-events yields a late answer rather than none.
     pub fn nostr_query_completed(&self, query_id: String) {
-        self.with_nostr_transport(|nostr| nostr.complete_query(&query_id));
+        let resolved_username = self.with_nostr_transport(|nostr| nostr.complete_query(&query_id));
+
+        if matches!(resolved_username, Some(Some(_))) {
+            let mut protocol = self.lock_inner_recovering();
+            protocol.flush_username_resolution(&query_id);
+        }
     }
 
     /// Called by the platform when publishing a Nostr event fails.
@@ -6050,6 +6178,76 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
+    /// Builds an invite blob for this identity.
+    ///
+    /// The result is an opaque base64url string. Apps own the container: the
+    /// recommended form is `<app-scheme>://connect?c=<blob>`, one parameter, so
+    /// it composes with an existing scheme and route.
+    ///
+    /// # When to sign
+    ///
+    /// Pass `sign = true` when the invite may travel **without its issuer** —
+    /// a link forwarded through a third party. The signature binds the petname
+    /// to the key, so a forwarded invite cannot save Alice's key under the name
+    /// "Bob".
+    ///
+    /// Pass `false` for a QR code shown phone to phone: the physical channel
+    /// already authenticates it, and an app that lets the user confirm or edit
+    /// the name has made the user the authority over it, which is what a
+    /// petname properly is. Signing costs ~90 characters.
+    ///
+    /// A signature does **not** defend against substitution. See
+    /// [`parse_invite`].
+    ///
+    /// # Why the parameter is `sign` and not `signed`
+    ///
+    /// A UDL parameter name is emitted verbatim as a C parameter name in the
+    /// generated FFI header, and `signed` is a C type specifier: `int8_t
+    /// signed` fails to compile and takes the whole `offline_protocolFFI`
+    /// module with it, breaking every iOS consumer of the generated bindings
+    /// rather than only this call. Rust, Kotlin, Swift and Python all accept
+    /// the name, so only the iOS bridge typecheck catches it.
+    pub fn create_invite(
+        &self,
+        petname: Option<String>,
+        sign: bool,
+    ) -> Result<String, ProtocolError> {
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
+
+        let public_key = guard
+            .get_identity_public_key()
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))?;
+        let address = CoreMlsManager::derive_address(&public_key)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))?;
+
+        let signature = if sign {
+            let payload = offline_protocol_mls::invite::invite_signing_payload(
+                &address,
+                &public_key,
+                petname.as_deref(),
+            )
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))?;
+            Some(
+                guard
+                    .sign_data(&payload)
+                    .map_err(|e| ProtocolError::MlsError(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+
+        offline_protocol_mls::invite::encode_invite(
+            &address,
+            &public_key,
+            petname.as_deref(),
+            signature.as_deref(),
+        )
+        .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
     /// Verify a signature against a public key.
     ///
     /// Returns true if the signature is valid, false otherwise.
@@ -6673,6 +6871,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6706,6 +6905,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7137,6 +7337,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7463,6 +7664,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7493,6 +7695,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7524,6 +7727,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7554,6 +7758,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7592,6 +7797,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7646,6 +7852,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7735,6 +7942,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7766,6 +7974,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7800,6 +8009,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7838,6 +8048,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7901,6 +8112,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -8011,6 +8223,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -8093,6 +8306,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -8121,6 +8335,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -8302,6 +8517,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -8337,6 +8553,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -8390,6 +8607,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -8411,6 +8629,7 @@ mod tests {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -13498,6 +13717,51 @@ mod tests {
         assert!(
             !protocol.protocol_lock_diagnostics().held,
             "dropping the guard must clear the holder record"
+        );
+    }
+
+    /// Pins the relay address-proof signing domain across the two bridges that
+    /// hand-mirror it.
+    ///
+    /// `offline-relay-addr-v1` is defined in the relay-server repository and
+    /// copied by hand into `AddressDeclarationPolicy.swift` and
+    /// `AddressDeclarationPolicy.kt`. No Rust constant holds it, so the
+    /// four-domain non-prefix test in `offline-protocol` carries it as a
+    /// literal — and a literal in one place plus copies in two others is
+    /// exactly the drift shape that ships silently.
+    ///
+    /// This reads both bridge sources and asserts the spelling. It cannot see
+    /// the relay's own copy (different repository), so a change there still
+    /// has to be coordinated by hand; what it does close is the case where one
+    /// bridge is edited and the other is not, which no test previously caught.
+    ///
+    /// The failure it prevents is not cosmetic. The domain separates an
+    /// address proof from a control frame, and if a device signed an address
+    /// proof under a domain that collided with `offline-ctrl-v1`, a hostile
+    /// relay would harvest a replayable control-frame signature from every
+    /// device that ever authenticated to it.
+    #[test]
+    fn relay_address_proof_domain_matches_across_both_bridges() {
+        const EXPECTED: &str = "offline-relay-addr-v1";
+
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            let path = rn_dir.join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+
+        let swift = read("ios/AddressDeclarationPolicy.swift");
+        assert!(
+            swift.contains(&format!("PROOF_DOMAIN = \"{EXPECTED}\"")),
+            "AddressDeclarationPolicy.swift must declare PROOF_DOMAIN = \"{EXPECTED}\""
+        );
+
+        let kotlin = read("android/src/main/java/com/offlineprotocol/AddressDeclarationPolicy.kt");
+        assert!(
+            kotlin.contains(&format!("PROOF_DOMAIN = \"{EXPECTED}\"")),
+            "AddressDeclarationPolicy.kt must declare PROOF_DOMAIN = \"{EXPECTED}\""
         );
     }
 }

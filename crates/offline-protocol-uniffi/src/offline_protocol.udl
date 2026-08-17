@@ -12,6 +12,43 @@ namespace offline_protocol {
     // Throws if publicKey is not exactly 32 bytes.
     [Throws=ProtocolError]
     string derive_address(sequence<u8> public_key);
+
+    // Decode and verify an invite blob (the base64url payload produced by
+    // create_invite, typically carried as <app-scheme>://connect?c=<blob>).
+    //
+    // Instance-less for the same reason derive_address is: a scanner must be
+    // able to verify a QR code BEFORE create(). Verification is mandatory and
+    // total -- the address must be the one its public key derives to, and any
+    // signature present must verify under that key -- so a returned InviteInfo
+    // is always self-certified.
+    //
+    // What it does NOT prove: that the invite came from who you think. An
+    // attacker's own correctly-signed invite is indistinguishable from a
+    // stranger's. Only the out-of-band context (this QR was on THIS person's
+    // screen) carries that, which is why the invite path is the trust anchor
+    // for username discovery rather than the other way around.
+    //
+    // Throws if the blob is malformed, the address is not the key's, or a
+    // signature does not verify. Every case means refuse, not warn.
+    [Throws=ProtocolError]
+    InviteInfo parse_invite(string blob);
+};
+
+// A decoded and verified invite.
+dictionary InviteInfo {
+    // The address this invite reaches, canonical "off1...".
+    string address;
+    // The Ed25519 identity key the address derives from.
+    sequence<u8> public_key;
+    // Suggested display name, if the invite carried one. Suggested, never
+    // authoritative: a petname is a locally assigned name and an app is right
+    // to let the user edit it.
+    string? petname;
+    // Whether a valid signature accompanied the invite. False does NOT mean
+    // untrustworthy -- an unsigned invite is the ordinary shape for a QR shown
+    // phone to phone, where the physical channel is the authentication. It
+    // means only that the petname is unbound to the key.
+    boolean signed;
 };
 
 // ========================================================================
@@ -501,6 +538,8 @@ dictionary TransportConfig {
     boolean nostr_sealing_enabled = true;
     // See ProtocolConfig::nostr_cold_contact_enabled.
     boolean nostr_cold_contact_enabled = true;
+    // See ProtocolConfig::nostr_username_discovery_enabled. Off by default.
+    boolean nostr_username_discovery_enabled = false;
 };
 
 enum OverflowPolicy {
@@ -609,6 +648,22 @@ dictionary ProtocolConfig {
     // published to. Turn it off to keep the transport silent until it has
     // traffic. Defaulted so existing callers keep compiling.
     boolean nostr_cold_contact_enabled = true;
+    // Publishes a username discovery record for this install's profile, and
+    // allows resolve_username() to look names up. OFF by default, unlike cold
+    // contact, and it additionally requires cold contact to be on: a claim
+    // points at an address whose key packages a resolver fetches next, so
+    // without them it resolves and then dead-ends.
+    //
+    // Publishing binds a human-readable name to an address in a public place.
+    // That is materially more disclosure than the key-package record's "an
+    // install with this tag exists" -- here the mapping IS the payload. The
+    // record is sealed, so a relay scraping by kind reads nothing, but anyone
+    // who guesses the name computes the tag and reads the claim.
+    //
+    // The directory is NOT authoritative: anyone may claim any name, so
+    // resolution returns the whole set of claimants and a human must confirm
+    // out of band. Defaulted so existing callers keep compiling.
+    boolean nostr_username_discovery_enabled = false;
     // Kill switch for the compact MLS envelope on encrypted messages (default
     // on). The end-to-end sibling of binary_wire_enabled with the same shape:
     // negotiated per-recipient via the key package, parsing of inbound compact
@@ -1491,7 +1546,55 @@ interface OfflineProtocol {
     // Returns true if the signature is valid, false otherwise.
     [Throws=ProtocolError]
     boolean verify_signature(sequence<u8> public_key, sequence<u8> data, sequence<u8> signature);
-    
+
+    // Build an invite blob for this identity: an opaque base64url string.
+    // Apps own the container; the recommended form is one parameter,
+    // <app-scheme>://connect?c=<blob>, so it composes with an existing route.
+    //
+    // Sign it (sign = true) when the invite may travel WITHOUT its issuer --
+    // a link forwarded through a third party -- because the signature binds
+    // the petname to the key, so a forwarded invite cannot save Alice's key
+    // under the name "Bob". Leave it unsigned for a QR shown phone to phone:
+    // the physical channel already authenticates it, and an app that lets the
+    // user confirm the name has made the user the authority over it. Signing
+    // costs about 90 characters.
+    //
+    // Carries no key package by design: an MLS init key is single-use and a QR
+    // code is static, so pairing them guarantees a collision the moment two
+    // people scan the same code. Carries no expiry either -- a printed QR that
+    // stops working is a bug.
+    //
+    // The parameter is `sign` and NOT `signed` because a UDL parameter name is
+    // emitted verbatim as a C parameter name in the generated FFI header, and
+    // `signed` is a C type specifier: `int8_t signed` fails to compile and
+    // takes the whole offline_protocolFFI module down with it, so every iOS
+    // consumer of the generated bindings breaks, not just this call. Rust,
+    // Kotlin, Swift and Python all accept the name, so only the iOS bridge
+    // typecheck catches it. Do not rename it back.
+    [Throws=ProtocolError]
+    string create_invite(string? petname, boolean sign);
+
+    // Resolve a username to the set of devices claiming it. Returns true if
+    // this call started the lookup, false if it joined one already in flight.
+    // BOTH mean an answer is coming: exactly one username_resolved event
+    // follows either way. Every case where no event will ever arrive throws
+    // instead -- InvalidConfiguration when discovery is off, InvalidState when
+    // too many lookups are in flight -- so a caller awaiting the event is never
+    // left waiting on one that has no trigger.
+    //
+    // The answer arrives as ONE username_resolved event carrying EVERY
+    // verified claim. There is deliberately no "best" claim and no ordering:
+    // anyone may publish any name, so what comes back is a set of assertions
+    // for a human to arbitrate, not a lookup result. An app that silently
+    // takes the first entry has turned a non-authoritative directory into an
+    // authoritative-looking one -- worse than not shipping it, because the
+    // user then believes the name was verified when only a key ever was.
+    //
+    // Store the ADDRESS the user confirms, never the name: a name can be
+    // re-claimed by anyone tomorrow, an address is self-certifying.
+    [Throws=ProtocolError]
+    boolean resolve_username(string username);
+
     // ========================================================================
     // PRESENCE, TYPING INDICATORS, AND READ RECEIPTS
     // ========================================================================

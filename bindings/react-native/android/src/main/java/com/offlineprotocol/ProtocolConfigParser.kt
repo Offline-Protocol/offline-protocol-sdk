@@ -72,6 +72,17 @@ internal object ProtocolConfigParser {
             "coldContactEnabled",
             "cold_contact_enabled"
         ) ?: json.optBooleanCompat("nostrColdContactEnabled", "nostr_cold_contact_enabled") ?: true
+        // Nostr username discovery (claim publication + username resolution).
+        // Same nested-then-flat shape, but the default is FALSE: publishing
+        // binds a human-readable name to an address in a public place, which
+        // an app must opt into rather than inherit.
+        val nostrUsernameDiscoveryEnabled = nostrJson?.optBooleanCompat(
+            "usernameDiscoveryEnabled",
+            "username_discovery_enabled"
+        ) ?: json.optBooleanCompat(
+            "nostrUsernameDiscoveryEnabled",
+            "nostr_username_discovery_enabled"
+        ) ?: false
         val compactEnvelopeEnabled = encryptionJson?.optBooleanCompat(
             "compactEnvelopeEnabled",
             "compact_envelope_enabled"
@@ -162,6 +173,7 @@ internal object ProtocolConfigParser {
             binaryWireEnabled = binaryWireEnabled,
             nostrSealingEnabled = nostrSealingEnabled,
             nostrColdContactEnabled = nostrColdContactEnabled,
+            nostrUsernameDiscoveryEnabled = nostrUsernameDiscoveryEnabled,
             compactEnvelopeEnabled = compactEnvelopeEnabled,
             richPayloadEnabled = richPayloadEnabled,
             cryptoRecoveryEnabled = cryptoRecoveryEnabled

@@ -1613,6 +1613,22 @@ pub(crate) mod storage_keys {
     pub const NOSTR_KEY_PACKAGE_SLOTS: &str = "nostr_key_package_slots";
     /// Key ID for the single Nostr publication-slot entry.
     pub const NOSTR_KEY_PACKAGE_SLOTS_ID: &str = "current";
+    /// Key type for this install's published username discovery claim.
+    ///
+    /// Records *which* username was last published, so a profile change or a
+    /// switched-off feature can retract the previous claim. Without it a
+    /// renamed install leaves its old name standing in the directory
+    /// indefinitely, pointing at an address that is still live — the one
+    /// failure a directory must not have, since retraction is the only control
+    /// a claimant holds.
+    ///
+    /// Protocol state rather than secure storage, on the same reasoning as the
+    /// slot map: the value is a username that this install already published
+    /// in a public place. Losing it costs an un-retractable stale claim, which
+    /// expires only when a resolver's second hop fails.
+    pub const NOSTR_DISCOVERY_CLAIM: &str = "nostr_discovery_claim";
+    /// Key ID for the single discovery-claim entry.
+    pub const NOSTR_DISCOVERY_CLAIM_ID: &str = "current";
     /// Key type for the per-install key that seals sensitive protocol-state
     /// records at rest.
     ///
@@ -1871,6 +1887,109 @@ pub(crate) struct MediaTransferDescriptor {
 pub(crate) enum OutboundSendPreparation {
     Ready(String),
     Queued(MessageId),
+}
+
+/// Pins that every live signing domain is mutually non-prefixing.
+///
+/// # Why this test exists here, of all places
+///
+/// Four domains are in production and they live in three languages and two
+/// repositories: `offline-ctrl-v1` (this crate), `offline-disc-v1` and
+/// `offline-invite-v1` (the MLS crate), and `offline-relay-addr-v1` (the relay
+/// server, plus hand-mirrored copies in the iOS and Android bridges). Nothing
+/// can import all four, so this module is the one place they can be compared at
+/// all: it is the highest crate that can see two of them, and the fourth is
+/// pinned as a literal.
+#[cfg(test)]
+mod signing_domain_tests {
+    use offline_protocol_mls::discovery::DISCOVERY_SIGN_DOMAIN;
+    use offline_protocol_mls::invite::INVITE_SIGN_DOMAIN;
+
+    use super::CTRL_SIGN_DOMAIN;
+
+    /// The relay's address-proof domain.
+    ///
+    /// A literal because it is defined in the relay-server repository and
+    /// hand-mirrored in `AddressDeclarationPolicy.swift` and
+    /// `AddressDeclarationPolicy.kt` — there is no Rust constant in this
+    /// workspace to import. If it ever changes there, this test does not
+    /// notice, which is the accepted cost of a cross-repository constant and is
+    /// why it is spelled out with this comment attached.
+    const RELAY_ADDR_SIGN_DOMAIN: &[u8] = b"offline-relay-addr-v1";
+
+    /// No live domain may be a prefix of another.
+    ///
+    /// The canonical payload is `domain ‖ Σ(u32be(len) ‖ field)`, and the
+    /// **domain itself is not length-prefixed**. So if one domain were a prefix
+    /// of another, a signature made under the shorter domain could be replayed
+    /// as one made under the longer: an attacker chooses a first field whose
+    /// leading bytes supply the rest of the longer domain, and the two payloads
+    /// become byte-identical. Length-prefixing the fields does not prevent it,
+    /// because the collision happens before the first length prefix.
+    ///
+    /// The concrete damage this stops is recorded in the addressing work: a
+    /// hostile relay that could make an address-proof signature verify as a
+    /// control-frame signature would harvest a replayable control frame from
+    /// every device that ever authenticated to it.
+    #[test]
+    fn signing_domains_are_mutually_non_prefixing() {
+        let domains: [(&str, &[u8]); 4] = [
+            ("offline-ctrl-v1", CTRL_SIGN_DOMAIN),
+            ("offline-disc-v1", DISCOVERY_SIGN_DOMAIN),
+            ("offline-invite-v1", INVITE_SIGN_DOMAIN),
+            ("offline-relay-addr-v1", RELAY_ADDR_SIGN_DOMAIN),
+        ];
+
+        for (a_name, a) in domains {
+            for (b_name, b) in domains {
+                if a_name == b_name {
+                    continue;
+                }
+                // Both the constant's name and its *value* are reported: a
+                // failure is usually caused by an edited value, and a message
+                // naming only the constant sends the reader to the wrong place.
+                assert!(
+                    !a.starts_with(b),
+                    "signing domain {} ({:?}) is a prefix of {} ({:?}), which \
+                     lets a signature made under one verify under the other",
+                    b_name,
+                    String::from_utf8_lossy(b),
+                    a_name,
+                    String::from_utf8_lossy(a)
+                );
+            }
+        }
+    }
+
+    /// The literals are what the rest of the system, and every other
+    /// implementation, actually expects. A renamed constant that still passes
+    /// the non-prefix test above would silently invalidate every signature in
+    /// the field, so the spellings are pinned too.
+    #[test]
+    fn signing_domains_have_their_published_spellings() {
+        assert_eq!(CTRL_SIGN_DOMAIN, b"offline-ctrl-v1");
+        assert_eq!(DISCOVERY_SIGN_DOMAIN, b"offline-disc-v1");
+        assert_eq!(INVITE_SIGN_DOMAIN, b"offline-invite-v1");
+        assert_eq!(RELAY_ADDR_SIGN_DOMAIN, b"offline-relay-addr-v1");
+    }
+
+    /// All four must be distinct, which non-prefixing already implies for
+    /// unequal strings but not for equal ones: two identical domains are
+    /// prefixes of each other, and the loop above skips same-name pairs.
+    #[test]
+    fn signing_domains_are_distinct() {
+        let domains: [&[u8]; 4] = [
+            CTRL_SIGN_DOMAIN,
+            DISCOVERY_SIGN_DOMAIN,
+            INVITE_SIGN_DOMAIN,
+            RELAY_ADDR_SIGN_DOMAIN,
+        ];
+        for (i, a) in domains.iter().enumerate() {
+            for b in domains.iter().skip(i + 1) {
+                assert_ne!(a, b, "two signing domains are the same string");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

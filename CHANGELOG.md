@@ -15,6 +15,71 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Username discovery and a self-certifying invite payload.** Two ways to
+  reach a peer you have never spoken to, restoring reach-by-username, which the
+  addressing migration removed.
+
+  `createInvite()` and `parseInvite()` produce and verify a compact base64url
+  blob carrying `{address, pubkey, petname?, sig?}`. It is verifiable offline
+  by anyone and, like `deriveAddress`, needs no protocol instance, so a scanner
+  can check a QR code before `create()`. The optional signature binds the
+  petname to the key; it does not defend against substitution (an attacker's
+  own correctly-signed invite is indistinguishable from a stranger's) but it
+  does stop a forwarded invite saving Alice's key under the name "Bob". Sign
+  when the invite may travel without its issuer. Invites deliberately carry no
+  key package (an MLS init key is single-use, a QR code is static, so pairing
+  them guarantees a collision the moment two people scan the same code) and no
+  expiry.
+
+  `resolveUsername()` looks a name up in a directory published over Nostr
+  (addressable kind 30777, sealed, one record per device). Off by default via
+  `transports.nostr.usernameDiscoveryEnabled`, and it additionally requires
+  cold contact, since a claim points at an address whose key packages are what
+  a resolver fetches next. Default-off is deliberate: publishing binds a
+  human-readable name to an address in a public place, where the mapping *is*
+  the payload, which is materially more disclosure than a key-package record's
+  "an install with this tag exists".
+
+  **The directory is not authoritative, and the API is shaped so you cannot
+  forget it.** Anyone may claim any name, so a resolution returns the whole set
+  of claimants as a single `username_resolved` event: no ranking, no "best"
+  claim, and no per-claim event to race. An app that auto-selects has converted
+  a non-authoritative directory into an authoritative-looking one, and its user
+  then believes the *name* was verified when only a *key* ever was. Present the
+  claims, let the user confirm out of band, and store the address rather than
+  the name. Note that even a single user resolves to a set: a phone and a
+  laptop are two genuine claims, and collapsing them hides the second device.
+
+  `resolveUsername()` resolves `true` if it started the lookup and `false` if
+  it joined one already in flight; **both mean the event is coming.** Every
+  case where no event will ever arrive rejects instead, so awaiting the
+  resolution can never hang on a lookup that was never started.
+
+  Each record binds the Nostr key it is published under, which the key-package
+  record does not. Without that binding a third party could unseal a claim,
+  re-seal the genuinely signed payload under their own key, and republish it,
+  and because addressable replacement is per-author the owner's retraction
+  would never displace the copy. Renaming or switching the feature off retracts
+  the standing claim.
+
+  Discovery events are additionally checked against their own BIP-340
+  signature, with the event id recomputed rather than trusted. This is the one
+  record kind that needs it: a retraction's body is a constant, so nothing
+  inside it is signed and its whole meaning is *who published it*, while the
+  seal key is public by construction. Without the check a single hostile relay
+  could forge a retraction for an honest claimant and erase them from the
+  resolved set even while every other relay served their genuine record —
+  inverting what querying many relays is for, since a claim needs only one
+  honest relay to survive.
+
+  Invite petnames are screened for the control and format characters a
+  username already refuses. A petname is what an app renders in the
+  confirmation dialog after a scan, and on a signed invite a bidi override
+  would otherwise arrive bound to a valid signature.
+
+  Wire format, verification order and threat model:
+  [docs/spec/username-discovery.md](docs/spec/username-discovery.md).
+
 - **Capability bias in mesh forwarding.** Battery level and charging state now
   continuously scale how much of the mesh's traffic a device carries: the delay
   before it transmits a forward, the number of neighbors it fans out to, and

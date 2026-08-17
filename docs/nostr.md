@@ -440,6 +440,105 @@ Sealing is therefore safe to enable or disable on one device without coordinatin
 
 Nothing in the SDK can detect this on your behalf: a relay that drops an event without an `["OK"]` is indistinguishable from a slow one, and the send fails through the ordinary pending-confirmation timeout. Before enabling Nostr in production, send real traffic through **your configured relays** and confirm delivery holds at your expected rate — a relay that works fine for one event per minute may not for a busy conversation. If it does not, the options are a relay you operate or one whose policy you know, rather than turning sealing off: unsealed frames publish the whole envelope in cleartext (see [What a relay can see](#what-a-relay-can-see)).
 
+## Username Discovery
+
+Off by default. `transports.nostr.usernameDiscoveryEnabled` (RN) /
+`nostr_username_discovery_enabled` (UniFFI, core `TransportConfig`) publishes a
+signed record binding this install's `profile` to its address, and enables
+`resolveUsername()`.
+
+The wire format, verification rules and threat model are specified in
+[docs/spec/username-discovery.md](spec/username-discovery.md). What follows is
+what an integrator needs to decide.
+
+### What it buys, and what it costs
+
+It restores reach-by-username, which the addressing migration removed: a
+stranger who knows only a name can find the addresses claiming it and open a
+session. Resolution is two hops, and only the first is new — a discovery record
+hands back `{address, pubkey}`, and everything after that is the existing
+published-key-package path.
+
+The cost is disclosure, and it is why the default is off rather than on like
+cold contact. A key-package record says "an install with this tag exists". A
+discovery record binds a human-readable name to an address, and here the
+mapping *is* the payload. The record is sealed, so a relay scraping by kind
+reads nothing, but anyone who guesses the name computes the tag and reads the
+claim. Publishing is also unprompted traffic: the record's existence and
+refresh timing are visible to every relay you publish to.
+
+Discovery additionally **requires cold contact**. A claim points at an address
+whose key packages a resolver fetches next, so with cold contact off the name
+resolves and then dead-ends. The two switches are coupled in the transport, not
+merely documented.
+
+### The directory is not authoritative, and your UI must say so
+
+Anyone may publish any claim to any name. A resolution returns the **whole set**
+of claimants as a single `username_resolved` event, and there is deliberately no
+"best" claim, no ranking, and no per-claim event to race.
+
+**Do not auto-select.** Taking the first entry converts a non-authoritative
+directory into an authoritative-looking one, and the user then believes the
+*name* was verified when only a *key* ever was. Present the claims, have the
+user confirm out of band, and store the **address**, never the name.
+
+Note that a username resolves to a set even for a single-device user: each
+install publishes its own record under its own key, so a user with a phone and
+a laptop is two claims, both genuine. An implementation that collapses them
+hides the user's own second device.
+
+```ts
+protocol.on('username_resolved', ({ username, claims, rejected }) => {
+  // claims: UsernameClaim[] — every claim that verified, unordered.
+  // rejected: how many records were seen and refused. Non-zero is normal;
+  // the tag is public and anyone may publish junk to it.
+  if (claims.length === 0) return showNotFound(username);
+  // Show them all. Let the user pick. Save claim.address, not username.
+  showClaimPicker(username, claims);
+});
+
+await protocol.resolveUsername('alice');
+```
+
+`resolveUsername()` resolves `true` if it started the lookup and `false` if it
+joined one already in flight. **Both mean the event above is coming**, so it is
+safe to await it after either. Every case where no event will ever arrive
+rejects instead (discovery disabled, or too many lookups in flight), so a
+`false` can never leave a spinner running forever.
+
+### Renames and retraction
+
+The claim tracks `config.profile`. Changing the profile retracts the old claim
+(a tombstone into the same addressable slot, plus a best-effort NIP-09
+deletion) and publishes the new one; turning the switch off retracts without
+republishing.
+
+Retraction is best effort by nature: a relay may honour neither half. The
+record that remembers *which* name to retract is persisted and sealed, because
+it is the only thing that knows — losing it leaves an old name standing in a
+public directory pointing at a live address.
+
+A retraction someone *else* published is a different matter, and it is refused.
+Discovery events are checked against their own BIP-340 signature before they
+are opened, with the event id recomputed rather than trusted. This is the only
+record kind that needs it: a tombstone's body is a constant, so nothing inside
+it is signed and its entire meaning is *who published it*, while the seal key
+is public by construction. Without the check one hostile relay could serve a
+forged retraction and erase an honest claimant from the resolved set even while
+every other relay served their genuine record.
+
+### Invites are the primary path, and permanent
+
+`createInvite()` / `parseInvite()` produce and verify a self-certifying blob
+carrying `{address, pubkey, petname?, sig?}`. Unlike a discovery record, an
+invite is verifiable offline by anyone: `derive_address(pubkey) == address` is
+checked at scan, before `create()`.
+
+Invites are not a stopgap for discovery. The out-of-band confirmation a QR code
+represents is the directory's *only* trust anchor, so the invite path is what
+makes discovery safe rather than the other way round.
+
 ## Troubleshooting
 
 ### Nostr Not Connecting

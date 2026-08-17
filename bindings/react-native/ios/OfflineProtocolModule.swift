@@ -354,6 +354,16 @@ class OfflineProtocolModule: RCTEventEmitter {
             ?? raw["nostr_cold_contact_enabled"] as? Bool
             ?? true
 
+        // Nostr username discovery (claim publication + username resolution).
+        // Same nested-then-flat shape, but the default is FALSE: publishing
+        // binds a human-readable name to an address in a public place, which
+        // an app must opt into rather than inherit.
+        let nostrUsernameDiscoveryEnabled = nostrRaw?["usernameDiscoveryEnabled"] as? Bool
+            ?? nostrRaw?["username_discovery_enabled"] as? Bool
+            ?? raw["nostrUsernameDiscoveryEnabled"] as? Bool
+            ?? raw["nostr_username_discovery_enabled"] as? Bool
+            ?? false
+
         // Group section (nested home under `group`, then top level, both
         // cases — same shape rules as `encryption`; mirrors
         // ProtocolConfigParser.kt, keep in sync). These were UniFFI-only
@@ -411,6 +421,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             binaryWireEnabled: binaryWireEnabled,
             nostrSealingEnabled: nostrSealingEnabled,
             nostrColdContactEnabled: nostrColdContactEnabled,
+            nostrUsernameDiscoveryEnabled: nostrUsernameDiscoveryEnabled,
             compactEnvelopeEnabled: encryption.compactEnvelopeEnabled,
             richPayloadEnabled: encryption.richPayloadEnabled,
             cryptoRecoveryEnabled: encryption.cryptoRecoveryEnabled
@@ -3377,6 +3388,83 @@ class OfflineProtocolModule: RCTEventEmitter {
             resolver(try deriveAddress(publicKey: publicKeyBytes))
         } catch {
             rejecter("ERROR_CRYPTO", "Failed to derive address: \(error.localizedDescription)", error)
+        }
+    }
+
+    /// Decode and verify an invite blob. Needs no protocol instance, so a
+    /// scanner can check a QR code before `create()`.
+    ///
+    /// Verification is total: a rejected blob throws rather than resolving
+    /// with a warning flag, because every failure mode here means the invite
+    /// must not be acted on.
+    ///
+    /// Same Swift-name-differs-from-JS-name rule as `deriveAddressBridge`: an
+    /// unqualified `parseInvite(blob:)` must resolve to the generated UniFFI
+    /// global rather than recurse into this method.
+    @objc(parseInvite:resolver:rejecter:)
+    func parseInviteBridge(_ blob: String,
+                           resolver: @escaping RCTPromiseResolveBlock,
+                           rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let invite = try parseInvite(blob: blob)
+            resolver([
+                "address": invite.address,
+                "public_key": invite.publicKey.map { NSNumber(value: $0) },
+                "petname": invite.petname as Any,
+                "signed": invite.signed,
+            ])
+        } catch {
+            rejecter("ERROR_INVALID_INVITE",
+                     "Invite did not verify: \(error.localizedDescription)",
+                     error)
+        }
+    }
+
+    /// Build an invite blob for this identity.
+    ///
+    /// Sign it when the invite may travel without its issuer; leave it
+    /// unsigned for a QR shown phone to phone. See the JS `createInvite` doc.
+    ///
+    /// The argument label is `sign`, never `signed`: this method's selector
+    /// reaches Objective-C through `OfflineProtocolModule.m`, where a
+    /// parameter named `signed` is a C type specifier rather than an
+    /// identifier and does not compile. The JS-facing name is unaffected —
+    /// React Native bridges positionally.
+    @objc func createInvite(_ petname: String?,
+                            sign: NSNumber,
+                            resolver: @escaping RCTPromiseResolveBlock,
+                            rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            resolver(try proto.createInvite(petname: petname, sign: sign.boolValue))
+        } catch {
+            rejecter("ERROR_CRYPTO",
+                     "Failed to create invite: \(error.localizedDescription)",
+                     error)
+        }
+    }
+
+    /// Resolve a username to the set of devices claiming it.
+    ///
+    /// The answer arrives as one `username_resolved` event carrying every
+    /// verified claim. Never auto-select from it: see the JS `resolveUsername`
+    /// doc for why picking the first entry defeats the design.
+    @objc func resolveUsername(_ username: String,
+                               resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            resolver(try proto.resolveUsername(username: username))
+        } catch {
+            rejecter("ERROR_INVALID_ARGUMENT",
+                     "Failed to resolve username: \(error.localizedDescription)",
+                     error)
         }
     }
 

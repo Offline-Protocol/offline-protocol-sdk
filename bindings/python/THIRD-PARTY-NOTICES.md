@@ -25,7 +25,7 @@ upstream source on each crate's page) — the exact versions are listed below.
 
 | License | Crates |
 |---------|--------|
-| MIT License | 159 |
+| MIT License | 162 |
 | Apache License 2.0 | 10 |
 | Mozilla Public License 2.0 | 9 |
 | GNU Affero General Public License v3.0 only | 8 |
@@ -1065,6 +1065,7 @@ DEALINGS IN THE SOFTWARE.
 Used by:
 
 - [heck 0.5.0](https://github.com/withoutboats/heck)
+- [unicode-normalization 0.1.25](https://github.com/unicode-rs/unicode-normalization)
 
 ```
 Copyright (c) 2015 The Rust Project Developers
@@ -3180,6 +3181,39 @@ SOFTWARE.
 
 Used by:
 
+- [tinyvec_macros 0.1.1](https://github.com/Soveu/tinyvec_macros)
+
+```
+MIT License
+
+Copyright (c) 2020 Soveu
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+```
+
+---
+
+### MIT License
+
+Used by:
+
 - [chrono 0.4.42](https://github.com/chronotope/chrono)
 - [openmls 0.7.4](https://github.com/openmls/openmls/)
 - [openmls_basic_credential 0.4.1](https://github.com/openmls/openmls/tree/main/basic_credential)
@@ -3342,6 +3376,23 @@ NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
 LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+```
+
+---
+
+### MIT License
+
+Used by:
+
+- [tinyvec 1.12.0](https://github.com/Lokathor/tinyvec)
+
+```
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
 

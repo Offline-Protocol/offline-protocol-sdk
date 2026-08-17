@@ -32,8 +32,11 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+mod canonical;
+pub mod discovery;
 pub mod error;
 pub mod group;
+pub mod invite;
 pub mod manager;
 pub mod provider;
 pub mod session;

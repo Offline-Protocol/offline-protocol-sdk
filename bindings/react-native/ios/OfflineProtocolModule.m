@@ -587,6 +587,22 @@ RCT_EXTERN_METHOD(deriveAddress:(NSArray *)publicKey
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(parseInvite:(NSString *)blob
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+// `sign:`, never `signed:` — the macro expands the parameter name into a C
+// declaration, and `signed` is a C type specifier, so `NSNumber *signed` is a
+// syntax error rather than a variable. Must match the Swift @objc selector.
+RCT_EXTERN_METHOD(createInvite:(NSString *)petname
+                  sign:(nonnull NSNumber *)sign
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(resolveUsername:(NSString *)username
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(deriveUserIdFromPublicKey:(NSArray *)publicKey
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
