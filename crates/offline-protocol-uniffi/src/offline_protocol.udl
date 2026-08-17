@@ -536,9 +536,10 @@ dictionary MeshRelayTunables {
 
 // What this device has actually been carrying for other people.
 //
-// Counters are cumulative for the lifetime of the protocol instance and never
-// reset. `forwarded` is the contribution figure to show a user; the rest are
-// diagnostics.
+// Every counter is cumulative for the lifetime of the protocol instance and
+// never resets, except `awaiting_transmission`, which is a gauge: it is the
+// queue depth right now and goes down as well as up. `forwarded` is the
+// contribution figure to show a user; the rest are diagnostics.
 dictionary MeshRelayStats {
     // Messages moved on someone else's behalf, counted once each.
     u64 forwarded;
@@ -557,8 +558,18 @@ dictionary MeshRelayStats {
     u64 covered_by_a_neighbor;
     // Frames refused because one neighbor was sending more than its share.
     u64 peer_rate_limited;
+    // Frames refused because the pending queue was full, on arrival or on the
+    // way back to it. Unlike rate_deferred this is a real loss: the frame
+    // reached nobody, and only a copy behind it or the sender's own retry will
+    // carry it now.
+    u64 refused_queue_full;
     // Forwards delayed by the per-second ceiling. Delayed, not dropped.
     u64 rate_deferred;
+    // Queued forwards given up on after waiting too long past their due time.
+    // The other end of rate_deferred: deferral is free to look healthy while
+    // this climbs, so it is the pair that says whether back-pressure is
+    // costing anything.
+    u64 abandoned_overdue;
     // Frames arriving with no hop budget left.
     u64 hop_limit_reached;
     // Frames whose TTL was clamped down to the mesh's own hop budget.

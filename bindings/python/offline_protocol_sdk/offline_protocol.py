@@ -4716,7 +4716,7 @@ class _UniffiFfiConverterTypeMeshRelayConfig(_UniffiConverterRustBuffer):
 
 @dataclass
 class MeshRelayStats:
-    def __init__(self, *, forwarded:int, transmissions:int, queued:int, awaiting_transmission:int, duplicates_suppressed:int, covered_by_a_neighbor:int, peer_rate_limited:int, rate_deferred:int, hop_limit_reached:int, reach_clamped:int, dropped_for_capacity:int):
+    def __init__(self, *, forwarded:int, transmissions:int, queued:int, awaiting_transmission:int, duplicates_suppressed:int, covered_by_a_neighbor:int, peer_rate_limited:int, refused_queue_full:int, rate_deferred:int, abandoned_overdue:int, hop_limit_reached:int, reach_clamped:int, dropped_for_capacity:int):
         self.forwarded = forwarded
         self.transmissions = transmissions
         self.queued = queued
@@ -4724,7 +4724,9 @@ class MeshRelayStats:
         self.duplicates_suppressed = duplicates_suppressed
         self.covered_by_a_neighbor = covered_by_a_neighbor
         self.peer_rate_limited = peer_rate_limited
+        self.refused_queue_full = refused_queue_full
         self.rate_deferred = rate_deferred
+        self.abandoned_overdue = abandoned_overdue
         self.hop_limit_reached = hop_limit_reached
         self.reach_clamped = reach_clamped
         self.dropped_for_capacity = dropped_for_capacity
@@ -4733,7 +4735,7 @@ class MeshRelayStats:
 
     
     def __str__(self):
-        return "MeshRelayStats(forwarded={}, transmissions={}, queued={}, awaiting_transmission={}, duplicates_suppressed={}, covered_by_a_neighbor={}, peer_rate_limited={}, rate_deferred={}, hop_limit_reached={}, reach_clamped={}, dropped_for_capacity={})".format(self.forwarded, self.transmissions, self.queued, self.awaiting_transmission, self.duplicates_suppressed, self.covered_by_a_neighbor, self.peer_rate_limited, self.rate_deferred, self.hop_limit_reached, self.reach_clamped, self.dropped_for_capacity)
+        return "MeshRelayStats(forwarded={}, transmissions={}, queued={}, awaiting_transmission={}, duplicates_suppressed={}, covered_by_a_neighbor={}, peer_rate_limited={}, refused_queue_full={}, rate_deferred={}, abandoned_overdue={}, hop_limit_reached={}, reach_clamped={}, dropped_for_capacity={})".format(self.forwarded, self.transmissions, self.queued, self.awaiting_transmission, self.duplicates_suppressed, self.covered_by_a_neighbor, self.peer_rate_limited, self.refused_queue_full, self.rate_deferred, self.abandoned_overdue, self.hop_limit_reached, self.reach_clamped, self.dropped_for_capacity)
     def __eq__(self, other):
         if self.forwarded != other.forwarded:
             return False
@@ -4749,7 +4751,11 @@ class MeshRelayStats:
             return False
         if self.peer_rate_limited != other.peer_rate_limited:
             return False
+        if self.refused_queue_full != other.refused_queue_full:
+            return False
         if self.rate_deferred != other.rate_deferred:
+            return False
+        if self.abandoned_overdue != other.abandoned_overdue:
             return False
         if self.hop_limit_reached != other.hop_limit_reached:
             return False
@@ -4770,7 +4776,9 @@ class _UniffiFfiConverterTypeMeshRelayStats(_UniffiConverterRustBuffer):
             duplicates_suppressed=_UniffiFfiConverterUInt64.read(buf),
             covered_by_a_neighbor=_UniffiFfiConverterUInt64.read(buf),
             peer_rate_limited=_UniffiFfiConverterUInt64.read(buf),
+            refused_queue_full=_UniffiFfiConverterUInt64.read(buf),
             rate_deferred=_UniffiFfiConverterUInt64.read(buf),
+            abandoned_overdue=_UniffiFfiConverterUInt64.read(buf),
             hop_limit_reached=_UniffiFfiConverterUInt64.read(buf),
             reach_clamped=_UniffiFfiConverterUInt64.read(buf),
             dropped_for_capacity=_UniffiFfiConverterUInt64.read(buf),
@@ -4785,7 +4793,9 @@ class _UniffiFfiConverterTypeMeshRelayStats(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt64.check_lower(value.duplicates_suppressed)
         _UniffiFfiConverterUInt64.check_lower(value.covered_by_a_neighbor)
         _UniffiFfiConverterUInt64.check_lower(value.peer_rate_limited)
+        _UniffiFfiConverterUInt64.check_lower(value.refused_queue_full)
         _UniffiFfiConverterUInt64.check_lower(value.rate_deferred)
+        _UniffiFfiConverterUInt64.check_lower(value.abandoned_overdue)
         _UniffiFfiConverterUInt64.check_lower(value.hop_limit_reached)
         _UniffiFfiConverterUInt64.check_lower(value.reach_clamped)
         _UniffiFfiConverterUInt64.check_lower(value.dropped_for_capacity)
@@ -4799,7 +4809,9 @@ class _UniffiFfiConverterTypeMeshRelayStats(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt64.write(value.duplicates_suppressed, buf)
         _UniffiFfiConverterUInt64.write(value.covered_by_a_neighbor, buf)
         _UniffiFfiConverterUInt64.write(value.peer_rate_limited, buf)
+        _UniffiFfiConverterUInt64.write(value.refused_queue_full, buf)
         _UniffiFfiConverterUInt64.write(value.rate_deferred, buf)
+        _UniffiFfiConverterUInt64.write(value.abandoned_overdue, buf)
         _UniffiFfiConverterUInt64.write(value.hop_limit_reached, buf)
         _UniffiFfiConverterUInt64.write(value.reach_clamped, buf)
         _UniffiFfiConverterUInt64.write(value.dropped_for_capacity, buf)

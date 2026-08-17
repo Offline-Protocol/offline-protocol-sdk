@@ -2931,7 +2931,9 @@ class OfflineProtocolModule: RCTEventEmitter {
             "duplicatesSuppressed": stats.duplicatesSuppressed,
             "coveredByANeighbor": stats.coveredByANeighbor,
             "peerRateLimited": stats.peerRateLimited,
+            "refusedQueueFull": stats.refusedQueueFull,
             "rateDeferred": stats.rateDeferred,
+            "abandonedOverdue": stats.abandonedOverdue,
             "hopLimitReached": stats.hopLimitReached,
             "reachClamped": stats.reachClamped,
             "droppedForCapacity": stats.droppedForCapacity

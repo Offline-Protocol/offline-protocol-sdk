@@ -547,6 +547,10 @@ What this means for an app: a message is not lost when this happens, but it can 
 
 `rate_deferred` rising means forwarding is hitting that ceiling — those frames are delayed, not dropped. `peer_rate_limited` means a single neighbor is sending more than its share. `dropped_for_capacity` should stay at zero; anything else means the device is seeing more traffic than it can remember having handled.
 
+Two counters say whether that back-pressure is costing anything, and they are the ones to read before concluding a device is coping. `refused_queue_full` counts frames turned away because the pending queue was full, on arrival or on their way back to it, and `abandoned_overdue` counts queued forwards given up on after waiting too long past their due time. Both are real losses: the frame reached nobody, and only a copy behind it or the sender's own retransmission carries it now. Deferral is free to look healthy while either climbs, which is exactly the case a device that is quietly shedding traffic presents.
+
+Every counter is cumulative for the lifetime of the instance, so a rate is a difference between two reads. `awaiting_transmission` is the exception: it is a gauge, the queue depth right now, and it goes down as well as up.
+
 The device's own sends draw on the same per-second budget — it is one radio — but keep a small reserve that forwarding never touches, so a device carrying a busy neighborhood can still get its own messages and acknowledgements out.
 
 Tunables live in `ProtocolConfig::mesh_relay`, and both the tunables and these counters cross to every binding. From React Native the section is `meshRelay` in the `create()` config, and the counters are `getMeshRelayStats()`; `getMeshRelayTunables()` reports what is actually in force, read from the governor rather than echoed back from what was passed in.

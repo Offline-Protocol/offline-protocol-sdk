@@ -27,7 +27,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `getMeshRelayStats()` reports what this device has carried; note that a
   device with a working relay connection forwards nothing, because the mesh is
   only offered frames no other carrier can deliver, so zero counters on an
-  online device are the honest answer rather than a fault.
+  online device are the honest answer rather than a fault. The counters include
+  `refusedQueueFull` and `abandonedOverdue`, the two that record frames
+  genuinely lost under pressure: without them a device shedding traffic reports
+  nothing but healthy-looking deferrals, which is the reading an app most needs
+  to be able to distinguish.
 
   Every config field is optional and an omitted one keeps the core's default,
   so a section naming one dial moves only that dial and no binding ever

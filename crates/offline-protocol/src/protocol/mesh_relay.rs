@@ -359,7 +359,9 @@ pub struct MeshRelayCounters {
 
 /// What this device has carried for other people.
 ///
-/// A snapshot, safe to poll: every field counts since start-up.
+/// A snapshot, safe to poll. Every field is cumulative since start-up except
+/// [`Self::awaiting_transmission`], which is a gauge: it is the queue depth
+/// right now, and it goes down as well as up.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MeshRelayStats {
     /// Frames carried onward on someone else's behalf, counted once each.
@@ -382,12 +384,28 @@ pub struct MeshRelayStats {
     pub covered_by_a_neighbor: u64,
     /// Frames refused because the neighbor sending them was over its share.
     pub peer_rate_limited: u64,
+    /// Frames refused admission, or refused room on their way back to the
+    /// queue, because the pending queue was full.
+    ///
+    /// This is a real loss: the frame reached nobody, and only a copy behind
+    /// it or the sender's own retransmission will carry it now. A rising value
+    /// means forwards are arriving faster than this device can transmit them,
+    /// so the queue is the thing to raise, or the rate ceiling that is filling
+    /// it — see [`Self::rate_deferred`].
+    pub refused_queue_full: u64,
     /// Transmissions held back because this device was at its forwarding rate.
     ///
     /// A frame counted here is delayed, not dropped: it goes back on the queue
     /// and is tried again on the next tick, until it is either sent or has
     /// waited so long past its turn that carrying it no longer helps.
     pub rate_deferred: u64,
+    /// Queued forwards given up on after waiting too long past their due time.
+    ///
+    /// The other end of [`Self::rate_deferred`]: this is where a frame that
+    /// kept being delayed finally stops being carried. Deferral is free to
+    /// look healthy while this climbs, so it is the pair that says whether
+    /// back-pressure is costing anything.
+    pub abandoned_overdue: u64,
     /// Frames that had travelled as far as they were allowed to.
     pub hop_limit_reached: u64,
     /// Frames whose claimed reach was cut down to local policy.

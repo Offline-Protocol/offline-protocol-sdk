@@ -3867,14 +3867,16 @@ public struct MeshRelayStats: Equatable, Hashable {
     public var duplicatesSuppressed: UInt64
     public var coveredByANeighbor: UInt64
     public var peerRateLimited: UInt64
+    public var refusedQueueFull: UInt64
     public var rateDeferred: UInt64
+    public var abandonedOverdue: UInt64
     public var hopLimitReached: UInt64
     public var reachClamped: UInt64
     public var droppedForCapacity: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(forwarded: UInt64, transmissions: UInt64, queued: UInt64, awaitingTransmission: UInt64, duplicatesSuppressed: UInt64, coveredByANeighbor: UInt64, peerRateLimited: UInt64, rateDeferred: UInt64, hopLimitReached: UInt64, reachClamped: UInt64, droppedForCapacity: UInt64) {
+    public init(forwarded: UInt64, transmissions: UInt64, queued: UInt64, awaitingTransmission: UInt64, duplicatesSuppressed: UInt64, coveredByANeighbor: UInt64, peerRateLimited: UInt64, refusedQueueFull: UInt64, rateDeferred: UInt64, abandonedOverdue: UInt64, hopLimitReached: UInt64, reachClamped: UInt64, droppedForCapacity: UInt64) {
         self.forwarded = forwarded
         self.transmissions = transmissions
         self.queued = queued
@@ -3882,7 +3884,9 @@ public struct MeshRelayStats: Equatable, Hashable {
         self.duplicatesSuppressed = duplicatesSuppressed
         self.coveredByANeighbor = coveredByANeighbor
         self.peerRateLimited = peerRateLimited
+        self.refusedQueueFull = refusedQueueFull
         self.rateDeferred = rateDeferred
+        self.abandonedOverdue = abandonedOverdue
         self.hopLimitReached = hopLimitReached
         self.reachClamped = reachClamped
         self.droppedForCapacity = droppedForCapacity
@@ -3909,7 +3913,9 @@ public struct FfiConverterTypeMeshRelayStats: FfiConverterRustBuffer {
                 duplicatesSuppressed: FfiConverterUInt64.read(from: &buf), 
                 coveredByANeighbor: FfiConverterUInt64.read(from: &buf), 
                 peerRateLimited: FfiConverterUInt64.read(from: &buf), 
+                refusedQueueFull: FfiConverterUInt64.read(from: &buf), 
                 rateDeferred: FfiConverterUInt64.read(from: &buf), 
+                abandonedOverdue: FfiConverterUInt64.read(from: &buf), 
                 hopLimitReached: FfiConverterUInt64.read(from: &buf), 
                 reachClamped: FfiConverterUInt64.read(from: &buf), 
                 droppedForCapacity: FfiConverterUInt64.read(from: &buf)
@@ -3924,7 +3930,9 @@ public struct FfiConverterTypeMeshRelayStats: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.duplicatesSuppressed, into: &buf)
         FfiConverterUInt64.write(value.coveredByANeighbor, into: &buf)
         FfiConverterUInt64.write(value.peerRateLimited, into: &buf)
+        FfiConverterUInt64.write(value.refusedQueueFull, into: &buf)
         FfiConverterUInt64.write(value.rateDeferred, into: &buf)
+        FfiConverterUInt64.write(value.abandonedOverdue, into: &buf)
         FfiConverterUInt64.write(value.hopLimitReached, into: &buf)
         FfiConverterUInt64.write(value.reachClamped, into: &buf)
         FfiConverterUInt64.write(value.droppedForCapacity, into: &buf)

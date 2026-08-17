@@ -2246,8 +2246,9 @@ export class OfflineProtocol {
    * Reports how much traffic this device is carrying for other people.
    *
    * Counters are cumulative for the lifetime of this instance and never reset,
-   * so a rate is a difference between two reads. `forwarded` is the
-   * contribution figure to show a user; `transmissions` is the one the
+   * so a rate is a difference between two reads. The exception is
+   * `awaitingTransmission`, a gauge that goes down as well as up. `forwarded`
+   * is the contribution figure to show a user; `transmissions` is the one the
    * per-second budget bounds, since it counts each link separately and
    * includes this device's own sends.
    *
@@ -2255,6 +2256,11 @@ export class OfflineProtocol {
    * hitting its ceiling and those frames are delayed rather than dropped, and
    * `coveredByANeighbor` is the mesh working as intended — a neighbor was
    * heard carrying the frame first, so this device stood down.
+   *
+   * For whether back-pressure is actually costing anything, read
+   * `refusedQueueFull` and `abandonedOverdue`. Those are the two that count
+   * frames genuinely lost, and a device shedding traffic can otherwise show
+   * nothing but healthy-looking deferrals.
    *
    * Note that a device with a working relay connection forwards nothing: the
    * mesh is only offered frames no other carrier can deliver. Zero counters on

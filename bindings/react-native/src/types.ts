@@ -160,7 +160,9 @@ export interface MeshRelayTunables {
  * What this device has been carrying for other people.
  *
  * Counters are cumulative for the lifetime of the protocol instance and never
- * reset. See `getMeshRelayStats()`.
+ * reset, so a rate is a difference between two reads. The one exception is
+ * `awaitingTransmission`, which is a gauge: it is the queue depth right now
+ * and goes down as well as up. See `getMeshRelayStats()`.
  */
 export interface MeshRelayStats {
   /**
@@ -187,8 +189,23 @@ export interface MeshRelayStats {
   coveredByANeighbor: number;
   /** Frames refused because one neighbor was sending more than its share */
   peerRateLimited: number;
+  /**
+   * Frames refused because the pending queue was full, on arrival or on the
+   * way back to it. Unlike `rateDeferred` this is a real loss: the frame
+   * reached nobody, and only a copy behind it or the sender's own retry will
+   * carry it now. Rising means forwards arrive faster than this device can
+   * transmit them.
+   */
+  refusedQueueFull: number;
   /** Forwards delayed by the per-second ceiling. Delayed, not dropped. */
   rateDeferred: number;
+  /**
+   * Queued forwards given up on after waiting too long past their due time.
+   * The other end of `rateDeferred`: deferral is free to look healthy while
+   * this climbs, so it is the pair that says whether back-pressure is costing
+   * anything.
+   */
+  abandonedOverdue: number;
   /** Frames arriving with no hop budget left */
   hopLimitReached: number;
   /** Frames whose TTL was clamped down to the mesh's own hop budget */

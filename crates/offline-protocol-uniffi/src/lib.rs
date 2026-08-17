@@ -2370,6 +2370,8 @@ pub struct MeshRelayTunables {
 }
 
 /// What this device has been carrying for other people.
+///
+/// Cumulative except `awaiting_transmission`, which is the queue depth now.
 #[derive(Debug, Clone)]
 pub struct MeshRelayStats {
     pub forwarded: u64,
@@ -2379,7 +2381,9 @@ pub struct MeshRelayStats {
     pub duplicates_suppressed: u64,
     pub covered_by_a_neighbor: u64,
     pub peer_rate_limited: u64,
+    pub refused_queue_full: u64,
     pub rate_deferred: u64,
+    pub abandoned_overdue: u64,
     pub hop_limit_reached: u64,
     pub reach_clamped: u64,
     pub dropped_for_capacity: u64,
@@ -2439,42 +2443,89 @@ impl MeshRelayConfig {
 }
 
 impl From<CoreMeshRelayConfig> for MeshRelayTunables {
+    /// Destructured rather than field-accessed, and deliberately so: a tunable
+    /// added to the core then fails to compile here instead of quietly never
+    /// reaching an app. `seen` is named and discarded for the same reason — it
+    /// is withheld on purpose (internal memory sizing, not a policy dial), and
+    /// naming it makes that a decision on the record rather than an omission.
     fn from(config: CoreMeshRelayConfig) -> Self {
+        let CoreMeshRelayConfig {
+            max_ttl,
+            dense_max_ttl,
+            dense_degree,
+            fanout,
+            jitter_min,
+            jitter_max,
+            rate_per_sec,
+            burst,
+            peer_rate_per_sec,
+            peer_burst,
+            queue_capacity,
+            seen: _,
+            bias_min_scale,
+            bias_max_handicap,
+            activity_window,
+            activity_min_forwards,
+            activity_idle_windows,
+        } = config;
+
         Self {
-            max_ttl: config.max_ttl,
-            dense_max_ttl: config.dense_max_ttl,
-            dense_degree: config.dense_degree as u64,
-            fanout: config.fanout as u64,
-            jitter_min_ms: config.jitter_min.as_millis() as u64,
-            jitter_max_ms: config.jitter_max.as_millis() as u64,
-            rate_per_sec: config.rate_per_sec,
-            burst: config.burst,
-            peer_rate_per_sec: config.peer_rate_per_sec,
-            peer_burst: config.peer_burst,
-            queue_capacity: config.queue_capacity as u64,
-            bias_min_scale: config.bias_min_scale,
-            bias_max_handicap_ms: config.bias_max_handicap.as_millis() as u64,
-            activity_window_ms: config.activity_window.as_millis() as u64,
-            activity_min_forwards: config.activity_min_forwards,
-            activity_idle_windows: config.activity_idle_windows,
+            max_ttl,
+            dense_max_ttl,
+            dense_degree: dense_degree as u64,
+            fanout: fanout as u64,
+            jitter_min_ms: jitter_min.as_millis() as u64,
+            jitter_max_ms: jitter_max.as_millis() as u64,
+            rate_per_sec,
+            burst,
+            peer_rate_per_sec,
+            peer_burst,
+            queue_capacity: queue_capacity as u64,
+            bias_min_scale,
+            bias_max_handicap_ms: bias_max_handicap.as_millis() as u64,
+            activity_window_ms: activity_window.as_millis() as u64,
+            activity_min_forwards,
+            activity_idle_windows,
         }
     }
 }
 
 impl From<CoreMeshRelayStats> for MeshRelayStats {
+    /// Destructured for the same reason as [`MeshRelayTunables`]: a counter
+    /// added to the core snapshot must break this build rather than silently
+    /// stop at the FFI boundary, which is how a diagnostic surface goes stale
+    /// without anyone noticing it has.
     fn from(stats: CoreMeshRelayStats) -> Self {
+        let CoreMeshRelayStats {
+            forwarded,
+            transmissions,
+            queued,
+            awaiting_transmission,
+            duplicates_suppressed,
+            covered_by_a_neighbor,
+            peer_rate_limited,
+            refused_queue_full,
+            rate_deferred,
+            abandoned_overdue,
+            hop_limit_reached,
+            reach_clamped,
+            dropped_for_capacity,
+        } = stats;
+
         Self {
-            forwarded: stats.forwarded,
-            transmissions: stats.transmissions,
-            queued: stats.queued,
-            awaiting_transmission: stats.awaiting_transmission as u64,
-            duplicates_suppressed: stats.duplicates_suppressed,
-            covered_by_a_neighbor: stats.covered_by_a_neighbor,
-            peer_rate_limited: stats.peer_rate_limited,
-            rate_deferred: stats.rate_deferred,
-            hop_limit_reached: stats.hop_limit_reached,
-            reach_clamped: stats.reach_clamped,
-            dropped_for_capacity: stats.dropped_for_capacity,
+            forwarded,
+            transmissions,
+            queued,
+            awaiting_transmission: awaiting_transmission as u64,
+            duplicates_suppressed,
+            covered_by_a_neighbor,
+            peer_rate_limited,
+            refused_queue_full,
+            rate_deferred,
+            abandoned_overdue,
+            hop_limit_reached,
+            reach_clamped,
+            dropped_for_capacity,
         }
     }
 }
@@ -13543,7 +13594,7 @@ mod tests {
         assert!(OfflineProtocol::new(config).is_err());
     }
 
-    /// The counters must map to the right fields, all eleven of them.
+    /// The counters must map to the right fields, all thirteen of them.
     ///
     /// A fresh instance has carried nothing, so every counter reads zero —
     /// which pins the wiring but not the mapping. The mapping is pinned by
@@ -13561,10 +13612,146 @@ mod tests {
         assert_eq!(stats.duplicates_suppressed, 0);
         assert_eq!(stats.covered_by_a_neighbor, 0);
         assert_eq!(stats.peer_rate_limited, 0);
+        assert_eq!(stats.refused_queue_full, 0);
         assert_eq!(stats.rate_deferred, 0);
+        assert_eq!(stats.abandoned_overdue, 0);
         assert_eq!(stats.hop_limit_reached, 0);
         assert_eq!(stats.reach_clamped, 0);
         assert_eq!(stats.dropped_for_capacity, 0);
+    }
+
+    /// Every mesh-relay counter must be reported by every layer that carries
+    /// it, in the one spelling each bridge emits.
+    ///
+    /// The read-side twin of
+    /// `react_native_bridges_read_every_mesh_relay_tunable`, and the same
+    /// silent failure in the other direction: a counter can join the UDL and be
+    /// missed by one native module with no error anywhere, leaving an app
+    /// reading a number that is simply never populated. Unlike the config
+    /// there are no snake_case aliases here — these values are built by the
+    /// bridges rather than parsed, so each field has exactly one spelling.
+    #[test]
+    fn react_native_bridges_report_every_mesh_relay_counter() {
+        /// Drops comment lines, so an assertion matches code rather than the
+        /// prose describing it — every field below is also named in a doc
+        /// comment somewhere.
+        fn code_only(source: &str) -> String {
+            source
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with("//") && !l.starts_with('*') && !l.starts_with("/*"))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        /// The region between two anchors, so an assertion cannot satisfy
+        /// itself from some unrelated part of the file.
+        fn slice_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            let after = source
+                .split_once(start)
+                .unwrap_or_else(|| panic!("expected {start:?} in source"))
+                .1;
+            after
+                .split_once(end)
+                .unwrap_or_else(|| panic!("expected {end:?} after {start:?}"))
+                .0
+        }
+
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            let path = rn_dir.join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+
+        // camelCase, in UDL order.
+        const FIELDS: &[&str] = &[
+            "forwarded",
+            "transmissions",
+            "queued",
+            "awaitingTransmission",
+            "duplicatesSuppressed",
+            "coveredByANeighbor",
+            "peerRateLimited",
+            "refusedQueueFull",
+            "rateDeferred",
+            "abandonedOverdue",
+            "hopLimitReached",
+            "reachClamped",
+            "droppedForCapacity",
+        ];
+
+        // Guard the guard: a counter that joins the UDL and not FIELDS would
+        // leave the loop below passing while the newcomer goes unchecked.
+        let udl = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/offline_protocol.udl"),
+        )
+        .expect("read udl");
+        let udl_fields: Vec<String> = slice_between(&udl, "dictionary MeshRelayStats {", "};")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .filter_map(|l| l.trim_end_matches(';').split_whitespace().nth(1))
+            .map(|snake| {
+                let mut out = String::new();
+                let mut upper = false;
+                for c in snake.chars() {
+                    if c == '_' {
+                        upper = true;
+                    } else if upper {
+                        out.extend(c.to_uppercase());
+                        upper = false;
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out
+            })
+            .collect();
+        assert_eq!(
+            udl_fields, FIELDS,
+            "MeshRelayStats gained or lost a counter in the UDL. Add it to FIELDS *and* to both \
+             native modules and the TypeScript interface, or apps read a number that is never \
+             populated"
+        );
+
+        let kotlin = code_only(slice_between(
+            &read("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"),
+            "fun getMeshRelayStats(",
+            "promise.resolve(map)",
+        ));
+        let swift = code_only(slice_between(
+            &read("ios/OfflineProtocolModule.swift"),
+            "func getMeshRelayStats(",
+            "resolver(statsDict)",
+        ));
+        let types_ts = code_only(slice_between(
+            &read("src/types.ts"),
+            "export interface MeshRelayStats {",
+            "}",
+        ));
+
+        for field in FIELDS {
+            assert!(
+                kotlin.contains(&format!("\"{field}\"")),
+                "OfflineProtocolModule.kt getMeshRelayStats must report `{field}`"
+            );
+            assert!(
+                swift.contains(&format!("\"{field}\"")),
+                "OfflineProtocolModule.swift getMeshRelayStats must report `{field}`"
+            );
+            // Types are erased at runtime, so a counter missing from the TS
+            // interface cannot be caught by any JS test — an app simply cannot
+            // read it without tsc rejecting the attempt.
+            assert!(
+                types_ts.contains(&format!("{field}:")),
+                "types.ts MeshRelayStats must declare `{field}:`, or no app can read it"
+            );
+        }
     }
 
     /// Every mesh-relay tunable must be readable by every layer that carries

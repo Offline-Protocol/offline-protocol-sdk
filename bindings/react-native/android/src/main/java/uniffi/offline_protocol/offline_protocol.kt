@@ -6942,7 +6942,11 @@ data class MeshRelayStats (
     , 
     var `peerRateLimited`: kotlin.ULong
     , 
+    var `refusedQueueFull`: kotlin.ULong
+    , 
     var `rateDeferred`: kotlin.ULong
+    , 
+    var `abandonedOverdue`: kotlin.ULong
     , 
     var `hopLimitReached`: kotlin.ULong
     , 
@@ -6974,6 +6978,8 @@ public object FfiConverterTypeMeshRelayStats: FfiConverterRustBuffer<MeshRelaySt
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
         )
     }
 
@@ -6985,7 +6991,9 @@ public object FfiConverterTypeMeshRelayStats: FfiConverterRustBuffer<MeshRelaySt
             FfiConverterULong.allocationSize(value.`duplicatesSuppressed`) +
             FfiConverterULong.allocationSize(value.`coveredByANeighbor`) +
             FfiConverterULong.allocationSize(value.`peerRateLimited`) +
+            FfiConverterULong.allocationSize(value.`refusedQueueFull`) +
             FfiConverterULong.allocationSize(value.`rateDeferred`) +
+            FfiConverterULong.allocationSize(value.`abandonedOverdue`) +
             FfiConverterULong.allocationSize(value.`hopLimitReached`) +
             FfiConverterULong.allocationSize(value.`reachClamped`) +
             FfiConverterULong.allocationSize(value.`droppedForCapacity`)
@@ -6999,7 +7007,9 @@ public object FfiConverterTypeMeshRelayStats: FfiConverterRustBuffer<MeshRelaySt
             FfiConverterULong.write(value.`duplicatesSuppressed`, buf)
             FfiConverterULong.write(value.`coveredByANeighbor`, buf)
             FfiConverterULong.write(value.`peerRateLimited`, buf)
+            FfiConverterULong.write(value.`refusedQueueFull`, buf)
             FfiConverterULong.write(value.`rateDeferred`, buf)
+            FfiConverterULong.write(value.`abandonedOverdue`, buf)
             FfiConverterULong.write(value.`hopLimitReached`, buf)
             FfiConverterULong.write(value.`reachClamped`, buf)
             FfiConverterULong.write(value.`droppedForCapacity`, buf)
