@@ -488,11 +488,18 @@ install publishes its own record under its own key, so a user with a phone and
 a laptop is two claims, both genuine. An implementation that collapses them
 hides the user's own second device.
 
+Subscribe **before** you call `resolveUsername()`. The answer is a single event
+with no replay, so a listener attached afterwards can miss it.
+
 ```ts
-protocol.on('username_resolved', ({ username, claims, rejected }) => {
+protocol.on('username_resolved', ({ username, claims, rejected, truncated }) => {
   // claims: UsernameClaim[] — every claim that verified, unordered.
   // rejected: how many records were seen and refused. Non-zero is normal;
   // the tag is public and anyone may publish junk to it.
+  // truncated: how many *verified* claims were dropped at the ceiling. The
+  // opposite of rejected: those records were good and are missing anyway.
+  // Non-zero means claims is a sample, so an absence from it proves nothing,
+  // and it is the only signal that a name is being squatted at volume.
   if (claims.length === 0) return showNotFound(username);
   // Show them all. Let the user pick. Save claim.address, not username.
   showClaimPicker(username, claims);
@@ -504,8 +511,19 @@ await protocol.resolveUsername('alice');
 `resolveUsername()` resolves `true` if it started the lookup and `false` if it
 joined one already in flight. **Both mean the event above is coming**, so it is
 safe to await it after either. Every case where no event will ever arrive
-rejects instead (discovery disabled, or too many lookups in flight), so a
-`false` can never leave a spinner running forever.
+rejects instead, so a `false` can never leave a spinner running forever. The
+rejection code says which case, and they need different handling:
+`InvalidConfiguration` (discovery is off, retrying cannot help),
+`InvalidState` (too many lookups in flight, retry shortly), and
+`InvalidArgument` (not a claimable name).
+
+A resolution query is broadcast to every connected relay, and it completes when
+**all** of them have answered rather than when the first one has. That is a
+correctness property, not a latency choice: a claim is meant to need only one
+honest relay to survive, so finishing early would let whichever relay answered
+fastest decide the whole answer, including a relay that holds nothing. A relay
+that never answers is bounded by a timeout, and a relay that disconnects stops
+being waited on.
 
 ### Renames and retraction
 
@@ -518,6 +536,14 @@ Retraction is best effort by nature: a relay may honour neither half. The
 record that remembers *which* name to retract is persisted and sealed, because
 it is the only thing that knows — losing it leaves an old name standing in a
 public directory pointing at a live address.
+
+The name is kept until a relay **acknowledges** the tombstone, not until one is
+queued. Those are different moments, and the gap between them is where a
+retraction is lost: the send can fail, the process can exit first, and with the
+Nostr transport switched off entirely the queue call does nothing at all. In
+each of those the profile has already moved on, so the old name is
+unrecoverable by the next tick. A retraction still owed is re-queued on each
+refresh, including after a restart, until it lands.
 
 A retraction someone *else* published is a different matter, and it is refused.
 Discovery events are checked against their own BIP-340 signature before they

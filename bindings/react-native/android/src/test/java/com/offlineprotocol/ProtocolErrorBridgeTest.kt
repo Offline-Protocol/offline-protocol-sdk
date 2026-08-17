@@ -17,6 +17,12 @@ class ProtocolErrorBridgeTest {
             ProtocolException.MediaTransferLimit("bob") to "MediaTransferLimit",
             ProtocolException.SendFailed("all transports failed") to "SendFailed",
             ProtocolException.InvalidState("cannot demote the last admin") to "InvalidState",
+            // resolveUsername raises this for "discovery is off", where a retry
+            // can never succeed, beside InvalidState for "retry shortly". One
+            // code for both is the difference between an app that stops and one
+            // that spins.
+            ProtocolException.InvalidConfiguration("username discovery is disabled")
+                to "InvalidConfiguration",
             ProtocolException.MlsNotInitialized("MLS not initialized") to "MlsNotInitialized",
             ProtocolException.TransportException("ble unavailable") to "TransportError",
             ProtocolException.SerializationException("bad json") to "SerializationError",

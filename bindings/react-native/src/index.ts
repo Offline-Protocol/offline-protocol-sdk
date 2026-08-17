@@ -2681,9 +2681,18 @@ export class OfflineProtocol {
    * `username_resolved` event follows either way, so awaiting that event after
    * either result is safe.
    *
-   * Every case where no event will ever arrive **rejects** instead — discovery
-   * disabled, or too many lookups in flight — so a `false` can never leave a
-   * spinner running forever.
+   * Every case where no event will ever arrive **rejects** instead, so a
+   * `false` can never leave a spinner running forever. The rejection code says
+   * which, and they call for different handling:
+   *
+   * - `InvalidConfiguration` — discovery is off (it also requires
+   *   `coldContactEnabled`). Retrying unchanged can never succeed.
+   * - `InvalidState` — too many lookups in flight. Transient; retry shortly.
+   * - `InvalidArgument` — not a claimable username (empty, over 64 bytes once
+   *   normalized, carrying a control or format character, or address-shaped).
+   *
+   * Subscribe to `username_resolved` **before** calling this. The answer is a
+   * single event with no replay, so a listener attached afterwards can miss it.
    *
    * The answer carries **every** verified claim. There is deliberately no
    * "best" claim and no ordering: anyone may publish any name, so what comes
@@ -2697,7 +2706,9 @@ export class OfflineProtocol {
    *
    * @param username - The name to look up; normalized to NFC and lowercase
    * @returns `true` if this call started the lookup, `false` if it joined one
-   * @throws If discovery is disabled, or too many lookups are in flight
+   * @throws `InvalidConfiguration` if discovery is off, `InvalidState` if too
+   *   many lookups are in flight, `InvalidArgument` if the name is not
+   *   claimable
    */
   async resolveUsername(username: string): Promise<boolean> {
     return await OfflineProtocolNativeModule.resolveUsername(username);

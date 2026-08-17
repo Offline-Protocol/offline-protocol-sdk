@@ -1616,6 +1616,16 @@ export interface UsernameResolvedEvent extends BaseEvent {
    * be told apart from "not found, everything was junk".
    */
   rejected: number;
+  /**
+   * How many *verified* claims were dropped at the accumulator's ceiling.
+   *
+   * The opposite statement to `rejected`: these records passed every check and
+   * are missing anyway, because one name attracted more claimants than a
+   * resolution will hold. Non-zero means `claims` is a sample, so an absence
+   * from it proves nothing — and it is the only signal that a name is being
+   * squatted at volume, which would otherwise render as a clean set.
+   */
+  truncated: number;
 }
 
 /**

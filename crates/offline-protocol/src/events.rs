@@ -1267,6 +1267,16 @@ pub enum Event {
         /// different from one that returns nothing having seen nothing, and an
         /// app showing "not found" may want to distinguish them.
         rejected: u32,
+        /// How many *verified* claims were dropped at the accumulator's
+        /// ceiling.
+        ///
+        /// Separate from `rejected` because it is the opposite statement: these
+        /// records were good and are missing anyway. Without it a crowded name
+        /// renders exactly like an uncrowded one, a clean set with nothing
+        /// refused, which hides the single signal that a name is being
+        /// squatted at volume. Non-zero means `claims` is a sample and no
+        /// absence in it can be trusted.
+        truncated: u32,
     },
 
     /// A group message was sent to all members via mesh (MLS-encrypted fan-out).
@@ -3229,11 +3239,13 @@ impl fmt::Debug for Event {
                 username: _,
                 claims,
                 rejected,
+                truncated,
             } => f
                 .debug_struct("UsernameResolved")
                 .field("username", &"<redacted>")
                 .field("claim_count", &claims.len())
                 .field("rejected", rejected)
+                .field("truncated", truncated)
                 .finish(),
             Self::GroupMessageSent {
                 group_id,

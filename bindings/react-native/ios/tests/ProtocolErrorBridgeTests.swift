@@ -14,6 +14,11 @@ final class ProtocolErrorBridgeTests: XCTestCase {
             (.MediaTransferLimit(message: "bob"), "MediaTransferLimit"),
             (.SendFailed(message: "all transports failed"), "SendFailed"),
             (.InvalidState(message: "cannot demote the last admin"), "InvalidState"),
+            // resolveUsername raises this for "discovery is off", where a retry
+            // can never succeed, beside InvalidState for "retry shortly". One
+            // code for both is the difference between an app that stops and one
+            // that spins.
+            (.InvalidConfiguration(message: "username discovery is disabled"), "InvalidConfiguration"),
             (.MlsNotInitialized(message: "MLS not initialized"), "MlsNotInitialized"),
             (.TransportError(message: "ble unavailable"), "TransportError"),
             (.SerializationError(message: "bad json"), "SerializationError"),

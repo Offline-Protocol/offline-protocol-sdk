@@ -613,6 +613,7 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             username,
             claims,
             rejected: _,
+            truncated: _,
         } => {
             hash_string(username, scrubber);
             for claim in claims.iter_mut() {
@@ -1509,6 +1510,46 @@ mod tests {
             // The scrub must not panic for any variant and must produce a
             // different `Event` when an identifier field was present.
             let _ = scrub_event(&ev, &scrubber).into_owned();
+        }
+    }
+    /// A username is the most directly personal identifier this SDK emits, and
+    /// the claims beside it are addresses and identity keys. Pinned because the
+    /// scrub arm is easy to add a field to and forget, and the failure is
+    /// silent: the event still ships, just with the name in it.
+    #[test]
+    fn username_resolution_hashes_the_name_and_every_claim() {
+        let event = Event::UsernameResolved {
+            username: "alice".into(),
+            claims: vec![crate::events::UsernameClaim {
+                address: "off1qy682ruch4vlely5dkj94247jva7z49yk5xpqee0".into(),
+                public_key: "aW1hZ2luZS1hLWtleQ==".into(),
+                issued_at_ms: 1_700_000_000_000,
+            }],
+            rejected: 3,
+            truncated: 2,
+        };
+
+        let scrubbed = scrub_event(&event, &scrubber_enabled());
+        match scrubbed.as_ref() {
+            Event::UsernameResolved {
+                username,
+                claims,
+                rejected,
+                truncated,
+            } => {
+                assert_eq!(username, &hashed("alice"));
+                assert_eq!(
+                    claims[0].address,
+                    hashed("off1qy682ruch4vlely5dkj94247jva7z49yk5xpqee0")
+                );
+                assert_eq!(claims[0].public_key, hashed("aW1hZ2luZS1hLWtleQ=="));
+                // Counts are not identifiers and must survive: they are what an
+                // operator reads to tell a quiet name from a crowded one.
+                assert_eq!(*rejected, 3);
+                assert_eq!(*truncated, 2);
+                assert_eq!(claims[0].issued_at_ms, 1_700_000_000_000);
+            }
+            other => panic!("expected UsernameResolved, got {:?}", other),
         }
     }
 }

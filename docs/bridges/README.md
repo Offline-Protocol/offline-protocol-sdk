@@ -102,7 +102,7 @@ See [ADR 0014](../adr/0014-dedicated-ffi-entry-points.md).
 
 ## C5. Hand-mirrored constants must be pinned in every language
 
-Some constants exist in several places no single compiler sees together. Four
+Some constants exist in several places no single compiler sees together. Five
 sets do today, and they are pinned by **two different** mechanisms, so knowing
 which one you are touching matters.
 
@@ -128,6 +128,13 @@ binding edited alone fails the Rust suite rather than its own. See
 
 The one-shot event tag list and the mesh wake task key are pinned the same way,
 by Rust guards that read the binding sources.
+
+**The relay address-proof signing domain** is the fifth, and the newest: the
+Swift and Kotlin `AddressDeclarationPolicy` each hold a copy of
+`offline-relay-addr-v1`, and a Rust guard reads both sources. It belongs to the
+four-domain mutual non-prefix rule the core pins separately, so an edit here
+that agrees with itself in one language still fails that guard rather than
+producing a signature nothing verifies.
 
 ## C6. Config parsers must not default to literals
 

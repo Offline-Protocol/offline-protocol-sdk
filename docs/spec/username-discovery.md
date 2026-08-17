@@ -396,6 +396,21 @@ half that works through the replacement rule rather than through a relay's
 cooperation, so an implementation MUST publish the tombstone and MAY treat the
 deletion as optional.
 
+An implementation MUST hold the retracted name until a relay acknowledges the
+tombstone, and MUST re-queue it, across restarts, until then. Queueing is not
+landing: the send can fail, the process can exit first, and an implementation
+with its Nostr transport disabled may accept the request and do nothing. By the
+time any of those is observable the name is gone from the local state that
+would name it, because a retraction is triggered by the very change that
+replaces it. A claim left standing this way does not expire on its own: the
+address it points at is still publishing key packages, so hop 2 keeps
+succeeding.
+
+The name is not owed forever. An implementation SHOULD bound how many
+un-landed retractions it carries, and dropping the oldest is the correct
+failure: an unbounded record that grows across restarts is worse than a stale
+claim hop 2 will still arbitrate.
+
 A resolver MUST treat a tombstone, or an undecodable body, as "no claim from
 this author".
 
@@ -418,11 +433,34 @@ A resolver:
   is that device republishing;
 - MUST return the whole set, in no meaningful order;
 - SHOULD report how many records were seen and refused, so "nobody claims this
-  name" can be distinguished from "everything claiming it was junk".
+  name" can be distinguished from "everything claiming it was junk";
+- SHOULD report how many *verified* claims it dropped at its own ceiling, which
+  is the opposite statement and must not be folded into the refusal count. A
+  resolution that silently truncates renders a crowded name exactly like an
+  uncrowded one, hiding the only signal that a name is being squatted at
+  volume.
 
 An implementation MUST bound both the number of concurrent resolutions and the
 number of claims accumulated per resolution. The tag is public and a squatter
 can flood it.
+
+### A resolution ends when every relay has answered
+
+The query is broadcast, so each relay answers under the same subscription and
+sends its own end-of-stored-events. A resolution MUST NOT be completed on the
+first of them.
+
+This is the same property [event authenticity](#event-authenticity-is-required-here-and-nowhere-else)
+protects, reached from the other side. A claim needs *one* honest relay to
+survive; completing on the first answer hands the entire result to whichever
+relay is fastest, and an empty or hostile one wins that race by having nothing
+to send. No forgery is required, so the check on tombstones would not see it.
+
+A conforming resolver therefore closes each relay's subscription as that relay
+finishes, which keeps a query from leaving a standing filter on a public tag,
+and completes the resolution only when every relay it asked has answered. It
+MUST bound that wait: a relay is free never to send end-of-stored-events, and a
+resolution with no deadline is a caller waiting forever.
 
 ### Gating
 
@@ -472,6 +510,13 @@ Residuals, stated plainly:
 - **No revocation of a compromised device's claim by anyone but that device.**
   A compromised key can re-sign its own claim indefinitely. This is inherent to
   a non-authoritative directory.
+- **A lost publishing key is a claim nobody can withdraw.** Addressable
+  replacement and NIP-09 deletion are both keyed on the author, and the
+  `nostr_author` binding stops anyone else from standing in, so an install that
+  loses its Nostr signing secret cannot retract what it published under it. Hop
+  2 is the only thing left that arbitrates, and it does so only once the
+  address stops answering. An implementation whose signing secret is
+  session-local should not publish claims under it at all.
 
 ## The server-backed alternative
 

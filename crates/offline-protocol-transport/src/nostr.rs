@@ -462,6 +462,22 @@ pub struct NostrTransport {
     /// at most one entry in practice and is keyed by our own derived tag in
     /// every case.
     failed_discovery_publications: Mutex<HashSet<String>>,
+    /// Discovery tags whose publication a relay acknowledged, waiting for the
+    /// engine to drain them via
+    /// [`Self::take_confirmed_discovery_publications`].
+    ///
+    /// The mirror of [`Self::failed_discovery_publications`], and it exists for
+    /// the half of the lifecycle that failure reporting alone cannot express: a
+    /// **retraction** is owed until it lands, so the engine must keep the
+    /// retracted name until something says the tombstone reached a relay.
+    /// Absence of a failure is not that signal — a report that never arrives is
+    /// indistinguishable from a publication still in flight — so the engine
+    /// would either forget the name too early (stranding a claim in a public
+    /// directory) or retract forever.
+    ///
+    /// Bounded by the same construction as its failure twin: entries are this
+    /// install's own derived tags, one per name it has claimed.
+    confirmed_discovery_publications: Mutex<HashSet<String>>,
     /// Ready-built NIP-09 deletion events, as `(event_id, relay_json)`.
     ///
     /// Queued by a retraction after its tombstone is built, so the deletion
@@ -569,6 +585,7 @@ impl NostrTransport {
             discovery_enabled: Mutex::new(false),
             discovery_queue: Mutex::new(VecDeque::new()),
             failed_discovery_publications: Mutex::new(HashSet::new()),
+            confirmed_discovery_publications: Mutex::new(HashSet::new()),
             pending_deletions: Mutex::new(VecDeque::new()),
             resolve_queue: Mutex::new(VecDeque::new()),
             discovery_resolve_queue: Mutex::new(VecDeque::new()),
@@ -807,6 +824,26 @@ impl NostrTransport {
     /// Drains the discovery tags whose publication never reached a relay.
     pub fn take_failed_discovery_publications(&self) -> Vec<String> {
         self.failed_discovery_publications
+            .lock_or_recover()
+            .drain()
+            .collect()
+    }
+
+    /// Records a discovery publication a relay acknowledged.
+    fn mark_discovery_publication_confirmed(&self, tag: String) {
+        self.confirmed_discovery_publications
+            .lock_or_recover()
+            .insert(tag);
+    }
+
+    /// Drains the discovery tags whose publication a relay acknowledged.
+    ///
+    /// The engine uses this to retire a retraction it owes. A tag appears here
+    /// for a claim and for a tombstone alike, which is not an ambiguity to
+    /// resolve: a name is either claimed or being retracted, and publishing a
+    /// claim for a name cancels any retraction owed for it anyway.
+    pub fn take_confirmed_discovery_publications(&self) -> Vec<String> {
+        self.confirmed_discovery_publications
             .lock_or_recover()
             .drain()
             .collect()
@@ -1090,6 +1127,16 @@ impl NostrTransport {
             };
             // The relay decides how many events arrive here, so the ceiling has
             // to be ours. See [`MAX_QUERY_EVENTS`].
+            //
+            // Counted before the record is parsed or authenticated, and that
+            // ordering is the deliberate half: the budget is a bound on *work*,
+            // so a relay streaming junk must spend it. The cost is that such a
+            // relay can also crowd out honest records that arrive later, which
+            // is the same crowding the per-relay `limit` accepts, and is why a
+            // resolution reports what it dropped rather than presenting a
+            // truncated set as complete. Only the per-query duplicate slot is
+            // spent after authentication, so a forgery cannot displace the
+            // genuine record whose id it copied.
             if query.delivered >= MAX_QUERY_EVENTS {
                 tracing::warn!(
                     query_id = %query_id,
@@ -1159,7 +1206,7 @@ impl NostrTransport {
             if !query.seen_events.insert(event_id.to_string()) {
                 tracing::debug!(
                     query_id = %query_id,
-                    "Duplicate Nostr key-package record for this query; already taken"
+                    "Duplicate Nostr resolution record for this query; already taken"
                 );
                 return Ok(None);
             }
@@ -1578,14 +1625,23 @@ impl NostrTransport {
 
         let result = (|| {
             let seal = nostr_crypto::discovery_seal_keypair_for_username(&pending.username)?;
-            let event = {
+            let (event, deletion) = {
                 let keypair = self.keypair.read_or_recover();
-                nostr_crypto::NostrEvent::create_discovery_publication(
+                let event = nostr_crypto::NostrEvent::create_discovery_publication(
                     &keypair,
                     &tag,
                     seal.public_key_hex(),
                     &pending.payload,
-                )?
+                )?;
+                // Built under the *same* keypair guard as the tombstone it
+                // follows. Re-reading the keypair for it would let an identity
+                // swap in between name a coordinate this install never
+                // published at, and a NIP-09 deletion is per-author, so that
+                // request would delete nothing while reporting nothing.
+                let deletion = pending
+                    .retraction
+                    .then(|| nostr_crypto::NostrEvent::create_discovery_deletion(&keypair, &tag));
+                (event, deletion)
             };
             let event_id = event.id.clone();
             let event_json = event.to_relay_message()?;
@@ -1595,13 +1651,13 @@ impl NostrTransport {
                     NOSTR_MAX_PAYLOAD_SIZE,
                 ));
             }
-            Ok((event_id, event_json))
+            Ok((event_id, event_json, deletion))
         })();
 
         match result {
-            Ok((event_id, event_json)) => {
-                if pending.retraction {
-                    self.queue_discovery_deletion(&tag);
+            Ok((event_id, event_json, deletion)) => {
+                if let Some(deletion) = deletion {
+                    self.queue_discovery_deletion(deletion);
                 }
                 self.pending_confirmation
                     .lock_or_recover()
@@ -1625,16 +1681,18 @@ impl NostrTransport {
 
     /// Queues the best-effort NIP-09 deletion half of a retraction.
     ///
-    /// Pushed to the *front* of the message queue's peer, the discovery queue,
-    /// so it follows the tombstone immediately. It carries no synthetic id and
-    /// no pending-confirmation entry: nothing republishes a deletion and
-    /// nothing recovers if a relay ignores it, which is what "best effort"
-    /// means here.
-    fn queue_discovery_deletion(&self, tag: &str) {
-        let event = {
-            let keypair = self.keypair.read_or_recover();
-            nostr_crypto::NostrEvent::create_discovery_deletion(&keypair, tag)
-        };
+    /// Takes an already-built event rather than building one, so it is signed
+    /// by the same key as the tombstone whose slot it names. See
+    /// [`Self::next_discovery_event`].
+    ///
+    /// Held in its own queue, drained after the discovery queue, so the
+    /// deletion follows its tombstone rather than racing it. A claim for
+    /// another name queued in between will go out first; that is harmless,
+    /// since the deletion names its coordinate explicitly. It carries no
+    /// synthetic id and no pending-confirmation entry: nothing republishes a
+    /// deletion and nothing recovers if a relay ignores it, which is what
+    /// "best effort" means here.
+    fn queue_discovery_deletion(&self, event: Result<nostr_crypto::NostrEvent>) {
         match event {
             Ok(event) => {
                 let event_id = event.id.clone();
@@ -2227,6 +2285,19 @@ impl Transport for NostrTransport {
             let mut metrics = self.metrics.lock_or_recover();
             metrics.success_count = metrics.success_count.saturating_add(1);
             recalculate_delivery_ratios(&mut metrics);
+        }
+
+        // Unconditional for the same reason the failure path is: a confirmation
+        // that races the pending-confirmation timeout finds nothing to remove,
+        // and the relay accepted the event either way. Reporting it is what
+        // lets the engine retire a retraction it owes, so dropping it on the
+        // race would leave that name being retracted on every tick forever.
+        match synthetic_publication(message_id) {
+            Some(SyntheticPublication::Discovery(tag)) => {
+                self.mark_discovery_publication_confirmed(tag)
+            }
+            Some(SyntheticPublication::KeyPackage(_)) | Some(SyntheticPublication::Deletion) => {}
+            None => {}
         }
     }
 
@@ -4101,9 +4172,23 @@ mod tests {
     /// retracted claim back up.
     ///
     /// One hostile relay would therefore erase an honest claimant from the
-    /// answer even while every other relay served their genuine record. The
-    /// forgery is built here exactly as an attacker would build it — only the
-    /// event signature is beyond reach, because that needs the victim's key.
+    /// answer even while every other relay served their genuine record.
+    ///
+    /// The forgery is built exactly as an attacker would build it, and both
+    /// halves of "exactly" are load-bearing:
+    ///
+    /// - the **id** is re-stamped over the forged fields, because an id is a
+    ///   hash of public fields and therefore free to recompute. A forgery
+    ///   carrying a stale id is refused one step early and proves nothing about
+    ///   the check that actually stops this attack;
+    /// - the **signature** is a well-formed one taken from a genuinely signed
+    ///   event, because an unparseable signature is refused one step early too.
+    ///   Only a signature that parses reaches the verification that fails.
+    ///
+    /// Both wrong-shaped forgeries are covered by the case below and by
+    /// `nostr_crypto`'s direct tests, so what is asserted here is the whole
+    /// pipeline: sealed under the public key anyone can derive, stood up under
+    /// the victim's name, and refused anyway.
     #[test]
     fn test_a_forged_tombstone_for_another_author_is_refused() {
         let alice = NostrTransport::new(addr("alice")).unwrap();
@@ -4115,11 +4200,13 @@ mod tests {
         let victim_author = victim.public_key_hex();
 
         // The attacker seals a tombstone to the victim's author key, which the
-        // public discovery-seal key lets anyone do.
+        // public discovery-seal key lets anyone do. The event this produces is
+        // signed by the seal key, so it also hands the attacker a *well-formed*
+        // signature to dress the forgery in.
         let username = user("bob");
         let seal = nostr_crypto::discovery_seal_keypair_for_username(&username).unwrap();
         let tombstone = br#"{"v":1,"retracted":true}"#;
-        let forged_content = {
+        let (forged_content, well_formed_sig) = {
             let event = nostr_crypto::NostrEvent::create_discovery_publication(
                 &seal,
                 &nostr_crypto::discovery_tag_for_username(&username).unwrap(),
@@ -4127,32 +4214,67 @@ mod tests {
                 tombstone,
             )
             .unwrap();
-            event.content
+            (event.content, event.sig)
         };
 
-        // Stood up as an event *claiming* the victim's author key. Every field
-        // an honest event has is present; only `sig` cannot be produced.
-        let forged = serde_json::json!({
-            "id": "0".repeat(64),
-            "pubkey": victim_author,
-            "created_at": 1_700_000_000,
-            "kind": nostr_crypto::NOSTR_DISCOVERY_KIND,
-            "tags": [["d", "x"], ["p", "x"]],
-            "content": forged_content,
-            "sig": "0".repeat(128),
-        });
+        // Stood up as an event *claiming* the victim's author key, with the id
+        // recomputed over these fields so it passes the cheap check. Only the
+        // signature is beyond reach, because that is the one thing the victim's
+        // key is needed for.
+        let tags = serde_json::json!([["d", "x"], ["p", "x"]]);
+        // A distinct `created_at` per case, so the two forgeries have distinct
+        // ids. Sharing one would let the first consume the per-query duplicate
+        // slot and make the second pass without being examined, which is
+        // exactly the vacuity this test exists to avoid.
+        let forge = |sig: &str, created_at: i64| {
+            let forged_id = hex::encode(
+                nostr_crypto::nip01_event_id(
+                    &victim_author,
+                    created_at,
+                    nostr_crypto::NOSTR_DISCOVERY_KIND as u64,
+                    &serde_json::to_string(&tags).expect("tags"),
+                    &forged_content,
+                )
+                .expect("id"),
+            );
+            serde_json::json!({
+                "id": forged_id,
+                "pubkey": victim_author,
+                "created_at": created_at,
+                "kind": nostr_crypto::NOSTR_DISCOVERY_KIND,
+                "tags": tags,
+                "content": forged_content,
+                "sig": sig,
+            })
+            .to_string()
+        };
 
         alice.resolve_username(username);
         let query = alice.next_query().unwrap().unwrap();
-        assert!(
-            alice
-                .open_query_event(&query.query_id, &forged.to_string())
-                .unwrap()
-                .is_none(),
-            "a tombstone attributed to an author who did not sign the event \
-             must never reach the resolver: one hostile relay would otherwise \
-             erase an honest claimant from the answer"
-        );
+
+        for (label, sig, created_at) in [
+            // The one that reaches the verification. A real signature, by a
+            // real key, over a different event: it parses, so every cheap
+            // screen passes and only checking it against the *claimed* author
+            // refuses it.
+            (
+                "a well-formed signature by another key",
+                &well_formed_sig,
+                1_700_000_000i64,
+            ),
+            // And the shape that never parses, one step earlier.
+            ("an unparseable signature", &"0".repeat(128), 1_700_000_001),
+        ] {
+            assert!(
+                alice
+                    .open_query_event(&query.query_id, &forge(sig, created_at))
+                    .unwrap()
+                    .is_none(),
+                "a tombstone carrying {label}, attributed to an author who did \
+                 not sign the event, must never reach the resolver: one hostile \
+                 relay would otherwise erase an honest claimant from the answer"
+            );
+        }
     }
 
     /// The id is recomputed, not trusted. An event claiming a genuine record's

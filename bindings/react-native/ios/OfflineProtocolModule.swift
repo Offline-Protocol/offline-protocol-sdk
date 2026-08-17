@@ -3410,7 +3410,12 @@ class OfflineProtocolModule: RCTEventEmitter {
             resolver([
                 "address": invite.address,
                 "public_key": invite.publicKey.map { NSNumber(value: $0) },
-                "petname": invite.petname as Any,
+                // `?? NSNull()` rather than `as Any`, matching every other
+                // optional in this file. The two bridge alike today, but the
+                // explicit form is the one that stays correct if the value ever
+                // stops being an Optional, and mixed spellings invite a copy
+                // that is not equivalent.
+                "petname": invite.petname ?? NSNull(),
                 "signed": invite.signed,
             ])
         } catch {
@@ -3462,9 +3467,15 @@ class OfflineProtocolModule: RCTEventEmitter {
         do {
             resolver(try proto.resolveUsername(username: username))
         } catch {
-            rejecter("ERROR_INVALID_ARGUMENT",
-                     "Failed to resolve username: \(error.localizedDescription)",
-                     error)
+            // Mapped rather than flattened: the three refusals mean different
+            // things to a caller. InvalidConfiguration is "discovery is off",
+            // InvalidState is "too many lookups in flight, retry", and
+            // InvalidArgument is "that is not a claimable name". Reporting them
+            // all as one code leaves an app either retrying forever or giving
+            // up on a lookup that was one drain away from working.
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_INVALID_ARGUMENT",
+                                    fallbackMessage: "Failed to resolve username")
         }
     }
 

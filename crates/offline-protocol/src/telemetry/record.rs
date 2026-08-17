@@ -639,6 +639,7 @@ mod tests {
                 username: String::new(),
                 claims: Vec::new(),
                 rejected: 0,
+                truncated: 0,
             },
             Event::GroupMessageSent {
                 group_id: String::new(),

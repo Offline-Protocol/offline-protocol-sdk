@@ -2289,14 +2289,17 @@ pub struct ProtocolConfig {
     pub nostr_sealing_enabled: bool,
     /// Kill switch for Nostr key-package publication and peer resolution
     /// (default on). See the UDL dictionary and
-    /// `TransportConfig::nostr_username_discovery_enabled` — off by default.
-    /// Publishing binds a human-readable name to an address in a public place,
-    /// which is more disclosure than the key-package record's "an install with
-    /// this tag exists", and it needs cold contact on to be useful at all.
-    pub nostr_username_discovery_enabled: bool,
     /// `TransportConfig::nostr_cold_contact_enabled` for what it buys and what
     /// it costs.
     pub nostr_cold_contact_enabled: bool,
+    /// Switch for the username directory (default **off**). See the UDL
+    /// dictionary and `TransportConfig::nostr_username_discovery_enabled`.
+    ///
+    /// Off by default because publishing binds a human-readable name to an
+    /// address in a public place, which is materially more disclosure than the
+    /// key-package record's "an install with this tag exists". It also requires
+    /// cold contact, since a resolved claim dead-ends one hop later without it.
+    pub nostr_username_discovery_enabled: bool,
     /// Kill switch for the compact MLS envelope (default on). See the UDL
     /// dictionary and `EncryptionConfig::compact_envelope_enabled` for
     /// semantics.
@@ -4913,9 +4916,11 @@ impl OfflineProtocol {
     /// one already in flight. **Both mean an answer is coming**: exactly one
     /// `username_resolved` event follows either way. Every case where no event
     /// will ever arrive throws instead — `InvalidConfiguration` when discovery
-    /// is off, `InvalidState` when too many lookups are in flight — so a caller
-    /// that awaits the event can never be left waiting on one that has no
-    /// trigger.
+    /// is off, `InvalidState` when too many lookups are in flight, and
+    /// `InvalidArgument` when the string is not a claimable username — so a
+    /// caller that awaits the event can never be left waiting on one that has
+    /// no trigger. The three are distinct because they call for different
+    /// handling: never, later, and not with that name.
     ///
     /// The answer carries **every** verified claim. There is deliberately no
     /// "best" claim and no ordering: anyone may publish any name, so what comes
@@ -4954,7 +4959,11 @@ impl OfflineProtocol {
                 .handle_resolved_key_package(&plaintext)
                 .map_err(ProtocolError::from),
             ResolvedRecord::Discovery {
-                username,
+                // The name is not forwarded: the engine checks the record
+                // against the resolution's own username, so that passing a
+                // second copy of it through here cannot disagree with the one
+                // the claims are being accumulated under.
+                username: _,
                 author,
                 plaintext,
             } => {
@@ -4962,8 +4971,7 @@ impl OfflineProtocol {
                 // one event when the query completes. See
                 // `PendingResolution` for why a per-claim event would be the
                 // wrong shape.
-                protocol
-                    .handle_resolved_discovery_record(&query_id, &username, &author, &plaintext);
+                protocol.handle_resolved_discovery_record(&query_id, &author, &plaintext);
                 Ok(())
             }
         }
@@ -12471,7 +12479,8 @@ mod tests {
                 "ios/NostrManager.swift",
                 "the poll handler's re-read",
                 "guard let self = self, !self.isPaused else { return } \
-                 self.pollAndSendMessages() self.pollAndSendQueries() } timer.resume()",
+                 self.pollAndSendMessages() self.pollAndSendQueries() \
+                 self.expireStaleQueries() } timer.resume()",
             ),
             (
                 "ios/ReticulumManager.swift",
