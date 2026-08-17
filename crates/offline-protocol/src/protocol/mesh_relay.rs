@@ -2119,11 +2119,23 @@ mod tests {
         // Independent of which frame it is: the handicap shifts the window, so
         // the worst case for the weak device beats the best case for the
         // capable one on every id.
+        //
+        // The bound that has to clear the span is the handicap a device can
+        // actually pay, not the configured ceiling. A device at the floor
+        // scales to `bias_min_scale`, never to zero, so the most it ever pays
+        // is `(1 - bias_min_scale) * bias_max_handicap` — mirroring
+        // `jitter_for`'s expression, truncation included. Asserting the raw
+        // ceiling instead would stay green while a raised min scale silently
+        // let the two windows overlap.
         let span = DEFAULT_RELAY_JITTER_MAX_MS - DEFAULT_RELAY_JITTER_MIN_MS;
+        let reachable_handicap_ms = ((1.0 - DEFAULT_RELAY_BIAS_MIN_SCALE)
+            * DEFAULT_RELAY_BIAS_MAX_HANDICAP_MS as f32) as u64;
         assert!(
-            DEFAULT_RELAY_BIAS_MAX_HANDICAP_MS >= span,
-            "the handicap ({DEFAULT_RELAY_BIAS_MAX_HANDICAP_MS}ms) must exceed the jitter span \
-             ({span}ms) or the two windows overlap"
+            reachable_handicap_ms >= span,
+            "the reachable handicap ({reachable_handicap_ms}ms: a \
+             {DEFAULT_RELAY_BIAS_MAX_HANDICAP_MS}ms ceiling scaled by 1 - \
+             {DEFAULT_RELAY_BIAS_MIN_SCALE}) must cover the jitter span ({span}ms) or the two \
+             windows overlap"
         );
     }
 

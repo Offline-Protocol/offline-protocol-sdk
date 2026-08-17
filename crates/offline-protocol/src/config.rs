@@ -853,6 +853,20 @@ impl ProtocolConfig {
             ));
         }
 
+        // A fan-out of zero is not a cheaper forward, it is a silent drop: the
+        // frame has already been admitted and recorded as seen, so no copy goes
+        // out and this node's suppression entry stops it arriving again by
+        // another path. Same argument as `bias_min_scale` below — declining to
+        // carry other people's traffic is `relay.allow_relay`'s job, and it is
+        // visible. The forwarding paths clamp with `.max(1)`; rejecting zero
+        // here keeps that clamp an unreachable defensive floor instead of a
+        // silent rewrite of what zero means.
+        if self.mesh_relay.fanout == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "mesh_relay.fanout must be greater than 0".to_string(),
+            ));
+        }
+
         // Capability bias scales forwarding effort; it must never be able to
         // scale it to nothing. Zero would make a low-battery device stop
         // forwarding by the back door, which is the partition the bias design
@@ -1475,6 +1489,25 @@ mod tests {
         // accepted.
         let mut config = ProtocolConfig::new("test-app", "user123");
         config.mesh_relay.bias_min_scale = 1.0;
+        assert!(config.validate().is_ok());
+    }
+
+    /// A fan-out of zero must be refused rather than clamped.
+    ///
+    /// It reads like an off switch and is not one: the frame is already
+    /// admitted and recorded as seen by the time fan-out is chosen, so zero
+    /// targets is a silent drop that also suppresses the copy arriving by
+    /// another path. The forwarding paths clamp it to one; this keeps that
+    /// clamp a defensive floor rather than a quiet reinterpretation.
+    #[test]
+    fn test_config_validation_rejects_a_fanout_of_zero() {
+        let mut config = ProtocolConfig::new("test-app", "user123");
+        config.mesh_relay.fanout = 0;
+        assert!(config.validate().is_err());
+
+        // One is a real setting — forward to a single neighbor — and must stay
+        // accepted, or the check has swallowed the narrowest working fan-out.
+        config.mesh_relay.fanout = 1;
         assert!(config.validate().is_ok());
     }
 
