@@ -553,10 +553,14 @@ impl MeshRelayGovernor {
         self.local_id = local_id.into();
     }
 
-    /// The tunables in force. Apps read these from
-    /// `ProtocolConfig::mesh_relay`; this is for the tests that assert the
-    /// defaults hold together.
-    #[cfg(test)]
+    /// The tunables actually in force.
+    ///
+    /// This is the governor's own snapshot, taken at construction, and it is
+    /// what every forwarding decision reads. Reporting it rather than
+    /// `ProtocolConfig::mesh_relay` keeps the answer honest: the two agree
+    /// today only because nothing can update the section after construction,
+    /// and a reader that trusted the config copy would start lying the moment
+    /// that changed.
     pub fn config(&self) -> &MeshRelayConfig {
         &self.config
     }

@@ -394,6 +394,31 @@ class OfflineProtocolModule: RCTEventEmitter {
             ?? raw["group_enforce_admin_commits"] as? Bool
             ?? false
 
+        // Mesh forwarding section: read by MeshRelayConfigReader — Foundation-only
+        // so the SwiftPM suite covers it; mirrors ProtocolConfigParser.kt, keep
+        // the read order and precedence in sync. Every field stays optional all
+        // the way to the core, which owns the defaults.
+        let meshRelay = MeshRelayConfigReader.read(raw).map { values in
+            MeshRelayConfig(
+                maxTtl: values.maxTtl,
+                denseMaxTtl: values.denseMaxTtl,
+                denseDegree: values.denseDegree,
+                fanout: values.fanout,
+                jitterMinMs: values.jitterMinMs,
+                jitterMaxMs: values.jitterMaxMs,
+                ratePerSec: values.ratePerSec,
+                burst: values.burst,
+                peerRatePerSec: values.peerRatePerSec,
+                peerBurst: values.peerBurst,
+                queueCapacity: values.queueCapacity,
+                biasMinScale: values.biasMinScale,
+                biasMaxHandicapMs: values.biasMaxHandicapMs,
+                activityWindowMs: values.activityWindowMs,
+                activityMinForwards: values.activityMinForwards,
+                activityIdleWindows: values.activityIdleWindows
+            )
+        }
+
         let config = ProtocolConfig(
             appId: raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
             profile: raw["profile"] as? String ?? "",
@@ -424,7 +449,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             nostrUsernameDiscoveryEnabled: nostrUsernameDiscoveryEnabled,
             compactEnvelopeEnabled: encryption.compactEnvelopeEnabled,
             richPayloadEnabled: encryption.richPayloadEnabled,
-            cryptoRecoveryEnabled: encryption.cryptoRecoveryEnabled
+            cryptoRecoveryEnabled: encryption.cryptoRecoveryEnabled,
+            meshRelay: meshRelay
         )
 
         return (config, raw)
@@ -2889,6 +2915,62 @@ class OfflineProtocolModule: RCTEventEmitter {
         resolver(statsDict)
     }
     
+    /// Cumulative mesh forwarding counters, read through to the Rust core.
+    @objc func getMeshRelayStats(_ resolver: @escaping RCTPromiseResolveBlock,
+                                 rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_STATS", "Protocol not initialized", nil)
+            return
+        }
+        let stats = proto.getMeshRelayStats()
+        let statsDict: [String: Any] = [
+            "forwarded": stats.forwarded,
+            "transmissions": stats.transmissions,
+            "queued": stats.queued,
+            "awaitingTransmission": stats.awaitingTransmission,
+            "duplicatesSuppressed": stats.duplicatesSuppressed,
+            "coveredByANeighbor": stats.coveredByANeighbor,
+            "peerRateLimited": stats.peerRateLimited,
+            "rateDeferred": stats.rateDeferred,
+            "hopLimitReached": stats.hopLimitReached,
+            "reachClamped": stats.reachClamped,
+            "droppedForCapacity": stats.droppedForCapacity
+        ]
+        resolver(statsDict)
+    }
+
+    /// The mesh forwarding tunables in force, read from the governor.
+    ///
+    /// Every field is populated, so no caller writes a fallback literal — a
+    /// fallback here would be a second copy of a core default, free to drift.
+    @objc func getMeshRelayTunables(_ resolver: @escaping RCTPromiseResolveBlock,
+                                    rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_STATS", "Protocol not initialized", nil)
+            return
+        }
+        let tunables = proto.getMeshRelayTunables()
+        let tunablesDict: [String: Any] = [
+            "maxTtl": tunables.maxTtl,
+            "denseMaxTtl": tunables.denseMaxTtl,
+            "denseDegree": tunables.denseDegree,
+            "fanout": tunables.fanout,
+            "jitterMinMs": tunables.jitterMinMs,
+            "jitterMaxMs": tunables.jitterMaxMs,
+            "ratePerSec": tunables.ratePerSec,
+            "burst": tunables.burst,
+            "peerRatePerSec": tunables.peerRatePerSec,
+            "peerBurst": tunables.peerBurst,
+            "queueCapacity": tunables.queueCapacity,
+            "biasMinScale": tunables.biasMinScale,
+            "biasMaxHandicapMs": tunables.biasMaxHandicapMs,
+            "activityWindowMs": tunables.activityWindowMs,
+            "activityMinForwards": tunables.activityMinForwards,
+            "activityIdleWindows": tunables.activityIdleWindows
+        ]
+        resolver(tunablesDict)
+    }
+
     @objc func getPendingAckCount(_ resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {

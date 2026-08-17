@@ -549,7 +549,11 @@ What this means for an app: a message is not lost when this happens, but it can 
 
 The device's own sends draw on the same per-second budget — it is one radio — but keep a small reserve that forwarding never touches, so a device carrying a busy neighborhood can still get its own messages and acknowledgements out.
 
-Tunables live in `ProtocolConfig::mesh_relay`. Both the tunables and these counters are **Rust-core surfaces today**: neither is mirrored over UniFFI or React Native yet, so apps get the defaults and cannot read the counters from JS or native.
+Tunables live in `ProtocolConfig::mesh_relay`, and both the tunables and these counters cross to every binding. From React Native the section is `meshRelay` in the `create()` config, and the counters are `getMeshRelayStats()`; `getMeshRelayTunables()` reports what is actually in force, read from the governor rather than echoed back from what was passed in.
+
+Two properties of that surface are deliberate. Every config field is **optional**, and an omitted one keeps the core's default rather than being restated by a binding: the defaults live here and nowhere else, so a partial section moves only the dials it names. The read side is the opposite, **every field required**, so no caller writes a fallback literal for an absent one. The section is applied at construction only. There is no runtime update, because the governor takes its snapshot when it is built and re-pointing it mid-flight would have to rebuild the token buckets and the suppression cache underneath in-flight forwards.
+
+The suppression-cache sizing (`seen`) stays core-only. It is internal memory sizing rather than a policy dial.
 
 #### An online device in a mixed neighborhood
 

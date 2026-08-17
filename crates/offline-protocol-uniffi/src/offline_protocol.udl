@@ -455,6 +455,120 @@ dictionary DorsConfig {
     u8 relay_optimal_connection_count;
 };
 
+// Mesh forwarding tunables: the shape of carrying other people's traffic once
+// `relay.allow_relay` has already answered *whether* to carry it.
+//
+// Every field is optional and every one defaults to null, which means "leave
+// the core default alone". That is deliberate and load-bearing: a caller sets
+// the two knobs it cares about and the other fifteen keep their Rust values,
+// so no binding ever has to restate a default it might get wrong. The core is
+// the only place the numbers live.
+//
+// The suppression-cache sizing (`seen`) is not here. It is internal memory
+// sizing rather than a policy dial, and nothing outside the core has a reason
+// to move it.
+dictionary MeshRelayConfig {
+    // Hop budget a forwarded frame is clamped to.
+    u8? max_ttl = null;
+    // Hop budget applied once the neighborhood is dense.
+    u8? dense_max_ttl = null;
+    // Neighbor count at which the dense budget applies.
+    u64? dense_degree = null;
+    // Neighbors a frame is forwarded to. Must be at least 1: zero is not a
+    // cheaper forward, it is a silent drop, and declining to carry other
+    // people's traffic is `relay.allow_relay`'s visible job.
+    u64? fanout = null;
+    // Shortest pre-transmit delay.
+    u64? jitter_min_ms = null;
+    // Longest pre-transmit delay at low density.
+    u64? jitter_max_ms = null;
+    // Sustained forwarding rate, frames per second.
+    f32? rate_per_sec = null;
+    // Burst allowance above the sustained rate.
+    f32? burst = null;
+    // Sustained per-neighbor acceptance rate.
+    f32? peer_rate_per_sec = null;
+    // Per-neighbor burst allowance.
+    f32? peer_burst = null;
+    // Maximum forwards awaiting transmission.
+    u64? queue_capacity = null;
+    // Smallest share of the full forwarding effort capability bias scales a
+    // device down to. 1.0 disables bias: every device forwards as eagerly as
+    // every other, whatever its battery. Must be in (0.0, 1.0].
+    f32? bias_min_scale = null;
+    // Longest extra pre-transmit delay bias adds to a weaker device. This plus
+    // jitter_max_ms must stay under the 5s overdue cut-off, past which a
+    // forward is abandoned rather than merely late.
+    u64? bias_max_handicap_ms = null;
+    // How long a stretch of forwarding activity is measured over.
+    u64? activity_window_ms = null;
+    // Frames carried within one window at or above which this device reads as
+    // an active relay.
+    u64? activity_min_forwards = null;
+    // Consecutive quiet windows before an active relay reads as inactive.
+    u32? activity_idle_windows = null;
+};
+
+// The mesh forwarding tunables actually in force, every field populated.
+//
+// The read-side twin of MeshRelayConfig. Input is all-optional so a caller
+// never restates a default; output is all-required for the same reason, from
+// the other direction — an absent field here would make every caller invent a
+// fallback, and those fallbacks are what drift.
+dictionary MeshRelayTunables {
+    u8 max_ttl;
+    u8 dense_max_ttl;
+    u64 dense_degree;
+    u64 fanout;
+    u64 jitter_min_ms;
+    u64 jitter_max_ms;
+    f32 rate_per_sec;
+    f32 burst;
+    f32 peer_rate_per_sec;
+    f32 peer_burst;
+    u64 queue_capacity;
+    f32 bias_min_scale;
+    u64 bias_max_handicap_ms;
+    u64 activity_window_ms;
+    u64 activity_min_forwards;
+    u32 activity_idle_windows;
+};
+
+// What this device has actually been carrying for other people.
+//
+// Counters are cumulative for the lifetime of the protocol instance and never
+// reset. `forwarded` is the contribution figure to show a user; the rest are
+// diagnostics.
+dictionary MeshRelayStats {
+    // Messages moved on someone else's behalf, counted once each.
+    u64 forwarded;
+    // Times a frame was put on a link, counting each link separately and
+    // including this device handing over its own messages. This is what the
+    // per-second budget bounds.
+    u64 transmissions;
+    // Forwards admitted to the queue.
+    u64 queued;
+    // Forwards queued and not yet transmitted.
+    u64 awaiting_transmission;
+    // Copies of a frame already being handled, dropped on arrival.
+    u64 duplicates_suppressed;
+    // Pending forwards stood down because a neighbor was heard carrying the
+    // same frame first. Working as intended, not a loss.
+    u64 covered_by_a_neighbor;
+    // Frames refused because one neighbor was sending more than its share.
+    u64 peer_rate_limited;
+    // Forwards delayed by the per-second ceiling. Delayed, not dropped.
+    u64 rate_deferred;
+    // Frames arriving with no hop budget left.
+    u64 hop_limit_reached;
+    // Frames whose TTL was clamped down to the mesh's own hop budget.
+    u64 reach_clamped;
+    // Suppression-cache entries evicted for capacity. Expected to stay at
+    // zero; anything else means this device is seeing more traffic than it can
+    // remember having handled.
+    u64 dropped_for_capacity;
+};
+
 // ACK configuration
 dictionary AckConfig {
     u64 default_timeout_ms;
@@ -696,6 +810,12 @@ dictionary ProtocolConfig {
     // SESSION_REKEY_TRIGGERED. Disabling reverts to the legacy drop-and-ACK
     // behavior. Defaulted so existing callers keep compiling.
     boolean crypto_recovery_enabled = true;
+    // How this device carries traffic for other people, once relay_priority
+    // and the battery floors have already decided that it does. Null leaves
+    // every tunable at its core default, and so does any field left null
+    // inside it — see MeshRelayConfig. Applied at construction: the governor
+    // takes its snapshot there, and there is no runtime update path.
+    MeshRelayConfig? mesh_relay = null;
 };
 
 // ========================================================================
@@ -1435,6 +1555,21 @@ interface OfflineProtocol {
     DedupStats get_dedup_stats();
     u64 get_pending_ack_count();
     u64 get_retry_queue_size();
+
+    // Mesh forwarding: what this device is carrying, and under what tunables.
+    //
+    // Both read through to the core. get_mesh_relay_tunables reports the
+    // governor's own snapshot rather than a copy held on this side, so it
+    // cannot answer with something forwarding is not actually using — a
+    // getter that round-trips its caller's own input proves nothing.
+    //
+    // It returns MeshRelayTunables, whose fields are all required, and not the
+    // all-optional MeshRelayConfig that goes in. An optional-valued answer
+    // would make every caller write its own fallback for an absent field, and
+    // those fallbacks are duplicated defaults that drift from the core — the
+    // exact thing the optional *input* exists to prevent.
+    MeshRelayStats get_mesh_relay_stats();
+    MeshRelayTunables get_mesh_relay_tunables();
     
     // ========================================================================
     // MLS (END-TO-END ENCRYPTION) OPERATIONS

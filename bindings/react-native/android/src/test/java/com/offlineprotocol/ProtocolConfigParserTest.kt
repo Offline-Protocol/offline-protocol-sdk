@@ -2,6 +2,7 @@ package com.offlineprotocol
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -360,5 +361,106 @@ class ProtocolConfigParserTest {
         assertFalse(config.groupEnforceAdminCommits)
         assertTrue(config.groupRelayEnabled)
         assertEquals(256, config.maxGroupMembers.toInt())
+    }
+
+    // ------------------------------------------------------------------
+    // Mesh forwarding section
+    // ------------------------------------------------------------------
+
+    @Test
+    fun meshRelaySectionIsAbsentWhenOmitted() {
+        // Absent must stay absent, not become an object of nulls: the core
+        // owns every default, and a section materialised here would be this
+        // parser quietly deciding them instead.
+        val config = parse("""{"appId":"app","userId":"alice"}""")
+        assertNull(config.meshRelay)
+    }
+
+    @Test
+    fun meshRelaySectionReadsItsNestedHome() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","meshRelay":{"maxTtl":6,"denseMaxTtl":4,"denseDegree":9,"fanout":2,"jitterMinMs":35,"jitterMaxMs":175,"ratePerSec":12.5,"burst":41,"peerRatePerSec":6.5,"peerBurst":17,"queueCapacity":321,"biasMinScale":0.4,"biasMaxHandicapMs":275,"activityWindowMs":45000,"activityMinForwards":5,"activityIdleWindows":3}}"""
+        )
+        val mesh = config.meshRelay!!
+        assertEquals(6, mesh.maxTtl!!.toInt())
+        assertEquals(4, mesh.denseMaxTtl!!.toInt())
+        assertEquals(9L, mesh.denseDegree!!.toLong())
+        assertEquals(2L, mesh.fanout!!.toLong())
+        assertEquals(35L, mesh.jitterMinMs!!.toLong())
+        assertEquals(175L, mesh.jitterMaxMs!!.toLong())
+        assertEquals(12.5f, mesh.ratePerSec!!, 0.0001f)
+        assertEquals(41f, mesh.burst!!, 0.0001f)
+        assertEquals(6.5f, mesh.peerRatePerSec!!, 0.0001f)
+        assertEquals(17f, mesh.peerBurst!!, 0.0001f)
+        assertEquals(321L, mesh.queueCapacity!!.toLong())
+        assertEquals(0.4f, mesh.biasMinScale!!, 0.0001f)
+        assertEquals(275L, mesh.biasMaxHandicapMs!!.toLong())
+        assertEquals(45000L, mesh.activityWindowMs!!.toLong())
+        assertEquals(5L, mesh.activityMinForwards!!.toLong())
+        assertEquals(3, mesh.activityIdleWindows!!.toInt())
+    }
+
+    @Test
+    fun meshRelaySectionReadsNestedSnakeCase() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","mesh_relay":{"max_ttl":7,"dense_max_ttl":3,"dense_degree":8,"jitter_min_ms":10,"jitter_max_ms":150,"rate_per_sec":9.5,"peer_rate_per_sec":4.5,"peer_burst":12,"queue_capacity":128,"bias_min_scale":0.5,"bias_max_handicap_ms":300,"activity_window_ms":30000,"activity_min_forwards":4,"activity_idle_windows":5}}"""
+        )
+        val mesh = config.meshRelay!!
+        assertEquals(7, mesh.maxTtl!!.toInt())
+        assertEquals(3, mesh.denseMaxTtl!!.toInt())
+        assertEquals(8L, mesh.denseDegree!!.toLong())
+        assertEquals(10L, mesh.jitterMinMs!!.toLong())
+        assertEquals(150L, mesh.jitterMaxMs!!.toLong())
+        assertEquals(9.5f, mesh.ratePerSec!!, 0.0001f)
+        assertEquals(4.5f, mesh.peerRatePerSec!!, 0.0001f)
+        assertEquals(12f, mesh.peerBurst!!, 0.0001f)
+        assertEquals(128L, mesh.queueCapacity!!.toLong())
+        assertEquals(0.5f, mesh.biasMinScale!!, 0.0001f)
+        assertEquals(300L, mesh.biasMaxHandicapMs!!.toLong())
+        assertEquals(30000L, mesh.activityWindowMs!!.toLong())
+        assertEquals(4L, mesh.activityMinForwards!!.toLong())
+        assertEquals(5, mesh.activityIdleWindows!!.toInt())
+    }
+
+    @Test
+    fun meshRelayLeavesUnnamedFieldsNull() {
+        // A partial section is the ordinary case: an app sets the one dial it
+        // cares about. Every field it did not name must arrive null so the
+        // core keeps its own value — this is the DORS silent-reset bug in the
+        // shape it would take here.
+        val config = parse(
+            """{"appId":"app","userId":"alice","meshRelay":{"fanout":7}}"""
+        )
+        val mesh = config.meshRelay!!
+        assertEquals(7L, mesh.fanout!!.toLong())
+        assertNull(mesh.maxTtl)
+        assertNull(mesh.denseMaxTtl)
+        assertNull(mesh.denseDegree)
+        assertNull(mesh.jitterMinMs)
+        assertNull(mesh.jitterMaxMs)
+        assertNull(mesh.ratePerSec)
+        assertNull(mesh.burst)
+        assertNull(mesh.peerRatePerSec)
+        assertNull(mesh.peerBurst)
+        assertNull(mesh.queueCapacity)
+        assertNull(mesh.biasMinScale)
+        assertNull(mesh.biasMaxHandicapMs)
+        assertNull(mesh.activityWindowMs)
+        assertNull(mesh.activityMinForwards)
+        assertNull(mesh.activityIdleWindows)
+    }
+
+    @Test
+    fun meshRelayNegativesAreClampedRatherThanWrapped() {
+        // These fields are unsigned across the FFI. A bare conversion would
+        // turn -1 into ~18 quintillion, which the core cannot recognise as
+        // wrong; clamped to 0 it hits the core's validation instead.
+        val config = parse(
+            """{"appId":"app","userId":"alice","meshRelay":{"fanout":-1,"maxTtl":-5,"activityIdleWindows":-2}}"""
+        )
+        val mesh = config.meshRelay!!
+        assertEquals(0L, mesh.fanout!!.toLong())
+        assertEquals(0, mesh.maxTtl!!.toInt())
+        assertEquals(0, mesh.activityIdleWindows!!.toInt())
     }
 }

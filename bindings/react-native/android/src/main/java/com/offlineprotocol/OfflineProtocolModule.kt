@@ -3056,6 +3056,76 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
     
+    /**
+     * Cumulative mesh forwarding counters, read through to the Rust core.
+     *
+     * Counters are u64 in the core and cross to JS as doubles, which is exact
+     * below 2^53 — a device would have to forward frames for millions of years
+     * to reach that.
+     */
+    @ReactMethod
+    fun getMeshRelayStats(promise: Promise) {
+        try {
+            val stats = protocol?.getMeshRelayStats()
+            if (stats != null) {
+                val map = Arguments.createMap()
+                map.putDouble("forwarded", stats.forwarded.toDouble())
+                map.putDouble("transmissions", stats.transmissions.toDouble())
+                map.putDouble("queued", stats.queued.toDouble())
+                map.putDouble("awaitingTransmission", stats.awaitingTransmission.toDouble())
+                map.putDouble("duplicatesSuppressed", stats.duplicatesSuppressed.toDouble())
+                map.putDouble("coveredByANeighbor", stats.coveredByANeighbor.toDouble())
+                map.putDouble("peerRateLimited", stats.peerRateLimited.toDouble())
+                map.putDouble("rateDeferred", stats.rateDeferred.toDouble())
+                map.putDouble("hopLimitReached", stats.hopLimitReached.toDouble())
+                map.putDouble("reachClamped", stats.reachClamped.toDouble())
+                map.putDouble("droppedForCapacity", stats.droppedForCapacity.toDouble())
+                promise.resolve(map)
+            } else {
+                promise.resolve(null)
+            }
+        } catch (e: Exception) {
+            promise.reject("ERROR_STATS", "Failed to get mesh relay stats: ${e.message}", e)
+        }
+    }
+
+    /**
+     * The mesh forwarding tunables in force, read from the governor.
+     *
+     * Every field is populated, so no caller writes a fallback literal — a
+     * fallback here would be a second copy of a core default, free to drift.
+     */
+    @ReactMethod
+    fun getMeshRelayTunables(promise: Promise) {
+        try {
+            val tunables = protocol?.getMeshRelayTunables()
+            if (tunables != null) {
+                val map = Arguments.createMap()
+                map.putInt("maxTtl", tunables.maxTtl.toInt())
+                map.putInt("denseMaxTtl", tunables.denseMaxTtl.toInt())
+                map.putDouble("denseDegree", tunables.denseDegree.toDouble())
+                map.putDouble("fanout", tunables.fanout.toDouble())
+                map.putDouble("jitterMinMs", tunables.jitterMinMs.toDouble())
+                map.putDouble("jitterMaxMs", tunables.jitterMaxMs.toDouble())
+                map.putDouble("ratePerSec", tunables.ratePerSec.toDouble())
+                map.putDouble("burst", tunables.burst.toDouble())
+                map.putDouble("peerRatePerSec", tunables.peerRatePerSec.toDouble())
+                map.putDouble("peerBurst", tunables.peerBurst.toDouble())
+                map.putDouble("queueCapacity", tunables.queueCapacity.toDouble())
+                map.putDouble("biasMinScale", tunables.biasMinScale.toDouble())
+                map.putDouble("biasMaxHandicapMs", tunables.biasMaxHandicapMs.toDouble())
+                map.putDouble("activityWindowMs", tunables.activityWindowMs.toDouble())
+                map.putDouble("activityMinForwards", tunables.activityMinForwards.toDouble())
+                map.putDouble("activityIdleWindows", tunables.activityIdleWindows.toDouble())
+                promise.resolve(map)
+            } else {
+                promise.resolve(null)
+            }
+        } catch (e: Exception) {
+            promise.reject("ERROR_STATS", "Failed to get mesh relay tunables: ${e.message}", e)
+        }
+    }
+
     @ReactMethod
     fun getPendingAckCount(promise: Promise) {
         try {

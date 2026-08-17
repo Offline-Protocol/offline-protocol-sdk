@@ -457,6 +457,47 @@ mechanism.
 | `minBatteryForRelay` | number | 30 | Min battery % for relay |
 | `relayPriority` | string | 'auto' | 'auto', 'always', or 'never' |
 
+### Mesh Forwarding Configuration
+
+The shape of carrying other people's traffic, once `relay.relayPriority` and the
+battery floors have already decided that this device does. Whether to forward at
+all is `relay.allowRelay`'s job; this section is only *how*.
+
+Applied at construction. There is no runtime update, because the governor takes
+its snapshot when it is built and re-pointing it mid-flight would have to
+rebuild the token buckets and suppression cache underneath in-flight forwards.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `maxTtl` | number | 8 | Hop budget a forwarded frame is clamped to |
+| `denseMaxTtl` | number | 5 | Hop budget once the neighborhood is dense |
+| `denseDegree` | number | 6 | Neighbor count at which the dense budget applies |
+| `fanout` | number | 3 | Neighbors a frame is forwarded to (must be ≥ 1) |
+| `jitterMinMs` | number | 20 | Shortest pre-transmit delay |
+| `jitterMaxMs` | number | 200 | Longest pre-transmit delay at low density |
+| `ratePerSec` | number | 10 | Sustained forwarding rate, frames per second |
+| `burst` | number | 30 | Burst allowance above the sustained rate |
+| `peerRatePerSec` | number | 5 | Sustained per-neighbor acceptance rate |
+| `peerBurst` | number | 15 | Per-neighbor burst allowance |
+| `queueCapacity` | number | 256 | Maximum forwards awaiting transmission |
+| `biasMinScale` | number | 0.25 | Smallest share of full forwarding effort capability bias scales down to; `1.0` disables bias |
+| `biasMaxHandicapMs` | number | 400 | Longest extra pre-transmit delay bias adds to a weaker device |
+| `activityWindowMs` | number | 60000 | How long a stretch of forwarding activity is measured over |
+| `activityMinForwards` | number | 3 | Frames carried in one window at or above which this device reads as an active relay |
+| `activityIdleWindows` | number | 2 | Consecutive quiet windows before an active relay reads as inactive |
+
+Every field is optional, and an omitted one keeps the default above rather than
+being restated by a binding. That is deliberate: the defaults live in the Rust
+core and nowhere else, so a section naming one dial moves only that dial. The
+suppression-cache sizing (`seen`) is not exposed, being internal memory sizing
+rather than a policy dial.
+
+To read what is actually in force, including every default the app never set,
+use `getMeshRelayTunables()`. Unlike the config, its result has every field
+populated, so no caller needs a fallback literal. Counters are
+`getMeshRelayStats()`; see [mesh.md](mesh.md#reading-the-numbers) for how to
+read them.
+
 ### Path Configuration
 
 | Parameter | Type | Default | Description |
@@ -647,6 +688,17 @@ work. Nothing is partially applied.
     `maxPendingGlobal` must be ≥ `maxPendingPerPeer`
 15. `pendingQueue.pendingTtlMs` must be > 0
 16. `maxGroupMembers` must be > 0
+
+**Mesh forwarding**
+
+17. `meshRelay.fanout` must be > 0. Zero is not a cheaper forward but a silent
+    drop: the frame is already admitted and recorded as seen, so no copy goes
+    out and this node's suppression entry stops it arriving by another path
+18. `meshRelay.biasMinScale` must be finite and in `(0.0, 1.0]`
+19. `meshRelay.jitterMaxMs + meshRelay.biasMaxHandicapMs` must stay under the
+    5s overdue cut-off, past which a forward is abandoned rather than late
+20. `meshRelay.activityWindowMs`, `activityMinForwards` and
+    `activityIdleWindows` must each be > 0
 
 Note what is *not* validated: `minBatteryForRelay` is a `u8` and is clamped by
 its type rather than range-checked. Earlier versions of this guide claimed it

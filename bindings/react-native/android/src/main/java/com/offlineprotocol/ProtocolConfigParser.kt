@@ -1,6 +1,7 @@
 package com.offlineprotocol
 
 import org.json.JSONObject
+import uniffi.offline_protocol.MeshRelayConfig
 import uniffi.offline_protocol.OverflowPolicy
 import uniffi.offline_protocol.ProtocolConfig
 
@@ -144,6 +145,48 @@ internal object ProtocolConfigParser {
         ) ?: json.optBooleanCompat("groupEnforceAdminCommits", "group_enforce_admin_commits")
             ?: false
 
+        // Mesh forwarding section (nested home under `meshRelay`, both cases).
+        // Absent stays absent all the way to the core: every field is nullable
+        // and null means "keep the Rust default", so this parser never states
+        // a default of its own and cannot silently reset one. Only the whole
+        // section being present with at least one field produces an object.
+        //
+        // Widths are coerced before the unsigned conversion, never bare
+        // `toULong()`: the value is app-supplied JS and a negative would wrap
+        // to something enormous — a fan-out of -1 becoming 18 quintillion is
+        // not a config error the core can see. Clamped low it reaches the
+        // core's own validation, which rejects a zero fan-out.
+        val meshRelayJson = json.optJSONObject("meshRelay") ?: json.optJSONObject("mesh_relay")
+        val meshRelay = meshRelayJson?.let { section ->
+            fun uLong(vararg keys: String): ULong? =
+                section.optLongCompat(*keys)?.coerceAtLeast(0L)?.toULong()
+            fun uByte(vararg keys: String): UByte? =
+                section.optIntCompat(*keys)?.coerceIn(0, UByte.MAX_VALUE.toInt())?.toUByte()
+            fun uInt(vararg keys: String): UInt? =
+                section.optLongCompat(*keys)?.coerceIn(0L, UInt.MAX_VALUE.toLong())?.toUInt()
+            fun float(vararg keys: String): Float? =
+                section.optDoubleCompat(*keys)?.toFloat()
+
+            MeshRelayConfig(
+                maxTtl = uByte("maxTtl", "max_ttl"),
+                denseMaxTtl = uByte("denseMaxTtl", "dense_max_ttl"),
+                denseDegree = uLong("denseDegree", "dense_degree"),
+                fanout = uLong("fanout"),
+                jitterMinMs = uLong("jitterMinMs", "jitter_min_ms"),
+                jitterMaxMs = uLong("jitterMaxMs", "jitter_max_ms"),
+                ratePerSec = float("ratePerSec", "rate_per_sec"),
+                burst = float("burst"),
+                peerRatePerSec = float("peerRatePerSec", "peer_rate_per_sec"),
+                peerBurst = float("peerBurst", "peer_burst"),
+                queueCapacity = uLong("queueCapacity", "queue_capacity"),
+                biasMinScale = float("biasMinScale", "bias_min_scale"),
+                biasMaxHandicapMs = uLong("biasMaxHandicapMs", "bias_max_handicap_ms"),
+                activityWindowMs = uLong("activityWindowMs", "activity_window_ms"),
+                activityMinForwards = uLong("activityMinForwards", "activity_min_forwards"),
+                activityIdleWindows = uInt("activityIdleWindows", "activity_idle_windows")
+            )
+        }
+
         val config = ProtocolConfig(
             appId = json.safeOptString("appId", json.safeOptString("app_id")),
             profile = json.safeOptString("profile"),
@@ -176,7 +219,8 @@ internal object ProtocolConfigParser {
             nostrUsernameDiscoveryEnabled = nostrUsernameDiscoveryEnabled,
             compactEnvelopeEnabled = compactEnvelopeEnabled,
             richPayloadEnabled = richPayloadEnabled,
-            cryptoRecoveryEnabled = cryptoRecoveryEnabled
+            cryptoRecoveryEnabled = cryptoRecoveryEnabled,
+            meshRelay = meshRelay
         )
 
         return ParsedConfig(config, json)

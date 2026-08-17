@@ -982,6 +982,10 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count(
@@ -1407,6 +1411,10 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_latency(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_member_role(`ptr`: Long,`groupId`: RustBuffer.ByValue,`userId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_tunables(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_message_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1943,6 +1951,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role() != 61568.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats() != 43508.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables() != 2956.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats() != 30825.toShort()) {
@@ -3339,6 +3353,10 @@ public interface OfflineProtocolInterface {
     
     fun `getMemberRole`(`groupId`: kotlin.String, `userId`: kotlin.String): kotlin.String
     
+    fun `getMeshRelayStats`(): MeshRelayStats
+    
+    fun `getMeshRelayTunables`(): MeshRelayTunables
+    
     fun `getMessageStats`(): List<MessageStats>
     
     fun `getPendingAckCount`(): kotlin.ULong
@@ -4257,6 +4275,32 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_member_role(
         it,
         FfiConverterString.lower(`groupId`),FfiConverterString.lower(`userId`),_status)
+}
+    }
+    )
+    }
+    
+
+    override fun `getMeshRelayStats`(): MeshRelayStats {
+            return FfiConverterTypeMeshRelayStats.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_stats(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `getMeshRelayTunables`(): MeshRelayTunables {
+            return FfiConverterTypeMeshRelayTunables.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_tunables(
+        it,
+        _status)
 }
     }
     )
@@ -6777,6 +6821,299 @@ public object FfiConverterTypeMediaSendOptions: FfiConverterRustBuffer<MediaSend
 
 
 
+data class MeshRelayConfig (
+    var `maxTtl`: kotlin.UByte? = null 
+    , 
+    var `denseMaxTtl`: kotlin.UByte? = null 
+    , 
+    var `denseDegree`: kotlin.ULong? = null 
+    , 
+    var `fanout`: kotlin.ULong? = null 
+    , 
+    var `jitterMinMs`: kotlin.ULong? = null 
+    , 
+    var `jitterMaxMs`: kotlin.ULong? = null 
+    , 
+    var `ratePerSec`: kotlin.Float? = null 
+    , 
+    var `burst`: kotlin.Float? = null 
+    , 
+    var `peerRatePerSec`: kotlin.Float? = null 
+    , 
+    var `peerBurst`: kotlin.Float? = null 
+    , 
+    var `queueCapacity`: kotlin.ULong? = null 
+    , 
+    var `biasMinScale`: kotlin.Float? = null 
+    , 
+    var `biasMaxHandicapMs`: kotlin.ULong? = null 
+    , 
+    var `activityWindowMs`: kotlin.ULong? = null 
+    , 
+    var `activityMinForwards`: kotlin.ULong? = null 
+    , 
+    var `activityIdleWindows`: kotlin.UInt? = null 
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshRelayConfig: FfiConverterRustBuffer<MeshRelayConfig> {
+    override fun read(buf: ByteBuffer): MeshRelayConfig {
+        return MeshRelayConfig(
+            FfiConverterOptionalUByte.read(buf),
+            FfiConverterOptionalUByte.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalFloat.read(buf),
+            FfiConverterOptionalFloat.read(buf),
+            FfiConverterOptionalFloat.read(buf),
+            FfiConverterOptionalFloat.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalFloat.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MeshRelayConfig) = (
+            FfiConverterOptionalUByte.allocationSize(value.`maxTtl`) +
+            FfiConverterOptionalUByte.allocationSize(value.`denseMaxTtl`) +
+            FfiConverterOptionalULong.allocationSize(value.`denseDegree`) +
+            FfiConverterOptionalULong.allocationSize(value.`fanout`) +
+            FfiConverterOptionalULong.allocationSize(value.`jitterMinMs`) +
+            FfiConverterOptionalULong.allocationSize(value.`jitterMaxMs`) +
+            FfiConverterOptionalFloat.allocationSize(value.`ratePerSec`) +
+            FfiConverterOptionalFloat.allocationSize(value.`burst`) +
+            FfiConverterOptionalFloat.allocationSize(value.`peerRatePerSec`) +
+            FfiConverterOptionalFloat.allocationSize(value.`peerBurst`) +
+            FfiConverterOptionalULong.allocationSize(value.`queueCapacity`) +
+            FfiConverterOptionalFloat.allocationSize(value.`biasMinScale`) +
+            FfiConverterOptionalULong.allocationSize(value.`biasMaxHandicapMs`) +
+            FfiConverterOptionalULong.allocationSize(value.`activityWindowMs`) +
+            FfiConverterOptionalULong.allocationSize(value.`activityMinForwards`) +
+            FfiConverterOptionalUInt.allocationSize(value.`activityIdleWindows`)
+    )
+
+    override fun write(value: MeshRelayConfig, buf: ByteBuffer) {
+            FfiConverterOptionalUByte.write(value.`maxTtl`, buf)
+            FfiConverterOptionalUByte.write(value.`denseMaxTtl`, buf)
+            FfiConverterOptionalULong.write(value.`denseDegree`, buf)
+            FfiConverterOptionalULong.write(value.`fanout`, buf)
+            FfiConverterOptionalULong.write(value.`jitterMinMs`, buf)
+            FfiConverterOptionalULong.write(value.`jitterMaxMs`, buf)
+            FfiConverterOptionalFloat.write(value.`ratePerSec`, buf)
+            FfiConverterOptionalFloat.write(value.`burst`, buf)
+            FfiConverterOptionalFloat.write(value.`peerRatePerSec`, buf)
+            FfiConverterOptionalFloat.write(value.`peerBurst`, buf)
+            FfiConverterOptionalULong.write(value.`queueCapacity`, buf)
+            FfiConverterOptionalFloat.write(value.`biasMinScale`, buf)
+            FfiConverterOptionalULong.write(value.`biasMaxHandicapMs`, buf)
+            FfiConverterOptionalULong.write(value.`activityWindowMs`, buf)
+            FfiConverterOptionalULong.write(value.`activityMinForwards`, buf)
+            FfiConverterOptionalUInt.write(value.`activityIdleWindows`, buf)
+    }
+}
+
+
+
+data class MeshRelayStats (
+    var `forwarded`: kotlin.ULong
+    , 
+    var `transmissions`: kotlin.ULong
+    , 
+    var `queued`: kotlin.ULong
+    , 
+    var `awaitingTransmission`: kotlin.ULong
+    , 
+    var `duplicatesSuppressed`: kotlin.ULong
+    , 
+    var `coveredByANeighbor`: kotlin.ULong
+    , 
+    var `peerRateLimited`: kotlin.ULong
+    , 
+    var `rateDeferred`: kotlin.ULong
+    , 
+    var `hopLimitReached`: kotlin.ULong
+    , 
+    var `reachClamped`: kotlin.ULong
+    , 
+    var `droppedForCapacity`: kotlin.ULong
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshRelayStats: FfiConverterRustBuffer<MeshRelayStats> {
+    override fun read(buf: ByteBuffer): MeshRelayStats {
+        return MeshRelayStats(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MeshRelayStats) = (
+            FfiConverterULong.allocationSize(value.`forwarded`) +
+            FfiConverterULong.allocationSize(value.`transmissions`) +
+            FfiConverterULong.allocationSize(value.`queued`) +
+            FfiConverterULong.allocationSize(value.`awaitingTransmission`) +
+            FfiConverterULong.allocationSize(value.`duplicatesSuppressed`) +
+            FfiConverterULong.allocationSize(value.`coveredByANeighbor`) +
+            FfiConverterULong.allocationSize(value.`peerRateLimited`) +
+            FfiConverterULong.allocationSize(value.`rateDeferred`) +
+            FfiConverterULong.allocationSize(value.`hopLimitReached`) +
+            FfiConverterULong.allocationSize(value.`reachClamped`) +
+            FfiConverterULong.allocationSize(value.`droppedForCapacity`)
+    )
+
+    override fun write(value: MeshRelayStats, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`forwarded`, buf)
+            FfiConverterULong.write(value.`transmissions`, buf)
+            FfiConverterULong.write(value.`queued`, buf)
+            FfiConverterULong.write(value.`awaitingTransmission`, buf)
+            FfiConverterULong.write(value.`duplicatesSuppressed`, buf)
+            FfiConverterULong.write(value.`coveredByANeighbor`, buf)
+            FfiConverterULong.write(value.`peerRateLimited`, buf)
+            FfiConverterULong.write(value.`rateDeferred`, buf)
+            FfiConverterULong.write(value.`hopLimitReached`, buf)
+            FfiConverterULong.write(value.`reachClamped`, buf)
+            FfiConverterULong.write(value.`droppedForCapacity`, buf)
+    }
+}
+
+
+
+data class MeshRelayTunables (
+    var `maxTtl`: kotlin.UByte
+    , 
+    var `denseMaxTtl`: kotlin.UByte
+    , 
+    var `denseDegree`: kotlin.ULong
+    , 
+    var `fanout`: kotlin.ULong
+    , 
+    var `jitterMinMs`: kotlin.ULong
+    , 
+    var `jitterMaxMs`: kotlin.ULong
+    , 
+    var `ratePerSec`: kotlin.Float
+    , 
+    var `burst`: kotlin.Float
+    , 
+    var `peerRatePerSec`: kotlin.Float
+    , 
+    var `peerBurst`: kotlin.Float
+    , 
+    var `queueCapacity`: kotlin.ULong
+    , 
+    var `biasMinScale`: kotlin.Float
+    , 
+    var `biasMaxHandicapMs`: kotlin.ULong
+    , 
+    var `activityWindowMs`: kotlin.ULong
+    , 
+    var `activityMinForwards`: kotlin.ULong
+    , 
+    var `activityIdleWindows`: kotlin.UInt
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshRelayTunables: FfiConverterRustBuffer<MeshRelayTunables> {
+    override fun read(buf: ByteBuffer): MeshRelayTunables {
+        return MeshRelayTunables(
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterFloat.read(buf),
+            FfiConverterFloat.read(buf),
+            FfiConverterFloat.read(buf),
+            FfiConverterFloat.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterFloat.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MeshRelayTunables) = (
+            FfiConverterUByte.allocationSize(value.`maxTtl`) +
+            FfiConverterUByte.allocationSize(value.`denseMaxTtl`) +
+            FfiConverterULong.allocationSize(value.`denseDegree`) +
+            FfiConverterULong.allocationSize(value.`fanout`) +
+            FfiConverterULong.allocationSize(value.`jitterMinMs`) +
+            FfiConverterULong.allocationSize(value.`jitterMaxMs`) +
+            FfiConverterFloat.allocationSize(value.`ratePerSec`) +
+            FfiConverterFloat.allocationSize(value.`burst`) +
+            FfiConverterFloat.allocationSize(value.`peerRatePerSec`) +
+            FfiConverterFloat.allocationSize(value.`peerBurst`) +
+            FfiConverterULong.allocationSize(value.`queueCapacity`) +
+            FfiConverterFloat.allocationSize(value.`biasMinScale`) +
+            FfiConverterULong.allocationSize(value.`biasMaxHandicapMs`) +
+            FfiConverterULong.allocationSize(value.`activityWindowMs`) +
+            FfiConverterULong.allocationSize(value.`activityMinForwards`) +
+            FfiConverterUInt.allocationSize(value.`activityIdleWindows`)
+    )
+
+    override fun write(value: MeshRelayTunables, buf: ByteBuffer) {
+            FfiConverterUByte.write(value.`maxTtl`, buf)
+            FfiConverterUByte.write(value.`denseMaxTtl`, buf)
+            FfiConverterULong.write(value.`denseDegree`, buf)
+            FfiConverterULong.write(value.`fanout`, buf)
+            FfiConverterULong.write(value.`jitterMinMs`, buf)
+            FfiConverterULong.write(value.`jitterMaxMs`, buf)
+            FfiConverterFloat.write(value.`ratePerSec`, buf)
+            FfiConverterFloat.write(value.`burst`, buf)
+            FfiConverterFloat.write(value.`peerRatePerSec`, buf)
+            FfiConverterFloat.write(value.`peerBurst`, buf)
+            FfiConverterULong.write(value.`queueCapacity`, buf)
+            FfiConverterFloat.write(value.`biasMinScale`, buf)
+            FfiConverterULong.write(value.`biasMaxHandicapMs`, buf)
+            FfiConverterULong.write(value.`activityWindowMs`, buf)
+            FfiConverterULong.write(value.`activityMinForwards`, buf)
+            FfiConverterUInt.write(value.`activityIdleWindows`, buf)
+    }
+}
+
+
+
 data class MessageStats (
     var `messageId`: kotlin.String
     , 
@@ -7555,6 +7892,8 @@ data class ProtocolConfig (
     var `richPayloadEnabled`: kotlin.Boolean = true 
     , 
     var `cryptoRecoveryEnabled`: kotlin.Boolean = true 
+    , 
+    var `meshRelay`: MeshRelayConfig? = null 
     
 ){
     
@@ -7598,6 +7937,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterOptionalTypeMeshRelayConfig.read(buf),
         )
     }
 
@@ -7630,7 +7970,8 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.allocationSize(value.`nostrUsernameDiscoveryEnabled`) +
             FfiConverterBoolean.allocationSize(value.`compactEnvelopeEnabled`) +
             FfiConverterBoolean.allocationSize(value.`richPayloadEnabled`) +
-            FfiConverterBoolean.allocationSize(value.`cryptoRecoveryEnabled`)
+            FfiConverterBoolean.allocationSize(value.`cryptoRecoveryEnabled`) +
+            FfiConverterOptionalTypeMeshRelayConfig.allocationSize(value.`meshRelay`)
     )
 
     override fun write(value: ProtocolConfig, buf: ByteBuffer) {
@@ -7663,6 +8004,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.write(value.`compactEnvelopeEnabled`, buf)
             FfiConverterBoolean.write(value.`richPayloadEnabled`, buf)
             FfiConverterBoolean.write(value.`cryptoRecoveryEnabled`, buf)
+            FfiConverterOptionalTypeMeshRelayConfig.write(value.`meshRelay`, buf)
     }
 }
 
@@ -10510,6 +10852,38 @@ public object FfiConverterOptionalTypeMediaMetadata: FfiConverterRustBuffer<Medi
         } else {
             buf.put(1)
             FfiConverterTypeMediaMetadata.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeMeshRelayConfig: FfiConverterRustBuffer<MeshRelayConfig?> {
+    override fun read(buf: ByteBuffer): MeshRelayConfig? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeMeshRelayConfig.read(buf)
+    }
+
+    override fun allocationSize(value: MeshRelayConfig?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeMeshRelayConfig.allocationSize(value)
+        }
+    }
+
+    override fun write(value: MeshRelayConfig?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeMeshRelayConfig.write(value, buf)
         }
     }
 }

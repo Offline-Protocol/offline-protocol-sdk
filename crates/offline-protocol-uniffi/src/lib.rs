@@ -9,7 +9,8 @@
 use offline_protocol::{
     DeduplicatorMode as CoreDeduplicatorMode, DeviceCapabilitySnapshot as CoreDeviceSnapshot,
     EstablishmentState as CoreEstablishmentState, Event as CoreEvent,
-    MediaSendOptions as CoreMediaSendOptions, MetricsFrame as CoreMetricsFrame,
+    MediaSendOptions as CoreMediaSendOptions, MeshRelayConfig as CoreMeshRelayConfig,
+    MeshRelayStats as CoreMeshRelayStats, MetricsFrame as CoreMetricsFrame,
     MlsVerbosity as CoreMlsVerbosity, NetworkVisualizer,
     NoopTelemetrySink as CoreNoopTelemetrySink, OfflineProtocol as CoreProtocol,
     OverflowPolicy as CoreOverflowPolicy, PendingQueueConfig as CorePendingQueueConfig,
@@ -2311,6 +2312,171 @@ pub struct ProtocolConfig {
     /// Kill switch for 1:1 MLS crypto-failure recovery (default on). See the UDL
     /// dictionary and `EncryptionConfig::crypto_recovery_enabled` for semantics.
     pub crypto_recovery_enabled: bool,
+    /// Mesh forwarding tunables. `None` (and any `None` field inside it)
+    /// leaves the core default alone — see [`MeshRelayConfig`].
+    pub mesh_relay: Option<MeshRelayConfig>,
+}
+
+/// Mesh forwarding tunables, every field optional.
+///
+/// Absent means "leave the core default alone", which is what keeps the
+/// defaults in exactly one place. A binding that filled these in would be
+/// restating numbers it does not own, and a partial update from an app would
+/// silently reset every field it did not mention.
+///
+/// Durations are milliseconds here; the core carries `Duration`.
+#[derive(Debug, Clone, Default)]
+pub struct MeshRelayConfig {
+    pub max_ttl: Option<u8>,
+    pub dense_max_ttl: Option<u8>,
+    pub dense_degree: Option<u64>,
+    pub fanout: Option<u64>,
+    pub jitter_min_ms: Option<u64>,
+    pub jitter_max_ms: Option<u64>,
+    pub rate_per_sec: Option<f32>,
+    pub burst: Option<f32>,
+    pub peer_rate_per_sec: Option<f32>,
+    pub peer_burst: Option<f32>,
+    pub queue_capacity: Option<u64>,
+    pub bias_min_scale: Option<f32>,
+    pub bias_max_handicap_ms: Option<u64>,
+    pub activity_window_ms: Option<u64>,
+    pub activity_min_forwards: Option<u64>,
+    pub activity_idle_windows: Option<u32>,
+}
+
+/// The mesh forwarding tunables in force, every field populated.
+///
+/// The read-side twin of [`MeshRelayConfig`]: required fields, so no caller
+/// has to invent a fallback for an absent one.
+#[derive(Debug, Clone)]
+pub struct MeshRelayTunables {
+    pub max_ttl: u8,
+    pub dense_max_ttl: u8,
+    pub dense_degree: u64,
+    pub fanout: u64,
+    pub jitter_min_ms: u64,
+    pub jitter_max_ms: u64,
+    pub rate_per_sec: f32,
+    pub burst: f32,
+    pub peer_rate_per_sec: f32,
+    pub peer_burst: f32,
+    pub queue_capacity: u64,
+    pub bias_min_scale: f32,
+    pub bias_max_handicap_ms: u64,
+    pub activity_window_ms: u64,
+    pub activity_min_forwards: u64,
+    pub activity_idle_windows: u32,
+}
+
+/// What this device has been carrying for other people.
+#[derive(Debug, Clone)]
+pub struct MeshRelayStats {
+    pub forwarded: u64,
+    pub transmissions: u64,
+    pub queued: u64,
+    pub awaiting_transmission: u64,
+    pub duplicates_suppressed: u64,
+    pub covered_by_a_neighbor: u64,
+    pub peer_rate_limited: u64,
+    pub rate_deferred: u64,
+    pub hop_limit_reached: u64,
+    pub reach_clamped: u64,
+    pub dropped_for_capacity: u64,
+}
+
+impl MeshRelayConfig {
+    /// Lays the fields the caller actually set over the core defaults.
+    ///
+    /// Every `None` falls through to `CoreMeshRelayConfig::default()`, so the
+    /// numbers live in the core and nowhere else. Values are not clamped or
+    /// range-checked here: `CoreConfig::validate` owns that, and running it as
+    /// the single gate is what stops the FFI and the core disagreeing about
+    /// what is legal.
+    fn overlay(self, base: CoreMeshRelayConfig) -> CoreMeshRelayConfig {
+        CoreMeshRelayConfig {
+            max_ttl: self.max_ttl.unwrap_or(base.max_ttl),
+            dense_max_ttl: self.dense_max_ttl.unwrap_or(base.dense_max_ttl),
+            dense_degree: self
+                .dense_degree
+                .map(|v| v as usize)
+                .unwrap_or(base.dense_degree),
+            fanout: self.fanout.map(|v| v as usize).unwrap_or(base.fanout),
+            jitter_min: self
+                .jitter_min_ms
+                .map(Duration::from_millis)
+                .unwrap_or(base.jitter_min),
+            jitter_max: self
+                .jitter_max_ms
+                .map(Duration::from_millis)
+                .unwrap_or(base.jitter_max),
+            rate_per_sec: self.rate_per_sec.unwrap_or(base.rate_per_sec),
+            burst: self.burst.unwrap_or(base.burst),
+            peer_rate_per_sec: self.peer_rate_per_sec.unwrap_or(base.peer_rate_per_sec),
+            peer_burst: self.peer_burst.unwrap_or(base.peer_burst),
+            queue_capacity: self
+                .queue_capacity
+                .map(|v| v as usize)
+                .unwrap_or(base.queue_capacity),
+            seen: base.seen,
+            bias_min_scale: self.bias_min_scale.unwrap_or(base.bias_min_scale),
+            bias_max_handicap: self
+                .bias_max_handicap_ms
+                .map(Duration::from_millis)
+                .unwrap_or(base.bias_max_handicap),
+            activity_window: self
+                .activity_window_ms
+                .map(Duration::from_millis)
+                .unwrap_or(base.activity_window),
+            activity_min_forwards: self
+                .activity_min_forwards
+                .unwrap_or(base.activity_min_forwards),
+            activity_idle_windows: self
+                .activity_idle_windows
+                .unwrap_or(base.activity_idle_windows),
+        }
+    }
+}
+
+impl From<CoreMeshRelayConfig> for MeshRelayTunables {
+    fn from(config: CoreMeshRelayConfig) -> Self {
+        Self {
+            max_ttl: config.max_ttl,
+            dense_max_ttl: config.dense_max_ttl,
+            dense_degree: config.dense_degree as u64,
+            fanout: config.fanout as u64,
+            jitter_min_ms: config.jitter_min.as_millis() as u64,
+            jitter_max_ms: config.jitter_max.as_millis() as u64,
+            rate_per_sec: config.rate_per_sec,
+            burst: config.burst,
+            peer_rate_per_sec: config.peer_rate_per_sec,
+            peer_burst: config.peer_burst,
+            queue_capacity: config.queue_capacity as u64,
+            bias_min_scale: config.bias_min_scale,
+            bias_max_handicap_ms: config.bias_max_handicap.as_millis() as u64,
+            activity_window_ms: config.activity_window.as_millis() as u64,
+            activity_min_forwards: config.activity_min_forwards,
+            activity_idle_windows: config.activity_idle_windows,
+        }
+    }
+}
+
+impl From<CoreMeshRelayStats> for MeshRelayStats {
+    fn from(stats: CoreMeshRelayStats) -> Self {
+        Self {
+            forwarded: stats.forwarded,
+            transmissions: stats.transmissions,
+            queued: stats.queued,
+            awaiting_transmission: stats.awaiting_transmission as u64,
+            duplicates_suppressed: stats.duplicates_suppressed,
+            covered_by_a_neighbor: stats.covered_by_a_neighbor,
+            peer_rate_limited: stats.peer_rate_limited,
+            rate_deferred: stats.rate_deferred,
+            hop_limit_reached: stats.hop_limit_reached,
+            reach_clamped: stats.reach_clamped,
+            dropped_for_capacity: stats.dropped_for_capacity,
+        }
+    }
 }
 
 impl From<ProtocolConfig> for CoreConfig {
@@ -2351,6 +2517,9 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.group.relay_broadcast_enabled = config.group_relay_broadcast_enabled;
         core_config.group.enforce_admin_commits = config.group_enforce_admin_commits;
         core_config.security.require_transport_identity = config.require_transport_identity;
+        if let Some(mesh_relay) = config.mesh_relay {
+            core_config.mesh_relay = mesh_relay.overlay(core_config.mesh_relay);
+        }
         core_config
     }
 }
@@ -5764,6 +5933,29 @@ impl OfflineProtocol {
         }
     }
 
+    /// Reports how much traffic this device is carrying for other people.
+    ///
+    /// Counters are cumulative for the lifetime of the instance. `forwarded`
+    /// is the contribution figure to show a user; `rate_deferred` rising means
+    /// forwarding is hitting its ceiling, and `dropped_for_capacity` above
+    /// zero means this device is seeing more traffic than it can remember
+    /// having handled.
+    pub fn get_mesh_relay_stats(&self) -> MeshRelayStats {
+        let protocol = self.lock_inner_recovering();
+        protocol.mesh_relay_stats().into()
+    }
+
+    /// Reports the mesh forwarding tunables actually in force.
+    ///
+    /// Read from the governor, not from a copy held on this side. An FFI-local
+    /// cache would round-trip the caller's own input and prove nothing about
+    /// what forwarding is using — the same vacuity `get_dors_config` has to
+    /// work around.
+    pub fn get_mesh_relay_tunables(&self) -> MeshRelayTunables {
+        let protocol = self.lock_inner_recovering();
+        protocol.mesh_relay_config().into()
+    }
+
     /// Gets the number of pending ACKs.
     pub fn get_pending_ack_count(&self) -> u64 {
         let protocol = self.lock_inner_recovering();
@@ -6876,6 +7068,7 @@ mod tests {
 
     fn create_test_config() -> ProtocolConfig {
         ProtocolConfig {
+            mesh_relay: None,
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
@@ -6910,6 +7103,7 @@ mod tests {
 
     fn create_ble_only_config() -> ProtocolConfig {
         ProtocolConfig {
+            mesh_relay: None,
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
@@ -7342,6 +7536,7 @@ mod tests {
 
     fn create_reticulum_config() -> ProtocolConfig {
         ProtocolConfig {
+            mesh_relay: None,
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
@@ -13192,6 +13387,378 @@ mod tests {
     }
 
     /// Every DORS field the FFI accepts must survive a round trip. The three
+    /// An absent mesh-relay section must leave every core default untouched.
+    ///
+    /// This is the whole contract of the optional shape. If the FFI ever
+    /// materialises a value for a field the caller did not set, apps get the
+    /// FFI's idea of the defaults instead of the core's, and the two drift
+    /// silently because nothing compares them.
+    #[test]
+    fn an_absent_mesh_relay_section_keeps_every_core_default() {
+        let defaults = CoreMeshRelayConfig::default();
+
+        // Section omitted entirely.
+        let core: CoreConfig = create_test_config().into();
+        assert_eq!(core.mesh_relay.fanout, defaults.fanout);
+        assert_eq!(core.mesh_relay.max_ttl, defaults.max_ttl);
+        assert_eq!(core.mesh_relay.jitter_max, defaults.jitter_max);
+        assert_eq!(core.mesh_relay.bias_min_scale, defaults.bias_min_scale);
+        assert_eq!(core.mesh_relay.activity_window, defaults.activity_window);
+
+        // Section present but every field left unset: same answer. A caller
+        // that constructs the dictionary to set nothing must not thereby
+        // overwrite anything.
+        let mut config = create_test_config();
+        config.mesh_relay = Some(MeshRelayConfig::default());
+        let core: CoreConfig = config.into();
+        assert_eq!(core.mesh_relay.fanout, defaults.fanout);
+        assert_eq!(core.mesh_relay.queue_capacity, defaults.queue_capacity);
+        assert_eq!(core.mesh_relay.burst, defaults.burst);
+        assert_eq!(core.mesh_relay.seen.capacity, defaults.seen.capacity);
+    }
+
+    /// A partial section must move exactly the fields it names.
+    ///
+    /// The failure this pins is the one DORS shipped: a payload naming one
+    /// field arriving with defaults for company, so every unmentioned field is
+    /// silently reset.
+    #[test]
+    fn a_partial_mesh_relay_section_moves_only_what_it_names() {
+        let defaults = CoreMeshRelayConfig::default();
+
+        let mut config = create_test_config();
+        config.mesh_relay = Some(MeshRelayConfig {
+            fanout: Some(7),
+            jitter_max_ms: Some(150),
+            ..MeshRelayConfig::default()
+        });
+        let core: CoreConfig = config.into();
+
+        assert_eq!(core.mesh_relay.fanout, 7);
+        assert_eq!(core.mesh_relay.jitter_max, Duration::from_millis(150));
+
+        // Everything else still the core's.
+        assert_eq!(core.mesh_relay.max_ttl, defaults.max_ttl);
+        assert_eq!(core.mesh_relay.dense_degree, defaults.dense_degree);
+        assert_eq!(core.mesh_relay.jitter_min, defaults.jitter_min);
+        assert_eq!(core.mesh_relay.rate_per_sec, defaults.rate_per_sec);
+        assert_eq!(core.mesh_relay.bias_min_scale, defaults.bias_min_scale);
+        assert_eq!(
+            core.mesh_relay.bias_max_handicap,
+            defaults.bias_max_handicap
+        );
+        assert_eq!(
+            core.mesh_relay.activity_min_forwards,
+            defaults.activity_min_forwards
+        );
+    }
+
+    /// Every field must survive the trip out and back.
+    ///
+    /// Sets all sixteen to values distinct from the defaults and from each
+    /// other, so a field wired to the wrong source, or dropped entirely, fails
+    /// here rather than in an app. A conversion this wide is exactly where a
+    /// copy-paste slip hides.
+    #[test]
+    fn every_mesh_relay_tunable_survives_the_round_trip() {
+        let mut config = create_test_config();
+        config.mesh_relay = Some(MeshRelayConfig {
+            max_ttl: Some(11),
+            dense_max_ttl: Some(4),
+            dense_degree: Some(9),
+            fanout: Some(2),
+            jitter_min_ms: Some(35),
+            jitter_max_ms: Some(175),
+            rate_per_sec: Some(12.5),
+            burst: Some(41.0),
+            peer_rate_per_sec: Some(6.5),
+            peer_burst: Some(17.0),
+            queue_capacity: Some(321),
+            bias_min_scale: Some(0.4),
+            bias_max_handicap_ms: Some(275),
+            activity_window_ms: Some(45_000),
+            activity_min_forwards: Some(5),
+            activity_idle_windows: Some(3),
+        });
+
+        let protocol = OfflineProtocol::new(config).unwrap();
+        let read_back = protocol.get_mesh_relay_tunables();
+
+        assert_eq!(read_back.max_ttl, 11);
+        assert_eq!(read_back.dense_max_ttl, 4);
+        assert_eq!(read_back.dense_degree, 9);
+        assert_eq!(read_back.fanout, 2);
+        assert_eq!(read_back.jitter_min_ms, 35);
+        assert_eq!(read_back.jitter_max_ms, 175);
+        assert_eq!(read_back.rate_per_sec, 12.5);
+        assert_eq!(read_back.burst, 41.0);
+        assert_eq!(read_back.peer_rate_per_sec, 6.5);
+        assert_eq!(read_back.peer_burst, 17.0);
+        assert_eq!(read_back.queue_capacity, 321);
+        assert_eq!(read_back.bias_min_scale, 0.4);
+        assert_eq!(read_back.bias_max_handicap_ms, 275);
+        assert_eq!(read_back.activity_window_ms, 45_000);
+        assert_eq!(read_back.activity_min_forwards, 5);
+        assert_eq!(read_back.activity_idle_windows, 3);
+    }
+
+    /// The tunables getter must read the governor, not a copy on this side.
+    ///
+    /// `get_dors_config` returns the FFI's own stored value, which makes a
+    /// round-trip assertion against it vacuous — the reason its test has to
+    /// reach into the selector. This getter has no stored copy to be vacuous
+    /// against, and this pins that: the value comes back from the engine even
+    /// though nothing on the FFI side ever recorded it.
+    #[test]
+    fn mesh_relay_tunables_are_read_from_the_governor() {
+        let mut config = create_test_config();
+        config.mesh_relay = Some(MeshRelayConfig {
+            fanout: Some(6),
+            ..MeshRelayConfig::default()
+        });
+        let protocol = OfflineProtocol::new(config).unwrap();
+
+        let inner = protocol.lock_inner().unwrap();
+        let from_engine = inner.mesh_relay_config().fanout;
+        drop(inner);
+
+        assert_eq!(from_engine, 6, "the governor took the configured fan-out");
+        assert_eq!(
+            protocol.get_mesh_relay_tunables().fanout,
+            from_engine as u64
+        );
+    }
+
+    /// Config validation is the core's, and the FFI must not route around it.
+    ///
+    /// A fan-out of zero is refused by `CoreConfig::validate`; creating with
+    /// one has to fail rather than be quietly clamped on the way through.
+    #[test]
+    fn an_invalid_mesh_relay_tunable_is_refused_at_create() {
+        let mut config = create_test_config();
+        config.mesh_relay = Some(MeshRelayConfig {
+            fanout: Some(0),
+            ..MeshRelayConfig::default()
+        });
+        assert!(OfflineProtocol::new(config).is_err());
+    }
+
+    /// The counters must map to the right fields, all eleven of them.
+    ///
+    /// A fresh instance has carried nothing, so every counter reads zero —
+    /// which pins the wiring but not the mapping. The mapping is pinned by
+    /// `MeshRelayStats`'s own conversion being exhaustive at compile time; what
+    /// this catches is a getter that panics, deadlocks, or was never wired.
+    #[test]
+    fn mesh_relay_stats_read_through_to_the_core() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let stats = protocol.get_mesh_relay_stats();
+
+        assert_eq!(stats.forwarded, 0);
+        assert_eq!(stats.transmissions, 0);
+        assert_eq!(stats.queued, 0);
+        assert_eq!(stats.awaiting_transmission, 0);
+        assert_eq!(stats.duplicates_suppressed, 0);
+        assert_eq!(stats.covered_by_a_neighbor, 0);
+        assert_eq!(stats.peer_rate_limited, 0);
+        assert_eq!(stats.rate_deferred, 0);
+        assert_eq!(stats.hop_limit_reached, 0);
+        assert_eq!(stats.reach_clamped, 0);
+        assert_eq!(stats.dropped_for_capacity, 0);
+    }
+
+    /// Every mesh-relay tunable must be readable by every layer that carries
+    /// it, in both spellings each bridge accepts.
+    ///
+    /// A field can join the UDL dictionary and be missed by one parser with no
+    /// error anywhere: the config still builds, the app still starts, and that
+    /// one dial silently does nothing. `cargo test` cannot see a Kotlin or
+    /// Swift parse gap, and neither language's own suite knows what the UDL
+    /// says — so the field list is derived from the UDL here and checked
+    /// against all four hand-written layers at once.
+    #[test]
+    fn react_native_bridges_read_every_mesh_relay_tunable() {
+        /// Drops comment lines, so an assertion matches code rather than the
+        /// prose describing it — every field below is also named in a doc
+        /// comment somewhere.
+        fn code_only(source: &str) -> String {
+            source
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with("//") && !l.starts_with('*') && !l.starts_with("/*"))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        /// The region between two anchors, so an assertion cannot satisfy
+        /// itself from some unrelated part of the file.
+        fn slice_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            let after = source
+                .split_once(start)
+                .unwrap_or_else(|| panic!("expected {start:?} in source"))
+                .1;
+            after
+                .split_once(end)
+                .unwrap_or_else(|| panic!("expected {end:?} after {start:?}"))
+                .0
+        }
+
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            let path = rn_dir.join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+
+        // camelCase, in UDL order.
+        const FIELDS: &[&str] = &[
+            "maxTtl",
+            "denseMaxTtl",
+            "denseDegree",
+            "fanout",
+            "jitterMinMs",
+            "jitterMaxMs",
+            "ratePerSec",
+            "burst",
+            "peerRatePerSec",
+            "peerBurst",
+            "queueCapacity",
+            "biasMinScale",
+            "biasMaxHandicapMs",
+            "activityWindowMs",
+            "activityMinForwards",
+            "activityIdleWindows",
+        ];
+
+        // Guard the guard: a field that joins the UDL and not FIELDS would
+        // leave the loops below passing while the newcomer goes unchecked.
+        let udl = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/offline_protocol.udl"),
+        )
+        .expect("read udl");
+        let udl_fields: Vec<String> = slice_between(&udl, "dictionary MeshRelayConfig {", "};")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .filter_map(|l| l.trim_end_matches(';').split_whitespace().nth(1))
+            .map(|snake| {
+                let mut out = String::new();
+                let mut upper = false;
+                for c in snake.chars() {
+                    if c == '_' {
+                        upper = true;
+                    } else if upper {
+                        out.extend(c.to_uppercase());
+                        upper = false;
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out
+            })
+            .collect();
+        assert_eq!(
+            udl_fields, FIELDS,
+            "MeshRelayConfig gained or lost a field in the UDL. Add it to FIELDS *and* to both \
+             bridge parsers, the TypeScript interface and the JS transform, or an app setting \
+             it is silently ignored"
+        );
+
+        // The read side must stay in step with the write side, or a tunable
+        // becomes settable and not readable.
+        let tunables: Vec<String> = slice_between(&udl, "dictionary MeshRelayTunables {", "};")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .filter_map(|l| l.trim_end_matches(';').split_whitespace().nth(1))
+            .map(|s| s.to_string())
+            .collect();
+        let config_snake: Vec<String> = slice_between(&udl, "dictionary MeshRelayConfig {", "};")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .filter_map(|l| l.trim_end_matches(';').split_whitespace().nth(1))
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            config_snake, tunables,
+            "MeshRelayConfig and MeshRelayTunables must carry the same fields in the same order: \
+             one is what an app writes and the other what it reads back, and a field in only one \
+             of them is either unsettable or unreadable"
+        );
+
+        let swift = code_only(&read("ios/MeshRelayConfigReader.swift"));
+        let kotlin = code_only(slice_between(
+            &read("android/src/main/java/com/offlineprotocol/ProtocolConfigParser.kt"),
+            "val meshRelayJson =",
+            "val config = ProtocolConfig(",
+        ));
+        let types_ts = code_only(slice_between(
+            &read("src/types.ts"),
+            "export interface MeshRelayConfig {",
+            "}",
+        ));
+        let index_ts = code_only(slice_between(
+            &read("src/index.ts"),
+            "if (this.config.meshRelay) {",
+            "nativeConfig.meshRelay = meshRelayConfig;",
+        ));
+
+        for field in FIELDS {
+            let snake = {
+                let mut out = String::new();
+                for c in field.chars() {
+                    if c.is_uppercase() {
+                        out.push('_');
+                        out.extend(c.to_lowercase());
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out
+            };
+
+            // Both bridges accept camelCase and snake_case for every field —
+            // the JS wrapper sends one shape and a direct native caller may
+            // send the other, and a field readable in only one spelling is a
+            // silent drop for whichever caller uses the other.
+            assert!(
+                swift.contains(&format!("\"{field}\"")),
+                "MeshRelayConfigReader.swift must read `{field}`"
+            );
+            assert!(
+                kotlin.contains(&format!("\"{field}\"")),
+                "ProtocolConfigParser.kt must read `{field}`"
+            );
+            if snake != *field {
+                assert!(
+                    swift.contains(&format!("\"{snake}\"")),
+                    "MeshRelayConfigReader.swift must also accept the snake_case `{snake}`"
+                );
+                assert!(
+                    kotlin.contains(&format!("\"{snake}\"")),
+                    "ProtocolConfigParser.kt must also accept the snake_case `{snake}`"
+                );
+            }
+
+            // Types are erased at runtime, so a field missing from the TS
+            // interface cannot be caught by any JS test — an app simply cannot
+            // express it, and tsc rejects the attempt.
+            assert!(
+                types_ts.contains(&format!("{field}?:")),
+                "types.ts MeshRelayConfig must declare `{field}?:`, or no app can set it"
+            );
+            assert!(
+                index_ts.contains(&format!("{field}: this.config.meshRelay.{field}")),
+                "index.ts must forward `{field}` to the native payload, or it never leaves JS"
+            );
+        }
+    }
+
     /// battery/relay fields used to be missing from the FFI shape, so *any*
     /// runtime DORS update silently reset them to 20/30/4 — including one that
     /// meant to change something else.

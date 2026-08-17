@@ -75,6 +75,133 @@ export interface DedupConfig {
 }
 
 /**
+ * Mesh forwarding tunables, as passed in at construction.
+ *
+ * Every field is optional: an omitted one keeps the Rust core's default. That
+ * is the point of the shape — a value written here would be a second copy of a
+ * default that can drift from the core's, and this section has no runtime
+ * update path to correct it. Durations are milliseconds.
+ */
+export interface MeshRelayConfig {
+  /** Hop budget a forwarded frame is clamped to (default: 8) */
+  maxTtl?: number;
+  /** Hop budget applied once the neighborhood is dense (default: 5) */
+  denseMaxTtl?: number;
+  /** Neighbor count at which the dense budget applies (default: 6) */
+  denseDegree?: number;
+  /**
+   * Neighbors a frame is forwarded to (default: 3). Must be at least 1 —
+   * zero is refused at construction, because it is not a cheaper forward but
+   * a silent drop. Use `relay.allowRelay` to stop carrying traffic.
+   */
+  fanout?: number;
+  /** Shortest pre-transmit delay in ms (default: 20) */
+  jitterMinMs?: number;
+  /** Longest pre-transmit delay at low density in ms (default: 200) */
+  jitterMaxMs?: number;
+  /** Sustained forwarding rate, frames per second (default: 10) */
+  ratePerSec?: number;
+  /** Burst allowance above the sustained rate (default: 30) */
+  burst?: number;
+  /** Sustained per-neighbor acceptance rate (default: 5) */
+  peerRatePerSec?: number;
+  /** Per-neighbor burst allowance (default: 15) */
+  peerBurst?: number;
+  /** Maximum forwards awaiting transmission (default: 256) */
+  queueCapacity?: number;
+  /**
+   * Smallest share of the full forwarding effort capability bias scales a
+   * device down to (default: 0.25). Must be in (0, 1]; `1.0` disables bias so
+   * every device forwards as eagerly as every other, whatever its battery.
+   */
+  biasMinScale?: number;
+  /**
+   * Longest extra pre-transmit delay bias adds to a weaker device, in ms
+   * (default: 400). This plus `jitterMaxMs` must stay under the 5s overdue
+   * cut-off, past which a forward is abandoned rather than merely late.
+   */
+  biasMaxHandicapMs?: number;
+  /** How long a stretch of forwarding activity is measured over, in ms (default: 60000) */
+  activityWindowMs?: number;
+  /** Frames carried in one window at or above which this device reads as an active relay (default: 3) */
+  activityMinForwards?: number;
+  /** Consecutive quiet windows before an active relay reads as inactive (default: 2) */
+  activityIdleWindows?: number;
+}
+
+/**
+ * The mesh forwarding tunables actually in force.
+ *
+ * The read side of {@link MeshRelayConfig}, with every field populated. It is
+ * required rather than optional on purpose: an optional answer would make each
+ * caller invent its own fallback, and those fallbacks are duplicated defaults
+ * that drift from the core.
+ */
+export interface MeshRelayTunables {
+  maxTtl: number;
+  denseMaxTtl: number;
+  denseDegree: number;
+  fanout: number;
+  jitterMinMs: number;
+  jitterMaxMs: number;
+  ratePerSec: number;
+  burst: number;
+  peerRatePerSec: number;
+  peerBurst: number;
+  queueCapacity: number;
+  biasMinScale: number;
+  biasMaxHandicapMs: number;
+  activityWindowMs: number;
+  activityMinForwards: number;
+  activityIdleWindows: number;
+}
+
+/**
+ * What this device has been carrying for other people.
+ *
+ * Counters are cumulative for the lifetime of the protocol instance and never
+ * reset. See `getMeshRelayStats()`.
+ */
+export interface MeshRelayStats {
+  /**
+   * Messages moved on someone else's behalf, counted once each. This is the
+   * contribution figure to show a user.
+   */
+  forwarded: number;
+  /**
+   * Times a frame was put on a link, counting each link separately and
+   * including this device handing over its own messages. This is what the
+   * per-second budget bounds, so it is the one to compare against the ceiling.
+   */
+  transmissions: number;
+  /** Forwards admitted to the queue */
+  queued: number;
+  /** Forwards queued and not yet transmitted */
+  awaitingTransmission: number;
+  /** Copies of a frame already being handled, dropped on arrival */
+  duplicatesSuppressed: number;
+  /**
+   * Pending forwards stood down because a neighbor was heard carrying the same
+   * frame first. This is the mesh working as intended, not a loss.
+   */
+  coveredByANeighbor: number;
+  /** Frames refused because one neighbor was sending more than its share */
+  peerRateLimited: number;
+  /** Forwards delayed by the per-second ceiling. Delayed, not dropped. */
+  rateDeferred: number;
+  /** Frames arriving with no hop budget left */
+  hopLimitReached: number;
+  /** Frames whose TTL was clamped down to the mesh's own hop budget */
+  reachClamped: number;
+  /**
+   * Suppression-cache entries evicted for capacity. Expected to stay at zero;
+   * anything else means this device is seeing more traffic than it can
+   * remember having handled.
+   */
+  droppedForCapacity: number;
+}
+
+/**
  * Deduplicator statistics for monitoring
  */
 export interface DedupStats {
@@ -603,6 +730,20 @@ export interface ProtocolConfig {
     /** Connection count DORS scores relay capacity against (default: 4) */
     relayOptimalConnectionCount?: number;
   };
+  /**
+   * Mesh forwarding tunables (optional).
+   *
+   * The shape of carrying other people's traffic, once `relay.relayPriority`
+   * and the battery floors have already decided that this device does. Whether
+   * to forward at all is `relay.allowRelay`'s job, not this section's.
+   *
+   * Every field is optional and an omitted one keeps the SDK default — the
+   * defaults live in the Rust core and nowhere else, so no value here is ever
+   * a restatement that can drift. Applied at construction only; there is no
+   * runtime update for this section. Read what is actually in force with
+   * `getMeshRelayTunables()`.
+   */
+  meshRelay?: MeshRelayConfig;
   /** Relay configuration (optional) */
   relay?: RelayConfig;
   /** Network configuration (optional) */

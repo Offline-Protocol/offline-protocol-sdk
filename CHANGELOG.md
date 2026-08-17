@@ -15,6 +15,32 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Mesh forwarding is configurable and observable from every binding.**
+  Multi-hop forwarding shipped with its tunables and counters as Rust-core
+  surfaces, so an RN app could neither tune it nor see it working: with no
+  counters to read, even a correctly staged three-device test could only infer
+  forwarding from delivery.
+
+  `ProtocolConfig.meshRelay` now carries the sixteen governor tunables (hop
+  budgets, fan-out, jitter, rate and burst budgets, queue capacity, the
+  capability-bias dials, and the activity window that decides relay standing).
+  `getMeshRelayStats()` reports what this device has carried; note that a
+  device with a working relay connection forwards nothing, because the mesh is
+  only offered frames no other carrier can deliver, so zero counters on an
+  online device are the honest answer rather than a fault.
+
+  Every config field is optional and an omitted one keeps the core's default,
+  so a section naming one dial moves only that dial and no binding ever
+  restates a number it does not own. The read side is deliberately the
+  opposite: `getMeshRelayTunables()` returns every field populated, read from
+  the governor rather than echoed back from what was passed in, so no caller
+  writes a fallback literal that could drift from the core. The section is
+  applied at construction; there is no runtime update, because the governor
+  snapshots it at build time and re-pointing it mid-flight would have to
+  rebuild the token buckets and suppression cache underneath in-flight
+  forwards. Suppression-cache sizing stays core-only, being internal memory
+  sizing rather than a policy dial.
+
 - **Username discovery and a self-certifying invite payload.** Two ways to
   reach a peer you have never spoken to, restoring reach-by-username, which the
   addressing migration removed.
@@ -217,6 +243,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   having set it. Unreachable from typed TypeScript; reachable from JavaScript.
 
 ### Fixed
+
+- **Three mesh-relay behaviours that shipped guarded by nothing.** A
+  `mesh_relay.fanout` of zero is now refused at construction: it read like an
+  off switch but had quietly become a fan-out of one, and before that it was a
+  silent drop of an already-admitted frame. The capability-bias window
+  separation is now asserted against the handicap a device can actually pay
+  ((1 - `bias_min_scale`) x `bias_max_handicap`) rather than the configured
+  ceiling, which no device ever reaches. The old assertion stayed green while
+  a raised min scale would let a weak device's jitter window overlap a capable
+  one's. And `RelayPriority::Always` excusing the *forwarding* battery floor,
+  not just the cosmetic relay label, now has gate-level coverage in both
+  directions: eager below the soft floor carries, eager below the hard critical
+  floor still does not.
 
 - **Battery-aware relaying actually runs now.** Every battery-dependent policy
   in the SDK reads the device's charge from the per-transport metrics map, and

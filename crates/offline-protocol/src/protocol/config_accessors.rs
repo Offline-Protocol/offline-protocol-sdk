@@ -1,6 +1,6 @@
 //! Configuration accessors, diagnostics, and service registration.
 
-use super::mesh_relay::MeshRelayStats;
+use super::mesh_relay::{MeshRelayConfig, MeshRelayStats};
 use super::{
     lock_shared_state, OfflineProtocol, PendingQueueMetrics, ProtocolState, KNOWN_PEER_TTL_SECS,
     MEDIA_TRANSFER_STALE_TIMEOUT_SECS,
@@ -257,6 +257,17 @@ impl OfflineProtocol {
             reach_clamped: counters.ttl_clamped,
             dropped_for_capacity: self.mesh_relay.seen_capacity_evictions(),
         }
+    }
+
+    /// Reports the mesh forwarding tunables currently in force.
+    ///
+    /// Read from the governor itself, not from the stored [`ProtocolConfig`],
+    /// so this reports what forwarding decisions actually use. The section is
+    /// fixed at construction today, which makes the two identical — reading
+    /// the consumer is what keeps that an implementation detail rather than
+    /// something a caller has to know.
+    pub fn mesh_relay_config(&self) -> MeshRelayConfig {
+        self.mesh_relay.config().clone()
     }
 
     /// Returns a mutable reference to the retry queue (test-only).
