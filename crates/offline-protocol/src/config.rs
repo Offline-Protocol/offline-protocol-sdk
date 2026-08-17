@@ -853,6 +853,76 @@ impl ProtocolConfig {
             ));
         }
 
+        // A fan-out of zero is not a cheaper forward, it is a silent drop: the
+        // frame has already been admitted and recorded as seen, so no copy goes
+        // out and this node's suppression entry stops it arriving again by
+        // another path. Same argument as `bias_min_scale` below — declining to
+        // carry other people's traffic is `relay.allow_relay`'s job, and it is
+        // visible. The forwarding paths clamp with `.max(1)`; rejecting zero
+        // here keeps that clamp an unreachable defensive floor instead of a
+        // silent rewrite of what zero means.
+        if self.mesh_relay.fanout == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "mesh_relay.fanout must be greater than 0".to_string(),
+            ));
+        }
+
+        // The same argument as fan-out, for every other dial that can reach
+        // zero. Each of these reads like a conservative setting and is in fact
+        // an off switch that reports nothing: the failure is total, silent, and
+        // indistinguishable from a quiet neighborhood, which is what makes
+        // rejecting it at construction worth more than any runtime clamp.
+        //
+        // A hop ceiling of zero clamps every arriving budget to nothing, so
+        // `prepare_hop` refuses the frame before it is ever queued. Both
+        // ceilings are checked: the dense one applies only in a crowded room,
+        // so a zero there fails exactly where the mesh is most needed and
+        // nowhere else — the hardest version of this bug to reproduce.
+        if self.mesh_relay.max_ttl == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "mesh_relay.max_ttl must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.mesh_relay.dense_max_ttl == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "mesh_relay.dense_max_ttl must be greater than 0".to_string(),
+            ));
+        }
+
+        // A queue that holds nothing refuses every admission: the length is
+        // always at or over capacity, and eviction has no victim to find, so
+        // each frame is rejected as queue-full. Nothing is forwarded and the
+        // only trace is `refused_queue_full`.
+        if self.mesh_relay.queue_capacity == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "mesh_relay.queue_capacity must be greater than 0".to_string(),
+            ));
+        }
+
+        // The rate and burst dials feed token buckets that clamp their inputs
+        // with `.max(0.0)`. That clamp makes a negative or NaN value safe in
+        // the arithmetic sense and catastrophic in every other: the bucket
+        // simply never yields a token, so forwarding stops for good with no
+        // error and no counter. NaN matters on its own because `f32::max`
+        // returns the *other* operand for it, so a NaN rate silently becomes
+        // zero rather than propagating anywhere visible.
+        //
+        // Checked as a set: they are the same failure, and naming the field in
+        // the message is what makes a rejected config actionable.
+        for (name, value) in [
+            ("rate_per_sec", self.mesh_relay.rate_per_sec),
+            ("burst", self.mesh_relay.burst),
+            ("peer_rate_per_sec", self.mesh_relay.peer_rate_per_sec),
+            ("peer_burst", self.mesh_relay.peer_burst),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(crate::Error::InvalidConfiguration(format!(
+                    "mesh_relay.{name} must be finite and greater than 0"
+                )));
+            }
+        }
+
         // Capability bias scales forwarding effort; it must never be able to
         // scale it to nothing. Zero would make a low-battery device stop
         // forwarding by the back door, which is the partition the bias design
@@ -864,6 +934,23 @@ impl ProtocolConfig {
             return Err(crate::Error::InvalidConfiguration(
                 "mesh_relay.bias_min_scale must be finite and in (0.0, 1.0]".to_string(),
             ));
+        }
+
+        // An inverted jitter window is not a narrow window, it is two separate
+        // failures. `jitter_for` raises the effective maximum to meet the
+        // minimum, so the span collapses to a single millisecond and every
+        // neighbor picks essentially the same delay — losing the spread that
+        // stops a crowded room transmitting on top of itself, which is the
+        // whole reason the delay exists. And because the check below reads
+        // `jitter_max`, an oversized `jitter_min` would slip past the overdue
+        // cut-off entirely: a ten-minute minimum with the default maximum
+        // validates clean and abandons every forward.
+        if self.mesh_relay.jitter_min > self.mesh_relay.jitter_max {
+            return Err(crate::Error::InvalidConfiguration(format!(
+                "mesh_relay.jitter_min ({}ms) must not exceed mesh_relay.jitter_max ({}ms)",
+                self.mesh_relay.jitter_min.as_millis(),
+                self.mesh_relay.jitter_max.as_millis(),
+            )));
         }
 
         // A forward is abandoned rather than sent once it sits
@@ -1476,6 +1563,123 @@ mod tests {
         let mut config = ProtocolConfig::new("test-app", "user123");
         config.mesh_relay.bias_min_scale = 1.0;
         assert!(config.validate().is_ok());
+    }
+
+    /// A fan-out of zero must be refused rather than clamped.
+    ///
+    /// It reads like an off switch and is not one: the frame is already
+    /// admitted and recorded as seen by the time fan-out is chosen, so zero
+    /// targets is a silent drop that also suppresses the copy arriving by
+    /// another path. The forwarding paths clamp it to one; this keeps that
+    /// clamp a defensive floor rather than a quiet reinterpretation.
+    #[test]
+    fn test_config_validation_rejects_a_fanout_of_zero() {
+        let mut config = ProtocolConfig::new("test-app", "user123");
+        config.mesh_relay.fanout = 0;
+        assert!(config.validate().is_err());
+
+        // One is a real setting — forward to a single neighbor — and must stay
+        // accepted, or the check has swallowed the narrowest working fan-out.
+        config.mesh_relay.fanout = 1;
+        assert!(config.validate().is_ok());
+    }
+
+    /// Every hop-budget, queue and rate dial that can silently switch
+    /// forwarding off must be refused, not clamped.
+    ///
+    /// These share one failure and it is the worst kind: the device keeps
+    /// running, reports no error, and carries nothing. Each value below is the
+    /// one a caller would reach for meaning "be conservative", so leaving them
+    /// legal makes an off switch out of a dial nobody thinks is one.
+    #[test]
+    fn test_config_validation_rejects_dials_that_silently_stop_forwarding() {
+        // Both hop ceilings: zero clamps every arriving budget to nothing, so
+        // the frame is refused before it can be queued. The dense one is
+        // checked separately because it only bites in a crowded room.
+        let mut zero_ttl = ProtocolConfig::new("test-app", "user123");
+        zero_ttl.mesh_relay.max_ttl = 0;
+        assert!(zero_ttl.validate().is_err());
+
+        let mut zero_dense_ttl = ProtocolConfig::new("test-app", "user123");
+        zero_dense_ttl.mesh_relay.dense_max_ttl = 0;
+        assert!(zero_dense_ttl.validate().is_err());
+
+        // A queue that holds nothing rejects every admission as queue-full.
+        let mut zero_queue = ProtocolConfig::new("test-app", "user123");
+        zero_queue.mesh_relay.queue_capacity = 0;
+        assert!(zero_queue.validate().is_err());
+
+        // The token buckets clamp their inputs with `.max(0.0)`, which turns
+        // each of these into a bucket that never yields a token. NaN is listed
+        // on its own because `f32::max` returns the other operand for it, so it
+        // arrives as zero rather than failing anywhere visible, and negatives
+        // are what a bridge's own clamp hands over for validation here.
+        for bad in [0.0_f32, -1.0, f32::NAN, f32::INFINITY] {
+            let mut rate = ProtocolConfig::new("test-app", "user123");
+            rate.mesh_relay.rate_per_sec = bad;
+            assert!(
+                rate.validate().is_err(),
+                "rate_per_sec of {bad} must be refused",
+            );
+
+            let mut burst = ProtocolConfig::new("test-app", "user123");
+            burst.mesh_relay.burst = bad;
+            assert!(burst.validate().is_err(), "burst of {bad} must be refused");
+
+            let mut peer_rate = ProtocolConfig::new("test-app", "user123");
+            peer_rate.mesh_relay.peer_rate_per_sec = bad;
+            assert!(
+                peer_rate.validate().is_err(),
+                "peer_rate_per_sec of {bad} must be refused",
+            );
+
+            let mut peer_burst = ProtocolConfig::new("test-app", "user123");
+            peer_burst.mesh_relay.peer_burst = bad;
+            assert!(
+                peer_burst.validate().is_err(),
+                "peer_burst of {bad} must be refused",
+            );
+        }
+
+        // The narrowest working settings must stay accepted, or the checks have
+        // swallowed real configurations along with the broken ones.
+        let mut minimal = ProtocolConfig::new("test-app", "user123");
+        minimal.mesh_relay.max_ttl = 1;
+        minimal.mesh_relay.dense_max_ttl = 1;
+        minimal.mesh_relay.queue_capacity = 1;
+        minimal.mesh_relay.rate_per_sec = 0.5;
+        minimal.mesh_relay.burst = 1.0;
+        minimal.mesh_relay.peer_rate_per_sec = 0.5;
+        minimal.mesh_relay.peer_burst = 1.0;
+        assert!(minimal.validate().is_ok());
+    }
+
+    /// An inverted jitter window must be refused.
+    ///
+    /// Two failures in one, which is why the equal case has to stay legal to
+    /// prove the check is an ordering check and not a ban on narrow windows.
+    /// `jitter_for` raises the effective maximum to meet the minimum, so the
+    /// span collapses to a millisecond and neighbors stop separating in time;
+    /// and since the overdue check reads `jitter_max`, an oversized minimum
+    /// would otherwise validate clean and abandon every forward.
+    #[test]
+    fn test_config_validation_rejects_an_inverted_jitter_window() {
+        let mut inverted = ProtocolConfig::new("test-app", "user123");
+        inverted.mesh_relay.jitter_min = std::time::Duration::from_millis(300);
+        inverted.mesh_relay.jitter_max = std::time::Duration::from_millis(200);
+        assert!(inverted.validate().is_err());
+
+        // The case the overdue check alone would have missed: a minimum past
+        // the 5s cut-off, with the maximum left at its default.
+        let mut oversized_min = ProtocolConfig::new("test-app", "user123");
+        oversized_min.mesh_relay.jitter_min = std::time::Duration::from_secs(600);
+        assert!(oversized_min.validate().is_err());
+
+        // Equal is a fixed delay, not an inversion, and stays accepted.
+        let mut equal = ProtocolConfig::new("test-app", "user123");
+        equal.mesh_relay.jitter_min = std::time::Duration::from_millis(200);
+        equal.mesh_relay.jitter_max = std::time::Duration::from_millis(200);
+        assert!(equal.validate().is_ok());
     }
 
     /// The activity window's tunables decide whether the relay standing can be

@@ -43,6 +43,9 @@ import type {
   RetryConfig,
   DedupConfig,
   DedupStats,
+  MeshRelayConfig,
+  MeshRelayStats,
+  MeshRelayTunables,
   MlsKeyPackage,
   MlsEncryptedMessage,
   MlsWelcome,
@@ -170,6 +173,7 @@ interface NativeConfig {
     relayBroadcastEnabled?: boolean;
     enforceAdminCommits?: boolean;
   };
+  meshRelay?: MeshRelayConfig;
   dors?: {
     preferOnline: boolean;
     switchHysteresis: number;
@@ -491,6 +495,37 @@ export class OfflineProtocol {
       });
       if (groupConfig) {
         nativeConfig.group = groupConfig;
+      }
+    }
+
+    // Mesh forwarding section. Nested only — there are no legacy flat
+    // spellings to keep in step, because nothing has ever read these from
+    // JavaScript. Forwarded field-for-field with no defaults filled in: an
+    // omitted field must stay omitted all the way to the core, which is what
+    // keeps the defaults in one place. `sanitize` drops the undefined entries
+    // and collapses an all-empty section, so "set nothing" arrives as an
+    // absent section rather than an object that overwrites with nulls.
+    if (this.config.meshRelay) {
+      const meshRelayConfig = sanitize({
+        maxTtl: this.config.meshRelay.maxTtl,
+        denseMaxTtl: this.config.meshRelay.denseMaxTtl,
+        denseDegree: this.config.meshRelay.denseDegree,
+        fanout: this.config.meshRelay.fanout,
+        jitterMinMs: this.config.meshRelay.jitterMinMs,
+        jitterMaxMs: this.config.meshRelay.jitterMaxMs,
+        ratePerSec: this.config.meshRelay.ratePerSec,
+        burst: this.config.meshRelay.burst,
+        peerRatePerSec: this.config.meshRelay.peerRatePerSec,
+        peerBurst: this.config.meshRelay.peerBurst,
+        queueCapacity: this.config.meshRelay.queueCapacity,
+        biasMinScale: this.config.meshRelay.biasMinScale,
+        biasMaxHandicapMs: this.config.meshRelay.biasMaxHandicapMs,
+        activityWindowMs: this.config.meshRelay.activityWindowMs,
+        activityMinForwards: this.config.meshRelay.activityMinForwards,
+        activityIdleWindows: this.config.meshRelay.activityIdleWindows,
+      });
+      if (meshRelayConfig) {
+        nativeConfig.meshRelay = meshRelayConfig;
       }
     }
 
@@ -2205,6 +2240,52 @@ export class OfflineProtocol {
    */
   async getDedupStats(): Promise<DedupStats> {
     return await OfflineProtocolNativeModule.getDedupStats();
+  }
+
+  /**
+   * Reports how much traffic this device is carrying for other people.
+   *
+   * Counters are cumulative for the lifetime of this instance and never reset,
+   * so a rate is a difference between two reads. The exception is
+   * `awaitingTransmission`, a gauge that goes down as well as up. `forwarded`
+   * is the contribution figure to show a user; `transmissions` is the one the
+   * per-second budget bounds, since it counts each link separately and
+   * includes this device's own sends.
+   *
+   * Two readings worth knowing: `rateDeferred` rising means forwarding is
+   * hitting its ceiling and those frames are delayed rather than dropped, and
+   * `coveredByANeighbor` is the mesh working as intended — a neighbor was
+   * heard carrying the frame first, so this device stood down.
+   *
+   * For whether back-pressure is actually costing anything, read
+   * `refusedQueueFull` and `abandonedOverdue`. Those are the two that count
+   * frames genuinely lost, and a device shedding traffic can otherwise show
+   * nothing but healthy-looking deferrals.
+   *
+   * Note that a device with a working relay connection forwards nothing: the
+   * mesh is only offered frames no other carrier can deliver. Zero counters on
+   * an online device are the honest answer, not a fault.
+   *
+   * @returns Cumulative mesh forwarding counters
+   */
+  async getMeshRelayStats(): Promise<MeshRelayStats> {
+    return await OfflineProtocolNativeModule.getMeshRelayStats();
+  }
+
+  /**
+   * Reports the mesh forwarding tunables actually in force.
+   *
+   * Read from the governor in the Rust core, so this is what forwarding
+   * decisions really use rather than an echo of what was passed to
+   * `create()` — including every default this app never set.
+   *
+   * Every field is present. Nothing here needs a `??` fallback, and writing
+   * one would be inventing a second copy of a default that can drift.
+   *
+   * @returns The mesh forwarding tunables in force
+   */
+  async getMeshRelayTunables(): Promise<MeshRelayTunables> {
+    return await OfflineProtocolNativeModule.getMeshRelayTunables();
   }
 
   /**

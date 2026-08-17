@@ -483,6 +483,8 @@ Connection-request failure contract: recipient offline emits `connection_request
 | **getPendingAckCount** | `getPendingAckCount(): Promise<number>` | Number of pending ACKs. |
 | **getRetryQueueSize** | `getRetryQueueSize(): Promise<number>` | Retry queue size. |
 | **shouldEscalateToWifi** | `shouldEscalateToWifi(): Promise<boolean>` | Whether DORS recommends escalating to Wi‑Fi Direct. |
+| **getMeshRelayStats** | `getMeshRelayStats(): Promise<MeshRelayStats>` | What this device has carried for other people (cumulative). |
+| **getMeshRelayTunables** | `getMeshRelayTunables(): Promise<MeshRelayTunables>` | Mesh forwarding tunables in force, read from the governor. Every field populated. |
 
 ---
 

@@ -613,6 +613,10 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role() != 8513:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats() != 17873:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables() != 6222:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats() != 35293:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count() != 5451:
@@ -1638,6 +1642,16 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_member_r
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_member_role.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_stats.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_stats.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_tunables.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_tunables.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_message_stats.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2565,6 +2579,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_me
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats.restype = ctypes.c_uint16
@@ -4501,6 +4521,421 @@ class _UniffiFfiConverterTypeMediaSendOptions(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeForwardInfo.write(value.forward_info, buf)
         _UniffiFfiConverterOptionalString.write(value.file_id, buf)
 
+class _UniffiFfiConverterOptionalFloat32(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterFloat32.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterFloat32.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterFloat32.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+@dataclass
+class MeshRelayConfig:
+    def __init__(self, *, max_ttl:typing.Optional[int] = _DEFAULT, dense_max_ttl:typing.Optional[int] = _DEFAULT, dense_degree:typing.Optional[int] = _DEFAULT, fanout:typing.Optional[int] = _DEFAULT, jitter_min_ms:typing.Optional[int] = _DEFAULT, jitter_max_ms:typing.Optional[int] = _DEFAULT, rate_per_sec:typing.Optional[float] = _DEFAULT, burst:typing.Optional[float] = _DEFAULT, peer_rate_per_sec:typing.Optional[float] = _DEFAULT, peer_burst:typing.Optional[float] = _DEFAULT, queue_capacity:typing.Optional[int] = _DEFAULT, bias_min_scale:typing.Optional[float] = _DEFAULT, bias_max_handicap_ms:typing.Optional[int] = _DEFAULT, activity_window_ms:typing.Optional[int] = _DEFAULT, activity_min_forwards:typing.Optional[int] = _DEFAULT, activity_idle_windows:typing.Optional[int] = _DEFAULT):
+        if max_ttl is _DEFAULT:
+            self.max_ttl = None
+        else:
+            self.max_ttl = max_ttl
+        if dense_max_ttl is _DEFAULT:
+            self.dense_max_ttl = None
+        else:
+            self.dense_max_ttl = dense_max_ttl
+        if dense_degree is _DEFAULT:
+            self.dense_degree = None
+        else:
+            self.dense_degree = dense_degree
+        if fanout is _DEFAULT:
+            self.fanout = None
+        else:
+            self.fanout = fanout
+        if jitter_min_ms is _DEFAULT:
+            self.jitter_min_ms = None
+        else:
+            self.jitter_min_ms = jitter_min_ms
+        if jitter_max_ms is _DEFAULT:
+            self.jitter_max_ms = None
+        else:
+            self.jitter_max_ms = jitter_max_ms
+        if rate_per_sec is _DEFAULT:
+            self.rate_per_sec = None
+        else:
+            self.rate_per_sec = rate_per_sec
+        if burst is _DEFAULT:
+            self.burst = None
+        else:
+            self.burst = burst
+        if peer_rate_per_sec is _DEFAULT:
+            self.peer_rate_per_sec = None
+        else:
+            self.peer_rate_per_sec = peer_rate_per_sec
+        if peer_burst is _DEFAULT:
+            self.peer_burst = None
+        else:
+            self.peer_burst = peer_burst
+        if queue_capacity is _DEFAULT:
+            self.queue_capacity = None
+        else:
+            self.queue_capacity = queue_capacity
+        if bias_min_scale is _DEFAULT:
+            self.bias_min_scale = None
+        else:
+            self.bias_min_scale = bias_min_scale
+        if bias_max_handicap_ms is _DEFAULT:
+            self.bias_max_handicap_ms = None
+        else:
+            self.bias_max_handicap_ms = bias_max_handicap_ms
+        if activity_window_ms is _DEFAULT:
+            self.activity_window_ms = None
+        else:
+            self.activity_window_ms = activity_window_ms
+        if activity_min_forwards is _DEFAULT:
+            self.activity_min_forwards = None
+        else:
+            self.activity_min_forwards = activity_min_forwards
+        if activity_idle_windows is _DEFAULT:
+            self.activity_idle_windows = None
+        else:
+            self.activity_idle_windows = activity_idle_windows
+        
+        
+
+    
+    def __str__(self):
+        return "MeshRelayConfig(max_ttl={}, dense_max_ttl={}, dense_degree={}, fanout={}, jitter_min_ms={}, jitter_max_ms={}, rate_per_sec={}, burst={}, peer_rate_per_sec={}, peer_burst={}, queue_capacity={}, bias_min_scale={}, bias_max_handicap_ms={}, activity_window_ms={}, activity_min_forwards={}, activity_idle_windows={})".format(self.max_ttl, self.dense_max_ttl, self.dense_degree, self.fanout, self.jitter_min_ms, self.jitter_max_ms, self.rate_per_sec, self.burst, self.peer_rate_per_sec, self.peer_burst, self.queue_capacity, self.bias_min_scale, self.bias_max_handicap_ms, self.activity_window_ms, self.activity_min_forwards, self.activity_idle_windows)
+    def __eq__(self, other):
+        if self.max_ttl != other.max_ttl:
+            return False
+        if self.dense_max_ttl != other.dense_max_ttl:
+            return False
+        if self.dense_degree != other.dense_degree:
+            return False
+        if self.fanout != other.fanout:
+            return False
+        if self.jitter_min_ms != other.jitter_min_ms:
+            return False
+        if self.jitter_max_ms != other.jitter_max_ms:
+            return False
+        if self.rate_per_sec != other.rate_per_sec:
+            return False
+        if self.burst != other.burst:
+            return False
+        if self.peer_rate_per_sec != other.peer_rate_per_sec:
+            return False
+        if self.peer_burst != other.peer_burst:
+            return False
+        if self.queue_capacity != other.queue_capacity:
+            return False
+        if self.bias_min_scale != other.bias_min_scale:
+            return False
+        if self.bias_max_handicap_ms != other.bias_max_handicap_ms:
+            return False
+        if self.activity_window_ms != other.activity_window_ms:
+            return False
+        if self.activity_min_forwards != other.activity_min_forwards:
+            return False
+        if self.activity_idle_windows != other.activity_idle_windows:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeMeshRelayConfig(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return MeshRelayConfig(
+            max_ttl=_UniffiFfiConverterOptionalUInt8.read(buf),
+            dense_max_ttl=_UniffiFfiConverterOptionalUInt8.read(buf),
+            dense_degree=_UniffiFfiConverterOptionalUInt64.read(buf),
+            fanout=_UniffiFfiConverterOptionalUInt64.read(buf),
+            jitter_min_ms=_UniffiFfiConverterOptionalUInt64.read(buf),
+            jitter_max_ms=_UniffiFfiConverterOptionalUInt64.read(buf),
+            rate_per_sec=_UniffiFfiConverterOptionalFloat32.read(buf),
+            burst=_UniffiFfiConverterOptionalFloat32.read(buf),
+            peer_rate_per_sec=_UniffiFfiConverterOptionalFloat32.read(buf),
+            peer_burst=_UniffiFfiConverterOptionalFloat32.read(buf),
+            queue_capacity=_UniffiFfiConverterOptionalUInt64.read(buf),
+            bias_min_scale=_UniffiFfiConverterOptionalFloat32.read(buf),
+            bias_max_handicap_ms=_UniffiFfiConverterOptionalUInt64.read(buf),
+            activity_window_ms=_UniffiFfiConverterOptionalUInt64.read(buf),
+            activity_min_forwards=_UniffiFfiConverterOptionalUInt64.read(buf),
+            activity_idle_windows=_UniffiFfiConverterOptionalUInt32.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterOptionalUInt8.check_lower(value.max_ttl)
+        _UniffiFfiConverterOptionalUInt8.check_lower(value.dense_max_ttl)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.dense_degree)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.fanout)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.jitter_min_ms)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.jitter_max_ms)
+        _UniffiFfiConverterOptionalFloat32.check_lower(value.rate_per_sec)
+        _UniffiFfiConverterOptionalFloat32.check_lower(value.burst)
+        _UniffiFfiConverterOptionalFloat32.check_lower(value.peer_rate_per_sec)
+        _UniffiFfiConverterOptionalFloat32.check_lower(value.peer_burst)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.queue_capacity)
+        _UniffiFfiConverterOptionalFloat32.check_lower(value.bias_min_scale)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.bias_max_handicap_ms)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.activity_window_ms)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.activity_min_forwards)
+        _UniffiFfiConverterOptionalUInt32.check_lower(value.activity_idle_windows)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterOptionalUInt8.write(value.max_ttl, buf)
+        _UniffiFfiConverterOptionalUInt8.write(value.dense_max_ttl, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.dense_degree, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.fanout, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.jitter_min_ms, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.jitter_max_ms, buf)
+        _UniffiFfiConverterOptionalFloat32.write(value.rate_per_sec, buf)
+        _UniffiFfiConverterOptionalFloat32.write(value.burst, buf)
+        _UniffiFfiConverterOptionalFloat32.write(value.peer_rate_per_sec, buf)
+        _UniffiFfiConverterOptionalFloat32.write(value.peer_burst, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.queue_capacity, buf)
+        _UniffiFfiConverterOptionalFloat32.write(value.bias_min_scale, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.bias_max_handicap_ms, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.activity_window_ms, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.activity_min_forwards, buf)
+        _UniffiFfiConverterOptionalUInt32.write(value.activity_idle_windows, buf)
+
+@dataclass
+class MeshRelayStats:
+    def __init__(self, *, forwarded:int, transmissions:int, queued:int, awaiting_transmission:int, duplicates_suppressed:int, covered_by_a_neighbor:int, peer_rate_limited:int, refused_queue_full:int, rate_deferred:int, abandoned_overdue:int, hop_limit_reached:int, reach_clamped:int, dropped_for_capacity:int):
+        self.forwarded = forwarded
+        self.transmissions = transmissions
+        self.queued = queued
+        self.awaiting_transmission = awaiting_transmission
+        self.duplicates_suppressed = duplicates_suppressed
+        self.covered_by_a_neighbor = covered_by_a_neighbor
+        self.peer_rate_limited = peer_rate_limited
+        self.refused_queue_full = refused_queue_full
+        self.rate_deferred = rate_deferred
+        self.abandoned_overdue = abandoned_overdue
+        self.hop_limit_reached = hop_limit_reached
+        self.reach_clamped = reach_clamped
+        self.dropped_for_capacity = dropped_for_capacity
+        
+        
+
+    
+    def __str__(self):
+        return "MeshRelayStats(forwarded={}, transmissions={}, queued={}, awaiting_transmission={}, duplicates_suppressed={}, covered_by_a_neighbor={}, peer_rate_limited={}, refused_queue_full={}, rate_deferred={}, abandoned_overdue={}, hop_limit_reached={}, reach_clamped={}, dropped_for_capacity={})".format(self.forwarded, self.transmissions, self.queued, self.awaiting_transmission, self.duplicates_suppressed, self.covered_by_a_neighbor, self.peer_rate_limited, self.refused_queue_full, self.rate_deferred, self.abandoned_overdue, self.hop_limit_reached, self.reach_clamped, self.dropped_for_capacity)
+    def __eq__(self, other):
+        if self.forwarded != other.forwarded:
+            return False
+        if self.transmissions != other.transmissions:
+            return False
+        if self.queued != other.queued:
+            return False
+        if self.awaiting_transmission != other.awaiting_transmission:
+            return False
+        if self.duplicates_suppressed != other.duplicates_suppressed:
+            return False
+        if self.covered_by_a_neighbor != other.covered_by_a_neighbor:
+            return False
+        if self.peer_rate_limited != other.peer_rate_limited:
+            return False
+        if self.refused_queue_full != other.refused_queue_full:
+            return False
+        if self.rate_deferred != other.rate_deferred:
+            return False
+        if self.abandoned_overdue != other.abandoned_overdue:
+            return False
+        if self.hop_limit_reached != other.hop_limit_reached:
+            return False
+        if self.reach_clamped != other.reach_clamped:
+            return False
+        if self.dropped_for_capacity != other.dropped_for_capacity:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeMeshRelayStats(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return MeshRelayStats(
+            forwarded=_UniffiFfiConverterUInt64.read(buf),
+            transmissions=_UniffiFfiConverterUInt64.read(buf),
+            queued=_UniffiFfiConverterUInt64.read(buf),
+            awaiting_transmission=_UniffiFfiConverterUInt64.read(buf),
+            duplicates_suppressed=_UniffiFfiConverterUInt64.read(buf),
+            covered_by_a_neighbor=_UniffiFfiConverterUInt64.read(buf),
+            peer_rate_limited=_UniffiFfiConverterUInt64.read(buf),
+            refused_queue_full=_UniffiFfiConverterUInt64.read(buf),
+            rate_deferred=_UniffiFfiConverterUInt64.read(buf),
+            abandoned_overdue=_UniffiFfiConverterUInt64.read(buf),
+            hop_limit_reached=_UniffiFfiConverterUInt64.read(buf),
+            reach_clamped=_UniffiFfiConverterUInt64.read(buf),
+            dropped_for_capacity=_UniffiFfiConverterUInt64.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterUInt64.check_lower(value.forwarded)
+        _UniffiFfiConverterUInt64.check_lower(value.transmissions)
+        _UniffiFfiConverterUInt64.check_lower(value.queued)
+        _UniffiFfiConverterUInt64.check_lower(value.awaiting_transmission)
+        _UniffiFfiConverterUInt64.check_lower(value.duplicates_suppressed)
+        _UniffiFfiConverterUInt64.check_lower(value.covered_by_a_neighbor)
+        _UniffiFfiConverterUInt64.check_lower(value.peer_rate_limited)
+        _UniffiFfiConverterUInt64.check_lower(value.refused_queue_full)
+        _UniffiFfiConverterUInt64.check_lower(value.rate_deferred)
+        _UniffiFfiConverterUInt64.check_lower(value.abandoned_overdue)
+        _UniffiFfiConverterUInt64.check_lower(value.hop_limit_reached)
+        _UniffiFfiConverterUInt64.check_lower(value.reach_clamped)
+        _UniffiFfiConverterUInt64.check_lower(value.dropped_for_capacity)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterUInt64.write(value.forwarded, buf)
+        _UniffiFfiConverterUInt64.write(value.transmissions, buf)
+        _UniffiFfiConverterUInt64.write(value.queued, buf)
+        _UniffiFfiConverterUInt64.write(value.awaiting_transmission, buf)
+        _UniffiFfiConverterUInt64.write(value.duplicates_suppressed, buf)
+        _UniffiFfiConverterUInt64.write(value.covered_by_a_neighbor, buf)
+        _UniffiFfiConverterUInt64.write(value.peer_rate_limited, buf)
+        _UniffiFfiConverterUInt64.write(value.refused_queue_full, buf)
+        _UniffiFfiConverterUInt64.write(value.rate_deferred, buf)
+        _UniffiFfiConverterUInt64.write(value.abandoned_overdue, buf)
+        _UniffiFfiConverterUInt64.write(value.hop_limit_reached, buf)
+        _UniffiFfiConverterUInt64.write(value.reach_clamped, buf)
+        _UniffiFfiConverterUInt64.write(value.dropped_for_capacity, buf)
+
+@dataclass
+class MeshRelayTunables:
+    def __init__(self, *, max_ttl:int, dense_max_ttl:int, dense_degree:int, fanout:int, jitter_min_ms:int, jitter_max_ms:int, rate_per_sec:float, burst:float, peer_rate_per_sec:float, peer_burst:float, queue_capacity:int, bias_min_scale:float, bias_max_handicap_ms:int, activity_window_ms:int, activity_min_forwards:int, activity_idle_windows:int):
+        self.max_ttl = max_ttl
+        self.dense_max_ttl = dense_max_ttl
+        self.dense_degree = dense_degree
+        self.fanout = fanout
+        self.jitter_min_ms = jitter_min_ms
+        self.jitter_max_ms = jitter_max_ms
+        self.rate_per_sec = rate_per_sec
+        self.burst = burst
+        self.peer_rate_per_sec = peer_rate_per_sec
+        self.peer_burst = peer_burst
+        self.queue_capacity = queue_capacity
+        self.bias_min_scale = bias_min_scale
+        self.bias_max_handicap_ms = bias_max_handicap_ms
+        self.activity_window_ms = activity_window_ms
+        self.activity_min_forwards = activity_min_forwards
+        self.activity_idle_windows = activity_idle_windows
+        
+        
+
+    
+    def __str__(self):
+        return "MeshRelayTunables(max_ttl={}, dense_max_ttl={}, dense_degree={}, fanout={}, jitter_min_ms={}, jitter_max_ms={}, rate_per_sec={}, burst={}, peer_rate_per_sec={}, peer_burst={}, queue_capacity={}, bias_min_scale={}, bias_max_handicap_ms={}, activity_window_ms={}, activity_min_forwards={}, activity_idle_windows={})".format(self.max_ttl, self.dense_max_ttl, self.dense_degree, self.fanout, self.jitter_min_ms, self.jitter_max_ms, self.rate_per_sec, self.burst, self.peer_rate_per_sec, self.peer_burst, self.queue_capacity, self.bias_min_scale, self.bias_max_handicap_ms, self.activity_window_ms, self.activity_min_forwards, self.activity_idle_windows)
+    def __eq__(self, other):
+        if self.max_ttl != other.max_ttl:
+            return False
+        if self.dense_max_ttl != other.dense_max_ttl:
+            return False
+        if self.dense_degree != other.dense_degree:
+            return False
+        if self.fanout != other.fanout:
+            return False
+        if self.jitter_min_ms != other.jitter_min_ms:
+            return False
+        if self.jitter_max_ms != other.jitter_max_ms:
+            return False
+        if self.rate_per_sec != other.rate_per_sec:
+            return False
+        if self.burst != other.burst:
+            return False
+        if self.peer_rate_per_sec != other.peer_rate_per_sec:
+            return False
+        if self.peer_burst != other.peer_burst:
+            return False
+        if self.queue_capacity != other.queue_capacity:
+            return False
+        if self.bias_min_scale != other.bias_min_scale:
+            return False
+        if self.bias_max_handicap_ms != other.bias_max_handicap_ms:
+            return False
+        if self.activity_window_ms != other.activity_window_ms:
+            return False
+        if self.activity_min_forwards != other.activity_min_forwards:
+            return False
+        if self.activity_idle_windows != other.activity_idle_windows:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeMeshRelayTunables(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return MeshRelayTunables(
+            max_ttl=_UniffiFfiConverterUInt8.read(buf),
+            dense_max_ttl=_UniffiFfiConverterUInt8.read(buf),
+            dense_degree=_UniffiFfiConverterUInt64.read(buf),
+            fanout=_UniffiFfiConverterUInt64.read(buf),
+            jitter_min_ms=_UniffiFfiConverterUInt64.read(buf),
+            jitter_max_ms=_UniffiFfiConverterUInt64.read(buf),
+            rate_per_sec=_UniffiFfiConverterFloat32.read(buf),
+            burst=_UniffiFfiConverterFloat32.read(buf),
+            peer_rate_per_sec=_UniffiFfiConverterFloat32.read(buf),
+            peer_burst=_UniffiFfiConverterFloat32.read(buf),
+            queue_capacity=_UniffiFfiConverterUInt64.read(buf),
+            bias_min_scale=_UniffiFfiConverterFloat32.read(buf),
+            bias_max_handicap_ms=_UniffiFfiConverterUInt64.read(buf),
+            activity_window_ms=_UniffiFfiConverterUInt64.read(buf),
+            activity_min_forwards=_UniffiFfiConverterUInt64.read(buf),
+            activity_idle_windows=_UniffiFfiConverterUInt32.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterUInt8.check_lower(value.max_ttl)
+        _UniffiFfiConverterUInt8.check_lower(value.dense_max_ttl)
+        _UniffiFfiConverterUInt64.check_lower(value.dense_degree)
+        _UniffiFfiConverterUInt64.check_lower(value.fanout)
+        _UniffiFfiConverterUInt64.check_lower(value.jitter_min_ms)
+        _UniffiFfiConverterUInt64.check_lower(value.jitter_max_ms)
+        _UniffiFfiConverterFloat32.check_lower(value.rate_per_sec)
+        _UniffiFfiConverterFloat32.check_lower(value.burst)
+        _UniffiFfiConverterFloat32.check_lower(value.peer_rate_per_sec)
+        _UniffiFfiConverterFloat32.check_lower(value.peer_burst)
+        _UniffiFfiConverterUInt64.check_lower(value.queue_capacity)
+        _UniffiFfiConverterFloat32.check_lower(value.bias_min_scale)
+        _UniffiFfiConverterUInt64.check_lower(value.bias_max_handicap_ms)
+        _UniffiFfiConverterUInt64.check_lower(value.activity_window_ms)
+        _UniffiFfiConverterUInt64.check_lower(value.activity_min_forwards)
+        _UniffiFfiConverterUInt32.check_lower(value.activity_idle_windows)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterUInt8.write(value.max_ttl, buf)
+        _UniffiFfiConverterUInt8.write(value.dense_max_ttl, buf)
+        _UniffiFfiConverterUInt64.write(value.dense_degree, buf)
+        _UniffiFfiConverterUInt64.write(value.fanout, buf)
+        _UniffiFfiConverterUInt64.write(value.jitter_min_ms, buf)
+        _UniffiFfiConverterUInt64.write(value.jitter_max_ms, buf)
+        _UniffiFfiConverterFloat32.write(value.rate_per_sec, buf)
+        _UniffiFfiConverterFloat32.write(value.burst, buf)
+        _UniffiFfiConverterFloat32.write(value.peer_rate_per_sec, buf)
+        _UniffiFfiConverterFloat32.write(value.peer_burst, buf)
+        _UniffiFfiConverterUInt64.write(value.queue_capacity, buf)
+        _UniffiFfiConverterFloat32.write(value.bias_min_scale, buf)
+        _UniffiFfiConverterUInt64.write(value.bias_max_handicap_ms, buf)
+        _UniffiFfiConverterUInt64.write(value.activity_window_ms, buf)
+        _UniffiFfiConverterUInt64.write(value.activity_min_forwards, buf)
+        _UniffiFfiConverterUInt32.write(value.activity_idle_windows, buf)
+
 @dataclass
 class MessageStats:
     def __init__(self, *, message_id:str, sent_at_ms:int, delivered_at_ms:typing.Optional[int], hop_count:int, status:str):
@@ -4641,31 +5076,6 @@ class _UniffiFfiConverterOptionalInt16(_UniffiConverterRustBuffer):
             return None
         elif flag == 1:
             return _UniffiFfiConverterInt16.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
-class _UniffiFfiConverterOptionalFloat32(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterFloat32.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterFloat32.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterFloat32.read(buf)
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
@@ -5693,9 +6103,34 @@ class _UniffiFfiConverterTypePeerDevice(_UniffiConverterRustBuffer):
         _UniffiFfiConverterInt16.write(value.rssi, buf)
         _UniffiFfiConverterUInt64.write(value.last_seen_ms, buf)
 
+class _UniffiFfiConverterOptionalTypeMeshRelayConfig(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeMeshRelayConfig.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeMeshRelayConfig.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeMeshRelayConfig.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
 @dataclass
 class ProtocolConfig:
-    def __init__(self, *, app_id:str, profile:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, max_group_members:int = 256, group_relay_enabled:bool = True, group_relay_broadcast_enabled:bool = True, group_enforce_admin_commits:bool = False, require_transport_identity:bool = False, binary_wire_enabled:bool = True, nostr_sealing_enabled:bool = True, nostr_cold_contact_enabled:bool = True, nostr_username_discovery_enabled:bool = False, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True, crypto_recovery_enabled:bool = True):
+    def __init__(self, *, app_id:str, profile:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, max_group_members:int = 256, group_relay_enabled:bool = True, group_relay_broadcast_enabled:bool = True, group_enforce_admin_commits:bool = False, require_transport_identity:bool = False, binary_wire_enabled:bool = True, nostr_sealing_enabled:bool = True, nostr_cold_contact_enabled:bool = True, nostr_username_discovery_enabled:bool = False, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True, crypto_recovery_enabled:bool = True, mesh_relay:typing.Optional[MeshRelayConfig] = _DEFAULT):
         self.app_id = app_id
         self.profile = profile
         self.ble_enabled = ble_enabled
@@ -5725,12 +6160,16 @@ class ProtocolConfig:
         self.compact_envelope_enabled = compact_envelope_enabled
         self.rich_payload_enabled = rich_payload_enabled
         self.crypto_recovery_enabled = crypto_recovery_enabled
+        if mesh_relay is _DEFAULT:
+            self.mesh_relay = None
+        else:
+            self.mesh_relay = mesh_relay
         
         
 
     
     def __str__(self):
-        return "ProtocolConfig(app_id={}, profile={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, max_group_members={}, group_relay_enabled={}, group_relay_broadcast_enabled={}, group_enforce_admin_commits={}, require_transport_identity={}, binary_wire_enabled={}, nostr_sealing_enabled={}, nostr_cold_contact_enabled={}, nostr_username_discovery_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={}, crypto_recovery_enabled={})".format(self.app_id, self.profile, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.max_group_members, self.group_relay_enabled, self.group_relay_broadcast_enabled, self.group_enforce_admin_commits, self.require_transport_identity, self.binary_wire_enabled, self.nostr_sealing_enabled, self.nostr_cold_contact_enabled, self.nostr_username_discovery_enabled, self.compact_envelope_enabled, self.rich_payload_enabled, self.crypto_recovery_enabled)
+        return "ProtocolConfig(app_id={}, profile={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, max_group_members={}, group_relay_enabled={}, group_relay_broadcast_enabled={}, group_enforce_admin_commits={}, require_transport_identity={}, binary_wire_enabled={}, nostr_sealing_enabled={}, nostr_cold_contact_enabled={}, nostr_username_discovery_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={}, crypto_recovery_enabled={}, mesh_relay={})".format(self.app_id, self.profile, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.max_group_members, self.group_relay_enabled, self.group_relay_broadcast_enabled, self.group_enforce_admin_commits, self.require_transport_identity, self.binary_wire_enabled, self.nostr_sealing_enabled, self.nostr_cold_contact_enabled, self.nostr_username_discovery_enabled, self.compact_envelope_enabled, self.rich_payload_enabled, self.crypto_recovery_enabled, self.mesh_relay)
     def __eq__(self, other):
         if self.app_id != other.app_id:
             return False
@@ -5790,6 +6229,8 @@ class ProtocolConfig:
             return False
         if self.crypto_recovery_enabled != other.crypto_recovery_enabled:
             return False
+        if self.mesh_relay != other.mesh_relay:
+            return False
         return True
 
 class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
@@ -5825,6 +6266,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
             compact_envelope_enabled=_UniffiFfiConverterBoolean.read(buf),
             rich_payload_enabled=_UniffiFfiConverterBoolean.read(buf),
             crypto_recovery_enabled=_UniffiFfiConverterBoolean.read(buf),
+            mesh_relay=_UniffiFfiConverterOptionalTypeMeshRelayConfig.read(buf),
         )
 
     @staticmethod
@@ -5858,6 +6300,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.check_lower(value.compact_envelope_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.rich_payload_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.crypto_recovery_enabled)
+        _UniffiFfiConverterOptionalTypeMeshRelayConfig.check_lower(value.mesh_relay)
 
     @staticmethod
     def write(value, buf):
@@ -5890,6 +6333,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.write(value.compact_envelope_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.rich_payload_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.crypto_recovery_enabled, buf)
+        _UniffiFfiConverterOptionalTypeMeshRelayConfig.write(value.mesh_relay, buf)
 
 @dataclass
 class ProtocolLockDiagnostics:
@@ -9225,6 +9669,10 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def get_member_role(self, group_id: str,user_id: str) -> str:
         raise NotImplementedError
+    def get_mesh_relay_stats(self, ) -> MeshRelayStats:
+        raise NotImplementedError
+    def get_mesh_relay_tunables(self, ) -> MeshRelayTunables:
+        raise NotImplementedError
     def get_message_stats(self, ) -> typing.List[MessageStats]:
         raise NotImplementedError
     def get_pending_ack_count(self, ) -> int:
@@ -10130,6 +10578,30 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_member_role,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def get_mesh_relay_stats(self, ) -> MeshRelayStats:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterTypeMeshRelayStats.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_stats,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def get_mesh_relay_tunables(self, ) -> MeshRelayTunables:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterTypeMeshRelayTunables.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_tunables,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -12159,6 +12631,9 @@ __all__ = [
     "MediaMetadata",
     "ReplyContext",
     "MediaSendOptions",
+    "MeshRelayConfig",
+    "MeshRelayStats",
+    "MeshRelayTunables",
     "MessageStats",
     "TransportMetrics",
     "TransportMetricsEntry",

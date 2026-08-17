@@ -880,6 +880,10 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func getMemberRole(groupId: String, userId: String) throws  -> String
     
+    func getMeshRelayStats()  -> MeshRelayStats
+    
+    func getMeshRelayTunables()  -> MeshRelayTunables
+    
     func getMessageStats()  -> [MessageStats]
     
     func getPendingAckCount()  -> UInt64
@@ -1548,6 +1552,22 @@ open func getMemberRole(groupId: String, userId: String)throws  -> String  {
             self.uniffiCloneHandle(),
         FfiConverterString.lower(groupId),
         FfiConverterString.lower(userId),$0
+    )
+})
+}
+    
+open func getMeshRelayStats() -> MeshRelayStats  {
+    return try!  FfiConverterTypeMeshRelayStats_lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_stats(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func getMeshRelayTunables() -> MeshRelayTunables  {
+    return try!  FfiConverterTypeMeshRelayTunables_lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_tunables(
+            self.uniffiCloneHandle(),$0
     )
 })
 }
@@ -3731,6 +3751,318 @@ public func FfiConverterTypeMediaSendOptions_lower(_ value: MediaSendOptions) ->
 }
 
 
+public struct MeshRelayConfig: Equatable, Hashable {
+    public var maxTtl: UInt8?
+    public var denseMaxTtl: UInt8?
+    public var denseDegree: UInt64?
+    public var fanout: UInt64?
+    public var jitterMinMs: UInt64?
+    public var jitterMaxMs: UInt64?
+    public var ratePerSec: Float?
+    public var burst: Float?
+    public var peerRatePerSec: Float?
+    public var peerBurst: Float?
+    public var queueCapacity: UInt64?
+    public var biasMinScale: Float?
+    public var biasMaxHandicapMs: UInt64?
+    public var activityWindowMs: UInt64?
+    public var activityMinForwards: UInt64?
+    public var activityIdleWindows: UInt32?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(maxTtl: UInt8? = nil, denseMaxTtl: UInt8? = nil, denseDegree: UInt64? = nil, fanout: UInt64? = nil, jitterMinMs: UInt64? = nil, jitterMaxMs: UInt64? = nil, ratePerSec: Float? = nil, burst: Float? = nil, peerRatePerSec: Float? = nil, peerBurst: Float? = nil, queueCapacity: UInt64? = nil, biasMinScale: Float? = nil, biasMaxHandicapMs: UInt64? = nil, activityWindowMs: UInt64? = nil, activityMinForwards: UInt64? = nil, activityIdleWindows: UInt32? = nil) {
+        self.maxTtl = maxTtl
+        self.denseMaxTtl = denseMaxTtl
+        self.denseDegree = denseDegree
+        self.fanout = fanout
+        self.jitterMinMs = jitterMinMs
+        self.jitterMaxMs = jitterMaxMs
+        self.ratePerSec = ratePerSec
+        self.burst = burst
+        self.peerRatePerSec = peerRatePerSec
+        self.peerBurst = peerBurst
+        self.queueCapacity = queueCapacity
+        self.biasMinScale = biasMinScale
+        self.biasMaxHandicapMs = biasMaxHandicapMs
+        self.activityWindowMs = activityWindowMs
+        self.activityMinForwards = activityMinForwards
+        self.activityIdleWindows = activityIdleWindows
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension MeshRelayConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshRelayConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshRelayConfig {
+        return
+            try MeshRelayConfig(
+                maxTtl: FfiConverterOptionUInt8.read(from: &buf), 
+                denseMaxTtl: FfiConverterOptionUInt8.read(from: &buf), 
+                denseDegree: FfiConverterOptionUInt64.read(from: &buf), 
+                fanout: FfiConverterOptionUInt64.read(from: &buf), 
+                jitterMinMs: FfiConverterOptionUInt64.read(from: &buf), 
+                jitterMaxMs: FfiConverterOptionUInt64.read(from: &buf), 
+                ratePerSec: FfiConverterOptionFloat.read(from: &buf), 
+                burst: FfiConverterOptionFloat.read(from: &buf), 
+                peerRatePerSec: FfiConverterOptionFloat.read(from: &buf), 
+                peerBurst: FfiConverterOptionFloat.read(from: &buf), 
+                queueCapacity: FfiConverterOptionUInt64.read(from: &buf), 
+                biasMinScale: FfiConverterOptionFloat.read(from: &buf), 
+                biasMaxHandicapMs: FfiConverterOptionUInt64.read(from: &buf), 
+                activityWindowMs: FfiConverterOptionUInt64.read(from: &buf), 
+                activityMinForwards: FfiConverterOptionUInt64.read(from: &buf), 
+                activityIdleWindows: FfiConverterOptionUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MeshRelayConfig, into buf: inout [UInt8]) {
+        FfiConverterOptionUInt8.write(value.maxTtl, into: &buf)
+        FfiConverterOptionUInt8.write(value.denseMaxTtl, into: &buf)
+        FfiConverterOptionUInt64.write(value.denseDegree, into: &buf)
+        FfiConverterOptionUInt64.write(value.fanout, into: &buf)
+        FfiConverterOptionUInt64.write(value.jitterMinMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.jitterMaxMs, into: &buf)
+        FfiConverterOptionFloat.write(value.ratePerSec, into: &buf)
+        FfiConverterOptionFloat.write(value.burst, into: &buf)
+        FfiConverterOptionFloat.write(value.peerRatePerSec, into: &buf)
+        FfiConverterOptionFloat.write(value.peerBurst, into: &buf)
+        FfiConverterOptionUInt64.write(value.queueCapacity, into: &buf)
+        FfiConverterOptionFloat.write(value.biasMinScale, into: &buf)
+        FfiConverterOptionUInt64.write(value.biasMaxHandicapMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.activityWindowMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.activityMinForwards, into: &buf)
+        FfiConverterOptionUInt32.write(value.activityIdleWindows, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshRelayConfig_lift(_ buf: RustBuffer) throws -> MeshRelayConfig {
+    return try FfiConverterTypeMeshRelayConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshRelayConfig_lower(_ value: MeshRelayConfig) -> RustBuffer {
+    return FfiConverterTypeMeshRelayConfig.lower(value)
+}
+
+
+public struct MeshRelayStats: Equatable, Hashable {
+    public var forwarded: UInt64
+    public var transmissions: UInt64
+    public var queued: UInt64
+    public var awaitingTransmission: UInt64
+    public var duplicatesSuppressed: UInt64
+    public var coveredByANeighbor: UInt64
+    public var peerRateLimited: UInt64
+    public var refusedQueueFull: UInt64
+    public var rateDeferred: UInt64
+    public var abandonedOverdue: UInt64
+    public var hopLimitReached: UInt64
+    public var reachClamped: UInt64
+    public var droppedForCapacity: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(forwarded: UInt64, transmissions: UInt64, queued: UInt64, awaitingTransmission: UInt64, duplicatesSuppressed: UInt64, coveredByANeighbor: UInt64, peerRateLimited: UInt64, refusedQueueFull: UInt64, rateDeferred: UInt64, abandonedOverdue: UInt64, hopLimitReached: UInt64, reachClamped: UInt64, droppedForCapacity: UInt64) {
+        self.forwarded = forwarded
+        self.transmissions = transmissions
+        self.queued = queued
+        self.awaitingTransmission = awaitingTransmission
+        self.duplicatesSuppressed = duplicatesSuppressed
+        self.coveredByANeighbor = coveredByANeighbor
+        self.peerRateLimited = peerRateLimited
+        self.refusedQueueFull = refusedQueueFull
+        self.rateDeferred = rateDeferred
+        self.abandonedOverdue = abandonedOverdue
+        self.hopLimitReached = hopLimitReached
+        self.reachClamped = reachClamped
+        self.droppedForCapacity = droppedForCapacity
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension MeshRelayStats: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshRelayStats: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshRelayStats {
+        return
+            try MeshRelayStats(
+                forwarded: FfiConverterUInt64.read(from: &buf), 
+                transmissions: FfiConverterUInt64.read(from: &buf), 
+                queued: FfiConverterUInt64.read(from: &buf), 
+                awaitingTransmission: FfiConverterUInt64.read(from: &buf), 
+                duplicatesSuppressed: FfiConverterUInt64.read(from: &buf), 
+                coveredByANeighbor: FfiConverterUInt64.read(from: &buf), 
+                peerRateLimited: FfiConverterUInt64.read(from: &buf), 
+                refusedQueueFull: FfiConverterUInt64.read(from: &buf), 
+                rateDeferred: FfiConverterUInt64.read(from: &buf), 
+                abandonedOverdue: FfiConverterUInt64.read(from: &buf), 
+                hopLimitReached: FfiConverterUInt64.read(from: &buf), 
+                reachClamped: FfiConverterUInt64.read(from: &buf), 
+                droppedForCapacity: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MeshRelayStats, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.forwarded, into: &buf)
+        FfiConverterUInt64.write(value.transmissions, into: &buf)
+        FfiConverterUInt64.write(value.queued, into: &buf)
+        FfiConverterUInt64.write(value.awaitingTransmission, into: &buf)
+        FfiConverterUInt64.write(value.duplicatesSuppressed, into: &buf)
+        FfiConverterUInt64.write(value.coveredByANeighbor, into: &buf)
+        FfiConverterUInt64.write(value.peerRateLimited, into: &buf)
+        FfiConverterUInt64.write(value.refusedQueueFull, into: &buf)
+        FfiConverterUInt64.write(value.rateDeferred, into: &buf)
+        FfiConverterUInt64.write(value.abandonedOverdue, into: &buf)
+        FfiConverterUInt64.write(value.hopLimitReached, into: &buf)
+        FfiConverterUInt64.write(value.reachClamped, into: &buf)
+        FfiConverterUInt64.write(value.droppedForCapacity, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshRelayStats_lift(_ buf: RustBuffer) throws -> MeshRelayStats {
+    return try FfiConverterTypeMeshRelayStats.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshRelayStats_lower(_ value: MeshRelayStats) -> RustBuffer {
+    return FfiConverterTypeMeshRelayStats.lower(value)
+}
+
+
+public struct MeshRelayTunables: Equatable, Hashable {
+    public var maxTtl: UInt8
+    public var denseMaxTtl: UInt8
+    public var denseDegree: UInt64
+    public var fanout: UInt64
+    public var jitterMinMs: UInt64
+    public var jitterMaxMs: UInt64
+    public var ratePerSec: Float
+    public var burst: Float
+    public var peerRatePerSec: Float
+    public var peerBurst: Float
+    public var queueCapacity: UInt64
+    public var biasMinScale: Float
+    public var biasMaxHandicapMs: UInt64
+    public var activityWindowMs: UInt64
+    public var activityMinForwards: UInt64
+    public var activityIdleWindows: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(maxTtl: UInt8, denseMaxTtl: UInt8, denseDegree: UInt64, fanout: UInt64, jitterMinMs: UInt64, jitterMaxMs: UInt64, ratePerSec: Float, burst: Float, peerRatePerSec: Float, peerBurst: Float, queueCapacity: UInt64, biasMinScale: Float, biasMaxHandicapMs: UInt64, activityWindowMs: UInt64, activityMinForwards: UInt64, activityIdleWindows: UInt32) {
+        self.maxTtl = maxTtl
+        self.denseMaxTtl = denseMaxTtl
+        self.denseDegree = denseDegree
+        self.fanout = fanout
+        self.jitterMinMs = jitterMinMs
+        self.jitterMaxMs = jitterMaxMs
+        self.ratePerSec = ratePerSec
+        self.burst = burst
+        self.peerRatePerSec = peerRatePerSec
+        self.peerBurst = peerBurst
+        self.queueCapacity = queueCapacity
+        self.biasMinScale = biasMinScale
+        self.biasMaxHandicapMs = biasMaxHandicapMs
+        self.activityWindowMs = activityWindowMs
+        self.activityMinForwards = activityMinForwards
+        self.activityIdleWindows = activityIdleWindows
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension MeshRelayTunables: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshRelayTunables: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshRelayTunables {
+        return
+            try MeshRelayTunables(
+                maxTtl: FfiConverterUInt8.read(from: &buf), 
+                denseMaxTtl: FfiConverterUInt8.read(from: &buf), 
+                denseDegree: FfiConverterUInt64.read(from: &buf), 
+                fanout: FfiConverterUInt64.read(from: &buf), 
+                jitterMinMs: FfiConverterUInt64.read(from: &buf), 
+                jitterMaxMs: FfiConverterUInt64.read(from: &buf), 
+                ratePerSec: FfiConverterFloat.read(from: &buf), 
+                burst: FfiConverterFloat.read(from: &buf), 
+                peerRatePerSec: FfiConverterFloat.read(from: &buf), 
+                peerBurst: FfiConverterFloat.read(from: &buf), 
+                queueCapacity: FfiConverterUInt64.read(from: &buf), 
+                biasMinScale: FfiConverterFloat.read(from: &buf), 
+                biasMaxHandicapMs: FfiConverterUInt64.read(from: &buf), 
+                activityWindowMs: FfiConverterUInt64.read(from: &buf), 
+                activityMinForwards: FfiConverterUInt64.read(from: &buf), 
+                activityIdleWindows: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MeshRelayTunables, into buf: inout [UInt8]) {
+        FfiConverterUInt8.write(value.maxTtl, into: &buf)
+        FfiConverterUInt8.write(value.denseMaxTtl, into: &buf)
+        FfiConverterUInt64.write(value.denseDegree, into: &buf)
+        FfiConverterUInt64.write(value.fanout, into: &buf)
+        FfiConverterUInt64.write(value.jitterMinMs, into: &buf)
+        FfiConverterUInt64.write(value.jitterMaxMs, into: &buf)
+        FfiConverterFloat.write(value.ratePerSec, into: &buf)
+        FfiConverterFloat.write(value.burst, into: &buf)
+        FfiConverterFloat.write(value.peerRatePerSec, into: &buf)
+        FfiConverterFloat.write(value.peerBurst, into: &buf)
+        FfiConverterUInt64.write(value.queueCapacity, into: &buf)
+        FfiConverterFloat.write(value.biasMinScale, into: &buf)
+        FfiConverterUInt64.write(value.biasMaxHandicapMs, into: &buf)
+        FfiConverterUInt64.write(value.activityWindowMs, into: &buf)
+        FfiConverterUInt64.write(value.activityMinForwards, into: &buf)
+        FfiConverterUInt32.write(value.activityIdleWindows, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshRelayTunables_lift(_ buf: RustBuffer) throws -> MeshRelayTunables {
+    return try FfiConverterTypeMeshRelayTunables.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshRelayTunables_lower(_ value: MeshRelayTunables) -> RustBuffer {
+    return FfiConverterTypeMeshRelayTunables.lower(value)
+}
+
+
 public struct MessageStats: Equatable, Hashable {
     public var messageId: String
     public var sentAtMs: UInt64
@@ -4685,10 +5017,11 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var compactEnvelopeEnabled: Bool
     public var richPayloadEnabled: Bool
     public var cryptoRecoveryEnabled: Bool
+    public var meshRelay: MeshRelayConfig?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true) {
+    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true, meshRelay: MeshRelayConfig? = nil) {
         self.appId = appId
         self.profile = profile
         self.bleEnabled = bleEnabled
@@ -4718,6 +5051,7 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.compactEnvelopeEnabled = compactEnvelopeEnabled
         self.richPayloadEnabled = richPayloadEnabled
         self.cryptoRecoveryEnabled = cryptoRecoveryEnabled
+        self.meshRelay = meshRelay
     }
 
     
@@ -4762,7 +5096,8 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 nostrUsernameDiscoveryEnabled: FfiConverterBool.read(from: &buf), 
                 compactEnvelopeEnabled: FfiConverterBool.read(from: &buf), 
                 richPayloadEnabled: FfiConverterBool.read(from: &buf), 
-                cryptoRecoveryEnabled: FfiConverterBool.read(from: &buf)
+                cryptoRecoveryEnabled: FfiConverterBool.read(from: &buf), 
+                meshRelay: FfiConverterOptionTypeMeshRelayConfig.read(from: &buf)
         )
     }
 
@@ -4796,6 +5131,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.compactEnvelopeEnabled, into: &buf)
         FfiConverterBool.write(value.richPayloadEnabled, into: &buf)
         FfiConverterBool.write(value.cryptoRecoveryEnabled, into: &buf)
+        FfiConverterOptionTypeMeshRelayConfig.write(value.meshRelay, into: &buf)
     }
 }
 
@@ -9170,6 +9506,30 @@ fileprivate struct FfiConverterOptionTypeMediaMetadata: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeMeshRelayConfig: FfiConverterRustBuffer {
+    typealias SwiftType = MeshRelayConfig?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMeshRelayConfig.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMeshRelayConfig.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeMlsGroupInfo: FfiConverterRustBuffer {
     typealias SwiftType = MlsGroupInfo?
 
@@ -9955,6 +10315,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role() != 61568) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats() != 43508) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables() != 2956) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats() != 30825) {

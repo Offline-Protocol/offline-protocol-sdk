@@ -333,6 +333,84 @@ test('a DORS update naming one field sends only that field', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// The create-time mesh forwarding section
+//
+// Same silent-failure class as the relay fields above. The property that
+// matters here is *absence*: every field the app did not set must be missing
+// from the payload entirely, because the native parsers pass null through and
+// the Rust core owns the defaults. A JS layer that helpfully filled in
+// defaults would put a second copy of every number on the wire, free to drift
+// from the core's, with no runtime update path to correct it.
+// ---------------------------------------------------------------------------
+
+test('every mesh relay tunable configured at create time reaches native', async () => {
+  const sdk = newSdk({
+    meshRelay: {
+      maxTtl: 6,
+      denseMaxTtl: 4,
+      denseDegree: 9,
+      fanout: 2,
+      jitterMinMs: 35,
+      jitterMaxMs: 175,
+      ratePerSec: 12.5,
+      burst: 41,
+      peerRatePerSec: 6.5,
+      peerBurst: 17,
+      queueCapacity: 321,
+      biasMinScale: 0.4,
+      biasMaxHandicapMs: 275,
+      activityWindowMs: 45000,
+      activityMinForwards: 5,
+      activityIdleWindows: 3,
+    },
+  });
+  await sdk.start();
+
+  assert.deepEqual(payloadOf('create').meshRelay, {
+    maxTtl: 6,
+    denseMaxTtl: 4,
+    denseDegree: 9,
+    fanout: 2,
+    jitterMinMs: 35,
+    jitterMaxMs: 175,
+    ratePerSec: 12.5,
+    burst: 41,
+    peerRatePerSec: 6.5,
+    peerBurst: 17,
+    queueCapacity: 321,
+    biasMinScale: 0.4,
+    biasMaxHandicapMs: 275,
+    activityWindowMs: 45000,
+    activityMinForwards: 5,
+    activityIdleWindows: 3,
+  });
+});
+
+test('an unset mesh relay section is absent from the create payload', async () => {
+  const sdk = newSdk();
+  await sdk.start();
+
+  assert.equal(
+    'meshRelay' in payloadOf('create'),
+    false,
+    'an absent section must stay absent: the core owns every default, and an ' +
+      'empty object on the wire invites a parser to start inventing them'
+  );
+});
+
+test('a mesh relay section naming one field sends only that field', async () => {
+  const sdk = newSdk({ meshRelay: { fanout: 7 } });
+  await sdk.start();
+
+  assert.deepEqual(
+    payloadOf('create').meshRelay,
+    { fanout: 7 },
+    'every unnamed field must reach the core absent so it keeps its default — ' +
+      'this is the DORS silent-reset failure in the shape it would take here'
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 

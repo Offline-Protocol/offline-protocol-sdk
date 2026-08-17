@@ -20975,7 +20975,25 @@ fn test_relay_forwards_third_party_message() {
 /// The device always has a neighbor to carry it and forwarding is otherwise
 /// allowed, so the only thing deciding the outcome is the battery gate.
 fn neighbors_carried_to_at_battery(level: Option<u8>, is_charging: bool) -> usize {
-    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+    neighbors_carried_to_at_battery_with_priority(
+        level,
+        is_charging,
+        offline_protocol_router::relay::RelayPriority::Auto,
+    )
+}
+
+/// As [`neighbors_carried_to_at_battery`], with the relay priority under test.
+///
+/// Priority reaches the *forwarding* floor, not only the cosmetic relay role:
+/// `Always` is excused the soft minimum exactly as charging is.
+fn neighbors_carried_to_at_battery_with_priority(
+    level: Option<u8>,
+    is_charging: bool,
+    priority: offline_protocol_router::relay::RelayPriority,
+) -> usize {
+    let mut config = create_relay_test_config_for_user("user123");
+    config.relay.relay_priority = priority;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
 
     let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
@@ -21047,6 +21065,44 @@ fn a_critical_battery_carries_nothing_even_while_charging() {
         neighbors_carried_to_at_battery(Some(10), true),
         0,
         "a critical battery stops carrying even while charging"
+    );
+}
+
+#[test]
+fn an_eager_device_carries_below_the_soft_floor() {
+    // `RelayPriority::Always` used to move only the cosmetic relay label while
+    // the 30% soft floor still stopped forwarding, so an app asking a device to
+    // relay got the badge and none of the carrying. It now excuses the soft
+    // floor the same way charging does — this is the only gate-level assertion
+    // of that, and without it the behaviour is pinned by nothing.
+    assert_eq!(
+        neighbors_carried_to_at_battery_with_priority(
+            Some(20),
+            false,
+            offline_protocol_router::relay::RelayPriority::Always,
+        ),
+        1,
+        "an eager device below the soft floor must still carry"
+    );
+}
+
+#[test]
+fn an_eager_device_still_stops_at_the_critical_floor() {
+    // The exemption is of the *soft* floor only. `CRITICAL_RELAY_BATTERY_LEVEL`
+    // is the hard one beneath it, and no configuration crosses it — otherwise
+    // an app could spend a device's last few percent on other people's traffic.
+    assert!(
+        crate::protocol::CRITICAL_RELAY_BATTERY_LEVEL == 15,
+        "the shared critical floor moved; this test's levels assume 15"
+    );
+    assert_eq!(
+        neighbors_carried_to_at_battery_with_priority(
+            Some(14),
+            false,
+            offline_protocol_router::relay::RelayPriority::Always,
+        ),
+        0,
+        "no priority crosses the hard critical floor"
     );
 }
 

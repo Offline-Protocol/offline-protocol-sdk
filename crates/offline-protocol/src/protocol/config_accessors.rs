@@ -1,6 +1,6 @@
 //! Configuration accessors, diagnostics, and service registration.
 
-use super::mesh_relay::MeshRelayStats;
+use super::mesh_relay::{MeshRelayConfig, MeshRelayStats};
 use super::{
     lock_shared_state, OfflineProtocol, PendingQueueMetrics, ProtocolState, KNOWN_PEER_TTL_SECS,
     MEDIA_TRANSFER_STALE_TIMEOUT_SECS,
@@ -242,6 +242,11 @@ impl OfflineProtocol {
     /// forwarding is hitting its ceiling, and `peer_rate_limited` means a
     /// single neighbor is sending more than its share. `dropped_for_capacity`
     /// is expected to stay at zero — see [`MeshRelayStats::dropped_for_capacity`].
+    ///
+    /// `refused_queue_full` and `abandoned_overdue` are the two that record
+    /// frames actually lost under pressure. Without them a shedding device
+    /// reports only healthy-looking deferrals, so a caller diagnosing a mesh
+    /// that is dropping traffic has nothing to see it with.
     pub fn mesh_relay_stats(&self) -> MeshRelayStats {
         let counters = self.mesh_relay.counters();
         MeshRelayStats {
@@ -252,11 +257,24 @@ impl OfflineProtocol {
             duplicates_suppressed: counters.duplicates_suppressed,
             covered_by_a_neighbor: counters.cancelled_by_duplicate,
             peer_rate_limited: counters.peer_rate_limited,
+            refused_queue_full: counters.queue_full,
             rate_deferred: counters.rate_deferred,
+            abandoned_overdue: counters.abandoned_overdue,
             hop_limit_reached: counters.hop_limit_reached,
             reach_clamped: counters.ttl_clamped,
             dropped_for_capacity: self.mesh_relay.seen_capacity_evictions(),
         }
+    }
+
+    /// Reports the mesh forwarding tunables currently in force.
+    ///
+    /// Read from the governor itself, not from the stored [`ProtocolConfig`],
+    /// so this reports what forwarding decisions actually use. The section is
+    /// fixed at construction today, which makes the two identical — reading
+    /// the consumer is what keeps that an implementation detail rather than
+    /// something a caller has to know.
+    pub fn mesh_relay_config(&self) -> MeshRelayConfig {
+        self.mesh_relay.config().clone()
     }
 
     /// Returns a mutable reference to the retry queue (test-only).

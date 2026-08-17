@@ -359,7 +359,9 @@ pub struct MeshRelayCounters {
 
 /// What this device has carried for other people.
 ///
-/// A snapshot, safe to poll: every field counts since start-up.
+/// A snapshot, safe to poll. Every field is cumulative since start-up except
+/// [`Self::awaiting_transmission`], which is a gauge: it is the queue depth
+/// right now, and it goes down as well as up.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MeshRelayStats {
     /// Frames carried onward on someone else's behalf, counted once each.
@@ -382,12 +384,28 @@ pub struct MeshRelayStats {
     pub covered_by_a_neighbor: u64,
     /// Frames refused because the neighbor sending them was over its share.
     pub peer_rate_limited: u64,
+    /// Frames refused admission, or refused room on their way back to the
+    /// queue, because the pending queue was full.
+    ///
+    /// This is a real loss: the frame reached nobody, and only a copy behind
+    /// it or the sender's own retransmission will carry it now. A rising value
+    /// means forwards are arriving faster than this device can transmit them,
+    /// so the queue is the thing to raise, or the rate ceiling that is filling
+    /// it — see [`Self::rate_deferred`].
+    pub refused_queue_full: u64,
     /// Transmissions held back because this device was at its forwarding rate.
     ///
     /// A frame counted here is delayed, not dropped: it goes back on the queue
     /// and is tried again on the next tick, until it is either sent or has
     /// waited so long past its turn that carrying it no longer helps.
     pub rate_deferred: u64,
+    /// Queued forwards given up on after waiting too long past their due time.
+    ///
+    /// The other end of [`Self::rate_deferred`]: this is where a frame that
+    /// kept being delayed finally stops being carried. Deferral is free to
+    /// look healthy while this climbs, so it is the pair that says whether
+    /// back-pressure is costing anything.
+    pub abandoned_overdue: u64,
     /// Frames that had travelled as far as they were allowed to.
     pub hop_limit_reached: u64,
     /// Frames whose claimed reach was cut down to local policy.
@@ -553,10 +571,14 @@ impl MeshRelayGovernor {
         self.local_id = local_id.into();
     }
 
-    /// The tunables in force. Apps read these from
-    /// `ProtocolConfig::mesh_relay`; this is for the tests that assert the
-    /// defaults hold together.
-    #[cfg(test)]
+    /// The tunables actually in force.
+    ///
+    /// This is the governor's own snapshot, taken at construction, and it is
+    /// what every forwarding decision reads. Reporting it rather than
+    /// `ProtocolConfig::mesh_relay` keeps the answer honest: the two agree
+    /// today only because nothing can update the section after construction,
+    /// and a reader that trusted the config copy would start lying the moment
+    /// that changed.
     pub fn config(&self) -> &MeshRelayConfig {
         &self.config
     }
@@ -2119,11 +2141,23 @@ mod tests {
         // Independent of which frame it is: the handicap shifts the window, so
         // the worst case for the weak device beats the best case for the
         // capable one on every id.
+        //
+        // The bound that has to clear the span is the handicap a device can
+        // actually pay, not the configured ceiling. A device at the floor
+        // scales to `bias_min_scale`, never to zero, so the most it ever pays
+        // is `(1 - bias_min_scale) * bias_max_handicap` — mirroring
+        // `jitter_for`'s expression, truncation included. Asserting the raw
+        // ceiling instead would stay green while a raised min scale silently
+        // let the two windows overlap.
         let span = DEFAULT_RELAY_JITTER_MAX_MS - DEFAULT_RELAY_JITTER_MIN_MS;
+        let reachable_handicap_ms = ((1.0 - DEFAULT_RELAY_BIAS_MIN_SCALE)
+            * DEFAULT_RELAY_BIAS_MAX_HANDICAP_MS as f32) as u64;
         assert!(
-            DEFAULT_RELAY_BIAS_MAX_HANDICAP_MS >= span,
-            "the handicap ({DEFAULT_RELAY_BIAS_MAX_HANDICAP_MS}ms) must exceed the jitter span \
-             ({span}ms) or the two windows overlap"
+            reachable_handicap_ms >= span,
+            "the reachable handicap ({reachable_handicap_ms}ms: a \
+             {DEFAULT_RELAY_BIAS_MAX_HANDICAP_MS}ms ceiling scaled by 1 - \
+             {DEFAULT_RELAY_BIAS_MIN_SCALE}) must cover the jitter span ({span}ms) or the two \
+             windows overlap"
         );
     }
 
