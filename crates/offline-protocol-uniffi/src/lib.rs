@@ -2397,15 +2397,23 @@ impl MeshRelayConfig {
     /// range-checked here: `CoreConfig::validate` owns that, and running it as
     /// the single gate is what stops the FFI and the core disagreeing about
     /// what is legal.
+    ///
+    /// The `u64` to `usize` conversions saturate rather than cast. A bare
+    /// `as usize` truncates on the 32-bit Android ABIs, where a value above
+    /// 2^32 wraps to a small number or to zero — so the same config would be
+    /// accepted on one device and rejected on another, with a message naming a
+    /// value the caller never wrote. Saturating keeps an absurd input absurd,
+    /// which is what `validate` is there to reject.
     fn overlay(self, base: CoreMeshRelayConfig) -> CoreMeshRelayConfig {
+        fn to_usize(value: u64) -> usize {
+            usize::try_from(value).unwrap_or(usize::MAX)
+        }
+
         CoreMeshRelayConfig {
             max_ttl: self.max_ttl.unwrap_or(base.max_ttl),
             dense_max_ttl: self.dense_max_ttl.unwrap_or(base.dense_max_ttl),
-            dense_degree: self
-                .dense_degree
-                .map(|v| v as usize)
-                .unwrap_or(base.dense_degree),
-            fanout: self.fanout.map(|v| v as usize).unwrap_or(base.fanout),
+            dense_degree: self.dense_degree.map(to_usize).unwrap_or(base.dense_degree),
+            fanout: self.fanout.map(to_usize).unwrap_or(base.fanout),
             jitter_min: self
                 .jitter_min_ms
                 .map(Duration::from_millis)
@@ -2420,7 +2428,7 @@ impl MeshRelayConfig {
             peer_burst: self.peer_burst.unwrap_or(base.peer_burst),
             queue_capacity: self
                 .queue_capacity
-                .map(|v| v as usize)
+                .map(to_usize)
                 .unwrap_or(base.queue_capacity),
             seen: base.seen,
             bias_min_scale: self.bias_min_scale.unwrap_or(base.bias_min_scale),
@@ -13589,6 +13597,42 @@ mod tests {
         let mut config = create_test_config();
         config.mesh_relay = Some(MeshRelayConfig {
             fanout: Some(0),
+            ..MeshRelayConfig::default()
+        });
+        assert!(OfflineProtocol::new(config).is_err());
+
+        // A zero queue would refuse every admission as queue-full, forwarding
+        // nothing and reporting no error.
+        let mut config = create_test_config();
+        config.mesh_relay = Some(MeshRelayConfig {
+            queue_capacity: Some(0),
+            ..MeshRelayConfig::default()
+        });
+        assert!(OfflineProtocol::new(config).is_err());
+
+        // Non-finite floats reach this boundary in a way no bridge can clamp:
+        // JSON cannot carry NaN, but Swift, Kotlin and Python callers use these
+        // dictionaries directly. A NaN rate is the dangerous one — the token
+        // bucket's `.max(0.0)` turns it into a bucket that never yields, so
+        // forwarding stops for good with nothing to show for it.
+        for bad in [f32::NAN, 0.0, -1.0] {
+            let mut config = create_test_config();
+            config.mesh_relay = Some(MeshRelayConfig {
+                rate_per_sec: Some(bad),
+                ..MeshRelayConfig::default()
+            });
+            assert!(
+                OfflineProtocol::new(config).is_err(),
+                "a rate_per_sec of {bad} must be refused at create",
+            );
+        }
+
+        // And an inverted jitter window, which would collapse the spread that
+        // keeps a crowded room from transmitting on top of itself.
+        let mut config = create_test_config();
+        config.mesh_relay = Some(MeshRelayConfig {
+            jitter_min_ms: Some(300),
+            jitter_max_ms: Some(200),
             ..MeshRelayConfig::default()
         });
         assert!(OfflineProtocol::new(config).is_err());

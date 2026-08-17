@@ -694,11 +694,29 @@ work. Nothing is partially applied.
 17. `meshRelay.fanout` must be > 0. Zero is not a cheaper forward but a silent
     drop: the frame is already admitted and recorded as seen, so no copy goes
     out and this node's suppression entry stops it arriving by another path
-18. `meshRelay.biasMinScale` must be finite and in `(0.0, 1.0]`
-19. `meshRelay.jitterMaxMs + meshRelay.biasMaxHandicapMs` must stay under the
+18. `meshRelay.maxTtl` and `meshRelay.denseMaxTtl` must each be > 0. A hop
+    ceiling of zero clamps every arriving budget to nothing, so the frame is
+    refused before it is ever queued. The dense ceiling only applies in a
+    crowded room, so a zero there fails exactly where the mesh is most needed
+19. `meshRelay.queueCapacity` must be > 0. A queue that holds nothing refuses
+    every admission as queue-full
+20. `meshRelay.ratePerSec`, `burst`, `peerRatePerSec` and `peerBurst` must each
+    be finite and > 0. The token buckets clamp their inputs to zero, so a
+    negative, zero or `NaN` value yields a bucket that never releases a token
+    and forwarding stops for good with no error and no counter
+21. `meshRelay.biasMinScale` must be finite and in `(0.0, 1.0]`
+22. `meshRelay.jitterMinMs` must not exceed `meshRelay.jitterMaxMs`. An
+    inverted window collapses the delay spread to a single millisecond, so
+    neighbors stop separating in time, and it would slip past rule 23 below
+23. `meshRelay.jitterMaxMs + meshRelay.biasMaxHandicapMs` must stay under the
     5s overdue cut-off, past which a forward is abandoned rather than late
-20. `meshRelay.activityWindowMs`, `activityMinForwards` and
+24. `meshRelay.activityWindowMs`, `activityMinForwards` and
     `activityIdleWindows` must each be > 0
+
+Rules 17 through 20 all guard one failure: a dial that reads like a
+conservative setting but is in fact an off switch, leaving the device running,
+reporting no error, and carrying nothing. Refusing them at construction is what
+keeps that distinguishable from a quiet neighborhood.
 
 Note what is *not* validated: `minBatteryForRelay` is a `u8` and is clamped by
 its type rather than range-checked. Earlier versions of this guide claimed it

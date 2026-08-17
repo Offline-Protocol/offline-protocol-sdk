@@ -248,6 +248,24 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **Every mesh forwarding dial that could silently switch forwarding off is
+  now refused at construction.** These share one failure and it is the worst
+  kind: the device keeps running, reports no error, and carries nothing, which
+  is indistinguishable from a quiet neighborhood. Each is also the value a
+  caller reaches for meaning "be conservative". Refused now: a `maxTtl` or
+  `denseMaxTtl` of zero (every arriving hop budget clamps to nothing, so frames
+  are refused before being queued, and the dense ceiling fails only in a
+  crowded room, where the mesh matters most); a `queueCapacity` of zero (every
+  admission rejected as queue-full); a `ratePerSec`, `burst`, `peerRatePerSec`
+  or `peerBurst` that is zero, negative or `NaN` (the token buckets clamp their
+  inputs to zero, so the bucket never releases a token — `NaN` matters on its
+  own, since `f32::max` returns the other operand for it and it therefore
+  arrives as zero rather than failing anywhere visible); and a `jitterMin`
+  above `jitterMax`, which collapsed the delay spread to a single millisecond
+  and, because the overdue check reads `jitterMax`, let a ten-minute minimum
+  validate clean while abandoning every forward. This matters more now that the
+  section is settable from JavaScript: these were builder-only before.
+
 - **Three mesh-relay behaviours that shipped guarded by nothing.** A
   `mesh_relay.fanout` of zero is now refused at construction: it read like an
   off switch but had quietly become a fan-out of one, and before that it was a
