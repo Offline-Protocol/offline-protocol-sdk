@@ -57,12 +57,6 @@ class NostrManager(
         private const val PING_INTERVAL_MS = 30000L  // OkHttp WebSocket ping interval
         private const val MAX_CONSECUTIVE_FAILURES = 2
 
-        // How long a query waits for stragglers before it is finished anyway.
-        // End-of-stored-events is the only completion signal a Nostr query has
-        // and a relay is free never to send one. Bounded well below the
-        // engine's own resolution sweep, so the ordinary answer still comes
-        // from here. Mirrors the iOS manager's QUERY_COMPLETION_TIMEOUT.
-        private const val QUERY_COMPLETION_TIMEOUT_MS = 10_000L
         // Name of the private looper this manager confines itself to. Shared
         // process-wide under this key, so a manager rebuilt after stop()
         // inherits the same ordered queue.
@@ -166,34 +160,16 @@ class NostrManager(
     // Populated when a WebSocket send succeeds; removed on relay ["OK", ...].
     private val pendingEventConfirmations = mutableMapOf<String, String>()
 
-    /**
-     * A resolution query the platform is running, and which relays still owe it
-     * an end-of-stored-events.
-     *
-     * A query is broadcast, so every connected relay answers it under the same
-     * subscription id and each sends its own EOSE. Ending the query on the
-     * *first* one makes the answer whatever the fastest relay happened to hold,
-     * and for a username resolution that answer is the entire result: a relay
-     * holding nothing, or holding only a squatter's claim, would decide what
-     * the user sees while every other relay served the honest claimants. A
-     * claim is supposed to need only one honest relay to survive.
-     *
-     * Tracking who is still owed is what lets each relay's subscription close
-     * as soon as *that* relay is done, which keeps the "no standing filter on a
-     * routing tag" property, without ending the query for the others.
-     */
-    private data class QueryProgress(
-        /** Relays that have not yet sent end-of-stored-events. */
-        val awaiting: MutableSet<String>,
-        /** When the query was issued, bounding how long a silent relay holds it. */
-        val issuedAtMs: Long
-    )
-
     // In-flight resolution queries, as opposed to the standing message
     // subscription. Events arriving under one of these are records fetched on
     // the transport's behalf, not inbound messages, and go to a different entry
-    // point. Guarded by relayLock.
-    private val activeQueries = mutableMapOf<String, QueryProgress>()
+    // point.
+    //
+    // The state machine lives in NostrQueryTracker, which holds its own lock
+    // (so this is deliberately not guarded by relayLock) and, having no I/O, is
+    // the half that unit tests can reach. See that file for why a query
+    // completes only once every relay it was sent to has answered.
+    private val queryTracker = NostrQueryTracker()
     private val pendingEventLock = Object()
 
     // Failure tracking for DORS
@@ -868,7 +844,7 @@ class NostrManager(
     // MARK: - Key-Package Resolution Queries
 
     private fun isActiveQuery(subscriptionId: String): Boolean =
-        synchronized(relayLock) { activeQueries.containsKey(subscriptionId) }
+        queryTracker.isActive(subscriptionId)
 
     /**
      * Drains queries the transport wants issued and sends each REQ to every
@@ -907,12 +883,7 @@ class NostrManager(
                 // Recorded against the relays this REQ actually goes to, so a
                 // relay that connects later is not waited on for an answer it
                 // was never asked for.
-                synchronized(relayLock) {
-                    activeQueries[query.queryId] = QueryProgress(
-                        awaiting = connectedRelays.keys.toMutableSet(),
-                        issuedAtMs = monotonicNowMs()
-                    )
-                }
+                queryTracker.issue(query.queryId, connectedRelays.keys, monotonicNowMs())
 
                 for ((_, socket) in connectedRelays) {
                     socket.send(query.reqJson)
@@ -954,11 +925,7 @@ class NostrManager(
      * resolution rate limit lapses.
      */
     private fun releaseActiveQueries() {
-        val queryIds = synchronized(relayLock) {
-            val ids = activeQueries.keys.toList()
-            activeQueries.clear()
-            ids
-        }
+        val queryIds = queryTracker.clear()
         if (queryIds.isEmpty()) return
 
         for (queryId in queryIds) {
@@ -984,23 +951,9 @@ class NostrManager(
         val closeMessage = JSONArray().put("CLOSE").put(subscriptionId).toString()
         synchronized(relayLock) { relayWebSockets[relayUrl] }?.send(closeMessage)
 
-        val finished = synchronized(relayLock) {
-            val progress = activeQueries[subscriptionId]
-            when {
-                progress == null -> false
-                else -> {
-                    progress.awaiting.remove(relayUrl)
-                    if (progress.awaiting.isEmpty()) {
-                        activeQueries.remove(subscriptionId)
-                        true
-                    } else {
-                        false
-                    }
-                }
-            }
+        if (queryTracker.noteEndOfStoredEvents(subscriptionId, relayUrl)) {
+            releaseQuery(subscriptionId)
         }
-
-        if (finished) releaseQuery(subscriptionId)
     }
 
     /**
@@ -1011,21 +964,7 @@ class NostrManager(
      * soon as the relays that *can* answer have.
      */
     private fun dropRelayFromQueries(relayUrl: String) {
-        val finished = synchronized(relayLock) {
-            val done = mutableListOf<String>()
-            // Over a snapshot, so the removals below cannot interact with the
-            // walk.
-            for ((subscriptionId, progress) in activeQueries.entries.toList()) {
-                if (!progress.awaiting.remove(relayUrl)) continue
-                if (progress.awaiting.isEmpty()) {
-                    activeQueries.remove(subscriptionId)
-                    done.add(subscriptionId)
-                }
-            }
-            done
-        }
-
-        for (subscriptionId in finished) releaseQuery(subscriptionId)
+        for (subscriptionId in queryTracker.dropRelay(relayUrl)) releaseQuery(subscriptionId)
     }
 
     /**
@@ -1036,12 +975,7 @@ class NostrManager(
      * connection while its caller waits on the engine's much later sweep.
      */
     private fun expireStaleQueries() {
-        val cutoff = monotonicNowMs() - QUERY_COMPLETION_TIMEOUT_MS
-        val stale = synchronized(relayLock) {
-            activeQueries.filterValues { it.issuedAtMs < cutoff }.keys.toList()
-        }
-
-        for (subscriptionId in stale) {
+        for (subscriptionId in queryTracker.staleQueries(monotonicNowMs())) {
             emitDiagnostic("debug", "Nostr query timed out waiting for end-of-stored-events", mapOf(
                 "queryId" to subscriptionId
             ))
@@ -1051,11 +985,11 @@ class NostrManager(
 
     /** Ends a query now, whatever the relays have or have not sent. */
     private fun finishQuery(subscriptionId: String) {
-        val progress = synchronized(relayLock) { activeQueries.remove(subscriptionId) } ?: return
+        val awaiting = queryTracker.finish(subscriptionId) ?: return
 
         val closeMessage = JSONArray().put("CLOSE").put(subscriptionId).toString()
         val sockets = synchronized(relayLock) {
-            progress.awaiting.mapNotNull { relayWebSockets[it] }
+            awaiting.mapNotNull { relayWebSockets[it] }
         }
         for (socket in sockets) {
             socket.send(closeMessage)

@@ -13773,4 +13773,60 @@ mod tests {
             "AddressDeclarationPolicy.kt must declare PROOF_DOMAIN = \"{EXPECTED}\""
         );
     }
+
+    /// Pins the resolution-query completion deadline across the two bridges
+    /// that hand-mirror it.
+    ///
+    /// A discovery query is broadcast and completes only once every relay it
+    /// was sent to has answered, because a claim is meant to need one honest
+    /// relay to survive. End-of-stored-events is the only completion signal
+    /// there is and a relay is free never to send one, so the wait needs a
+    /// deadline. That deadline is a bridge-side constant with no Rust
+    /// counterpart, copied by hand into `NostrQueryTracker.swift` and
+    /// `NostrQueryTracker.kt`.
+    ///
+    /// It is pinned because it is not free to choose: it has to stay *below*
+    /// the engine's `RESOLUTION_TIMEOUT` sweep. Above it, the engine answers
+    /// first and every silent-relay resolution is decided by the sweep instead
+    /// of by the bridge that knows which relays actually replied, which is a
+    /// behaviour change no test on either side of the boundary would show. One
+    /// bridge edited and the other left alone is the same drift in half the
+    /// fleet.
+    #[test]
+    fn nostr_query_completion_timeout_matches_across_both_bridges() {
+        const EXPECTED_MS: u64 = 10_000;
+
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rn_dir = manifest.join("../../bindings/react-native");
+        let read_abs = |path: std::path::PathBuf| -> String {
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+        let read = |rel: &str| -> String { read_abs(rn_dir.join(rel)) };
+
+        // The engine's own sweep, read rather than restated. The bridge
+        // deadline is only meaningful if it lands first, and that relationship
+        // is invisible from either side alone: shortening the sweep below the
+        // bridge's wait would hand every silent-relay resolution back to the
+        // sweep with nothing failing.
+        let engine = read_abs(manifest.join("../offline-protocol/src/protocol/nostr_discovery.rs"));
+        assert!(
+            engine.contains("const RESOLUTION_TIMEOUT: Duration = Duration::from_secs(30);"),
+            "the engine's resolution sweep is no longer 30s; the bridge deadline pinned here \
+             ({EXPECTED_MS} ms) has to stay under it, so re-derive both rather than editing \
+             this literal"
+        );
+
+        let swift = read("ios/NostrQueryTracker.swift");
+        assert!(
+            swift.contains("COMPLETION_TIMEOUT_MS: Int64 = 10_000"),
+            "NostrQueryTracker.swift must declare COMPLETION_TIMEOUT_MS = {EXPECTED_MS} ms"
+        );
+
+        let kotlin = read("android/src/main/java/com/offlineprotocol/NostrQueryTracker.kt");
+        assert!(
+            kotlin.contains("COMPLETION_TIMEOUT_MS = 10_000L"),
+            "NostrQueryTracker.kt must declare COMPLETION_TIMEOUT_MS = {EXPECTED_MS} ms"
+        );
+    }
 }

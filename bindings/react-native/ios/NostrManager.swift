@@ -85,40 +85,16 @@ public class NostrManager: NSObject, TransportManager {
     // Guarded by stateLock.
     private var _pendingEventConfirmations: [String: String] = [:]
 
-    /// A resolution query the platform is running, and which relays still owe
-    /// it an end-of-stored-events.
-    ///
-    /// A query is broadcast, so every connected relay answers it under the same
-    /// subscription id and each sends its own EOSE. Ending the query on the
-    /// *first* one makes the answer whatever the fastest relay happened to
-    /// hold, and for a username resolution that answer is the entire result: a
-    /// relay holding nothing, or holding only a squatter's claim, would decide
-    /// what the user sees while every other relay served the honest claimants.
-    /// A claim is supposed to need only one honest relay to survive.
-    ///
-    /// Tracking who is still owed is what lets each relay's subscription close
-    /// as soon as *that* relay is done, which keeps the "no standing filter on
-    /// a routing tag" property, without ending the query for the others.
-    private struct QueryProgress {
-        /// Relays that have not yet sent end-of-stored-events.
-        var awaiting: Set<String>
-        /// When the query was issued, bounding how long a silent relay can hold
-        /// it open.
-        let issuedAt: Date
-    }
-
     // In-flight resolution queries, as opposed to the standing message
     // subscription. Events arriving under one of these are records fetched on
     // the transport's behalf, not inbound messages, and go to a different entry
-    // point. Guarded by stateLock.
-    private var _activeQueries: [String: QueryProgress] = [:]
-
-    /// How long a query waits for stragglers before it is finished anyway.
-    ///
-    /// End-of-stored-events is the only completion signal a Nostr query has and
-    /// a relay is free never to send one. Bounded well below the engine's own
-    /// resolution sweep, so the ordinary answer still comes from here.
-    private let QUERY_COMPLETION_TIMEOUT: TimeInterval = 10.0
+    // point.
+    //
+    // The state machine lives in NostrQueryTracker, which holds its own lock
+    // (so this is deliberately not guarded by stateLock) and, having no I/O, is
+    // the half that unit tests can reach. See that file for why a query
+    // completes only once every relay it was sent to has answered.
+    private let queryTracker = NostrQueryTracker()
 
     private func reconnectAttempts(for relay: String) -> Int {
         stateLock.lock(); defer { stateLock.unlock() }
@@ -826,8 +802,7 @@ public class NostrManager: NSObject, TransportManager {
     // MARK: - Key-Package Resolution Queries
 
     private func isActiveQuery(_ subscriptionId: String) -> Bool {
-        stateLock.lock(); defer { stateLock.unlock() }
-        return _activeQueries[subscriptionId] != nil
+        return queryTracker.isActive(subscriptionId)
     }
 
     /// Drains queries the transport wants issued and sends each REQ to every
@@ -865,12 +840,11 @@ public class NostrManager: NSObject, TransportManager {
             // Recorded against the relays this REQ actually goes to, so a relay
             // that connects later is not waited on for an answer it was never
             // asked for.
-            stateLock.lock()
-            _activeQueries[query.queryId] = QueryProgress(
-                awaiting: Set(relays),
-                issuedAt: Date()
+            queryTracker.issue(
+                query.queryId,
+                relays: Set(relays),
+                nowMs: MonotonicClock.nowMs()
             )
-            stateLock.unlock()
 
             for relayUrl in relays {
                 sendToRelay(relayUrl, message: query.reqJson)
@@ -916,10 +890,7 @@ public class NostrManager: NSObject, TransportManager {
     /// Called on `messageQueue` like the rest of the release path, so it lands
     /// after any events already enqueued for these queries.
     private func releaseActiveQueries() {
-        stateLock.lock()
-        let queryIds = Array(_activeQueries.keys)
-        _activeQueries.removeAll()
-        stateLock.unlock()
+        let queryIds = queryTracker.clear()
 
         guard !queryIds.isEmpty else { return }
 
@@ -943,21 +914,7 @@ public class NostrManager: NSObject, TransportManager {
     private func noteEndOfStoredEvents(subscriptionId: String, from relayUrl: String) {
         sendToRelay(relayUrl, message: "[\"CLOSE\",\"\(subscriptionId)\"]")
 
-        stateLock.lock()
-        guard var progress = _activeQueries[subscriptionId] else {
-            stateLock.unlock()
-            return
-        }
-        progress.awaiting.remove(relayUrl)
-        let finished = progress.awaiting.isEmpty
-        if finished {
-            _activeQueries.removeValue(forKey: subscriptionId)
-        } else {
-            _activeQueries[subscriptionId] = progress
-        }
-        stateLock.unlock()
-
-        if finished {
+        if queryTracker.noteEndOfStoredEvents(subscriptionId, from: relayUrl) {
             releaseQuery(subscriptionId)
         }
     }
@@ -968,22 +925,7 @@ public class NostrManager: NSObject, TransportManager {
     /// query it was asked would wait out the timeout instead of finishing as
     /// soon as the relays that *can* answer have.
     private func dropRelayFromQueries(_ relayUrl: String) {
-        stateLock.lock()
-        var finished: [String] = []
-        // Over a snapshot, so the removals below cannot interact with the walk.
-        for (subscriptionId, existing) in Array(_activeQueries) {
-            var progress = existing
-            guard progress.awaiting.remove(relayUrl) != nil else { continue }
-            if progress.awaiting.isEmpty {
-                _activeQueries.removeValue(forKey: subscriptionId)
-                finished.append(subscriptionId)
-            } else {
-                _activeQueries[subscriptionId] = progress
-            }
-        }
-        stateLock.unlock()
-
-        for subscriptionId in finished {
+        for subscriptionId in queryTracker.dropRelay(relayUrl) {
             releaseQuery(subscriptionId)
         }
     }
@@ -994,12 +936,7 @@ public class NostrManager: NSObject, TransportManager {
     /// a deadline such a query holds its subscription for the life of the
     /// connection while its caller waits on the engine's much later sweep.
     private func expireStaleQueries() {
-        let cutoff = Date().addingTimeInterval(-QUERY_COMPLETION_TIMEOUT)
-        stateLock.lock()
-        let stale = _activeQueries.filter { $0.value.issuedAt < cutoff }.map { $0.key }
-        stateLock.unlock()
-
-        for subscriptionId in stale {
+        for subscriptionId in queryTracker.staleQueries(nowMs: MonotonicClock.nowMs()) {
             emitDiagnostic("debug", "Nostr query timed out waiting for end-of-stored-events", context: [
                 "queryId": subscriptionId
             ])
@@ -1009,13 +946,10 @@ public class NostrManager: NSObject, TransportManager {
 
     /// Ends a query now, whatever the relays have or have not sent.
     private func finishQuery(subscriptionId: String) {
-        stateLock.lock()
-        let progress = _activeQueries.removeValue(forKey: subscriptionId)
-        stateLock.unlock()
-        guard let progress = progress else { return }
+        guard let awaiting = queryTracker.finish(subscriptionId) else { return }
 
         let closeMessage = "[\"CLOSE\",\"\(subscriptionId)\"]"
-        for relayUrl in progress.awaiting {
+        for relayUrl in awaiting {
             sendToRelay(relayUrl, message: closeMessage)
         }
 
@@ -1034,7 +968,7 @@ public class NostrManager: NSObject, TransportManager {
     /// key package cold contact fails to upgrade and the peer waits out the
     /// resolution rate limit. `messageQueue` is serial, so hopping onto it puts
     /// the release strictly after every event already enqueued. The
-    /// `_activeQueries` removal and the CLOSE stay synchronous — they must beat
+    /// `queryTracker` removal and the CLOSE stay synchronous — they must beat
     /// the *next* relay's EOSE, and they touch nothing the engine owns.
     private func releaseQuery(_ subscriptionId: String) {
         messageQueue.async { [weak self] in
