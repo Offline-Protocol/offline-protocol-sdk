@@ -29,7 +29,7 @@ use crate::{
     Error, Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType,
 };
 use base64::Engine;
-use offline_protocol_core::{Address, Message, MutexExt, RwLockExt};
+use offline_protocol_core::{Address, Message, MutexExt, RwLockExt, Username};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,24 +53,81 @@ const MAX_SIGN_RETRIES: u8 = 3;
 /// construction rather than by a check that could be forgotten.
 pub const NOSTR_PUBLICATION_ID_PREFIX: &str = "__nostr_kp__:";
 
-/// Recovers the slot id from a publication's synthetic message id, or `None`
-/// for an ordinary message id.
+/// Marks a synthetic message id belonging to a published username discovery
+/// record.
 ///
-/// Every message-path side effect must consult this, not just the failure
-/// reporting that motivated it. In particular a publication's outcome is
-/// deliberately kept out of [`TransportMetrics`]: DORS scores this transport's
-/// reliability on `success_count / (success_count + failure_count)`, those
+/// A second discriminator beside [`NOSTR_PUBLICATION_ID_PREFIX`], and the
+/// reason the classifier returns an enum rather than an `Option`.
+pub const NOSTR_DISCOVERY_ID_PREFIX: &str = "__nostr_disc__:";
+
+/// Marks a synthetic message id belonging to a NIP-09 deletion request.
+///
+/// Deletions are the best-effort half of a retraction and nothing recovers when
+/// one fails, but they still ride the send queue and so still need to be kept
+/// out of the delivery metrics. Giving them a discriminator is what makes that
+/// automatic rather than a special case someone has to remember.
+pub const NOSTR_DELETION_ID_PREFIX: &str = "__nostr_del__:";
+
+/// What a synthetic message id denotes, when it is one.
+///
+/// # Why this is an enum and not two `Option`-returning helpers
+///
+/// This classifier is consulted by every message-path side effect —
+/// [`NostrTransport::confirm_sent`], [`NostrTransport::report_send_failure`],
+/// `drain_expired_pending` and `fail_all_pending` — and getting *one* of them
+/// wrong is a shipped, previously-diagnosed bug: publication outcomes leaking
+/// into [`TransportMetrics`] poison DORS scoring, because DORS scores this
+/// transport on `success_count / (success_count + failure_count)`, those
 /// counters are lifetime totals with no decay, and an idle install publishes
-/// far more than it sends — so counting publications would score the transport
-/// on something other than its ability to carry messages. A relay that rejects
-/// kind 30443 would drive the ratio toward zero and make DORS deprioritise
-/// Nostr for traffic that delivers fine; publications that succeed would
-/// equally mask real message failures. See
-/// `test_publication_outcomes_stay_out_of_the_delivery_metrics`.
-fn publication_slot_id(message_id: &str) -> Option<String> {
-    message_id
-        .strip_prefix(NOSTR_PUBLICATION_ID_PREFIX)
-        .map(str::to_string)
+/// far more than it sends. A relay that rejects the kind drives the ratio
+/// toward zero and makes DORS deprioritise Nostr for traffic that delivers
+/// fine; publications that succeed equally mask real message failures.
+///
+/// A second record type is exactly the change that historically half-wires:
+/// adding another prefix plus another `Option` helper leaves four call sites
+/// that each *silently* keep compiling while consulting only the old one.
+/// Returning a single enum means every site matches, so a third record type
+/// added later fails to compile at each of them instead of quietly scoring
+/// itself as delivery. That is the whole point of the shape.
+///
+/// The metrics rule is kind-independent — any variant stays out of
+/// [`TransportMetrics`] — while failure *routing* differs per variant, which is
+/// why the payload rides along. See
+/// `test_publication_outcomes_stay_out_of_the_delivery_metrics` and
+/// `test_discovery_publication_outcomes_stay_out_of_the_delivery_metrics`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SyntheticPublication {
+    /// A key-package record. Carries the addressable slot id, which the engine
+    /// needs in order to mark the slot unpublished and refill it.
+    KeyPackage(String),
+    /// A username discovery record. Carries the discovery tag it was published
+    /// at, which is both its `#p` tag and its `d` tag.
+    Discovery(String),
+    /// A NIP-09 deletion request, the best-effort half of a retraction.
+    ///
+    /// Carries no payload because nothing acts on its outcome: the durable half
+    /// of a retraction is the tombstone, which replaces the claim through the
+    /// addressable rule rather than through a relay's cooperation. It is a
+    /// variant rather than an untagged id so the metrics exclusion covers it by
+    /// construction.
+    Deletion,
+}
+
+/// Classifies a message id, returning `None` for an ordinary protocol message.
+///
+/// See [`SyntheticPublication`] for why this exists and what every caller owes
+/// it.
+pub(crate) fn synthetic_publication(message_id: &str) -> Option<SyntheticPublication> {
+    if let Some(slot_id) = message_id.strip_prefix(NOSTR_PUBLICATION_ID_PREFIX) {
+        return Some(SyntheticPublication::KeyPackage(slot_id.to_string()));
+    }
+    if let Some(tag) = message_id.strip_prefix(NOSTR_DISCOVERY_ID_PREFIX) {
+        return Some(SyntheticPublication::Discovery(tag.to_string()));
+    }
+    if message_id.starts_with(NOSTR_DELETION_ID_PREFIX) {
+        return Some(SyntheticPublication::Deletion);
+    }
+    None
 }
 
 /// Maximum peers queued for key-package resolution at once.
@@ -106,12 +163,8 @@ const MAX_QUERY_EVENTS: usize = 64;
 /// A resolution query the platform is currently running.
 #[derive(Debug)]
 struct ActiveQuery {
-    /// The peer being resolved. An inbound event is meaningless without it:
-    /// this is whose derivable key opens the record.
-    ///
-    /// Carried as a parsed [`Address`] so the record-seal derivation this
-    /// feeds cannot be handed a string that was never validated.
-    user_id: Address,
+    /// What this query is resolving, and the key that opens what comes back.
+    subject: QuerySubject,
     /// Event ids already taken for this query. The query is broadcast, so the
     /// same record arrives once per relay, and opening it more than once
     /// re-runs the key-package handler's durable writes for no gain. Bounded
@@ -119,6 +172,53 @@ struct ActiveQuery {
     seen_events: HashSet<String>,
     /// Events delivered for this query so far, whether or not they opened.
     delivered: usize,
+}
+
+/// What an active query is asking for.
+///
+/// The variant decides three things at once — which kind is accepted, which
+/// derivable key opens the payload, and which engine handler the plaintext goes
+/// to — so carrying them together is what stops a discovery record from being
+/// fed to the key-package handler, or vice versa. A record delivered under the
+/// wrong subject is not merely useless: `handle_resolved_key_package` is a
+/// deliberately narrow gate, and widening the set of things that can reach it
+/// is exactly what that gate exists to prevent.
+#[derive(Debug, Clone)]
+enum QuerySubject {
+    /// A peer's published key packages.
+    ///
+    /// Carried as a parsed [`Address`] so the record-seal derivation this feeds
+    /// cannot be handed a string that was never validated.
+    KeyPackage(Address),
+    /// The devices claiming a username.
+    ///
+    /// Carried as a parsed [`Username`] for the same reason: the
+    /// discovery-seal derivation must not be handed an unnormalized name.
+    Discovery(Username),
+}
+
+/// What opening a query event produced.
+#[derive(Debug, Clone)]
+pub enum ResolvedRecord {
+    /// A key-package record: the author's Nostr pubkey and the decrypted
+    /// protocol message bytes.
+    KeyPackage {
+        /// The event's author key.
+        author: String,
+        /// The decrypted protocol message.
+        plaintext: Vec<u8>,
+    },
+    /// A discovery record: the username queried, the author key it must be
+    /// bound to, and the decrypted record body.
+    Discovery {
+        /// The username this query resolved.
+        username: Username,
+        /// The event's author key, which the record's `nostr_author` field must
+        /// equal.
+        author: String,
+        /// The decrypted `DiscoveryRecordV1` or tombstone body.
+        plaintext: Vec<u8>,
+    },
 }
 
 /// A key-package record waiting to be published to the relays.
@@ -131,6 +231,23 @@ struct PendingPublication {
     payload: Vec<u8>,
 }
 
+/// A username discovery record waiting to be published.
+#[derive(Debug, Clone)]
+struct PendingDiscoveryPublication {
+    /// The username this record claims. Held parsed so the tag and seal
+    /// derivations at drain time cannot be handed an unnormalized string.
+    username: Username,
+    /// The serialized `DiscoveryRecordV1`, or a tombstone for a retraction.
+    payload: Vec<u8>,
+    /// Whether this publication is a retraction.
+    ///
+    /// A retraction publishes a tombstone into the addressable slot *and*
+    /// emits a best-effort NIP-09 deletion. Carried as a flag rather than a
+    /// separate queue because the two share the whole drain path and differ
+    /// only in that one extra event.
+    retraction: bool,
+}
+
 /// A relay query the platform should issue on the transport's behalf.
 #[derive(Debug, Clone)]
 pub struct NostrQuery {
@@ -139,6 +256,14 @@ pub struct NostrQuery {
     pub query_id: String,
     /// Complete `["REQ", ...]` JSON string for the relay WebSocket.
     pub req_json: String,
+    /// The username being resolved, when this is a discovery query.
+    ///
+    /// Carried out so the engine can open an accumulator keyed by `query_id`
+    /// at the moment the query is minted. Doing it here rather than on the
+    /// first answer means a query that returns *nothing* still emits an empty
+    /// result rather than silently never completing — "no such name" is an
+    /// answer, and an app waiting on one deserves to receive it.
+    pub discovery_username: Option<Username>,
 }
 
 /// Mints a subscription id for a resolution query.
@@ -287,6 +412,40 @@ pub struct NostrTransport {
     /// Bounded by construction: the keys are our own slot ids, of which the
     /// engine keeps at most `NOSTR_KEY_PACKAGE_SLOTS`.
     failed_publications: Mutex<HashSet<String>>,
+    /// Whether this install publishes and resolves username discovery records.
+    /// Mirrors `TransportConfig::nostr_username_discovery_enabled`.
+    ///
+    /// Off by default, unlike cold contact. Publishing a discovery record binds
+    /// a human-readable name to an address in a public place, which is
+    /// materially more disclosure than the key-package record's "an install
+    /// with this tag exists", and it is the kind of decision an app should make
+    /// deliberately rather than inherit.
+    discovery_enabled: Mutex<bool>,
+    /// Username discovery records waiting to go out.
+    ///
+    /// Separate from [`Self::publication_queue`] rather than a variant inside
+    /// it, because the two drain in a fixed order (key packages first) and
+    /// share no state: a discovery claim republished while a key-package slot
+    /// is queued must not displace it.
+    discovery_queue: Mutex<VecDeque<PendingDiscoveryPublication>>,
+    /// Discovery tags whose publication left the queue but never reached a
+    /// relay, waiting for the engine to drain them via
+    /// [`Self::take_failed_discovery_publications`].
+    ///
+    /// The same channel [`Self::failed_publications`] provides for slots, and
+    /// for the same reason: the engine marks a claim published when it queues
+    /// it, so without this a failure after that point leaves the claim marked
+    /// healthy while the relays hold nothing.
+    ///
+    /// Bounded by construction: an install claims one username, so this holds
+    /// at most one entry in practice and is keyed by our own derived tag in
+    /// every case.
+    failed_discovery_publications: Mutex<HashSet<String>>,
+    /// Ready-built NIP-09 deletion events, as `(event_id, relay_json)`.
+    ///
+    /// Queued by a retraction after its tombstone is built, so the deletion
+    /// follows the tombstone rather than racing it. Nothing retries these.
+    pending_deletions: Mutex<VecDeque<(String, String)>>,
     /// Peer addresses whose published key packages we want fetched.
     ///
     /// Holds parsed [`Address`]es rather than strings: an entry becomes the
@@ -295,6 +454,12 @@ pub struct NostrTransport {
     /// writer and parses there, which is what lets `next_query` derive a tag
     /// without re-validating or re-deciding what to do when it fails.
     resolve_queue: Mutex<VecDeque<Address>>,
+    /// Usernames whose discovery records we want fetched.
+    ///
+    /// Holds parsed [`Username`]s for the same reason [`Self::resolve_queue`]
+    /// holds parsed [`Address`]es: an entry becomes the `#p` tag of a relay
+    /// query, and an unnormalized name derives a tag nobody publishes at.
+    discovery_resolve_queue: Mutex<VecDeque<Username>>,
     /// Query id → the query's state. An inbound event is meaningless without
     /// this: the id tells us whose derivable key opens it, and carries the
     /// per-query dedup and delivery ceiling with it.
@@ -380,7 +545,12 @@ impl NostrTransport {
             cold_contact_enabled: Mutex::new(true),
             publication_queue: Mutex::new(VecDeque::new()),
             failed_publications: Mutex::new(HashSet::new()),
+            discovery_enabled: Mutex::new(false),
+            discovery_queue: Mutex::new(VecDeque::new()),
+            failed_discovery_publications: Mutex::new(HashSet::new()),
+            pending_deletions: Mutex::new(VecDeque::new()),
             resolve_queue: Mutex::new(VecDeque::new()),
+            discovery_resolve_queue: Mutex::new(VecDeque::new()),
             active_queries: Mutex::new(HashMap::new()),
             resolve_attempts: Mutex::new(HashMap::new()),
             config,
@@ -598,6 +768,90 @@ impl NostrTransport {
         }
     }
 
+    /// Records discovery publications that never reached a relay.
+    fn mark_discovery_publications_failed(&self, tags: Vec<String>) {
+        if tags.is_empty() {
+            return;
+        }
+        let mut failed = self.failed_discovery_publications.lock_or_recover();
+        for tag in tags {
+            tracing::warn!(
+                "Nostr username discovery publication did not reach a relay; \
+                 the claim will be republished"
+            );
+            failed.insert(tag);
+        }
+    }
+
+    /// Drains the discovery tags whose publication never reached a relay.
+    pub fn take_failed_discovery_publications(&self) -> Vec<String> {
+        self.failed_discovery_publications
+            .lock_or_recover()
+            .drain()
+            .collect()
+    }
+
+    /// Enables or disables username discovery publication and resolution.
+    pub fn set_discovery_enabled(&self, enabled: bool) {
+        *self.discovery_enabled.lock_or_recover() = enabled;
+    }
+
+    /// Whether username discovery is active.
+    ///
+    /// **Requires cold contact as well as its own switch.** A discovery record
+    /// points at an address whose key packages are what a resolver fetches
+    /// next; with cold contact off, nothing is published there and the claim
+    /// resolves to a dead end one hop later. Hard-coupled here rather than
+    /// documented, so the dead-end configuration is unreachable rather than
+    /// merely discouraged.
+    pub fn discovery_enabled(&self) -> bool {
+        *self.discovery_enabled.lock_or_recover() && self.cold_contact_enabled()
+    }
+
+    /// Queues a username discovery record for publication.
+    ///
+    /// Replacing a claim is the caller's decision, not this queue's: the record
+    /// is addressable at a deterministic `d`, so publishing the same username
+    /// again overwrites it at the relay. A claim queued twice before it drains
+    /// is collapsed to the newer payload — the older one is by definition
+    /// superseded, and publishing both would briefly stand the stale one back
+    /// up.
+    pub fn publish_discovery_record(&self, username: Username, payload: Vec<u8>) {
+        self.enqueue_discovery_publication(username, payload, false);
+    }
+
+    /// Queues a retraction: a tombstone into the claim's slot, plus a
+    /// best-effort NIP-09 deletion.
+    ///
+    /// Not gated on [`Self::discovery_enabled`], deliberately and unlike
+    /// [`Self::publish_discovery_record`]. Turning the feature *off* is the
+    /// single most likely reason to retract, and a gate here would make the
+    /// switch strand exactly the claim the user just asked to withdraw.
+    pub fn retract_discovery_record(&self, username: Username, payload: Vec<u8>) {
+        self.enqueue_discovery_publication(username, payload, true);
+    }
+
+    fn enqueue_discovery_publication(
+        &self,
+        username: Username,
+        payload: Vec<u8>,
+        retraction: bool,
+    ) {
+        if !retraction && !self.discovery_enabled() {
+            return;
+        }
+        {
+            let mut queue = self.discovery_queue.lock_or_recover();
+            queue.retain(|pending| pending.username != username);
+            queue.push_back(PendingDiscoveryPublication {
+                username,
+                payload,
+                retraction,
+            });
+        }
+        self.notify_messages_available();
+    }
+
     /// Drains the slot ids whose publication never reached a relay, so the
     /// engine can clear them from its published set and republish.
     pub fn take_failed_publications(&self) -> Vec<String> {
@@ -677,17 +931,37 @@ impl NostrTransport {
     /// Pops the next queued resolution and returns the REQ for the platform to
     /// issue, registering the query so inbound events can be routed back.
     pub fn next_query(&self) -> Result<Option<NostrQuery>> {
-        let user_id = {
+        // Key-package resolutions drain first: they are triggered by a send
+        // that is already waiting on the bootstrap leg, whereas a discovery
+        // query is a user-initiated lookup with no frame behind it.
+        let subject = {
             let mut queue = self.resolve_queue.lock_or_recover();
-            match queue.pop_front() {
-                Some(u) => u,
-                None => return Ok(None),
+            queue.pop_front().map(QuerySubject::KeyPackage)
+        };
+        let subject = match subject {
+            Some(subject) => subject,
+            None => {
+                let mut queue = self.discovery_resolve_queue.lock_or_recover();
+                match queue.pop_front() {
+                    Some(username) => QuerySubject::Discovery(username),
+                    None => return Ok(None),
+                }
             }
         };
 
-        let routing_tag = nostr_crypto::routing_tag_for_address(&user_id)?;
+        let subject_for_caller = subject;
+        let subject = &subject_for_caller;
         let query_id = new_query_id();
-        let req_json = nostr_crypto::create_key_package_query_message(&routing_tag, &query_id)?;
+        let req_json = match subject {
+            QuerySubject::KeyPackage(address) => {
+                let routing_tag = nostr_crypto::routing_tag_for_address(address)?;
+                nostr_crypto::create_key_package_query_message(&routing_tag, &query_id)?
+            }
+            QuerySubject::Discovery(username) => {
+                let discovery_tag = nostr_crypto::discovery_tag_for_username(username)?;
+                nostr_crypto::create_discovery_query_message(&discovery_tag, &query_id)?
+            }
+        };
 
         {
             let mut active = self.active_queries.lock_or_recover();
@@ -704,14 +978,23 @@ impl NostrTransport {
             active.insert(
                 query_id.clone(),
                 ActiveQuery {
-                    user_id,
+                    subject: subject_for_caller.clone(),
                     seen_events: HashSet::new(),
                     delivered: 0,
                 },
             );
         }
 
-        Ok(Some(NostrQuery { query_id, req_json }))
+        let discovery_username = match &subject_for_caller {
+            QuerySubject::Discovery(username) => Some(username.clone()),
+            QuerySubject::KeyPackage(_) => None,
+        };
+
+        Ok(Some(NostrQuery {
+            query_id,
+            req_json,
+            discovery_username,
+        }))
     }
 
     /// Opens an event delivered for `query_id`, returning the author's Nostr
@@ -761,16 +1044,16 @@ impl NostrTransport {
         &self,
         query_id: &str,
         event_json: &str,
-    ) -> Result<Option<(String, Vec<u8>)>> {
+    ) -> Result<Option<ResolvedRecord>> {
         if event_json.len() > NOSTR_MAX_PAYLOAD_SIZE {
             tracing::warn!(
                 len = event_json.len(),
-                "Oversized Nostr key-package record; ignoring"
+                "Oversized Nostr resolution record; ignoring"
             );
             return Ok(None);
         }
 
-        let user_id = {
+        let subject = {
             let mut active = self.active_queries.lock_or_recover();
             let Some(query) = active.get_mut(query_id) else {
                 tracing::debug!(query_id = %query_id, "Nostr query event for an unknown query");
@@ -787,20 +1070,26 @@ impl NostrTransport {
                 return Ok(None);
             }
             query.delivered += 1;
-            query.user_id
+            query.subject.clone()
         };
 
         let event: serde_json::Value = match serde_json::from_str(event_json) {
             Ok(v) => v,
             Err(e) => {
-                tracing::debug!(error = %e, "Unparseable Nostr key-package record");
+                tracing::debug!(error = %e, "Unparseable Nostr resolution record");
                 return Ok(None);
             }
         };
 
-        if event.get("kind").and_then(|k| k.as_u64())
-            != Some(nostr_crypto::NOSTR_KEY_PACKAGE_KIND as u64)
-        {
+        // The kind is checked against what *this query asked for*, not against
+        // the set of kinds this transport understands. A relay answering a
+        // discovery REQ with a key-package record — or the reverse — must be
+        // dropped rather than routed to the other handler.
+        let expected_kind = match &subject {
+            QuerySubject::KeyPackage(_) => nostr_crypto::NOSTR_KEY_PACKAGE_KIND,
+            QuerySubject::Discovery(_) => nostr_crypto::NOSTR_DISCOVERY_KIND,
+        };
+        if event.get("kind").and_then(|k| k.as_u64()) != Some(expected_kind as u64) {
             return Ok(None);
         }
 
@@ -834,28 +1123,93 @@ impl NostrTransport {
         let sealed = match base64::engine::general_purpose::STANDARD.decode(content) {
             Ok(bytes) => bytes,
             Err(e) => {
-                tracing::debug!(error = %e, "Nostr key-package record content is not base64");
+                tracing::debug!(error = %e, "Nostr resolution record content is not base64");
                 return Ok(None);
             }
         };
 
-        // The peer's derivable key is computable from their user id — that is
-        // the whole reason a record sealed to it stays fetchable by anyone
-        // entitled to fetch it, while remaining opaque to a relay scraping by
-        // kind alone.
-        let peer_key = nostr_crypto::record_seal_keypair_for_address(&user_id)?;
-        match nostr_crypto::open_key_package_publication(&peer_key, author, &sealed) {
-            Ok(plaintext) => Ok(Some((author.to_string(), plaintext))),
-            Err(e) => {
-                tracing::debug!(error = %e, "Nostr key-package record did not open");
-                Ok(None)
+        match subject {
+            QuerySubject::KeyPackage(address) => {
+                // The peer's derivable key is computable from their address —
+                // that is the whole reason a record sealed to it stays
+                // fetchable by anyone entitled to fetch it, while remaining
+                // opaque to a relay scraping by kind alone.
+                let peer_key = nostr_crypto::record_seal_keypair_for_address(&address)?;
+                match nostr_crypto::open_key_package_publication(&peer_key, author, &sealed) {
+                    Ok(plaintext) => Ok(Some(ResolvedRecord::KeyPackage {
+                        author: author.to_string(),
+                        plaintext,
+                    })),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Nostr key-package record did not open");
+                        Ok(None)
+                    }
+                }
+            }
+            QuerySubject::Discovery(username) => {
+                // Reconstructed from the queried name, exactly as any resolver
+                // would. See `discovery_seal_keypair_for_username` for why this
+                // key is public by construction and must never be load-bearing.
+                let seal_key = nostr_crypto::discovery_seal_keypair_for_username(&username)?;
+                match nostr_crypto::open_discovery_record(&seal_key, author, &sealed) {
+                    Ok(plaintext) => Ok(Some(ResolvedRecord::Discovery {
+                        username,
+                        author: author.to_string(),
+                        plaintext,
+                    })),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Nostr discovery record did not open");
+                        Ok(None)
+                    }
+                }
             }
         }
     }
 
     /// Releases a query once the platform has seen its end-of-stored-events.
-    pub fn complete_query(&self, query_id: &str) {
-        self.active_queries.lock_or_recover().remove(query_id);
+    ///
+    /// Returns the username when the query was a discovery lookup, so the
+    /// engine knows which accumulated claim set to flush. End-of-stored-events
+    /// is the *only* natural completion signal a Nostr query has, which is why
+    /// the engine also sweeps on a timer: a relay that never sends EOSE would
+    /// otherwise leave a resolution accumulating forever and never answering.
+    pub fn complete_query(&self, query_id: &str) -> Option<Username> {
+        let query = self.active_queries.lock_or_recover().remove(query_id)?;
+        match query.subject {
+            QuerySubject::Discovery(username) => Some(username),
+            QuerySubject::KeyPackage(_) => None,
+        }
+    }
+
+    /// Requests resolution of the devices claiming `username`.
+    ///
+    /// Returns whether a query was newly queued. `false` means discovery is
+    /// disabled, the username was already queued, or the queue is full.
+    ///
+    /// Deliberately *not* rate-limited the way key-package resolution is. That
+    /// limiter exists because a send to an unpublished peer would otherwise
+    /// mint a round-trip per frame, automatically and invisibly. A discovery
+    /// lookup is user-initiated — someone typed a name and pressed search — so
+    /// throttling it would make the second attempt at a mistyped name silently
+    /// do nothing. The queue bound is what keeps it finite.
+    pub fn resolve_username(&self, username: Username) -> bool {
+        if !self.discovery_enabled() {
+            return false;
+        }
+
+        {
+            let mut queue = self.discovery_resolve_queue.lock_or_recover();
+            if queue.iter().any(|queued| *queued == username) {
+                return false;
+            }
+            if queue.len() >= MAX_PENDING_RESOLUTIONS {
+                return false;
+            }
+            queue.push_back(username);
+        }
+
+        self.notify_messages_available();
+        true
     }
 
     /// Records a peer's real per-install Nostr public key, learned from the
@@ -1115,6 +1469,132 @@ impl NostrTransport {
         }
     }
 
+    /// Builds the next queued discovery publication, if any.
+    ///
+    /// Mirrors [`Self::next_publication_event`], including its failure policy:
+    /// a build error drops the record rather than re-queueing it (retrying in
+    /// place would head-of-line block the message queue behind something that
+    /// keeps failing) and reports the tag through
+    /// [`Self::mark_discovery_publications_failed`], which is what makes the
+    /// engine republish it on a later tick. Reporting is not optional — the
+    /// engine marked the claim published when it queued the record, so a silent
+    /// drop strands it until the process restarts.
+    ///
+    /// A retraction additionally emits a NIP-09 deletion. That event is
+    /// best-effort: it is queued behind the tombstone, and a failure to build
+    /// it is logged rather than propagated, because the tombstone is the half
+    /// that actually works through addressable replacement.
+    fn next_discovery_event(&self) -> Result<Option<SignedNostrEvent>> {
+        let pending = {
+            let mut queue = self.discovery_queue.lock_or_recover();
+            match queue.pop_front() {
+                Some(p) => p,
+                None => return Ok(None),
+            }
+        };
+
+        let tag = match nostr_crypto::discovery_tag_for_username(&pending.username) {
+            Ok(tag) => tag,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to derive a Nostr discovery tag; claim left unpublished"
+                );
+                return Err(e);
+            }
+        };
+        let message_id = format!("{}{}", NOSTR_DISCOVERY_ID_PREFIX, tag);
+
+        let result = (|| {
+            let seal = nostr_crypto::discovery_seal_keypair_for_username(&pending.username)?;
+            let event = {
+                let keypair = self.keypair.read_or_recover();
+                nostr_crypto::NostrEvent::create_discovery_publication(
+                    &keypair,
+                    &tag,
+                    seal.public_key_hex(),
+                    &pending.payload,
+                )?
+            };
+            let event_id = event.id.clone();
+            let event_json = event.to_relay_message()?;
+            if event_json.len() > NOSTR_MAX_PAYLOAD_SIZE {
+                return Err(crate::Error::MessageTooLarge(
+                    event_json.len(),
+                    NOSTR_MAX_PAYLOAD_SIZE,
+                ));
+            }
+            Ok((event_id, event_json))
+        })();
+
+        match result {
+            Ok((event_id, event_json)) => {
+                if pending.retraction {
+                    self.queue_discovery_deletion(&tag);
+                }
+                self.pending_confirmation
+                    .lock_or_recover()
+                    .insert(message_id.clone(), Instant::now());
+                Ok(Some(SignedNostrEvent {
+                    message_id,
+                    event_id,
+                    event_json,
+                }))
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to build a Nostr discovery publication; claim left unpublished"
+                );
+                self.mark_discovery_publications_failed(vec![tag]);
+                Err(e)
+            }
+        }
+    }
+
+    /// Queues the best-effort NIP-09 deletion half of a retraction.
+    ///
+    /// Pushed to the *front* of the message queue's peer, the discovery queue,
+    /// so it follows the tombstone immediately. It carries no synthetic id and
+    /// no pending-confirmation entry: nothing republishes a deletion and
+    /// nothing recovers if a relay ignores it, which is what "best effort"
+    /// means here.
+    fn queue_discovery_deletion(&self, tag: &str) {
+        let event = {
+            let keypair = self.keypair.read_or_recover();
+            nostr_crypto::NostrEvent::create_discovery_deletion(&keypair, tag)
+        };
+        match event {
+            Ok(event) => {
+                let event_id = event.id.clone();
+                match event.to_relay_message() {
+                    Ok(json) => self
+                        .pending_deletions
+                        .lock_or_recover()
+                        .push_back((event_id, json)),
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "Failed to serialize a Nostr discovery deletion; the tombstone still stands"
+                    ),
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "Failed to build a Nostr discovery deletion; the tombstone still stands"
+            ),
+        }
+    }
+
+    /// Pops a ready-built deletion event, if any.
+    fn next_deletion_event(&self) -> Option<SignedNostrEvent> {
+        let (event_id, event_json) = self.pending_deletions.lock_or_recover().pop_front()?;
+        Some(SignedNostrEvent {
+            message_id: format!("{}{}", NOSTR_DELETION_ID_PREFIX, event_id),
+            event_id,
+            event_json,
+        })
+    }
+
     /// Pops the next outgoing message, creates a signed Nostr event, and returns
     /// `(message_id, recipient_device_id, relay_event_json)`.
     ///
@@ -1138,6 +1618,24 @@ impl NostrTransport {
 
         if let Some(publication) = self.next_publication_event()? {
             return Ok(Some(publication));
+        }
+
+        // Discovery records drain after key packages and before messages. The
+        // order matters in one direction only: a claim points at an address
+        // whose key packages a resolver fetches next, so publishing the claim
+        // first would advertise a name that momentarily resolves to nothing.
+        if let Some(publication) = self.next_discovery_event()? {
+            return Ok(Some(publication));
+        }
+
+        // Deletions last among the synthetic events, so a retraction's
+        // tombstone is always on the wire before the deletion that accompanies
+        // it. If a relay honours the deletion and drops the tombstone, the
+        // claim is gone either way; the reverse order could delete the old
+        // claim and then have the tombstone fail, leaving nothing to mark the
+        // slot retracted.
+        if let Some(deletion) = self.next_deletion_event() {
+            return Ok(Some(deletion));
         }
 
         let message = {
@@ -1339,20 +1837,36 @@ impl NostrTransport {
 
     /// Fails all pending confirmations and records them as failures.
     fn fail_all_pending(&self) {
-        let (pending, publications) = {
+        let (pending, slots, tags) = {
             let mut map = self.pending_confirmation.lock_or_recover();
-            let publications: Vec<String> = map
-                .keys()
-                .filter_map(|id| publication_slot_id(id))
-                .collect();
+            let mut slots = Vec::new();
+            let mut tags = Vec::new();
+            let mut synthetic = 0usize;
+            for id in map.keys() {
+                match synthetic_publication(id) {
+                    Some(SyntheticPublication::KeyPackage(slot)) => {
+                        slots.push(slot);
+                        synthetic += 1;
+                    }
+                    Some(SyntheticPublication::Discovery(tag)) => {
+                        tags.push(tag);
+                        synthetic += 1;
+                    }
+                    // Nothing republishes a deletion; it is counted only so it
+                    // does not fall through into the delivery failures.
+                    Some(SyntheticPublication::Deletion) => synthetic += 1,
+                    None => {}
+                }
+            }
             // Only the messages count as failures — the publications among
             // them are reported to the engine instead. See
-            // [`publication_slot_id`].
-            let count = map.len().saturating_sub(publications.len());
+            // [`SyntheticPublication`].
+            let count = map.len().saturating_sub(synthetic);
             map.clear();
-            (count, publications)
+            (count, slots, tags)
         };
-        self.mark_publications_failed(publications);
+        self.mark_publications_failed(slots);
+        self.mark_discovery_publications_failed(tags);
         if pending > 0 {
             let mut metrics = self.metrics.lock_or_recover();
             metrics.failure_count = metrics.failure_count.saturating_add(pending as u32);
@@ -1365,7 +1879,8 @@ impl NostrTransport {
         let timeout = Duration::from_secs(NOSTR_PENDING_CONFIRMATION_TIMEOUT_SECS);
         let now = Instant::now();
         let mut expired_count = 0u32;
-        let mut expired_publications = Vec::new();
+        let mut expired_slots = Vec::new();
+        let mut expired_tags = Vec::new();
 
         {
             let mut pending = self.pending_confirmation.lock_or_recover();
@@ -1373,9 +1888,16 @@ impl NostrTransport {
                 if now.duration_since(*enqueued_at) > timeout {
                     // A timed-out publication is reported to the engine, not
                     // counted as a delivery failure. See
-                    // [`publication_slot_id`].
-                    match publication_slot_id(message_id) {
-                        Some(slot_id) => expired_publications.push(slot_id),
+                    // [`SyntheticPublication`].
+                    match synthetic_publication(message_id) {
+                        Some(SyntheticPublication::KeyPackage(slot_id)) => {
+                            expired_slots.push(slot_id)
+                        }
+                        Some(SyntheticPublication::Discovery(tag)) => expired_tags.push(tag),
+                        // Best effort: a deletion the relay never acknowledged
+                        // is simply gone. The tombstone is what carries the
+                        // retraction.
+                        Some(SyntheticPublication::Deletion) => {}
                         None => expired_count += 1,
                     }
                     false
@@ -1385,7 +1907,8 @@ impl NostrTransport {
             });
         }
 
-        self.mark_publications_failed(expired_publications);
+        self.mark_publications_failed(expired_slots);
+        self.mark_discovery_publications_failed(expired_tags);
 
         if expired_count > 0 {
             let mut metrics = self.metrics.lock_or_recover();
@@ -1626,9 +2149,10 @@ impl Transport for NostrTransport {
             .remove(message_id);
 
         // A publication is not a message and never moves the delivery metrics
-        // — see [`publication_slot_id`] for why counting it would misreport
-        // this transport's reliability to DORS.
-        if removed.is_some() && publication_slot_id(message_id).is_none() {
+        // — see [`SyntheticPublication`] for why counting it would misreport
+        // this transport's reliability to DORS. The rule is the same for every
+        // record kind, so this tests only that the id *is* synthetic.
+        if removed.is_some() && synthetic_publication(message_id).is_none() {
             let mut metrics = self.metrics.lock_or_recover();
             metrics.success_count = metrics.success_count.saturating_add(1);
             recalculate_delivery_ratios(&mut metrics);
@@ -1644,7 +2168,7 @@ impl Transport for NostrTransport {
 
         // Same rule as `confirm_sent`: a publication's outcome is reported to
         // the engine below, never to the delivery metrics DORS scores on.
-        if removed.is_some() && publication_slot_id(message_id).is_none() {
+        if removed.is_some() && synthetic_publication(message_id).is_none() {
             let mut metrics = self.metrics.lock_or_recover();
             metrics.failure_count = metrics.failure_count.saturating_add(1);
             recalculate_delivery_ratios(&mut metrics);
@@ -1652,10 +2176,17 @@ impl Transport for NostrTransport {
 
         // Unconditional, unlike the metrics above: a report that races the
         // confirmation timeout finds no pending entry, and missing a real
-        // failure strands the slot until restart while a redundant republish
+        // failure strands the record until restart while a redundant republish
         // costs one idempotent relay write.
-        if let Some(slot_id) = publication_slot_id(message_id) {
-            self.mark_publications_failed(vec![slot_id]);
+        match synthetic_publication(message_id) {
+            Some(SyntheticPublication::KeyPackage(slot_id)) => {
+                self.mark_publications_failed(vec![slot_id])
+            }
+            Some(SyntheticPublication::Discovery(tag)) => {
+                self.mark_discovery_publications_failed(vec![tag])
+            }
+            Some(SyntheticPublication::Deletion) => {}
+            None => {}
         }
     }
 }
@@ -1737,6 +2268,11 @@ mod tests {
     /// come from a key, for fixtures that also have to satisfy MLS.
     fn addr(label: &str) -> String {
         addr_typed(label).to_string()
+    }
+
+    /// A parsed [`Username`], for the derivations that take one.
+    fn user(label: &str) -> Username {
+        label.parse().expect("test username should parse")
     }
 
     /// `addr` as the parsed type, for the derivations that take an [`Address`].
@@ -3137,7 +3673,14 @@ mod tests {
             .open_query_event(&query.query_id, &event_json)
             .unwrap()
             .expect("bob's record opens with bob's derivable key");
-        assert_eq!(opened.1, b"bob's key package");
+        match opened {
+            ResolvedRecord::KeyPackage { plaintext, .. } => {
+                assert_eq!(plaintext, b"bob's key package");
+            }
+            ResolvedRecord::Discovery { .. } => {
+                panic!("a key-package query must not yield a discovery record")
+            }
+        }
 
         // The same record delivered under a query for someone else does not
         // open: the query id is what says whose key to try.
@@ -3242,6 +3785,227 @@ mod tests {
             crate::constants::NOSTR_KEY_PACKAGE_SLOTS,
             "keeping publications out of the metrics must not lose the reports"
         );
+    }
+
+    /// The same rule, for the second record type.
+    ///
+    /// This is the test that exists because the rule was *nearly* half-wired
+    /// once: adding a record kind means adding a discriminator, and a
+    /// discriminator consulted at three of four sites produces exactly the DORS
+    /// poisoning the key-package version above prevents — silently, since
+    /// nothing observes a transport's score directly.
+    ///
+    /// It covers all three paths that move the counters: `confirm_sent`,
+    /// `report_send_failure`, and the confirmation timeout via
+    /// `fail_all_pending`.
+    #[test]
+    fn test_discovery_publication_outcomes_stay_out_of_the_delivery_metrics() {
+        let transport = NostrTransport::new(addr("alice")).unwrap();
+        transport.set_discovery_enabled(true);
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        // One real message, delivered.
+        transport.send(&create_test_message()).unwrap();
+        let msg = transport.get_next_signed_event().unwrap().unwrap();
+        transport.confirm_sent(&msg.message_id);
+
+        // A claim the relay rejects.
+        transport.publish_discovery_record(user("alice"), b"{}".to_vec());
+        let published = transport.get_next_signed_event().unwrap().unwrap();
+        assert!(published.message_id.starts_with(NOSTR_DISCOVERY_ID_PREFIX));
+        transport.report_send_failure(&published.message_id);
+
+        // A claim the relay accepts.
+        transport.publish_discovery_record(user("bob"), b"{}".to_vec());
+        let accepted = transport.get_next_signed_event().unwrap().unwrap();
+        transport.confirm_sent(&accepted.message_id);
+
+        let metrics = transport.metrics();
+        assert_eq!(
+            metrics.success_count, 1,
+            "an accepted discovery publication was counted as a delivered message"
+        );
+        assert_eq!(
+            metrics.failure_count, 0,
+            "a rejected discovery publication was counted as a delivery failure"
+        );
+        assert_eq!(
+            metrics.delivery_ratio,
+            Some(1.0),
+            "the only message sent was delivered; the ratio DORS reads must say so"
+        );
+
+        // ...and the failed claim is still reported back for republication.
+        assert_eq!(
+            transport.take_failed_discovery_publications(),
+            vec![nostr_crypto::discovery_tag_for_username(&user("alice")).unwrap()],
+            "keeping publications out of the metrics must not lose the reports"
+        );
+    }
+
+    /// A retraction's NIP-09 deletion rides the send queue like anything else,
+    /// so it must be kept out of the metrics too — and, unlike the tombstone,
+    /// it must *not* be reported for republication, because nothing retries a
+    /// deletion.
+    #[test]
+    fn test_discovery_deletion_is_metrics_neutral_and_never_republished() {
+        let transport = NostrTransport::new(addr("alice")).unwrap();
+        transport.set_discovery_enabled(true);
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        transport.retract_discovery_record(user("alice"), b"{\"v\":1}".to_vec());
+
+        let tombstone = transport.get_next_signed_event().unwrap().unwrap();
+        assert!(tombstone.message_id.starts_with(NOSTR_DISCOVERY_ID_PREFIX));
+        transport.confirm_sent(&tombstone.message_id);
+
+        let deletion = transport.get_next_signed_event().unwrap().unwrap();
+        assert!(
+            deletion.message_id.starts_with(NOSTR_DELETION_ID_PREFIX),
+            "the deletion must follow the tombstone, not precede it"
+        );
+        transport.report_send_failure(&deletion.message_id);
+
+        let metrics = transport.metrics();
+        assert_eq!(metrics.success_count, 0);
+        assert_eq!(metrics.failure_count, 0);
+        assert!(
+            transport.take_failed_discovery_publications().is_empty(),
+            "a failed deletion must not queue a republication: the tombstone \
+             already carried the retraction"
+        );
+    }
+
+    /// A retraction must go out even when discovery has just been switched off,
+    /// which is the single most likely reason to retract. A gate here would
+    /// strand exactly the claim the user asked to withdraw.
+    #[test]
+    fn test_retraction_is_not_gated_on_discovery_being_enabled() {
+        let transport = NostrTransport::new(addr("alice")).unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        // Never enabled: a publication is refused...
+        transport.publish_discovery_record(user("alice"), b"{}".to_vec());
+        assert!(
+            transport.get_next_signed_event().unwrap().is_none(),
+            "a claim must not publish while discovery is disabled"
+        );
+
+        // ...but a retraction still goes out.
+        transport.retract_discovery_record(user("alice"), b"{\"v\":1}".to_vec());
+        let tombstone = transport
+            .get_next_signed_event()
+            .unwrap()
+            .expect("a retraction must publish even with discovery disabled");
+        assert!(tombstone.message_id.starts_with(NOSTR_DISCOVERY_ID_PREFIX));
+    }
+
+    /// Discovery requires cold contact as well as its own switch: a claim
+    /// pointing at an address with no published key packages resolves and then
+    /// dead-ends one hop later.
+    #[test]
+    fn test_discovery_requires_cold_contact() {
+        let transport = NostrTransport::new(addr("alice")).unwrap();
+        transport.set_discovery_enabled(true);
+        assert!(transport.discovery_enabled());
+
+        transport.set_cold_contact_enabled(false);
+        assert!(
+            !transport.discovery_enabled(),
+            "discovery must be off when cold contact is off, since the claim \
+             would point at an address with no key packages to fetch"
+        );
+    }
+
+    /// Republishing a claim before it drains collapses to the newer payload:
+    /// the older one is by definition superseded, and publishing both would
+    /// briefly stand the stale one back up.
+    #[test]
+    fn test_requeued_discovery_claim_collapses_to_the_newest() {
+        let transport = NostrTransport::new(addr("alice")).unwrap();
+        transport.set_discovery_enabled(true);
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        transport.publish_discovery_record(user("alice"), b"first".to_vec());
+        transport.publish_discovery_record(user("alice"), b"second".to_vec());
+
+        assert!(transport.get_next_signed_event().unwrap().is_some());
+        assert!(
+            transport.get_next_signed_event().unwrap().is_none(),
+            "a re-queued claim must replace the pending one, not queue twice"
+        );
+    }
+
+    /// A discovery query must not accept a key-package record, and vice versa.
+    /// The kind is checked against what *this query asked for*, so a relay
+    /// answering the wrong REQ cannot route a record into the other handler.
+    #[test]
+    fn test_query_refuses_a_record_of_the_wrong_kind() {
+        let alice = NostrTransport::new(addr("alice")).unwrap();
+        alice.set_discovery_enabled(true);
+
+        let bob = NostrTransport::new(addr("bob")).unwrap();
+        bob.install_signing_secret(&[9u8; 32]).unwrap();
+        bob.start().unwrap();
+        bob.on_status_changed(TransportStatus::Available);
+
+        // A genuine key-package record.
+        bob.publish_key_package("slot-a", b"bob's key package".to_vec());
+        let published = bob.get_next_signed_event().unwrap().unwrap();
+        let event_json = serde_json::to_string(&event_object(&published)).unwrap();
+
+        // Delivered under a *discovery* query.
+        alice.resolve_username(user("bob"));
+        let query = alice.next_query().unwrap().unwrap();
+        assert!(
+            alice
+                .open_query_event(&query.query_id, &event_json)
+                .unwrap()
+                .is_none(),
+            "a key-package record must not open under a discovery query"
+        );
+    }
+
+    /// The query carries the username out so the engine can open an
+    /// accumulator at mint time — which is what lets a name nobody claims still
+    /// emit an empty answer rather than never completing.
+    #[test]
+    fn test_discovery_query_reports_its_username() {
+        let transport = NostrTransport::new(addr("alice")).unwrap();
+        transport.set_discovery_enabled(true);
+
+        assert!(transport.resolve_username(user("bob")));
+        let query = transport.next_query().unwrap().unwrap();
+        assert_eq!(query.discovery_username, Some(user("bob")));
+
+        // Completing it hands the username back, so the engine knows which
+        // accumulated set to flush.
+        assert_eq!(transport.complete_query(&query.query_id), Some(user("bob")));
+    }
+
+    /// A key-package query completing must not look like a discovery query
+    /// completing, or the engine would flush a resolution that never existed.
+    #[test]
+    fn test_key_package_query_completion_reports_no_username() {
+        let transport = NostrTransport::new(addr("alice")).unwrap();
+        transport.request_peer_key_packages(&addr("bob"));
+        let query = transport.next_query().unwrap().unwrap();
+        assert_eq!(query.discovery_username, None);
+        assert_eq!(transport.complete_query(&query.query_id), None);
+    }
+
+    /// Resolution is refused outright while discovery is disabled: no query is
+    /// minted, so nothing is published to a relay about what this install is
+    /// looking up.
+    #[test]
+    fn test_resolution_is_refused_while_discovery_is_disabled() {
+        let transport = NostrTransport::new(addr("alice")).unwrap();
+        assert!(!transport.resolve_username(user("bob")));
+        assert!(transport.next_query().unwrap().is_none());
     }
 
     /// The same rule in the other direction: a successful publication must not

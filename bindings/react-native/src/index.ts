@@ -58,6 +58,7 @@ import type {
   TransportMetrics,
   RelayConfig,
   RelayPriority,
+  InviteInfo,
 } from './types';
 import { ContentType, MessagePriority } from './types';
 import {
@@ -133,6 +134,7 @@ interface NativeConfig {
   nostrEnabled: boolean;
   nostrSealingEnabled: boolean;
   nostrColdContactEnabled: boolean;
+  nostrUsernameDiscoveryEnabled: boolean;
   preferOnline: boolean;
   initialTtl: number;
   binaryWireEnabled: boolean;
@@ -423,6 +425,10 @@ export class OfflineProtocol {
       // Same nested-is-the-documented-home shape as sealingEnabled above.
       nostrColdContactEnabled:
         this.config.transports?.nostr?.coldContactEnabled ?? true,
+      // Off by default, unlike the two above: publishing a username claim is
+      // materially more disclosure than publishing a key-package record.
+      nostrUsernameDiscoveryEnabled:
+        this.config.transports?.nostr?.usernameDiscoveryEnabled ?? false,
       preferOnline: dorsSource?.preferOnline ?? false,
       initialTtl: this.config.network?.initialTtl ?? 8,
       binaryWireEnabled: this.config.binaryWireEnabled ?? true,
@@ -2610,6 +2616,85 @@ export class OfflineProtocol {
    */
   async deriveAddress(publicKey: number[]): Promise<string> {
     return await OfflineProtocolNativeModule.deriveAddress(publicKey);
+  }
+
+  /**
+   * Decodes and verifies an invite blob.
+   *
+   * Needs no protocol instance — safe to call before `create()`, which is the
+   * whole point: a scanner verifies a QR code before deciding to act on it.
+   *
+   * Verification is mandatory and total. The address must be the one its
+   * public key derives to, and any signature present must verify under that
+   * key, so a resolved `InviteInfo` is always self-certified.
+   *
+   * **What it does not prove:** that the invite came from who you think. An
+   * attacker's own correctly-signed invite is indistinguishable from a
+   * legitimate stranger's — only the out-of-band context (this QR was on
+   * *this* person's screen) carries that.
+   *
+   * @param blob - The base64url payload, e.g. the `c` query parameter
+   * @returns The verified invite
+   * @throws If the blob is malformed, the address is not the key's, or a
+   *   signature does not verify. Every case means refuse, not warn.
+   */
+  async parseInvite(blob: string): Promise<InviteInfo> {
+    return await OfflineProtocolNativeModule.parseInvite(blob);
+  }
+
+  /**
+   * Builds an invite blob for this identity.
+   *
+   * The result is opaque base64url. Apps own the container; the recommended
+   * form is one parameter, `<app-scheme>://connect?c=<blob>`, so it composes
+   * with an existing scheme and route.
+   *
+   * Sign it when the invite may travel **without its issuer** — a link
+   * forwarded through a third party — because the signature binds the petname
+   * to the key, so a forwarded invite cannot save Alice's key under the name
+   * "Bob". Leave it unsigned for a QR shown phone to phone: the physical
+   * channel already authenticates it, and an app that lets the user confirm
+   * the name has made the user the authority over it. Signing costs about 90
+   * characters.
+   *
+   * Carries no key package by design (an MLS init key is single-use and a QR
+   * code is static, so pairing them guarantees a collision as soon as two
+   * people scan the same code) and no expiry (a printed QR that stops working
+   * is a bug).
+   *
+   * @param petname - Suggested display name, ≤ 64 bytes
+   * @param signed - Whether to bind the petname to the key
+   */
+  async createInvite(petname?: string, signed = false): Promise<string> {
+    return await OfflineProtocolNativeModule.createInvite(
+      petname ?? null,
+      signed
+    );
+  }
+
+  /**
+   * Resolves a username to the set of devices claiming it.
+   *
+   * Requires `transports.nostr.usernameDiscoveryEnabled`. Returns whether a
+   * lookup started; `false` means discovery is off or a lookup for this name
+   * is already in flight (which answers for both callers).
+   *
+   * The answer arrives as one `username_resolved` event carrying **every**
+   * verified claim. There is deliberately no "best" claim and no ordering:
+   * anyone may publish any name, so what comes back is a set of assertions for
+   * a human to arbitrate, not a lookup result.
+   *
+   * **Do not auto-select.** Taking the first entry turns a non-authoritative
+   * directory into an authoritative-looking one — the user then believes the
+   * *name* was verified when only a key ever was. Present the claims, have the
+   * user confirm out of band, and store the address, never the name: a name
+   * can be re-claimed by anyone tomorrow, an address is self-certifying.
+   *
+   * @param username - The name to look up; normalized to NFC and lowercase
+   * @returns Whether a lookup was started
+   */
+  async resolveUsername(username: string): Promise<boolean> {
+    return await OfflineProtocolNativeModule.resolveUsername(username);
   }
 
   /**

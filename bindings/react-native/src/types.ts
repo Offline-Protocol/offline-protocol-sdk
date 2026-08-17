@@ -245,6 +245,32 @@ export interface NostrTransportConfig {
    * Turn it off to keep the transport silent until it has traffic.
    */
   coldContactEnabled?: boolean;
+
+  /**
+   * Publish a username discovery record for this install's profile, and allow
+   * `resolveUsername()` to look names up.
+   *
+   * **Off by default**, unlike `coldContactEnabled`, and it additionally
+   * requires cold contact to be on: a claim points at an address whose key
+   * packages a resolver fetches next, so without them the name resolves and
+   * then dead-ends one hop later.
+   *
+   * Buys back reach-by-username: a stranger who knows only a name can find the
+   * addresses claiming it. The name published is the app's configured
+   * `profile`, normalized to NFC and lowercase.
+   *
+   * **Default-off is deliberate, and the reason is disclosure.** Publishing
+   * binds a human-readable name to an address in a public place — here the
+   * mapping *is* the payload, which is materially more than the key-package
+   * record's "an install with this tag exists". The record is sealed, so a
+   * relay scraping by kind reads nothing, but anyone who guesses the name can
+   * compute the tag and read the claim.
+   *
+   * **The directory is not authoritative.** Anyone may claim any name, so a
+   * resolution returns the whole set of claimants and a human must confirm out
+   * of band. See {@link UsernameResolvedEvent}.
+   */
+  usernameDiscoveryEnabled?: boolean;
 }
 
 /**
@@ -1496,6 +1522,103 @@ export interface GroupRelaySyncChangedEvent extends BaseEvent {
 }
 
 /**
+ * A decoded and verified invite.
+ *
+ * Every field has passed verification: the address is the one its public key
+ * derives to, and when `signed` is true the petname is bound to that key by
+ * the key's owner.
+ */
+export interface InviteInfo {
+  /** The address this invite reaches, canonical `off1…`. */
+  address: string;
+  /** The Ed25519 identity key the address derives from. */
+  public_key: number[];
+  /**
+   * Suggested display name, if the invite carried one.
+   *
+   * Suggested, never authoritative: a petname is a *locally assigned* name and
+   * an app is right to let the user edit it before saving.
+   */
+  petname: string | null;
+  /**
+   * Whether a valid signature accompanied the invite.
+   *
+   * `false` does **not** mean untrustworthy — an unsigned invite is the
+   * ordinary shape for a QR shown phone to phone, where the physical channel
+   * is the authentication. It means only that the petname is unbound to the
+   * key, so a forwarded copy could carry a different name.
+   */
+  signed: boolean;
+}
+
+/**
+ * One device's verified claim to a username.
+ *
+ * Every field here has already passed verification: the address derives from
+ * the public key, the record's signature verifies under that key, and the
+ * record was published under the Nostr key it names. What that proves is
+ * narrow: **this key asserts this name**. It does not prove the name belongs
+ * to the claimant, because nothing can.
+ */
+export interface UsernameClaim {
+  /**
+   * The claimed address, canonical `off1…`.
+   *
+   * This is the value to keep. An app that stores the *name* has stored
+   * something anyone can re-claim tomorrow; the address is self-certifying.
+   */
+  address: string;
+  /** The Ed25519 identity key the address derives from, base64. */
+  public_key: string;
+  /**
+   * When the claimant signed the record, in milliseconds since the epoch.
+   *
+   * **Advisory.** A record is not a liveness signal. An old claim from a peer
+   * who has been offline for a month is still valid, and filtering on age
+   * would make them unreachable by name while their key packages sit live on
+   * a relay. Sort by it if it helps a user choose; do not filter on it.
+   */
+  issued_at_ms: number;
+}
+
+/**
+ * A username resolution finished, carrying **every** claim found.
+ *
+ * ## The set is the whole point
+ *
+ * Anyone may publish any username claim, so a name resolves to a set of
+ * assertions, never to an answer. Even a single-device user is a set of one.
+ * This event fires exactly once per resolution and carries the complete set
+ * precisely so an app cannot accidentally treat the first arrival as the
+ * winner: there is no per-claim event to race and no ordering to mistake for
+ * a ranking.
+ *
+ * **Let the user choose.** Silently picking one claim converts a
+ * non-authoritative directory into an authoritative-looking one, which is
+ * worse than not shipping the feature: the user believes they are talking to
+ * the name, and the protocol only ever promised them a key. Present the
+ * claims, have a human confirm out of band (a QR code, a shared secret, a
+ * voice call), and store the address rather than the name.
+ *
+ * An empty `claims` list is an ordinary outcome, not an error.
+ */
+export interface UsernameResolvedEvent extends BaseEvent {
+  type: 'username_resolved';
+  /** The normalized username that was resolved. */
+  username: string;
+  /** Every claim that verified, in no meaningful order. */
+  claims: UsernameClaim[];
+  /**
+   * How many records were seen but rejected.
+   *
+   * Non-zero is normal, not an error: the tag is public, anyone may publish
+   * to it, and junk arrives. Surfaced so "not found, having seen nothing" can
+   * be told apart from "not found, everything was junk".
+   */
+  rejected: number;
+}
+
+/**
  * Group message sent event — a group message was sent to all members via mesh
  * (MLS-encrypted fan-out).
  */
@@ -2217,6 +2340,7 @@ export type ProtocolEvent =
   | UserGroupsEvent
   | GroupErrorEvent
   | GroupRelaySyncChangedEvent
+  | UsernameResolvedEvent
   | GroupMessageSentEvent
   | GroupMessagePartialFailureEvent
   | GroupMessageDeliveryReportEvent

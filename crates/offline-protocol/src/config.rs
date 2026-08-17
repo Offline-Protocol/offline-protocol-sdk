@@ -360,6 +360,39 @@ pub struct TransportConfig {
     /// until it has traffic, at the price of cold contact.
     pub nostr_cold_contact_enabled: bool,
 
+    /// Whether this install publishes a username discovery record and can
+    /// resolve usernames to the devices claiming them.
+    ///
+    /// Defaults to **`false`**, unlike `nostr_cold_contact_enabled`, and gates
+    /// publication and resolution together. It also *requires* cold contact:
+    /// a discovery record points at an address whose key packages are what a
+    /// resolver fetches next, so with cold contact off the claim resolves and
+    /// then dead-ends one hop later. The two are hard-coupled in the transport
+    /// rather than merely documented.
+    ///
+    /// Buys back **reach by username**, which the addressing migration removed:
+    /// a stranger who knows only a name can find the addresses claiming it and
+    /// open a session. The name is published as the app's configured `profile`,
+    /// normalized to NFC and lowercase.
+    ///
+    /// **Default-off is the deliberate choice, and the reason is disclosure.**
+    /// Publishing binds a human-readable name to an address in a public place.
+    /// That is materially more than the key-package record's "an install with
+    /// this tag exists": the mapping *is* the payload. The record is sealed to
+    /// a key derived from the username, so a relay scraping by kind alone reads
+    /// nothing, but anyone who guesses the name can compute the tag, confirm a
+    /// claim exists, and read it. That is the same class of exposure a public
+    /// user directory has, and it is a decision an app should make explicitly.
+    ///
+    /// **What the directory is not: authoritative.** Anyone may publish any
+    /// claim at any name. Every record is a claim that *some key* asserts a
+    /// name, and a resolution returns the whole set of claimants with their
+    /// verification status. An app that silently picks the first result has
+    /// converted a non-authoritative directory into an authoritative-looking
+    /// one; the user must confirm out of band. See
+    /// `docs/spec/username-discovery.md`.
+    pub nostr_username_discovery_enabled: bool,
+
     /// Whether to negotiate and emit the compact binary wire codec.
     ///
     /// Defaults to `true`. It only takes effect between two peers that both
@@ -379,6 +412,7 @@ impl Default for TransportConfig {
             nostr_enabled: false,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
+            nostr_username_discovery_enabled: false,
             binary_wire_enabled: true,
         }
     }
@@ -919,6 +953,14 @@ impl ProtocolConfigBuilder {
     /// Enables or disables sealing of outgoing Nostr frames (default on).
     pub fn nostr_sealing_enabled(mut self, enabled: bool) -> Self {
         self.config.transport.nostr_sealing_enabled = enabled;
+        self
+    }
+
+    /// Enables username discovery publication and resolution
+    /// (default **off**; see
+    /// [`TransportConfig::nostr_username_discovery_enabled`]).
+    pub fn nostr_username_discovery_enabled(mut self, enabled: bool) -> Self {
+        self.config.transport.nostr_username_discovery_enabled = enabled;
         self
     }
 

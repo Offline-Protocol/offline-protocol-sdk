@@ -32607,10 +32607,14 @@ fn nostr_resolution_arms_the_reverse_exchange_that_heals_a_replayed_record() {
 
     bob_nostr.request_peer_key_packages(&id("alice"));
     let query = bob_nostr.next_query().unwrap().unwrap();
-    let (_author, plaintext) = bob_nostr
+    use offline_protocol_transport::nostr::ResolvedRecord;
+    let ResolvedRecord::KeyPackage { plaintext, .. } = bob_nostr
         .open_query_event(&query.query_id, &event_json)
         .unwrap()
-        .expect("the record opens with alice's derivable key");
+        .expect("the record opens with alice's derivable key")
+    else {
+        panic!("a key-package query must not yield a discovery record")
+    };
 
     assert!(
         !bob.key_package_sent_to.contains(&id("alice")),
@@ -32706,10 +32710,14 @@ fn nostr_resolution_registers_the_publishers_key_end_to_end() {
 
     bob_nostr.request_peer_key_packages(&id("alice"));
     let query = bob_nostr.next_query().unwrap().unwrap();
-    let (_author, plaintext) = bob_nostr
+    use offline_protocol_transport::nostr::ResolvedRecord;
+    let ResolvedRecord::KeyPackage { plaintext, .. } = bob_nostr
         .open_query_event(&query.query_id, &event_json)
         .unwrap()
-        .expect("alice's published record opens with her derivable key");
+        .expect("alice's published record opens with her derivable key")
+    else {
+        panic!("a key-package query must not yield a discovery record")
+    };
 
     bob.handle_resolved_key_package(&plaintext).unwrap();
 
@@ -34518,4 +34526,368 @@ fn test_relay_prose_never_reaches_the_persisted_welcome_record() {
         })
         .expect("the unreachable verdict must surface as a welcome send failure");
     assert_eq!(transport_error.as_deref(), Some("recipient_unreachable"));
+}
+
+// ============================================================================
+// Username discovery: resolution accumulates a SET
+// ============================================================================
+
+/// Builds a signed discovery record for `username` from a deterministic
+/// identity, published under `author`.
+///
+/// Deliberately does not go through the engine: these tests are about what the
+/// *resolver* does with records other devices published, so the records have to
+/// come from somewhere the engine has no hand in.
+fn discovery_record_for(
+    seed: u8,
+    username: &str,
+    author: &[u8],
+    issued_at_ms: i64,
+) -> offline_protocol_mls::discovery::DiscoveryRecordV1 {
+    use ed25519_dalek::{Signer, SigningKey};
+    use offline_protocol_mls::discovery::DiscoveryRecordV1;
+
+    let signing = SigningKey::from_bytes(&[seed; 32]);
+    let public = signing.verifying_key().to_bytes().to_vec();
+    let address = offline_protocol_mls::MlsManager::derive_address(&public).unwrap();
+
+    DiscoveryRecordV1::unsigned(
+        username.parse().unwrap(),
+        address,
+        public,
+        author.to_vec(),
+        issued_at_ms,
+    )
+    .sign_with(|payload| Ok(signing.sign(payload).to_bytes().to_vec()))
+    .unwrap()
+}
+
+fn capture_events(protocol: &mut OfflineProtocol) -> Arc<Mutex<Vec<Event>>> {
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        handle.lock().unwrap().push(event);
+    });
+    events
+}
+
+fn resolved_claims(
+    events: &Arc<Mutex<Vec<Event>>>,
+) -> Option<(String, Vec<crate::events::UsernameClaim>, u32)> {
+    events.lock().unwrap().iter().find_map(|event| match event {
+        Event::UsernameResolved {
+            username,
+            claims,
+            rejected,
+        } => Some((username.clone(), claims.clone(), *rejected)),
+        _ => None,
+    })
+}
+
+/// **The case a naive implementation collapses.**
+///
+/// Two devices of the *same* user claim one name, and a third party claims it
+/// too. All three must come back. An implementation keyed on the address, or
+/// one that keeps "the" record for a username, silently returns one — and the
+/// user never learns their own second device exists, let alone the squatter.
+#[test]
+fn test_username_resolution_returns_every_claimant_including_two_devices_of_one_user() {
+    let mut protocol = protocol_with_nostr("resolver");
+    let events = capture_events(&mut protocol);
+
+    let username: offline_protocol_core::Username = "alice".parse().unwrap();
+    let query_id = "query-1".to_string();
+    protocol.begin_username_resolution(query_id.clone(), username.clone());
+
+    // Alice's phone and Alice's laptop: different identity keys, different
+    // Nostr author keys, same claimed name. Plus a squatter.
+    let alice_phone_author = [0x11u8; 32];
+    let alice_laptop_author = [0x22u8; 32];
+    let squatter_author = [0x33u8; 32];
+
+    for (seed, author) in [
+        (1u8, alice_phone_author),
+        (2u8, alice_laptop_author),
+        (3u8, squatter_author),
+    ] {
+        let record = discovery_record_for(seed, "alice", &author, 1_700_000_000_000);
+        let body = serde_json::to_vec(&record).unwrap();
+        protocol.handle_resolved_discovery_record(
+            &query_id,
+            &username,
+            &hex::encode(author),
+            &body,
+        );
+    }
+
+    protocol.flush_username_resolution(&query_id);
+
+    let (name, claims, rejected) =
+        resolved_claims(&events).expect("a resolution must emit exactly one event");
+    assert_eq!(name, "alice");
+    assert_eq!(rejected, 0);
+    assert_eq!(
+        claims.len(),
+        3,
+        "all three claimants must be returned; collapsing them hides both the \
+         user's own second device and the squatter"
+    );
+
+    // Three distinct addresses, so nothing was merged.
+    let addresses: std::collections::HashSet<&str> =
+        claims.iter().map(|c| c.address.as_str()).collect();
+    assert_eq!(addresses.len(), 3);
+}
+
+/// Exactly one event per resolution. A per-claim stream would make "take the
+/// first" the easiest thing an app could write, which is the failure mode the
+/// whole set-shaped API exists to prevent.
+#[test]
+fn test_username_resolution_emits_exactly_one_event() {
+    let mut protocol = protocol_with_nostr("resolver");
+    let events = capture_events(&mut protocol);
+
+    let username: offline_protocol_core::Username = "alice".parse().unwrap();
+    let query_id = "query-1".to_string();
+    protocol.begin_username_resolution(query_id.clone(), username.clone());
+
+    for (seed, author) in [(1u8, [0x11u8; 32]), (2u8, [0x22u8; 32])] {
+        let record = discovery_record_for(seed, "alice", &author, 1_700_000_000_000);
+        let body = serde_json::to_vec(&record).unwrap();
+        protocol.handle_resolved_discovery_record(
+            &query_id,
+            &username,
+            &hex::encode(author),
+            &body,
+        );
+    }
+
+    assert!(
+        events.lock().unwrap().is_empty(),
+        "no event may be emitted before the resolution completes: a per-claim \
+         event would make picking the first arrival the path of least resistance"
+    );
+
+    protocol.flush_username_resolution(&query_id);
+    let count = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, Event::UsernameResolved { .. }))
+        .count();
+    assert_eq!(count, 1);
+}
+
+/// A name nobody claims still answers. "No such name" is an answer, and an app
+/// waiting on one must not hang.
+#[test]
+fn test_username_resolution_emits_an_empty_set_for_an_unclaimed_name() {
+    let mut protocol = protocol_with_nostr("resolver");
+    let events = capture_events(&mut protocol);
+
+    let username: offline_protocol_core::Username = "nobody".parse().unwrap();
+    protocol.begin_username_resolution("query-1".to_string(), username);
+    protocol.flush_username_resolution("query-1");
+
+    let (name, claims, rejected) = resolved_claims(&events).expect("an empty answer is an answer");
+    assert_eq!(name, "nobody");
+    assert!(claims.is_empty());
+    assert_eq!(rejected, 0);
+}
+
+/// Flushing twice must not emit twice. The timeout sweep and a late
+/// end-of-stored-events can both fire for one query, and a second, smaller set
+/// would contradict the first.
+#[test]
+fn test_username_resolution_flush_is_idempotent() {
+    let mut protocol = protocol_with_nostr("resolver");
+    let events = capture_events(&mut protocol);
+
+    let username: offline_protocol_core::Username = "alice".parse().unwrap();
+    protocol.begin_username_resolution("query-1".to_string(), username);
+    protocol.flush_username_resolution("query-1");
+    protocol.flush_username_resolution("query-1");
+
+    let count = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, Event::UsernameResolved { .. }))
+        .count();
+    assert_eq!(count, 1);
+}
+
+/// A re-authored record — a squatter republishing someone else's genuinely
+/// signed claim under their own Nostr key — must be counted as rejected, not
+/// returned. This is the `nostr_author` binding doing its job at the engine
+/// level, where the author actually comes off the wire.
+#[test]
+fn test_username_resolution_refuses_a_re_authored_record() {
+    let mut protocol = protocol_with_nostr("resolver");
+    let events = capture_events(&mut protocol);
+
+    let username: offline_protocol_core::Username = "alice".parse().unwrap();
+    let query_id = "query-1".to_string();
+    protocol.begin_username_resolution(query_id.clone(), username.clone());
+
+    let genuine_author = [0x11u8; 32];
+    let record = discovery_record_for(1, "alice", &genuine_author, 1_700_000_000_000);
+    let body = serde_json::to_vec(&record).unwrap();
+
+    // Untouched record, delivered under the squatter's author key.
+    let squatter_author = [0x99u8; 32];
+    protocol.handle_resolved_discovery_record(
+        &query_id,
+        &username,
+        &hex::encode(squatter_author),
+        &body,
+    );
+
+    protocol.flush_username_resolution(&query_id);
+
+    let (_, claims, rejected) = resolved_claims(&events).expect("event");
+    assert!(
+        claims.is_empty(),
+        "a record republished under a foreign Nostr key must not be returned: \
+         accepting it would let a squatter keep a retracted claim alive"
+    );
+    assert_eq!(rejected, 1);
+}
+
+/// A record claiming a different name than the one queried is refused. This is
+/// what catches a genuine record for `bob` copied onto `alice`'s tag.
+#[test]
+fn test_username_resolution_refuses_a_record_for_another_name() {
+    let mut protocol = protocol_with_nostr("resolver");
+    let events = capture_events(&mut protocol);
+
+    let queried: offline_protocol_core::Username = "alice".parse().unwrap();
+    let query_id = "query-1".to_string();
+    protocol.begin_username_resolution(query_id.clone(), queried.clone());
+
+    let author = [0x11u8; 32];
+    let record = discovery_record_for(1, "bob", &author, 1_700_000_000_000);
+    let body = serde_json::to_vec(&record).unwrap();
+    protocol.handle_resolved_discovery_record(&query_id, &queried, &hex::encode(author), &body);
+
+    protocol.flush_username_resolution(&query_id);
+
+    let (_, claims, rejected) = resolved_claims(&events).expect("event");
+    assert!(claims.is_empty());
+    assert_eq!(rejected, 1);
+}
+
+/// One device republishing is one claim, and the newer statement wins.
+#[test]
+fn test_username_resolution_keeps_the_newest_record_per_device() {
+    let mut protocol = protocol_with_nostr("resolver");
+    let events = capture_events(&mut protocol);
+
+    let username: offline_protocol_core::Username = "alice".parse().unwrap();
+    let query_id = "query-1".to_string();
+    protocol.begin_username_resolution(query_id.clone(), username.clone());
+
+    let author = [0x11u8; 32];
+    for issued_at in [1_700_000_000_000i64, 1_700_000_500_000, 1_700_000_200_000] {
+        let record = discovery_record_for(1, "alice", &author, issued_at);
+        let body = serde_json::to_vec(&record).unwrap();
+        protocol.handle_resolved_discovery_record(
+            &query_id,
+            &username,
+            &hex::encode(author),
+            &body,
+        );
+    }
+
+    protocol.flush_username_resolution(&query_id);
+
+    let (_, claims, _) = resolved_claims(&events).expect("event");
+    assert_eq!(claims.len(), 1, "one device is one claim");
+    assert_eq!(
+        claims[0].issued_at_ms, 1_700_000_500_000,
+        "the newest record must win, whatever order the relays answered in"
+    );
+}
+
+/// A tombstone withdraws that device's claim, even when a stale copy of the
+/// live record arrives from another relay afterwards.
+#[test]
+fn test_username_resolution_honours_a_tombstone() {
+    use offline_protocol_mls::discovery::DiscoveryTombstoneV1;
+
+    let mut protocol = protocol_with_nostr("resolver");
+    let events = capture_events(&mut protocol);
+
+    let username: offline_protocol_core::Username = "alice".parse().unwrap();
+    let query_id = "query-1".to_string();
+    protocol.begin_username_resolution(query_id.clone(), username.clone());
+
+    let author = [0x11u8; 32];
+    let record = discovery_record_for(1, "alice", &author, 1_700_000_000_000);
+    protocol.handle_resolved_discovery_record(
+        &query_id,
+        &username,
+        &hex::encode(author),
+        &serde_json::to_vec(&record).unwrap(),
+    );
+
+    let tombstone = serde_json::to_vec(&DiscoveryTombstoneV1::new()).unwrap();
+    protocol.handle_resolved_discovery_record(
+        &query_id,
+        &username,
+        &hex::encode(author),
+        &tombstone,
+    );
+
+    protocol.flush_username_resolution(&query_id);
+
+    let (_, claims, _) = resolved_claims(&events).expect("event");
+    assert!(
+        claims.is_empty(),
+        "a retraction must withdraw the claim: the tombstone is the newer statement"
+    );
+}
+
+/// Claims are keyed by the publishing Nostr key, not by the address.
+///
+/// The two agree in the ordinary case — one install holds one identity key and
+/// one Nostr key — so this pins the case where they diverge: the *same*
+/// identity key publishing from two Nostr keys. That is anomalous (it means an
+/// identity key was copied between installs, which no shipped API allows) and
+/// it is exactly why it must not be silently merged: collapsing the two would
+/// hide the anomaly from the only layer positioned to show it.
+#[test]
+fn test_username_resolution_keys_claims_by_publisher_not_by_address() {
+    let mut protocol = protocol_with_nostr("resolver");
+    let events = capture_events(&mut protocol);
+
+    let username: offline_protocol_core::Username = "alice".parse().unwrap();
+    let query_id = "query-1".to_string();
+    protocol.begin_username_resolution(query_id.clone(), username.clone());
+
+    // One identity (seed 1), two different Nostr publishers.
+    for author in [[0x11u8; 32], [0x22u8; 32]] {
+        let record = discovery_record_for(1, "alice", &author, 1_700_000_000_000);
+        let body = serde_json::to_vec(&record).unwrap();
+        protocol.handle_resolved_discovery_record(
+            &query_id,
+            &username,
+            &hex::encode(author),
+            &body,
+        );
+    }
+
+    protocol.flush_username_resolution(&query_id);
+
+    let (_, claims, _) = resolved_claims(&events).expect("event");
+    assert_eq!(
+        claims.len(),
+        2,
+        "two publishers of one identity must stay distinct: merging them would \
+         hide that an identity key is in two places"
+    );
+    assert_eq!(
+        claims[0].address, claims[1].address,
+        "precondition: both claims name the same address"
+    );
 }

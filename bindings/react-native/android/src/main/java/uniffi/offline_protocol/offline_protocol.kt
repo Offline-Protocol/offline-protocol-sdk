@@ -884,6 +884,8 @@ internal object IntegrityCheckingUniffiLib {
     }
     external fun uniffi_offline_protocol_uniffi_checksum_func_derive_address(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_func_parse_invite(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service(
@@ -929,6 +931,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_canc
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cleanup_expired_routes(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key(
 ): Short
@@ -1131,6 +1135,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remo
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume(
 ): Short
@@ -1352,6 +1358,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cleanup_ex
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group(`ptr`: Long,`groupName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_invite(`ptr`: Long,`petname`: RustBuffer.ByValue,`signed`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_derive_user_id_from_public_key(`ptr`: Long,`publicKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1554,6 +1562,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rename_gro
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resolve_username(`ptr`: Long,`username`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_confirm_sent(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1663,6 +1673,8 @@ external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_telemetrysin
 external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttransportcallback(`vtable`: UniffiVTableCallbackInterfaceWifiDirectTransportCallback,
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_func_derive_address(`publicKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_func_parse_invite(`blob`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun ffi_offline_protocol_uniffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1786,6 +1798,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_func_derive_address() != 55050.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_func_parse_invite() != 15865.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != 866.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1853,6 +1868,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 8723.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite() != 9631.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 23152.toShort()) {
@@ -2156,6 +2174,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration() != 5596.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username() != 5393.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596.toShort()) {
@@ -3268,6 +3289,8 @@ public interface OfflineProtocolInterface {
     
     fun `createGroup`(`groupName`: kotlin.String): MlsGroupInfo
     
+    fun `createInvite`(`petname`: kotlin.String?, `signed`: kotlin.Boolean): kotlin.String
+    
     fun `deriveUserIdFromPublicKey`(`publicKey`: List<kotlin.UByte>): kotlin.String
     
     fun `emitTestEvent`()
@@ -3469,6 +3492,8 @@ public interface OfflineProtocolInterface {
     fun `renameGroup`(`groupId`: kotlin.String, `newName`: kotlin.String)
     
     fun `requestGroupRelayRegistration`(`groupId`: kotlin.String): kotlin.Boolean
+    
+    fun `resolveUsername`(`username`: kotlin.String): kotlin.Boolean
     
     fun `resume`()
     
@@ -3898,6 +3923,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group(
         it,
         FfiConverterString.lower(`groupName`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `createInvite`(`petname`: kotlin.String?, `signed`: kotlin.Boolean): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_invite(
+        it,
+        FfiConverterOptionalString.lower(`petname`),FfiConverterBoolean.lower(`signed`),_status)
 }
     }
     )
@@ -5228,6 +5267,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
+    @Throws(ProtocolException::class)override fun `resolveUsername`(`username`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resolve_username(
+        it,
+        FfiConverterString.lower(`username`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(ProtocolException::class)override fun `resume`()
         = 
     callWithHandle {
@@ -6516,6 +6569,52 @@ public object FfiConverterTypeInternetMessage: FfiConverterRustBuffer<InternetMe
 
 
 
+data class InviteInfo (
+    var `address`: kotlin.String
+    , 
+    var `publicKey`: List<kotlin.UByte>
+    , 
+    var `petname`: kotlin.String?
+    , 
+    var `signed`: kotlin.Boolean
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeInviteInfo: FfiConverterRustBuffer<InviteInfo> {
+    override fun read(buf: ByteBuffer): InviteInfo {
+        return InviteInfo(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceUByte.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: InviteInfo) = (
+            FfiConverterString.allocationSize(value.`address`) +
+            FfiConverterSequenceUByte.allocationSize(value.`publicKey`) +
+            FfiConverterOptionalString.allocationSize(value.`petname`) +
+            FfiConverterBoolean.allocationSize(value.`signed`)
+    )
+
+    override fun write(value: InviteInfo, buf: ByteBuffer) {
+            FfiConverterString.write(value.`address`, buf)
+            FfiConverterSequenceUByte.write(value.`publicKey`, buf)
+            FfiConverterOptionalString.write(value.`petname`, buf)
+            FfiConverterBoolean.write(value.`signed`, buf)
+    }
+}
+
+
+
 data class MediaMetadata (
     var `mimeType`: kotlin.String
     , 
@@ -7449,6 +7548,8 @@ data class ProtocolConfig (
     , 
     var `nostrColdContactEnabled`: kotlin.Boolean = true 
     , 
+    var `nostrUsernameDiscoveryEnabled`: kotlin.Boolean = false 
+    , 
     var `compactEnvelopeEnabled`: kotlin.Boolean = true 
     , 
     var `richPayloadEnabled`: kotlin.Boolean = true 
@@ -7496,6 +7597,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -7525,6 +7627,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.allocationSize(value.`binaryWireEnabled`) +
             FfiConverterBoolean.allocationSize(value.`nostrSealingEnabled`) +
             FfiConverterBoolean.allocationSize(value.`nostrColdContactEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`nostrUsernameDiscoveryEnabled`) +
             FfiConverterBoolean.allocationSize(value.`compactEnvelopeEnabled`) +
             FfiConverterBoolean.allocationSize(value.`richPayloadEnabled`) +
             FfiConverterBoolean.allocationSize(value.`cryptoRecoveryEnabled`)
@@ -7556,6 +7659,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.write(value.`binaryWireEnabled`, buf)
             FfiConverterBoolean.write(value.`nostrSealingEnabled`, buf)
             FfiConverterBoolean.write(value.`nostrColdContactEnabled`, buf)
+            FfiConverterBoolean.write(value.`nostrUsernameDiscoveryEnabled`, buf)
             FfiConverterBoolean.write(value.`compactEnvelopeEnabled`, buf)
             FfiConverterBoolean.write(value.`richPayloadEnabled`, buf)
             FfiConverterBoolean.write(value.`cryptoRecoveryEnabled`, buf)
@@ -8241,6 +8345,8 @@ data class TransportConfig (
     var `nostrSealingEnabled`: kotlin.Boolean = true 
     , 
     var `nostrColdContactEnabled`: kotlin.Boolean = true 
+    , 
+    var `nostrUsernameDiscoveryEnabled`: kotlin.Boolean = false 
     
 ){
     
@@ -8262,6 +8368,7 @@ public object FfiConverterTypeTransportConfig: FfiConverterRustBuffer<TransportC
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -8272,7 +8379,8 @@ public object FfiConverterTypeTransportConfig: FfiConverterRustBuffer<TransportC
             FfiConverterBoolean.allocationSize(value.`reticulumEnabled`) +
             FfiConverterBoolean.allocationSize(value.`nostrEnabled`) +
             FfiConverterBoolean.allocationSize(value.`nostrSealingEnabled`) +
-            FfiConverterBoolean.allocationSize(value.`nostrColdContactEnabled`)
+            FfiConverterBoolean.allocationSize(value.`nostrColdContactEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`nostrUsernameDiscoveryEnabled`)
     )
 
     override fun write(value: TransportConfig, buf: ByteBuffer) {
@@ -8283,6 +8391,7 @@ public object FfiConverterTypeTransportConfig: FfiConverterRustBuffer<TransportC
             FfiConverterBoolean.write(value.`nostrEnabled`, buf)
             FfiConverterBoolean.write(value.`nostrSealingEnabled`, buf)
             FfiConverterBoolean.write(value.`nostrColdContactEnabled`, buf)
+            FfiConverterBoolean.write(value.`nostrUsernameDiscoveryEnabled`, buf)
     }
 }
 
@@ -11181,6 +11290,17 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     UniffiLib.uniffi_offline_protocol_uniffi_fn_func_derive_address(
     
         FfiConverterSequenceUByte.lower(`publicKey`),_status)
+}
+    )
+    }
+    
+
+    @Throws(ProtocolException::class) fun `parseInvite`(`blob`: kotlin.String): InviteInfo {
+            return FfiConverterTypeInviteInfo.lift(
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_func_parse_invite(
+    
+        FfiConverterString.lower(`blob`),_status)
 }
     )
     }

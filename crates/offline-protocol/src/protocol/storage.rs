@@ -62,6 +62,10 @@ pub(crate) enum StateCategory {
     /// [`Self::NostrWatermark`], and absent from
     /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] for the same reason.
     NostrKeyPackageSlots,
+    /// This install's published username discovery claim. Post-split only, like
+    /// [`Self::NostrKeyPackageSlots`], and absent from
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] for the same reason.
+    NostrDiscoveryClaim,
     /// The value-less marker recording that the pre-split adoption sweep
     /// completed. Post-split only, so it is deliberately absent from
     /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] — but it *is* written to
@@ -88,6 +92,7 @@ impl StateCategory {
             storage_keys::LAMPORT_CLOCK => Self::LamportClock,
             storage_keys::NOSTR_WATERMARK => Self::NostrWatermark,
             storage_keys::NOSTR_KEY_PACKAGE_SLOTS => Self::NostrKeyPackageSlots,
+            storage_keys::NOSTR_DISCOVERY_CLAIM => Self::NostrDiscoveryClaim,
             storage_keys::STATE_ADOPTION => Self::StateAdoption,
             _ => return None,
         })
@@ -136,6 +141,16 @@ impl StateCategory {
     ///   stranger who fetches it builds a Welcome that can never be processed.
     ///   An AEAD makes that edit unopenable, and unopenable lands on the
     ///   self-healing path.
+    /// - [`storage_keys::NOSTR_DISCOVERY_CLAIM`]: the third integrity case, and
+    ///   again not for confidentiality — the value is a username this install
+    ///   already published in a public directory. What sealing buys is that the
+    ///   damaging edit is unreachable. This record is the *only* thing that
+    ///   knows which name to retract, so an attacker who rewrites it to a name
+    ///   this install never claimed makes the real claim unretractable: the
+    ///   retraction is published at the wrong tag, and the live one stands
+    ///   pointing at this address forever. Deleting the record instead is the
+    ///   benign direction and is not prevented (nothing sealing does can),
+    ///   which is why the claim is also republished on every launch.
     ///
     /// Everything else is advertised capability versions, a small state enum, a
     /// logical clock, a coarse wall-clock mark, or a value-less marker whose
@@ -161,7 +176,8 @@ impl StateCategory {
             | Self::Outbox
             | Self::MediaDescriptors
             | Self::PeerKeyPackages
-            | Self::NostrKeyPackageSlots => true,
+            | Self::NostrKeyPackageSlots
+            | Self::NostrDiscoveryClaim => true,
             Self::PeerCapabilities
             | Self::SessionStates
             | Self::WelcomeLifecycles

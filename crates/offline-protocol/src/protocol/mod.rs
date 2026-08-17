@@ -5,6 +5,7 @@ mod config_accessors;
 mod decryption_queue;
 pub(crate) mod mesh_relay;
 mod message_dispatch;
+mod nostr_discovery;
 mod nostr_publication;
 mod observability;
 mod pending_queue;
@@ -39,7 +40,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use mesh_relay::{MeshRelayGovernor, RelayActivity};
-use offline_protocol_core::{LamportClock, Message, MessageId, MutexExt};
+use offline_protocol_core::{LamportClock, Message, MessageId, MutexExt, Username};
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
 use offline_protocol_router::{
@@ -573,6 +574,40 @@ pub struct OfflineProtocol {
     /// repeats for a cause that by nature persists.
     last_nostr_slot_warning: Option<Instant>,
 
+    /// The username this install has published a discovery claim for, as last
+    /// persisted. `None` means no claim stands.
+    ///
+    /// Persisted, because it is the only thing that knows *which* name to
+    /// retract when the profile changes or the feature is turned off. See
+    /// `storage_keys::NOSTR_DISCOVERY_CLAIM`.
+    nostr_discovery_claim: Option<Username>,
+
+    /// Whether the standing claim has been published during *this* process.
+    ///
+    /// Not persisted, for the same reason `nostr_published_slots` is not: an
+    /// addressable record lives on the relays and a launch cannot know which
+    /// of them still hold it. Republishing once per process replaces rather
+    /// than accumulates.
+    nostr_discovery_published: bool,
+
+    /// Republish backoff for the discovery claim, keyed by its tag.
+    ///
+    /// Memory-only and structurally identical to
+    /// `nostr_publication_backoff`: a relay that rejects kind 30777 outright
+    /// would otherwise be retried once per refresh forever.
+    nostr_discovery_backoff: HashMap<String, nostr_publication::PublicationBackoff>,
+
+    /// When the discovery claim was last re-examined, throttling the tick.
+    last_nostr_discovery_refresh: Option<Instant>,
+
+    /// In-flight username resolutions, keyed by query id.
+    ///
+    /// A resolution accumulates every verified claim for its username and
+    /// emits **one** event carrying the whole set. See
+    /// `nostr_discovery::PendingResolution` for why the set is the only thing
+    /// that is ever emitted.
+    nostr_resolutions: HashMap<String, nostr_discovery::PendingResolution>,
+
     /// When the push key-package pool-exhaustion warning was last emitted.
     ///
     /// Suppressed for the same reason the slot warning is: the condition is a
@@ -754,6 +789,11 @@ impl OfflineProtocol {
             last_nostr_slot_refresh: None,
             nostr_publication_backoff: HashMap::new(),
             last_nostr_slot_warning: None,
+            nostr_discovery_claim: None,
+            nostr_discovery_published: false,
+            nostr_discovery_backoff: HashMap::new(),
+            last_nostr_discovery_refresh: None,
+            nostr_resolutions: HashMap::new(),
             last_push_key_package_warning: None,
             config,
         })
@@ -927,6 +967,7 @@ impl OfflineProtocol {
         // a stale-but-installed mark does is narrow one replay window.
         self.restore_nostr_watermark();
         self.restore_nostr_publication_slots();
+        self.restore_nostr_discovery_claim();
 
         // The launch's whole durable-delete allowance, in one place because the
         // bound is on the launch. A device-barrier storm kills *this call*, not
@@ -1057,6 +1098,7 @@ impl OfflineProtocol {
         self.restore_or_init_nostr_signing_secret();
         self.restore_nostr_watermark();
         self.restore_nostr_publication_slots();
+        self.restore_nostr_discovery_claim();
         // Same three pools as `initialize_mls_inner`, for the same reason.
         let mut advisory_prunes = PruneAllowance::pool();
         let mut pending_prunes = PruneAllowance::pool();
@@ -1337,6 +1379,9 @@ impl OfflineProtocol {
             .set_nostr_sealing_enabled(self.config.transport.nostr_sealing_enabled);
         self.transport_manager
             .set_nostr_cold_contact_enabled(self.config.transport.nostr_cold_contact_enabled);
+        self.transport_manager.set_nostr_username_discovery_enabled(
+            self.config.transport.nostr_username_discovery_enabled,
+        );
 
         // Wire DORS event callback so app receives dors_score_updated, dors_transport_selected,
         let shared = self.shared_state.clone();
@@ -2459,6 +2504,11 @@ impl OfflineProtocol {
         let _ = self.prune_expired_pending_global_front(Instant::now(), 256);
         self.pump_media_transfers();
         self.refresh_nostr_key_package_slots();
+        self.refresh_nostr_discovery_claim();
+        // A relay is free never to send end-of-stored-events, and that is the
+        // only natural completion signal a resolution has. Without this sweep
+        // a quiet relay turns a lookup into a hang rather than an empty answer.
+        self.sweep_username_resolutions();
         self.cleanup_expired_entries();
         self.evaluate_relay_role();
         self.tick_telemetry_categories();

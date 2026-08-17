@@ -224,6 +224,21 @@ pub const NOSTR_MAX_TRACKED_PEER_KEYS: usize = 1000;
 /// until the next tick refills rather than silently reusing a spent package.
 pub const NOSTR_KEY_PACKAGE_SLOTS: usize = 5;
 
+/// Maximum discovery records one relay may return for a username query.
+///
+/// A username resolves to the set of devices claiming it, so this bounds how
+/// many claimants a single relay can put in front of a user. Sized well above
+/// any real user's device count and well below
+/// `nostr::MAX_QUERY_EVENTS`, which bounds the whole query across every
+/// connected relay.
+///
+/// The cost of this being too low is not a dropped record but a *displaced*
+/// one: the tag is public, anyone may publish to it, and a squatter who floods
+/// it pushes legitimate claimants out of the answer. That is crowding, which
+/// the design accepts as the price of a non-authoritative directory — the user
+/// still confirms out of band, and the invite path is unaffected.
+pub const NOSTR_DISCOVERY_QUERY_LIMIT: usize = 16;
+
 // Transport-wide Constants
 /// Default maximum message size in bytes (1 MB).
 /// Applied at the transport layer before JSON deserialization to prevent

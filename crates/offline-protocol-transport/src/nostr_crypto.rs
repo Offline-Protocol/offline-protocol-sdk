@@ -54,7 +54,7 @@ use crate::nip44::{self, ConversationKey};
 use crate::{Error, Result};
 use hkdf::Hkdf;
 use k256::schnorr::SigningKey;
-use offline_protocol_core::Address;
+use offline_protocol_core::{Address, Username};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -72,6 +72,21 @@ const SIGNING_KEY_HKDF_INFO: &[u8] = b"offline-protocol/nostr/v1/signing-key/";
 /// between them is the kind of thing that is fine until someone reuses one
 /// where they meant the other.
 const RECORD_SEAL_HKDF_INFO: &[u8] = b"offline-protocol/nostr/v1/record-seal-key/";
+
+/// Domain-separation prefix for the publicly computable discovery-seal key.
+///
+/// Structurally identical to [`RECORD_SEAL_HKDF_INFO`], different info string,
+/// and keyed on a *username* rather than an address — which is the property
+/// that makes it a weaker key and the reason the invariant below is stated
+/// rather than assumed. See [`discovery_seal_keypair_for_username`].
+const DISCOVERY_SEAL_HKDF_INFO: &[u8] = b"offline-protocol/nostr/v1/discovery-seal-key/";
+
+/// Domain separator for the discovery tag's hash preimage.
+///
+/// The trailing colon is part of the constant: without a separator,
+/// `"offline-disc-v1" ‖ username` and a username that happened to begin with
+/// the tail of the domain would share a preimage.
+const DISCOVERY_TAG_DOMAIN: &[u8] = b"offline-disc-v1:";
 
 /// Upper bound on HKDF derivation attempts. Each attempt fails with
 /// probability ~2^-128 (scalar of zero or above the curve order), so more
@@ -300,6 +315,106 @@ pub fn routing_tag_for_address(address: &Address) -> Result<String> {
     Ok(hex::encode(tag_key.verifying_key().to_bytes()))
 }
 
+/// Computes the public discovery tag for a username.
+///
+/// Derivation: `SHA-256("offline-disc-v1:" ‖ username)` → scalar → x-only
+/// secp256k1 public key hex. The scalar→pubkey step mirrors
+/// [`routing_tag_for_address`] so the published value is shaped like any other
+/// `#p` pubkey and one relay-side code path serves both.
+///
+/// # Why the preimage is domain-separated
+///
+/// The naive framing overstates the direct damage, so be precise about what
+/// this buys. If the preimage were the bare username, a user who registered
+/// the literal string `off1qys…` would derive *that address's* key-package tag.
+/// The immediate harm is small — the two record kinds are separately queryable
+/// so results do not cross-contaminate, and the seal keys already differ by
+/// their HKDF info string.
+///
+/// What the separator actually buys is that the two namespaces stop sharing a
+/// preimage space at all, so no *future* third derivation can be aimed across
+/// them, and "refuse address-shaped usernames"
+/// ([`UsernameError::AddressShaped`](offline_protocol_core::UsernameError))
+/// becomes belt-and-braces rather than the only thing standing between the two.
+/// One constant, one class of bug removed.
+///
+/// # Why the parameter is a [`Username`] and not a string
+///
+/// The tag is a hash of the *normalized* name. Two callers that normalize
+/// differently derive different tags and silently fail to find each other —
+/// there is no error to observe, only an empty result for a name that exists.
+/// Taking the parsed type moves normalization to the boundary and makes
+/// "derive a tag for whatever the app typed" fail to compile, the same move
+/// [`routing_tag_for_address`] makes for addresses.
+pub fn discovery_tag_for_username(username: &Username) -> Result<String> {
+    let mut preimage = Vec::with_capacity(DISCOVERY_TAG_DOMAIN.len() + username.as_str().len());
+    preimage.extend_from_slice(DISCOVERY_TAG_DOMAIN);
+    preimage.extend_from_slice(username.as_str().as_bytes());
+
+    let tag_scalar = Sha256::digest(&preimage);
+    let tag_key = SigningKey::from_bytes(tag_scalar.as_slice())
+        .map_err(|e| Error::CryptoError(format!("Invalid discovery tag for username: {}", e)))?;
+    Ok(hex::encode(tag_key.verifying_key().to_bytes()))
+}
+
+/// Reconstructs the keypair that seals a username's discovery records.
+///
+/// Derivation: `HKDF-SHA256(ikm = normalized username, salt = none,
+/// info = "offline-protocol/nostr/v1/discovery-seal-key/" ‖ counter)`.
+///
+/// # This key is public by construction, and that is deliberate
+///
+/// **It reintroduces the exact class the address migration deleted**: a
+/// keypair derived from a *guessable* string. That is not an oversight and it
+/// must not be quietly "fixed" by a later change that does not know why it is
+/// here, so the reasoning is recorded at the definition site.
+///
+/// The invariant that makes it acceptable is the same one in both directions:
+/// **this key must never be load-bearing.** It is an opaque discovery label. It
+/// must never back encryption of anything secret, never back NIP-42 AUTH, and
+/// never inform any authentication decision. Every authenticity property of a
+/// discovery record comes from the Ed25519 signature inside it and from
+/// `derive_address(pubkey) == address` — nothing rests on who could open the
+/// seal.
+///
+/// What sealing buys, given that anyone who knows the username can unseal, is
+/// resistance to *bulk collection*. Publishing the records in the clear would
+/// let a single `{"kinds":[30777]}` request return a directory of every
+/// username on the relay paired with its address — strictly worse than the leak
+/// the record-seal key was introduced to close, since there the pairing had to
+/// be inferred and here the mapping *is* the payload. Sealing costs nothing in
+/// reach: fetching requires the tag, the tag requires the username, and the
+/// username is what reconstructs this key.
+///
+/// Deliberately not numerically the discovery tag, for the same reason
+/// [`record_seal_keypair_for_address`] is not the routing tag; pinned by
+/// `test_discovery_seal_key_is_not_the_discovery_tag`.
+pub fn discovery_seal_keypair_for_username(username: &Username) -> Result<NostrKeypair> {
+    let hkdf = Hkdf::<Sha256>::new(None, username.as_str().as_bytes());
+    let mut info = Vec::with_capacity(DISCOVERY_SEAL_HKDF_INFO.len() + 1);
+    for counter in 0..MAX_DERIVE_ATTEMPTS {
+        info.clear();
+        info.extend_from_slice(DISCOVERY_SEAL_HKDF_INFO);
+        info.push(counter);
+
+        let mut candidate = Zeroizing::new([0u8; 32]);
+        hkdf.expand(&info, &mut *candidate)
+            .map_err(|e| Error::CryptoError(format!("HKDF expand failed: {}", e)))?;
+
+        if let Ok(signing_key) = SigningKey::from_bytes(&*candidate) {
+            let public_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
+            return Ok(NostrKeypair {
+                signing_key,
+                public_key_hex,
+            });
+        }
+    }
+
+    Err(Error::CryptoError(
+        "Failed to derive a discovery-seal key for the username".to_string(),
+    ))
+}
+
 /// Event kind for a NIP-59 gift wrap. Taken in isolation one of our events is
 /// an ordinary wrapped DM — kind, unlinkable per-event pubkey, opaque `#p`
 /// tag, coarse timestamp, ciphertext — which is why we reuse the wrapper
@@ -357,6 +472,33 @@ pub const NOSTR_LEGACY_DM_KIND: u32 = 4;
 /// a routing tag is distinguishable from a generic NIP-17 recipient's, listed
 /// on [`NOSTR_GIFT_WRAP_KIND`].
 pub const NOSTR_KEY_PACKAGE_KIND: u32 = 30443;
+
+/// Event kind for a published username discovery record: addressable, so a
+/// republished claim *replaces* the previous one.
+///
+/// # Why a kind of our own, when the key-package record shares Marmot's
+///
+/// The key-package record shares 30443 to join an anonymity set: several
+/// protocols publish MLS key packages to Nostr, so a scrape by kind alone
+/// cannot enumerate this SDK's userbase. There is no equivalent set to join for
+/// a username directory — no other protocol publishes one — so a distinct kind
+/// buys clean filtering and costs nothing that was available to take.
+///
+/// 30777 is **unregistered**. Nothing in the NIPs kind registry is assigned
+/// anywhere in the 30700–30800 range (re-checked 2026-08-17), and nothing
+/// prevents use of an unassigned kind. If this format is ever published as a
+/// specification, whether to seek a registry entry or accept the collision risk
+/// of an unregistered kind is an open question recorded in
+/// `docs/spec/username-discovery.md`.
+pub const NOSTR_DISCOVERY_KIND: u32 = 30777;
+
+/// NIP-09 deletion-request kind, used for the best-effort half of a retraction.
+///
+/// Best-effort by nature: a relay may honour it, ignore it, or honour it only
+/// for events it still holds. The durable half of a retraction is republishing
+/// the addressable slot with a tombstone body, which uses the replacement rule
+/// rather than the relay's goodwill.
+pub const NOSTR_DELETION_KIND: u32 = 5;
 
 /// Picks a `created_at` uniformly in `[now - NOSTR_CREATED_AT_JITTER_SECS, now]`.
 ///
@@ -534,6 +676,64 @@ impl NostrEvent {
             &sealed,
             now_unix_secs(),
         )
+    }
+
+    /// Builds a sealed, addressable username discovery record.
+    ///
+    /// `discovery_tag` addresses the record and is **also its `d` tag**, which
+    /// is the one structural difference from
+    /// [`Self::create_key_package_publication`] and is deliberate. Key packages
+    /// need random slot ids because an init key is single-use and two fetchers
+    /// must not collide, so their records accumulate. A directory entry is the
+    /// opposite: it is a *statement* that should be replaced rather than
+    /// accumulated, and a deterministic `d` is exactly what makes NIP-01
+    /// addressable replacement do that work. Setting `d` to the tag duplicates
+    /// a value that is already public, so it leaks nothing new, and it leaves a
+    /// device a natural way to claim more than one username — one record per
+    /// `d`.
+    ///
+    /// `created_at` is the true current time and is deliberately **not**
+    /// jittered, for the same reason the key-package record is not: relays keep
+    /// the newest event per `(kind, pubkey, d)`, so a backdated republication
+    /// is silently dropped and would strand a stale claim standing as live.
+    pub fn create_discovery_publication(
+        keypair: &NostrKeypair,
+        discovery_tag: &str,
+        seal_pubkey: &str,
+        plaintext: &[u8],
+    ) -> Result<Self> {
+        let seal_bytes = hex::decode(seal_pubkey)
+            .map_err(|e| Error::CryptoError(format!("Invalid discovery-seal pubkey: {}", e)))?;
+        let conversation_key = ConversationKey::derive(&keypair.signing_key, &seal_bytes)?;
+        let sealed = nip44::encrypt(plaintext, &conversation_key)?;
+
+        let tags = vec![
+            vec!["d".to_string(), discovery_tag.to_string()],
+            vec!["p".to_string(), discovery_tag.to_string()],
+        ];
+        Self::sign_with_tags(
+            keypair,
+            NOSTR_DISCOVERY_KIND,
+            tags,
+            &sealed,
+            now_unix_secs(),
+        )
+    }
+
+    /// Builds a NIP-09 deletion request for an addressable discovery record.
+    ///
+    /// Names the record by its `a` coordinate (`kind:pubkey:d`) rather than by
+    /// event id, so it covers whichever event currently occupies the slot
+    /// without the caller having to have kept the id.
+    pub fn create_discovery_deletion(keypair: &NostrKeypair, discovery_tag: &str) -> Result<Self> {
+        let coordinate = format!(
+            "{}:{}:{}",
+            NOSTR_DISCOVERY_KIND,
+            keypair.public_key_hex(),
+            discovery_tag
+        );
+        let tags = vec![vec!["a".to_string(), coordinate]];
+        Self::sign_with_tags(keypair, NOSTR_DELETION_KIND, tags, "", now_unix_secs())
     }
 
     /// Builds and signs a NIP-01 event with a single `p` tag.
@@ -738,6 +938,48 @@ pub(crate) fn create_key_package_query_message(
     serde_json::to_string(&msg).map_err(|e| Error::SerializationError(e.to_string()))
 }
 
+/// Opens a sealed discovery record.
+///
+/// Like [`open_key_package_publication`], the event's own BIP-340 signature is
+/// never checked: it would prove only that the publisher holds the key the
+/// event names, which is not the claim anything rests on. The record's
+/// authenticity comes from the Ed25519 signature inside it, and the *binding*
+/// of that record to this publisher comes from comparing the record's
+/// `nostr_author` field against the event's author — a check that belongs to
+/// the verifier, not to the unsealing.
+pub(crate) fn open_discovery_record(
+    discovery_seal_key: &NostrKeypair,
+    author_pubkey_hex: &str,
+    sealed: &[u8],
+) -> Result<Vec<u8>> {
+    unwrap_gift_wrap(discovery_seal_key, author_pubkey_hex, sealed)
+}
+
+/// Builds the REQ that fetches the records claiming a username.
+///
+/// Carries no `since`, for the same reason the key-package query does not: a
+/// claim is republished only when it changes, so a stable claimant's record may
+/// be arbitrarily old while remaining entirely current. A `since` here would
+/// hide exactly the long-settled claims a directory exists to return.
+///
+/// `limit` bounds how many claimants one relay may offer. It is well above the
+/// device count of any real user and far below
+/// [`MAX_QUERY_EVENTS`](crate::nostr::MAX_QUERY_EVENTS): the tag is public, so
+/// anything past a handful of records is another author crowding it, and
+/// crowding costs the *legitimate* claimants their place in the answer.
+pub(crate) fn create_discovery_query_message(
+    discovery_tag: &str,
+    subscription_id: &str,
+) -> Result<String> {
+    let filter = serde_json::json!({
+        "#p": [discovery_tag],
+        "kinds": [NOSTR_DISCOVERY_KIND],
+        "limit": crate::constants::NOSTR_DISCOVERY_QUERY_LIMIT
+    });
+    let msg = serde_json::json!(["REQ", subscription_id, filter]);
+    serde_json::to_string(&msg).map_err(|e| Error::SerializationError(e.to_string()))
+}
+
 /// Whether `data` has the shape of a sealed gift-wrap payload.
 pub(crate) fn is_sealed_payload(data: &[u8]) -> bool {
     nip44::looks_like_payload(data)
@@ -767,6 +1009,346 @@ mod tests {
         let mut hash = [0u8; Address::HASH_LEN];
         hash.copy_from_slice(&digest[..Address::HASH_LEN]);
         Address::from_hash_bytes(hash)
+    }
+
+    fn user(label: &str) -> Username {
+        label.parse().expect("username should parse")
+    }
+
+    /// The discovery tag and the *address* routing tag for the same string must
+    /// differ. This is the whole point of domain-separating the discovery
+    /// preimage (see [`discovery_tag_for_username`]), and it is the case a
+    /// naive implementation collapses by hashing the bare name.
+    ///
+    /// The comparison is made over a string that is simultaneously a valid
+    /// username and, as a label, derivable to an address — so the two
+    /// derivations are being fed the same bytes, which is exactly the
+    /// collision this separation prevents.
+    #[test]
+    fn test_discovery_tag_is_not_the_address_routing_tag() {
+        for label in ["alice", "bob", "carol"] {
+            let username = user(label);
+            let discovery = discovery_tag_for_username(&username).expect("discovery tag");
+
+            // The address whose *canonical string* is what the routing tag
+            // hashes. Different preimage spaces entirely, which is the point.
+            let address = addr(label);
+            let routing = routing_tag_for_address(&address).expect("routing tag");
+
+            assert_ne!(
+                discovery, routing,
+                "the discovery tag must not equal the routing tag for {label}"
+            );
+        }
+    }
+
+    /// A username and an address that render to the same *string* must still
+    /// derive different tags. Address-shaped usernames are refused by the
+    /// `Username` type, so this pins the property one level down: even if that
+    /// screen were removed, the domain separator alone keeps the namespaces
+    /// apart.
+    #[test]
+    fn test_discovery_tag_domain_separates_from_the_bare_hash() {
+        let username = user("alice");
+        let tag = discovery_tag_for_username(&username).expect("tag");
+
+        // What the tag would have been without the domain separator.
+        let bare_scalar = Sha256::digest(b"alice");
+        let bare = hex::encode(
+            SigningKey::from_bytes(bare_scalar.as_slice())
+                .expect("scalar")
+                .verifying_key()
+                .to_bytes(),
+        );
+
+        assert_ne!(
+            tag, bare,
+            "the discovery tag must not be the undomained hash of the username"
+        );
+    }
+
+    /// The same invariant [`test_record_seal_key_is_not_the_routing_tag`] pins
+    /// for addresses. A seal key that *is* the tag leaves every published label
+    /// standing as a key whose private half anyone can compute, which stops
+    /// being harmless the moment something reaches for "the key matching this
+    /// tag".
+    #[test]
+    fn test_discovery_seal_key_is_not_the_discovery_tag() {
+        for label in ["alice", "bob", "a-name-with-dashes"] {
+            let username = user(label);
+            assert_ne!(
+                discovery_seal_keypair_for_username(&username)
+                    .unwrap()
+                    .public_key_hex(),
+                discovery_tag_for_username(&username).unwrap(),
+                "the discovery-seal key must not be the discovery tag for {label}"
+            );
+        }
+    }
+
+    /// The two seal keys must not collide either: a username and an address are
+    /// different namespaces and their seals are derived under different HKDF
+    /// info strings.
+    #[test]
+    fn test_discovery_seal_key_is_not_the_record_seal_key() {
+        for label in ["alice", "bob"] {
+            let username = user(label);
+            let address = addr(label);
+            assert_ne!(
+                discovery_seal_keypair_for_username(&username)
+                    .unwrap()
+                    .public_key_hex(),
+                record_seal_keypair_for_address(&address)
+                    .unwrap()
+                    .public_key_hex(),
+                "the discovery-seal key must not be the record-seal key for {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_discovery_tag_and_seal_key_are_deterministic() {
+        let username = user("alice");
+        assert_eq!(
+            discovery_tag_for_username(&username).unwrap(),
+            discovery_tag_for_username(&username).unwrap()
+        );
+        assert_eq!(
+            discovery_seal_keypair_for_username(&username)
+                .unwrap()
+                .public_key_hex(),
+            discovery_seal_keypair_for_username(&username)
+                .unwrap()
+                .public_key_hex()
+        );
+    }
+
+    #[test]
+    fn test_discovery_tag_is_username_specific() {
+        assert_ne!(
+            discovery_tag_for_username(&user("alice")).unwrap(),
+            discovery_tag_for_username(&user("bob")).unwrap()
+        );
+    }
+
+    /// Golden vectors for the discovery derivations, so a second
+    /// implementation can check its tag and seal derivations without this
+    /// repository.
+    ///
+    /// **Computed independently of this code**, by a Python script that
+    /// implements secp256k1 from the curve equation and HKDF-SHA256 from
+    /// RFC 5869 — not by calling `k256` or the `hkdf` crate. That script was
+    /// itself validated by reproducing all three shipped
+    /// [`test_routing_tag_golden_values`] literals, which were generated
+    /// independently of it, so the arithmetic behind these values is
+    /// cross-checked rather than self-consistent.
+    ///
+    /// Every intermediate is pinned as well as the result: a mismatch then
+    /// says *which* step diverged — the preimage, the HKDF, or the curve —
+    /// instead of only that the final hex differs.
+    #[test]
+    fn test_discovery_derivation_golden_values() {
+        let username = user("alice");
+
+        // The part another implementation is most likely to get wrong: the
+        // separator, and the fact that the name is the *normalized* one.
+        assert_eq!(
+            hex::encode(Sha256::digest(b"offline-disc-v1:alice")),
+            "f0fe1d050a281d611fdd951f13e6e6878407ec87a80cd7fa0b42442f44020466"
+        );
+
+        assert_eq!(
+            discovery_tag_for_username(&username).unwrap(),
+            "179183d1f394327bb8a244dbe9160dd77bf86f7125caa21c2d2eec6e50267703"
+        );
+        assert_eq!(
+            discovery_seal_keypair_for_username(&username)
+                .unwrap()
+                .public_key_hex(),
+            "a008efac2c8ebe103dc2dfc78acd7890cff5cadb238159eaf615aa7ad9d8994e"
+        );
+    }
+
+    /// A discovery publication is addressable at a *deterministic* `d`, which
+    /// is what makes republishing replace the claim rather than accumulate
+    /// claims. Pinned because the key-package record does the opposite, and
+    /// copying its random slot id here would silently break retraction.
+    #[test]
+    fn test_discovery_publication_is_addressable_at_the_tag() {
+        let keypair = NostrKeypair::generate_ephemeral().expect("keypair");
+        let username = user("alice");
+        let tag = discovery_tag_for_username(&username).expect("tag");
+        let seal = discovery_seal_keypair_for_username(&username).expect("seal");
+
+        let event =
+            NostrEvent::create_discovery_publication(&keypair, &tag, seal.public_key_hex(), b"{}")
+                .expect("publication");
+
+        assert_eq!(event.kind, NOSTR_DISCOVERY_KIND);
+        let d_tag = event
+            .tags
+            .iter()
+            .find(|t| t.first().map(String::as_str) == Some("d"))
+            .expect("d tag");
+        assert_eq!(d_tag[1], tag, "the d tag must be the discovery tag");
+        let p_tag = event
+            .tags
+            .iter()
+            .find(|t| t.first().map(String::as_str) == Some("p"))
+            .expect("p tag");
+        assert_eq!(p_tag[1], tag);
+    }
+
+    /// Republishing must land on the same addressable coordinate, or the relay
+    /// keeps both and a retraction never displaces the claim it retracts.
+    #[test]
+    fn test_discovery_republication_replaces_rather_than_accumulates() {
+        let keypair = NostrKeypair::generate_ephemeral().expect("keypair");
+        let tag = discovery_tag_for_username(&user("alice")).expect("tag");
+        let seal = discovery_seal_keypair_for_username(&user("alice")).expect("seal");
+
+        let first =
+            NostrEvent::create_discovery_publication(&keypair, &tag, seal.public_key_hex(), b"{}")
+                .expect("first");
+        let second = NostrEvent::create_discovery_publication(
+            &keypair,
+            &tag,
+            seal.public_key_hex(),
+            b"{\"v\":1}",
+        )
+        .expect("second");
+
+        assert_eq!(first.kind, second.kind);
+        assert_eq!(first.pubkey, second.pubkey);
+        let d_of = |e: &NostrEvent| {
+            e.tags
+                .iter()
+                .find(|t| t.first().map(String::as_str) == Some("d"))
+                .expect("d tag")[1]
+                .clone()
+        };
+        assert_eq!(d_of(&first), d_of(&second));
+    }
+
+    /// `created_at` must be the true present, never jittered into the past:
+    /// relays keep the newest event per `(kind, pubkey, d)`, so a backdated
+    /// republication is dropped and strands the claim it meant to replace.
+    #[test]
+    fn test_discovery_publication_is_not_backdated() {
+        let keypair = NostrKeypair::generate_ephemeral().expect("keypair");
+        let tag = discovery_tag_for_username(&user("alice")).expect("tag");
+        let seal = discovery_seal_keypair_for_username(&user("alice")).expect("seal");
+
+        let before = now_unix_secs();
+        let event =
+            NostrEvent::create_discovery_publication(&keypair, &tag, seal.public_key_hex(), b"{}")
+                .expect("publication");
+        let after = now_unix_secs();
+
+        assert!(
+            event.created_at >= before && event.created_at <= after,
+            "created_at {} must sit in [{}, {}]",
+            event.created_at,
+            before,
+            after
+        );
+    }
+
+    #[test]
+    fn test_discovery_record_round_trips_through_its_seal() {
+        let keypair = NostrKeypair::generate_ephemeral().expect("keypair");
+        let username = user("alice");
+        let tag = discovery_tag_for_username(&username).expect("tag");
+        let seal = discovery_seal_keypair_for_username(&username).expect("seal");
+        let plaintext = b"{\"v\":1,\"username\":\"alice\"}";
+
+        let event = NostrEvent::create_discovery_publication(
+            &keypair,
+            &tag,
+            seal.public_key_hex(),
+            plaintext,
+        )
+        .expect("publication");
+
+        let sealed = base64::engine::general_purpose::STANDARD
+            .decode(&event.content)
+            .expect("content is base64");
+        let opened = open_discovery_record(&seal, &event.pubkey, &sealed).expect("open");
+        assert_eq!(opened, plaintext);
+    }
+
+    /// Anyone who knows the username can open the record. That is the design,
+    /// not a leak — the payload holds only what is public to someone who
+    /// already knows the name — and it is pinned so a later change that makes
+    /// this key load-bearing fails a test rather than a review.
+    #[test]
+    fn test_discovery_seal_is_openable_by_anyone_who_knows_the_username() {
+        let keypair = NostrKeypair::generate_ephemeral().expect("keypair");
+        let username = user("alice");
+        let tag = discovery_tag_for_username(&username).expect("tag");
+        let publisher_seal = discovery_seal_keypair_for_username(&username).expect("seal");
+
+        let event = NostrEvent::create_discovery_publication(
+            &keypair,
+            &tag,
+            publisher_seal.public_key_hex(),
+            b"public",
+        )
+        .expect("publication");
+
+        // A stranger reconstructs the same key from the name alone.
+        let stranger_seal = discovery_seal_keypair_for_username(&user("alice")).expect("seal");
+        let sealed = base64::engine::general_purpose::STANDARD
+            .decode(&event.content)
+            .expect("base64");
+        assert_eq!(
+            open_discovery_record(&stranger_seal, &event.pubkey, &sealed).expect("open"),
+            b"public"
+        );
+    }
+
+    #[test]
+    fn test_discovery_query_names_the_right_kind_and_tag() {
+        let tag = discovery_tag_for_username(&user("alice")).expect("tag");
+        let req = create_discovery_query_message(&tag, "sub1").expect("req");
+        let parsed: serde_json::Value = serde_json::from_str(&req).expect("json");
+
+        assert_eq!(parsed[0], "REQ");
+        assert_eq!(parsed[1], "sub1");
+        assert_eq!(parsed[2]["kinds"][0], NOSTR_DISCOVERY_KIND);
+        assert_eq!(parsed[2]["#p"][0], tag);
+        assert_eq!(
+            parsed[2]["limit"],
+            crate::constants::NOSTR_DISCOVERY_QUERY_LIMIT
+        );
+        assert!(
+            parsed[2].get("since").is_none(),
+            "a discovery query must carry no `since`: a settled claim is old \
+             and current at the same time"
+        );
+    }
+
+    #[test]
+    fn test_discovery_deletion_names_the_addressable_coordinate() {
+        let keypair = NostrKeypair::generate_ephemeral().expect("keypair");
+        let tag = discovery_tag_for_username(&user("alice")).expect("tag");
+        let event = NostrEvent::create_discovery_deletion(&keypair, &tag).expect("deletion");
+
+        assert_eq!(event.kind, NOSTR_DELETION_KIND);
+        let a_tag = event
+            .tags
+            .iter()
+            .find(|t| t.first().map(String::as_str) == Some("a"))
+            .expect("a tag");
+        assert_eq!(
+            a_tag[1],
+            format!(
+                "{}:{}:{}",
+                NOSTR_DISCOVERY_KIND,
+                keypair.public_key_hex(),
+                tag
+            )
+        );
     }
 
     #[test]

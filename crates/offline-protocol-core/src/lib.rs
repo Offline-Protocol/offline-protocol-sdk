@@ -16,6 +16,7 @@ pub mod message;
 pub mod service;
 pub mod sync;
 pub mod types;
+pub mod username;
 pub mod wire;
 
 pub use address::{Address, AddressError};
@@ -30,4 +31,5 @@ pub use types::{
     validate_id_chars, AppId, HopCount, IdValidationError, LamportClock, LocalInstant, Timestamp,
     UserId, WallClockTimestamp, MAX_ID_LEN, TTL,
 };
+pub use username::{Username, UsernameError};
 pub use wire::{WIRE_V1_MAGIC, WIRE_VERSION_V1};

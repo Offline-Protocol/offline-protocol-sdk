@@ -87,6 +87,47 @@ class ProtocolConfigParserTest {
     }
 
     @Test
+    fun nostrUsernameDiscoveryDefaultsOffWhenOmitted() {
+        // OFF by default, unlike the two switches above. Publishing a claim
+        // binds a human-readable name to an address in a public place, so an
+        // app must opt in rather than inherit it.
+        assertFalse(parse("""{"appId":"app","userId":"alice"}""").nostrUsernameDiscoveryEnabled)
+    }
+
+    @Test
+    fun nostrUsernameDiscoveryReadsBothShapes() {
+        // Same nested-home-plus-flat-fallback contract. A parser that missed a
+        // shape here would silently reset the flag to its default, which for
+        // this one means an app that asked to publish silently does not.
+        assertTrue(
+            parse(
+                """{"appId":"app","userId":"alice","transports":{"nostr":{"usernameDiscoveryEnabled":true}}}"""
+            ).nostrUsernameDiscoveryEnabled
+        )
+        assertTrue(
+            parse(
+                """{"appId":"app","userId":"alice","transports":{"nostr":{"username_discovery_enabled":true}}}"""
+            ).nostrUsernameDiscoveryEnabled
+        )
+        assertTrue(
+            parse("""{"appId":"app","userId":"alice","nostrUsernameDiscoveryEnabled":true}""")
+                .nostrUsernameDiscoveryEnabled
+        )
+        assertTrue(
+            parse("""{"appId":"app","userId":"alice","nostr_username_discovery_enabled":true}""")
+                .nostrUsernameDiscoveryEnabled
+        )
+    }
+
+    @Test
+    fun nestedNostrUsernameDiscoveryWinsOverTopLevel() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","nostrUsernameDiscoveryEnabled":true,"transports":{"nostr":{"usernameDiscoveryEnabled":false}}}"""
+        )
+        assertFalse(config.nostrUsernameDiscoveryEnabled)
+    }
+
+    @Test
     fun nestedNostrColdContactWinsOverTopLevel() {
         val config = parse(
             """{"appId":"app","userId":"alice","nostrColdContactEnabled":false,"transports":{"nostr":{"coldContactEnabled":true}}}"""

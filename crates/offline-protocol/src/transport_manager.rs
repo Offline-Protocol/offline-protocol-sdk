@@ -9,7 +9,7 @@ use crate::events::{DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCod
 use crate::telemetry::routing::{RoutingDecision, RoutingPhase, RoutingReasonCode};
 use crate::{Error, Result};
 use chrono::Utc;
-use offline_protocol_core::{Message, WireCodec};
+use offline_protocol_core::{Message, Username, WireCodec};
 use offline_protocol_router::{
     display_routing_score, DorsConfig, EscalationTriggerReason, TransportScore, TransportSelector,
 };
@@ -399,6 +399,51 @@ impl TransportManager {
     pub fn nostr_cold_contact_active(&self) -> bool {
         self.nostr_transport()
             .map(|nostr| nostr.cold_contact_enabled())
+            .unwrap_or(false)
+    }
+
+    /// Enables or disables username discovery on the Nostr transport.
+    pub fn set_nostr_username_discovery_enabled(&mut self, enabled: bool) {
+        if let Some(nostr) = self.nostr_transport() {
+            nostr.set_discovery_enabled(enabled);
+        }
+    }
+
+    /// Whether the Nostr transport is installed and username discovery is on.
+    ///
+    /// Already accounts for the cold-contact coupling: the transport reports
+    /// false when either switch is off.
+    pub fn nostr_discovery_active(&self) -> bool {
+        self.nostr_transport()
+            .map(|nostr| nostr.discovery_enabled())
+            .unwrap_or(false)
+    }
+
+    /// Queues this install's username claim for publication.
+    pub fn publish_nostr_discovery_record(&mut self, username: Username, payload: Vec<u8>) {
+        if let Some(nostr) = self.nostr_transport() {
+            nostr.publish_discovery_record(username, payload);
+        }
+    }
+
+    /// Queues a retraction of this install's username claim.
+    pub fn retract_nostr_discovery_record(&mut self, username: Username, payload: Vec<u8>) {
+        if let Some(nostr) = self.nostr_transport() {
+            nostr.retract_discovery_record(username, payload);
+        }
+    }
+
+    /// Drains the discovery tags whose publication never reached a relay.
+    pub fn take_failed_nostr_discovery_publications(&self) -> Vec<String> {
+        self.nostr_transport()
+            .map(|nostr| nostr.take_failed_discovery_publications())
+            .unwrap_or_default()
+    }
+
+    /// Requests resolution of the devices claiming `username`.
+    pub fn resolve_nostr_username(&self, username: Username) -> bool {
+        self.nostr_transport()
+            .map(|nostr| nostr.resolve_username(username))
             .unwrap_or(false)
     }
 

@@ -147,6 +147,53 @@ test('every relay field configured at create time reaches native', async () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// The Nostr username-discovery switch
+//
+// Same silent-failure class as the relay fields above, and worse in one
+// direction: this flag governs whether a human-readable name is published to
+// public relays. A drop between JS and native leaves the engine on its default
+// with no error anywhere, so an app that asked to publish quietly does not, and
+// an app that asked NOT to would quietly publish if the default were the other
+// way. Assert both directions and the default.
+// ---------------------------------------------------------------------------
+
+test('username discovery defaults to off in the create payload', async () => {
+  const sdk = newSdk();
+  await sdk.start();
+
+  assert.equal(
+    payloadOf('create').nostrUsernameDiscoveryEnabled,
+    false,
+    'publishing a name to a public directory must never be inherited'
+  );
+});
+
+test('username discovery crosses the bridge when enabled', async () => {
+  const sdk = newSdk({ transports: { nostr: { usernameDiscoveryEnabled: true } } });
+  await sdk.start();
+
+  assert.equal(
+    payloadOf('create').nostrUsernameDiscoveryEnabled,
+    true,
+    'the nested key is the documented home; a drop here silently disables the feature'
+  );
+});
+
+test('username discovery is explicitly present, never omitted', async () => {
+  const sdk = newSdk({ transports: { nostr: { usernameDiscoveryEnabled: false } } });
+  await sdk.start();
+
+  // Present-and-false rather than absent: the native parsers fall back to
+  // their own literal default for a missing key, so an omitted field and an
+  // explicit false are indistinguishable on the far side. They agree today;
+  // asserting presence is what keeps a future default flip from being silent.
+  assert.ok(
+    'nostrUsernameDiscoveryEnabled' in payloadOf('create'),
+    'the flag must be sent explicitly, not left to the native default'
+  );
+});
+
 test('a relay section without a priority still crosses the bridge', async () => {
   // The old gate was `if (relay?.relayPriority)`, so a config that set only a
   // battery floor was dropped whole — the shape most apps actually write.

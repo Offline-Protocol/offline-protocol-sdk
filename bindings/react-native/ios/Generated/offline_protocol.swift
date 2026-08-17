@@ -830,6 +830,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func createGroup(groupName: String) throws  -> MlsGroupInfo
     
+    func createInvite(petname: String?, signed: Bool) throws  -> String
+    
     func deriveUserIdFromPublicKey(publicKey: [UInt8])  -> String
     
     func emitTestEvent() 
@@ -1031,6 +1033,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func renameGroup(groupId: String, newName: String) throws 
     
     func requestGroupRelayRegistration(groupId: String) throws  -> Bool
+    
+    func resolveUsername(username: String) throws  -> Bool
     
     func resume() throws 
     
@@ -1327,6 +1331,16 @@ open func createGroup(groupName: String)throws  -> MlsGroupInfo  {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(groupName),$0
+    )
+})
+}
+    
+open func createInvite(petname: String?, signed: Bool)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_invite(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionString.lower(petname),
+        FfiConverterBool.lower(signed),$0
     )
 })
 }
@@ -2190,6 +2204,15 @@ open func requestGroupRelayRegistration(groupId: String)throws  -> Bool  {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(groupId),$0
+    )
+})
+}
+    
+open func resolveUsername(username: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resolve_username(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(username),$0
     )
 })
 }
@@ -3472,6 +3495,66 @@ public func FfiConverterTypeInternetMessage_lower(_ value: InternetMessage) -> R
 }
 
 
+public struct InviteInfo: Equatable, Hashable {
+    public var address: String
+    public var publicKey: [UInt8]
+    public var petname: String?
+    public var signed: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(address: String, publicKey: [UInt8], petname: String?, signed: Bool) {
+        self.address = address
+        self.publicKey = publicKey
+        self.petname = petname
+        self.signed = signed
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension InviteInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeInviteInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> InviteInfo {
+        return
+            try InviteInfo(
+                address: FfiConverterString.read(from: &buf), 
+                publicKey: FfiConverterSequenceUInt8.read(from: &buf), 
+                petname: FfiConverterOptionString.read(from: &buf), 
+                signed: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: InviteInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.address, into: &buf)
+        FfiConverterSequenceUInt8.write(value.publicKey, into: &buf)
+        FfiConverterOptionString.write(value.petname, into: &buf)
+        FfiConverterBool.write(value.signed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeInviteInfo_lift(_ buf: RustBuffer) throws -> InviteInfo {
+    return try FfiConverterTypeInviteInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeInviteInfo_lower(_ value: InviteInfo) -> RustBuffer {
+    return FfiConverterTypeInviteInfo.lower(value)
+}
+
+
 public struct MediaMetadata: Equatable, Hashable {
     public var mimeType: String
     public var fileName: String
@@ -4598,13 +4681,14 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var binaryWireEnabled: Bool
     public var nostrSealingEnabled: Bool
     public var nostrColdContactEnabled: Bool
+    public var nostrUsernameDiscoveryEnabled: Bool
     public var compactEnvelopeEnabled: Bool
     public var richPayloadEnabled: Bool
     public var cryptoRecoveryEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true) {
+    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true) {
         self.appId = appId
         self.profile = profile
         self.bleEnabled = bleEnabled
@@ -4630,6 +4714,7 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.binaryWireEnabled = binaryWireEnabled
         self.nostrSealingEnabled = nostrSealingEnabled
         self.nostrColdContactEnabled = nostrColdContactEnabled
+        self.nostrUsernameDiscoveryEnabled = nostrUsernameDiscoveryEnabled
         self.compactEnvelopeEnabled = compactEnvelopeEnabled
         self.richPayloadEnabled = richPayloadEnabled
         self.cryptoRecoveryEnabled = cryptoRecoveryEnabled
@@ -4674,6 +4759,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 binaryWireEnabled: FfiConverterBool.read(from: &buf), 
                 nostrSealingEnabled: FfiConverterBool.read(from: &buf), 
                 nostrColdContactEnabled: FfiConverterBool.read(from: &buf), 
+                nostrUsernameDiscoveryEnabled: FfiConverterBool.read(from: &buf), 
                 compactEnvelopeEnabled: FfiConverterBool.read(from: &buf), 
                 richPayloadEnabled: FfiConverterBool.read(from: &buf), 
                 cryptoRecoveryEnabled: FfiConverterBool.read(from: &buf)
@@ -4706,6 +4792,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.binaryWireEnabled, into: &buf)
         FfiConverterBool.write(value.nostrSealingEnabled, into: &buf)
         FfiConverterBool.write(value.nostrColdContactEnabled, into: &buf)
+        FfiConverterBool.write(value.nostrUsernameDiscoveryEnabled, into: &buf)
         FfiConverterBool.write(value.compactEnvelopeEnabled, into: &buf)
         FfiConverterBool.write(value.richPayloadEnabled, into: &buf)
         FfiConverterBool.write(value.cryptoRecoveryEnabled, into: &buf)
@@ -5568,10 +5655,11 @@ public struct TransportConfig: Equatable, Hashable {
     public var nostrEnabled: Bool
     public var nostrSealingEnabled: Bool
     public var nostrColdContactEnabled: Bool
+    public var nostrUsernameDiscoveryEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true) {
+    public init(bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false) {
         self.bleEnabled = bleEnabled
         self.wifiDirectEnabled = wifiDirectEnabled
         self.internetEnabled = internetEnabled
@@ -5579,6 +5667,7 @@ public struct TransportConfig: Equatable, Hashable {
         self.nostrEnabled = nostrEnabled
         self.nostrSealingEnabled = nostrSealingEnabled
         self.nostrColdContactEnabled = nostrColdContactEnabled
+        self.nostrUsernameDiscoveryEnabled = nostrUsernameDiscoveryEnabled
     }
 
     
@@ -5601,7 +5690,8 @@ public struct FfiConverterTypeTransportConfig: FfiConverterRustBuffer {
                 reticulumEnabled: FfiConverterBool.read(from: &buf), 
                 nostrEnabled: FfiConverterBool.read(from: &buf), 
                 nostrSealingEnabled: FfiConverterBool.read(from: &buf), 
-                nostrColdContactEnabled: FfiConverterBool.read(from: &buf)
+                nostrColdContactEnabled: FfiConverterBool.read(from: &buf), 
+                nostrUsernameDiscoveryEnabled: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -5613,6 +5703,7 @@ public struct FfiConverterTypeTransportConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.nostrEnabled, into: &buf)
         FfiConverterBool.write(value.nostrSealingEnabled, into: &buf)
         FfiConverterBool.write(value.nostrColdContactEnabled, into: &buf)
+        FfiConverterBool.write(value.nostrUsernameDiscoveryEnabled, into: &buf)
     }
 }
 
@@ -9693,6 +9784,13 @@ public func deriveAddress(publicKey: [UInt8])throws  -> String  {
     )
 })
 }
+public func parseInvite(blob: String)throws  -> InviteInfo  {
+    return try  FfiConverterTypeInviteInfo_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_func_parse_invite(
+        FfiConverterString.lower(blob),$0
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -9710,6 +9808,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.contractVersionMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_func_derive_address() != 55050) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_func_parse_invite() != 15865) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != 866) {
@@ -9779,6 +9880,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 8723) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite() != 9631) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 23152) {
@@ -10082,6 +10186,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration() != 5596) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username() != 5393) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596) {

@@ -3532,6 +3532,69 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     /**
+     * Decode and verify an invite blob. Needs no protocol instance, so a
+     * scanner can check a QR code before create().
+     *
+     * Verification is total: a rejected blob rejects the promise rather than
+     * resolving with a warning flag, because every failure mode here means the
+     * invite must not be acted on.
+     */
+    @ReactMethod
+    fun parseInvite(blob: String, promise: Promise) {
+        try {
+            val invite = uniffi.offline_protocol.parseInvite(blob)
+            val publicKey = Arguments.createArray().apply {
+                invite.publicKey.forEach { pushInt(it.toInt()) }
+            }
+            promise.resolve(Arguments.createMap().apply {
+                putString("address", invite.address)
+                putArray("public_key", publicKey)
+                if (invite.petname != null) {
+                    putString("petname", invite.petname)
+                } else {
+                    putNull("petname")
+                }
+                putBoolean("signed", invite.signed)
+            })
+        } catch (e: Exception) {
+            promise.reject("ERROR_INVALID_INVITE", "Invite did not verify: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Build an invite blob for this identity.
+     *
+     * Sign it when the invite may travel without its issuer; leave it unsigned
+     * for a QR shown phone to phone. See the JS createInvite doc.
+     */
+    @ReactMethod
+    fun createInvite(petname: String?, signed: Boolean, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            promise.resolve(proto.createInvite(petname, signed))
+        } catch (e: Exception) {
+            promise.reject("ERROR_CRYPTO", "Failed to create invite: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Resolve a username to the set of devices claiming it.
+     *
+     * The answer arrives as one username_resolved event carrying every
+     * verified claim. Never auto-select from it: see the JS resolveUsername
+     * doc for why picking the first entry defeats the design.
+     */
+    @ReactMethod
+    fun resolveUsername(username: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            promise.resolve(proto.resolveUsername(username))
+        } catch (e: Exception) {
+            promise.reject("ERROR_INVALID_ARGUMENT", "Failed to resolve username: ${e.message}", e)
+        }
+    }
+
+    /**
      * Derive a user ID from a public key.
      *
      * Deprecated: use deriveAddress, which needs no protocol instance and

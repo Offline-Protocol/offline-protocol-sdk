@@ -19,6 +19,7 @@ document says which reading is normative for the wire.
 | [Encryption envelopes](encryption-envelopes.md) | The `__MLS_ENC__` envelope forms, the media chunk envelope, and the sealed rich payload |
 | [Group protocol](group-protocol.md) | Group frames, membership commits, leaf identity binding, relay broadcast and the delivery report |
 | [Capability negotiation](capability-negotiation.md) | What peers advertise, what each capability gates, and what happens on absence |
+| [Username discovery and invites](username-discovery.md) | The self-certifying invite payload, and the non-authoritative username directory |
 
 ## Conformance language
 

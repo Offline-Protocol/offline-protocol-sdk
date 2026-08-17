@@ -151,6 +151,7 @@ mod tests {
         "protocol.group.user_groups",
         "protocol.group.error",
         "protocol.group.relay_sync_changed",
+        "protocol.username.resolved",
         "protocol.group.message_sent",
         "protocol.group.message_partial_failure",
         "protocol.group.delivery_report",
@@ -329,6 +330,7 @@ mod tests {
             | Event::UserGroups { .. }
             | Event::GroupError { .. }
             | Event::GroupRelaySyncChanged { .. }
+            | Event::UsernameResolved { .. }
             | Event::GroupMessageSent { .. }
             | Event::GroupMessagePartialFailure { .. }
             | Event::GroupMessageDeliveryReport { .. }
@@ -632,6 +634,11 @@ mod tests {
                 group_id: String::new(),
                 synced: false,
                 reason: String::new(),
+            },
+            Event::UsernameResolved {
+                username: String::new(),
+                claims: Vec::new(),
+                rejected: 0,
             },
             Event::GroupMessageSent {
                 group_id: String::new(),

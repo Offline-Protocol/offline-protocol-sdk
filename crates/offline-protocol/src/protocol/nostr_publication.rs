@@ -76,11 +76,11 @@ pub(crate) struct NostrPublicationSlot {
 #[derive(Debug, Clone)]
 pub(crate) struct PublicationBackoff {
     /// Consecutive failures, which set the delay.
-    failures: u32,
+    pub(crate) failures: u32,
     /// When the most recent failure was reported.
-    last_failure: Instant,
+    pub(crate) last_failure: Instant,
     /// Earliest this slot may be republished.
-    retry_at: Instant,
+    pub(crate) retry_at: Instant,
 }
 
 impl OfflineProtocol {
