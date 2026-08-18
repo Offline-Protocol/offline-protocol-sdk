@@ -212,7 +212,10 @@ on this carrier exactly as on every other.
 ```
 
 A gateway MAY answer unsolicited when a watched peer's state changes. Presence
-answers are claims with the same standing as verdicts, and decay the same way.
+answers are claims with the same standing as verdicts: they may open a path, they
+may not close one, and they decay. They decay faster, on a shorter TTL than a
+verdict, because presence is a statement about a moment and a verdict is a
+statement about an attempt.
 
 ### Capabilities
 
