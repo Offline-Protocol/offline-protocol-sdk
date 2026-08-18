@@ -26,7 +26,7 @@ members = [
 # publish a tag whose number does not match this one — crates.io versions are
 # immutable, so discovering the mismatch afterwards means the number is wrong
 # forever.
-version = "0.21.0"
+version = "0.22.0"
 edition = "2021"
 authors = ["Offline Protocol, Inc."]
 # Dual-licensed: AGPL-3.0-only for open-source use, with a separate commercial
@@ -111,13 +111,13 @@ chacha20poly1305 = "0.10"
 # Keep these in lockstep with `workspace.package.version` above — a crate can
 # only be published once its dependencies exist on the registry at the named
 # version, so all seven move together.
-offline-protocol-core = { path = "crates/offline-protocol-core", version = "0.21.0" }
-offline-protocol-transport = { path = "crates/offline-protocol-transport", version = "0.21.0" }
-offline-protocol-router = { path = "crates/offline-protocol-router", version = "0.21.0" }
-offline-protocol-reliability = { path = "crates/offline-protocol-reliability", version = "0.21.0" }
-offline-protocol-mls = { path = "crates/offline-protocol-mls", version = "0.21.0" }
-offline-protocol-services = { path = "crates/offline-protocol-services", version = "0.21.0" }
-offline-protocol = { path = "crates/offline-protocol", version = "0.21.0" }
+offline-protocol-core = { path = "crates/offline-protocol-core", version = "0.22.0" }
+offline-protocol-transport = { path = "crates/offline-protocol-transport", version = "0.22.0" }
+offline-protocol-router = { path = "crates/offline-protocol-router", version = "0.22.0" }
+offline-protocol-reliability = { path = "crates/offline-protocol-reliability", version = "0.22.0" }
+offline-protocol-mls = { path = "crates/offline-protocol-mls", version = "0.22.0" }
+offline-protocol-services = { path = "crates/offline-protocol-services", version = "0.22.0" }
+offline-protocol = { path = "crates/offline-protocol", version = "0.22.0" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

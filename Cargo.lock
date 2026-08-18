@@ -1392,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "base64",
  "chacha20poly1305",
@@ -1419,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-bench"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "criterion",
  "offline-protocol",
@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-core"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "base64",
  "bech32",
@@ -1448,7 +1448,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-mls"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "base64",
  "chrono",
@@ -1470,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-reliability"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "chrono",
  "offline-protocol-core",
@@ -1480,7 +1480,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-router"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "chrono",
  "offline-protocol-core",
@@ -1492,7 +1492,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-services"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "offline-protocol-core",
  "serde",
@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-transport"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "base64",
  "chacha20",
@@ -1525,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-uniffi"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "offline-protocol",
  "offline-protocol-core",

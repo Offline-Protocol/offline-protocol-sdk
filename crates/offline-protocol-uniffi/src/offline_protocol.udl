@@ -1725,10 +1725,11 @@ interface OfflineProtocol {
     // BOTH mean an answer is coming: exactly one username_resolved event
     // follows either way. Every case where no event will ever arrive throws
     // instead -- InvalidConfiguration when discovery is off, InvalidState when
-    // too many lookups are in flight, InvalidArgument when the string is not a
-    // claimable username -- so a caller awaiting the event is never left
-    // waiting on one that has no trigger. The three are distinct because they
-    // call for different handling: never, later, and not-with-that-name.
+    // too many lookups are in flight, NotStarted when the protocol is not
+    // running, and InvalidArgument when the string is not a claimable username
+    // -- so a caller awaiting the event is never left waiting on one that has
+    // no trigger. The four are distinct because they call for different
+    // handling: never, later, after start(), and not-with-that-name.
     //
     // The answer arrives as ONE username_resolved event carrying EVERY
     // verified claim. There is deliberately no "best" claim and no ordering:

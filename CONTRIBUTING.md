@@ -262,6 +262,15 @@ Then the prose: `CHANGELOG.md` (replace `## [Unreleased]` with
 and `docs/UPGRADING.md` (the current-line reference, and a labelled subsection
 for anything that compiles fine but behaves differently).
 
+Then archive: the working `CHANGELOG.md` holds unreleased changes plus **one**
+release, so cutting X.Y.Z moves the now-previous release's section into
+`docs/changelog/<major>.<minor>.md` (creating the file with its title and
+release table if the series is new) and adds a row to both archive tables, the
+one in [`docs/changelog/README.md`](docs/changelog/README.md) and the one at the
+foot of `CHANGELOG.md`. Relative links move with the text and break silently:
+`./docs/UPGRADING.md` becomes `../UPGRADING.md` and `./CONTRIBUTING.md` becomes
+`../../CONTRIBUTING.md` once the section lives two directories down.
+
 To rehearse the whole thing, push a `vX.Y.Z-rc.N` tag. Every gate runs, every
 crate is packaged and verify-built, and npm publishes under the `next`
 dist-tag — but crates.io gets nothing, because those versions are immutable and

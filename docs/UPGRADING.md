@@ -1,7 +1,7 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.21.x` line.
+current `v0.22.x` line.
 
 The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 `initialize_mls` changes shape, three config updaters become fallible, and
@@ -54,6 +54,19 @@ adds one more of these: `secure_session_failed` can now fire while the session
 with that peer stays **live**
 ([§11.2](#112-secure_session_failed-no-longer-implies-the-session-is-gone-v0210)),
 so an app that tears down session state on that event alone must stop.
+
+`v0.22.0` adds two more. The first is the larger: the battery-aware relay policy
+was complete but unreachable, because nothing ever wrote the charge that all of
+it reads. `relay_promoted` and `relay_demoted` could not fire, and the
+forwarding battery floor was decorative. The feed is now wired through, so the
+policy starts deciding behaviour the moment your app calls `setBatteryState`
+([§11.3](#113-relay_promoted-and-relay_demoted-can-now-actually-fire-v0220)),
+and on React Native two `relay` config fields that were parsed by nothing begin
+taking effect. The second needs no code change and is pure relief: React
+Native's `updateDorsConfig` rebuilt the entire `DorsConfig` from literals on
+every call, so a payload naming one field silently reset everything the caller
+did not mention. Both bridges now merge onto the live config read back from the
+engine, so if you were restating every field to survive that, you can stop.
 
 Work through it in order. [§0](#0-before-you-ship-downgrade-is-not-a-rollback)
 is a release-engineering decision, not a code change, and it is the one that
@@ -1054,6 +1067,43 @@ alone, stop — the peer may still be reachable over the surviving session.
 Settle session liveness on `secure_session_established` and actual send
 results; treat `secure_session_failed` as a diagnostic about one attempt.
 
+
+### 11.3 `relay_promoted` and `relay_demoted` can now actually fire *(v0.22.0)*
+
+The SDK has carried a complete battery-aware relay policy for several releases:
+DORS scores energy, the relay role promotes and demotes, and message forwarding
+refuses to spend the last few percent of somebody's battery carrying other
+people's traffic. All of it read the charge out of a per-transport metrics map
+that nothing ever wrote to. The policy was complete and unreachable, so on every
+real device the relay role was never evaluated, `relay_promoted` and
+`relay_demoted` could not fire, and forwarding always took its "unknown battery
+means willing" branch. The floor that exists to stop a dying phone relaying was
+decorative.
+
+`v0.22.0` lands the feed on the `TransportManager` and merges it into the two
+snapshot loops that build the metrics map, so everything downstream of it comes
+alive at once. Three consequences, none of which changes a signature:
+
+- **Nothing happens until your app supplies the feed.** Call
+  `setBatteryState(level, isCharging)`. Prefer it over `setBatteryLevel(level)`:
+  a plugged-in device is deliberately excused the soft floor, and reporting the
+  level alone strips relay duty from exactly the devices that should keep it. An
+  app that calls neither gets the same nothing it got before, now documented
+  rather than accidental.
+- **Once the feed arrives, forwarding can stop.** A device under the floor now
+  declines to carry other people's frames, which it never did before. That is
+  the floor working rather than a regression, and it is the whole point of
+  reporting the level.
+- **React Native only: `allowRelay` and `minBatteryForRelay` were ornamental and
+  now take effect.** Both crossed the bridge and were then parsed by nothing,
+  because only `relayPriority` was read. An app that set `allowRelay: false` and
+  watched the device relay anyway will now see it stop.
+
+**What to change.** Subscribe a platform battery observer (`BatteryManager` on
+Android, `UIDevice` on iOS) and push into `setBatteryState`; this release ships
+the API, not the subscription. Then re-read any `relay` config you set while it
+was inert, because those values now decide behaviour instead of being recorded
+and ignored.
 ---
 
 ## 12. Build and packaging
