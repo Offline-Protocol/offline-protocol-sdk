@@ -249,6 +249,20 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A replayed group frame refused on identity grounds no longer earns a
+  delivery acknowledgement.** The mesh handler marks a message identifier
+  before attempting the decrypt, which bounds replay amplification to one
+  crypto operation per identifier, but it never released that mark when the
+  decrypt came back a security refusal (the wire sender and the
+  MLS-authenticated author disagree). The refusal withholds the ACK and clears
+  the transport-level mark, so a replayed copy reached the group handler
+  again, found its identifier marked but not pending, and was classified as
+  already delivered, which acknowledges it. Withholding that acknowledgement
+  from whoever forged the attribution is the entire point of refusing
+  silently: an ACK confirms the device is online and processing. The handler
+  now releases the identifier on refusal, matching the relay path and the
+  drain, at a cost of one crypto operation per replayed copy.
+
 - **`resolveUsername()` no longer promises an event the engine cannot send.**
   It gated only on the discovery switches, which survive `stop()`, while the
   event it promises is emitted from `process()`, which is inert unless the

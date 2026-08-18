@@ -1023,7 +1023,10 @@ impl OfflineProtocol {
     /// Returns [`InternalMessageResult::SecurityRejected`] when the wire
     /// sender does not match the MLS-authenticated sender (SEC-M1), so the
     /// caller suppresses the delivery ACK exactly like the `__MLS_ENC__`
-    /// path; a genuine crypto/parse failure consumes the message.
+    /// path; a genuine crypto/parse failure consumes the message. That
+    /// refusal also releases the group-level dedup entry marked below, so a
+    /// replayed copy is judged again on its own merits instead of reading as
+    /// already delivered in the duplicate branch and being re-ACKed.
     ///
     /// Deferred-ACK atom (mesh-group analog of the DM/media fix, PR #223): a
     /// message buffered because local group state is not ready yet returns
@@ -1155,7 +1158,22 @@ impl OfflineProtocol {
                 ));
                 InternalMessageResult::Consumed
             }
-            GroupDecryptOutcome::SecurityRejected => InternalMessageResult::SecurityRejected,
+            GroupDecryptOutcome::SecurityRejected => {
+                // Refused on attribution grounds: no ACK, and no dedup entry
+                // left behind either. Left marked, a replay of this frame
+                // reaches the duplicate branch above, reads as marked but not
+                // pending (that is, already delivered), and is Consumed, which
+                // the receive loop ACKs. That hands back exactly the liveness
+                // confirmation the silent refusal exists to withhold
+                // (invariant I4, ADR 0005). Only the envelope id can be marked
+                // at this point; the logical id is marked on a successful
+                // decrypt only. The transport-level unmark stays with the
+                // receive loop's `SecurityRejected` arm, which owns that layer
+                // for every rejected frame. Cost is one MLS crypto operation
+                // per replayed copy, the same trade the relay path accepts.
+                self.group_mesh.message_dedup.remove(&message.id.as_str());
+                InternalMessageResult::SecurityRejected
+            }
             GroupDecryptOutcome::Retriable => {
                 let group_id = payload.group_id.clone();
                 self.buffer_pending_group_message(
