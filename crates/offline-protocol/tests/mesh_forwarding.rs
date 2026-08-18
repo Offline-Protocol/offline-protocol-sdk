@@ -70,6 +70,19 @@ impl Neighborhood {
         self.add_node_inner(id, default_config(id), true);
     }
 
+    /// An online device whose scoring puts the relay ahead of its radio.
+    ///
+    /// Without `prefer_online` the selector already demotes the relay below
+    /// every mesh transport, so the ordering hides whether the recipient was
+    /// ever considered. This is the configuration where reaching a neighbour
+    /// has to be decided by a fact about the recipient rather than by carrier
+    /// scoring.
+    fn add_relay_first_node(&mut self, id: &str) {
+        let mut config = default_config(id);
+        config.dors.prefer_online = true;
+        self.add_node_inner(id, config, true);
+    }
+
     fn add_node_inner(&mut self, id: &str, config: ProtocolConfig, online: bool) {
         let radio = MockTransport::new(TransportType::BLE);
         radio.start().unwrap();
@@ -367,6 +380,29 @@ fn an_online_sender_reaches_a_recipient_only_the_mesh_can_see() {
         "alice must learn it was delivered — parking removed the pending ACK, \
          so a delivery she cannot settle would be probed until it expired"
     );
+}
+
+#[test]
+fn an_online_sender_hands_the_frame_straight_to_a_neighbor_it_can_see() {
+    // The other half of the mixed neighborhood. Above, carol is two links away
+    // and only the relay's verdict can reveal it. Here bob is standing right
+    // next to alice, and alice's own scoring prefers the relay — which is a
+    // hole in the ground. Waiting for a verdict to discover a neighbour that
+    // was addressable from the first instant is latency for nothing.
+    let mut net = Neighborhood::new(&["bob"]);
+    net.add_relay_first_node("alice");
+    net.link("alice", "bob");
+
+    let msg_id = net.send("alice", "bob", "you are right here");
+    net.run_until_quiet(6);
+
+    assert_eq!(
+        net.inbox("bob"),
+        vec!["you are right here".to_string()],
+        "a recipient one link away must be reached over that link, \
+         with no relay verdict needed first"
+    );
+    assert_eq!(net.deliveries_to("bob", &msg_id), 1, "and exactly once");
 }
 
 #[test]

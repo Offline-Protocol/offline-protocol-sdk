@@ -12,6 +12,7 @@ use super::{
 };
 use crate::events::SecurityWarningCode;
 use crate::mls_observability::MlsOperationContext;
+use crate::protocol::reachability::{Claim, FactSource};
 use crate::{Error, EstablishmentState, Event, Result, SessionStateError};
 use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::{Message, MessagePriority};
@@ -1203,6 +1204,22 @@ impl OfflineProtocol {
         if peer_id.is_empty() || peer_id == self.local_id || self.is_user_blocked(peer_id) {
             return;
         }
+        // A presence answer is a claim about this recipient on the carrier
+        // that answered, so it is recorded as one. It supersedes an earlier
+        // verdict for that carrier: both answer the same question and this is
+        // the later answer. Presence facts decay faster than verdicts, since
+        // this is a third party's report about someone else's connection.
+        self.reachability.record(
+            peer_id,
+            TransportType::Internet,
+            if online {
+                Claim::Reachable
+            } else {
+                Claim::Unreachable
+            },
+            FactSource::GatewayPresence,
+            std::time::Instant::now(),
+        );
         if online {
             // Relay-scoped reachability proof: un-park and re-drive the
             // peer's DMs over the internet transport before anything else

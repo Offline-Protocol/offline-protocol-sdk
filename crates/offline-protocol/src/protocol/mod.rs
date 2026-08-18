@@ -10,6 +10,7 @@ mod nostr_publication;
 mod observability;
 mod pending_queue;
 mod prefixes;
+pub(crate) mod reachability;
 mod receive;
 mod security;
 mod send;
@@ -148,6 +149,16 @@ pub struct OfflineProtocol {
     /// settling terminally (`try_repark_exhausted_dm`). In-memory only: a
     /// restart re-drives the outbox anyway, which is itself a fresh probe.
     dm_unreachable_parks: HashMap<String, u32>,
+
+    /// Per-recipient reachability claims, keyed by recipient and carrier.
+    ///
+    /// The generalisation of the counter above: that one records *how often*
+    /// a recipient has been parked, this one records *what a carrier said*
+    /// about reaching them, so a decision can be made before the send rather
+    /// than only after it failed. Written by the same producers (a gateway
+    /// verdict, a gateway presence answer), read at the send and carrying
+    /// seams. In-memory only, and absent facts mean today's behaviour.
+    pub(crate) reachability: reachability::ReachabilityFacts,
 
     /// MLS manager for end-to-end encryption.
     mls_manager: Option<Arc<RwLock<MlsManager>>>,
@@ -736,6 +747,7 @@ impl OfflineProtocol {
             pending_reseal: HashMap::new(),
             media_outbox: HashMap::new(),
             dm_unreachable_parks: HashMap::new(),
+            reachability: reachability::ReachabilityFacts::default(),
             mls_manager: None,
             pending_encrypted_messages: HashMap::new(),
             deferred_restore_settlements: Vec::new(),
