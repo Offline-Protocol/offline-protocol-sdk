@@ -928,8 +928,6 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_canc
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer(
 ): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cleanup_expired_routes(
-): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite(
@@ -950,11 +948,7 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forw
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports(
 ): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_all_routes(
-): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_best_route(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users(
 ): Short
@@ -996,8 +990,6 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size(
 ): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_routing_stats(
-): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology(
@@ -1009,8 +1001,6 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_grou
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_route(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls(
 ): Short
@@ -1047,8 +1037,6 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_m
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_learn_route(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group(
 ): Short
@@ -1131,8 +1119,6 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reje
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_neighbor_routes(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport(
 ): Short
@@ -1217,8 +1203,6 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_upda
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_routing_config(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics(
 ): Short
@@ -1358,8 +1342,6 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_con
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cleanup_expired_routes(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group(`ptr`: Long,`groupName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_invite(`ptr`: Long,`petname`: RustBuffer.ByValue,`sign`: Byte,uniffi_out_err: UniffiRustCallStatus, 
@@ -1380,11 +1362,7 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_me
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_active_transports(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_all_routes(`ptr`: Long,`destination`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_battery_level(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_best_route(`ptr`: Long,`destination`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_blocked_users(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1426,8 +1404,6 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_retry_queue_size(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_routing_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_state(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_topology(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1439,8 +1415,6 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rela
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rich_readiness(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_route(`ptr`: Long,`destination`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(`ptr`: Long,`secureStorage`: Long,`protocolStateStorage`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1478,8 +1452,6 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_relay(`
 ): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_user_blocked(`ptr`: Long,`userId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_learn_route(`ptr`: Long,`destination`: RustBuffer.ByValue,`nextHop`: RustBuffer.ByValue,`hopCount`: Byte,`quality`: Float,`sequenceNumber`: Int,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_leave_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_list_groups(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1561,8 +1533,6 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reject_con
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_release_transport_lock(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_from_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,`memberId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_neighbor_routes(`ptr`: Long,`neighborId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_transport(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1647,8 +1617,6 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dor
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_relay_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_retry_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_routing_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_transport_metrics(`ptr`: Long,`transportType`: RustBuffer.ByValue,`metrics`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1872,9 +1840,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 6632.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cleanup_expired_routes() != 32382.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 8723.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1905,13 +1870,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports() != 5327.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_all_routes() != 27292.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level() != 12938.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_best_route() != 31041.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users() != 24603.toShort()) {
@@ -1974,9 +1933,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size() != 53188.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_routing_stats() != 51722.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state() != 51778.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1993,9 +1949,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 30881.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_route() != 44869.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 43685.toShort()) {
@@ -2050,9 +2003,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked() != 39343.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_learn_route() != 29659.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group() != 2480.toShort()) {
@@ -2176,9 +2126,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group() != 64736.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_neighbor_routes() != 19049.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport() != 16891.toShort()) {
@@ -2305,9 +2252,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config() != 27543.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_routing_config() != 61324.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics() != 51165.toShort()) {
@@ -3299,8 +3243,6 @@ public interface OfflineProtocolInterface {
     
     fun `cancelFileTransfer`(`fileId`: kotlin.String)
     
-    fun `cleanupExpiredRoutes`()
-    
     fun `createGroup`(`groupName`: kotlin.String): MlsGroupInfo
     
     fun `createInvite`(`petname`: kotlin.String?, `sign`: kotlin.Boolean): kotlin.String
@@ -3321,11 +3263,7 @@ public interface OfflineProtocolInterface {
     
     fun `getActiveTransports`(): List<kotlin.String>
     
-    fun `getAllRoutes`(`destination`: kotlin.String): List<RouteEntry>
-    
     fun `getBatteryLevel`(): kotlin.UByte?
-    
-    fun `getBestRoute`(`destination`: kotlin.String): RouteEntry?
     
     fun `getBlockedUsers`(): List<kotlin.String>
     
@@ -3367,8 +3305,6 @@ public interface OfflineProtocolInterface {
     
     fun `getRetryQueueSize`(): kotlin.ULong
     
-    fun `getRoutingStats`(): RoutingStats
-    
     fun `getState`(): ProtocolState
     
     fun `getTopology`(): NetworkTopology
@@ -3380,8 +3316,6 @@ public interface OfflineProtocolInterface {
     fun `groupRichReadiness`(`groupId`: kotlin.String): GroupRichReadiness
     
     fun `hasPendingKeyPackage`(`peerId`: kotlin.String): kotlin.Boolean
-    
-    fun `hasRoute`(`destination`: kotlin.String): kotlin.Boolean
     
     fun `initializeMls`(`secureStorage`: MlsStorageProvider, `protocolStateStorage`: ProtocolStateStorageProvider)
     
@@ -3418,8 +3352,6 @@ public interface OfflineProtocolInterface {
     fun `isRelay`(): kotlin.Boolean
     
     fun `isUserBlocked`(`userId`: kotlin.String): kotlin.Boolean
-    
-    fun `learnRoute`(`destination`: kotlin.String, `nextHop`: kotlin.String, `hopCount`: kotlin.UByte, `quality`: kotlin.Float, `sequenceNumber`: kotlin.UInt)
     
     fun `leaveGroup`(`groupId`: kotlin.String)
     
@@ -3502,8 +3434,6 @@ public interface OfflineProtocolInterface {
     fun `releaseTransportLock`()
     
     fun `removeFromGroup`(`groupId`: kotlin.String, `memberId`: kotlin.String)
-    
-    fun `removeNeighborRoutes`(`neighborId`: kotlin.String)
     
     fun `removeTransport`(`transportType`: TransportType)
     
@@ -3588,8 +3518,6 @@ public interface OfflineProtocolInterface {
     fun `updateRelayConfig`(`config`: RelayConfig)
     
     fun `updateRetryConfig`(`config`: RetryConfig)
-    
-    fun `updateRoutingConfig`(`config`: GradientRoutingConfig)
     
     fun `updateTransportMetrics`(`transportType`: TransportType, `metrics`: TransportMetrics)
     
@@ -3921,18 +3849,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
     
 
-    override fun `cleanupExpiredRoutes`()
-        = 
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cleanup_expired_routes(
-        it,
-        _status)
-}
-    }
-    
-    
-
     
     @Throws(ProtocolException::class)override fun `createGroup`(`groupName`: kotlin.String): MlsGroupInfo {
             return FfiConverterTypeMlsGroupInfo.lift(
@@ -4067,19 +3983,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
-    override fun `getAllRoutes`(`destination`: kotlin.String): List<RouteEntry> {
-            return FfiConverterSequenceTypeRouteEntry.lift(
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_all_routes(
-        it,
-        FfiConverterString.lower(`destination`),_status)
-}
-    }
-    )
-    }
-    
-
     override fun `getBatteryLevel`(): kotlin.UByte? {
             return FfiConverterOptionalUByte.lift(
     callWithHandle {
@@ -4087,19 +3990,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_battery_level(
         it,
         _status)
-}
-    }
-    )
-    }
-    
-
-    override fun `getBestRoute`(`destination`: kotlin.String): RouteEntry? {
-            return FfiConverterOptionalTypeRouteEntry.lift(
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_best_route(
-        it,
-        FfiConverterString.lower(`destination`),_status)
 }
     }
     )
@@ -4372,19 +4262,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
-    override fun `getRoutingStats`(): RoutingStats {
-            return FfiConverterTypeRoutingStats.lift(
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_routing_stats(
-        it,
-        _status)
-}
-    }
-    )
-    }
-    
-
     override fun `getState`(): ProtocolState {
             return FfiConverterTypeProtocolState.lift(
     callWithHandle {
@@ -4460,19 +4337,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(
         it,
         FfiConverterString.lower(`peerId`),_status)
-}
-    }
-    )
-    }
-    
-
-    override fun `hasRoute`(`destination`: kotlin.String): kotlin.Boolean {
-            return FfiConverterBoolean.lift(
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_route(
-        it,
-        FfiConverterString.lower(`destination`),_status)
 }
     }
     )
@@ -4706,18 +4570,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     )
     }
-    
-
-    override fun `learnRoute`(`destination`: kotlin.String, `nextHop`: kotlin.String, `hopCount`: kotlin.UByte, `quality`: kotlin.Float, `sequenceNumber`: kotlin.UInt)
-        = 
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_learn_route(
-        it,
-        FfiConverterString.lower(`destination`),FfiConverterString.lower(`nextHop`),FfiConverterUByte.lower(`hopCount`),FfiConverterFloat.lower(`quality`),FfiConverterUInt.lower(`sequenceNumber`),_status)
-}
-    }
-    
     
 
     
@@ -5253,18 +5105,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_from_group(
         it,
         FfiConverterString.lower(`groupId`),FfiConverterString.lower(`memberId`),_status)
-}
-    }
-    
-    
-
-    override fun `removeNeighborRoutes`(`neighborId`: kotlin.String)
-        = 
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_neighbor_routes(
-        it,
-        FfiConverterString.lower(`neighborId`),_status)
 }
     }
     
@@ -5816,18 +5656,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_retry_config(
         it,
         FfiConverterTypeRetryConfig.lower(`config`),_status)
-}
-    }
-    
-    
-
-    override fun `updateRoutingConfig`(`config`: GradientRoutingConfig)
-        = 
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_routing_config(
-        it,
-        FfiConverterTypeGradientRoutingConfig.lower(`config`),_status)
 }
     }
     
@@ -6475,47 +6303,6 @@ public object FfiConverterTypeForwardInfo: FfiConverterRustBuffer<ForwardInfo> {
             FfiConverterString.write(value.`originalMessageId`, buf)
             FfiConverterLong.write(value.`originalTimestamp`, buf)
             FfiConverterUInt.write(value.`forwardCount`, buf)
-    }
-}
-
-
-
-data class GradientRoutingConfig (
-    var `maxRoutesPerDestination`: kotlin.UInt
-    , 
-    var `routeTtlSecs`: kotlin.ULong
-    , 
-    var `maxRoutingTableSize`: kotlin.UInt
-    
-){
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeGradientRoutingConfig: FfiConverterRustBuffer<GradientRoutingConfig> {
-    override fun read(buf: ByteBuffer): GradientRoutingConfig {
-        return GradientRoutingConfig(
-            FfiConverterUInt.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterUInt.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: GradientRoutingConfig) = (
-            FfiConverterUInt.allocationSize(value.`maxRoutesPerDestination`) +
-            FfiConverterULong.allocationSize(value.`routeTtlSecs`) +
-            FfiConverterUInt.allocationSize(value.`maxRoutingTableSize`)
-    )
-
-    override fun write(value: GradientRoutingConfig, buf: ByteBuffer) {
-            FfiConverterUInt.write(value.`maxRoutesPerDestination`, buf)
-            FfiConverterULong.write(value.`routeTtlSecs`, buf)
-            FfiConverterUInt.write(value.`maxRoutingTableSize`, buf)
     }
 }
 
@@ -7721,42 +7508,6 @@ public object FfiConverterTypeNostrQuery: FfiConverterRustBuffer<NostrQuery> {
 
 
 
-data class PathConfig (
-    var `forwardToTopK`: kotlin.UInt
-    , 
-    var `maxCongestionLevel`: kotlin.UInt
-    
-){
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypePathConfig: FfiConverterRustBuffer<PathConfig> {
-    override fun read(buf: ByteBuffer): PathConfig {
-        return PathConfig(
-            FfiConverterUInt.read(buf),
-            FfiConverterUInt.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: PathConfig) = (
-            FfiConverterUInt.allocationSize(value.`forwardToTopK`) +
-            FfiConverterUInt.allocationSize(value.`maxCongestionLevel`)
-    )
-
-    override fun write(value: PathConfig, buf: ByteBuffer) {
-            FfiConverterUInt.write(value.`forwardToTopK`, buf)
-            FfiConverterUInt.write(value.`maxCongestionLevel`, buf)
-    }
-}
-
-
-
 data class PeerDevice (
     var `peerId`: kotlin.String
     , 
@@ -8357,52 +8108,6 @@ public object FfiConverterTypeRetryQueueStats: FfiConverterRustBuffer<RetryQueue
 
 
 
-data class RouteEntry (
-    var `nextHop`: kotlin.String
-    , 
-    var `hopCount`: kotlin.UByte
-    , 
-    var `quality`: kotlin.Float
-    , 
-    var `lastSeenMs`: kotlin.ULong
-    
-){
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeRouteEntry: FfiConverterRustBuffer<RouteEntry> {
-    override fun read(buf: ByteBuffer): RouteEntry {
-        return RouteEntry(
-            FfiConverterString.read(buf),
-            FfiConverterUByte.read(buf),
-            FfiConverterFloat.read(buf),
-            FfiConverterULong.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: RouteEntry) = (
-            FfiConverterString.allocationSize(value.`nextHop`) +
-            FfiConverterUByte.allocationSize(value.`hopCount`) +
-            FfiConverterFloat.allocationSize(value.`quality`) +
-            FfiConverterULong.allocationSize(value.`lastSeenMs`)
-    )
-
-    override fun write(value: RouteEntry, buf: ByteBuffer) {
-            FfiConverterString.write(value.`nextHop`, buf)
-            FfiConverterUByte.write(value.`hopCount`, buf)
-            FfiConverterFloat.write(value.`quality`, buf)
-            FfiConverterULong.write(value.`lastSeenMs`, buf)
-    }
-}
-
-
-
 data class RoutingDecision (
     var `timestampMs`: kotlin.Long
     , 
@@ -8530,42 +8235,6 @@ public object FfiConverterTypeRoutingScoreEntry: FfiConverterRustBuffer<RoutingS
             FfiConverterFloat.write(value.`reliability`, buf)
             FfiConverterFloat.write(value.`load`, buf)
             FfiConverterFloat.write(value.`total`, buf)
-    }
-}
-
-
-
-data class RoutingStats (
-    var `destinationCount`: kotlin.UInt
-    , 
-    var `routeCount`: kotlin.UInt
-    
-){
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeRoutingStats: FfiConverterRustBuffer<RoutingStats> {
-    override fun read(buf: ByteBuffer): RoutingStats {
-        return RoutingStats(
-            FfiConverterUInt.read(buf),
-            FfiConverterUInt.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: RoutingStats) = (
-            FfiConverterUInt.allocationSize(value.`destinationCount`) +
-            FfiConverterUInt.allocationSize(value.`routeCount`)
-    )
-
-    override fun write(value: RoutingStats, buf: ByteBuffer) {
-            FfiConverterUInt.write(value.`destinationCount`, buf)
-            FfiConverterUInt.write(value.`routeCount`, buf)
     }
 }
 
@@ -11096,38 +10765,6 @@ public object FfiConverterOptionalTypeReticulumMessage: FfiConverterRustBuffer<R
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeRouteEntry: FfiConverterRustBuffer<RouteEntry?> {
-    override fun read(buf: ByteBuffer): RouteEntry? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterTypeRouteEntry.read(buf)
-    }
-
-    override fun allocationSize(value: RouteEntry?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterTypeRouteEntry.allocationSize(value)
-        }
-    }
-
-    override fun write(value: RouteEntry?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterTypeRouteEntry.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
 public object FfiConverterOptionalTypeTransportMetrics: FfiConverterRustBuffer<TransportMetrics?> {
     override fun read(buf: ByteBuffer): TransportMetrics? {
         if (buf.get().toInt() == 0) {
@@ -11542,34 +11179,6 @@ public object FfiConverterSequenceTypeNetworkNode: FfiConverterRustBuffer<List<N
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeNetworkNode.write(it, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterSequenceTypeRouteEntry: FfiConverterRustBuffer<List<RouteEntry>> {
-    override fun read(buf: ByteBuffer): List<RouteEntry> {
-        val len = buf.getInt()
-        return List<RouteEntry>(len) {
-            FfiConverterTypeRouteEntry.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<RouteEntry>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeRouteEntry.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<RouteEntry>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeRouteEntry.write(it, buf)
         }
     }
 }

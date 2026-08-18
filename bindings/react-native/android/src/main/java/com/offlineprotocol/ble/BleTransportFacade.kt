@@ -471,11 +471,6 @@ class BleTransportFacade(
                     this@BleTransportFacade.refreshSelfMetrics()
                 override fun maybeHandleRebalance(trigger: String) =
                     this@BleTransportFacade.maybeHandleRebalance(trigger)
-                override fun learnRouteFromMessage(
-                    messageJson: String,
-                    neighborId: String,
-                    neighborAddress: String?,
-                ) = this@BleTransportFacade.learnRouteFromMessage(messageJson, neighborId, neighborAddress)
                 override fun drainAndSendFragments() =
                     this@BleTransportFacade.drainAndSendFragments()
                 override fun onWriteCompleted(address: String) =
@@ -863,11 +858,10 @@ class BleTransportFacade(
         }
     }
     
-    // Gradient routing cleanup
-    private val ROUTING_CLEANUP_INTERVAL_MS = 30_000L
-    private val routingCleanupRunnable = object : Runnable {
+    // Periodic inbound-fragment sweep.
+    private val FRAGMENT_SWEEP_INTERVAL_MS = 30_000L
+    private val fragmentSweepRunnable = object : Runnable {
         override fun run() {
-            protocol.cleanupExpiredRoutes()
             // Evict stale inbound pending fragments independent of traffic.
             // Without this, a peer that connects, queues fragments while its
             // device ID is being resolved, then goes silent will leak those
@@ -875,7 +869,7 @@ class BleTransportFacade(
             // sweep inside handleReceivedData.
             pendingInbound.evictExpired()
             if (state == TransportState.RUNNING) {
-                bleHandler.postDelayed(this, ROUTING_CLEANUP_INTERVAL_MS)
+                bleHandler.postDelayed(this, FRAGMENT_SWEEP_INTERVAL_MS)
             }
         }
     }
@@ -1274,8 +1268,8 @@ class BleTransportFacade(
             // Start fragment polling
             bleHandler.post(fragmentPollingRunnable)
             
-            // Start routing cleanup
-            bleHandler.postDelayed(routingCleanupRunnable, ROUTING_CLEANUP_INTERVAL_MS)
+            // Start the inbound-fragment sweep
+            bleHandler.postDelayed(fragmentSweepRunnable, FRAGMENT_SWEEP_INTERVAL_MS)
             
             updateState(TransportState.RUNNING)
             if (isScanning) {
@@ -1340,8 +1334,8 @@ class BleTransportFacade(
         // or, at the ceiling, not at all.
         backpressureRetry.cancel()
 
-        // Stop routing cleanup
-        bleHandler.removeCallbacks(routingCleanupRunnable)
+        // Stop the inbound-fragment sweep
+        bleHandler.removeCallbacks(fragmentSweepRunnable)
 
         // Stop scanning
         stopScanning("stop")
@@ -1436,7 +1430,7 @@ class BleTransportFacade(
         // For Android background mode
         stopScanning("pause")
         bleHandler.removeCallbacks(fragmentPollingRunnable)
-        bleHandler.removeCallbacks(routingCleanupRunnable)
+        bleHandler.removeCallbacks(fragmentSweepRunnable)
     }
     
     override fun resume() {
@@ -1450,7 +1444,7 @@ class BleTransportFacade(
         if (state == TransportState.RUNNING) {
             startScanning("resume")
             bleHandler.post(fragmentPollingRunnable)
-            bleHandler.postDelayed(routingCleanupRunnable, ROUTING_CLEANUP_INTERVAL_MS)
+            bleHandler.postDelayed(fragmentSweepRunnable, FRAGMENT_SWEEP_INTERVAL_MS)
         }
     }
     
@@ -2910,9 +2904,6 @@ class BleTransportFacade(
             meshController.registerDisconnection(peerId)
             refreshSelfMetrics()
 
-            // Clean up routes through this neighbor
-            protocol.removeNeighborRoutes(peerId)
-
             try {
                 protocol.blePeerLost(peerId)
             } catch (e: Exception) {
@@ -3637,7 +3628,6 @@ class BleTransportFacade(
                         "senderId" to resolvedSenderId,
                         "messageContent" to completedMessage
                     ))
-                    learnRouteFromMessage(completedMessage, resolvedSenderId, address)
                     completedMessage = protocol.receiveMessage()
                 }
             } catch (e: Exception) {
@@ -3680,34 +3670,6 @@ class BleTransportFacade(
         // Map RSSI from [-100, -20] to [0.0, 1.0]
         val clamped = rssi.coerceIn(-100, -20)
         return (clamped + 100).toFloat() / 80f
-    }
-    
-    /** Learns a route from a received message */
-    private fun learnRouteFromMessage(messageJson: String, neighborId: String, neighborAddress: String?) {
-        try {
-            val json = org.json.JSONObject(messageJson)
-            val sender = json.optNullableString("sender") ?: return
-            val hopCount = json.optInt("hop_count", 0)
-            
-            // Don't learn route to ourselves
-            if (sender == deviceId) return
-            
-            // Compute quality from RSSI
-            val rssi = neighborAddress?.let { lastSeenRssi[it]?.toInt() }
-            val quality = computeRouteQuality(rssi)
-            
-            // Learn the route: sender can be reached through neighborId (sequence_number from message or 0)
-            val seqNum = json.optInt("sequence_number", 0).coerceAtLeast(0).toUInt()
-            protocol.learnRoute(
-                sender,
-                neighborId,
-                minOf(255, hopCount + 1).toUByte(),
-                quality,
-                seqNum
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to learn route from message: ${e.message}")
-        }
     }
     
     // MARK: - Adaptive Scan Methods
@@ -4164,7 +4126,6 @@ class BleTransportFacade(
         if (!isCleanDisconnect) {
             lastSeenRssi.remove(address)
             connections.deviceIdForAddress(address)?.let { peerId ->
-                protocol.removeNeighborRoutes(peerId)
                 try {
                     protocol.blePeerLost(peerId)
                 } catch (e: Exception) {

@@ -5,7 +5,7 @@ use super::{
     internal_prefixes, lock_shared_state, ChunkOutcome, InternalMessageResult, OfflineProtocol,
     PendingMediaMetadataEntry, ProtocolState, RichPayloadV1, CRITICAL_RELAY_BATTERY_LEVEL,
 };
-use crate::constants::{ACK_FOR_KEY, RELAY_LEARNED_ROUTE_QUALITY};
+use crate::constants::ACK_FOR_KEY;
 use crate::events::{Event, SecurityWarningCode};
 use crate::file_transfer::FileChunk;
 use crate::media_envelope::{decode_media_envelope, is_media_envelope, MediaChunkPlaintext};
@@ -435,19 +435,6 @@ impl OfflineProtocol {
         {
             return;
         }
-
-        // Learn the route back toward the sender. The next hop is the neighbor
-        // that handed us the frame, not the sender itself: for anything past
-        // the first hop the sender is several links away and naming it here
-        // would record a next hop we cannot address. Frames from carriers that
-        // do not identify links fall back to the sender, which is correct at
-        // one hop and no worse than before beyond it.
-        let learned_next_hop = arrival_peer.unwrap_or_else(|| message.sender.as_str());
-        self.path_selector.learn_route_from_message(
-            message,
-            learned_next_hop,
-            RELAY_LEARNED_ROUTE_QUALITY,
-        );
 
         // Carrying traffic for others costs this device's radio and battery,
         // so it stays a local decision.

@@ -92,7 +92,7 @@ offline-protocol-reliability   AckManager, RetryQueue, Deduplicator, AckOptimize
 offline-protocol-mls           MlsManager, MlsStorage trait, session & group encryption
 offline-protocol-services      MeshServices: registry, discovery (gossip), request/response
     |
-offline-protocol-router        DORS transport selector, RelayManager, PathSelector, gossip
+offline-protocol-router        DORS transport selector, relay role vocabulary
     |
 offline-protocol               Engine: OfflineProtocol, ProtocolConfig, TransportManager, events
     |

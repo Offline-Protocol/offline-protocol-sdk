@@ -85,7 +85,6 @@ pub struct ProtocolConfig {
     pub transport: TransportConfig, // Transport settings
     pub dors: DorsConfig,          // DORS settings
     pub relay: RelayConfig,        // Relay settings
-    pub path: PathConfig,          // Path selection settings
     pub reliability: ReliabilityConfig, // Reliability settings
     pub encryption: EncryptionConfig, // Auto-encryption (MLS) settings
     pub initial_ttl: u8,           // Initial TTL (default: 8)

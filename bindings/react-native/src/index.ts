@@ -210,10 +210,6 @@ interface NativeConfig {
     retry?: RetryConfig;
     dedup?: DedupConfig;
   };
-  path?: {
-    forwardToTopK?: number;
-    maxCongestionLevel?: number;
-  };
 }
 
 function sanitize<T extends object>(value: T | undefined | null): T | undefined {
@@ -531,16 +527,6 @@ export class OfflineProtocol {
 
     if (reliabilityConfig) {
       nativeConfig.reliability = reliabilityConfig;
-    }
-
-    if (this.config.path) {
-      const pathConfig = sanitize({
-        forwardToTopK: this.config.path.forwardToTopK,
-        maxCongestionLevel: this.config.path.maxCongestionLevel,
-      });
-      if (pathConfig) {
-        nativeConfig.path = pathConfig;
-      }
     }
 
     console.log(
@@ -2304,126 +2290,6 @@ export class OfflineProtocol {
    */
   async getRetryQueueSize(): Promise<number> {
     return await OfflineProtocolNativeModule.getRetryQueueSize();
-  }
-
-  // ============================================================================
-  // GRADIENT ROUTING
-  // ============================================================================
-
-  /**
-   * Learns a route from an incoming message.
-   * Call this when receiving a message from a neighbor to record that
-   * the neighbor can reach the message's original sender.
-   *
-   * @param destination - Destination user ID
-   * @param nextHop - Neighbor ID that delivered the message
-   * @param hopCount - Number of hops to reach destination
-   * @param quality - Route quality score (0.0 - 1.0)
-   * @param sequenceNumber - DSDV-style sequence number; pass 0 when the message does not carry one
-   */
-  async learnRoute(
-    destination: string,
-    nextHop: string,
-    hopCount: number,
-    quality: number,
-    sequenceNumber: number = 0
-  ): Promise<void> {
-    // Clamp to match Android (coerceAtLeast(0)); avoids negative wrapping to uint32 (e.g. -1 → 2^32-1).
-    const clampedSequenceNumber = Math.max(0, sequenceNumber);
-    return await OfflineProtocolNativeModule.learnRoute(
-      destination,
-      nextHop,
-      hopCount,
-      quality,
-      clampedSequenceNumber
-    );
-  }
-
-  /**
-   * Gets the best (highest quality) route to a destination.
-   *
-   * @param destination - Destination user ID
-   * @returns Best route entry or null if no route exists
-   */
-  async getBestRoute(destination: string): Promise<{
-    nextHop: string;
-    hopCount: number;
-    quality: number;
-    lastSeenMs: number;
-  } | null> {
-    return await OfflineProtocolNativeModule.getBestRoute(destination);
-  }
-
-  /**
-   * Gets all valid (non-expired) routes to a destination.
-   *
-   * @param destination - Destination user ID
-   * @returns Array of route entries
-   */
-  async getAllRoutes(destination: string): Promise<
-    Array<{
-      nextHop: string;
-      hopCount: number;
-      quality: number;
-      lastSeenMs: number;
-    }>
-  > {
-    return await OfflineProtocolNativeModule.getAllRoutes(destination);
-  }
-
-  /**
-   * Checks if a route exists to the destination.
-   *
-   * @param destination - Destination user ID
-   * @returns True if at least one route exists
-   */
-  async hasRoute(destination: string): Promise<boolean> {
-    return await OfflineProtocolNativeModule.hasRoute(destination);
-  }
-
-  /**
-   * Removes all routes through a neighbor.
-   * Call this when a neighbor disconnects to clean up stale routes.
-   *
-   * @param neighborId - Neighbor ID to remove routes for
-   */
-  async removeNeighborRoutes(neighborId: string): Promise<void> {
-    return await OfflineProtocolNativeModule.removeNeighborRoutes(neighborId);
-  }
-
-  /**
-   * Cleans up expired routes.
-   * Call this periodically (e.g., every 30 seconds) for maintenance.
-   */
-  async cleanupExpiredRoutes(): Promise<void> {
-    return await OfflineProtocolNativeModule.cleanupExpiredRoutes();
-  }
-
-  /**
-   * Gets routing table statistics for monitoring.
-   *
-   * @returns Routing statistics
-   */
-  async getRoutingStats(): Promise<{
-    destinationCount: number;
-    routeCount: number;
-  }> {
-    return await OfflineProtocolNativeModule.getRoutingStats();
-  }
-
-  /**
-   * Updates the gradient routing configuration.
-   *
-   * @param config - Routing configuration
-   */
-  async updateRoutingConfig(config: {
-    maxRoutesPerDestination?: number;
-    routeTtlSecs?: number;
-    maxRoutingTableSize?: number;
-  }): Promise<void> {
-    return await OfflineProtocolNativeModule.updateRoutingConfig(
-      JSON.stringify(config)
-    );
   }
 
   // ============================================================================

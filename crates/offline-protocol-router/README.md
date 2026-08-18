@@ -5,8 +5,7 @@ Routing layer for the [Offline Protocol SDK](https://github.com/Offline-Protocol
 Provides:
 
 - **DORS** (Dynamic Offline Relay Switch) — multi-factor transport scoring (signal strength, congestion, bandwidth, battery, reliability, capacity) with hysteresis, cooldown, and a stability window to prevent transport flapping
-- `RelayManager` and `PathSelector` — relay coordination and path choice for multi-hop delivery
-- Gossip-based routing state exchange
+- `RelayConfig` / `RelayPriority` / `RelayRole` — the vocabulary for whether this device forwards for others; the standing itself is decided by the engine's forwarding governor from traffic actually carried
 
 This crate is an internal layer of the SDK. Most Rust consumers want the main [`offline-protocol`](https://crates.io/crates/offline-protocol) crate instead — see the [DORS deep dive](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/dors.md) and [DORS configuration guide](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/dors-configuration.md).
 

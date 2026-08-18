@@ -488,19 +488,6 @@ Connection-request failure contract: recipient offline emits `connection_request
 
 ---
 
-### 11.8 Gradient Routing
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| **learnRoute** | `learnRoute(destination, nextHop, hopCount, quality, sequenceNumber?): Promise<void>` | Records a route from an incoming message. `sequenceNumber` is DSDV-style (default 0); pass 0 when the message does not carry one. Negative values are clamped to 0. |
-| **getBestRoute** | `getBestRoute(destination): Promise<{nextHop, hopCount, quality, lastSeenMs} \| null>` | Best route to destination. |
-| **getAllRoutes** | `getAllRoutes(destination): Promise<Array<{...}>>` | All valid routes to destination. |
-| **hasRoute** | `hasRoute(destination): Promise<boolean>` | Whether any route exists. |
-| **removeNeighborRoutes** | `removeNeighborRoutes(neighborId): Promise<void>` | Removes routes through a neighbor. |
-| **cleanupExpiredRoutes** | `cleanupExpiredRoutes(): Promise<void>` | Removes expired routes. |
-| **getRoutingStats** | `getRoutingStats(): Promise<{destinationCount, routeCount}>` | Routing table stats. |
-| **updateRoutingConfig** | `updateRoutingConfig(config): Promise<void>` | Updates routing config (maxRoutesPerDestination, routeTtlSecs, maxRoutingTableSize). |
-
 ---
 
 ### 11.9 File Transfer

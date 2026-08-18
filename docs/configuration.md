@@ -21,7 +21,6 @@ macOS, Linux, and Windows can use the Python binding's snake_case
   encryption?: EncryptionConfig,  // NEW: Auto-encryption settings
   dors?: DorsConfig,
   relay?: RelayConfig,
-  path?: PathConfig,
   reliability?: ReliabilityConfig,
   network?: NetworkConfig,
 }

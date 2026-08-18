@@ -95,7 +95,8 @@ impl Default for DorsConfig {
 }
 
 /// Scores within this delta of the *best* score are treated as a tie for selection,
-/// and the tie-break order (Internet > WiFiDirect > BLE > Reticulum) is then used.
+/// and the tie-break order (Internet > WiFiDirect > BLE > Reticulum > Nostr) is
+/// then used.
 const TIE_EPSILON: f32 = 0.01;
 
 /// No-RSSI-data default for radio transports (not transport-specific, just means
@@ -134,7 +135,7 @@ pub fn display_routing_score(raw_total: f32) -> f32 {
 }
 
 /// Tie-break priority for transport selection when scores are equal or within TIE_EPSILON.
-/// Lower value = preferred. Order: Internet, WiFiDirect, BLE, Reticulum.
+/// Lower value = preferred. Order: Internet, WiFiDirect, BLE, Reticulum, Nostr.
 ///
 /// Kept as a standalone function (rather than going through [`TransportScoringProfile`])
 /// because tie-breaking is called per-element inside `min_by_key` / `sort_by`, and

@@ -52,8 +52,9 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Key Components**:
 - `TransportSelector` - DORS algorithm with multi-factor scoring
-- `RelayManager` - Promotion/demotion with battery awareness
-- `PathSelector` - Optimal relay selection
+- `RelayConfig` / `RelayRole` - Whether this device forwards for others; the
+  standing is decided by the engine's forwarding governor from traffic actually
+  carried, not predicted from thresholds
 
 **Algorithms**:
 - Transport scoring: Signal + Proximity + Bandwidth + Congestion + Energy + Reliability + Load

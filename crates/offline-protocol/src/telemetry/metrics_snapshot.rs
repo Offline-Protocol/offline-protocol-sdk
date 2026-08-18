@@ -33,7 +33,9 @@ pub struct MetricsFrame {
     pub neighbor_count: usize,
     /// Whether this node is currently acting as a relay on the mesh.
     ///
-    /// Reflects `RelayManager::current_role()` at the moment of emission.
+    /// Reflects `MeshRelayGovernor::is_active_relay()` at the moment of
+    /// emission: the standing is derived from traffic this device actually
+    /// carried, never predicted from thresholds.
     /// Named deliberately — this is a local-role flag, not a peer count.
     /// A future record with an explicit per-peer-relay registry may add a
     /// `relay_peer_count` field alongside; those semantics are orthogonal.

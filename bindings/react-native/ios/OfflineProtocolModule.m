@@ -261,41 +261,6 @@ RCT_EXTERN_METHOD(getPendingAckCount:(RCTPromiseResolveBlock)resolve
 RCT_EXTERN_METHOD(getRetryQueueSize:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
-// Gradient Routing
-RCT_EXTERN_METHOD(learnRoute:(NSString *)destination
-                  nextHop:(NSString *)nextHop
-                  hopCount:(nonnull NSNumber *)hopCount
-                  quality:(nonnull NSNumber *)quality
-                  sequenceNumber:(nonnull NSNumber *)sequenceNumber
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(getBestRoute:(NSString *)destination
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(getAllRoutes:(NSString *)destination
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(hasRoute:(NSString *)destination
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(removeNeighborRoutes:(NSString *)neighborId
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(cleanupExpiredRoutes:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(getRoutingStats:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(updateRoutingConfig:(NSString *)configJson
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
 // DORS Decision Support
 RCT_EXTERN_METHOD(shouldEscalateToWifi:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)

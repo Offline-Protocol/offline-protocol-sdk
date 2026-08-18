@@ -559,8 +559,6 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 40871:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cleanup_expired_routes() != 23680:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 15087:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite() != 60286:
@@ -581,11 +579,7 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports() != 48673:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_all_routes() != 28435:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level() != 41959:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_best_route() != 8254:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users() != 56869:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -627,8 +621,6 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size() != 33113:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_routing_stats() != 18846:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state() != 15724:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology() != 59022:
@@ -640,8 +632,6 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness() != 53848:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 498:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_route() != 49895:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 23277:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -678,8 +668,6 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay() != 32583:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked() != 33607:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_learn_route() != 46160:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group() != 42839:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -762,8 +750,6 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock() != 26544:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group() != 50629:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_neighbor_routes() != 3540:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport() != 14605:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -848,8 +834,6 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config() != 11465:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config() != 45701:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_routing_config() != 13854:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics() != 794:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1486,11 +1470,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer.restype = None
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cleanup_expired_routes.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cleanup_expired_routes.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -1554,23 +1533,11 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_active_t
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_active_transports.restype = _UniffiRustBuffer
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_all_routes.argtypes = (
-    ctypes.c_uint64,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_all_routes.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_battery_level.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_battery_level.restype = _UniffiRustBuffer
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_best_route.argtypes = (
-    ctypes.c_uint64,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_best_route.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_blocked_users.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -1677,11 +1644,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_retry_qu
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_retry_queue_size.restype = ctypes.c_uint64
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_routing_stats.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_routing_stats.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_state.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -1716,12 +1678,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package.restype = ctypes.c_int8
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_route.argtypes = (
-    ctypes.c_uint64,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_route.restype = ctypes.c_int8
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls.argtypes = (
     ctypes.c_uint64,
     ctypes.c_uint64,
@@ -1833,16 +1789,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_user_bloc
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_user_blocked.restype = ctypes.c_int8
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_learn_route.argtypes = (
-    ctypes.c_uint64,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-    ctypes.c_uint8,
-    ctypes.c_float,
-    ctypes.c_uint32,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_learn_route.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_leave_group.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2087,12 +2033,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_from_
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_from_group.restype = None
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_neighbor_routes.argtypes = (
-    ctypes.c_uint64,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_neighbor_routes.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_transport.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2369,12 +2309,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_retry
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_retry_config.restype = None
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_routing_config.argtypes = (
-    ctypes.c_uint64,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_routing_config.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_transport_metrics.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2498,9 +2432,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cleanup_expired_routes.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cleanup_expired_routes.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group.restype = ctypes.c_uint16
@@ -2531,15 +2462,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forwar
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_all_routes.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_all_routes.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_best_route.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_best_route.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users.restype = ctypes.c_uint16
@@ -2600,9 +2525,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_re
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_routing_stats.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_routing_stats.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state.restype = ctypes.c_uint16
@@ -2621,9 +2543,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_route.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_route.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls.restype = ctypes.c_uint16
@@ -2678,9 +2597,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_rel
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_learn_route.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_learn_route.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group.restype = ctypes.c_uint16
@@ -2804,9 +2720,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_releas
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_neighbor_routes.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_neighbor_routes.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport.restype = ctypes.c_uint16
@@ -2933,9 +2846,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_routing_config.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_routing_config.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics.restype = ctypes.c_uint16
@@ -3848,48 +3758,6 @@ class _UniffiFfiConverterTypeForwardInfo(_UniffiConverterRustBuffer):
         _UniffiFfiConverterString.write(value.original_message_id, buf)
         _UniffiFfiConverterInt64.write(value.original_timestamp, buf)
         _UniffiFfiConverterUInt32.write(value.forward_count, buf)
-
-@dataclass
-class GradientRoutingConfig:
-    def __init__(self, *, max_routes_per_destination:int, route_ttl_secs:int, max_routing_table_size:int):
-        self.max_routes_per_destination = max_routes_per_destination
-        self.route_ttl_secs = route_ttl_secs
-        self.max_routing_table_size = max_routing_table_size
-        
-        
-
-    
-    def __str__(self):
-        return "GradientRoutingConfig(max_routes_per_destination={}, route_ttl_secs={}, max_routing_table_size={})".format(self.max_routes_per_destination, self.route_ttl_secs, self.max_routing_table_size)
-    def __eq__(self, other):
-        if self.max_routes_per_destination != other.max_routes_per_destination:
-            return False
-        if self.route_ttl_secs != other.route_ttl_secs:
-            return False
-        if self.max_routing_table_size != other.max_routing_table_size:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeGradientRoutingConfig(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return GradientRoutingConfig(
-            max_routes_per_destination=_UniffiFfiConverterUInt32.read(buf),
-            route_ttl_secs=_UniffiFfiConverterUInt64.read(buf),
-            max_routing_table_size=_UniffiFfiConverterUInt32.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterUInt32.check_lower(value.max_routes_per_destination)
-        _UniffiFfiConverterUInt64.check_lower(value.route_ttl_secs)
-        _UniffiFfiConverterUInt32.check_lower(value.max_routing_table_size)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterUInt32.write(value.max_routes_per_destination, buf)
-        _UniffiFfiConverterUInt64.write(value.route_ttl_secs, buf)
-        _UniffiFfiConverterUInt32.write(value.max_routing_table_size, buf)
 
 class _UniffiFfiConverterSequenceString(_UniffiConverterRustBuffer):
     @classmethod
@@ -6026,42 +5894,6 @@ class _UniffiFfiConverterTypeNostrQuery(_UniffiConverterRustBuffer):
         _UniffiFfiConverterString.write(value.req_json, buf)
 
 @dataclass
-class PathConfig:
-    def __init__(self, *, forward_to_top_k:int, max_congestion_level:int):
-        self.forward_to_top_k = forward_to_top_k
-        self.max_congestion_level = max_congestion_level
-        
-        
-
-    
-    def __str__(self):
-        return "PathConfig(forward_to_top_k={}, max_congestion_level={})".format(self.forward_to_top_k, self.max_congestion_level)
-    def __eq__(self, other):
-        if self.forward_to_top_k != other.forward_to_top_k:
-            return False
-        if self.max_congestion_level != other.max_congestion_level:
-            return False
-        return True
-
-class _UniffiFfiConverterTypePathConfig(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return PathConfig(
-            forward_to_top_k=_UniffiFfiConverterUInt32.read(buf),
-            max_congestion_level=_UniffiFfiConverterUInt32.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterUInt32.check_lower(value.forward_to_top_k)
-        _UniffiFfiConverterUInt32.check_lower(value.max_congestion_level)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterUInt32.write(value.forward_to_top_k, buf)
-        _UniffiFfiConverterUInt32.write(value.max_congestion_level, buf)
-
-@dataclass
 class PeerDevice:
     def __init__(self, *, peer_id:str, rssi:int, last_seen_ms:int):
         self.peer_id = peer_id
@@ -6623,54 +6455,6 @@ class _UniffiFfiConverterTypeReticulumMessage(_UniffiConverterRustBuffer):
         _UniffiFfiConverterSequenceUInt8.write(value.data, buf)
         _UniffiFfiConverterOptionalString.write(value.reply_to_msg, buf)
 
-@dataclass
-class RouteEntry:
-    def __init__(self, *, next_hop:str, hop_count:int, quality:float, last_seen_ms:int):
-        self.next_hop = next_hop
-        self.hop_count = hop_count
-        self.quality = quality
-        self.last_seen_ms = last_seen_ms
-        
-        
-
-    
-    def __str__(self):
-        return "RouteEntry(next_hop={}, hop_count={}, quality={}, last_seen_ms={})".format(self.next_hop, self.hop_count, self.quality, self.last_seen_ms)
-    def __eq__(self, other):
-        if self.next_hop != other.next_hop:
-            return False
-        if self.hop_count != other.hop_count:
-            return False
-        if self.quality != other.quality:
-            return False
-        if self.last_seen_ms != other.last_seen_ms:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeRouteEntry(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return RouteEntry(
-            next_hop=_UniffiFfiConverterString.read(buf),
-            hop_count=_UniffiFfiConverterUInt8.read(buf),
-            quality=_UniffiFfiConverterFloat32.read(buf),
-            last_seen_ms=_UniffiFfiConverterUInt64.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterString.check_lower(value.next_hop)
-        _UniffiFfiConverterUInt8.check_lower(value.hop_count)
-        _UniffiFfiConverterFloat32.check_lower(value.quality)
-        _UniffiFfiConverterUInt64.check_lower(value.last_seen_ms)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterString.write(value.next_hop, buf)
-        _UniffiFfiConverterUInt8.write(value.hop_count, buf)
-        _UniffiFfiConverterFloat32.write(value.quality, buf)
-        _UniffiFfiConverterUInt64.write(value.last_seen_ms, buf)
-
 
 
 
@@ -7046,42 +6830,6 @@ class _UniffiFfiConverterTypeRoutingDecision(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalFloat32.write(value.winning_score, buf)
         _UniffiFfiConverterOptionalTypeRoutingReasonCode.write(value.reason_code, buf)
         _UniffiFfiConverterSequenceTypeRoutingScoreEntry.write(value.scores, buf)
-
-@dataclass
-class RoutingStats:
-    def __init__(self, *, destination_count:int, route_count:int):
-        self.destination_count = destination_count
-        self.route_count = route_count
-        
-        
-
-    
-    def __str__(self):
-        return "RoutingStats(destination_count={}, route_count={})".format(self.destination_count, self.route_count)
-    def __eq__(self, other):
-        if self.destination_count != other.destination_count:
-            return False
-        if self.route_count != other.route_count:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeRoutingStats(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return RoutingStats(
-            destination_count=_UniffiFfiConverterUInt32.read(buf),
-            route_count=_UniffiFfiConverterUInt32.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterUInt32.check_lower(value.destination_count)
-        _UniffiFfiConverterUInt32.check_lower(value.route_count)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterUInt32.write(value.destination_count, buf)
-        _UniffiFfiConverterUInt32.write(value.route_count, buf)
 
 
 
@@ -8567,54 +8315,6 @@ class _UniffiFfiConverterOptionalTypeMlsWelcomeMessage(_UniffiConverterRustBuffe
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
-class _UniffiFfiConverterSequenceTypeRouteEntry(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        for item in value:
-            _UniffiFfiConverterTypeRouteEntry.check_lower(item)
-
-    @classmethod
-    def write(cls, value, buf):
-        items = len(value)
-        buf.write_i32(items)
-        for item in value:
-            _UniffiFfiConverterTypeRouteEntry.write(item, buf)
-
-    @classmethod
-    def read(cls, buf):
-        count = buf.read_i32()
-        if count < 0:
-            raise InternalError("Unexpected negative sequence length")
-
-        return [
-            _UniffiFfiConverterTypeRouteEntry.read(buf) for i in range(count)
-        ]
-
-class _UniffiFfiConverterOptionalTypeRouteEntry(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterTypeRouteEntry.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterTypeRouteEntry.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterTypeRouteEntry.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
 class _UniffiFfiConverterOptionalTypeFileProgress(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
@@ -9615,8 +9315,6 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def cancel_file_transfer(self, file_id: str) -> None:
         raise NotImplementedError
-    def cleanup_expired_routes(self, ) -> None:
-        raise NotImplementedError
     def create_group(self, group_name: str) -> MlsGroupInfo:
         raise NotImplementedError
     def create_invite(self, petname: typing.Optional[str],sign: bool) -> str:
@@ -9637,11 +9335,7 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def get_active_transports(self, ) -> typing.List[str]:
         raise NotImplementedError
-    def get_all_routes(self, destination: str) -> typing.List[RouteEntry]:
-        raise NotImplementedError
     def get_battery_level(self, ) -> typing.Optional[int]:
-        raise NotImplementedError
-    def get_best_route(self, destination: str) -> typing.Optional[RouteEntry]:
         raise NotImplementedError
     def get_blocked_users(self, ) -> typing.List[str]:
         raise NotImplementedError
@@ -9683,8 +9377,6 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def get_retry_queue_size(self, ) -> int:
         raise NotImplementedError
-    def get_routing_stats(self, ) -> RoutingStats:
-        raise NotImplementedError
     def get_state(self, ) -> ProtocolState:
         raise NotImplementedError
     def get_topology(self, ) -> NetworkTopology:
@@ -9696,8 +9388,6 @@ class OfflineProtocolProtocol(typing.Protocol):
     def group_rich_readiness(self, group_id: str) -> GroupRichReadiness:
         raise NotImplementedError
     def has_pending_key_package(self, peer_id: str) -> bool:
-        raise NotImplementedError
-    def has_route(self, destination: str) -> bool:
         raise NotImplementedError
     def initialize_mls(self, secure_storage: MlsStorageProvider,protocol_state_storage: ProtocolStateStorageProvider) -> None:
         raise NotImplementedError
@@ -9734,8 +9424,6 @@ class OfflineProtocolProtocol(typing.Protocol):
     def is_relay(self, ) -> bool:
         raise NotImplementedError
     def is_user_blocked(self, user_id: str) -> bool:
-        raise NotImplementedError
-    def learn_route(self, destination: str,next_hop: str,hop_count: int,quality: float,sequence_number: int) -> None:
         raise NotImplementedError
     def leave_group(self, group_id: str) -> None:
         raise NotImplementedError
@@ -9818,8 +9506,6 @@ class OfflineProtocolProtocol(typing.Protocol):
     def release_transport_lock(self, ) -> None:
         raise NotImplementedError
     def remove_from_group(self, group_id: str,member_id: str) -> None:
-        raise NotImplementedError
-    def remove_neighbor_routes(self, neighbor_id: str) -> None:
         raise NotImplementedError
     def remove_transport(self, transport_type: TransportType) -> None:
         raise NotImplementedError
@@ -9904,8 +9590,6 @@ class OfflineProtocolProtocol(typing.Protocol):
     def update_relay_config(self, config: RelayConfig) -> None:
         raise NotImplementedError
     def update_retry_config(self, config: RetryConfig) -> None:
-        raise NotImplementedError
-    def update_routing_config(self, config: GradientRoutingConfig) -> None:
         raise NotImplementedError
     def update_transport_metrics(self, transport_type: TransportType,metrics: TransportMetrics) -> None:
         raise NotImplementedError
@@ -10194,18 +9878,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
-    def cleanup_expired_routes(self, ) -> None:
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-        )
-        _uniffi_lift_return = lambda val: None
-        _uniffi_error_converter = None
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cleanup_expired_routes,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
     def create_group(self, group_name: str) -> MlsGroupInfo:
         
         _UniffiFfiConverterString.check_lower(group_name)
@@ -10365,21 +10037,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
-    def get_all_routes(self, destination: str) -> typing.List[RouteEntry]:
-        
-        _UniffiFfiConverterString.check_lower(destination)
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-            _UniffiFfiConverterString.lower(destination),
-        )
-        _uniffi_lift_return = _UniffiFfiConverterSequenceTypeRouteEntry.lift
-        _uniffi_error_converter = None
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_all_routes,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
     def get_battery_level(self, ) -> typing.Optional[int]:
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -10389,21 +10046,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_battery_level,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
-    def get_best_route(self, destination: str) -> typing.Optional[RouteEntry]:
-        
-        _UniffiFfiConverterString.check_lower(destination)
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-            _UniffiFfiConverterString.lower(destination),
-        )
-        _uniffi_lift_return = _UniffiFfiConverterOptionalTypeRouteEntry.lift
-        _uniffi_error_converter = None
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_best_route,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -10665,18 +10307,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
-    def get_routing_stats(self, ) -> RoutingStats:
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-        )
-        _uniffi_lift_return = _UniffiFfiConverterTypeRoutingStats.lift
-        _uniffi_error_converter = None
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_routing_stats,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
     def get_state(self, ) -> ProtocolState:
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -10758,21 +10388,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
-    def has_route(self, destination: str) -> bool:
-        
-        _UniffiFfiConverterString.check_lower(destination)
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-            _UniffiFfiConverterString.lower(destination),
-        )
-        _uniffi_lift_return = _UniffiFfiConverterBoolean.lift
-        _uniffi_error_converter = None
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_route,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -11052,33 +10667,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_user_blocked,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
-    def learn_route(self, destination: str,next_hop: str,hop_count: int,quality: float,sequence_number: int) -> None:
-        
-        _UniffiFfiConverterString.check_lower(destination)
-        
-        _UniffiFfiConverterString.check_lower(next_hop)
-        
-        _UniffiFfiConverterUInt8.check_lower(hop_count)
-        
-        _UniffiFfiConverterFloat32.check_lower(quality)
-        
-        _UniffiFfiConverterUInt32.check_lower(sequence_number)
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-            _UniffiFfiConverterString.lower(destination),
-            _UniffiFfiConverterString.lower(next_hop),
-            _UniffiFfiConverterUInt8.lower(hop_count),
-            _UniffiFfiConverterFloat32.lower(quality),
-            _UniffiFfiConverterUInt32.lower(sequence_number),
-        )
-        _uniffi_lift_return = lambda val: None
-        _uniffi_error_converter = None
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_learn_route,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -11688,21 +11276,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_from_group,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
-    def remove_neighbor_routes(self, neighbor_id: str) -> None:
-        
-        _UniffiFfiConverterString.check_lower(neighbor_id)
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-            _UniffiFfiConverterString.lower(neighbor_id),
-        )
-        _uniffi_lift_return = lambda val: None
-        _uniffi_error_converter = None
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_neighbor_routes,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -12408,21 +11981,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
-    def update_routing_config(self, config: GradientRoutingConfig) -> None:
-        
-        _UniffiFfiConverterTypeGradientRoutingConfig.check_lower(config)
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-            _UniffiFfiConverterTypeGradientRoutingConfig.lower(config),
-        )
-        _uniffi_lift_return = lambda val: None
-        _uniffi_error_converter = None
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_routing_config,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
     def update_transport_metrics(self, transport_type: TransportType,metrics: TransportMetrics) -> None:
         
         _UniffiFfiConverterTypeTransportType.check_lower(transport_type)
@@ -12624,7 +12182,6 @@ __all__ = [
     "EncryptionConfig",
     "FileProgress",
     "ForwardInfo",
-    "GradientRoutingConfig",
     "GroupRichReadiness",
     "InternetMessage",
     "InviteInfo",
@@ -12649,7 +12206,6 @@ __all__ = [
     "NetworkTopology",
     "NostrMessage",
     "NostrQuery",
-    "PathConfig",
     "PeerDevice",
     "ProtocolConfig",
     "ProtocolLockDiagnostics",
@@ -12657,10 +12213,8 @@ __all__ = [
     "RetryConfig",
     "ReliabilityConfig",
     "ReticulumMessage",
-    "RouteEntry",
     "RoutingScoreEntry",
     "RoutingDecision",
-    "RoutingStats",
     "SendMessageOptions",
     "TelemetryConfig",
     "TransportConfig",
