@@ -1494,6 +1494,10 @@ impl OfflineProtocol {
         // Same for the Nostr receive watermark: an un-flushed tail costs the
         // next launch a wider replay window.
         self.flush_nostr_watermark();
+        // Answer any lookup still in flight while the transport is still up to
+        // take the cancellations. Nothing pumps relays or sweeps deadlines once
+        // stopped, so a resolution left here is an event that never comes.
+        self.flush_username_resolutions_for_stop();
 
         // Clear event callbacks to release shared_state references.
         // NOTE: the routing-decision callback is deliberately NOT cleared

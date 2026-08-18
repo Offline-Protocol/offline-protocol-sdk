@@ -2071,6 +2071,58 @@ pub struct DorsConfig {
     pub relay_optimal_connection_count: u8,
 }
 
+/// The one core-to-FFI mapping for this section.
+///
+/// Destructured exhaustively and without a rest pattern, so a field added to
+/// the core config fails this conversion to compile rather than going missing
+/// from what every binding reads back.
+impl From<CoreDorsConfig> for DorsConfig {
+    fn from(core: CoreDorsConfig) -> Self {
+        let CoreDorsConfig {
+            prefer_online,
+            switch_hysteresis,
+            switch_cooldown_secs,
+            ble_to_wifi_retry_threshold,
+            min_success_rate_before_escalation,
+            min_ble_samples_before_success_rate_escalation,
+            rssi_switch_threshold,
+            congestion_queue_threshold,
+            stability_window_secs,
+            poor_signal_duration_secs,
+            ttl_escalation_threshold,
+            congestion_duration_secs,
+            ttl_escalation_hold_secs,
+            history_window_size,
+            queue_recovery_ratio,
+            low_battery_threshold,
+            relay_min_battery_level,
+            relay_optimal_connection_count,
+        } = core;
+
+        Self {
+            prefer_online,
+            switch_hysteresis,
+            switch_cooldown_secs,
+            ble_to_wifi_retry_threshold,
+            min_success_rate_before_escalation,
+            min_ble_samples_before_success_rate_escalation:
+                min_ble_samples_before_success_rate_escalation as u64,
+            rssi_switch_threshold,
+            congestion_queue_threshold: congestion_queue_threshold as u64,
+            stability_window_secs,
+            poor_signal_duration_secs,
+            ttl_escalation_threshold,
+            congestion_duration_secs,
+            ttl_escalation_hold_secs,
+            history_window_size: history_window_size as u64,
+            queue_recovery_ratio,
+            low_battery_threshold,
+            relay_min_battery_level,
+            relay_optimal_connection_count,
+        }
+    }
+}
+
 /// ACK configuration
 #[derive(Debug, Clone)]
 pub struct AckConfig {
@@ -2796,7 +2848,6 @@ pub struct OfflineProtocol {
     visualizer: Mutex<NetworkVisualizer>,
     path_selector: Mutex<PathSelector>,
     forced_transport: RwLock<Option<TransportType>>,
-    dors_config: RwLock<Option<DorsConfig>>,
     /// Which transports this instance was configured with, so they can be
     /// rebuilt against the derived address once `initialize_mls` knows it.
     enabled_transports: EnabledTransports,
@@ -2963,7 +3014,6 @@ impl OfflineProtocol {
             visualizer: Mutex::new(NetworkVisualizer::new(user_id.clone())),
             path_selector: Mutex::new(PathSelector::new()),
             forced_transport: RwLock::new(None),
-            dors_config: RwLock::new(None),
             enabled_transports: EnabledTransports {
                 ble: ble_enabled,
                 internet: internet_enabled,
@@ -3263,15 +3313,6 @@ impl OfflineProtocol {
         self.forced_transport
             .write()
             .map_err(|e| ProtocolError::LockPoisoned(format!("forced_transport: {}", e)))
-    }
-
-    /// Write-lock the DORS config, converting poison errors.
-    fn write_dors_config(
-        &self,
-    ) -> Result<std::sync::RwLockWriteGuard<'_, Option<DorsConfig>>, ProtocolError> {
-        self.dors_config
-            .write()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("dors_config: {}", e)))
     }
 
     // ========================================================================
@@ -5144,11 +5185,12 @@ impl OfflineProtocol {
     /// one already in flight. **Both mean an answer is coming**: exactly one
     /// `username_resolved` event follows either way. Every case where no event
     /// will ever arrive throws instead — `InvalidConfiguration` when discovery
-    /// is off, `InvalidState` when too many lookups are in flight, and
-    /// `InvalidArgument` when the string is not a claimable username — so a
-    /// caller that awaits the event can never be left waiting on one that has
-    /// no trigger. The three are distinct because they call for different
-    /// handling: never, later, and not with that name.
+    /// is off, `InvalidState` when too many lookups are in flight, `NotStarted`
+    /// when the protocol is not running, and `InvalidArgument` when the string
+    /// is not a claimable username — so a caller that awaits the event can
+    /// never be left waiting on one that has no trigger. They are distinct
+    /// because they call for different handling: never, later, after `start()`,
+    /// and not with that name.
     ///
     /// The answer carries **every** verified claim. There is deliberately no
     /// "best" claim and no ordering: anyone may publish any name, so what comes
@@ -5754,9 +5796,6 @@ impl OfflineProtocol {
 
     /// Updates DORS configuration at runtime
     pub fn update_dors_config(&self, config: DorsConfig) -> Result<(), ProtocolError> {
-        // Store locally for retrieval
-        *self.write_dors_config()? = Some(config.clone());
-
         // Convert to core DorsConfig and update the protocol
         let core_config = CoreDorsConfig {
             switch_hysteresis: config.switch_hysteresis,
@@ -5787,35 +5826,18 @@ impl OfflineProtocol {
         Ok(())
     }
 
-    /// Gets the current DORS configuration
+    /// Gets the DORS configuration transport selection is actually using.
+    ///
+    /// Read from the engine's selector, not from a copy held on this side.
+    /// A cache here answers with whatever last crossed the FFI, which is a
+    /// different thing: nothing wrote it before the first
+    /// [`Self::update_dors_config`], so it answered from core defaults and
+    /// dropped the `prefer_online` this instance was *constructed* with. The
+    /// documented read-modify-write then wrote that default back over the live
+    /// selector, so reading a section you had set and changing an unrelated
+    /// field silently turned internet-first routing off.
     pub fn get_dors_config(&self) -> DorsConfig {
-        if let Some(config) = recover_rwlock_read(&self.dors_config, "dors_config").clone() {
-            return config;
-        }
-
-        let core = CoreDorsConfig::default();
-        DorsConfig {
-            prefer_online: core.prefer_online,
-            switch_hysteresis: core.switch_hysteresis,
-            switch_cooldown_secs: core.switch_cooldown_secs,
-            ble_to_wifi_retry_threshold: core.ble_to_wifi_retry_threshold,
-            min_success_rate_before_escalation: core.min_success_rate_before_escalation,
-            min_ble_samples_before_success_rate_escalation: core
-                .min_ble_samples_before_success_rate_escalation
-                as u64,
-            rssi_switch_threshold: core.rssi_switch_threshold,
-            congestion_queue_threshold: core.congestion_queue_threshold as u64,
-            stability_window_secs: core.stability_window_secs,
-            poor_signal_duration_secs: core.poor_signal_duration_secs,
-            ttl_escalation_threshold: core.ttl_escalation_threshold,
-            congestion_duration_secs: core.congestion_duration_secs,
-            ttl_escalation_hold_secs: core.ttl_escalation_hold_secs,
-            history_window_size: core.history_window_size as u64,
-            queue_recovery_ratio: core.queue_recovery_ratio,
-            low_battery_threshold: core.low_battery_threshold,
-            relay_min_battery_level: core.relay_min_battery_level,
-            relay_optimal_connection_count: core.relay_optimal_connection_count,
-        }
+        DorsConfig::from(self.lock_inner_recovering().dors_config())
     }
 
     // ========================================================================
@@ -6008,8 +6030,9 @@ impl OfflineProtocol {
     ///
     /// Read from the governor, not from a copy held on this side. An FFI-local
     /// cache would round-trip the caller's own input and prove nothing about
-    /// what forwarding is using — the same vacuity `get_dors_config` has to
-    /// work around.
+    /// what forwarding is using; [`Self::get_dors_config`] reads the selector
+    /// for the same reason, having shipped the cached shape first and drifted
+    /// from the engine on its construction-time `prefer_online`.
     pub fn get_mesh_relay_tunables(&self) -> MeshRelayTunables {
         let protocol = self.lock_inner_recovering();
         protocol.mesh_relay_config().into()
@@ -13563,11 +13586,11 @@ mod tests {
 
     /// The tunables getter must read the governor, not a copy on this side.
     ///
-    /// `get_dors_config` returns the FFI's own stored value, which makes a
-    /// round-trip assertion against it vacuous — the reason its test has to
-    /// reach into the selector. This getter has no stored copy to be vacuous
-    /// against, and this pins that: the value comes back from the engine even
-    /// though nothing on the FFI side ever recorded it.
+    /// A getter answering from an FFI-local copy makes a round-trip assertion
+    /// vacuous, which is why the DORS test reaches into the selector rather
+    /// than trusting its read-back. Neither getter keeps a copy now, and this
+    /// pins it here: the value comes back from the engine even though nothing
+    /// on the FFI side ever recorded it.
     #[test]
     fn mesh_relay_tunables_are_read_from_the_governor() {
         let mut config = create_test_config();
@@ -14011,14 +14034,54 @@ mod tests {
         assert_eq!(read_back.stability_window_secs, 33);
 
         // ...and reached the DORS selector, which is what actually scores
-        // transports. Reading back through `get_dors_config` alone would be
-        // vacuous: it returns the FFI's own stored copy.
+        // transports. Asserted separately from the read-back so this stays a
+        // statement about the engine even if the getter ever grows a copy of
+        // its own again.
         let inner = protocol.lock_inner().unwrap();
         let core = inner.transport_manager().selector_config().clone();
         drop(inner);
         assert_eq!(core.low_battery_threshold, 11);
         assert_eq!(core.relay_min_battery_level, 44);
         assert_eq!(core.relay_optimal_connection_count, 7);
+        assert_eq!(core.stability_window_secs, 33);
+    }
+
+    /// The getter must answer from the engine, not from a copy on this side.
+    ///
+    /// It used to answer from an FFI-local cache that nothing wrote until the
+    /// first `update_dors_config`, so until then it fell back to
+    /// `CoreDorsConfig::default()` — and `prefer_online` is the field whose
+    /// default (`false`) disagrees with what construction seeds from
+    /// `ProtocolConfig`. An app that created with `prefer_online: true` and
+    /// then performed the documented read-modify-write to change *any other*
+    /// field read `false`, wrote it back, and silently turned internet-first
+    /// routing off. React Native was shielded only by accident, so this is a
+    /// direct-FFI (Swift/Kotlin/Python) defect.
+    #[test]
+    fn test_get_dors_config_reads_the_engine_not_an_ffi_copy() {
+        let mut config = create_test_config();
+        config.prefer_online = true;
+        let protocol = OfflineProtocol::new(config).unwrap();
+
+        assert!(
+            protocol.get_dors_config().prefer_online,
+            "the getter must report what this instance was constructed with, \
+             before any update has written a cache"
+        );
+
+        // The documented read-modify-write of an unrelated field must not
+        // carry a stale default back into the live selector.
+        let mut dors = protocol.get_dors_config();
+        dors.stability_window_secs = 33;
+        protocol.update_dors_config(dors).unwrap();
+
+        let inner = protocol.lock_inner().unwrap();
+        let core = inner.transport_manager().selector_config().clone();
+        drop(inner);
+        assert!(
+            core.prefer_online,
+            "changing one field must not turn internet-first routing off"
+        );
         assert_eq!(core.stability_window_secs, 33);
     }
 

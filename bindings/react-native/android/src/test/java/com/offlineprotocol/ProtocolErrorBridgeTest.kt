@@ -17,6 +17,11 @@ class ProtocolErrorBridgeTest {
             ProtocolException.MediaTransferLimit("bob") to "MediaTransferLimit",
             ProtocolException.SendFailed("all transports failed") to "SendFailed",
             ProtocolException.InvalidState("cannot demote the last admin") to "InvalidState",
+            // resolveUsername raises this while the protocol is stopped or
+            // paused. Unmapped it fell to that method's fallback code,
+            // InvalidArgument, which tells an app the name was unusable when
+            // start() was all that was missing.
+            ProtocolException.NotStarted("Protocol not started") to "NotStarted",
             // resolveUsername raises this for "discovery is off", where a retry
             // can never succeed, beside InvalidState for "retry shortly". One
             // code for both is the difference between an app that stops and one

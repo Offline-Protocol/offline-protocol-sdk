@@ -76,6 +76,18 @@ impl OfflineProtocol {
         self.transport_manager.update_selector_config(config);
     }
 
+    /// The DORS configuration transport selection is actually using.
+    ///
+    /// Read from the selector, not from the stored [`ProtocolConfig`], for the
+    /// reason [`Self::mesh_relay_config`] gives: a caller reading a section
+    /// back is asking what the consumer has, and a copy kept anywhere else is
+    /// one that can disagree with it. Here the two genuinely do diverge, since
+    /// [`Self::update_dors_config`] rewrites the selector and leaves the
+    /// stored config alone.
+    pub fn dors_config(&self) -> DorsConfig {
+        self.transport_manager.selector_config().clone()
+    }
+
     /// Records the host's battery reading for this device.
     ///
     /// The platform owns this number — no transport can observe it — and until
