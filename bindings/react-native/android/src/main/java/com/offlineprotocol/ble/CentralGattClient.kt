@@ -98,7 +98,6 @@ internal class CentralGattClient(
         fun refreshAdvertising(reason: String)
         fun refreshSelfMetrics()
         fun maybeHandleRebalance(trigger: String)
-        fun learnRouteFromMessage(messageJson: String, neighborId: String, neighborAddress: String?)
         fun drainAndSendFragments()
 
         /** Release the per-peer write gate after a GATT characteristic write
@@ -571,7 +570,7 @@ internal class CentralGattClient(
             // stack reuses the buffer for the next operation, then repost
             // the entire body to the BLE handler. Everything downstream
             // from here calls into UniFFI (blePeerDiscovered,
-            // bleFragmentReceived, verifySignature, learnRoute) and must
+            // bleFragmentReceived, verifySignature) and must
             // never run on the shared binder-thread pool — stalling it
             // blocks GATT work for every client in this process. Same
             // pattern as onCharacteristicChanged below.
@@ -776,7 +775,7 @@ internal class CentralGattClient(
             // Stale callback (wasConnected=false) or transport stopped
             // mid-flight (!isRunning). We have to notify the protocol of
             // peer loss, but the prior shape of this branch called UniFFI
-            // (removeNeighborRoutes, blePeerLost) directly from the
+            // (blePeerLost) directly from the
             // Bluetooth binder thread. That is exactly the pattern the
             // rest of this file is built to avoid — it blocks GATT work
             // for every client in this process while the UniFFI mutex is
@@ -811,7 +810,6 @@ internal class CentralGattClient(
         // `onConnectionStateChange` can reach here without having gone
         // through close first.
         cancelMtuWatchdog(address)
-        host.protocol.removeNeighborRoutes(peerId)
         try {
             host.protocol.blePeerLost(peerId)
         } catch (e: Exception) {
@@ -1013,17 +1011,6 @@ internal class CentralGattClient(
             diagnosticEmitter("error", "Error notifying peer discovered", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
         }
 
-        // Seed the route with the same verified address, now that the peer
-        // exists to the protocol layer. This used to run inside the identity
-        // handler ahead of the announce, which could learn a route to a peer
-        // `peers` had no entry for.
-        val quality = minOf(1.0f, maxOf(0.0f, (rssi.toFloat() + 100f) / 80f))
-        try {
-            host.protocol.learnRoute(peerId, peerId, 1.toUByte(), quality, 0u)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error learning route for $peerId", e)
-        }
-
         // Drain all pending inbound fragments keyed by this address — the
         // same buffer holds central-side notify fragments and server-side
         // write fragments, since both paths queue under the
@@ -1202,7 +1189,6 @@ internal class CentralGattClient(
                             "senderId" to deviceId,
                             "messageContent" to msg,
                         ))
-                        host.learnRouteFromMessage(msg, deviceId, address)
                         msg = host.protocol.receiveMessage()
                     }
                 } catch (e: Exception) {

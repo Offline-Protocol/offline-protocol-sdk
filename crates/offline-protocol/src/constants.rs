@@ -110,8 +110,3 @@ pub const MAX_FORWARD_COUNT: u32 = 100;
 /// Maximum messages to send in a single flush operation.
 /// Prevents blocking the process loop when many messages are pending.
 pub const FLUSH_BATCH_LIMIT: usize = 20;
-
-/// Default route quality assigned when learning a route from a relayed message.
-/// Conservative (0.5) because the transport layer doesn't expose the immediate
-/// peer identity, so the route may be sub-optimal for multi-hop return paths.
-pub const RELAY_LEARNED_ROUTE_QUALITY: f32 = 0.5;

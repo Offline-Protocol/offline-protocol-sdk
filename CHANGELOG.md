@@ -11,6 +11,62 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+> **The routing layer that never routed anything is gone.** A learned-route
+> table, a path scorer and an adaptive-TTL calculator sat between DORS and the
+> mesh, complete with a UniFFI surface, native bridge code on both platforms
+> that fed it on every BLE connect and every assembled message, and a
+> 30-second cleanup timer. Nothing read any of it: forwarding has always chosen
+> among the neighbors a device can address right now. Deleting it removes about
+> 1,800 lines from the router crate plus its whole bridge apparatus, and makes
+> the architecture documentation describe what actually delivers messages.
+> **This is breaking on every binding** — see
+> [docs/UPGRADING.md §15](./docs/UPGRADING.md#15-the-learned-route-api-is-gone-v0230).
+
+### Removed
+
+- **The gradient-routing and path-selection layer, in full.** `PathSelector`,
+  `GradientRoutingTable`, `RouteEntry`, `GossipConfig`, `PathConfig`,
+  `AdaptiveTtlCalculator`, `RelayInfo` and `RelayManager` are deleted from
+  `offline-protocol-router`, along with the constants module that existed only
+  to serve them. `RelayConfig`, `RelayPriority` and `RelayRole` stay: they are
+  the vocabulary for whether this device forwards, and the standing itself is
+  decided by the forwarding governor from traffic actually carried.
+
+- **The routing surface on every binding.** `learn_route`, `get_best_route`,
+  `get_all_routes`, `has_route`, `remove_neighbor_routes`,
+  `cleanup_expired_routes`, `get_routing_stats` and `update_routing_config`,
+  plus the `RouteEntry` / `RoutingStats` / `GradientRoutingConfig` / `PathConfig`
+  dictionaries, are gone from the UDL, the React Native TypeScript wrapper, both
+  native modules and the Python bindings. `ProtocolConfig.path` is removed with
+  them.
+
+- **The bridge code that fed the table.** Both BLE managers learned a route on
+  every completed inbound message and seeded one on every peer connect, and both
+  ran a 30-second timer calling `cleanupExpiredRoutes`. All of it is removed.
+  On Android that timer also swept stale inbound fragments, which is a live
+  duty: the runnable survives as `fragmentSweepRunnable` and keeps that sweep on
+  the same 30-second cadence.
+
+### Documentation
+
+- **`docs/mesh.md` no longer documents the dormant layer as the delivery path.**
+  The "Path Scoring" section and everything under it (route entries, the
+  routing-table configuration table, the UniFFI method table and the Swift and
+  Kotlin route-learning examples) described machinery that never carried a
+  frame. It is replaced by how a forwarding device actually chooses: live link
+  state among addressable neighbors, with DORS choosing the carrier and the
+  per-recipient facts applied at the send and acknowledgement seams.
+
+- **Stale references corrected.** `docs/architecture.md`, the router crate
+  README, `docs/api-reference.md`, `docs/configuration.md`,
+  `docs/react-native-integration.md` and the React Native README no longer list
+  the removed types. Two code comments cited `RelayManager::current_role()`, a
+  method that stopped existing when relay standing moved to the forwarding
+  governor. The DORS tie-break comments claimed an order ending at Reticulum
+  when Nostr, not Reticulum, is lowest.
+
 ## [0.22.0] — 2026-08-18
 
 > **The battery-aware relay policy was complete and unreachable; it now runs.**

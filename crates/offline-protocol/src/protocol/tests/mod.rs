@@ -23600,8 +23600,9 @@ fn test_routing_diagnostic_default_leaves_scores_empty() {
 #[test]
 fn test_metrics_frame_is_local_relay_matches_role() {
     // Regression guard for the renamed field: is_local_relay must reflect
-    // RelayManager::current_role() and nothing else (no stale "peer count"
-    // semantics). Default role is Regular; the flag must be false.
+    // the forwarding governor's own standing and nothing else (no stale
+    // "peer count" semantics). Default role is Regular; the flag must be
+    // false.
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     let sink = RecordingTelemetrySink::default();
     protocol

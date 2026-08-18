@@ -3,7 +3,7 @@
 use crate::constants::DEFAULT_INITIAL_TTL;
 use crate::protocol::mesh_relay::{MeshRelayConfig, RELAY_QUEUE_MAX_OVERDUE};
 use offline_protocol_reliability::{AckConfig, DeduplicatorConfig, RetryConfig};
-use offline_protocol_router::{DorsConfig, PathConfig, RelayConfig};
+use offline_protocol_router::{DorsConfig, RelayConfig};
 use serde::{Deserialize, Serialize};
 
 /// Overflow policy for bounded pending encrypted message queues.
@@ -612,9 +612,6 @@ pub struct ProtocolConfig {
     /// it once the answer is yes.
     pub mesh_relay: MeshRelayConfig,
 
-    /// Path selection configuration.
-    pub path: PathConfig,
-
     /// Reliability layer configuration.
     pub reliability: ReliabilityConfig,
 
@@ -646,7 +643,6 @@ impl ProtocolConfig {
             dors: DorsConfig::default(),
             relay: RelayConfig::default(),
             mesh_relay: MeshRelayConfig::default(),
-            path: PathConfig::default(),
             reliability: ReliabilityConfig::default(),
             encryption: EncryptionConfig::default(),
             initial_ttl: DEFAULT_INITIAL_TTL,
@@ -1079,12 +1075,6 @@ impl ProtocolConfigBuilder {
     /// Configures how traffic is carried for other people.
     pub fn mesh_relay(mut self, config: MeshRelayConfig) -> Self {
         self.config.mesh_relay = config;
-        self
-    }
-
-    /// Configures path selection.
-    pub fn path(mut self, config: PathConfig) -> Self {
-        self.config.path = config;
         self
     }
 

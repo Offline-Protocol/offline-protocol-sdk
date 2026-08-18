@@ -572,85 +572,26 @@ Because parking removes the pending acknowledgement, a parked message that is th
 
 What is still not covered: a device whose only infrastructure is **Nostr or Reticulum** never receives an unreachable verdict at all — neither reports per-recipient delivery — so nothing contradicts the initial "reachable" answer and no mesh fallback fires for it. Note also that carrier status is reported by the platform bridge and means "this carrier is up", not "the relay connection is authenticated"; a bridge that reports a connection it never authenticates produces no verdicts either, and its messages settle by acknowledgement timeout as they always did.
 
-### Path Scoring
+### How a forwarding device chooses
 
-Each neighbor is scored based on:
-- **RSSI**: Signal strength to the neighbor
-- **Link Quality**: Historical connection reliability
-- **Relay Information**: Congestion level and capacity if the neighbor is a relay
-- **Hop Count**: Distance to destination (if known via gradient routing)
+There is no routing table and no remembered path. A device that decides to
+carry a frame offers it to the neighbors it can address **right now**, and the
+choice among them is made from live link state: which links are up, their
+signal, and what the forwarding governor will admit for that peer.
 
-### Data Structures
+This is deliberate, and it is the whole reason the earlier learned-route layer
+was deleted rather than finished. In the environments this is built for (a
+crowd, a venue, a march) links appear and vanish in seconds, so a remembered
+route is usually stale by the time it would be used, while a fresh choice among
+current neighbors never is. Suppression makes the redundancy cheap: a neighbor
+that hears someone else carry the frame stands down, so offering to several
+costs far less than the arithmetic suggests.
 
-#### routes: HashMap<String, Vec<RouteEntry>>
-Maps destination user IDs to a list of possible routes:
-
-```
-"user-alice" → [
-  RouteEntry { next_hop: "peer-A", hop_count: 2, quality: 0.85, last_seen: ... },
-  RouteEntry { next_hop: "peer-B", hop_count: 3, quality: 0.72, last_seen: ... },
-]
-```
-
-Each destination can have multiple routes (up to `max_routes_per_destination`, default 3), enabling failover if a route becomes unavailable.
-
-#### neighbor_destinations: HashMap<String, Vec<String>>
-Reverse mapping from neighbors to destinations reachable through them:
-
-```
-"peer-A" → ["user-alice", "user-bob", "user-charlie"]
-"peer-B" → ["user-alice", "user-david"]
-```
-
-Used for efficient cleanup when a neighbor disconnects—removes all routes through that neighbor.
-
-### Route Entry Structure
-
-Each route entry contains:
-- **next_hop**: The neighbor to forward messages through
-- **hop_count**: Number of hops to destination (used for shortest-path selection)
-- **quality**: Route quality score (0.0-1.0, higher is better)
-- **last_seen_ms**: Timestamp (milliseconds since epoch) for TTL-based expiration
-
-### Configuration
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `max_routes_per_destination` | 3 | Maximum alternate routes per destination |
-| `route_ttl_secs` | 300 | Route expiration time (5 minutes) |
-| `max_routing_table_size` | 1000 | Maximum total entries |
-
-### UniFFI API
-
-The gradient routing table is exposed via the `OfflineProtocol` interface with the following methods:
-
-| Method | Description |
-|--------|-------------|
-| `learn_route(destination, next_hop, hop_count, quality, sequence_number)` | Record a learned route from an incoming message. `sequence_number` is DSDV-style; pass 0 when the message does not carry one. |
-| `get_best_route(destination) -> RouteEntry?` | Get the highest-quality route to a destination |
-| `get_all_routes(destination) -> [RouteEntry]` | Get all valid (non-expired) routes to a destination |
-| `has_route(destination) -> bool` | Check if any route exists to the destination |
-| `remove_neighbor_routes(neighbor_id)` | Remove all routes through a neighbor (call on disconnect) |
-| `cleanup_expired_routes()` | Clean up expired routes (call periodically) |
-| `get_routing_stats() -> RoutingStats` | Get routing table statistics for monitoring |
-| `update_routing_config(config)` | Update routing configuration at runtime |
-
-### Route Learning
-
-When a message is received, the native layer should call `learn_route()`:
-1. The sender can be reached through the delivering neighbor
-2. The hop count is incremented from the message's hop count
-3. Route quality is computed from link metrics (RSSI, connection stability)
-4. Use the message's DSDV-style sequence number when present, or 0 otherwise (negative values are clamped to 0 on the React Native bridge)
-
-If the destination already has maximum routes, the lowest-quality route is evicted.
-
-### Route Selection
-
-When sending to a known destination:
-1. Filter out expired routes (older than TTL)
-2. Sort by quality score
-3. Return the highest-quality route
+The transport a frame leaves on is DORS's decision (see [DORS](dors.md)), and
+DORS scores carriers, not recipients. It is deliberately recipient-blind; the
+per-recipient facts that override it (a relay's unreachable verdict, a live
+mesh link to the recipient) are applied at the send and acknowledgement seams
+described above, never as another weight inside the score.
 
 ### Do apps need to do any of this?
 
@@ -661,61 +602,12 @@ forwarding to write, and writing one is a mistake: a second forwarder would
 transmit copies the SDK's own accounting knows nothing about, so neither the
 handled-once check nor the per-second budgets would cover it.
 
-The routing-table calls below remain available over UniFFI for native code that
-wants its own view of reachability. They are read-and-record only; nothing an
-app does with them changes what the SDK forwards.
-
-```swift
-// Record what a neighbor can reach, from a message it delivered:
-protocol.learnRoute(
-    destination: message.sender,
-    nextHop: neighborId,
-    hopCount: UInt8(message.hopCount + 1),
-    quality: computeQuality(rssi: rssi, stability: linkStability),
-    sequenceNumber: message.sequenceNumber ?? 0
-)
-
-// Look up what is known about reaching someone:
-let route = protocol.getBestRoute(destination: recipient)
-
-// On peer disconnect - cleanup stale routes:
-protocol.removeNeighborRoutes(neighborId: disconnectedPeerId)
-
-// Periodic maintenance (e.g., every 30 seconds):
-protocol.cleanupExpiredRoutes()
-```
-
-```kotlin
-protocol.learnRoute(
-    destination = message.sender,
-    nextHop = neighborId,
-    hopCount = (message.hopCount + 1).toUByte(),
-    quality = computeQuality(rssi, linkStability),
-    sequenceNumber = (message.sequenceNumber ?: 0).coerceAtLeast(0).toUInt()
-)
-
-val route = protocol.getBestRoute(destination = recipient)
-
-protocol.removeNeighborRoutes(neighborId = disconnectedPeerId)
-protocol.cleanupExpiredRoutes()
-```
-
-### Gradient Routing Table
-
-The gradient routing table learns routes from incoming messages. When a message arrives from a neighbor, we record that neighbor as a route to the message's original sender. Over time, this builds a map of how to reach known destinations.
-
-Routes are learned from the link a frame arrived on, which is the neighbor that can be addressed to reach back toward its sender — not the sender itself, who may be several devices away.
-
-**Current status**: forwarding decisions are made from live neighbor state rather than from this table, and that is deliberate. In the environments this is built for — a crowd, a venue, a march — links appear and vanish in seconds, so a remembered route is usually stale by the time it would be used, while a fresh choice among current neighbors never is. The table is also exposed over UniFFI for native code that wants it.
-
-### Monitoring
-
-Use `getRoutingStats()` to monitor routing table health:
-
-```swift
-let stats = protocol.getRoutingStats()
-print("Destinations: \(stats.destinationCount), Routes: \(stats.routeCount)")
-```
+There is no routing API to call either. Earlier releases exposed a
+learned-route table over UniFFI (`learn_route`, `get_best_route`,
+`get_all_routes`, `has_route`, `remove_neighbor_routes`,
+`cleanup_expired_routes`, `get_routing_stats`, `update_routing_config`); it fed
+a table nothing read, and the whole layer was removed in 0.23.0. Nothing
+replaced it: forwarding needs no help from the app.
 
 ## Events and Monitoring
 

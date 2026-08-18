@@ -159,10 +159,6 @@ public class BleManager: NSObject, TransportManager {
     // Fragment sending (event-driven, no polling)
     private let fragmentQueue = DispatchQueue(label: "com.offlineprotocol.ble.fragments")
     
-    // Gradient routing cleanup
-    private var routingCleanupTimer: DispatchSourceTimer?
-    private let ROUTING_CLEANUP_INTERVAL: TimeInterval = 30.0
-    
     // Pending fragments waiting for device ID.
     //
     // Thread-safety contract: MUTATIONS are owned by fragmentQueue and must
@@ -568,9 +564,6 @@ public class BleManager: NSObject, TransportManager {
         }
         
         updateState(.stopping)
-        
-        // Stop routing cleanup
-        stopRoutingCleanup()
         
         // Stop scanning
         stopScanning(reason: "stop")
@@ -1491,77 +1484,6 @@ public class BleManager: NSObject, TransportManager {
         }
     }
     
-    // MARK: - Gradient Routing
-    
-    /// Periodically expires stale gradient-routing entries.
-    ///
-    /// This was a `Timer.scheduledTimer` added to `RunLoop.current`. Its only
-    /// caller is `centralManagerDidUpdateState`, a main-queue delegate, so
-    /// "current" was always the main RunLoop and the tick called into the core
-    /// on the main thread. A `DispatchSource` timer on `fragmentQueue` fires
-    /// off-main and — unlike a RunLoop timer — is not starved while the main
-    /// RunLoop is in a tracking mode.
-    private func startRoutingCleanup() {
-        stopRoutingCleanup()
-
-        let timer = DispatchSource.makeTimerSource(queue: fragmentQueue)
-        timer.schedule(deadline: .now() + ROUTING_CLEANUP_INTERVAL,
-                       repeating: ROUTING_CLEANUP_INTERVAL)
-        timer.setEventHandler { [weak self] in
-            self?.protocolInstance.cleanupExpiredRoutes()
-        }
-        timer.resume()
-        routingCleanupTimer = timer
-    }
-
-    private func stopRoutingCleanup() {
-        routingCleanupTimer?.cancel()
-        routingCleanupTimer = nil
-    }
-    
-    /// Computes route quality from RSSI value (0.0 to 1.0)
-    private func computeRouteQuality(rssi: Int?) -> Float {
-        guard let rssi = rssi else { return 0.5 }
-        // Map RSSI from [-100, -20] to [0.0, 1.0]
-        let normalized = Float(max(-100, min(-20, rssi)) + 100) / 80.0
-        return normalized
-    }
-    
-    /// Learns a route from a received message
-    private func learnRouteFromMessage(_ messageJson: String, deliveredBy neighborId: String, neighborUUID: UUID?) {
-        guard let data = messageJson.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let sender = json["sender"] as? String,
-              let hopCount = json["hop_count"] as? Int else {
-            return
-        }
-        
-        // Don't learn route to ourselves
-        if sender == deviceId { return }
-
-        // Learn the route: sender can be reached through neighborId (sequence_number from message or 0). Clamp to avoid negative wrapping to uint32.
-        let seqRaw = (json["sequence_number"] as? NSNumber)?.intValue ?? 0
-        let seqNum = UInt32(max(0, seqRaw))
-
-        // `peripheralRSSI` is main-affine — the CoreBluetooth delegates mutate
-        // it there — while every caller of this method runs on `fragmentQueue`.
-        // Read it on main, then hand the protocol call back off the main thread.
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            let rssi = neighborUUID.flatMap { self.peripheralRSSI[$0] }.map { Int($0) }
-            let quality = self.computeRouteQuality(rssi: rssi)
-            self.onProtocolQueue {
-                self.protocolInstance.learnRoute(
-                    destination: sender,
-                    nextHop: neighborId,
-                    hopCount: UInt8(min(255, hopCount + 1)),
-                    quality: quality,
-                    sequenceNumber: seqNum
-                )
-            }
-        }
-    }
-    
     // pollAndSendFragments and sendFragment removed — replaced by
     // event-driven drainAndSendFragments() triggered via onFragmentsAvailable().
 
@@ -1726,7 +1648,6 @@ public class BleManager: NSObject, TransportManager {
         // `blePeerLost` takes the core protocol mutex.
         onProtocolQueue { [weak self] in
             guard let self = self else { return }
-            self.protocolInstance.removeNeighborRoutes(neighborId: deviceId)
             do {
                 try self.protocolInstance.blePeerLost(peerId: deviceId)
             } catch {
@@ -1990,9 +1911,6 @@ public class BleManager: NSObject, TransportManager {
                         "messageContent": completedMessage,
                         "messageNumber": messageCount
                     ])
-                    
-                    // Learn route from the message sender through the delivering neighbor
-                    self.learnRouteFromMessage(completedMessage, deliveredBy: senderId, neighborUUID: centralId)
                 }
                 
                 if messageCount == 0 {
@@ -2077,7 +1995,6 @@ public class BleManager: NSObject, TransportManager {
                             "messageContent": completedMessage,
                             "messageNumber": messageCount
                         ])
-                        self.learnRouteFromMessage(completedMessage, deliveredBy: deviceId, neighborUUID: centralId)
                     }
                     if messageCount > 0 {
                         print("[BleManager] ✅ Processed \(messageCount) complete message(s) from queued fragments")
@@ -2582,7 +2499,6 @@ extension BleManager: CBCentralManagerDelegate {
             
             centralReady = true
             startScanning(reason: "central_powered_on")
-            startRoutingCleanup()
             emitDiagnostic("info", "Central manager powered on and ready")
             
             // Drain any fragments that may have queued while BLE was unavailable
@@ -3172,12 +3088,8 @@ extension BleManager: CBPeripheralDelegate {
         // read it once, here, at the moment the peer becomes real to us.
         let maxPayload = peripheral.maximumWriteValueLength(for: .withoutResponse)
         let rssi = peripheralRSSI[peripheral.identifier] ?? -60
-        // Seeds the route below with the same verified address. This used to
-        // live in the identity handler, which ran after the announce and could
-        // learn a route to a peer the protocol layer had never been told about.
-        let quality = Float(min(1.0, max(0.0, (Double(rssi) + 100.0) / 80.0)))
 
-        // All three protocol calls in ONE serial block, off the main thread.
+        // Both protocol calls in ONE serial block, off the main thread.
         // Every caller of this method is a CoreBluetooth delegate, so making
         // these inline meant taking the core protocol mutex on the main thread.
         // Keeping them in a single block also makes the ordering invariant
@@ -3215,16 +3127,6 @@ extension BleManager: CBPeripheralDelegate {
             // the MTU flush. If you are tempted to move this
             // earlier "for clarity", don't.
             try? self.protocolInstance.blePeerDiscovered(peerId: peerId, rssi: rssi)
-
-            // ORDERING INVARIANT: after the announce, for the reason given
-            // where `quality` is computed.
-            self.protocolInstance.learnRoute(
-                destination: peerId,
-                nextHop: peerId,
-                hopCount: 1,
-                quality: quality,
-                sequenceNumber: 0
-            )
         }
 
         let role = connections.consumePendingRole(for: peripheral.identifier) ?? connections.connectionRole(for: peerId) ?? .member

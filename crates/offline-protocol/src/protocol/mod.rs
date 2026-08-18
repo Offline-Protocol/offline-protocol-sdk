@@ -43,9 +43,7 @@ use mesh_relay::{MeshRelayGovernor, RelayActivity};
 use offline_protocol_core::{LamportClock, Message, MessageId, MutexExt, Username};
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
-use offline_protocol_router::{
-    PathSelector, RelayManager, RelayPriority, RelayRole, TransportSelector,
-};
+use offline_protocol_router::{RelayPriority, RelayRole, TransportSelector};
 use offline_protocol_services::MeshServices;
 use offline_protocol_transport::{BleTransport, TransportStatus, TransportType};
 use std::collections::HashMap;
@@ -106,9 +104,6 @@ pub struct OfflineProtocol {
 
     /// Transport manager (manages all transports with DORS).
     pub(crate) transport_manager: TransportManager,
-
-    /// Path selector for routing (includes relay scoring logic).
-    path_selector: PathSelector,
 
     /// ACK manager for tracking acknowledgments.
     ack_manager: AckManager,
@@ -727,7 +722,6 @@ impl OfflineProtocol {
 
         Ok(Self {
             transport_manager,
-            path_selector: PathSelector::with_config(config.path.clone(), RelayManager::new()),
             ack_manager: AckManager::with_config(config.reliability.ack.clone()),
             retry_queue: RetryQueue::with_config(config.reliability.retry.clone()),
             deduplicator: Deduplicator::with_config(config.reliability.dedup.clone()),

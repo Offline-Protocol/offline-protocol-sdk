@@ -36,8 +36,8 @@ use offline_protocol_mls::{
 };
 use offline_protocol_router::RelayRole as CoreRelayRole;
 use offline_protocol_router::{
-    DorsConfig as CoreDorsConfig, GradientRoutingConfig as CoreGradientRoutingConfig, PathSelector,
-    RelayConfig as CoreRelayConfig, RelayPriority as CoreRelayPriority,
+    DorsConfig as CoreDorsConfig, RelayConfig as CoreRelayConfig,
+    RelayPriority as CoreRelayPriority,
 };
 use offline_protocol_transport::{
     ble::BleTransport, internet::InternetTransport, nostr::NostrTransport, nostr::ResolvedRecord,
@@ -2165,37 +2165,6 @@ pub struct ReliabilityConfig {
     pub dedup: DedupConfig,
 }
 
-/// Path selection configuration
-#[derive(Debug, Clone)]
-pub struct PathConfig {
-    pub forward_to_top_k: u32,
-    pub max_congestion_level: u32,
-}
-
-/// Gradient routing table entry - represents a learned route to a destination
-#[derive(Debug, Clone)]
-pub struct RouteEntry {
-    pub next_hop: String,
-    pub hop_count: u8,
-    pub quality: f32,
-    pub last_seen_ms: u64,
-}
-
-/// Gradient routing configuration
-#[derive(Debug, Clone)]
-pub struct GradientRoutingConfig {
-    pub max_routes_per_destination: u32,
-    pub route_ttl_secs: u64,
-    pub max_routing_table_size: u32,
-}
-
-/// Routing table statistics for monitoring
-#[derive(Debug, Clone)]
-pub struct RoutingStats {
-    pub destination_count: u32,
-    pub route_count: u32,
-}
-
 /// Relay configuration
 #[derive(Debug, Clone)]
 pub struct RelayConfig {
@@ -2846,7 +2815,6 @@ pub struct OfflineProtocol {
     reticulum_state: Mutex<ReticulumState>,
     nostr_state: Mutex<NostrState>,
     visualizer: Mutex<NetworkVisualizer>,
-    path_selector: Mutex<PathSelector>,
     forced_transport: RwLock<Option<TransportType>>,
     /// Which transports this instance was configured with, so they can be
     /// rebuilt against the derived address once `initialize_mls` knows it.
@@ -3012,7 +2980,6 @@ impl OfflineProtocol {
                 is_connected: false,
             }),
             visualizer: Mutex::new(NetworkVisualizer::new(user_id.clone())),
-            path_selector: Mutex::new(PathSelector::new()),
             forced_transport: RwLock::new(None),
             enabled_transports: EnabledTransports {
                 ble: ble_enabled,
@@ -5840,127 +5807,6 @@ impl OfflineProtocol {
         DorsConfig::from(self.lock_inner_recovering().dors_config())
     }
 
-    // ========================================================================
-    // GRADIENT ROUTING TABLE OPERATIONS
-    // ========================================================================
-
-    /// Learns a route from an incoming message.
-    /// Call this when receiving a message from a neighbor to record that
-    /// the neighbor can reach the message's original sender.
-    pub fn learn_route(
-        &self,
-        destination: String,
-        next_hop: String,
-        hop_count: u8,
-        quality: f32,
-        sequence_number: u32,
-    ) {
-        let mut path_selector = recover_mutex(&self.path_selector, "path_selector");
-        path_selector.routing_table_mut().learn_route(
-            &destination,
-            &next_hop,
-            hop_count,
-            quality,
-            sequence_number,
-        );
-    }
-
-    /// Gets the best (highest quality) route to a destination.
-    /// Returns None if no route is known or all routes have expired.
-    pub fn get_best_route(&self, destination: String) -> Option<RouteEntry> {
-        let path_selector = recover_mutex(&self.path_selector, "path_selector");
-        path_selector.get_route_to(&destination).map(|entry| {
-            let elapsed = entry.last_seen.elapsed();
-            let last_seen_ms = SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0)
-                .saturating_sub(elapsed.as_millis() as u64);
-
-            RouteEntry {
-                next_hop: entry.next_hop.clone(),
-                hop_count: entry.hop_count,
-                quality: entry.quality,
-                last_seen_ms,
-            }
-        })
-    }
-
-    /// Gets all valid (non-expired) routes to a destination.
-    /// Routes are returned in no particular order.
-    pub fn get_all_routes(&self, destination: String) -> Vec<RouteEntry> {
-        let mut path_selector = recover_mutex(&self.path_selector, "path_selector");
-        let now = SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        path_selector
-            .routing_table_mut()
-            .get_routes(&destination)
-            .into_iter()
-            .map(|entry| {
-                let elapsed = entry.last_seen.elapsed();
-                let last_seen_ms = now - (elapsed.as_millis() as u64);
-
-                RouteEntry {
-                    next_hop: entry.next_hop.clone(),
-                    hop_count: entry.hop_count,
-                    quality: entry.quality,
-                    last_seen_ms,
-                }
-            })
-            .collect()
-    }
-
-    /// Checks if a route exists to the destination.
-    pub fn has_route(&self, destination: String) -> bool {
-        let path_selector = recover_mutex(&self.path_selector, "path_selector");
-        path_selector.has_route_to(&destination)
-    }
-
-    /// Removes all routes through a neighbor.
-    /// Call this when a neighbor disconnects to clean up stale routes.
-    pub fn remove_neighbor_routes(&self, neighbor_id: String) {
-        let mut path_selector = recover_mutex(&self.path_selector, "path_selector");
-        path_selector.remove_neighbor_routes(&neighbor_id);
-    }
-
-    /// Cleans up expired routes.
-    /// Call this periodically (e.g., every 30 seconds) for maintenance.
-    pub fn cleanup_expired_routes(&self) {
-        let mut path_selector = recover_mutex(&self.path_selector, "path_selector");
-        path_selector.cleanup_routes();
-    }
-
-    /// Gets routing table statistics for monitoring.
-    pub fn get_routing_stats(&self) -> RoutingStats {
-        let path_selector = recover_mutex(&self.path_selector, "path_selector");
-        let (destination_count, route_count) = path_selector.routing_stats();
-
-        RoutingStats {
-            destination_count: destination_count as u32,
-            route_count: route_count as u32,
-        }
-    }
-
-    /// Updates the gradient routing configuration.
-    pub fn update_routing_config(&self, config: GradientRoutingConfig) {
-        let core_config = CoreGradientRoutingConfig {
-            enabled: true,
-            max_routes_per_destination: config.max_routes_per_destination as usize,
-            route_ttl_secs: config.route_ttl_secs,
-            max_routing_table_size: config.max_routing_table_size as usize,
-        };
-
-        // Create a new PathSelector with the updated routing config
-        let mut path_selector = recover_mutex(&self.path_selector, "path_selector");
-        let mut path_config = path_selector.config().clone();
-        path_config.gradient_routing = core_config;
-        *path_selector =
-            PathSelector::with_config(path_config, offline_protocol_router::RelayManager::new());
-    }
-
     /// Updates the ACK configuration at runtime.
     pub fn update_ack_config(&self, config: AckConfig) -> Result<(), ProtocolError> {
         let core_config = offline_protocol::AckConfig {
@@ -7493,127 +7339,6 @@ mod tests {
         assert_eq!(progress.chunks_sent, 1);
         assert_eq!(progress.total_chunks, 2);
         assert!(progress.percentage < 100);
-    }
-
-    #[test]
-    fn test_gradient_routing_learn_and_query() {
-        let config = create_ble_only_config();
-
-        let protocol = OfflineProtocol::new(config).unwrap();
-
-        // Initially no routes
-        assert!(!protocol.has_route("alice".to_string()));
-        assert!(protocol.get_best_route("alice".to_string()).is_none());
-
-        // Learn a route to alice through peer1
-        protocol.learn_route(
-            "alice".to_string(),
-            "peer1".to_string(),
-            2,   // hop count
-            0.8, // quality
-            0,   // sequence_number (none from message)
-        );
-
-        // Should now have a route
-        assert!(protocol.has_route("alice".to_string()));
-
-        let route = protocol.get_best_route("alice".to_string());
-        assert!(route.is_some());
-        let route = route.unwrap();
-        assert_eq!(route.next_hop, "peer1");
-        assert_eq!(route.hop_count, 2);
-        assert!((route.quality - 0.8).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_gradient_routing_multiple_routes() {
-        let config = create_ble_only_config();
-
-        let protocol = OfflineProtocol::new(config).unwrap();
-
-        // Learn multiple routes to the same destination
-        protocol.learn_route("bob".to_string(), "peer1".to_string(), 3, 0.7, 0);
-        protocol.learn_route("bob".to_string(), "peer2".to_string(), 2, 0.9, 0);
-        protocol.learn_route("bob".to_string(), "peer3".to_string(), 1, 0.6, 0);
-
-        // Best route should be through peer2 (highest quality)
-        let best = protocol.get_best_route("bob".to_string());
-        assert!(best.is_some());
-        assert_eq!(best.unwrap().next_hop, "peer2");
-
-        // All routes should be returned
-        let all_routes = protocol.get_all_routes("bob".to_string());
-        assert_eq!(all_routes.len(), 3);
-    }
-
-    #[test]
-    fn test_gradient_routing_remove_neighbor() {
-        let config = create_ble_only_config();
-
-        let protocol = OfflineProtocol::new(config).unwrap();
-
-        // Learn routes through peer1
-        protocol.learn_route("alice".to_string(), "peer1".to_string(), 2, 0.8, 0);
-        protocol.learn_route("bob".to_string(), "peer1".to_string(), 3, 0.7, 0);
-
-        // Learn route through peer2
-        protocol.learn_route("charlie".to_string(), "peer2".to_string(), 1, 0.9, 0);
-
-        // All destinations should be reachable
-        assert!(protocol.has_route("alice".to_string()));
-        assert!(protocol.has_route("bob".to_string()));
-        assert!(protocol.has_route("charlie".to_string()));
-
-        // Remove peer1 (simulating disconnect)
-        protocol.remove_neighbor_routes("peer1".to_string());
-
-        // Routes through peer1 should be gone
-        assert!(!protocol.has_route("alice".to_string()));
-        assert!(!protocol.has_route("bob".to_string()));
-
-        // Route through peer2 should remain
-        assert!(protocol.has_route("charlie".to_string()));
-    }
-
-    #[test]
-    fn test_gradient_routing_stats() {
-        let config = create_ble_only_config();
-
-        let protocol = OfflineProtocol::new(config).unwrap();
-
-        // Initially empty
-        let stats = protocol.get_routing_stats();
-        assert_eq!(stats.destination_count, 0);
-        assert_eq!(stats.route_count, 0);
-
-        // Add some routes
-        protocol.learn_route("alice".to_string(), "peer1".to_string(), 2, 0.8, 0);
-        protocol.learn_route("alice".to_string(), "peer2".to_string(), 3, 0.6, 0);
-        protocol.learn_route("bob".to_string(), "peer1".to_string(), 1, 0.9, 0);
-
-        let stats = protocol.get_routing_stats();
-        assert_eq!(stats.destination_count, 2); // alice and bob
-        assert_eq!(stats.route_count, 3); // 2 routes to alice, 1 to bob
-    }
-
-    #[test]
-    fn test_gradient_routing_config_update() {
-        let config = create_ble_only_config();
-
-        let protocol = OfflineProtocol::new(config).unwrap();
-
-        // Update routing config
-        let routing_config = GradientRoutingConfig {
-            max_routes_per_destination: 5,
-            route_ttl_secs: 600,
-            max_routing_table_size: 500,
-        };
-        protocol.update_routing_config(routing_config);
-
-        // Config should be applied (routing table is reset with new config)
-        let stats = protocol.get_routing_stats();
-        assert_eq!(stats.destination_count, 0);
-        assert_eq!(stats.route_count, 0);
     }
 
     fn create_reticulum_config() -> ProtocolConfig {

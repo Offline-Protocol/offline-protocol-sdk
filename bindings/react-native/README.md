@@ -493,7 +493,6 @@ interface ProtocolConfig {
   network?: NetworkConfig;
   reliability?: ReliabilityConfig;
   fileTransfer?: FileTransferConfig;
-  path?: PathConfig;
 }
 ```
 
@@ -619,15 +618,6 @@ during `start()`, where a rejection is logged and swallowed (the SDK keeps its
 defaults), so grep for `Failed to apply … configuration` rather than assuming it
 took. A direct `updateDedupConfig(...)` / `updateAckConfig(...)` /
 `updateRetryConfig(...)` call rejects the promise instead.
-
-### PathConfig
-
-```typescript
-interface PathConfig {
-  forwardToTopK?: number;        // default: 3
-  maxCongestionLevel?: number;   // default: 0.7
-}
-```
 
 ### FileTransferConfig
 
@@ -779,19 +769,6 @@ interface TransportMetrics {
 | `getDedupStats()` | `Promise<DedupStats>` | Get deduplication statistics |
 | `getPendingAckCount()` | `Promise<number>` | Get pending ACK count |
 | `getRetryQueueSize()` | `Promise<number>` | Get retry queue size |
-
-### Gradient Routing
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `learnRoute(destination, nextHop, hopCount, quality, sequenceNumber?)` | `Promise<void>` | Learn a route from incoming message. `sequenceNumber` is DSDV-style; pass `0` when the message does not carry one. Negative values are clamped to 0 before passing to the native layer. |
-| `getBestRoute(destination)` | `Promise<RouteEntry \| null>` | Get best route to destination |
-| `getAllRoutes(destination)` | `Promise<RouteEntry[]>` | Get all routes to destination |
-| `hasRoute(destination)` | `Promise<boolean>` | Check if route exists |
-| `removeNeighborRoutes(neighborId)` | `Promise<void>` | Remove routes through neighbor |
-| `cleanupExpiredRoutes()` | `Promise<void>` | Clean up expired routes |
-| `getRoutingStats()` | `Promise<RoutingStats>` | Get routing table statistics |
-| `updateRoutingConfig(config)` | `Promise<void>` | Update routing configuration |
 
 ### Event Listeners
 
@@ -1134,26 +1111,6 @@ interface MessageDeliveryStats {
   transport?: TransportType;
   retry_count: number;
   latency_ms?: number;
-}
-```
-
-### RouteEntry
-
-```typescript
-interface RouteEntry {
-  nextHop: string;
-  hopCount: number;
-  quality: number;     // 0.0 - 1.0
-  lastSeenMs: number;
-}
-```
-
-### RoutingStats
-
-```typescript
-interface RoutingStats {
-  destinationCount: number;
-  routeCount: number;
 }
 ```
 

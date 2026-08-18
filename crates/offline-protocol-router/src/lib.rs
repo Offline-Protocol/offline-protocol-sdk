@@ -8,23 +8,13 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-pub mod constants;
 pub mod dors;
 pub mod error;
 pub mod relay;
-pub mod router;
-pub mod ttl;
 
 pub use dors::{
     display_routing_score, DorsConfig, EscalationTriggerReason, TransportScore,
     TransportScoreFactors, TransportSelector,
 };
 pub use error::{Error, Result};
-pub use relay::{
-    RelayConfig, RelayManager, RelayPriority, RelayRole, CRITICAL_RELAY_BATTERY_LEVEL,
-};
-pub use router::{
-    ForwardingDecision, GossipConfig, GradientRoutingConfig, GradientRoutingTable, PathConfig,
-    PathSelector, RouteEntry,
-};
-pub use ttl::{AdaptiveTtlCalculator, AdaptiveTtlConfig, NetworkSizeEstimate};
+pub use relay::{RelayConfig, RelayPriority, RelayRole, CRITICAL_RELAY_BATTERY_LEVEL};

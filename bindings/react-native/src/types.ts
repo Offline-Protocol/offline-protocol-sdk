@@ -272,13 +272,6 @@ export interface NetworkConfig {
   initialTtl?: number;
 }
 
-export interface PathConfig {
-  /** Number of neighbors to forward to for redundancy */
-  forwardToTopK?: number;
-  /** Maximum acceptable congestion level (0.0-1.0) */
-  maxCongestionLevel?: number;
-}
-
 /**
  * BLE transport configuration
  */
@@ -767,8 +760,6 @@ export interface ProtocolConfig {
   network?: NetworkConfig;
   /** Reliability configuration (optional) */
   reliability?: ReliabilityConfig;
-  /** Path selection configuration (optional) */
-  path?: PathConfig;
 }
 
 /**
@@ -2647,46 +2638,6 @@ export interface MessageDeliveryStats {
   retry_count: number;
   /** Delivery latency in milliseconds (if delivered) */
   latency_ms?: number;
-}
-
-// ============================================================================
-// GRADIENT ROUTING TYPES
-// ============================================================================
-
-/**
- * A route entry representing a path to a destination through a neighbor
- */
-export interface RouteEntry {
-  /** Next hop neighbor ID */
-  nextHop: string;
-  /** Number of hops to destination */
-  hopCount: number;
-  /** Route quality score (0.0 - 1.0) */
-  quality: number;
-  /** Timestamp when route was last seen (ms since epoch) */
-  lastSeenMs: number;
-}
-
-/**
- * Routing table statistics
- */
-export interface RoutingStats {
-  /** Number of unique destinations in routing table */
-  destinationCount: number;
-  /** Total number of routes across all destinations */
-  routeCount: number;
-}
-
-/**
- * Gradient routing configuration
- */
-export interface GradientRoutingConfig {
-  /** Maximum routes to keep per destination */
-  maxRoutesPerDestination?: number;
-  /** Route TTL in seconds before expiration */
-  routeTtlSecs?: number;
-  /** Maximum total routing table size */
-  maxRoutingTableSize?: number;
 }
 
 // ============================================================================

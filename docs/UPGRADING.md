@@ -1485,6 +1485,32 @@ off unless you run neither.
 
 ---
 
+## 15. The learned-route API is gone (v0.23.0)
+
+Eight methods and four types were removed from every binding:
+
+| Removed | Surface |
+|---|---|
+| `learnRoute`, `getBestRoute`, `getAllRoutes`, `hasRoute`, `removeNeighborRoutes`, `cleanupExpiredRoutes`, `getRoutingStats`, `updateRoutingConfig` | UniFFI, React Native (TS/Kotlin/Swift), Python |
+| `RouteEntry`, `RoutingStats`, `GradientRoutingConfig`, `PathConfig` | dictionaries and their TypeScript interfaces |
+| `ProtocolConfig.path` (`forwardToTopK`, `maxCongestionLevel`) | config, every language |
+
+**Delete your calls; there is nothing to replace them with.** The table they
+read and wrote was never consulted by the delivery path: forwarding chooses
+among the neighbors a device can address at that moment, and always did. A
+route recorded through `learnRoute` changed nothing, and `getBestRoute` answered
+from a table no frame ever followed. Keeping the surface implied a routing layer
+that did not exist.
+
+If you passed a `path` section in your config, drop it. It was parsed and
+carried to the engine, which never read it.
+
+Applications that never called these methods (the expected case, since nothing
+in the delivery path depended on them) need no changes beyond removing the
+config section if present.
+
+---
+
 ## Appendix A: limits reference
 
 | Limit | Value | Where enforced |
