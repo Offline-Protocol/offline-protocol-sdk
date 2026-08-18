@@ -708,17 +708,8 @@ impl TransportManager {
         // trait every downstream implementor relies on. The transport's own
         // queue-clone is unaffected either way. If profiling ever flags this,
         // stamp via a lightweight wrapper rather than cloning the payload.
-        let stamped;
-        let message = if message.wire_codec() != WireCodec::BinaryV1
-            && self.peer_binary_wire.contains(message.recipient.as_str())
-        {
-            let mut m = message.clone();
-            m.set_wire_codec(WireCodec::BinaryV1);
-            stamped = m;
-            &stamped
-        } else {
-            message
-        };
+        let stamped = self.stamp_negotiated_wire_codec(message);
+        let message = stamped.as_ref().unwrap_or(message);
 
         let available = self.get_available_transports();
         if available.is_empty() {
@@ -1011,6 +1002,12 @@ impl TransportManager {
         // both answer on `Error::Transport(_)`, so on this path they saw
         // `Unknown`/`false` and the rendered string was the only surviving
         // signal. That is exactly the string that must stop being read.
+        // Stamped exactly as `send` does. This path carries ordinary DMs
+        // whenever a recipient is a live mesh neighbour, so skipping the stamp
+        // would downgrade binary-capable peers to JSON on the mesh while the
+        // DORS path kept them on binary.
+        let stamped = self.stamp_negotiated_wire_codec(message);
+        let message = stamped.as_ref().unwrap_or(message);
         transport.send(message).map_err(Error::Transport)?;
 
         // Only update current transport after successful send
@@ -1052,6 +1049,64 @@ impl TransportManager {
         }
 
         neighbors
+    }
+
+    /// Returns an owned copy stamped with the negotiated binary codec, when
+    /// this recipient has one and the message is not already stamped.
+    ///
+    /// `None` means the borrowed message is already correct, which is the
+    /// common case (JSON peers, unknown peers, already-stamped messages) and
+    /// costs no allocation.
+    ///
+    /// Shared by every send path rather than living inline in [`Self::send`].
+    /// The codec is negotiated per recipient, so a path that skips the stamp
+    /// silently downgrades a binary-capable peer to JSON — a regression with no
+    /// error and no event, visible only as larger frames on the wire.
+    fn stamp_negotiated_wire_codec(&self, message: &Message) -> Option<Message> {
+        if message.wire_codec() == WireCodec::BinaryV1
+            || !self.peer_binary_wire.contains(message.recipient.as_str())
+        {
+            return None;
+        }
+        let mut stamped = message.clone();
+        stamped.set_wire_codec(WireCodec::BinaryV1);
+        Some(stamped)
+    }
+
+    /// The mesh carrier holding a live link straight to `peer_id`, if any.
+    ///
+    /// Ordered by mesh-carrier preference, so a peer reachable over both answers
+    /// with the higher-bandwidth carrier. This is ground truth rather than a
+    /// claim: it is read from the transport's live link view at the moment it
+    /// is asked, never remembered.
+    pub fn mesh_transport_for(&self, peer_id: &str) -> Option<TransportType> {
+        MESH_TRANSPORTS.iter().copied().find(|transport_type| {
+            self.transports
+                .get(transport_type)
+                .filter(|transport| transport.status() == TransportStatus::Available)
+                .is_some_and(|transport| {
+                    transport
+                        .connected_peers()
+                        .iter()
+                        .any(|link| link.peer_id == peer_id)
+                })
+        })
+    }
+
+    /// Every available carrier that does its own routing.
+    ///
+    /// The enumerated form of [`Self::has_infrastructure_carrier`], for callers
+    /// that hold a per-recipient fact and must ask each carrier separately
+    /// rather than accepting "one of them is up" for every recipient.
+    pub fn available_infrastructure_carriers(&self) -> Vec<TransportType> {
+        self.transports
+            .iter()
+            .filter(|(transport_type, transport)| {
+                !MESH_TRANSPORTS.contains(transport_type)
+                    && transport.status() == TransportStatus::Available
+            })
+            .map(|(transport_type, _)| *transport_type)
+            .collect()
     }
 
     /// Whether a frame for `peer_id` can plausibly arrive without being carried
@@ -1111,17 +1166,7 @@ impl TransportManager {
     /// because callers that already know infrastructure is up still need to ask
     /// whether the mesh can hand a frame over without anyone carrying it.
     pub fn mesh_can_address(&self, peer_id: &str) -> bool {
-        MESH_TRANSPORTS.iter().any(|transport_type| {
-            self.transports
-                .get(transport_type)
-                .filter(|transport| transport.status() == TransportStatus::Available)
-                .is_some_and(|transport| {
-                    transport
-                        .connected_peers()
-                        .iter()
-                        .any(|link| link.peer_id == peer_id)
-                })
-        })
+        self.mesh_transport_for(peer_id).is_some()
     }
 
     /// Whether `transport_type` is a short-range carrier that can only address

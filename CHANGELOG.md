@@ -24,6 +24,62 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 > **This is breaking on every binding** — see
 > [docs/UPGRADING.md §15](./docs/UPGRADING.md#15-the-learned-route-api-is-gone-v0230).
 
+
+### Added
+
+- **Transport choice can now ask where the recipient is.** The engine keeps a
+  per-recipient reachability table: `(recipient, carrier, claim, source,
+  recorded_at)`, written by the producers that already existed (a carrier's
+  `recipient_unreachable` verdict and a relay presence answer) and read at the
+  two seams that previously had to guess.
+
+  What changes in practice: **a recipient this device holds a live mesh link to
+  is now sent to over that link**, even when an infrastructure carrier is up
+  and scoring would have put it first. Previously an online sender standing
+  next to the recipient routed to the relay, waited for it to answer that the
+  recipient was not there, and only then offered the frame to the neighbour who
+  had been addressable from the first instant. The link is checked live rather
+  than remembered, and a refusal falls through to ordinary selection, so a
+  marginal radio cannot strand a message another carrier could take.
+
+  And **a carrier that has said it cannot reach someone stops counting as a way
+  to reach them**, for as long as the fact stands. Verdicts stand for ten
+  minutes (the unreachable-probe escalation cap), presence answers for five;
+  after that a fact reverts to unknown, which means exactly today's behaviour.
+  Decay is deliberate: a remembered "unreachable" that never expired would keep
+  a path shut long after the recipient came back, and because nothing is ever
+  settled by a claim (only by the recipient's end-to-end acknowledgement or
+  terminal outbox expiry), the worst a stale or lying claim can cost is latency.
+
+  Three properties bound the change. Absent facts mean today's behaviour
+  byte-for-byte, so a device that never receives a verdict routes exactly as it
+  did. Live mesh links are never stored, only queried, so there is no stale-link
+  failure to introduce. And a carrier that produces no facts keeps its blanket
+  claim — Nostr cannot report per-recipient delivery at all, so the
+  mixed-neighbourhood residual stays open there by design rather than closing by
+  accident.
+
+  DORS is untouched. It remains the recipient-blind scorer, because pushing a
+  hard per-recipient fact into a seven-factor weighted sum would make it
+  tunable, and a mis-tuned weight would override it silently.
+
+- **Parking works for any carrier's verdict, not just the relay's.** The
+  machinery was always keyed to the `recipient_unreachable` token rather than to
+  the relay, and the bridges' failure entry points already shared one boundary;
+  what was missing was which carrier had spoken. Failure reports now carry that,
+  so a Reticulum gateway reporting the verdict parks the message, offers it to
+  the mesh and schedules the probe exactly as the relay does. This is the
+  behaviour a gateway's Verdict verb plugs into.
+
+### Fixed
+
+- **Messages sent over an explicitly chosen transport skipped the negotiated
+  binary wire codec.** `send_via_transport` never stamped it, while the
+  selection path did, so a peer known to support the binary codec silently fell
+  back to JSON whenever a send bypassed selection. Both paths now share one
+  stamping helper. Visible only as larger frames on the wire, with no error and
+  no event, which is why it survived.
+
 ### Removed
 
 - **The gradient-routing and path-selection layer, in full.** `PathSelector`,

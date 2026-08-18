@@ -4445,7 +4445,11 @@ impl OfflineProtocol {
     /// telemetry can classify root causes more accurately.
     pub fn internet_send_failed_with_reason(&self, message_id: String, reason: Option<String>) {
         let mut protocol = self.lock_inner_recovering();
-        if let Err(err) = protocol.on_transport_send_failed(&message_id, reason) {
+        if let Err(err) = protocol.on_transport_send_failed_via(
+            &message_id,
+            reason,
+            Some(CoreTransportType::Internet),
+        ) {
             tracing::warn!(
                 message_id = %message_id,
                 error = %err,
@@ -4868,7 +4872,11 @@ impl OfflineProtocol {
     pub fn reticulum_send_failed_with_reason(&self, message_id: String, reason: Option<String>) {
         {
             let mut protocol = self.lock_inner_recovering();
-            if let Err(err) = protocol.on_transport_send_failed(&message_id, reason) {
+            if let Err(err) = protocol.on_transport_send_failed_via(
+                &message_id,
+                reason,
+                Some(CoreTransportType::Reticulum),
+            ) {
                 tracing::warn!(
                     message_id = %message_id,
                     error = %err,
@@ -5242,7 +5250,11 @@ impl OfflineProtocol {
     pub fn nostr_send_failed_with_reason(&self, message_id: String, reason: Option<String>) {
         {
             let mut protocol = self.lock_inner_recovering();
-            if let Err(err) = protocol.on_transport_send_failed(&message_id, reason) {
+            if let Err(err) = protocol.on_transport_send_failed_via(
+                &message_id,
+                reason,
+                Some(CoreTransportType::Nostr),
+            ) {
                 tracing::warn!(
                     message_id = %message_id,
                     error = %err,

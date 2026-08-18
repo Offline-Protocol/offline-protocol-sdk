@@ -302,6 +302,7 @@ impl OfflineProtocol {
         self.retry_queue.cleanup_expired();
         self.mesh_relay.maintain(std::time::Instant::now());
         self.prune_stale_known_peers(std::time::Instant::now());
+        self.reachability.prune(std::time::Instant::now());
         self.cleanup_expired_pending_messages_if_due();
         self.cleanup_outbox();
         self.mesh_services.cleanup_expired();

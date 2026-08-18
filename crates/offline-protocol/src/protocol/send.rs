@@ -22,6 +22,7 @@ use crate::events::{DecryptionFailureCode, Event, PresenceStatus};
 use crate::file_transfer::{FileChunk, OutboundTransferState};
 use crate::media_envelope::{encode_media_envelope, MediaChunkPlaintext, MediaRichExtras};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
+use crate::protocol::reachability::{Claim, FactSource};
 use crate::transport_manager::TransportManager;
 use crate::{Error, Result};
 use chrono::{DateTime, Utc};
@@ -366,8 +367,49 @@ impl OfflineProtocol {
         self.deduplicator.mark_seen(message_id.clone());
 
         let previous_transport = self.transport_manager.current_transport();
-        let send_result = self.transport_manager.send(&message);
-        let current_transport = self.transport_manager.current_transport();
+
+        // A recipient this device holds a live mesh link to is reached over
+        // that link, even with infrastructure up. Without this the online
+        // sender standing next to an offline recipient routes through the
+        // relay, which answers `recipient_unreachable`, and delivery waits for
+        // the park machinery to offer the frame to the very neighbour that was
+        // addressable all along. DORS cannot make this call: it scores
+        // carriers, and the fact that decides it is about the recipient.
+        //
+        // The link is ground truth, not a stored claim, so there is nothing to
+        // go stale. A refusal here is not terminal: the frame falls through to
+        // selection exactly as if this had never been tried, which keeps a
+        // marginal radio link from stranding a message another carrier could
+        // take.
+        let direct_mesh = self
+            .transport_manager
+            .mesh_transport_for(message.recipient.as_str());
+        let mut sent_via_mesh = None;
+        if let Some(transport) = direct_mesh {
+            match self
+                .transport_manager
+                .send_via_transport(&message, transport)
+            {
+                Ok(()) => sent_via_mesh = Some(transport),
+                Err(err) => {
+                    self.transport_manager.record_retry_failure(transport);
+                    debug!(
+                        message_id = %message.id,
+                        transport = ?transport,
+                        error = %err,
+                        "Direct mesh link refused the frame; falling back to transport selection"
+                    );
+                }
+            }
+        }
+
+        let (send_result, current_transport) = match sent_via_mesh {
+            Some(transport) => (Ok(()), Some(transport)),
+            None => {
+                let result = self.transport_manager.send(&message);
+                (result, self.transport_manager.current_transport())
+            }
+        };
 
         match send_result {
             Ok(()) => {
@@ -2963,6 +3005,39 @@ impl OfflineProtocol {
     // ========================================================================
 
     /// Handles successful message send.
+    /// Whether a frame for `peer_id` can arrive without a neighbour carrying
+    /// it, given what this device knows about *this recipient*.
+    ///
+    /// [`TransportManager::can_reach_without_carrying`] answers the same
+    /// question from carrier status alone, and so says yes for every recipient
+    /// while any infrastructure carrier is up. This is that answer with the
+    /// per-recipient facts applied: a carrier that has already told us it
+    /// cannot reach this recipient stops counting as a way to reach them.
+    ///
+    /// Two properties hold by construction:
+    ///
+    /// - **A carrier holding no fact is unchanged.** Nostr cannot report
+    ///   per-recipient delivery at all, so it never produces a fact and keeps
+    ///   its blanket claim. That is deliberate: the mixed-neighbourhood
+    ///   residual stays open for Nostr-only devices rather than closing by
+    ///   accident under a design that never gave them a verdict to act on.
+    /// - **A live mesh link always wins.** It is ground truth rather than a
+    ///   claim, and it is checked whether or not any fact exists.
+    pub(crate) fn can_reach_recipient(&self, peer_id: &str) -> bool {
+        let now = Instant::now();
+        let infrastructure_reaches_peer = self
+            .transport_manager
+            .available_infrastructure_carriers()
+            .into_iter()
+            .any(|carrier| {
+                !matches!(
+                    self.reachability.claim_for(peer_id, carrier, now),
+                    Some(Claim::Unreachable)
+                )
+            });
+        infrastructure_reaches_peer || self.transport_manager.mesh_can_address(peer_id)
+    }
+
     pub(super) fn handle_send_success(
         &mut self,
         message: &Message,
@@ -2984,10 +3059,7 @@ impl OfflineProtocol {
         // the ACK registration above stand either way, and if the accepting
         // carrier did deliver after all, the recipient's deduplicator absorbs
         // the second copy.
-        if !self
-            .transport_manager
-            .can_reach_without_carrying(message.recipient.as_str())
-        {
+        if !self.can_reach_recipient(message.recipient.as_str()) {
             let handed_to_mesh = self.offer_to_mesh(message);
             if handed_to_mesh > 0 {
                 debug!(
@@ -3251,6 +3323,23 @@ impl OfflineProtocol {
         message_id: &str,
         transport_error: Option<String>,
     ) -> Result<()> {
+        self.on_transport_send_failed_via(message_id, transport_error, None)
+    }
+
+    /// [`Self::on_transport_send_failed`] with the carrier that reported it.
+    ///
+    /// The carrier is what turns a failure into a *fact*: "the recipient is
+    /// not reachable" is meaningless on its own, since a device may hold
+    /// several carriers and only one of them is making the claim. Bridges that
+    /// know which transport answered pass it; the plain form above keeps
+    /// working for callers that do not, and records no fact rather than
+    /// guessing one.
+    pub fn on_transport_send_failed_via(
+        &mut self,
+        message_id: &str,
+        transport_error: Option<String>,
+        carrier: Option<TransportType>,
+    ) -> Result<()> {
         // Classified at the boundary, once, and never carried past it.
         //
         // The platform bridges build this string from the relay's own
@@ -3315,7 +3404,7 @@ impl OfflineProtocol {
             // Not a connection request, not a welcome: a plain DM or media
             // chunk. Surface the relay's verdict and park plain DMs so the
             // ACK retry budget stops burning against an offline peer.
-            self.handle_recipient_unreachable_for_message(message_id, transport_error);
+            self.handle_recipient_unreachable_for_message(message_id, transport_error, carrier);
             return Ok(());
         };
         // A reason tagged "recipient_unreachable" (the internet bridge's
@@ -3328,6 +3417,15 @@ impl OfflineProtocol {
         // no-op on it, stranding a false `Sent`.
         let peer_unreachable = transport_error == Some(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE);
         if peer_unreachable {
+            if let Some(carrier) = carrier {
+                self.reachability.record(
+                    &peer_id,
+                    carrier,
+                    Claim::Unreachable,
+                    FactSource::GatewayVerdict,
+                    Instant::now(),
+                );
+            }
             return self.apply_recipient_unreachable_failure(&peer_id, transport_error);
         }
         let reason = crate::events::WelcomeReasonCode::TransportUnavailable;
@@ -3383,6 +3481,7 @@ impl OfflineProtocol {
         &mut self,
         message_id: &str,
         transport_error: Option<&'static str>,
+        carrier: Option<TransportType>,
     ) {
         let Some(reason) = transport_error.filter(|r| *r == SEND_FAIL_REASON_RECIPIENT_UNREACHABLE)
         else {
@@ -3406,6 +3505,18 @@ impl OfflineProtocol {
         };
         let recipient = entry.message.recipient.as_str().to_string();
         let attempt_count = entry.attempt_count;
+        // The verdict, recorded as a fact before anything acts on it. Parking
+        // below reacts to *this* message; the fact is what lets the next send
+        // to the same recipient skip a carrier that has already said no.
+        if let Some(carrier) = carrier {
+            self.reachability.record(
+                &recipient,
+                carrier,
+                Claim::Unreachable,
+                FactSource::GatewayVerdict,
+                Instant::now(),
+            );
+        }
         // Media never parks, so the mesh offer the park performs for a DM has
         // to happen here instead. Cloned while the entry is still borrowed;
         // only on a verdict, so not a per-chunk cost.
@@ -3939,7 +4050,7 @@ impl OfflineProtocol {
         );
 
         // No route at all without help: the mesh is the entire answer.
-        let no_direct_route = !self.transport_manager.can_reach_without_carrying(&ack_to);
+        let no_direct_route = !self.can_reach_recipient(&ack_to);
         // Reached us through other devices, and we cannot hand it straight
         // back: the way it came is a route we know exists, whatever our own
         // carriers claim.

@@ -21171,6 +21171,342 @@ fn a_device_with_infrastructure_does_not_spend_the_mesh_on_its_own_traffic() {
 }
 
 #[test]
+fn an_online_sender_prefers_a_neighbor_it_can_see_over_the_relay() {
+    // The program's headline gap: a device with a working relay connection,
+    // standing next to the recipient. Routing through the relay makes delivery
+    // wait for a verdict that has to fail first, when the recipient was
+    // addressable the whole time. The link is ground truth, so it wins.
+    //
+    // `prefer_online` is what makes the gap reachable: without it DORS already
+    // demotes Internet below every mesh transport, so the ordering hides the
+    // problem. With it, scoring puts the relay first for a recipient standing
+    // one radio link away, and only a per-recipient fact can override that.
+    let mut config = create_relay_test_config_for_user("user123");
+    config.dors.prefer_online = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    ble.add_connected_peer("bob", -55);
+    let ble_handle = ble.clone();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    protocol
+        .send_message("bob", "you are right here", None, None::<String>)
+        .unwrap();
+
+    assert_eq!(
+        ble_handle.sent_messages().len(),
+        1,
+        "a recipient we hold a live link to must be reached over that link"
+    );
+    assert!(
+        internet_handle.sent_messages().is_empty(),
+        "with the recipient directly addressable, the relay must not be used"
+    );
+}
+
+#[test]
+fn a_recipient_who_is_not_a_neighbor_still_takes_the_relay() {
+    // The vacuity guard for the preference above: it must fire only for
+    // recipients this device can actually address, and change nothing else.
+    // Same `prefer_online` setup, so the only difference from the test above
+    // is whether the recipient is a live neighbour.
+    let mut config = create_relay_test_config_for_user("user123");
+    config.dors.prefer_online = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    ble.add_connected_peer("carol", -55);
+    let ble_handle = ble.clone();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    protocol
+        .send_message("distant", "over the wire", None, None::<String>)
+        .unwrap();
+
+    assert_eq!(
+        internet_handle.sent_messages().len(),
+        1,
+        "a recipient we hold no link to must still route by ordinary selection"
+    );
+    assert!(
+        ble_handle.sent_messages().is_empty(),
+        "the direct-link preference must not fire for a peer we hold no link to"
+    );
+}
+
+#[test]
+fn a_refused_mesh_link_falls_back_instead_of_stranding_the_message() {
+    // The direct link is preferred, not mandatory. A marginal radio must not
+    // strand a message an available carrier could take, so a refusal falls
+    // through to ordinary selection.
+    let mut config = create_relay_test_config_for_user("user123");
+    config.dors.prefer_online = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    ble.add_connected_peer("bob", -55);
+    let ble_handle = ble.clone();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    ble_handle.set_fail_next_sends(1);
+    protocol
+        .send_message("bob", "the link just went", None, None::<String>)
+        .unwrap();
+
+    assert_eq!(
+        internet_handle.sent_messages().len(),
+        1,
+        "a refused link must fall through to selection, not defer the message"
+    );
+}
+
+#[test]
+fn a_carrier_that_said_unreachable_stops_answering_for_that_recipient() {
+    // The carrying predicate is peer-blind by itself: any infrastructure
+    // carrier being up answers yes for everyone. A verdict is the fact that
+    // contradicts it, and it must apply to the recipient it named and to no
+    // one else.
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    assert!(
+        protocol.can_reach_recipient("bob"),
+        "with no facts at all, behaviour must match a carrier-status answer"
+    );
+
+    protocol.reachability.record(
+        "bob",
+        TransportType::Internet,
+        crate::protocol::reachability::Claim::Unreachable,
+        crate::protocol::reachability::FactSource::GatewayVerdict,
+        std::time::Instant::now(),
+    );
+
+    assert!(
+        !protocol.can_reach_recipient("bob"),
+        "a carrier that refused this recipient no longer counts as a way to reach them"
+    );
+    assert!(
+        protocol.can_reach_recipient("carol"),
+        "a verdict about one recipient must say nothing about another"
+    );
+}
+
+#[test]
+fn a_live_link_outranks_a_carrier_that_said_unreachable() {
+    // Ground truth beats a claim. A recipient standing next to us is reachable
+    // no matter what the relay believes about them.
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    ble.add_connected_peer("bob", -55);
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    protocol.reachability.record(
+        "bob",
+        TransportType::Internet,
+        crate::protocol::reachability::Claim::Unreachable,
+        crate::protocol::reachability::FactSource::GatewayVerdict,
+        std::time::Instant::now(),
+    );
+
+    assert!(
+        protocol.can_reach_recipient("bob"),
+        "a live mesh link is ground truth and outranks any carrier's claim"
+    );
+}
+
+#[test]
+fn a_carrier_that_never_answers_keeps_its_blanket_claim() {
+    // Nostr cannot report per-recipient delivery, so it never produces a fact.
+    // A verdict from one carrier must not silence a different one: that would
+    // close the Nostr residual by accident rather than by design.
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+    let nostr = MockTransport::new(TransportType::Nostr);
+    nostr.start().unwrap();
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Nostr, Box::new(nostr));
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    protocol.reachability.record(
+        "bob",
+        TransportType::Internet,
+        crate::protocol::reachability::Claim::Unreachable,
+        crate::protocol::reachability::FactSource::GatewayVerdict,
+        std::time::Instant::now(),
+    );
+
+    assert!(
+        protocol.can_reach_recipient("bob"),
+        "a carrier holding no fact keeps answering for every recipient"
+    );
+}
+
+#[test]
+fn a_relay_verdict_records_the_fact_that_drove_the_park() {
+    // The park counter and the fact table are written by the same producer, so
+    // they cannot disagree about what the relay just said.
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let sent = protocol
+        .send_message("bob", "are you there", None, None::<String>)
+        .unwrap();
+
+    protocol
+        .on_transport_send_failed_via(
+            &sent.as_str(),
+            Some("recipient_unreachable: not connected".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+
+    assert_eq!(
+        protocol
+            .reachability
+            .claim_for("bob", TransportType::Internet, std::time::Instant::now()),
+        Some(crate::protocol::reachability::Claim::Unreachable),
+        "the verdict that parked the message must also be recorded as a fact"
+    );
+}
+
+#[test]
+fn a_verdict_from_any_carrier_parks_the_message() {
+    // Parking is keyed to the token, not to the relay. A Reticulum gateway
+    // reporting the same verdict must drive the same machinery — this is what
+    // makes the gateway contract's Verdict verb worth implementing.
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+    let reticulum = MockTransport::new(TransportType::Reticulum);
+    reticulum.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Reticulum, Box::new(reticulum));
+    protocol.start().unwrap();
+
+    let sent = protocol
+        .send_message("bob", "over the backbone", None, None::<String>)
+        .unwrap();
+
+    protocol
+        .on_transport_send_failed_via(
+            &sent.as_str(),
+            Some("recipient_unreachable: no path".to_string()),
+            Some(TransportType::Reticulum),
+        )
+        .unwrap();
+
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&1),
+        "any carrier's unreachable verdict must park the message"
+    );
+    assert_eq!(
+        protocol
+            .reachability
+            .claim_for("bob", TransportType::Reticulum, std::time::Instant::now()),
+        Some(crate::protocol::reachability::Claim::Unreachable),
+        "and be recorded against the carrier that reported it"
+    );
+}
+
+#[test]
+fn a_presence_answer_supersedes_an_earlier_verdict() {
+    // Both answer the same question; the later one is the one that reflects
+    // the network now. Without this a recovered peer stays shut out until the
+    // verdict ages out.
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    protocol.reachability.record(
+        "bob",
+        TransportType::Internet,
+        crate::protocol::reachability::Claim::Unreachable,
+        crate::protocol::reachability::FactSource::GatewayVerdict,
+        std::time::Instant::now(),
+    );
+    assert!(!protocol.can_reach_recipient("bob"));
+
+    protocol.on_peer_presence("bob", true, None);
+
+    assert!(
+        protocol.can_reach_recipient("bob"),
+        "a presence answer must supersede the earlier verdict for that carrier"
+    );
+}
+
+#[test]
 fn a_forward_whose_links_all_failed_is_kept_rather_than_dropped() {
     // A link can go away between being chosen for a frame and being written to.
     // The frame has then travelled nowhere — but its id was recorded as handled
