@@ -30,6 +30,15 @@ func mapProtocolBridgeError(_ error: Error) -> (code: String, message: String)? 
         return ("SendFailed", message)
     case let .InvalidState(message):
         return ("InvalidState", message)
+    // Also transient, and distinct from InvalidState because the retry is
+    // gated on something the app itself controls: `resolveUsername` refuses a
+    // lookup while the protocol is stopped or paused, since nothing would pump
+    // relays or sweep its deadline. Without this arm it fell to the caller's
+    // fallback code, which for that method is InvalidArgument — telling the app
+    // the *name* was unusable and that retrying could never help, when
+    // `start()` is all that was missing.
+    case let .NotStarted(message):
+        return ("NotStarted", message)
     // Distinct from InvalidState on purpose: this one says the *configuration*
     // forbids the call, so retrying it unchanged can never succeed, while
     // InvalidState is transient and a retry is exactly right. `resolveUsername`

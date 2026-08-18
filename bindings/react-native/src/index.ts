@@ -2769,6 +2769,9 @@ export class OfflineProtocol {
    * - `InvalidConfiguration` — discovery is off (it also requires
    *   `coldContactEnabled`). Retrying unchanged can never succeed.
    * - `InvalidState` — too many lookups in flight. Transient; retry shortly.
+   * - `NotStarted` — the protocol is not running, so nothing would pump relay
+   *   traffic or sweep the deadline for this lookup. Transient; retry after
+   *   `start()`.
    * - `InvalidArgument` — not a claimable username (empty, over 64 bytes once
    *   normalized, carrying a control or format character, or address-shaped).
    *
@@ -2788,8 +2791,8 @@ export class OfflineProtocol {
    * @param username - The name to look up; normalized to NFC and lowercase
    * @returns `true` if this call started the lookup, `false` if it joined one
    * @throws `InvalidConfiguration` if discovery is off, `InvalidState` if too
-   *   many lookups are in flight, `InvalidArgument` if the name is not
-   *   claimable
+   *   many lookups are in flight, `NotStarted` if the protocol is not running,
+   *   `InvalidArgument` if the name is not claimable
    */
   async resolveUsername(username: string): Promise<boolean> {
     return await OfflineProtocolNativeModule.resolveUsername(username);

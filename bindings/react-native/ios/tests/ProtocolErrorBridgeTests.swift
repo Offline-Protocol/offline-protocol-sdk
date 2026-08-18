@@ -14,6 +14,11 @@ final class ProtocolErrorBridgeTests: XCTestCase {
             (.MediaTransferLimit(message: "bob"), "MediaTransferLimit"),
             (.SendFailed(message: "all transports failed"), "SendFailed"),
             (.InvalidState(message: "cannot demote the last admin"), "InvalidState"),
+            // resolveUsername raises this while the protocol is stopped or
+            // paused. Unmapped it fell to that method's fallback code,
+            // InvalidArgument, which tells an app the name was unusable when
+            // start() was all that was missing.
+            (.NotStarted(message: "Protocol not started"), "NotStarted"),
             // resolveUsername raises this for "discovery is off", where a retry
             // can never succeed, beside InvalidState for "retry shortly". One
             // code for both is the difference between an app that stops and one

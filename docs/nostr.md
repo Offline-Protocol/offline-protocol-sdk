@@ -514,8 +514,9 @@ safe to await it after either. Every case where no event will ever arrive
 rejects instead, so a `false` can never leave a spinner running forever. The
 rejection code says which case, and they need different handling:
 `InvalidConfiguration` (discovery is off, retrying cannot help),
-`InvalidState` (too many lookups in flight, retry shortly), and
-`InvalidArgument` (not a claimable name).
+`InvalidState` (too many lookups in flight, retry shortly), `NotStarted` (the
+protocol is not running, so nothing would pump relays or sweep deadlines for
+it; retry after `start()`), and `InvalidArgument` (not a claimable name).
 
 A resolution query is broadcast to every connected relay, and it completes when
 **all** of them have answered rather than when the first one has. That is a

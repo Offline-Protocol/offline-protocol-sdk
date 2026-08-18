@@ -2258,10 +2258,26 @@ fn protocol_with_mls_storage(storage: Arc<InMemoryStorage>) -> OfflineProtocol {
 /// layer builds it when `nostr_enabled` is set.
 #[cfg(test)]
 fn protocol_with_nostr(user_id: &str) -> OfflineProtocol {
+    protocol_with_nostr_discovery(user_id, false)
+}
+
+/// Same, but with username discovery enabled in the **config**.
+///
+/// Setting the flag on the transport by hand does not survive `start()`, which
+/// re-applies the whole Nostr section from config — so any test that starts the
+/// protocol has to configure discovery the way an app does.
+#[cfg(test)]
+fn protocol_with_discovery(user_id: &str) -> OfflineProtocol {
+    protocol_with_nostr_discovery(user_id, true)
+}
+
+#[cfg(test)]
+fn protocol_with_nostr_discovery(user_id: &str, discovery: bool) -> OfflineProtocol {
     let mut config = create_test_config();
     config.profile = user_id.to_string();
     config.encryption.enabled = true;
     config.transport.nostr_enabled = true;
+    config.transport.nostr_username_discovery_enabled = discovery;
     let mut protocol = OfflineProtocol::new(config).unwrap();
     // Identity first: `NostrTransport` derives its routing tag and bootstrap
     // keypair from the id it is built with, so building it before the address
@@ -35076,6 +35092,110 @@ fn test_resolving_with_discovery_disabled_is_an_error_not_a_false() {
     assert!(protocol.nostr_resolution_requests.is_empty());
 }
 
+/// A lookup on a protocol that is not running is an **error**, not `Ok(true)`.
+///
+/// The promise `Ok(true)` makes is kept by `process()`, which is inert unless
+/// the protocol is running. Accepting the lookup here returned "an answer is
+/// coming" for an answer nothing could deliver, and — worse than the silence
+/// itself — left the registration behind, so every later attempt at the same
+/// name answered `Ok(false)`, which says the same thing again. The caller was
+/// told twice that a resolution was in flight and could never learn otherwise.
+#[test]
+fn test_resolving_while_stopped_is_an_error_not_a_promise() {
+    let mut protocol = protocol_with_discovery("resolver");
+    protocol.start().expect("start");
+    protocol.stop().expect("stop");
+
+    assert!(
+        matches!(protocol.resolve_username("alice"), Err(Error::NotStarted)),
+        "a stopped protocol cannot emit the event, so it must refuse the lookup"
+    );
+
+    // Nothing recorded, so the retry after `start()` is a fresh lookup rather
+    // than one deduplicated against a registration that outlived its engine.
+    assert!(protocol.nostr_resolution_requests.is_empty());
+    assert!(protocol.nostr_resolutions.is_empty());
+
+    // And the name is resolvable again once there is machinery behind it.
+    protocol.start().expect("restart");
+    assert!(
+        protocol.resolve_username("alice").expect("resolve"),
+        "after restart the lookup starts fresh"
+    );
+}
+
+/// Configuration errors outrank the state error, because only one of them is
+/// worth retrying.
+///
+/// Both are true of a stopped protocol with discovery off. Reporting
+/// `NotStarted` would send an app round a start-and-retry loop to arrive at
+/// the permanent problem it could have been told about first.
+#[test]
+fn test_a_disabled_lookup_reports_configuration_before_state() {
+    let mut protocol = protocol_with_nostr("resolver");
+    // Discovery deliberately left off, and the protocol never started.
+    assert!(matches!(
+        protocol.resolve_username("alice"),
+        Err(Error::InvalidConfiguration(_))
+    ));
+}
+
+/// Stopping answers the lookups it is about to strand.
+///
+/// `stop()` takes down both halves of the promise: relays stop being pumped,
+/// and `process()` stops sweeping deadlines. Without this the caller holding
+/// `Ok(true)` waits forever, and the registration left behind would answer
+/// every later lookup for that name with `Ok(false)` — an answer is coming,
+/// for an answer that already will not.
+#[test]
+fn test_stopping_answers_a_lookup_it_would_otherwise_strand() {
+    let mut protocol = protocol_with_discovery("resolver");
+    protocol.start().expect("start");
+
+    let events = capture_events(&mut protocol);
+    assert!(
+        protocol.resolve_username("alice").expect("resolve"),
+        "precondition: the lookup is accepted while running"
+    );
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::UsernameResolved { .. })),
+        "precondition: nothing has answered it yet"
+    );
+
+    protocol.stop().expect("stop");
+
+    let emitted = events.lock().unwrap();
+    let resolved: Vec<&Event> = emitted
+        .iter()
+        .filter(|e| matches!(e, Event::UsernameResolved { .. }))
+        .collect();
+    assert_eq!(
+        resolved.len(),
+        1,
+        "the promise is kept exactly once on the way down"
+    );
+    match resolved[0] {
+        Event::UsernameResolved {
+            username, claims, ..
+        } => {
+            assert_eq!(username, "alice");
+            assert!(
+                claims.is_empty(),
+                "it never reached a relay, so the honest answer is the empty set"
+            );
+        }
+        other => panic!("unexpected event: {:?}", other),
+    }
+
+    // The registration is gone with it, so a restart does not find a lookup
+    // that has already been answered.
+    assert!(protocol.nostr_resolution_requests.is_empty());
+}
+
 /// Deduplication must cover a lookup that has already been minted into a
 /// query, not only one still sitting in the transport's queue.
 ///
@@ -35086,10 +35206,10 @@ fn test_resolving_with_discovery_disabled_is_an_error_not_a_false() {
 /// property the whole set-shaped API rests on.
 #[test]
 fn test_a_second_lookup_joins_an_already_minted_resolution() {
-    let mut protocol = protocol_with_nostr("resolver");
-    protocol
-        .transport_manager_mut()
-        .set_nostr_username_discovery_enabled(true);
+    let mut protocol = protocol_with_discovery("resolver");
+    // A lookup is only accepted while running, because only `process()` emits
+    // the event it promises.
+    protocol.start().expect("start");
 
     let name = "alice";
     assert!(
@@ -35119,10 +35239,10 @@ fn test_a_second_lookup_joins_an_already_minted_resolution() {
 /// turning a transient offline moment into a permanent one.
 #[test]
 fn test_a_swept_lookup_can_be_requested_again() {
-    let mut protocol = protocol_with_nostr("resolver");
-    protocol
-        .transport_manager_mut()
-        .set_nostr_username_discovery_enabled(true);
+    let mut protocol = protocol_with_discovery("resolver");
+    // A lookup is only accepted while running, because only `process()` emits
+    // the event it promises.
+    protocol.start().expect("start");
 
     let name = "alice";
     assert!(

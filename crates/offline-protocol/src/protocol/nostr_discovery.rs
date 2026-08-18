@@ -31,7 +31,7 @@ use offline_protocol_transport::nostr_crypto::discovery_tag_for_username;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use super::{storage_keys, OfflineProtocol};
+use super::{lock_shared_state, storage_keys, OfflineProtocol, ProtocolState};
 use crate::events::{Event, UsernameClaim};
 use crate::{Error, Result};
 
@@ -557,6 +557,10 @@ impl OfflineProtocol {
     ///   dead-end one hop later.
     /// - [`Error::InvalidState`] if too many lookups are already in flight.
     ///   Transient: retry once earlier ones drain.
+    /// - [`Error::NotStarted`] if the protocol is not running. Nothing pumps
+    ///   relay traffic and nothing sweeps deadlines outside `Running`, so a
+    ///   lookup accepted here would be a promise with no machinery behind it.
+    ///   Transient: retry after `start()`.
     pub fn resolve_username(&mut self, username: &str) -> Result<bool> {
         let username: Username = username
             .parse()
@@ -568,6 +572,20 @@ impl OfflineProtocol {
                  (which also requires nostr_cold_contact_enabled)"
                     .to_string(),
             ));
+        }
+
+        // The event this returns a promise of is emitted from `process()`,
+        // either on a relay's answer or on the deadline sweep, and `process()`
+        // is inert unless the protocol is running. Accepting the lookup while
+        // stopped or paused would return `Ok(true)` for an event that cannot
+        // arrive, and would then answer every later call for the same name
+        // with `Ok(false)` off the registration left behind — the caller told
+        // an answer is coming, twice, with nothing able to deliver one.
+        {
+            let state = lock_shared_state(&self.shared_state)?;
+            if state.state != ProtocolState::Running {
+                return Err(Error::NotStarted);
+            }
         }
 
         // Deduplicated against both halves of "in flight", because the transport
@@ -845,6 +863,42 @@ impl OfflineProtocol {
             // the platform releases a query with no relay connected, so the
             // two unreachable paths report identically rather than one of them
             // being silent.
+            self.emit_event(Event::UsernameResolved {
+                username: username.into_string(),
+                claims: Vec::new(),
+                rejected: 0,
+                truncated: 0,
+            });
+        }
+    }
+
+    /// Answers every lookup still in flight, because after this nothing can.
+    ///
+    /// `stop()` takes down both halves of the promise [`Self::resolve_username`]
+    /// makes: relays stop being pumped, so no answer arrives, and `process()`
+    /// goes inert, so the deadline sweep that exists to turn silence into an
+    /// empty answer never runs either. A caller holding `Ok(true)` would wait
+    /// forever on an event with nothing left to emit it.
+    ///
+    /// Flushed rather than discarded, on the same terms the sweep uses:
+    /// discarding would leave the promise broken and would additionally leave
+    /// the registrations behind, so every later lookup for those names would
+    /// answer `Ok(false)` ("an answer is coming") for an answer that already
+    /// will not. A resolution that heard from some relays emits what it has; a
+    /// lookup that never reached one emits an empty set.
+    pub(crate) fn flush_username_resolutions_for_stop(&mut self) {
+        let in_flight: Vec<String> = self.nostr_resolutions.keys().cloned().collect();
+        for query_id in in_flight {
+            debug!(query_id = %query_id, "Protocol stopping; emitting what this resolution has");
+            self.flush_username_resolution(&query_id);
+        }
+
+        let unminted: Vec<Username> = self.nostr_resolution_requests.keys().cloned().collect();
+        for username in unminted {
+            debug!("Protocol stopping; answering a lookup that never reached a relay");
+            self.nostr_resolution_requests.remove(&username);
+            self.transport_manager
+                .cancel_nostr_username_resolution(&username);
             self.emit_event(Event::UsernameResolved {
                 username: username.into_string(),
                 claims: Vec::new(),

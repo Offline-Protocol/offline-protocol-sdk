@@ -86,8 +86,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   resolution can never hang on a lookup that was never started. The rejection
   code says which case, because they need different handling:
   `InvalidConfiguration` (discovery is off, so retrying cannot help),
-  `InvalidState` (too many lookups in flight, retry shortly), and
-  `InvalidArgument` (not a claimable name).
+  `InvalidState` (too many lookups in flight, retry shortly), `NotStarted` (the
+  protocol is not running, retry after `start()`), and `InvalidArgument` (not a
+  claimable name).
 
   The event also reports `truncated`, the number of *verified* claims dropped
   at the accumulator's ceiling. It is the opposite statement to `rejected`:
@@ -247,6 +248,39 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   having set it. Unreachable from typed TypeScript; reachable from JavaScript.
 
 ### Fixed
+
+- **`resolveUsername()` no longer promises an event the engine cannot send.**
+  It gated only on the discovery switches, which survive `stop()`, while the
+  event it promises is emitted from `process()`, which is inert unless the
+  protocol is running. A lookup requested on a stopped or paused instance
+  therefore returned `true` ("an answer is coming") with nothing able to
+  deliver one, and — the part that made it permanent — left its registration
+  behind, so every later attempt at that name answered `false`, which says the
+  same thing again. The caller was told twice that a resolution was in flight
+  and had no way to learn otherwise. It now rejects with `NotStarted`, after
+  the discovery checks, so an app with discovery switched off still learns
+  that first rather than being sent round a start-and-retry loop to find out.
+
+  `stop()` answers the lookups it is about to strand rather than dropping
+  them: a resolution that heard from some relays emits what it has, and one
+  that never reached a relay emits the empty set, both on the terms the
+  deadline sweep already uses. Discarding them silently would leave the
+  promise broken and the registrations standing.
+
+- **`getDorsConfig()` reports the engine's configuration, not a copy of the
+  last thing written through the FFI.** It answered from an FFI-local cache
+  that nothing populated until the first `updateDorsConfig`, falling back to
+  the core defaults until then — and `preferOnline` is the field whose default
+  (`false`) disagrees with what construction takes from `ProtocolConfig`. An
+  app created with `preferOnline: true` that then performed the documented
+  read-modify-write to change *any other* field read `false`, wrote it back,
+  and silently turned internet-first routing off. React Native was shielded
+  only by accident (its TypeScript layer sources the flag from the `dors`
+  section, whose create-time application populated the cache), so this bit
+  Swift, Kotlin and Python callers. The getter now reads the live selector,
+  the way `getMeshRelayTunables()` reads the governor, and the cache is gone
+  rather than corrected: a second copy of a value is a thing that can disagree
+  with it.
 
 - **Every mesh forwarding dial that could silently switch forwarding off is
   now refused at construction.** These share one failure and it is the worst
