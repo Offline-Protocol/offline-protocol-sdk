@@ -33,6 +33,7 @@ reduces but does not eliminate what that reveals.
 | **A4. Group insider** | Holds a legitimate leaf in a group | Everything a member can do, plus can craft frames as a member |
 | **A5. Malicious application** | Runs above the SDK on the same device | Full access to the SDK's public API |
 | **A6. Device compromise** | Root or equivalent on the device | Everything |
+| **A7. Hostile gateway** | Operates or has compromised a gateway a device attached to | Everything A3 has, at a zone's bridge to the wider network: originates verdicts and presence answers, and observes attach sessions |
 
 A6 is out of scope. The protocol assumes platform secure storage holds. A5 is
 partly in scope: the SDK refuses control-frame injection through public send
@@ -330,6 +331,65 @@ request and response bodies is not implemented.
 
 **What application teams must do today:** treat a service body as public, and
 encrypt anything sensitive above the SDK before handing it over.
+
+### R10. Gateways are unauthenticated for delivery, and see who is in the zone
+
+A [gateway](../spec/gateway-contract.md) bridges a zone to the internet or to a
+wide-area backbone. Attaching to one binds the session to the device's address
+with a domain-separated proof under `offline-gateway-addr-v1`, which stops a
+gateway from attaching a session under an address the device does not control,
+and stops a proof harvested by one gateway being replayed against the relay. It
+does **not** make the gateway trusted for delivery, and nothing about the design
+tries to.
+
+**Impact:** an A7 gateway can do four things.
+
+*Blackhole.* Accept frames and forward none. Costs latency and battery.
+
+*Lie "unreachable".* Trigger parking for a recipient who is reachable. Retries
+quiet down and the sender's probes stretch out, so delivery is delayed. Mesh
+offers and probes continue, and the outbox still holds the message, so it
+remains deliverable by every other path.
+
+*Lie "reachable".* Attract traffic to a path that goes nowhere, bounded exactly
+as the blackhole is.
+
+*Observe.* Attach sessions and presence queries reveal which addresses are in
+the zone, and when they are active, to the gateway operator. This is the same
+exposure relay attach already gives the relay operator, at zone granularity.
+
+**Why it stands:** verdicts are not authenticated and cannot be. They are claims
+about a third party's connectivity, and no signature makes a claim true. The
+design answers this at the policy layer instead: a verdict MAY open a path and
+economise retries, and MUST NOT close one; a "reachable" claim never suppresses
+the acknowledgement ladder. Delivery settles only on the recipient's end-to-end
+acknowledgement or terminal outbox expiry, so no gateway answer settles
+anything.
+
+**Mitigations in place today**, carrying the internet relay as the one shipped
+gateway: the settlement invariant, verdicts-never-close-a-path, MLS end to end
+so a gateway sees ciphertext plus routing metadata, and the recipient-aware
+decay that reverts every gateway claim to "no opinion" on a TTL (ten minutes for
+a verdict, five for a presence answer) rather than letting it stand
+indefinitely. These hold against a hostile relay right now, which is why an A7
+gateway inherits a bounded blast radius rather than a new one.
+
+**Mitigations specified but not yet implemented**, and therefore not yet
+protecting anyone: address-bound attach under `offline-gateway-addr-v1` (the
+domain is [reserved, not emitted](../spec/username-discovery.md#signing-domains)),
+and per-device and per-peer token-bucket budgets at the gateway against
+exhaustion. They are listed apart from the others on purpose: a threat model
+that reads as protection when the protection is still prose is the failure this
+document exists to prevent.
+
+**What would close it:** nothing closes the lying-gateway case, because the lie
+is about someone else's state. Provisioning is the real control: gateways are
+installed by a person ([ADR 0016](../adr/0016-gateways-are-provisioned-not-emergent.md)),
+so "which gateways can my device attach to" is an operational decision rather
+than an emergent one. Multiple gateways per zone reduce the blast radius of any
+single hostile or broken one. Zone-membership exposure would need a design that
+does not name recipients to the bridge at all, which no addressing scheme here
+provides; it is the same open problem as relay-side metadata.
 
 ## The telemetry producer rule
 

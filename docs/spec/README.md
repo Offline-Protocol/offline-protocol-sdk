@@ -20,6 +20,7 @@ document says which reading is normative for the wire.
 | [Group protocol](group-protocol.md) | Group frames, membership commits, leaf identity binding, relay broadcast and the delivery report |
 | [Capability negotiation](capability-negotiation.md) | What peers advertise, what each capability gates, and what happens on absence |
 | [Username discovery and invites](username-discovery.md) | The self-certifying invite payload, and the non-authoritative username directory |
+| [The gateway contract](gateway-contract.md) | What a gateway is, the five verbs it implements, the gateway-daemon wire protocol, and the backbone |
 
 ## Conformance language
 

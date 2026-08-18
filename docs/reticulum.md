@@ -4,7 +4,9 @@
 
 The Reticulum transport provides long-range, resilient mesh networking via the [Reticulum](https://reticulum.network/) network stack. It supports LoRa, TCP, UDP, serial, I2P, and other mediums, making it ideal for off-grid communication, disaster recovery, and infrastructure-sparse environments where BLE range is insufficient and Internet connectivity is unavailable.
 
-Reticulum is the fourth transport in the Offline Protocol SDK, alongside BLE, WiFi Direct, and Internet. It is disabled by default because it requires external infrastructure (a running Reticulum instance, an RNode radio, or a network gateway).
+Reticulum is one of five transports in the Offline Protocol SDK, alongside BLE, Wi-Fi Direct, Internet and Nostr. It is disabled by default because it requires external infrastructure (a running Reticulum instance, an RNode radio, or a gateway).
+
+> **No counterpart daemon ships yet.** The Rust transport opens no Reticulum link of its own: it manages queues, metrics and the send-confirmation loop, and expects the platform to bridge to a real Reticulum stack. Both mobile managers speak the protocol below to a configurable address, and nothing in this repository or any companion repository answers on the other end. Until a daemon exists, enabling Reticulum gives you a transport that queues and never drains. See [the gateway contract](spec/gateway-contract.md), which specifies what that daemon has to be.
 
 ## When to Use Reticulum
 
@@ -159,10 +161,10 @@ let config = ProtocolConfig(
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| Connection timeout | 60s | Time to wait for Reticulum connection (vs 30s for Internet) |
-| Pending confirmation timeout | 120s | Time before treating an unconfirmed send as failed (vs 15s for Internet) |
-| Max payload size | 64 KB | SDK-imposed limit; Reticulum's Resource mechanism has no inherent cap |
-| Reticulum encrypted MDU | 383 bytes | Single-packet maximum for encrypted data; plain MDU is 464 bytes |
+| Connection timeout | 60s | Enforced by the native managers, which each hold their own constant. The identically-valued Rust `ReticulumConfig` field is not read by anything. |
+| Pending confirmation timeout | 120s | Time before treating an unconfirmed send as failed (vs 15s for Internet). Enforced in Rust. |
+| Max payload size | 64 KB | Declared as `RETICULUM_MAX_PAYLOAD_SIZE` and **not currently enforced anywhere**: no code reads it. Treat it as intent, not as a limit you can rely on. |
+| Reticulum encrypted MDU | 383 bytes | Single-packet maximum for encrypted data; plain MDU is 465 bytes |
 | Reticulum MTU | 500 bytes | Total wire-format maximum including headers |
 
 The longer timeouts reflect the high-latency reality of LoRa multi-hop paths.
@@ -182,7 +184,29 @@ Regardless of which integration strategy you choose, the platform bridge interac
 
 ### Daemon TCP Protocol
 
-The built-in `ReticulumManager` (iOS and Android) communicates with a Reticulum daemon over a newline-delimited JSON protocol on TCP (default `localhost:4242`). Both platforms must implement the same message types to stay in sync.
+> **Normative home:** this protocol is specified in
+> [the gateway contract](spec/gateway-contract.md#gateway-daemon-contract-v1),
+> which is the document to implement against. What follows describes what the
+> shipped managers do today: contract v1 minus the verbs that make a gateway a
+> gateway (address declaration, per-recipient verdicts, presence, capabilities,
+> the version field). `Identify`, `SendMessage`, `MessageReceived` and
+> `StatusUpdate` are the whole of what they speak.
+>
+> One difference is easy to miss when implementing the daemon side, because it
+> is a silence rather than a message: **the shipped clients confirm a send on
+> the socket write, not on a daemon answer.** They call
+> `reticulumConfirmSent()` as soon as the line is written and ignore both
+> `MessageSent` and `DeliveryError`, so a daemon that answers contract v1
+> correctly gets no verdict handling from today's bridges. Teaching them to
+> settle on the daemon's answer is part of the transport work, not the daemon's.
+>
+> Note what this section used to imply and does not: **no Reticulum daemon
+> speaks this protocol.** `rnsd`'s own shared-instance IPC is HDLC-framed
+> Reticulum packets over a Unix domain socket (Strategy 3 above), not this. This
+> is a bespoke protocol whose counterpart has never existed, which is why the
+> gateway contract promotes it rather than inventing a third one.
+
+The built-in `ReticulumManager` (iOS and Android) speaks a newline-delimited JSON protocol over TCP to a configurable `daemonAddress` (default `localhost:4242`). Both platforms implement the same message types to stay in sync.
 
 **Client-to-daemon messages:**
 
@@ -436,18 +460,22 @@ The `update_metrics` method preserves confirmation loop counts (success/failure)
 
 ## Reconnection
 
-Reticulum transport supports automatic reconnection:
+Reconnection is owned entirely by the native managers, and is configured from
+the app's transport config, **not** from the Rust `ReticulumConfig`, whose
+fields are inert (nothing constructs it with non-default values, and
+`reconnect_delay` has no reader at all).
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `auto_reconnect` | `true` | Automatically reconnect after disconnection |
-| `reconnect_delay` | 5 seconds | Delay between reconnection attempts |
-| `max_reconnect_attempts` | 0 (infinite) | Maximum attempts before giving up |
+| Parameter | Where it lives | Default | Description |
+|-----------|----------------|---------|-------------|
+| `daemonAddress` | app config (`transports.reticulum`) | `localhost:4242` | Host and port of the daemon |
+| `autoReconnect` | app config | `true` | Reconnect after disconnection |
+| `maxReconnectAttempts` | app config | `0` (infinite) | Attempts before giving up |
+| Backoff | native managers | 1s doubling to 30s | Not configurable |
 
 On disconnection:
 1. All pending confirmations are failed immediately
 2. Send queue is preserved (messages will be sent after reconnection)
-3. Reconnection attempts begin after `reconnect_delay`
+3. Reconnection attempts begin after the current backoff interval
 4. Reconnect counter resets on successful connection
 
 ## Troubleshooting

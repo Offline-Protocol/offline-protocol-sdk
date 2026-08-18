@@ -173,7 +173,7 @@ This feeds real delivery data into DORS so it can make accurate routing decision
 Device ←→ Platform Bridge ←→ Reticulum Stack ←→ LoRa/TCP/UDP/I2P ←→ Remote Device
 ```
 
-**Platform bridge pattern**: The platform bridges to a Reticulum stack via embedded Python (most proven for mobile, used by Sideband), the emerging `reticulum-rs` Rust crate, HDLC shared instance IPC (desktop), or a TCP gateway. The Rust transport manages queues, metrics, and the confirmation loop.
+**Platform bridge pattern**: The platform bridges to a Reticulum stack via embedded Python (most proven for mobile, used by Sideband), the emerging `reticulum-rs` Rust crate, HDLC shared instance IPC (desktop), or a gateway daemon speaking [the gateway contract](spec/gateway-contract.md). The Rust transport manages queues, metrics, and the confirmation loop, and opens no Reticulum link itself. No gateway daemon ships yet, so this transport has no working counterpart today.
 
 **Send confirmation loop**: Like Internet transport, the platform drains the outgoing queue via `reticulumGetNextMessage()`, sends through the Reticulum daemon, and **must** report the outcome via `reticulumConfirmSent(messageId)` or `reticulumSendFailed(messageId)`. Pending confirmations time out after 120 seconds (longer than Internet's 15s due to high-latency LoRa paths).
 
