@@ -21,7 +21,9 @@ The relay path marks it at arrival.** Both are correct for their path, and each
 carries an obligation the other does not.
 
 **G4. Every relay-path arm that ends with the frame neither delivered, nor
-buffered, nor consumed by MLS must unmark before returning.**
+buffered, nor consumed by MLS must unmark before returning.** On the mesh path
+the same obligation binds the identity refusal, which releases both layers. Its
+other permanent verdicts are acknowledged and stay marked.
 
 ## Send
 
@@ -85,17 +87,17 @@ stateDiagram-v2
 
     Buffered --> Deferred: no ack, unmark transport dedup
     Deferred --> [*]
-    SecurityRejected --> [*]: no ack, unmark transport dedup only
+    SecurityRejected --> [*]: no ack, release both dedup layers
     PolicyRejected --> [*]: ack, stays marked
     Delivered --> [*]: ack
 ```
 
 Two group-specific differences from the direct-message deferred atom:
 
-**Difference 1: only the transport deduplication layer is unmarked.** The
-group-level layer stays marked for the whole pending lifetime. It is the
-replay-amplification defence and the authoritative double-delivery guard, so the
-drain does **not** re-mark the transport layer either.
+**Difference 1: a buffered message unmarks only the transport deduplication
+layer.** The group-level layer stays marked for the whole pending lifetime. It
+is the replay-amplification defence and the authoritative double-delivery guard,
+so the drain does **not** re-mark the transport layer either.
 
 **Difference 2: a duplicate of a still-pending message returns `Deferred`, not a
 re-acknowledgement.** It is checked before decrypt. Only a duplicate of an
@@ -108,6 +110,14 @@ deduplication layers.
 **The logical identifier is marked only after a successful decrypt**, so a
 failed decrypt cannot poison it. Failing to hold that line turns a rejected copy
 into an apparent delivery.
+
+**The envelope identifier is released on an identity refusal**, which is the
+other half of the same rule. It is marked before the decrypt to bound replay
+amplification, so a refusal that leaves it marked leaves it readable as marked
+and not pending, which the duplicate branch treats as already delivered: a
+verbatim replay is then acknowledged, and that acknowledgement is the liveness
+confirmation the refusal withheld. Releasing costs one crypto operation per
+replayed copy.
 
 ### Relay path
 

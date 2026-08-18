@@ -4528,6 +4528,95 @@ fn test_grp_mls_msg_failed_decrypt_does_not_poison_logical_id() {
     );
 }
 
+/// The mesh path's copy of the refusal-unmark obligation (#366). The handler
+/// marks the envelope id *before* decrypting, to bound replay amplification to
+/// one crypto operation per id. A SEC-M1 refusal then withholds the ACK and the
+/// receive loop unmarks the *transport* deduplicator, so a replay is not
+/// absorbed there and reaches this handler a second time. Left marked at the
+/// group level, that replay hits the duplicate branch, reads as marked but not
+/// pending (already delivered), and returns `Consumed`, which the receive loop
+/// ACKs: the replay earns the liveness confirmation the silent refusal exists
+/// to withhold (invariant I4, ADR 0005).
+///
+/// Pin the release, and pin what it can and cannot recover. The refused
+/// decrypt already spent the ciphertext's ratchet generation (OpenMLS persists
+/// message secrets through the storage provider before the identity check
+/// runs), so the replay cannot decrypt: the honest outcome is `Deferred`,
+/// buffered and un-ACKed, never `Consumed`.
+#[test]
+fn test_mesh_copy_sender_mismatch_rejected_releases_dedup_entry() {
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Mesh Mismatch Group");
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    let logical = "cafecafe-1111-2222-3333-444444444444";
+    let encrypted = {
+        let mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        mls.encrypt_for_group(&gid, b"mesh body").unwrap()
+    };
+    let payload = serde_json::json!({
+        "group_id": group_id,
+        "ciphertext": base64_encode(&encrypted.ciphertext),
+        "epoch": encrypted.epoch,
+        "message_id": logical,
+    })
+    .to_string();
+
+    // Alice's genuine ciphertext, injected on the mesh under mallory's wire
+    // identity: MLS authenticates alice as the author, the wire sender claims
+    // mallory, so SEC-M1 refuses to attribute the frame to anyone.
+    let wire = make_message(
+        &id("mallory"),
+        &id("bob"),
+        &format!("{}{}", internal_prefixes::GROUP_MLS_MSG, payload),
+    );
+    let res = bob.handle_group_mls_msg(&wire, &id("mallory"), &payload);
+    assert!(
+        matches!(res, InternalMessageResult::SecurityRejected),
+        "A wire sender that is not the MLS-authenticated author must be refused: got {:?}",
+        res
+    );
+    assert!(
+        !bob.group_mesh.message_dedup.contains_key(&wire.id.as_str()),
+        "A SecurityRejected mesh copy must not leave the envelope id marked, \
+         or the duplicate branch re-ACKs a replay as already delivered"
+    );
+    assert!(
+        !bob.group_mesh.message_dedup.contains_key(logical),
+        "The logical id is marked on a successful decrypt only"
+    );
+
+    // The verbatim replay an injector sends to fish for that ACK: same
+    // envelope, same ciphertext. It must be judged again rather than absorbed.
+    let res = bob.handle_group_mls_msg(&wire, &id("mallory"), &payload);
+    assert!(
+        matches!(res, InternalMessageResult::Deferred),
+        "A replayed refusal must not be absorbed as an already-delivered \
+         duplicate (Consumed), which the receive loop ACKs: got {:?}",
+        res
+    );
+    assert!(
+        bob.group_mesh
+            .pending_group_messages
+            .get(&group_id)
+            .is_some_and(|q| !q.is_empty()),
+        "Deferred means buffered: the generation was spent by the refused \
+         decrypt, so custody stays with the sender"
+    );
+
+    let events = events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::GroupMessageReceived { .. })),
+        "A refused frame must never deliver"
+    );
+}
+
 /// The relay path's own copy of the poison hazard. Its handler marks the
 /// relay-supplied id (the logical id) pre-decrypt as replay defense — but a
 /// copy whose wire `sender` is not the MLS credential (a v2 relay

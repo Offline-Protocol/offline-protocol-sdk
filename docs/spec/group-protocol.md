@@ -117,19 +117,21 @@ row 1 refusals happen at the MLS layer, *after* the outer sender was proved,
 which is exactly what makes them attribution failures: the proved outer sender
 is contradicting the authenticated inner author.
 
-The unmark obligation in row 1 spans **both** deduplication layers, and the two
-group paths do not currently discharge it alike. The relay path removes its
-group-level entry on a security refusal. The mesh path does not: it marks the
-envelope identifier before decrypting (to bound replay amplification to one
-crypto operation per identifier) and never releases it on refusal, so a verbatim
-replay is absorbed by the duplicate branch, which treats a marked-but-not-pending
-identifier as already delivered and **acknowledges** it.
+The unmark obligation in row 1 spans **both** deduplication layers, and every
+inbound path discharges it. The receive loop releases the transport-level
+identifier for a refused frame that reached it. At the group level, the mesh
+handler, the relay handler and the drain each release their own entry.
 
-The mesh behaviour is a defect against this specification, not the specification
-describing itself. A conforming implementation MUST release the identifier on
-the refusal path, in the mesh handler as well as the relay handler; the
-replay-amplification bound survives, at a cost of one crypto operation per
-replayed copy, which is the same trade the relay path already accepts.
+Releasing is not optional, and the failure it prevents is specific. Both group
+handlers mark the identifier *before* attempting the decrypt, which bounds
+replay amplification to one crypto operation per identifier. An implementation
+that marks but does not release on refusal leaves the identifier marked and not
+pending, and the duplicate branch reads that state as already delivered: a
+verbatim replay is then **acknowledged**, handing whoever forged the
+attribution the liveness confirmation the refusal was designed to withhold. A
+conforming implementation MUST therefore release the identifier on the refusal
+path in every group handler. The replay-amplification bound survives, at a cost
+of one crypto operation per replayed copy.
 
 A refused commit MUST be classified **permanently** refused. An implementation
 that treats it as retriable buffers it, re-decrypts it on every drain, and,
