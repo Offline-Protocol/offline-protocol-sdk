@@ -123,6 +123,53 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   governor. The DORS tie-break comments claimed an order ending at Reticulum
   when Nostr, not Reticulum, is lowest.
 
+- **The gateway contract is specified** in
+  [docs/spec/gateway-contract.md](./docs/spec/gateway-contract.md): what a
+  gateway is, the five verbs it must implement (Attach, Submit, Verdict,
+  Presence, Capabilities), the newline-JSON wire protocol a device speaks to a
+  gateway daemon, and how the Reticulum backbone carries traffic between zones.
+
+  The framing is deliberately a reframing rather than an invention: **the
+  internet relay already implements every verb**, so everything the SDK does
+  with the relay's answers today (parking, escalating probes, mesh offers,
+  presence-driven flush) is gateway machinery that predates the name. Verdict is
+  the load-bearing verb, and the contract states plainly that verdicts are
+  unauthenticated claims which may open a path and must never close one, because
+  nothing settles a message except the recipient's own acknowledgement.
+
+  The device-to-daemon protocol promotes the one both mobile bridges already
+  speak, extended with the verbs that make a gateway a gateway: a version field,
+  an address declaration under a new `offline-gateway-addr-v1` signing domain
+  (registered in the spec's signing-domain table as reserved), per-recipient
+  verdicts, presence and capability advertisement.
+
+- **Two decisions recorded.**
+  [ADR 0016](./docs/adr/0016-gateways-are-provisioned-not-emergent.md): gateways
+  are provisioned, never emergent — the forwarding-bias shape does not transfer
+  to bridging, because most devices structurally cannot bridge and there is no
+  in-zone redundancy to cover a bridge that leaves, so self-promotion produces
+  silent partitions.
+  [ADR 0017](./docs/adr/0017-nostr-is-a-carrier-not-a-gateway.md): Nostr is a
+  carrier and never a gateway, because a broadcast relay reports no
+  per-recipient delivery. The resulting gap is recorded as permanent so it stops
+  being rediscovered as a bug, and so nobody "fixes" it by inferring verdicts
+  from evidence that is really about the relay.
+
+- **Threat model grows a gateway section.** New adversary class A7 (hostile
+  gateway) and residual R10, covering blackholing, verdicts that lie in either
+  direction, zone-membership exposure to the operator, and backbone exhaustion —
+  with the reason each is bounded to latency rather than loss.
+
+- **`docs/reticulum.md` stops describing a daemon that does not exist.** The
+  "Daemon TCP Protocol" section implied `rnsd` speaks this protocol; it does
+  not, and no counterpart has ever existed in any repository. It now points at
+  the contract spec and says so. Also corrected: "fourth transport" predated
+  Nostr; the reconnection table presented inert Rust `ReticulumConfig` fields as
+  live behaviour when reconnection is entirely owned by the native managers
+  (1s doubling to 30s, not configurable) and configured from app config; and
+  `RETICULUM_MAX_PAYLOAD_SIZE` is documented as a limit but has no reader.
+  `docs/transport-architecture.md` aligned to match.
+
 ## [0.22.0] — 2026-08-18
 
 > **The battery-aware relay policy was complete and unreachable; it now runs.**

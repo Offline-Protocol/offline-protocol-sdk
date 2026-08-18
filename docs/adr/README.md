@@ -26,6 +26,8 @@ silently undo it. Decisions that follow from the obvious default do not need one
 | [0013](0013-exhaustive-privacy-classifier.md) | Remote-influenced text is classified to a fixed vocabulary by an exhaustive match | Accepted |
 | [0014](0014-dedicated-ffi-entry-points.md) | Security-relevant relay answers arrive through dedicated entry points | Accepted |
 | [0015](0015-relay-hint-frames-unacked-and-pinned.md) | Relay hint frames are unacknowledged and transport-pinned | Accepted |
+| [0016](0016-gateways-are-provisioned-not-emergent.md) | Gateways are provisioned, never emergent | Accepted |
+| [0017](0017-nostr-is-a-carrier-not-a-gateway.md) | Nostr is a carrier, never a gateway | Accepted |
 
 ## Format
 
