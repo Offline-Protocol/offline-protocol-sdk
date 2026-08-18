@@ -366,12 +366,20 @@ the acknowledgement ladder. Delivery settles only on the recipient's end-to-end
 acknowledgement or terminal outbox expiry, so no gateway answer settles
 anything.
 
-**Mitigations in place:** the settlement invariant, verdicts-never-close-a-path,
-address-bound attach under a distinct signing domain, MLS end to end so a
-gateway sees ciphertext plus routing metadata, and per-device and per-peer
-token-bucket budgets at the gateway against exhaustion. Recipient-aware policy
-also decays every gateway claim, so a stale or malicious one reverts to "no
-opinion" rather than standing indefinitely.
+**Mitigations in place today**, carrying the internet relay as the one shipped
+gateway: the settlement invariant, verdicts-never-close-a-path, and MLS end to
+end so a gateway sees ciphertext plus routing metadata. These hold for a hostile
+relay right now, which is why an A7 gateway inherits a bounded blast radius
+rather than a new one.
+
+**Mitigations specified but not yet implemented**, and therefore not yet
+protecting anyone: address-bound attach under `offline-gateway-addr-v1` (the
+domain is [reserved, not emitted](../spec/username-discovery.md#signing-domains)),
+per-device and per-peer token-bucket budgets at the gateway against exhaustion,
+and the recipient-aware decay that reverts a stale or malicious claim to "no
+opinion" rather than letting it stand indefinitely. They are listed separately
+on purpose: a threat model that reads as protection when the protection is prose
+is the failure this document exists to prevent.
 
 **What would close it:** nothing closes the lying-gateway case, because the lie
 is about someone else's state. Provisioning is the real control: gateways are

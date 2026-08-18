@@ -163,8 +163,8 @@ let config = ProtocolConfig(
 |----------|-------|-------------|
 | Connection timeout | 60s | Enforced by the native managers, which each hold their own constant. The identically-valued Rust `ReticulumConfig` field is not read by anything. |
 | Pending confirmation timeout | 120s | Time before treating an unconfirmed send as failed (vs 15s for Internet). Enforced in Rust. |
-| Max payload size | 64 KB | Declared as `RETICULUM_MAX_PAYLOAD_SIZE` and **not currently enforced anywhere** — no code reads it. Treat it as intent, not as a limit you can rely on. |
-| Reticulum encrypted MDU | 383 bytes | Single-packet maximum for encrypted data; plain MDU is 464 bytes |
+| Max payload size | 64 KB | Declared as `RETICULUM_MAX_PAYLOAD_SIZE` and **not currently enforced anywhere**: no code reads it. Treat it as intent, not as a limit you can rely on. |
+| Reticulum encrypted MDU | 383 bytes | Single-packet maximum for encrypted data; plain MDU is 465 bytes |
 | Reticulum MTU | 500 bytes | Total wire-format maximum including headers |
 
 The longer timeouts reflect the high-latency reality of LoRa multi-hop paths.
@@ -187,9 +187,18 @@ Regardless of which integration strategy you choose, the platform bridge interac
 > **Normative home:** this protocol is specified in
 > [the gateway contract](spec/gateway-contract.md#gateway-daemon-contract-v1),
 > which is the document to implement against. What follows describes what the
-> shipped managers do today, which is contract v1 minus the verbs that make a
-> gateway a gateway (address declaration, per-recipient verdicts, presence,
-> capabilities, the version field).
+> shipped managers do today: contract v1 minus the verbs that make a gateway a
+> gateway (address declaration, per-recipient verdicts, presence, capabilities,
+> the version field). `Identify`, `SendMessage`, `MessageReceived` and
+> `StatusUpdate` are the whole of what they speak.
+>
+> One difference is easy to miss when implementing the daemon side, because it
+> is a silence rather than a message: **the shipped clients confirm a send on
+> the socket write, not on a daemon answer.** They call
+> `reticulumConfirmSent()` as soon as the line is written and ignore both
+> `MessageSent` and `DeliveryError`, so a daemon that answers contract v1
+> correctly gets no verdict handling from today's bridges. Teaching them to
+> settle on the daemon's answer is part of the transport work, not the daemon's.
 >
 > Note what this section used to imply and does not: **no Reticulum daemon
 > speaks this protocol.** `rnsd`'s own shared-instance IPC is HDLC-framed
@@ -452,7 +461,7 @@ The `update_metrics` method preserves confirmation loop counts (success/failure)
 ## Reconnection
 
 Reconnection is owned entirely by the native managers, and is configured from
-the app's transport config — **not** from the Rust `ReticulumConfig`, whose
+the app's transport config, **not** from the Rust `ReticulumConfig`, whose
 fields are inert (nothing constructs it with non-default values, and
 `reconnect_delay` has no reader at all).
 

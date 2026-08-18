@@ -131,13 +131,33 @@ domain**. The domain MUST be `offline-gateway-addr-v1` and MUST NOT be
 `offline-relay-addr-v1`: a shared domain would let a signature harvested by a
 hostile gateway be replayed against the relay, and vice versa. The domain itself
 is not length-prefixed, so it MUST remain mutually non-prefixing with every
-other live domain (see [Signing domains](username-discovery.md#signing-domains)).
+other domain, live or reserved (see
+[Signing domains](username-discovery.md#signing-domains)).
 
 The address is inside the signed bytes deliberately. A signature over a bare
 gateway-chosen challenge would be a signing oracle: the gateway picks challenge
 bytes that are also a valid control-frame payload and replays the result.
 
-A device MUST verify that the address in `AddressDeclared` is its own. A
+Both ends have something to verify, and neither check substitutes for the other.
+
+**The gateway** MUST verify all three of the following before answering
+`AddressDeclared`, and MUST answer `AddressError` otherwise:
+
+1. The signature verifies over the canonical bytes above under `public_key`.
+2. `address` is the address derived from `public_key`. Addresses are
+   self-certifying (bech32m over `0x01 ‖ SHA-256(ed25519_pub)[..20]`), so this
+   is the check that makes the binding mean anything: without it, a signature
+   made under any key the sender holds attaches the session to any address it
+   cares to name.
+3. `challenge` is the one this gateway minted for this connection, and has not
+   been accepted before. A challenge honoured twice turns one captured
+   `DeclareAddress` into a reusable credential.
+
+A gateway that skips these attaches sessions under addresses the attaching
+device does not control, which is how a hostile device draws another device's
+inbound traffic to itself and poisons the presence answers given about it.
+
+**The device** MUST verify that the address in `AddressDeclared` is its own. A
 mismatch is a security event, not a retry: it means the gateway bound the
 session to an address this device does not control.
 
@@ -161,11 +181,34 @@ trailing prose after the token is for human logs and MUST NOT be relied on: the
 SDK discards it at the classification boundary and never carries it into an
 event.
 
+### Deliver
+
+```
+← {"type":"MessageReceived","sender":"<off1…>","content":"<base64>","encoding":"base64"}
+```
+
+A frame the gateway holds for this device, handed to it over the attach
+connection. `encoding` is optional; absent means UTF-8 text, and every binary
+frame uses `base64`.
+
+Delivery is deliberately **not** a sixth verb. It is what any carrier does, not
+what makes a carrier a gateway, and the internet relay's own inbound path is not
+a verb either. It is specified here because the daemon link is the only inbound
+path a device attached over local IP has: such a device need not be inside the
+flood a gateway re-originates into, so a daemon built to the five verbs alone
+would attach devices, accept their frames, answer their verdicts, and never
+deliver anything to them. A gateway MUST implement it.
+
+`sender` is a **claim** by the gateway, with the same standing as a verdict. It
+supplies peer attribution and reachability, and it MUST NOT be read as
+authentication of the frame's origin: what authenticates a frame is the frame,
+on this carrier exactly as on every other.
+
 ### Presence
 
 ```
 → {"type":"CheckPresence","peers":["<off1…>", …]}
-← {"type":"PresenceStatus","peer":"<off1…>","online":true,"last_seen_ms":1234567890}
+← {"type":"PresenceStatus","peer":"<off1…>","online":true,"last_seen_ms":1786924800000}
 ```
 
 A gateway MAY answer unsolicited when a watched peer's state changes. Presence

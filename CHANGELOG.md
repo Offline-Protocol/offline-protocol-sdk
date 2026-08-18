@@ -141,7 +141,22 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   speak, extended with the verbs that make a gateway a gateway: a version field,
   an address declaration under a new `offline-gateway-addr-v1` signing domain
   (registered in the spec's signing-domain table as reserved), per-recipient
-  verdicts, presence and capability advertisement.
+  verdicts, presence and capability advertisement. Attach is specified from both
+  sides: the gateway verifies the proof, the address against the declared key,
+  and its own single-use challenge, while the device verifies the address it is
+  bound to. Neither check substitutes for the other, and a gateway that skips
+  its half attaches sessions under addresses the attaching device does not
+  control. Inbound delivery is specified alongside the five verbs (without being
+  a sixth), because the daemon link is the only inbound path a device attached
+  over local IP has, and a daemon built to the verbs alone would deliver nothing
+  to the devices attached to it.
+
+- **The reserved signing domain is pinned by the guard that owns that
+  property.** `offline-gateway-addr-v1` joins the non-prefixing and distinctness
+  tests in `protocol::types::signing_domain_tests` even though nothing emits it
+  yet. Non-prefixing is a property of the whole set, so a guard watching only
+  live domains would accept a future live domain that prefixes this one, and the
+  collision would surface in whichever implementation first signed under it.
 
 - **Two decisions recorded.**
   [ADR 0016](./docs/adr/0016-gateways-are-provisioned-not-emergent.md): gateways
@@ -168,7 +183,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   live behaviour when reconnection is entirely owned by the native managers
   (1s doubling to 30s, not configurable) and configured from app config; and
   `RETICULUM_MAX_PAYLOAD_SIZE` is documented as a limit but has no reader.
-  `docs/transport-architecture.md` aligned to match.
+  `docs/transport-architecture.md` aligned to match. The daemon section now
+  also records what the shipped clients do *not* do: they confirm a send on the
+  socket write and ignore `MessageSent` and `DeliveryError` entirely, so a
+  daemon answering the contract correctly gets no verdict handling from today's
+  bridges.
 
 ## [0.22.0] — 2026-08-18
 

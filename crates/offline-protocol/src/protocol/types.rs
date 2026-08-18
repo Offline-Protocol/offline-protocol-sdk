@@ -1889,7 +1889,7 @@ pub(crate) enum OutboundSendPreparation {
     Queued(MessageId),
 }
 
-/// Pins that every live signing domain is mutually non-prefixing.
+/// Pins that every signing domain, live or reserved, is mutually non-prefixing.
 ///
 /// # Why this test exists here, of all places
 ///
@@ -1900,6 +1900,13 @@ pub(crate) enum OutboundSendPreparation {
 /// can import all four, so this module is the one place they can be compared at
 /// all: it is the highest crate that can see two of them, and the fourth is
 /// pinned as a literal.
+///
+/// A fifth is reserved and covered here too, for the reason reservation exists:
+/// non-prefixing is a property of the whole set, so a domain that is specified
+/// but not yet emitted still has to be held against every other one. A guard
+/// that watched only live domains would happily accept a new live domain that
+/// prefixes a reserved one, and the collision would be discovered by the
+/// implementation that finally emits it.
 #[cfg(test)]
 mod signing_domain_tests {
     use offline_protocol_mls::discovery::DISCOVERY_SIGN_DOMAIN;
@@ -1917,7 +1924,17 @@ mod signing_domain_tests {
     /// why it is spelled out with this comment attached.
     const RELAY_ADDR_SIGN_DOMAIN: &[u8] = b"offline-relay-addr-v1";
 
-    /// No live domain may be a prefix of another.
+    /// The gateway's address-proof domain: **reserved, not yet emitted.**
+    ///
+    /// Specified by `docs/spec/gateway-contract.md` and registered in the
+    /// signing-domain table of `docs/spec/username-discovery.md`. No code signs
+    /// under it yet, which is precisely why it is pinned before anything does:
+    /// it must be chosen against the whole set, and it must stay distinct from
+    /// [`RELAY_ADDR_SIGN_DOMAIN`] so a proof harvested by a hostile gateway
+    /// cannot be replayed against the relay, or the reverse.
+    const GATEWAY_ADDR_SIGN_DOMAIN: &[u8] = b"offline-gateway-addr-v1";
+
+    /// No domain, live or reserved, may be a prefix of another.
     ///
     /// The canonical payload is `domain ‖ Σ(u32be(len) ‖ field)`, and the
     /// **domain itself is not length-prefixed**. So if one domain were a prefix
@@ -1933,11 +1950,12 @@ mod signing_domain_tests {
     /// every device that ever authenticated to it.
     #[test]
     fn signing_domains_are_mutually_non_prefixing() {
-        let domains: [(&str, &[u8]); 4] = [
+        let domains: [(&str, &[u8]); 5] = [
             ("offline-ctrl-v1", CTRL_SIGN_DOMAIN),
             ("offline-disc-v1", DISCOVERY_SIGN_DOMAIN),
             ("offline-invite-v1", INVITE_SIGN_DOMAIN),
             ("offline-relay-addr-v1", RELAY_ADDR_SIGN_DOMAIN),
+            ("offline-gateway-addr-v1", GATEWAY_ADDR_SIGN_DOMAIN),
         ];
 
         for (a_name, a) in domains {
@@ -1971,18 +1989,20 @@ mod signing_domain_tests {
         assert_eq!(DISCOVERY_SIGN_DOMAIN, b"offline-disc-v1");
         assert_eq!(INVITE_SIGN_DOMAIN, b"offline-invite-v1");
         assert_eq!(RELAY_ADDR_SIGN_DOMAIN, b"offline-relay-addr-v1");
+        assert_eq!(GATEWAY_ADDR_SIGN_DOMAIN, b"offline-gateway-addr-v1");
     }
 
-    /// All four must be distinct, which non-prefixing already implies for
+    /// All five must be distinct, which non-prefixing already implies for
     /// unequal strings but not for equal ones: two identical domains are
     /// prefixes of each other, and the loop above skips same-name pairs.
     #[test]
     fn signing_domains_are_distinct() {
-        let domains: [&[u8]; 4] = [
+        let domains: [&[u8]; 5] = [
             CTRL_SIGN_DOMAIN,
             DISCOVERY_SIGN_DOMAIN,
             INVITE_SIGN_DOMAIN,
             RELAY_ADDR_SIGN_DOMAIN,
+            GATEWAY_ADDR_SIGN_DOMAIN,
         ];
         for (i, a) in domains.iter().enumerate() {
             for b in domains.iter().skip(i + 1) {
