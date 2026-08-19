@@ -6,13 +6,12 @@ use super::{
     MediaTransferDescriptor, OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation,
     OutboxEntry, OutboxReseal, PendingConnectionRequest, PendingMessage, PendingProvenance,
     PresencePayload, ProtocolState, ReadReceiptPayload, RichPayloadV1, RichSendExtras,
-    SendMessageOptions, TypingIndicatorPayload, WelcomeDeliveryState, DATA_SYNC_V1,
-    MAX_INITIAL_MESSAGE_BYTES, MAX_KEY_PACKAGE_SENT_TO, MAX_MESSAGE_CONTENT_BYTES,
-    MAX_PENDING_CONNECTION_REQUESTS, MAX_PENDING_EXPIRIES_PER_PASS, MAX_PENDING_MESSAGES_GLOBAL,
-    MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
-    MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS, MAX_RICH_EXTRAS_BYTES,
-    MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL, RICH_PAYLOAD_V1,
-    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, SEND_FAIL_REASON_TRANSPORT,
+    SendMessageOptions, TypingIndicatorPayload, WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES,
+    MAX_KEY_PACKAGE_SENT_TO, MAX_MESSAGE_CONTENT_BYTES, MAX_PENDING_CONNECTION_REQUESTS,
+    MAX_PENDING_EXPIRIES_PER_PASS, MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER,
+    MAX_PENDING_MESSAGE_BYTES_GLOBAL, MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS,
+    MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL,
+    RICH_PAYLOAD_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, SEND_FAIL_REASON_TRANSPORT,
     WELCOME_NO_CARRIER_RETRY_SECS, WELCOME_UNREACHABLE_RETRY_CAP_SECS,
 };
 use super::{classify_transport_send_error, send_failure_token};
@@ -959,7 +958,7 @@ impl OfflineProtocol {
         #[cfg(feature = "data")]
         {
             if self.config.data.enabled {
-                return vec![DATA_SYNC_V1];
+                return vec![super::types::DATA_SYNC_V1];
             }
         }
         Vec::new()
