@@ -1558,6 +1558,13 @@ Verify any custom backend with `runStorageConformance(provider)`: an empty
 `failures` array is the definition of supported. Reference adapters live in
 [`examples/storage-adapters/`](../examples/storage-adapters/README.md).
 
+Two things to know about the seam. Sealing covers record **values**, not
+record **keys**: a backend sees `{space}/{doc}`, so treat space and document
+names as metadata and do not put secrets in them. And switching backends
+while documents are open migrates each open document into the new backend
+before it returns, so if the migration cannot be written the switch fails and
+nothing moves.
+
 ### Four new error codes
 
 `DataDisabled`, `DataStorageUnavailable`, `DocTooLarge` and `DataCorrupted`
@@ -1605,6 +1612,7 @@ failure than the bytes.
 | Pending lifetime | 7 days (configurable) | `pending_message_max_lifetime_ms` |
 | Outbox lifetime | 7 days (configurable) | `outbox_max_lifetime_ms` |
 | One replicated document | 1 MiB compacted | `DocTooLarge` at commit, warning event at 768 KiB |
+| One value in a document | 1 MiB | `InvalidArgument` at the operation |
 | One protocol-state record | 4 MiB | refused on write, dropped on read |
 | Provider transfer ceiling | 8 MiB | `MAX_PROTOCOL_STATE_RECORD_TRANSFER_BYTES`, enforced *inside* each provider |
 | Transport frame | 1 MiB | transport layer (unchanged) |
@@ -1630,9 +1638,12 @@ source files and asserts their literals).
 | Document past the 1 MiB cap | `Error::DocTooLarge` | `ProtocolError.DocTooLarge` |
 | Document bytes will not decode | `Error::DataCorrupted` | `ProtocolError.DataCorrupted` |
 | Bad space / document / collection name | `Error::InvalidArgument` | `ProtocolError.InvalidArgument` |
+| Single value over the 1 MiB value limit | `Error::InvalidArgument` | `ProtocolError.InvalidArgument` |
 
-No `ProtocolError` variants were added — the FFI error taxonomy is append-only
-and unchanged this release.
+Four `ProtocolError` variants were **appended** this release for the data layer
+(`DataDisabled`, `DataStorageUnavailable`, `DocTooLarge`, `DataCorrupted`). The
+taxonomy is append-only, so every code that existed before keeps the
+discriminant it shipped with and no existing mapping changes.
 
 ---
 

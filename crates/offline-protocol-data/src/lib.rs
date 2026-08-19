@@ -32,7 +32,7 @@ pub mod policy;
 /// Values stored in collections.
 pub mod value;
 
-pub use doc::{DataDoc, Delta, DocStats, VersionToken};
+pub use doc::{DataDoc, Delta, DocStats, ImportOutcome, VersionToken};
 pub use error::{DataError, DataResult};
 pub use policy::{
     should_compact, size_verdict, SizeVerdict, COMPACT_DELTA_LOG_RATIO, COMPACT_MAX_COMMITS,
@@ -45,6 +45,16 @@ pub const MAX_NAME_LEN: usize = 128;
 
 /// Longest accepted map key.
 pub const MAX_KEY_LEN: usize = 256;
+
+/// Longest accepted single value, equal to the whole-document cap.
+///
+/// A value at or past this size can never fit inside a document that also
+/// has to hold its own framing, so accepting one only defers the refusal to
+/// a place where it is expensive: an unbounded value makes a commit whose
+/// delta record cannot be written at all, and a delta that cannot be written
+/// is re-exported larger at every retry. Refusing at the operation keeps that
+/// failure in front of the caller, while the edit is still theirs to change.
+pub const MAX_VALUE_BYTES: usize = policy::MAX_DOC_BYTES;
 
 /// Check a space, document, or collection name.
 ///
@@ -95,6 +105,38 @@ pub fn validate_key(key: &str) -> DataResult<()> {
         return Err(DataError::InvalidName {
             name: key.to_string(),
             reason: "longer than MAX_KEY_LEN",
+        });
+    }
+    Ok(())
+}
+
+/// Check the size of a single value.
+///
+/// Bounds the one input the caller controls without limit. Note this is a
+/// per-value bound only: the whole-document cap still applies, and is what
+/// catches many small values adding up.
+pub fn validate_value(value: &DataValue) -> DataResult<()> {
+    let len = match value {
+        DataValue::Text { value } => value.len(),
+        DataValue::Bytes { value } => value.len(),
+        // Scalars are fixed-width and cannot breach any bound.
+        DataValue::Null
+        | DataValue::Bool { .. }
+        | DataValue::Int { .. }
+        | DataValue::Float { .. } => 0,
+    };
+    validate_value_len(len)
+}
+
+/// Check a value length against [`MAX_VALUE_BYTES`].
+///
+/// Split out for text insertions, which carry a `&str` rather than a
+/// [`DataValue`].
+pub fn validate_value_len(len: usize) -> DataResult<()> {
+    if len > MAX_VALUE_BYTES {
+        return Err(DataError::ValueTooLarge {
+            actual: len,
+            limit: MAX_VALUE_BYTES,
         });
     }
     Ok(())

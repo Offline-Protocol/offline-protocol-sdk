@@ -68,6 +68,29 @@ mobile, from data the SDK did not write. This is also why replication (F3)
 cannot simply hand remote deltas to `import`: that is a different threat
 model, and it needs its own answer.
 
+### 2a. An accepted import is not necessarily an applied one
+
+The engine accepts a change whose causal predecessor it has never seen and
+answers `Ok`. The change is *parked*: invisible to every read, and absent
+from a compacted export, until the predecessor arrives. `import` therefore
+returns `Applied` or `Parked`, and any caller that can destroy history has to
+branch on it.
+
+Two rules follow, and both are load-bearing rather than defensive:
+
+- A document whose delta log did not fully apply is **never compacted**.
+  Folding it would write a snapshot without the parked changes and then
+  delete the records that still hold them, which converts a gap that a
+  resend could close into permanent loss. A growing delta log is the
+  cheaper failure.
+- A delta record that fails to read **transiently** refuses the open,
+  exactly as an unreadable snapshot already did. Skipping it does not cost
+  one commit; it costs every commit after it, because they all park behind
+  the gap.
+
+**Failure prevented:** a single transient read failure, or one corrupt
+record, silently emptying a document at the next compaction.
+
 ### 3. Storage is a one-line runtime swap, and sealing sits above it
 
 The backend for documents is `DataConfig::storage` in Rust and a second
@@ -85,6 +108,19 @@ careless.
 The same trait the SDK already uses for protocol state is reused rather than
 a new data-specific one, so an application implements one storage interface
 and one conformance suite covers it.
+
+Swapping mid-session writes every open document into the new backend as a
+self-contained snapshot before the swap returns, and if that cannot be
+written the swap does not happen at all. This is not a convenience. A delta
+record only describes the change *since* the previous one, so a document that
+merely kept appending deltas into the new backend would leave its history
+behind in the old one; the orphan delta then parks (see 2a), the document
+reads **empty**, and the next compaction deletes the orphans for good.
+
+Note what the seam does not hide: values are sealed, but record **key ids**
+are not. A backend sees `{space}/{doc}`, so space and document names are
+metadata visible to whoever runs the store, and an application must not put
+secrets in a document name.
 
 **Failure prevented:** the differentiator dying by degrees, through an
 adapter interface that grows a second shape, a swap that needs a rebuild, or

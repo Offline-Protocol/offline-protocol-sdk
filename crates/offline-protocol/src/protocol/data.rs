@@ -34,7 +34,7 @@ use tracing::{debug, warn};
 use crate::error::{Error, Result};
 use crate::events::Event;
 use crate::protocol::storage::StateRecord;
-use crate::protocol::types::storage_keys;
+use crate::protocol::types::{storage_keys, MAX_PROTOCOL_STATE_RECORD_BYTES};
 use crate::protocol::OfflineProtocol;
 use crate::protocol_state_storage::ProtocolStateStorage;
 
@@ -65,6 +65,16 @@ struct LoadedDoc {
     /// application that hit the cap can shrink its way back out. Cleared by
     /// the next flush that measures under the cap.
     over_cap: bool,
+    /// Whether every delta record on disk actually applied at open.
+    ///
+    /// False when a delta was unreadable, or when one imported but parked
+    /// behind a predecessor that never arrived. Both mean the document in
+    /// memory is missing changes the records still describe, and both make
+    /// compaction destructive: folding the log would write a snapshot without
+    /// those changes and then delete the records holding them. A growing log
+    /// is the cheaper failure, so compaction is simply switched off until an
+    /// open sees a complete log again.
+    history_complete: bool,
 }
 
 /// In-memory state for the data layer.
@@ -93,6 +103,9 @@ fn map_data_error(err: DataError) -> Error {
         DataError::InvalidName { name, reason } => {
             Error::InvalidArgument(format!("invalid name {name:?}: {reason}"))
         }
+        DataError::ValueTooLarge { actual, limit } => Error::InvalidArgument(format!(
+            "value is {actual} bytes, over the {limit} byte limit"
+        )),
         DataError::OutOfRange { position, length } => Error::InvalidArgument(format!(
             "position {position} is out of range for length {length}"
         )),
@@ -233,6 +246,7 @@ impl OfflineProtocol {
 
         let mut document = DataDoc::new();
         let mut compacted_bytes = 0usize;
+        let mut history_complete = true;
 
         match self.read_state_record_detailed(
             storage,
@@ -241,10 +255,15 @@ impl OfflineProtocol {
         ) {
             Ok(StateRecord::Present(bytes)) => {
                 compacted_bytes = bytes.len();
-                document.import(&bytes).map_err(map_data_error)?;
+                // A snapshot is self-contained, so parking here should not be
+                // reachable. Recorded rather than assumed away: if it ever is,
+                // the document is missing its own base and compaction would
+                // write that gap over the delta log.
+                if document.import(&bytes).map_err(map_data_error)?.is_parked() {
+                    history_complete = false;
+                    warn!(space, doc, "Document snapshot did not fully apply");
+                }
             }
-            // `Unreadable` means the record was examined and is permanently
-            // gone; the delta log may still carry the document forward.
             // `Unavailable` means it is still on disk and may be fine, so
             // refusing here keeps a transient failure from looking like data
             // loss to the application.
@@ -253,7 +272,16 @@ impl OfflineProtocol {
                     "document {space}/{doc} could not be read this session"
                 )));
             }
-            Ok(StateRecord::Missing) | Ok(StateRecord::Unreadable) => {}
+            // `Unreadable` means the record was examined and is permanently
+            // gone; the delta log may still carry the document forward. The
+            // document has lost its base either way, so compaction stays off:
+            // folding now would write whatever partial state survived over the
+            // records that still hold the rest.
+            Ok(StateRecord::Unreadable) => {
+                history_complete = false;
+                warn!(space, doc, "Document snapshot is permanently unreadable");
+            }
+            Ok(StateRecord::Missing) => {}
             Err(err) => {
                 return Err(Error::Other(format!("failed to read document: {err}")));
             }
@@ -278,16 +306,54 @@ impl OfflineProtocol {
                 Ok(StateRecord::Present(bytes)) => {
                     log_bytes = log_bytes.saturating_add(bytes.len());
                     replayed = replayed.saturating_add(1);
-                    if let Err(err) = document.import(&bytes) {
-                        // One unreadable delta must not cost the document.
-                        // Everything else still applies, and a resend or the
-                        // next compaction closes the hole.
-                        warn!(space, doc, seq, error = %err, "Skipping undecodable document delta");
+                    match document.import(&bytes) {
+                        // The engine accepted the delta but cannot apply it:
+                        // its predecessor is missing, so it and everything
+                        // after it are invisible. Recording that is what stops
+                        // compaction from writing a snapshot without these
+                        // changes and then deleting the records holding them.
+                        Ok(outcome) if outcome.is_parked() => {
+                            history_complete = false;
+                            warn!(
+                                space,
+                                doc,
+                                seq,
+                                "Document delta is waiting on a predecessor that never \
+                                 arrived; compaction is disabled for this document"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            // A permanently undecodable delta is a hole. The
+                            // document still opens with everything that did
+                            // apply, but the log must not be folded away: F3
+                            // resend is what closes a hole, and compaction
+                            // would destroy what is left to resend against.
+                            history_complete = false;
+                            warn!(space, doc, seq, error = %err, "Skipping undecodable document delta");
+                        }
                     }
                 }
-                Ok(_) => {}
+                // Still on disk and possibly perfectly good next launch.
+                // Refusing the open keeps a transient read failure from
+                // looking like data loss, exactly as the snapshot path above
+                // does, and keeps compaction away from records that
+                // everything after this delta depends on.
+                Ok(StateRecord::Unavailable) => {
+                    return Err(Error::Other(format!(
+                        "delta {seq} of document {space}/{doc} could not be read this session"
+                    )));
+                }
+                // Listed but gone or permanently unreadable: a hole, not a
+                // reason to refuse the document.
+                Ok(_) => {
+                    history_complete = false;
+                    warn!(space, doc, seq, "Document delta is missing or unreadable");
+                }
                 Err(err) => {
-                    warn!(space, doc, seq, error = %err, "Failed to read document delta");
+                    return Err(Error::Other(format!(
+                        "failed to read delta {seq} of document {space}/{doc}: {err}"
+                    )));
                 }
             }
         }
@@ -314,6 +380,7 @@ impl OfflineProtocol {
                 log_bytes,
                 compacted_bytes,
                 over_cap: false,
+                history_complete,
             },
         );
         Ok(())
@@ -368,14 +435,98 @@ impl OfflineProtocol {
     /// Point documents at a backend the application supplies.
     ///
     /// Documents move; protocol secrets do not. Applied immediately, so a
-    /// store opened afterwards reads and writes through the new backend
-    /// while everything else stays where it is.
+    /// store opened afterwards reads and writes through the new backend while
+    /// everything else stays where it is.
     ///
-    /// Any document already open keeps its in-memory state and will persist
-    /// into the new backend on its next flush, so a swap mid-session moves
-    /// future writes rather than silently stranding them.
-    pub fn set_data_storage(&mut self, storage: Arc<dyn ProtocolStateStorage>) {
+    /// Any document already open is written into the new backend as a
+    /// self-contained snapshot before this returns. That is not a
+    /// convenience, it is the whole correctness of a mid-session swap: a
+    /// delta record only describes the change *since* the previous one, so a
+    /// document that merely kept writing deltas into the new backend would
+    /// leave every earlier delta behind in the old one. The engine accepts
+    /// such an orphan delta and parks it, which means the document reads
+    /// **empty** from the new backend and the next compaction deletes the
+    /// orphans for good.
+    ///
+    /// If the migration cannot be written the swap does not happen at all and
+    /// the error is returned, because a half-swapped layer is precisely the
+    /// stranding this method exists to prevent.
+    ///
+    /// Documents that are not open are not migrated: they live wholly in the
+    /// old backend, which is what switching backends means.
+    pub fn set_data_storage(&mut self, storage: Arc<dyn ProtocolStateStorage>) -> Result<()> {
+        let previous = self.config.data.storage.take();
         self.config.data.storage = Some(storage);
+
+        match self.migrate_open_docs_to_data_storage() {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.config.data.storage = previous;
+                Err(err)
+            }
+        }
+    }
+
+    /// Write every open document into the current backend as a self-contained
+    /// snapshot, so nothing depends on history that lives somewhere else.
+    fn migrate_open_docs_to_data_storage(&mut self) -> Result<()> {
+        let Some(storage) = self.data_storage() else {
+            return Ok(());
+        };
+
+        let keys: Vec<(String, String)> = self.data.docs.keys().cloned().collect();
+        for (space, doc) in &keys {
+            let map_key = (space.clone(), doc.clone());
+
+            // Fold pending edits in first: the snapshot below has to be the
+            // whole document, including what has not been flushed yet.
+            let committed = {
+                let Some(entry) = self.data.docs.get_mut(&map_key) else {
+                    continue;
+                };
+                entry.doc.commit().map_err(map_data_error)?.is_some()
+            };
+            let compacted = {
+                let Some(entry) = self.data.docs.get(&map_key) else {
+                    continue;
+                };
+                entry.doc.export_compacted().map_err(map_data_error)?
+            };
+
+            if let Err(err) = self.write_state_record(
+                storage.as_ref(),
+                storage_keys::DATA_DOCS,
+                &doc_key(space, doc),
+                &compacted,
+            ) {
+                // The commit above advanced the export marker. Leaving it
+                // advanced would drop those edits from every future delta.
+                if committed {
+                    if let Some(entry) = self.data.docs.get_mut(&map_key) {
+                        entry.doc.rewind_last_commit();
+                    }
+                }
+                return Err(Error::Other(format!(
+                    "failed to move document {space}/{doc} into the new backend: {err}"
+                )));
+            }
+
+            if let Some(entry) = self.data.docs.get_mut(&map_key) {
+                // The new backend holds one snapshot and no delta log.
+                entry.next_seq = 0;
+                entry.log_bytes = 0;
+                entry.compacted_bytes = compacted.len();
+                entry.doc.mark_compacted(compacted.len());
+            }
+        }
+
+        // The space indexes carry document names that have no records of
+        // their own yet; without them the new backend forgets those names.
+        let spaces: Vec<String> = self.data.spaces.keys().cloned().collect();
+        for space in spaces {
+            self.persist_space(storage.as_ref(), &space)?;
+        }
+        Ok(())
     }
 
     /// Create a document, or do nothing if it already exists.
@@ -394,17 +545,43 @@ impl OfflineProtocol {
 
         self.data.docs.remove(&(space.to_string(), doc.to_string()));
 
-        let _ = storage.delete(storage_keys::DATA_DOCS, &doc_key(space, doc));
-        let prefix = format!("{space}/{doc}/");
-        if let Ok(keys) = storage.list_keys(storage_keys::DATA_DELTA_LOG) {
-            for key in keys.iter().filter(|key| key.starts_with(&prefix)) {
-                let _ = storage.delete(storage_keys::DATA_DELTA_LOG, key);
+        // Every record is attempted even after one fails, so a partial
+        // failure still removes as much as it can; the first error is what
+        // the caller hears. Reporting matters because a record that survives
+        // a delete is replayed into the *next* document of the same name,
+        // which resurrects the deleted incarnation's contents.
+        let mut first_error: Option<String> = None;
+        let mut record_error = |err: crate::protocol_state_storage::ProtocolStateError| {
+            if first_error.is_none() {
+                first_error = Some(err.to_string());
             }
+        };
+
+        if let Err(err) = storage.delete(storage_keys::DATA_DOCS, &doc_key(space, doc)) {
+            record_error(err);
+        }
+        let prefix = format!("{space}/{doc}/");
+        match storage.list_keys(storage_keys::DATA_DELTA_LOG) {
+            Ok(keys) => {
+                for key in keys.iter().filter(|key| key.starts_with(&prefix)) {
+                    if let Err(err) = storage.delete(storage_keys::DATA_DELTA_LOG, key) {
+                        record_error(err);
+                    }
+                }
+            }
+            Err(err) => record_error(err),
         }
         if let Some(record) = self.data.spaces.get_mut(space) {
             record.docs.remove(doc);
         }
-        self.persist_space(storage.as_ref(), space)
+        self.persist_space(storage.as_ref(), space)?;
+
+        match first_error {
+            Some(detail) => Err(Error::Other(format!(
+                "failed to delete every record of document {space}/{doc}: {detail}"
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// The documents in a space.
@@ -420,7 +597,10 @@ impl OfflineProtocol {
             .unwrap_or_default())
     }
 
-    /// Every space that holds at least one document.
+    /// Every space the store knows of.
+    ///
+    /// Derived from what is on disk, so a space whose last document was
+    /// deleted still lists while its index record survives.
     pub fn data_list_spaces(&mut self) -> Result<Vec<String>> {
         let storage = self.require_data_storage()?;
         let mut spaces = BTreeSet::new();
@@ -624,8 +804,44 @@ impl OfflineProtocol {
         };
         let seq = entry.next_seq;
         let delta_bytes = delta.bytes.len();
+        let history_complete = entry.history_complete;
 
-        if let Err(err) = self.write_state_record(
+        // A commit too large for one record can never be stored as a delta,
+        // and refusing it is not a recovery: the rewind below puts the change
+        // back in the pending set, so the *next* commit exports a strictly
+        // larger delta and fails the same way forever. A compacted snapshot
+        // is bounded by the document cap rather than by history, so it is the
+        // route that still works, and the commit's changes are inside it.
+        let oversized = delta_bytes > MAX_PROTOCOL_STATE_RECORD_BYTES;
+
+        let rewind = |protocol: &mut Self| {
+            if let Some(entry) = protocol.data.docs.get_mut(&map_key) {
+                entry.doc.rewind_last_commit();
+            }
+        };
+
+        if oversized && !history_complete {
+            // Compaction is the only way out and it is unavailable: folding a
+            // log with a hole in it would delete records the document still
+            // needs. Say so rather than looping on an unwritable delta.
+            rewind(self);
+            return Err(Error::Other(format!(
+                "commit for document {space}/{doc} is {delta_bytes} bytes, over the \
+                 {MAX_PROTOCOL_STATE_RECORD_BYTES} byte record limit, and its delta log \
+                 is incomplete so it cannot be compacted instead"
+            )));
+        }
+
+        if oversized {
+            warn!(
+                space,
+                doc, delta_bytes, "Commit is too large for one delta record; compacting instead"
+            );
+            if let Err(err) = self.compact_doc(storage, space, doc) {
+                rewind(self);
+                return Err(err);
+            }
+        } else if let Err(err) = self.write_state_record(
             storage,
             storage_keys::DATA_DELTA_LOG,
             &delta_key(space, doc, seq),
@@ -637,9 +853,7 @@ impl OfflineProtocol {
             // only what came after, and the change is simply gone at the next
             // restart. Re-exporting it later costs at worst a duplicate
             // record, which the merge absorbs.
-            if let Some(entry) = self.data.docs.get_mut(&map_key) {
-                entry.doc.rewind_last_commit();
-            }
+            rewind(self);
             return Err(Error::Other(format!(
                 "failed to persist document delta: {err}"
             )));
@@ -651,18 +865,24 @@ impl OfflineProtocol {
                 .docs
                 .get_mut(&map_key)
                 .ok_or_else(|| Error::Other("document vanished during flush".to_string()))?;
-            entry.next_seq = seq.saturating_add(1);
-            entry.log_bytes = entry.log_bytes.saturating_add(delta_bytes);
+            if !oversized {
+                entry.next_seq = seq.saturating_add(1);
+                entry.log_bytes = entry.log_bytes.saturating_add(delta_bytes);
+            }
 
             let (verdict, measured) = entry.doc.check_size().map_err(map_data_error)?;
             if let Some(bytes) = measured {
                 entry.compacted_bytes = bytes;
             }
-            let should_compact = policy::should_compact(
-                entry.log_bytes,
-                entry.compacted_bytes,
-                entry.doc.commits_since_compaction(),
-            );
+            // Never fold a log that did not fully apply, and never compact
+            // twice for one flush.
+            let should_compact = !oversized
+                && entry.history_complete
+                && policy::should_compact(
+                    entry.log_bytes,
+                    entry.compacted_bytes,
+                    entry.doc.commits_since_compaction(),
+                );
             (verdict, measured, should_compact, entry.compacted_bytes)
         };
 
@@ -728,6 +948,17 @@ impl OfflineProtocol {
             let Some(entry) = self.data.docs.get(&map_key) else {
                 return Ok(());
             };
+            // Folding a log that did not fully apply would write a snapshot
+            // missing those changes and then delete the records that still
+            // hold them, turning a recoverable gap into permanent loss. An
+            // oversized delta log is the cheaper failure.
+            if !entry.history_complete {
+                warn!(
+                    space,
+                    doc, "Skipping compaction: the document's delta log did not fully apply"
+                );
+                return Ok(());
+            }
             entry.doc.export_compacted().map_err(map_data_error)?
         };
 

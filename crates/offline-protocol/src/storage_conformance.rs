@@ -256,9 +256,14 @@ pub fn run(storage: &dyn ProtocolStateStorage) -> ConformanceReport {
         });
     report.check("composed_key_ids_round_trip", outcome);
 
-    // 11. A long key id. The SDK's are bounded, but a backend with a short
-    // internal limit fails silently on the longest legitimate ones.
-    let long_key = format!("{}/{}", "s".repeat(128), "d".repeat(128));
+    // 11. The longest key id the SDK can actually write: a delta record for a
+    // maximum-length space and document name, which is
+    // `{128}/{128}/{16 hex}` = 274 bytes. Probing anything shorter lets a
+    // backend with a limit in between pass here and fail in production on
+    // exactly the record type whose loss is silent.
+    // 128 is `offline_protocol_data::MAX_NAME_LEN`, written as a literal
+    // because this suite must still compile with the data layer switched off.
+    let long_key = format!("{}/{}/{:016x}", "s".repeat(128), "d".repeat(128), u64::MAX);
     let outcome = storage
         .store(CONFORMANCE_KEY_TYPE, &long_key, b"long")
         .map_err(|err| format!("store with a long key failed: {err}"))

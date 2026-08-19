@@ -1,9 +1,10 @@
 //! Unit tests for the replicated-document layer.
 
-use crate::doc::DataDoc;
+use crate::doc::{DataDoc, ImportOutcome};
 use crate::error::DataError;
 use crate::policy;
 use crate::value::DataValue;
+use crate::MAX_VALUE_BYTES;
 
 fn doc_with_one_set() -> DataDoc {
     let mut doc = DataDoc::new();
@@ -499,4 +500,87 @@ fn stats_report_the_commit_count_since_compaction() {
 
     doc.mark_compacted(stats.compacted_bytes);
     assert_eq!(doc.commits_since_compaction(), 0);
+}
+
+#[test]
+fn a_delta_whose_predecessor_is_missing_is_reported_as_parked() {
+    let mut source = DataDoc::new();
+    source.map_set("m", "k1", DataValue::int(1)).expect("set");
+    let first = source.commit().expect("commit").expect("a delta");
+    source.map_set("m", "k2", DataValue::int(2)).expect("set");
+    let second = source.commit().expect("commit").expect("a delta");
+
+    // Only the second delta arrives. The engine takes it and answers Ok, so
+    // the outcome is the only thing that distinguishes "applied" from "held
+    // out of sight" — and an owner that cannot tell them apart will compact
+    // this document and delete the record it is waiting for.
+    let mut replica = DataDoc::new();
+    let outcome = replica.import(&second.bytes).expect("import");
+    assert_eq!(
+        outcome,
+        ImportOutcome::Parked,
+        "an orphan delta was reported as applied"
+    );
+    assert_eq!(
+        replica.map_get("m", "k2").expect("get"),
+        None,
+        "a parked change must not read as present"
+    );
+
+    // And it must stay out of a compacted export, which is what makes
+    // compacting-then-deleting destructive here.
+    let compacted = replica.export_compacted().expect("export");
+    let mut round_trip = DataDoc::new();
+    round_trip.import(&compacted).expect("import");
+    assert_eq!(round_trip.map_get("m", "k2").expect("get"), None);
+
+    // Once the predecessor lands, both apply.
+    let outcome = replica.import(&first.bytes).expect("import");
+    assert_eq!(outcome, ImportOutcome::Applied);
+    assert_eq!(
+        replica.map_get("m", "k2").expect("get"),
+        Some(DataValue::int(2)),
+        "the parked change did not apply once its predecessor arrived"
+    );
+}
+
+#[test]
+fn a_complete_delta_is_reported_as_applied() {
+    let mut source = DataDoc::new();
+    source.map_set("m", "k", DataValue::int(7)).expect("set");
+    let delta = source.commit().expect("commit").expect("a delta");
+
+    let mut replica = DataDoc::new();
+    assert_eq!(
+        replica.import(&delta.bytes).expect("import"),
+        ImportOutcome::Applied,
+        "a delta with no missing predecessor was reported as parked"
+    );
+}
+
+#[test]
+fn a_value_larger_than_any_document_is_refused() {
+    let mut doc = DataDoc::new();
+    let huge = "x".repeat(MAX_VALUE_BYTES + 1);
+
+    assert!(matches!(
+        doc.map_set("m", "k", DataValue::text(huge.clone())),
+        Err(DataError::ValueTooLarge { .. })
+    ));
+    assert!(matches!(
+        doc.list_push("l", DataValue::bytes(vec![0u8; MAX_VALUE_BYTES + 1])),
+        Err(DataError::ValueTooLarge { .. })
+    ));
+    assert!(matches!(
+        doc.list_insert("l", 0, DataValue::text(huge.clone())),
+        Err(DataError::ValueTooLarge { .. })
+    ));
+    assert!(matches!(
+        doc.text_insert("t", 0, &huge),
+        Err(DataError::ValueTooLarge { .. })
+    ));
+
+    // The refusal is at the operation, so nothing reached the document.
+    assert_eq!(doc.map_get("m", "k").expect("get"), None);
+    assert!(doc.commit().expect("commit").is_none());
 }

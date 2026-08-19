@@ -62,6 +62,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   Passing the cap raises `DocTooLarge`: the breaching change stays durable and
   deletions keep working, so a document can be brought back under the cap.
 
+  Switching backends while documents are open migrates each open document into
+  the new backend before the call returns, and fails without switching if that
+  cannot be written: a delta record only describes the change since the
+  previous one, so a document that merely kept writing deltas would leave its
+  history behind and read back empty. Individual values are capped at 1 MiB for
+  the same family of reasons.
+
   **A custom backend brings one obligation:** `wipePersistedState()` clears the
   *default* provider's account directory, which a custom backend is not inside,
   so call `DataStore.wipeAll()` on logout as well.

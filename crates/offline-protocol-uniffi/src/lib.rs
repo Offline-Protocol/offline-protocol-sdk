@@ -3868,8 +3868,7 @@ impl OfflineProtocol {
         storage: Arc<dyn CoreProtocolStateStorage>,
     ) -> Result<(), ProtocolError> {
         let mut guard = self.lock_inner()?;
-        guard.set_data_storage(storage);
-        Ok(())
+        guard.set_data_storage(storage).map_err(ProtocolError::from)
     }
 
     pub(crate) fn data_create_doc(

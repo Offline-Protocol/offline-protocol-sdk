@@ -1861,9 +1861,9 @@ interface MeshServices {
 // are sealed at rest with the same per-install record key as every other
 // protocol-state category, and that key is minted during initialize_mls.
 //
-// Values cross as scalars plus an explicit kind, rather than as a variant
-// type, so the surface stays flat and adding a value kind later does not
-// reshape every binding.
+// Values cross as a JSON-encoded kind/value pair (see map_set below), rather
+// than as a variant type or as six parallel optional scalars, so the surface
+// stays flat and adding a value kind later does not reshape every binding.
 interface DataStore {
     [Throws=ProtocolError]
     constructor(OfflineProtocol protocol);

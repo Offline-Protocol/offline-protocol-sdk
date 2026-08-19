@@ -53,6 +53,33 @@ pub struct DocStats {
     pub commits_since_compaction: u32,
 }
 
+/// What happened to the changes in an imported blob.
+///
+/// The distinction is load-bearing and is the reason [`DataDoc::import`]
+/// does not return `()`. The engine accepts a change whose causal
+/// predecessor it has never seen, and answers `Ok`: the change is *parked*,
+/// invisible to every read and absent from [`DataDoc::export_compacted`],
+/// until the predecessor arrives. An owner that treats that `Ok` as "applied"
+/// will happily compact the document and delete the very records the parked
+/// change is still waiting for, which turns a recoverable gap into permanent
+/// silent loss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportOutcome {
+    /// Every change in the blob applied and is readable now.
+    Applied,
+    /// Some or all of the blob is parked, waiting on a predecessor that has
+    /// not arrived. The document is missing those changes until it does, so
+    /// nothing that could destroy the missing predecessor may run.
+    Parked,
+}
+
+impl ImportOutcome {
+    /// Whether anything in the blob is still waiting on a predecessor.
+    pub fn is_parked(self) -> bool {
+        matches!(self, Self::Parked)
+    }
+}
+
 /// A replicated document.
 ///
 /// Holds named collections (`map`, `list`, `text`, `counter`). Concurrent
@@ -124,7 +151,11 @@ impl DataDoc {
     /// reason no code path may ever feed unverified bytes here: the
     /// `catch_unwind` below is a second line, and under the `minisize`
     /// profile (`panic = "abort"`) it does not exist at all.
-    pub fn import(&mut self, bytes: &[u8]) -> DataResult<()> {
+    ///
+    /// Returns whether the blob applied or is parked behind a missing
+    /// predecessor. Callers that can destroy history (compaction, log
+    /// truncation) must branch on it: see [`ImportOutcome`].
+    pub fn import(&mut self, bytes: &[u8]) -> DataResult<ImportOutcome> {
         self.check_live()?;
 
         // Reject a blob the engine cannot even describe before asking it to
@@ -136,7 +167,13 @@ impl DataDoc {
 
         let outcome = catch_unwind(AssertUnwindSafe(|| self.inner.import(bytes)));
         match outcome {
-            Ok(Ok(_)) => Ok(()),
+            // `pending` names the changes the engine took but cannot apply
+            // yet. Discarding it is how a gap in the delta log turns into
+            // silent loss, so it is reported rather than dropped.
+            Ok(Ok(status)) => Ok(match status.pending {
+                Some(range) if !range.is_empty() => ImportOutcome::Parked,
+                _ => ImportOutcome::Applied,
+            }),
             Ok(Err(err)) => Err(DataError::Corrupt(err.to_string())),
             Err(_) => {
                 // The engine may hold a poisoned lock now; the handle is done.
@@ -310,6 +347,7 @@ impl DataDoc {
         self.check_live()?;
         crate::validate_name(collection)?;
         crate::validate_key(key)?;
+        crate::validate_value(&value)?;
         let map = self.inner.get_map(collection);
         map.insert(key, to_engine_value(value))
             .map_err(|err| DataError::Engine(err.to_string()))
@@ -339,6 +377,7 @@ impl DataDoc {
     pub fn list_push(&mut self, collection: &str, value: DataValue) -> DataResult<()> {
         self.check_live()?;
         crate::validate_name(collection)?;
+        crate::validate_value(&value)?;
         let list = self.inner.get_list(collection);
         list.push(to_engine_value(value))
             .map_err(|err| DataError::Engine(err.to_string()))
@@ -353,6 +392,7 @@ impl DataDoc {
     ) -> DataResult<()> {
         self.check_live()?;
         crate::validate_name(collection)?;
+        crate::validate_value(&value)?;
         let list = self.inner.get_list(collection);
         let length = list.len();
         if index > length {
@@ -392,6 +432,7 @@ impl DataDoc {
     pub fn text_insert(&mut self, collection: &str, position: usize, text: &str) -> DataResult<()> {
         self.check_live()?;
         crate::validate_name(collection)?;
+        crate::validate_value_len(text.len())?;
         let handle = self.inner.get_text(collection);
         let length = handle.len_unicode();
         if position > length {

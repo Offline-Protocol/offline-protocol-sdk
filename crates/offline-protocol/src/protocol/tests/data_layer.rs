@@ -247,7 +247,9 @@ fn a_custom_backend_takes_the_documents_and_nothing_else() {
     let custom = Arc::new(RecordingStorage::default());
 
     let mut protocol = device.launch();
-    protocol.set_data_storage(custom.clone());
+    protocol
+        .set_data_storage(custom.clone())
+        .expect("swap backend");
 
     protocol
         .data_map_set("space1", "notes", "profile", "name", DataValue::text("ada"))
@@ -287,7 +289,9 @@ fn a_custom_backend_never_sees_document_plaintext() {
     let device = Device::new();
     let custom = Arc::new(RecordingStorage::default());
     let mut protocol = device.launch();
-    protocol.set_data_storage(custom.clone());
+    protocol
+        .set_data_storage(custom.clone())
+        .expect("swap backend");
 
     protocol
         .data_map_set(
@@ -317,7 +321,9 @@ fn wiping_empties_a_custom_backend() {
     let device = Device::new();
     let custom = Arc::new(RecordingStorage::default());
     let mut protocol = device.launch();
-    protocol.set_data_storage(custom.clone());
+    protocol
+        .set_data_storage(custom.clone())
+        .expect("swap backend");
 
     protocol
         .data_map_set("space1", "notes", "m", "k", DataValue::int(1))
@@ -389,17 +395,45 @@ fn a_crash_between_the_snapshot_and_the_delete_loses_nothing() {
         }
     }
 
-    // Simulate the crash window: a compacted record exists AND the deltas it
-    // folded are still on disk. Re-opening must absorb the duplicate history
-    // rather than double-apply or refuse, which is the property that lets
-    // compaction write-then-delete instead of needing a transaction.
+    // Build the crash window for real: a compacted record on disk AND the
+    // deltas it folded still present. `data_export_raw` alone does not create
+    // it — it writes nothing — so the snapshot goes in through the same
+    // sealing chokepoint compaction uses, leaving the delta records in place.
     {
         let mut protocol = device.launch();
         protocol.data_flush("space1", "doc").expect("flush");
-        // Force a compacted record without removing the deltas.
-        let compacted = protocol.data_export_raw("space1", "doc").expect("export");
-        assert!(!compacted.is_empty());
+        let snapshot = protocol.data_export_raw("space1", "doc").expect("export");
+        let storage = Arc::new(TestProtocolStateStorage {
+            storage: device.state.clone() as Arc<dyn MlsStorage>,
+        });
+        protocol
+            .write_state_record(
+                storage.as_ref(),
+                storage_keys::DATA_DOCS,
+                "space1/doc",
+                &snapshot,
+            )
+            .expect("write the compacted record");
     }
+
+    // Both halves must coexist, or the test is not standing in the window it
+    // names.
+    assert!(
+        !device
+            .state
+            .list_keys(storage_keys::DATA_DOCS)
+            .unwrap_or_default()
+            .is_empty(),
+        "no compacted record: the crash window was not constructed"
+    );
+    assert!(
+        !device
+            .state
+            .list_keys(storage_keys::DATA_DELTA_LOG)
+            .unwrap_or_default()
+            .is_empty(),
+        "no delta records: the crash window was not constructed"
+    );
 
     let mut reopened = device.launch();
     for index in 0..5i64 {
@@ -445,7 +479,9 @@ fn a_change_survives_a_storage_failure_that_later_clears() {
 
     {
         let mut protocol = device.launch();
-        protocol.set_data_storage(flaky.clone());
+        protocol
+            .set_data_storage(flaky.clone())
+            .expect("swap backend");
         protocol
             .data_map_set("s", "d", "m", "k", DataValue::text("important"))
             .expect("set");
@@ -468,7 +504,9 @@ fn a_change_survives_a_storage_failure_that_later_clears() {
 
     // The real assertion: a fresh instance over the same records sees it.
     let mut reopened = device.launch();
-    reopened.set_data_storage(flaky.clone());
+    reopened
+        .set_data_storage(flaky.clone())
+        .expect("swap backend");
     assert_eq!(
         reopened.data_map_get("s", "d", "m", "k").expect("get"),
         Some(DataValue::text("important")),
@@ -702,5 +740,399 @@ fn the_conformance_suite_catches_a_broken_backend() {
             .any(|failure| failure.check == "store_overwrites"),
         "the overwrite defect was not the reported failure: {}",
         report.summary()
+    );
+}
+
+/// A transient read failure on one delta must not become permanent loss.
+///
+/// The shape that made this necessary: the engine accepts a delta whose
+/// predecessor is missing and answers `Ok`, parking it out of sight. So a
+/// skipped delta does not cost one commit, it costs every commit after it —
+/// and the next compaction then deletes the records holding them.
+#[test]
+fn a_transiently_unreadable_delta_does_not_cost_the_document() {
+    /// Fails `load` for one nominated key, and only once.
+    #[derive(Default)]
+    struct HiccupStorage {
+        inner: RecordingStorage,
+        fail_key: Mutex<Option<String>>,
+    }
+
+    impl ProtocolStateStorage for HiccupStorage {
+        fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> ProtocolStateResult<()> {
+            self.inner.store(key_type, key_id, data)
+        }
+        fn load(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
+            let mut fail = self.fail_key.lock().expect("lock");
+            if fail.as_deref() == Some(key_id) {
+                *fail = None;
+                return Err(crate::ProtocolStateError::LoadFailed("flaky read".into()));
+            }
+            drop(fail);
+            self.inner.load(key_type, key_id)
+        }
+        fn delete(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<()> {
+            self.inner.delete(key_type, key_id)
+        }
+        fn list_keys(&self, key_type: &str) -> ProtocolStateResult<Vec<String>> {
+            self.inner.list_keys(key_type)
+        }
+    }
+
+    let device = Device::new();
+    let hiccup = Arc::new(HiccupStorage::default());
+
+    {
+        let mut protocol = device.launch();
+        protocol
+            .set_data_storage(hiccup.clone())
+            .expect("swap backend");
+        for index in 0..4i64 {
+            protocol
+                .data_map_set("s", "d", "m", &format!("k{index}"), DataValue::int(index))
+                .expect("set");
+            protocol.data_flush("s", "d").expect("flush");
+        }
+    }
+
+    // Make the FIRST delta unreadable for exactly one open.
+    let first_delta = {
+        let mut keys = hiccup
+            .inner
+            .list_keys(storage_keys::DATA_DELTA_LOG)
+            .expect("list");
+        keys.sort();
+        keys.first().cloned().expect("a delta record")
+    };
+    *hiccup.fail_key.lock().expect("lock") = Some(first_delta);
+
+    {
+        let mut protocol = device.launch();
+        protocol
+            .set_data_storage(hiccup.clone())
+            .expect("swap backend");
+        // Refused rather than opened half-empty: an open that silently
+        // dropped the delta would hand back a document missing everything
+        // after it, and the next flush would compact that loss into the
+        // record and delete the evidence.
+        assert!(
+            protocol.data_map_get("s", "d", "m", "k0").is_err(),
+            "a transient read failure was treated as an empty document"
+        );
+    }
+
+    // The hiccup is over. Everything is still there.
+    let mut reopened = device.launch();
+    reopened
+        .set_data_storage(hiccup.clone())
+        .expect("swap backend");
+    for index in 0..4i64 {
+        assert_eq!(
+            reopened
+                .data_map_get("s", "d", "m", &format!("k{index}"))
+                .expect("get"),
+            Some(DataValue::int(index)),
+            "key k{index} was lost to a transient read failure"
+        );
+    }
+}
+
+/// Swapping the backend mid-session must move the whole document, not just
+/// its future deltas.
+///
+/// A delta only describes the change since the previous one. A document that
+/// merely kept appending deltas into the new backend would leave every
+/// earlier delta in the old one, and the engine parks such an orphan rather
+/// than rejecting it — so the document reads EMPTY from the new backend and
+/// the next compaction deletes the orphans for good.
+#[test]
+fn swapping_the_backend_mid_session_moves_the_whole_document() {
+    let device = Device::new();
+    let custom = Arc::new(RecordingStorage::default());
+
+    {
+        let mut protocol = device.launch();
+        // Build real history in the DEFAULT backend first.
+        for index in 0..4i64 {
+            protocol
+                .data_map_set(
+                    "space1",
+                    "notes",
+                    "m",
+                    &format!("k{index}"),
+                    DataValue::int(index),
+                )
+                .expect("set");
+            protocol.data_flush("space1", "notes").expect("flush");
+        }
+
+        // Now swap, with the document open and its history elsewhere.
+        protocol
+            .set_data_storage(custom.clone())
+            .expect("the swap must migrate the open document");
+
+        protocol
+            .data_map_set("space1", "notes", "m", "after", DataValue::int(99))
+            .expect("set after the swap");
+        protocol.data_flush("space1", "notes").expect("flush");
+    }
+
+    // Reopen against the NEW backend alone. This is the assertion that fails
+    // if the swap only moved future writes.
+    let fresh = Device {
+        secure: device.secure.clone(),
+        state: Arc::new(InMemoryStorage::new()),
+    };
+    let mut reopened = fresh.launch();
+    reopened
+        .set_data_storage(custom.clone())
+        .expect("swap backend");
+
+    for index in 0..4i64 {
+        assert_eq!(
+            reopened
+                .data_map_get("space1", "notes", "m", &format!("k{index}"))
+                .expect("get"),
+            Some(DataValue::int(index)),
+            "pre-swap key k{index} was stranded in the old backend"
+        );
+    }
+    assert_eq!(
+        reopened
+            .data_map_get("space1", "notes", "m", "after")
+            .expect("get"),
+        Some(DataValue::int(99)),
+        "the post-swap edit did not survive"
+    );
+}
+
+/// A failed migration must leave the swap undone.
+///
+/// Half-swapped is the stranding the migration exists to prevent: history in
+/// the old backend, a dependent delta in the new one, and a document that
+/// reads empty from either.
+#[test]
+fn a_backend_swap_that_cannot_be_written_does_not_happen() {
+    #[derive(Default)]
+    struct RefusingStorage;
+
+    impl ProtocolStateStorage for RefusingStorage {
+        fn store(&self, _: &str, _: &str, _: &[u8]) -> ProtocolStateResult<()> {
+            Err(crate::ProtocolStateError::StoreFailed("read only".into()))
+        }
+        fn load(&self, _: &str, _: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn delete(&self, _: &str, _: &str) -> ProtocolStateResult<()> {
+            Ok(())
+        }
+        fn list_keys(&self, _: &str) -> ProtocolStateResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    let device = Device::new();
+    let mut protocol = device.launch();
+    protocol
+        .data_map_set("space1", "notes", "m", "k", DataValue::text("keep me"))
+        .expect("set");
+    protocol.data_flush("space1", "notes").expect("flush");
+
+    assert!(
+        protocol
+            .set_data_storage(Arc::new(RefusingStorage))
+            .is_err(),
+        "a swap whose migration cannot be written must fail"
+    );
+
+    // The document is still readable, still through the original backend.
+    assert_eq!(
+        protocol
+            .data_map_get("space1", "notes", "m", "k")
+            .expect("get"),
+        Some(DataValue::text("keep me")),
+        "a refused swap stranded the document anyway"
+    );
+    protocol.data_flush("space1", "notes").expect("flush");
+}
+
+/// The cap is a contract with three halves, and all three are asserted here
+/// against one built-up document: the warning fires with room left, the cap
+/// refuses growth without discarding the breaching change, and deletion is
+/// the way back.
+#[test]
+fn the_cap_warns_then_refuses_growth_but_never_discards_work() {
+    use crate::events::Event;
+
+    let device = Device::new();
+    let mut protocol = device.launch();
+
+    let warned = Arc::new(Mutex::new(Vec::<u64>::new()));
+    let seen = warned.clone();
+    protocol.on_event(move |event| {
+        if let Event::DataDocSizeWarning {
+            compacted_bytes, ..
+        } = event
+        {
+            seen.lock().expect("lock").push(compacted_bytes);
+        }
+    });
+
+    // Incompressible filler, ~8 KiB per entry. A repeated byte would not do:
+    // the compacted encoding compresses, so a megabyte of "x" measures as
+    // almost nothing and the document would never reach the cap at all.
+    let filler = |index: u32| -> Vec<u8> {
+        let mut state = 0x9e37_79b9u32.wrapping_mul(index.wrapping_add(1));
+        (0..8192)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect()
+    };
+
+    let mut breached = None;
+    for index in 0..400u32 {
+        protocol
+            .data_map_set(
+                "space1",
+                "big",
+                "m",
+                &format!("k{index:04}"),
+                DataValue::bytes(filler(index)),
+            )
+            .expect("set");
+        if let Err(err) = protocol.data_flush("space1", "big") {
+            breached = Some((index, err));
+            break;
+        }
+    }
+
+    let (breach_index, err) = breached.expect("the document never reached the cap");
+    assert!(
+        matches!(err, Error::DocTooLarge { .. }),
+        "the cap was reported as {err:?}, not DocTooLarge"
+    );
+
+    // The warning must have arrived while there was still room to act.
+    let warnings = warned.lock().expect("lock").clone();
+    assert!(
+        !warnings.is_empty(),
+        "the cap was reached with no size warning first"
+    );
+    assert!(
+        warnings.iter().any(|bytes| *bytes < 1024 * 1024),
+        "every warning fired at or past the cap: {warnings:?}"
+    );
+
+    // The breaching change is durable, not discarded. Refusing it would lose
+    // work the application believed it had made.
+    assert_eq!(
+        protocol
+            .data_map_get("space1", "big", "m", &format!("k{breach_index:04}"))
+            .expect("get"),
+        Some(DataValue::bytes(filler(breach_index))),
+        "the change that breached the cap was discarded"
+    );
+
+    // Growth is refused...
+    let grow = protocol.data_map_set(
+        "space1",
+        "big",
+        "m",
+        "one-more",
+        DataValue::bytes(filler(9999)),
+    );
+    assert!(
+        matches!(grow, Err(Error::DocTooLarge { .. })),
+        "growth past the cap was accepted: {grow:?}"
+    );
+
+    // ...but deletion is not, which is the only route back under the cap.
+    for index in 0..breach_index.saturating_sub(20) {
+        protocol
+            .data_map_delete("space1", "big", "m", &format!("k{index:04}"))
+            .expect("deletions must keep working past the cap");
+    }
+    protocol
+        .data_flush("space1", "big")
+        .expect("a document brought back under the cap must flush");
+
+    // And the document accepts edits again.
+    protocol
+        .data_map_set("space1", "big", "m", "after-recovery", DataValue::int(1))
+        .expect("edits must resume once back under the cap");
+    protocol.data_flush("space1", "big").expect("flush");
+}
+
+/// A value no document could ever hold is refused at the operation.
+///
+/// Discovering it at commit instead would wedge the document permanently: the
+/// oversized delta cannot be written, the rewind puts the change back, and
+/// the next commit exports a strictly larger delta.
+#[test]
+fn a_value_too_large_for_any_document_is_refused_at_the_operation() {
+    let device = Device::new();
+    let mut protocol = device.launch();
+
+    let huge = "x".repeat(offline_protocol_data::MAX_VALUE_BYTES + 1);
+    let result = protocol.data_map_set("space1", "notes", "m", "k", DataValue::text(huge));
+    assert!(
+        matches!(result, Err(Error::InvalidArgument(_))),
+        "an impossible value was accepted: {result:?}"
+    );
+
+    // The document is untouched and still usable.
+    protocol
+        .data_map_set("space1", "notes", "m", "k", DataValue::text("fine"))
+        .expect("set");
+    protocol.data_flush("space1", "notes").expect("flush");
+}
+
+/// A delete that the backend refuses must be reported, not swallowed.
+///
+/// A surviving record is replayed into the NEXT document of the same name, so
+/// silence here resurrects the deleted incarnation's contents.
+#[test]
+fn a_delete_the_backend_refuses_is_reported() {
+    #[derive(Default)]
+    struct UndeletableStorage {
+        inner: RecordingStorage,
+    }
+
+    impl ProtocolStateStorage for UndeletableStorage {
+        fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> ProtocolStateResult<()> {
+            self.inner.store(key_type, key_id, data)
+        }
+        fn load(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
+            self.inner.load(key_type, key_id)
+        }
+        fn delete(&self, key_type: &str, _: &str) -> ProtocolStateResult<()> {
+            if key_type == storage_keys::DATA_DELTA_LOG {
+                return Err(crate::ProtocolStateError::DeleteFailed("locked".into()));
+            }
+            Ok(())
+        }
+        fn list_keys(&self, key_type: &str) -> ProtocolStateResult<Vec<String>> {
+            self.inner.list_keys(key_type)
+        }
+    }
+
+    let device = Device::new();
+    let stubborn = Arc::new(UndeletableStorage::default());
+    let mut protocol = device.launch();
+    protocol
+        .set_data_storage(stubborn.clone())
+        .expect("swap backend");
+
+    protocol
+        .data_map_set("space1", "notes", "m", "k", DataValue::int(1))
+        .expect("set");
+    protocol.data_flush("space1", "notes").expect("flush");
+
+    let result = protocol.data_delete_doc("space1", "notes");
+    assert!(
+        result.is_err(),
+        "records survived the delete and nothing was reported"
     );
 }

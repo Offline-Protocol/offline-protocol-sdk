@@ -241,6 +241,11 @@ adapter must round-trip **bytes**, not text: a backend that passes values
 through a string type corrupts ciphertext, and the symptom is a record that
 will not open much later.
 
+Sealing covers values, not key ids. An adapter is handed `{space}/{doc}` in
+the clear, so space and document names are metadata visible to whoever runs
+the backend, in the same way a directory listing of the default provider is.
+Applications must not put secrets in a document name.
+
 **Green on the conformance suite is the definition of supported.** Run
 `runStorageConformance(provider)` (namespace-level, no protocol instance
 needed) and check that `failures` is empty. It covers the round trip,

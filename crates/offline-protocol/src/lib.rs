@@ -40,7 +40,7 @@ pub use group_mesh::{GroupRichReadiness, GroupSendOptions, RelaySyncState};
 /// value model and the size constants are part of this crate's surface, and
 /// the engine behind them is not part of anyone's.
 #[cfg(feature = "data")]
-pub use offline_protocol_data::{DataValue, DOC_SIZE_WARN_BYTES, MAX_DOC_BYTES};
+pub use offline_protocol_data::{DataValue, DOC_SIZE_WARN_BYTES, MAX_DOC_BYTES, MAX_VALUE_BYTES};
 pub use offline_protocol_services::MeshServices;
 pub use protocol::mesh_relay::{MeshRelayConfig, MeshRelayStats};
 pub use protocol::{MediaSendOptions, OfflineProtocol, SendMessageOptions};

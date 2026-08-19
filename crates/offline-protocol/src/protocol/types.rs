@@ -1689,8 +1689,9 @@ pub(crate) mod storage_keys {
     /// Key type for per-space document indexes and compaction bookkeeping.
     ///
     /// Key ID is the space id. Sync watermarks join this record when
-    /// replication lands; today it carries the document list and the
-    /// per-document commit sequence high-water mark.
+    /// replication lands; today it carries the document list and nothing
+    /// else. Sequence numbers and sizes are derived from the delta records
+    /// themselves at open, so this record can never disagree with the store.
     ///
     /// Post-split only: deliberately absent from
     /// [`ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split data to inherit

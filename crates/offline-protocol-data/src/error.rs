@@ -44,6 +44,20 @@ pub enum DataError {
         limit: usize,
     },
 
+    /// A single value is larger than [`crate::MAX_VALUE_BYTES`].
+    ///
+    /// Refused at the operation rather than at commit. A value this size can
+    /// never fit in a document, and discovering that at commit means the
+    /// document's next delta record is unwritable and stays unwritable,
+    /// because a refused write is re-exported (larger) by the commit after it.
+    #[error("value is {actual} bytes, over the {limit} byte limit")]
+    ValueTooLarge {
+        /// Size of the rejected value.
+        actual: usize,
+        /// The limit in force, [`crate::MAX_VALUE_BYTES`].
+        limit: usize,
+    },
+
     /// A collection or document name is empty, over-long, or uses characters
     /// outside the accepted set.
     #[error("invalid name {name:?}: {reason}")]
