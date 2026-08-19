@@ -23,6 +23,51 @@ ignore = [
     { id = "RUSTSEC-2026-0207", reason = "libcrux-sha3 incremental SHAKE squeeze bug; SHAKE unreachable with our classical MLS ciphersuite; no hpke-rs-0.6-compatible fix exists" },
     { id = "RUSTSEC-2026-0208", reason = "libcrux-sha3 AVX2 SHAKE-256 panic; same unreachable SHAKE path, same missing upstream fix" },
     { id = "RUSTSEC-2026-0212", reason = "libcrux-secrets aarch64 swap/select; only used beneath the unreachable SHAKE/ML-KEM path, same missing upstream fix" },
+    # Unmaintained-crate notice for atomic-polyfill, which enters the lockfile
+    # under heapless 0.7 -> postcard's default `heapless-cas` feature, pulled
+    # in by the CRDT engine's serde_columnar. It is never compiled for any
+    # target this SDK ships: heapless 0.7.17 declares atomic-polyfill only for
+    # riscv32i / riscv32imc / xtensa-esp32s2 (required) and thumbv6m / avr
+    # (optional), none of which are iOS, Android, macOS, Linux or Windows.
+    #
+    # This is NOT the workspace giving up on the opt-out. `postcard` is still
+    # declared `default-features = false` (see the comment in Cargo.toml), and
+    # loro-internal already sets the same on its own postcard dependency
+    # (loro-dev/loro#1014). The remaining path is serde_columnar 0.3.14, whose
+    # fix exists only as an unreleased draft (loro-dev/columnar#48, tracked by
+    # loro-dev/loro#818); cargo unifies features across the graph, so one
+    # unfixed dependency re-enables the flag for everyone. Drop this waiver as
+    # soon as a serde_columnar release carries the fix.
+    { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill unmaintained; reaches the lockfile via heapless 0.7 under serde_columnar's default-featured postcard, and is target-conditional so it never compiles for any shipped target; upstream fix unreleased (loro-dev/columnar#48)" },
+    # The `im` persistent-collections family: all three crates were archived
+    # by the same upstream author in 2026 and flagged unmaintained together.
+    # They reach us as
+    # `offline-protocol-data -> loro -> loro-internal -> im -> {bitmaps,
+    # sized-chunks}`.
+    #
+    # Unlike the atomic-polyfill entry above, these ARE compiled and ARE on
+    # the shipped path: `im` is the persistent-collection library the CRDT
+    # engine's internals are built on. Stated plainly rather than filed next
+    # to the unreachable waivers, because the two deserve different
+    # attention.
+    #
+    # What makes these waivers and not blockers: "unmaintained" is a
+    # maintenance-status notice, not a known vulnerability, and there is
+    # nothing to upgrade to — each advisory says no safe upgrade exists. The
+    # recommended successor (`imbl`, a maintained fork of the same family)
+    # only helps once loro-internal adopts it, which is an upstream change we
+    # do not control.
+    #
+    # Standing obligation, and the reason this block is written out rather
+    # than reduced to three ids: the engine's core collection library is
+    # unmaintained, which is a fact about the engine, not about our lockfile.
+    # Re-check at every loro bump alongside the MSRV check and the
+    # binary-size measurement that bump already requires, and treat a real
+    # vulnerability against any of the three as an engine question rather
+    # than a waiver renewal.
+    { id = "RUSTSEC-2026-0247", reason = "bitmaps unmaintained (archived upstream); compiled, beneath im under the CRDT engine; no safe upgrade exists and the successor fork requires an upstream loro change" },
+    { id = "RUSTSEC-2026-0248", reason = "im unmaintained (archived upstream); compiled, the CRDT engine's persistent-collection library; no safe upgrade exists and the successor fork requires an upstream loro change" },
+    { id = "RUSTSEC-2026-0251", reason = "sized-chunks unmaintained (archived upstream); compiled, beneath im under the CRDT engine; no safe upgrade exists and the successor fork requires an upstream loro change" },
 ]
 
 [licenses]
@@ -41,6 +86,12 @@ allow = [
     "MPL-2.0",
     "Unicode-DFS-2016",
     "Unicode-3.0",
+    # BSL-1.0 (Boost Software License) arrives with `xxhash-rust`, a hashing
+    # dependency of the CRDT engine. It is a permissive, OSI-approved,
+    # GPL-compatible license with no attribution requirement on binaries;
+    # the notices file lists it anyway, because listing costs nothing and a
+    # missing entry is the expensive direction.
+    "BSL-1.0",
 ]
 
 [bans]

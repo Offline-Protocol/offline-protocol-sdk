@@ -7,6 +7,7 @@ members = [
     "crates/offline-protocol-reliability",
     "crates/offline-protocol-mls",
     "crates/offline-protocol-services",
+    "crates/offline-protocol-data",
     "crates/offline-protocol",
     "crates/offline-protocol-uniffi",
     "crates/offline-protocol-bench",
@@ -47,6 +48,16 @@ serde_json = "1.0"
 # which otherwise pulls heapless 0.7 -> atomic-polyfill (unmaintained,
 # RUSTSEC-2023-0089). We only use the alloc-backed `to_allocvec`/`from_bytes`,
 # so `alloc` alone is sufficient and the heapless flavor is dead weight.
+#
+# This opt-out is now INTENT, not effect: cargo unifies features across the
+# graph, and `offline-protocol-data`'s engine pulls postcard with default
+# features through `serde_columnar` (upstream fix unreleased, see
+# loro-dev/columnar#48). `heapless-cas` is therefore enabled workspace-wide
+# regardless. Nothing compiled on our targets changes — atomic-polyfill is
+# target-conditional in heapless 0.7 and never builds for iOS, Android,
+# macOS, Linux or Windows — and the advisory is waived with that reasoning
+# in `deny.toml` and `.cargo/audit.toml`. Keep the flag: it is what makes the
+# opt-out effective again the moment the upstream fix lands.
 postcard = { version = "1.0", default-features = false, features = ["alloc"] }
 
 # Error handling
@@ -110,13 +121,14 @@ chacha20poly1305 = "0.10"
 #   "all dependencies must have a version requirement specified when packaging"
 # Keep these in lockstep with `workspace.package.version` above — a crate can
 # only be published once its dependencies exist on the registry at the named
-# version, so all seven move together.
+# version, so all eight move together.
 offline-protocol-core = { path = "crates/offline-protocol-core", version = "0.22.0" }
 offline-protocol-transport = { path = "crates/offline-protocol-transport", version = "0.22.0" }
 offline-protocol-router = { path = "crates/offline-protocol-router", version = "0.22.0" }
 offline-protocol-reliability = { path = "crates/offline-protocol-reliability", version = "0.22.0" }
 offline-protocol-mls = { path = "crates/offline-protocol-mls", version = "0.22.0" }
 offline-protocol-services = { path = "crates/offline-protocol-services", version = "0.22.0" }
+offline-protocol-data = { path = "crates/offline-protocol-data", version = "0.22.0" }
 offline-protocol = { path = "crates/offline-protocol", version = "0.22.0" }
 
 [workspace.lints.clippy]
