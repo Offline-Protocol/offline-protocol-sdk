@@ -732,6 +732,16 @@ impl OfflineProtocol {
             // nothing downstream may fold history while one is outstanding:
             // compaction would write a snapshot without it and then delete
             // the records it is waiting for.
+            //
+            // It stays false for the rest of this document's time in memory,
+            // deliberately. The engine reports what one import left pending,
+            // never whether a document still holds anything parked, so a
+            // later import that applies cleanly is not evidence that the
+            // earlier gap closed. Clearing it on that evidence would re-arm
+            // compaction while a change is still waiting, which is the loss
+            // this flag exists to prevent; leaving it set costs a document
+            // its compaction until it is next opened, where the flag is
+            // recomputed from the records themselves.
             if outcome == RemoteImport::Parked {
                 entry.history_complete = false;
             }
