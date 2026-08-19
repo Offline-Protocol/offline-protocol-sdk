@@ -130,6 +130,14 @@ crash, to solve a problem the anti-entropy exchange already solves.
   contents, abort the process once per unique blob on a `panic = "abort"`
   build. It is attributable, it is bounded by layer 4, and it requires
   someone the user has already accepted into a shared document.
+- A process that dies mid-import for reasons of its own (the user force
+  quits it, the system reclaims its memory) quarantines a blob that was never
+  at fault. The cost is one document change refused on this device, and it
+  clears itself: the digest is over the bytes, so the next catch-up the
+  sender computes carries different ones as soon as either replica gains a
+  change. The window is the length of one import, and the alternative is
+  assuming that a process which died during an import died for an unrelated
+  reason.
 - A refusal on a run of changes costs a round trip. The receiver names what
   would work (`need_snap`), and a sender holding a superset of what the
   receiver kept answers with a snapshot that closes the gap.
