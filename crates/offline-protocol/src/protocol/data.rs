@@ -27,7 +27,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use offline_protocol_data::{policy, DataDoc, DataError, DataValue};
+use offline_protocol_data::{
+    policy, CatchUp, DataDoc, DataError, DataValue, RemoteImport, VersionToken,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -596,6 +598,97 @@ impl OfflineProtocol {
         self.persist_space(storage.as_ref(), space)
     }
 
+    // ---- replication seams ------------------------------------------
+    //
+    // The sync module owns the frames and the peer bookkeeping; these are
+    // the four things it needs from the store, and they are here rather
+    // than there so nothing outside this module touches a document handle.
+
+    /// The backend documents live in, when the layer is on.
+    ///
+    /// Unlike `require_data_storage` this answers `None` rather than an
+    /// error: the sync path treats a switched-off layer as "nothing to do",
+    /// not as a failure to report.
+    pub(crate) fn data_storage_for_sync(&self) -> Option<Arc<dyn ProtocolStateStorage>> {
+        if !self.config.data.enabled {
+            return None;
+        }
+        self.data_storage()
+    }
+
+    /// Every document in a space with the version we hold of it.
+    pub(crate) fn data_sync_versions(&mut self, space: &str) -> Result<BTreeMap<String, String>> {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+        let docs = self.data_list_docs(space)?;
+        let mut versions = BTreeMap::new();
+        for doc in docs {
+            let token = self.read_doc(space, &doc, |document| Ok(document.version()))?;
+            versions.insert(doc, BASE64.encode(token.as_bytes()));
+        }
+        Ok(versions)
+    }
+
+    /// What a replica at `theirs` is missing from a document.
+    pub(crate) fn data_catch_up(
+        &mut self,
+        space: &str,
+        doc: &str,
+        theirs: &VersionToken,
+    ) -> Result<CatchUp> {
+        self.read_doc(space, doc, |document| document.export_since(theirs))
+    }
+
+    /// A self-contained encoding of a document, for a peer no run of
+    /// changes can catch up.
+    pub(crate) fn data_export_snapshot(&mut self, space: &str, doc: &str) -> Result<Vec<u8>> {
+        self.read_doc(space, doc, |document| document.export_raw())
+    }
+
+    /// Apply a blob that arrived from a peer, and persist what it changed.
+    ///
+    /// The import goes through the engine's remote path, which judges the
+    /// blob before touching it. A change that applies is flushed here rather
+    /// than left in memory: an unflushed remote change would be lost to a
+    /// restart, and the sender has already been told (by the acknowledgement
+    /// the frame rides on) that it arrived.
+    pub(crate) fn data_apply_remote(
+        &mut self,
+        space: &str,
+        doc: &str,
+        blob: &[u8],
+    ) -> Result<RemoteImport> {
+        Self::validate_ids(space, doc)?;
+        let storage = self.require_data_storage()?;
+        self.open_doc(storage.as_ref(), space, doc)?;
+
+        let map_key = (space.to_string(), doc.to_string());
+        let outcome = {
+            let entry = self
+                .data
+                .docs
+                .get_mut(&map_key)
+                .ok_or_else(|| Error::Other("document vanished after open".to_string()))?;
+            let outcome = entry.doc.import_remote(blob).map_err(map_data_error)?;
+            // A parked change is invisible to the engine's own version, so
+            // nothing downstream may fold history while one is outstanding:
+            // compaction would write a snapshot without it and then delete
+            // the records it is waiting for.
+            if outcome == RemoteImport::Parked {
+                entry.history_complete = false;
+            }
+            outcome
+        };
+
+        if outcome == RemoteImport::Applied {
+            // Remote work is not this replica's to push onward, so the flush
+            // is told where the change came from.
+            self.flush_doc_from(storage.as_ref(), space, doc, Some(space))?;
+            self.persist_space(storage.as_ref(), space)?;
+        }
+        Ok(outcome)
+    }
+
     /// Delete a document and every record belonging to it.
     pub fn data_delete_doc(&mut self, space: &str, doc: &str) -> Result<()> {
         Self::validate_ids(space, doc)?;
@@ -853,6 +946,22 @@ impl OfflineProtocol {
         space: &str,
         doc: &str,
     ) -> Result<()> {
+        self.flush_doc_from(storage, space, doc, None)
+    }
+
+    /// [`Self::flush_doc`], told which peer the change came from.
+    ///
+    /// `origin` is `None` for a local edit and the peer's address for one
+    /// applied from a sync frame. It exists so replication does not send a
+    /// change straight back to whoever sent it: the merge would absorb the
+    /// echo, but on a mesh it is a frame nobody needed.
+    fn flush_doc_from(
+        &mut self,
+        storage: &dyn ProtocolStateStorage,
+        space: &str,
+        doc: &str,
+        origin: Option<&str>,
+    ) -> Result<()> {
         let map_key = (space.to_string(), doc.to_string());
 
         let Some(entry) = self.data.docs.get_mut(&map_key) else {
@@ -944,6 +1053,20 @@ impl OfflineProtocol {
                 );
             (verdict, measured, should_compact, entry.compacted_bytes)
         };
+
+        // Replicated here for the same reason the event fires here: the
+        // claim being made is that the change is durable, and that became
+        // true at the write above. Pushing before it would advertise a
+        // change that a crash could still take back, and pushing after
+        // compaction would let a compaction failure suppress replication of
+        // something already on disk.
+        //
+        // The oversized branch wrote a compacted snapshot instead of a delta
+        // record, so there is no delta to push; the peer's next version
+        // offer finds the gap and the catch-up ladder answers it.
+        if !oversized {
+            self.push_data_delta(space, doc, &delta.bytes, origin);
+        }
 
         // Emitted here, before compaction: the event's claim is that the
         // change reached storage, and that became true at the write above.

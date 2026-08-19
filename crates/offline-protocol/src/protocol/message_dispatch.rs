@@ -1098,6 +1098,27 @@ impl OfflineProtocol {
                     ));
                     let surfaced = if is_session_confirm {
                         Some(InternalMessageResult::Consumed)
+                    } else if let Some(body) = text.strip_prefix(internal_prefixes::DATA_V1) {
+                        // A document sync frame. Consumed either way, and
+                        // never deferred for anything the data layer decides:
+                        // deferral is reserved for "the session will be ready
+                        // and this same ciphertext will then work", so using
+                        // it for a corrupt blob or a switched-off layer would
+                        // spend the sender's whole retry budget on a frame
+                        // that can never be accepted. A frame that arrives
+                        // before the session is ready never reaches here at
+                        // all — it queues undecrypted, like every other
+                        // sealed body, and lands here when the drain runs.
+                        #[cfg(feature = "data")]
+                        {
+                            let body = body.to_string();
+                            self.handle_data_sync_frame(&sender_owned, &body);
+                        }
+                        #[cfg(not(feature = "data"))]
+                        {
+                            let _ = body;
+                        }
+                        Some(InternalMessageResult::Consumed)
                     } else {
                         Some(InternalMessageResult::Decrypted(text))
                     };

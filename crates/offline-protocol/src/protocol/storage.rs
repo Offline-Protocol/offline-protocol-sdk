@@ -85,6 +85,10 @@ pub(crate) enum StateCategory {
     /// only, like [`Self::DataDocs`], and absent from
     /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] for the same reason.
     DataSpaces,
+    /// Per-space replication bookkeeping. Post-split only, like
+    /// [`Self::DataDocs`], and absent from
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] for the same reason.
+    DataSync,
 }
 
 impl StateCategory {
@@ -110,6 +114,7 @@ impl StateCategory {
             storage_keys::DATA_DOCS => Self::DataDocs,
             storage_keys::DATA_DELTA_LOG => Self::DataDeltaLog,
             storage_keys::DATA_SPACES => Self::DataSpaces,
+            storage_keys::DATA_SYNC => Self::DataSync,
             _ => return None,
         })
     }
@@ -144,6 +149,7 @@ impl StateCategory {
         Self::DataDocs,
         Self::DataDeltaLog,
         Self::DataSpaces,
+        Self::DataSync,
     ];
 
     /// The storage key type this category is written under.
@@ -171,6 +177,7 @@ impl StateCategory {
             Self::DataDocs => storage_keys::DATA_DOCS,
             Self::DataDeltaLog => storage_keys::DATA_DELTA_LOG,
             Self::DataSpaces => storage_keys::DATA_SPACES,
+            Self::DataSync => storage_keys::DATA_SYNC,
         }
     }
 
@@ -256,7 +263,8 @@ impl StateCategory {
             | Self::NostrDiscoveryClaim
             | Self::DataDocs
             | Self::DataDeltaLog
-            | Self::DataSpaces => true,
+            | Self::DataSpaces
+            | Self::DataSync => true,
             Self::PeerCapabilities
             | Self::SessionStates
             | Self::WelcomeLifecycles
@@ -4848,6 +4856,7 @@ mod category_registration_tests {
             storage_keys::DATA_DOCS,
             storage_keys::DATA_DELTA_LOG,
             storage_keys::DATA_SPACES,
+            storage_keys::DATA_SYNC,
         ] {
             assert!(
                 !storage_keys::ADOPTABLE_STATE_KEY_TYPES.contains(&key_type),

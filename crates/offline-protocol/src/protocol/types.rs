@@ -1750,6 +1750,24 @@ pub(crate) mod storage_keys {
     /// [`ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split data to inherit
     /// for it.
     pub const DATA_SPACES: &str = "data_spaces";
+    /// Key type for per-space replication bookkeeping.
+    ///
+    /// Key ID is the space id. Holds the containment state the sync path
+    /// needs to survive a crash: the digest of the blob currently being
+    /// handed to the document engine, and the digests of blobs that were
+    /// in flight when a previous run died.
+    ///
+    /// Kept out of [`DATA_SPACES`] deliberately. That record is a cache
+    /// reconciled from `list_keys` at open, so anything in it may be
+    /// rebuilt from the store at any time; this one records something the
+    /// store cannot show, and rebuilding it from the listing would silently
+    /// answer "nothing was in flight" after exactly the crash it exists to
+    /// remember.
+    ///
+    /// Post-split only: deliberately absent from
+    /// [`ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split data to inherit
+    /// for it.
+    pub const DATA_SYNC: &str = "data_sync";
 
     /// Every key type that moved from secure storage into protocol-state
     /// storage when the two domains were split.

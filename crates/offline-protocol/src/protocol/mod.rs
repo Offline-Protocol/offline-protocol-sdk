@@ -4,6 +4,8 @@ mod blocking;
 mod config_accessors;
 #[cfg(feature = "data")]
 pub(crate) mod data;
+#[cfg(feature = "data")]
+mod data_sync;
 mod decryption_queue;
 pub(crate) mod mesh_relay;
 mod message_dispatch;
@@ -1484,6 +1486,19 @@ impl OfflineProtocol {
         self.drain_deferred_restore_settlements();
 
         self.flush_restored_confirmed_pending_messages();
+
+        // Cold start: sessions restored from storage are already confirmed,
+        // so no confirmation transition will fire for them and nothing else
+        // would offer versions until the peer happened to be rediscovered.
+        // Frames toward an unreachable peer queue in the outbox, which is the
+        // ladder doing its job rather than a reason not to try.
+        #[cfg(feature = "data")]
+        {
+            for space in self.data_sync_spaces() {
+                self.kick_data_sync(&space, "start");
+            }
+        }
+
         self.kick_pending_session_reconciliation("start");
         self.process_welcome_retry_queue()?;
 
@@ -1677,6 +1692,14 @@ impl OfflineProtocol {
         // has a fresh delivery opportunity over the carrier that surfaced this
         // peer — re-arm it. No-op when there is no pending Welcome for the peer.
         self.rearm_welcome_for_peer(peer_id, "peer_rediscovered");
+
+        // Offer document versions while the peer is in front of us. This has
+        // to sit above the key-package guard below, which returns early for
+        // any peer we have already exchanged with — that is to say, for
+        // exactly the established peers whose documents drifted apart during
+        // the partition this discovery just ended.
+        #[cfg(feature = "data")]
+        self.kick_data_sync(peer_id, "peer_rediscovered");
 
         // Only send key package if encryption is enabled and auto key exchange is on
         if !self.config.encryption.enabled || !self.config.encryption.auto_key_exchange {
