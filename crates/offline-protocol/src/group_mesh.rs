@@ -1486,16 +1486,33 @@ impl OfflineProtocol {
 
             self.group_mesh.members.insert(group_id.clone(), members);
 
-            // Store member roles and the creator of record from the welcome
-            // payload. The creator is what makes `check_is_admin`'s fallback
-            // reachable for a joiner: without it our metadata is materialized
-            // by `set_member_role` via `GroupMetadata::new(None)`, so a group
-            // whose role snapshot arrived incomplete would resolve to
-            // deny-by-default with no way back. Deliberately not bounded to
-            // the roster we just joined — the creator of record may already
-            // have left. `set_group_creator` is first-write-wins, so a
-            // duplicate or later Welcome cannot rewrite it.
-            if !payload.member_roles.is_empty() || payload.created_by.is_some() {
+            // Store the display name, the member roles, and the creator of
+            // record from the welcome payload. The creator is what makes
+            // `check_is_admin`'s fallback reachable for a joiner: without it
+            // our metadata is materialized by `set_member_role` via
+            // `GroupMetadata::new(None)`, so a group whose role snapshot
+            // arrived incomplete would resolve to deny-by-default with no way
+            // back. Deliberately not bounded to the roster we just joined —
+            // the creator of record may already have left.
+            // `set_group_creator` is first-write-wins, so a duplicate or
+            // later Welcome cannot rewrite it.
+            //
+            // This Welcome is the only copy of the name this device will ever
+            // be handed: MLS `join_group` puts it on the `GroupInfo` it
+            // returns and persists nothing. Without this write a joiner
+            // registers its groups with the relay namelessly, and because the
+            // bridge sends a `CreateGroup` for every member's registration
+            // while the relay keeps the first name it sees, a joiner that
+            // reconnects before the creator would title the group
+            // `group:<uuid>` for everyone (see `try_relay_register_group`).
+            // Writing it here also carries the name on down the invite chain,
+            // since an invite sources the Welcome's name from the inviter's
+            // stored metadata.
+            let welcome_name = Self::normalize_group_name(payload.group_name.as_deref());
+            if !payload.member_roles.is_empty()
+                || payload.created_by.is_some()
+                || welcome_name.is_some()
+            {
                 if let Ok(mls_guard) = self.read_mls_guard() {
                     for (user_id, role) in &payload.member_roles {
                         if let Err(e) = mls_guard.set_member_role(&gid, user_id, *role) {
@@ -1505,6 +1522,11 @@ impl OfflineProtocol {
                     if let Some(creator) = &payload.created_by {
                         if let Err(e) = mls_guard.set_group_creator(&gid, creator) {
                             warn!(creator = %creator, error = %e, "Failed to store group creator from welcome");
+                        }
+                    }
+                    if let Some(name) = &welcome_name {
+                        if let Err(e) = mls_guard.set_group_name(&gid, name) {
+                            warn!(group_id = %group_id, error = %e, "Failed to store group name from welcome");
                         }
                     }
                 }
@@ -4507,6 +4529,26 @@ impl OfflineProtocol {
             .map(|creator| creator == &self.local_id)
     }
 
+    /// Normalizes a display name to the form the relay should be told:
+    /// trimmed, with blank reading as absent. The bridge translator
+    /// substitutes the group id for a missing name, so letting `Some("  ")`
+    /// through would title the group `group:<uuid>` exactly as `None` does.
+    fn normalize_group_name(name: Option<&str>) -> Option<String> {
+        name.map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+    }
+
+    /// The group's display name as stored in local MLS metadata, if the
+    /// group is known and has one. Best-effort: any lookup failure reads as
+    /// "no name", the caller decides what that means.
+    fn stored_group_name(&self, group_id: &str) -> Option<String> {
+        let mls_guard = self.read_mls_guard().ok()?;
+        let gid = offline_protocol_mls::GroupId::new(group_id).ok()?;
+        let metadata = mls_guard.get_group_metadata(&gid).ok()??;
+        Self::normalize_group_name(metadata.name.as_deref())
+    }
+
     /// Attempts to register (or update) a group with the relay server.
     ///
     /// Sends a `__GRP_RELAY_REG__` message to the user's own ID via Internet
@@ -4520,6 +4562,29 @@ impl OfflineProtocol {
     /// for the group), never here — otherwise `send_group_message` takes the
     /// O(1) broadcast path and the messages vanish into the echo.
     ///
+    /// A registration frame carries the group's display name whenever this
+    /// device holds one. The relay stores the name it sees on the first
+    /// `CreateGroup` for a mesh group id and never rewrites it on later
+    /// re-syncs, and the bridge translator substitutes the group id for a
+    /// missing name, so the first registration to reach the relay decides
+    /// the name forever. That first registration is not necessarily the
+    /// creator's: the bridge sends `CreateGroup` for every member's
+    /// registration (the admin hint gates only the member deltas), so
+    /// whichever member reconnects first names the group. And a group
+    /// created offline skips creation's own registration, leaving the
+    /// first one to the reconnect re-sync or to
+    /// `request_group_relay_registration`, neither of which is given a
+    /// name. A nameless frame from any of those paths would title the
+    /// group `group:<uuid>` for every member.
+    ///
+    /// Callers that have the name pass it; otherwise it is read from the
+    /// locally stored MLS group metadata, which every member holds: the
+    /// creator writes it in `create_group`, a joiner in
+    /// `handle_group_mls_welcome`, and a rename updates it wherever it
+    /// lands. The residual case is a joiner whose Welcome carried no name,
+    /// which means the inviter had none to send (a device that joined
+    /// before the Welcome name was persisted, or an SDK predating it).
+    ///
     /// Fire-and-forget: returns `Ok(true)` if sent, `Ok(false)` if Internet
     /// is unavailable, `Err` on serialization failure.
     fn try_relay_register_group(
@@ -4532,9 +4597,12 @@ impl OfflineProtocol {
             return Ok(false);
         }
 
+        let group_name =
+            Self::normalize_group_name(group_name).or_else(|| self.stored_group_name(group_id));
+
         let payload = RelayGroupRegistrationPayload {
             group_id: group_id.to_string(),
-            group_name: group_name.map(|s| s.to_string()),
+            group_name,
             members: members.to_vec(),
             is_admin: self.relay_registration_admin_hint(group_id),
         };

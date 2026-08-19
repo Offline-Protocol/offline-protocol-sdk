@@ -3220,6 +3220,139 @@ fn test_request_group_relay_registration() {
     protocol.stop().unwrap();
 }
 
+/// The `group_name` of every `__GRP_RELAY_REG__` frame the transport sent,
+/// in order. Asserts in passing that each frame names `group_id`.
+fn relay_registration_names(
+    handle: &offline_protocol_transport::mock::MockTransport,
+    group_id: &str,
+) -> Vec<Option<String>> {
+    handle
+        .sent_messages()
+        .iter()
+        .filter_map(|m| {
+            m.content
+                .strip_prefix(internal_prefixes::GROUP_RELAY_REGISTER)
+                .map(str::to_string)
+        })
+        .map(|json| {
+            let payload: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                payload.get("group_id").and_then(|v| v.as_str()),
+                Some(group_id)
+            );
+            payload
+                .get("group_name")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// A group created without Internet is first registered by a later
+/// re-sync, which does not know the name. The relay keeps the first name it
+/// sees and the bridge substitutes the group id for a missing one, so a
+/// nameless first registration would title the group `group:<uuid>` for
+/// every member. The frame must therefore carry the stored MLS name.
+#[test]
+fn test_deferred_relay_registration_carries_stored_group_name() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+    protocol.start().unwrap();
+
+    // Offline creation: no registration frame can be sent.
+    let info = protocol.create_group("Offline Created").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+
+    // Reconnect re-sync (the 0 -> 1 Internet transition) passes no name.
+    assert!(!protocol.group_mesh.internet_was_available);
+    protocol.check_relay_group_sync();
+    assert_eq!(
+        relay_registration_names(&internet_handle, &group_id),
+        vec![Some("Offline Created".to_string())],
+        "re-sync registration must carry the stored group name"
+    );
+
+    // The explicit registration request passes no name either.
+    protocol.group_mesh.relay_register_pending.remove(&group_id);
+    assert_eq!(
+        protocol.request_group_relay_registration(&group_id).ok(),
+        Some(true)
+    );
+    assert_eq!(
+        relay_registration_names(&internet_handle, &group_id),
+        vec![
+            Some("Offline Created".to_string()),
+            Some("Offline Created".to_string())
+        ],
+        "requested registration must carry the stored group name"
+    );
+
+    protocol.stop().unwrap();
+}
+
+/// The name must survive on a joiner too, not just on the creator. The
+/// bridge sends a `CreateGroup` for every member's registration and the
+/// relay keeps the first name it sees, so whichever member reconnects first
+/// names the group for everyone. MLS `join_group` puts the Welcome's
+/// name only on the `GroupInfo` it returns, so unless the Welcome handler
+/// persists it, a joiner that reconnects first titles the group
+/// `group:<uuid>` for the whole roster.
+#[test]
+fn test_joiner_relay_registration_carries_welcome_group_name() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    // Alice created "Race Group"; Bob has been invited but has not joined.
+    // Bob is the joiner, and the Welcome is his only source for the name.
+    let (_alice, mut bob, _events, group_id, welcome_json) = setup_race_alice_bob();
+    bob.start().unwrap();
+
+    bob.handle_group_mls_welcome("welcome-carries-name", &id("alice"), &welcome_json);
+
+    // Persisted, not merely returned by `join_group`: the relay registration
+    // reads stored metadata, and so does the next Welcome Bob sends on.
+    let persisted = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        bob_mls
+            .get_group_metadata(&gid)
+            .unwrap()
+            .and_then(|m| m.name)
+    };
+    assert_eq!(
+        persisted.as_deref(),
+        Some("Race Group"),
+        "a joiner must persist the group name the Welcome carried"
+    );
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+
+    // Bob reconnects before Alice, so his re-sync is the registration that
+    // names the group on the relay for every member.
+    assert!(!bob.group_mesh.internet_was_available);
+    bob.check_relay_group_sync();
+    assert_eq!(
+        relay_registration_names(&internet_handle, &group_id),
+        vec![Some("Race Group".to_string())],
+        "a joiner's re-sync registration must carry the group name"
+    );
+
+    bob.stop().unwrap();
+}
+
 #[test]
 fn test_relay_sync_disabled_config() {
     use offline_protocol_transport::mock::MockTransport;
