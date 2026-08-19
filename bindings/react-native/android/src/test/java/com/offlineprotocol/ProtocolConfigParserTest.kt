@@ -484,9 +484,10 @@ class ProtocolConfigParserTest {
 
     @Test
     fun dataLayerCanBeExplicitlyDisabled() {
-        // Explicitly off and unset must both reach the constructor as false.
-        // They differ only in intent, and the constructor is where that
-        // stops mattering.
+        // Explicitly off is applied; unset is left alone so the generated
+        // default governs. Both end up false today, which is exactly why the
+        // difference has to be pinned here rather than assumed: the day the
+        // default flips, only one of them is supposed to change.
         val config = parse("""{"appId":"app","userId":"alice","data":{"enabled":false}}""")
         assertFalse(config.dataEnabled)
     }

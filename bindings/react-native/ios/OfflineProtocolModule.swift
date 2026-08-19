@@ -425,9 +425,9 @@ class OfflineProtocolModule: RCTEventEmitter {
         // only default. Kept in step with android/ ProtocolConfigParser —
         // read order and precedence must match.
         let dataSection = raw["data"] as? [String: Any]
-        let dataEnabled = dataSection?["enabled"] as? Bool ?? false
+        let dataEnabled = dataSection?["enabled"] as? Bool
 
-        let config = ProtocolConfig(
+        var config = ProtocolConfig(
             appId: raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
             profile: raw["profile"] as? String ?? "",
             bleEnabled: raw["bleEnabled"] as? Bool ?? raw["ble_enabled"] as? Bool ?? true,
@@ -458,9 +458,18 @@ class OfflineProtocolModule: RCTEventEmitter {
             compactEnvelopeEnabled: encryption.compactEnvelopeEnabled,
             richPayloadEnabled: encryption.richPayloadEnabled,
             cryptoRecoveryEnabled: encryption.cryptoRecoveryEnabled,
-            meshRelay: meshRelay,
-            dataEnabled: dataEnabled
+            meshRelay: meshRelay
         )
+
+        // Assigned only when the app actually sent it. Writing `?? false`
+        // above would restate the default as a literal here, and the literal
+        // is what survives a change to the real default: the release that
+        // flips it on would keep forcing `false` for every app that omits the
+        // section, exactly as `config.relay` sat at its defaults for several
+        // releases.
+        if let dataEnabled {
+            config.dataEnabled = dataEnabled
+        }
 
         return (config, raw)
     }

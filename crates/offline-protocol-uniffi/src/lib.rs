@@ -7575,17 +7575,29 @@ mod tests {
             read(rn.join("android/src/main/java/com/offlineprotocol/ProtocolConfigParser.kt"));
         assert!(
             kotlin.contains("optJSONObject(\"data\")")
-                && kotlin.contains("dataEnabled = dataEnabled"),
-            "the Kotlin parser must read the data section AND pass it to the \
-             ProtocolConfig constructor; reading it and dropping it is the \
-             silent half of this failure"
+                && kotlin.contains("config.dataEnabled = dataEnabled"),
+            "the Kotlin parser must read the data section AND apply it to the \
+             ProtocolConfig; reading it and dropping it is the silent half of \
+             this failure"
+        );
+        assert!(
+            !kotlin.contains("optBooleanCompat(\"enabled\") ?: false"),
+            "the Kotlin parser must not restate the data default as a literal: \
+             an omitted field has to stay omitted so the generated default \
+             governs, or the release that flips the default on keeps forcing \
+             false for every app that omits the section"
         );
 
         let swift = read(rn.join("ios/OfflineProtocolModule.swift"));
         assert!(
-            swift.contains("raw[\"data\"]") && swift.contains("dataEnabled: dataEnabled"),
-            "the Swift parser must read the data section AND pass it to the \
-             ProtocolConfig initializer"
+            swift.contains("raw[\"data\"]") && swift.contains("config.dataEnabled = dataEnabled"),
+            "the Swift parser must read the data section AND apply it to the \
+             ProtocolConfig"
+        );
+        assert!(
+            !swift.contains("dataSection?[\"enabled\"] as? Bool ?? false"),
+            "the Swift parser must not restate the data default as a literal; \
+             see the Kotlin assertion above for what that costs"
         );
 
         let ts = read(rn.join("src/index.ts"));

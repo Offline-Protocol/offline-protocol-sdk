@@ -194,7 +194,7 @@ internal object ProtocolConfigParser {
         // other knobs will land and one home is easier to keep correct than
         // two spellings.
         val dataJson = json.optJSONObject("data")
-        val dataEnabled = dataJson?.optBooleanCompat("enabled") ?: false
+        val dataEnabled = dataJson?.optBooleanCompat("enabled")
 
         val config = ProtocolConfig(
             appId = json.safeOptString("appId", json.safeOptString("app_id")),
@@ -229,9 +229,18 @@ internal object ProtocolConfigParser {
             compactEnvelopeEnabled = compactEnvelopeEnabled,
             richPayloadEnabled = richPayloadEnabled,
             cryptoRecoveryEnabled = cryptoRecoveryEnabled,
-            meshRelay = meshRelay,
-            dataEnabled = dataEnabled
+            meshRelay = meshRelay
         )
+
+        // Assigned only when the app actually sent it. Writing
+        // `dataEnabled = dataEnabled ?: false` above would restate the
+        // default as a literal here, and the literal is what survives a
+        // change to the real default: the release that flips it on would
+        // keep forcing `false` for every app that omits the section, exactly
+        // as `config.relay` sat at its defaults for several releases.
+        if (dataEnabled != null) {
+            config.dataEnabled = dataEnabled
+        }
 
         return ParsedConfig(config, json)
     }
