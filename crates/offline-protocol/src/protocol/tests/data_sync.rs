@@ -8,17 +8,19 @@
 //! have to build, and a test that shortcuts any of it would be testing
 //! something else.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use offline_protocol_data::DataValue;
 use offline_protocol_transport::{MockTransport, Transport, TransportType};
 
 use crate::constants::ACK_FOR_KEY;
 use crate::mls::InMemoryStorage;
-use crate::protocol::data_sync::MAX_DOCS_PER_SPACE;
+use crate::protocol::data_sync::{blob_digest, MAX_DOCS_PER_SPACE, MAX_QUARANTINED_BLOBS};
 use crate::protocol::tests::{create_test_config_for_user, id};
 use crate::protocol::types::{storage_keys, SessionState};
 use crate::protocol::{OfflineProtocol, TestProtocolStateStorage};
+use crate::{ProtocolStateResult, ProtocolStateStorage};
 use offline_protocol_mls::MlsStorage;
 
 /// One replica, with the transport its frames actually go through.
@@ -211,6 +213,65 @@ fn read(node: &mut Node, space: &str, doc: &str, key: &str) -> Option<DataValue>
     node.protocol
         .data_map_get(space, doc, "m", key)
         .expect("get")
+}
+
+/// The replication bookkeeping on disk for one space, as JSON.
+///
+/// Read back through the protocol's own sealed reader rather than out of the
+/// store, because the record is sealed and what this asserts about is what
+/// the next launch will actually be able to open.
+fn sync_record(node: &mut Node, space: &str) -> serde_json::Value {
+    let storage = node
+        .protocol
+        .data_storage_for_sync()
+        .expect("the data layer is on");
+    let bytes = node
+        .protocol
+        .read_state_record(storage.as_ref(), storage_keys::DATA_SYNC, space)
+        .expect("read the replication bookkeeping")
+        .expect("the replication bookkeeping exists");
+    serde_json::from_slice(&bytes).expect("the record is JSON")
+}
+
+/// Write a space's replication bookkeeping, as a previous run would have left
+/// it.
+///
+/// A crash in the middle of an import is not a thing a test can stage, so the
+/// state one leaves behind is staged instead: the marker on disk, written
+/// before the engine was called, that the dead process never reached the line
+/// to clear. It goes through the protocol's own sealed writer, because a
+/// record this build cannot open is not the record it has to survive.
+fn seed_sync_record(node: &mut Node, space: &str, record: &serde_json::Value) {
+    let storage = node
+        .protocol
+        .data_storage_for_sync()
+        .expect("the data layer is on");
+    let bytes = serde_json::to_vec(record).expect("encode");
+    node.protocol
+        .write_state_record(storage.as_ref(), storage_keys::DATA_SYNC, space, &bytes)
+        .expect("seed the replication bookkeeping");
+}
+
+/// The digests a space is refusing.
+fn quarantined(node: &mut Node, space: &str) -> Vec<String> {
+    sync_record(node, space)
+        .get("quarantined")
+        .and_then(|value| value.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A `snap` frame carrying `blob`, as the peer would send it.
+fn snapshot_frame(doc: &str, blob: &[u8]) -> String {
+    format!(
+        r#"{{"v":1,"k":"snap","doc":"{doc}","blob":"{}"}}"#,
+        BASE64.encode(blob)
+    )
 }
 
 #[test]
@@ -733,5 +794,243 @@ fn nothing_is_sent_to_a_blocked_peer_and_unblocking_forgets_them() {
     assert!(
         !alice.protocol.peer_data_sync.contains(&bob.address),
         "the clean slate kept the sync capability it had just deleted from disk"
+    );
+}
+
+/// Protocol-state storage that remembers which categories were written, in
+/// the order they were written.
+///
+/// The one thing about the crash record that no assertion on its contents can
+/// reach: a marker written *after* the import would hold exactly the same
+/// bytes, and would be worthless.
+struct RecordingStateStorage {
+    inner: TestProtocolStateStorage,
+    writes: Arc<Mutex<Vec<String>>>,
+}
+
+impl ProtocolStateStorage for RecordingStateStorage {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> ProtocolStateResult<()> {
+        self.writes.lock().unwrap().push(key_type.to_string());
+        self.inner.store(key_type, key_id, data)
+    }
+
+    fn load(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
+        self.inner.load(key_type, key_id)
+    }
+
+    fn delete(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<()> {
+        self.inner.delete(key_type, key_id)
+    }
+
+    fn list_keys(&self, key_type: &str) -> ProtocolStateResult<Vec<String>> {
+        self.inner.list_keys(key_type)
+    }
+}
+
+#[test]
+fn a_blob_that_did_not_survive_its_last_import_is_refused_when_the_sender_retries_it() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    // A real blob, exported exactly as a catch-up exports one.
+    write(&mut alice, &alice_space, "notes", "title", "hello");
+    let blob = alice
+        .protocol
+        .data_export_snapshot(&alice_space, "notes")
+        .expect("snapshot");
+    let digest = blob_digest(&blob);
+
+    // What a run that died inside the engine leaves behind.
+    seed_sync_record(
+        &mut bob,
+        &bob_space,
+        &serde_json::json!({ "in_flight": digest }),
+    );
+    bob.restart(&alice.address);
+
+    bob.protocol
+        .handle_data_sync_frame(&alice.address, &snapshot_frame("notes", &blob));
+
+    assert!(
+        bob.protocol
+            .data_list_docs(&bob_space)
+            .expect("list")
+            .is_empty(),
+        "the blob that did not survive its last import was handed to the engine again"
+    );
+    assert_eq!(
+        read(&mut bob, &bob_space, "notes", "title"),
+        None,
+        "the refused blob applied anyway"
+    );
+
+    // The marker became a refusal rather than being merely dropped, and it is
+    // on disk: the sender's ladder will retry this blob across relaunches, so
+    // a quarantine that lived in memory would survive nothing that matters.
+    assert!(
+        quarantined(&mut bob, &bob_space).contains(&digest),
+        "the marker left by the dead run was not promoted to a refusal"
+    );
+    assert!(
+        sync_record(&mut bob, &bob_space).get("in_flight").is_none(),
+        "the promoted marker was left in flight, so the next open promotes it again"
+    );
+
+    // It survives the next launch too, which is the whole point: the retry
+    // that ends the process is the one after the process came back.
+    bob.restart(&alice.address);
+    bob.protocol
+        .handle_data_sync_frame(&alice.address, &snapshot_frame("notes", &blob));
+    assert!(
+        bob.protocol
+            .data_list_docs(&bob_space)
+            .expect("list")
+            .is_empty(),
+        "the quarantine did not survive a relaunch, so the retry ladder gets another go"
+    );
+
+    // And it refuses one blob, not one peer. Anything else would turn a
+    // single bad frame into a peer that silently stops replicating.
+    write(&mut alice, &alice_space, "notes", "title", "hello again");
+    let fresh = alice
+        .protocol
+        .data_export_snapshot(&alice_space, "notes")
+        .expect("snapshot");
+    assert_ne!(
+        blob_digest(&fresh),
+        digest,
+        "precondition: the second blob has to be a different one to prove anything"
+    );
+    bob.protocol
+        .handle_data_sync_frame(&alice.address, &snapshot_frame("notes", &fresh));
+    assert_eq!(
+        read(&mut bob, &bob_space, "notes", "title"),
+        Some(DataValue::text("hello again")),
+        "a quarantined blob stopped the peer replicating rather than stopping itself"
+    );
+}
+
+#[test]
+fn the_in_flight_marker_reaches_disk_before_the_engine_sees_the_blob() {
+    // The ordering is the mechanism, and it is invisible in the record it
+    // writes: a marker persisted after the import holds the same digest and
+    // remembers only the imports that already worked. So this asserts on the
+    // order the store was written in, which is the only place the difference
+    // shows.
+    let mut alice = Node::new("alice");
+    let sender = alice.address.clone();
+    let space = id("bob");
+    write(&mut alice, &space, "notes", "title", "hello");
+    let blob = alice
+        .protocol
+        .data_export_snapshot(&space, "notes")
+        .expect("snapshot");
+
+    let mut config = create_test_config_for_user("bob");
+    config.encryption.enabled = true;
+    config.data.enabled = true;
+    let mut receiver = OfflineProtocol::new(config).expect("protocol");
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    receiver
+        .initialize_mls(
+            crate::test_identity::seeded_storage("bob"),
+            Arc::new(RecordingStateStorage {
+                inner: TestProtocolStateStorage {
+                    storage: Arc::new(InMemoryStorage::new()),
+                },
+                writes: writes.clone(),
+            }),
+        )
+        .expect("initialize_mls");
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.start().expect("transport start");
+    receiver
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    receiver.start().expect("start");
+
+    writes.lock().unwrap().clear();
+    receiver.handle_data_sync_frame(&sender, &snapshot_frame("notes", &blob));
+
+    assert_eq!(
+        receiver
+            .data_map_get(&sender, "notes", "m", "title")
+            .expect("get"),
+        Some(DataValue::text("hello")),
+        "precondition: the blob has to reach the engine for the ordering to mean anything"
+    );
+
+    // Only the categories this ordering is about. The space index is written
+    // on its own schedule and says nothing either way.
+    let order: Vec<String> = writes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|key_type| {
+            [
+                storage_keys::DATA_SYNC,
+                storage_keys::DATA_DOCS,
+                storage_keys::DATA_DELTA_LOG,
+            ]
+            .contains(&key_type.as_str())
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        order.first().map(String::as_str),
+        Some(storage_keys::DATA_SYNC),
+        "the document was written before the marker that says an import was \
+         under way, so a blob that ends the process leaves nothing behind: {order:?}"
+    );
+    assert!(
+        order
+            .iter()
+            .any(|key_type| key_type != storage_keys::DATA_SYNC),
+        "nothing was written for the document, so this proves only that the \
+         marker came first among no other writes: {order:?}"
+    );
+}
+
+#[test]
+fn the_quarantine_forgets_its_oldest_entry_rather_than_growing() {
+    let (alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+
+    // A full list, and one more marker to promote into it. Every entry is a
+    // change this device has decided never to apply, so an unbounded list is
+    // a liability that grows with every crash rather than a safety net.
+    let existing: Vec<String> = (0..MAX_QUARANTINED_BLOBS)
+        .map(|n| format!("{n:032x}"))
+        .collect();
+    let newest = "f".repeat(32);
+    seed_sync_record(
+        &mut bob,
+        &bob_space,
+        &serde_json::json!({ "in_flight": newest, "quarantined": existing }),
+    );
+
+    // Any blob for this space opens the record, which is when a marker left
+    // behind by a previous run is promoted. This one is unreadable, which is
+    // beside the point: it is the open that matters.
+    bob.protocol.handle_data_sync_frame(
+        &alice.address,
+        r#"{"v":1,"k":"delta","doc":"notes","blob":"AAAA"}"#,
+    );
+
+    let held = quarantined(&mut bob, &bob_space);
+    assert_eq!(
+        held.len(),
+        MAX_QUARANTINED_BLOBS,
+        "the quarantine grew past its ceiling"
+    );
+    assert!(
+        !held.contains(&existing[0]),
+        "the oldest refusal was kept and something else was dropped instead"
+    );
+    assert_eq!(
+        held.last().map(String::as_str),
+        Some(newest.as_str()),
+        "the marker left by the previous run is not the newest refusal"
     );
 }

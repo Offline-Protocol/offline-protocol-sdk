@@ -110,7 +110,7 @@ pub(crate) const MAX_DOCS_PER_SPACE: usize = 1024;
 /// Small on purpose. The list only has to outlive the sender's retries of
 /// one blob, and every entry in it is a document change we have decided
 /// never to apply, so a long list is a liability rather than a safety net.
-const MAX_QUARANTINED_BLOBS: usize = 32;
+pub(crate) const MAX_QUARANTINED_BLOBS: usize = 32;
 
 /// One sync frame's body, inside the decrypted MLS plaintext.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,7 +190,7 @@ struct SyncRecord {
 }
 
 /// The digest a blob is remembered by.
-fn blob_digest(blob: &[u8]) -> String {
+pub(crate) fn blob_digest(blob: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(blob);
     // Half a SHA-256 is 128 bits, which is far past what a collision would
