@@ -411,6 +411,129 @@ RCT_EXTERN_METHOD(isUserBlocked:(NSString *)userId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+// Replicated documents (DataStore)
+
+RCT_EXTERN_METHOD(dataCreateDoc:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataDeleteDoc:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataListDocs:(NSString *)spaceId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataListSpaces:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataMapSet:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  collection:(NSString *)collection
+                  key:(NSString *)key
+                  valueJson:(NSString *)valueJson
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataMapDelete:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  collection:(NSString *)collection
+                  key:(NSString *)key
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataMapGetJson:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  collection:(NSString *)collection
+                  key:(NSString *)key
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataListPush:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  collection:(NSString *)collection
+                  valueJson:(NSString *)valueJson
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataListDelete:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  collection:(NSString *)collection
+                  index:(nonnull NSNumber *)index
+                  count:(nonnull NSNumber *)count
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataListLen:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  collection:(NSString *)collection
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataTextInsert:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  collection:(NSString *)collection
+                  position:(nonnull NSNumber *)position
+                  text:(NSString *)text
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataTextDelete:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  collection:(NSString *)collection
+                  position:(nonnull NSNumber *)position
+                  count:(nonnull NSNumber *)count
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataTextValue:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  collection:(NSString *)collection
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataCounterIncrement:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  collection:(NSString *)collection
+                  amount:(nonnull NSNumber *)amount
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataCounterValue:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  collection:(NSString *)collection
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataDocJson:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataExportRaw:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataFlush:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataFlushAll:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataDocSize:(NSString *)spaceId
+                  docId:(NSString *)docId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataWipeAll:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 // Service Discovery & Request/Response
 RCT_EXTERN_METHOD(registerService:(NSString *)serviceId
                   version:(NSString *)version

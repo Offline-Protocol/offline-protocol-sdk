@@ -60,6 +60,7 @@ are listed in the registry so application content can never impersonate them.
 |--------|----------------|---------|
 | `__MLS_ENC_CONFIRM__` | Inside an `__MLS_ENC__` envelope | A group-aware decrypt that lets the both-create session owner converge. Consumed on receipt, never surfaced to the application |
 | `__RICH_V1__` | Inside the decrypted MLS plaintext | The sealed rich payload body |
+| `__DATA_V1__` | Inside the decrypted MLS plaintext | Replicated-document sync frames. Reserved, not yet emitted: the marker is registered ahead of the frames so no application message can occupy the name first |
 
 ### Connection lifecycle
 

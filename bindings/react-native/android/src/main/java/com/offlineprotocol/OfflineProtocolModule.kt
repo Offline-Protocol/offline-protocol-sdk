@@ -36,6 +36,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     private var protocol: OfflineProtocol? = null
     private var meshServices: MeshServices? = null
+    private var dataStore: DataStore? = null
     private var bleTransport: BleTransportFacade? = null
     private var internetManager: InternetManager? = null
     private var wifiDirectManager: WifiDirectManager? = null
@@ -483,6 +484,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
             protocol = proto
             meshServices = MeshServices(proto)
+            // Constructed unconditionally, like MeshServices: the store is
+            // inert until the config enables it, and every method answers
+            // DataDisabled until then. Constructing lazily would only move
+            // that check somewhere less obvious.
+            dataStore = DataStore(proto)
 
             // Initialize BLE manager if BLE is enabled
             if (config.bleEnabled) {
@@ -1773,6 +1779,241 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.resolve(messageId)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_READ_RECEIPT", "Failed to send read receipt")
+        }
+    }
+
+
+    // ====================================================================
+    // Replicated documents (via DataStore)
+    // ====================================================================
+    //
+    // Generated shape, kept deliberately thin: every method resolves the
+    // store or rejects, calls one UniFFI method, and resolves. Anything
+    // smarter belongs in the core, where it is shared by all four bindings
+    // instead of reimplemented in each.
+
+
+    @ReactMethod
+    fun dataCreateDoc(spaceId: String, docId: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.createDoc(spaceId, docId)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATACREATEDOC", "createDoc failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataDeleteDoc(spaceId: String, docId: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.deleteDoc(spaceId, docId)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATADELETEDOC", "deleteDoc failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataListDocs(spaceId: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            val values = store.listDocs(spaceId)
+            promise.resolve(JSONArray(values).toString())
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATALISTDOCS", "listDocs failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataListSpaces(promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            val values = store.listSpaces()
+            promise.resolve(JSONArray(values).toString())
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATALISTSPACES", "listSpaces failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataMapSet(spaceId: String, docId: String, collection: String, key: String, valueJson: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.mapSet(spaceId, docId, collection, key, valueJson)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATAMAPSET", "mapSet failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataMapDelete(spaceId: String, docId: String, collection: String, key: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.mapDelete(spaceId, docId, collection, key)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATAMAPDELETE", "mapDelete failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataMapGetJson(spaceId: String, docId: String, collection: String, key: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            promise.resolve(store.mapGetJson(spaceId, docId, collection, key))
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATAMAPGETJSON", "mapGet failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataListPush(spaceId: String, docId: String, collection: String, valueJson: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.listPush(spaceId, docId, collection, valueJson)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATALISTPUSH", "listPush failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataListDelete(spaceId: String, docId: String, collection: String, index: Double, count: Double, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.listDelete(spaceId, docId, collection, index.toUInt(), count.toUInt())
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATALISTDELETE", "listDelete failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataListLen(spaceId: String, docId: String, collection: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            promise.resolve(store.listLen(spaceId, docId, collection).toDouble())
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATALISTLEN", "listLength failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataTextInsert(spaceId: String, docId: String, collection: String, position: Double, text: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.textInsert(spaceId, docId, collection, position.toUInt(), text)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATATEXTINSERT", "textInsert failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataTextDelete(spaceId: String, docId: String, collection: String, position: Double, count: Double, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.textDelete(spaceId, docId, collection, position.toUInt(), count.toUInt())
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATATEXTDELETE", "textDelete failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataTextValue(spaceId: String, docId: String, collection: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            promise.resolve(store.textValue(spaceId, docId, collection))
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATATEXTVALUE", "textValue failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataCounterIncrement(spaceId: String, docId: String, collection: String, amount: Double, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.counterIncrement(spaceId, docId, collection, amount)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATACOUNTERINCREMENT", "counterIncrement failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataCounterValue(spaceId: String, docId: String, collection: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            promise.resolve(store.counterValue(spaceId, docId, collection))
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATACOUNTERVALUE", "counterValue failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataDocJson(spaceId: String, docId: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            promise.resolve(store.docJson(spaceId, docId))
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATADOCJSON", "docJson failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataExportRaw(spaceId: String, docId: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            promise.resolve(android.util.Base64.encodeToString(store.exportRaw(spaceId, docId), android.util.Base64.NO_WRAP))
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATAEXPORTRAW", "exportRaw failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataFlush(spaceId: String, docId: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.flush(spaceId, docId)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATAFLUSH", "flush failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataFlushAll(promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.flushAll()
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATAFLUSHALL", "flushAll failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataDocSize(spaceId: String, docId: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            promise.resolve(store.docSize(spaceId, docId))
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATADOCSIZE", "docSize failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataWipeAll(promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.wipeAll()
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATAWIPEALL", "wipeAll failed")
         }
     }
 

@@ -19,12 +19,13 @@ pub mod mls;
 pub mod mls_observability;
 pub mod protocol;
 pub mod protocol_state_storage;
+pub mod storage_conformance;
 pub mod telemetry;
 pub mod transport_manager;
 pub mod visualization;
 
 pub use config::{
-    EncryptionConfig, GroupConfig, OverflowPolicy, PendingQueueConfig, ProtocolConfig,
+    DataConfig, EncryptionConfig, GroupConfig, OverflowPolicy, PendingQueueConfig, ProtocolConfig,
     SecurityConfig, DEFAULT_PENDING_TTL_MS,
 };
 pub use error::{Error, EstablishmentState, Result, SessionStateError};
@@ -33,6 +34,13 @@ pub use events::{
     EventCallback, GroupInfoMember, PresenceSource, PresenceStatus, UserGroupSummary,
 };
 pub use group_mesh::{GroupRichReadiness, GroupSendOptions, RelaySyncState};
+/// Replicated-document types.
+///
+/// Re-exported so callers never name `offline-protocol-data` directly: the
+/// value model and the size constants are part of this crate's surface, and
+/// the engine behind them is not part of anyone's.
+#[cfg(feature = "data")]
+pub use offline_protocol_data::{DataValue, DOC_SIZE_WARN_BYTES, MAX_DOC_BYTES, MAX_VALUE_BYTES};
 pub use offline_protocol_services::MeshServices;
 pub use protocol::mesh_relay::{MeshRelayConfig, MeshRelayStats};
 pub use protocol::{MediaSendOptions, OfflineProtocol, SendMessageOptions};

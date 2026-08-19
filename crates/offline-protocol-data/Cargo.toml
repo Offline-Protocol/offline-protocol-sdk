@@ -1,0 +1,34 @@
+[package]
+name = "offline-protocol-data"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+# AGPL-3.0-only requires the license text to accompany the program, and a
+# published crate ships on its own. Rather than `license-file = "../../LICENSE"`
+# (which makes cargo warn that `license` and `license-file` are redundant on
+# every invocation), each publishable crate carries its own byte-identical
+# LICENSE copy; cargo packages every git-tracked file under the crate root, so
+# it lands in the .crate archive. scripts/check-license-consistency.sh asserts
+# the copies never drift.
+repository.workspace = true
+rust-version.workspace = true
+description = "Offline-first replicated documents (CRDT) for the Offline Protocol SDK"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The CRDT engine, pinned exactly. Loro publishes no `rust-version` metadata on
+# any release, so MSRV compatibility can only be proven empirically: 1.13.9 is
+# verified clean on 1.87.0. Re-run the MSRV check AND the mobile binary-size
+# measurement on every bump, and read the changelog against the open
+# import-panic issues (loro-dev/loro#793, #1068) before moving the pin.
+#
+# Default features are `counter` alone, which this crate's API uses. `jsonpath`
+# stays off: it violates the v1 no-query-language non-goal and adds weight.
+loro = "=1.13.9"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

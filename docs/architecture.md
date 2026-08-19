@@ -119,7 +119,27 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Dependencies**: `offline-protocol-core`
 
-### 7. offline-protocol
+### 7. offline-protocol-data
+
+**Purpose**: Replicated documents — offline-first state that any member of a space can edit while disconnected, merging deterministically when replicas meet again. Messaging is synced events; this crate is synced state.
+
+**Key Components**:
+- `DataDoc` - A document of `map`, `list`, `text` and `counter` collections
+- `DataValue` - The scalar value model (structured values go in as JSON strings and merge whole)
+- `Delta` / `VersionToken` - Opaque encoded changes and opaque version markers
+- `policy` - Size caps and the compaction trigger, as pure arithmetic over byte counts
+
+**Design**: A CRDT engine is embedded and named nowhere in the public API. No engine type appears in a signature, in the FFI surface, or in any binding, so the engine can be replaced without a breaking release everywhere — see [ADR 0018](adr/0018-data-layer-engine-and-storage-seams.md). The crate persists, encrypts and sends nothing: it turns edits into opaque byte deltas and back. Storage, sealing and delivery belong to the main crate.
+
+**Constants**:
+- Per-document cap: 1 MiB compacted, warning at 768 KiB
+- Compaction: delta log > max(4x compacted document, 64 KiB), or 1024 commits
+
+**Safety**: `#![deny(unsafe_code)]` - 100% safe Rust
+
+**Dependencies**: `loro` (pinned exactly; it publishes no MSRV metadata, so every bump re-runs the MSRV check and the mobile size measurement)
+
+### 8. offline-protocol
 
 **Purpose**: Main SDK API integrating all components.
 
@@ -144,9 +164,9 @@ AEAD key held in secure storage before they reach the state provider. See
 
 **Safety**: `#![deny(unsafe_code)]` - 100% safe Rust
 
-**Dependencies**: All other crates
+**Dependencies**: All other crates. `offline-protocol-data` is behind a default-on `data` feature, so a native consumer that only wants messaging can drop the CRDT engine with `default-features = false`.
 
-### 8. offline-protocol-uniffi
+### 9. offline-protocol-uniffi
 
 **Purpose:** UniFFI bindings for cross-platform interoperability.
 

@@ -1646,6 +1646,35 @@ pub enum Event {
         /// User ID that was unblocked.
         user_id: String,
     },
+
+    /// A replicated document changed and the change reached storage.
+    ///
+    /// Emitted after the delta is durable, never before: an application that
+    /// re-renders on this event is then rendering state that survives a
+    /// crash.
+    DataChanged {
+        /// The space the document belongs to.
+        space_id: String,
+        /// The document that changed.
+        doc_id: String,
+        /// Size of the change that was persisted.
+        delta_bytes: u64,
+    },
+
+    /// A replicated document is approaching the per-document size cap.
+    ///
+    /// Fires while there is still room to act. Without it the cap would be a
+    /// cliff an application meets for the first time as a failed write.
+    DataDocSizeWarning {
+        /// The space the document belongs to.
+        space_id: String,
+        /// The document approaching the cap.
+        doc_id: String,
+        /// Its current compacted size.
+        compacted_bytes: u64,
+        /// The cap it is measured against.
+        cap_bytes: u64,
+    },
 }
 
 /// Member entry in GroupInfo.
@@ -2640,6 +2669,8 @@ impl Event {
             Self::MessageRelayed { .. } => "protocol.message.relayed",
             Self::UserBlocked { .. } => "protocol.user.blocked",
             Self::UserUnblocked { .. } => "protocol.user.unblocked",
+            Self::DataChanged { .. } => "protocol.data.changed",
+            Self::DataDocSizeWarning { .. } => "protocol.data.doc_size_warning",
         }
     }
 }
@@ -3439,6 +3470,31 @@ impl fmt::Debug for Event {
             Self::UserUnblocked { user_id: _ } => f
                 .debug_struct("UserUnblocked")
                 .field("user_id", &"[REDACTED]")
+                .finish(),
+            Self::DataChanged {
+                space_id: _,
+                doc_id: _,
+                delta_bytes,
+            } => f
+                .debug_struct("DataChanged")
+                // A space id is the peer or group the space rides on, and a
+                // document name is application content. Both are identifiers,
+                // so both redact.
+                .field("space_id", &"[REDACTED]")
+                .field("doc_id", &"[REDACTED]")
+                .field("delta_bytes", delta_bytes)
+                .finish(),
+            Self::DataDocSizeWarning {
+                space_id: _,
+                doc_id: _,
+                compacted_bytes,
+                cap_bytes,
+            } => f
+                .debug_struct("DataDocSizeWarning")
+                .field("space_id", &"[REDACTED]")
+                .field("doc_id", &"[REDACTED]")
+                .field("compacted_bytes", compacted_bytes)
+                .field("cap_bytes", cap_bytes)
                 .finish(),
             Self::GroupRoleChanged {
                 group_id,

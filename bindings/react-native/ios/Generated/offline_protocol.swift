@@ -620,6 +620,380 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 
+public protocol DataStoreProtocol: AnyObject, Sendable {
+    
+    func counterIncrement(spaceId: String, docId: String, collection: String, amount: Double) throws 
+    
+    func counterValue(spaceId: String, docId: String, collection: String) throws  -> Double
+    
+    func createDoc(spaceId: String, docId: String) throws 
+    
+    func deleteDoc(spaceId: String, docId: String) throws 
+    
+    func docJson(spaceId: String, docId: String) throws  -> String
+    
+    func docSize(spaceId: String, docId: String) throws  -> UInt64
+    
+    func exportRaw(spaceId: String, docId: String) throws  -> Data
+    
+    func flush(spaceId: String, docId: String) throws 
+    
+    func flushAll() throws 
+    
+    func listDelete(spaceId: String, docId: String, collection: String, index: UInt32, count: UInt32) throws 
+    
+    func listDocs(spaceId: String) throws  -> [String]
+    
+    func listLen(spaceId: String, docId: String, collection: String) throws  -> UInt32
+    
+    func listPush(spaceId: String, docId: String, collection: String, valueJson: String) throws 
+    
+    func listSpaces() throws  -> [String]
+    
+    func mapDelete(spaceId: String, docId: String, collection: String, key: String) throws 
+    
+    func mapGetJson(spaceId: String, docId: String, collection: String, key: String) throws  -> String?
+    
+    func mapSet(spaceId: String, docId: String, collection: String, key: String, valueJson: String) throws 
+    
+    func textDelete(spaceId: String, docId: String, collection: String, position: UInt32, count: UInt32) throws 
+    
+    func textInsert(spaceId: String, docId: String, collection: String, position: UInt32, text: String) throws 
+    
+    func textValue(spaceId: String, docId: String, collection: String) throws  -> String
+    
+    func wipeAll() throws 
+    
+}
+open class DataStore: DataStoreProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_offline_protocol_uniffi_fn_clone_datastore(self.handle, $0) }
+    }
+public convenience init(`protocol`: OfflineProtocol)throws  {
+    let handle =
+        try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_constructor_datastore_new(
+        FfiConverterTypeOfflineProtocol_lower(`protocol`),$0
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        try! rustCall { uniffi_offline_protocol_uniffi_fn_free_datastore(handle, $0) }
+    }
+
+    
+public static func withStorage(`protocol`: OfflineProtocol, storage: ProtocolStateStorageProvider)throws  -> DataStore  {
+    return try  FfiConverterTypeDataStore_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_constructor_datastore_with_storage(
+        FfiConverterTypeOfflineProtocol_lower(`protocol`),
+        FfiConverterCallbackInterfaceProtocolStateStorageProvider_lower(storage),$0
+    )
+})
+}
+    
+
+    
+open func counterIncrement(spaceId: String, docId: String, collection: String, amount: Double)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_counter_increment(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),
+        FfiConverterString.lower(collection),
+        FfiConverterDouble.lower(amount),$0
+    )
+}
+}
+    
+open func counterValue(spaceId: String, docId: String, collection: String)throws  -> Double  {
+    return try  FfiConverterDouble.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_counter_value(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),
+        FfiConverterString.lower(collection),$0
+    )
+})
+}
+    
+open func createDoc(spaceId: String, docId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_create_doc(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),$0
+    )
+}
+}
+    
+open func deleteDoc(spaceId: String, docId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_delete_doc(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),$0
+    )
+}
+}
+    
+open func docJson(spaceId: String, docId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_doc_json(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),$0
+    )
+})
+}
+    
+open func docSize(spaceId: String, docId: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_doc_size(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),$0
+    )
+})
+}
+    
+open func exportRaw(spaceId: String, docId: String)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_export_raw(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),$0
+    )
+})
+}
+    
+open func flush(spaceId: String, docId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_flush(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),$0
+    )
+}
+}
+    
+open func flushAll()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_flush_all(
+            self.uniffiCloneHandle(),$0
+    )
+}
+}
+    
+open func listDelete(spaceId: String, docId: String, collection: String, index: UInt32, count: UInt32)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_list_delete(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),
+        FfiConverterString.lower(collection),
+        FfiConverterUInt32.lower(index),
+        FfiConverterUInt32.lower(count),$0
+    )
+}
+}
+    
+open func listDocs(spaceId: String)throws  -> [String]  {
+    return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_list_docs(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),$0
+    )
+})
+}
+    
+open func listLen(spaceId: String, docId: String, collection: String)throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_list_len(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),
+        FfiConverterString.lower(collection),$0
+    )
+})
+}
+    
+open func listPush(spaceId: String, docId: String, collection: String, valueJson: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_list_push(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),
+        FfiConverterString.lower(collection),
+        FfiConverterString.lower(valueJson),$0
+    )
+}
+}
+    
+open func listSpaces()throws  -> [String]  {
+    return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_list_spaces(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func mapDelete(spaceId: String, docId: String, collection: String, key: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_map_delete(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),
+        FfiConverterString.lower(collection),
+        FfiConverterString.lower(key),$0
+    )
+}
+}
+    
+open func mapGetJson(spaceId: String, docId: String, collection: String, key: String)throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_map_get_json(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),
+        FfiConverterString.lower(collection),
+        FfiConverterString.lower(key),$0
+    )
+})
+}
+    
+open func mapSet(spaceId: String, docId: String, collection: String, key: String, valueJson: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_map_set(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),
+        FfiConverterString.lower(collection),
+        FfiConverterString.lower(key),
+        FfiConverterString.lower(valueJson),$0
+    )
+}
+}
+    
+open func textDelete(spaceId: String, docId: String, collection: String, position: UInt32, count: UInt32)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_text_delete(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),
+        FfiConverterString.lower(collection),
+        FfiConverterUInt32.lower(position),
+        FfiConverterUInt32.lower(count),$0
+    )
+}
+}
+    
+open func textInsert(spaceId: String, docId: String, collection: String, position: UInt32, text: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_text_insert(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),
+        FfiConverterString.lower(collection),
+        FfiConverterUInt32.lower(position),
+        FfiConverterString.lower(text),$0
+    )
+}
+}
+    
+open func textValue(spaceId: String, docId: String, collection: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_text_value(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),
+        FfiConverterString.lower(collection),$0
+    )
+})
+}
+    
+open func wipeAll()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_wipe_all(
+            self.uniffiCloneHandle(),$0
+    )
+}
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDataStore: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = DataStore
+
+    public static func lift(_ handle: UInt64) throws -> DataStore {
+        return DataStore(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: DataStore) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DataStore {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: DataStore, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDataStore_lift(_ handle: UInt64) throws -> DataStore {
+    return try FfiConverterTypeDataStore.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDataStore_lower(_ value: DataStore) -> UInt64 {
+    return FfiConverterTypeDataStore.lower(value)
+}
+
+
+
+
+
+
 public protocol MeshServicesProtocol: AnyObject, Sendable {
     
     func discoverServices(serviceId: String?) throws  -> String
@@ -4824,10 +5198,11 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var richPayloadEnabled: Bool
     public var cryptoRecoveryEnabled: Bool
     public var meshRelay: MeshRelayConfig?
+    public var dataEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true, meshRelay: MeshRelayConfig? = nil) {
+    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true, meshRelay: MeshRelayConfig? = nil, dataEnabled: Bool = false) {
         self.appId = appId
         self.profile = profile
         self.bleEnabled = bleEnabled
@@ -4858,6 +5233,7 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.richPayloadEnabled = richPayloadEnabled
         self.cryptoRecoveryEnabled = cryptoRecoveryEnabled
         self.meshRelay = meshRelay
+        self.dataEnabled = dataEnabled
     }
 
     
@@ -4903,7 +5279,8 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 compactEnvelopeEnabled: FfiConverterBool.read(from: &buf), 
                 richPayloadEnabled: FfiConverterBool.read(from: &buf), 
                 cryptoRecoveryEnabled: FfiConverterBool.read(from: &buf), 
-                meshRelay: FfiConverterOptionTypeMeshRelayConfig.read(from: &buf)
+                meshRelay: FfiConverterOptionTypeMeshRelayConfig.read(from: &buf), 
+                dataEnabled: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -4938,6 +5315,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.richPayloadEnabled, into: &buf)
         FfiConverterBool.write(value.cryptoRecoveryEnabled, into: &buf)
         FfiConverterOptionTypeMeshRelayConfig.write(value.meshRelay, into: &buf)
+        FfiConverterBool.write(value.dataEnabled, into: &buf)
     }
 }
 
@@ -6662,6 +7040,14 @@ public enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.Localize
     
     case InvalidArgument(message: String)
     
+    case DataDisabled(message: String)
+    
+    case DataStorageUnavailable(message: String)
+    
+    case DocTooLarge(message: String)
+    
+    case DataCorrupted(message: String)
+    
 
     
 
@@ -6769,6 +7155,22 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
         )
         
+        case 21: return .DataDisabled(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 22: return .DataStorageUnavailable(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 23: return .DocTooLarge(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 24: return .DataCorrupted(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -6820,6 +7222,14 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(19))
         case .InvalidArgument(_ /* message is ignored*/):
             writeInt(&buf, Int32(20))
+        case .DataDisabled(_ /* message is ignored*/):
+            writeInt(&buf, Int32(21))
+        case .DataStorageUnavailable(_ /* message is ignored*/):
+            writeInt(&buf, Int32(22))
+        case .DocTooLarge(_ /* message is ignored*/):
+            writeInt(&buf, Int32(23))
+        case .DataCorrupted(_ /* message is ignored*/):
+            writeInt(&buf, Int32(24))
 
         
         }
@@ -9796,6 +10206,13 @@ public func parseInvite(blob: String)throws  -> InviteInfo  {
     )
 })
 }
+public func runStorageConformance(storage: ProtocolStateStorageProvider) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance(
+        FfiConverterCallbackInterfaceProtocolStateStorageProvider_lower(storage),$0
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -9816,6 +10233,72 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_func_parse_invite() != 15865) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() != 20699) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment() != 55977) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value() != 24087) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc() != 55339) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc() != 39527) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json() != 47882) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size() != 43106) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw() != 29802) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_flush() != 53125) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all() != 40738) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_list_delete() != 9370) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_list_docs() != 22411) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_list_len() != 15956) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_list_push() != 38678) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_list_spaces() != 55668) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete() != 33661) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json() != 4286) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set() != 53094) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete() != 35552) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert() != 11172) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_text_value() != 15927) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all() != 49136) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != 866) {
@@ -10314,6 +10797,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() != 35006) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new() != 36671) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage() != 2283) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new() != 61363) {

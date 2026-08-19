@@ -250,7 +250,7 @@ Version files to bump together:
 
 | File | How |
 | --- | --- |
-| `Cargo.toml` | `[workspace.package].version` **and** the seven internal-dependency versions in `[workspace.dependencies]`. A partial *minor* bump fails to resolve immediately and locally; a partial *patch* bump resolves silently, because `version = "X.Y.Z"` is a caret requirement that a sibling one patch ahead still satisfies. Harmless if it ships, but move them together |
+| `Cargo.toml` | `[workspace.package].version` **and** the eight internal-dependency versions in `[workspace.dependencies]`. A partial *minor* bump fails to resolve immediately and locally; a partial *patch* bump resolves silently, because `version = "X.Y.Z"` is a caret requirement that a sibling one patch ahead still satisfies. Harmless if it ships, but move them together |
 | `Cargo.lock` | any `cargo` command refreshes it once the manifests change |
 | `bindings/python/pyproject.toml` | `version` — release.yml gates this one against the tag too |
 | `bindings/react-native/package.json` + `package-lock.json` | `npm version X.Y.Z --no-git-tag-version --allow-same-version` from `bindings/react-native/` |

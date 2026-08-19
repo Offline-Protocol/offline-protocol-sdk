@@ -382,6 +382,25 @@ pub enum ProtocolError {
     /// A caller-supplied argument failed validation.
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
+
+    /// The data layer is switched off in configuration.
+    #[error("Data layer is disabled")]
+    DataDisabled,
+
+    /// The data layer has no storage backend yet; `initializeMls` must run
+    /// first, because that call mints the key documents are sealed with.
+    #[error("Data layer has no storage; initializeMls must run first")]
+    DataStorageUnavailable,
+
+    /// A document has grown past the per-document cap. The breaching change
+    /// is already durable; further growth is refused until the document
+    /// shrinks.
+    #[error("Document is over the size cap: {0}")]
+    DocTooLarge(String),
+
+    /// Document data could not be decoded. Permanent, not worth retrying.
+    #[error("Document data is corrupt: {0}")]
+    DataCorrupted(String),
 }
 
 /// Error types for MLS storage operations
@@ -657,6 +676,12 @@ impl From<offline_protocol::Error> for ProtocolError {
             E::PermissionDenied(msg) => ProtocolError::PermissionDenied(msg),
             E::InvalidState(msg) => ProtocolError::InvalidState(msg),
             E::InvalidArgument(msg) => ProtocolError::InvalidArgument(msg),
+            E::DataDisabled => ProtocolError::DataDisabled,
+            E::DataStorageUnavailable => ProtocolError::DataStorageUnavailable,
+            E::DocTooLarge { actual, limit } => ProtocolError::DocTooLarge(format!(
+                "document is {actual} bytes compacted, over the {limit} byte cap"
+            )),
+            E::DataCorrupted(detail) => ProtocolError::DataCorrupted(detail),
             E::Core(err) => match err {
                 CoreErr::SerializationError(msg) | CoreErr::DeserializationError(msg) => {
                     ProtocolError::SerializationError(msg)
@@ -2336,6 +2361,9 @@ pub struct ProtocolConfig {
     /// Mesh forwarding tunables. `None` (and any `None` field inside it)
     /// leaves the core default alone — see [`MeshRelayConfig`].
     pub mesh_relay: Option<MeshRelayConfig>,
+    /// Whether the replicated-document layer accepts work (default off). See
+    /// the UDL dictionary and `DataConfig::enabled` for semantics.
+    pub data_enabled: bool,
 }
 
 /// Mesh forwarding tunables, every field optional.
@@ -2600,6 +2628,7 @@ impl From<ProtocolConfig> for CoreConfig {
         if let Some(mesh_relay) = config.mesh_relay {
             core_config.mesh_relay = mesh_relay.overlay(core_config.mesh_relay);
         }
+        core_config.data.enabled = config.data_enabled;
         core_config
     }
 }
@@ -3827,6 +3856,251 @@ impl OfflineProtocol {
             .cancel_connection_request(&recipient)
             .map_err(map_send_error)?;
         Ok(message_id.as_str())
+    }
+
+    // ====================================================================
+    // REPLICATED DOCUMENTS (delegated via the DataStore wrapper)
+    // ====================================================================
+
+    /// Installs an application-supplied backend for documents only.
+    pub(crate) fn data_set_storage(
+        &self,
+        storage: Arc<dyn CoreProtocolStateStorage>,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard.set_data_storage(storage).map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_create_doc(
+        &self,
+        space_id: String,
+        doc_id: String,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_create_doc(&space_id, &doc_id)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_delete_doc(
+        &self,
+        space_id: String,
+        doc_id: String,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_delete_doc(&space_id, &doc_id)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_list_docs(&self, space_id: String) -> Result<Vec<String>, ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard.data_list_docs(&space_id).map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_list_spaces(&self) -> Result<Vec<String>, ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard.data_list_spaces().map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_map_set(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+        key: String,
+        value: offline_protocol::DataValue,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_map_set(&space_id, &doc_id, &collection, &key, value)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_map_delete(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+        key: String,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_map_delete(&space_id, &doc_id, &collection, &key)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_map_get_json(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+        key: String,
+    ) -> Result<Option<String>, ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        let value = guard
+            .data_map_get(&space_id, &doc_id, &collection, &key)
+            .map_err(ProtocolError::from)?;
+        match value {
+            Some(value) => serde_json::to_string(&value)
+                .map(Some)
+                .map_err(|e| ProtocolError::SerializationError(e.to_string())),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn data_list_push(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+        value: offline_protocol::DataValue,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_list_push(&space_id, &doc_id, &collection, value)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_list_delete(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+        index: u32,
+        count: u32,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_list_delete(&space_id, &doc_id, &collection, index, count)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_list_len(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+    ) -> Result<u32, ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_list_len(&space_id, &doc_id, &collection)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_text_insert(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+        position: u32,
+        text: String,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_text_insert(&space_id, &doc_id, &collection, position, &text)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_text_delete(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+        position: u32,
+        count: u32,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_text_delete(&space_id, &doc_id, &collection, position, count)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_text_value(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+    ) -> Result<String, ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_text_value(&space_id, &doc_id, &collection)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_counter_increment(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+        amount: f64,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_counter_increment(&space_id, &doc_id, &collection, amount)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_counter_value(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+    ) -> Result<f64, ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_counter_value(&space_id, &doc_id, &collection)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_doc_json(
+        &self,
+        space_id: String,
+        doc_id: String,
+    ) -> Result<String, ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_doc_json(&space_id, &doc_id)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_export_raw(
+        &self,
+        space_id: String,
+        doc_id: String,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_export_raw(&space_id, &doc_id)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_flush(&self, space_id: String, doc_id: String) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_flush(&space_id, &doc_id)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_flush_all(&self) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard.data_flush_all().map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_doc_size(
+        &self,
+        space_id: String,
+        doc_id: String,
+    ) -> Result<u64, ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_doc_size(&space_id, &doc_id)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_wipe_all(&self) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard.data_wipe_all().map_err(ProtocolError::from)
     }
 
     // ========================================================================
@@ -6668,6 +6942,261 @@ impl OfflineProtocol {
     }
 }
 
+/// Decode a `DataValue` from the JSON the bindings send.
+///
+/// JSON rather than a flat scalar surface: it is symmetric with
+/// `map_get_json`, matches how events already cross this boundary, and keeps
+/// a value kind from becoming six parallel optional arguments in four
+/// languages.
+fn data_value_from_json(value_json: &str) -> Result<offline_protocol::DataValue, ProtocolError> {
+    serde_json::from_str(value_json).map_err(|err| {
+        ProtocolError::InvalidArgument(format!(
+            "value_json is not a data value: {err}; expected \
+             {{\"kind\":\"text\",\"value\":\"...\"}} with kind one of \
+             null, bool, int, float, text, bytes"
+        ))
+    })
+}
+
+/// A document store over the protocol's spaces, for UniFFI.
+///
+/// Holds an `Arc<OfflineProtocol>` and delegates through public wrapper
+/// methods, the same shape as [`MeshServices`]: no returned-object pattern
+/// exists elsewhere in this UDL, and introducing one would be a new lifetime
+/// contract to maintain in three bindings.
+pub struct DataStore {
+    protocol: Arc<OfflineProtocol>,
+}
+
+impl DataStore {
+    /// Creates a store over the given protocol, using whichever backend
+    /// protocol state already runs on.
+    ///
+    /// This is the zero-configuration path: every binding ships a default
+    /// provider, so an application that configures no storage still gets a
+    /// working document store.
+    pub fn new(protocol: Arc<OfflineProtocol>) -> Result<Self, ProtocolError> {
+        Ok(Self { protocol })
+    }
+
+    /// Creates a store whose documents live in a backend the application
+    /// supplies.
+    ///
+    /// Protocol secrets stay where they are; only documents move. Sealing
+    /// sits above this seam, so the adapter is handed sealed bytes and never
+    /// sees document content: a custom backend cannot weaken the at-rest
+    /// posture even by accident.
+    ///
+    /// An application that uses this must call [`DataStore::wipe_all`] on
+    /// logout. `wipePersistedState` clears the account directory of the
+    /// *default* provider, which a custom backend is not inside.
+    pub fn with_storage(
+        protocol: Arc<OfflineProtocol>,
+        storage: Box<dyn ProtocolStateStorageProvider>,
+    ) -> Result<Self, ProtocolError> {
+        let adapter: Arc<dyn CoreProtocolStateStorage> = Arc::new(ProtocolStateStorageWrapper {
+            provider: Arc::from(storage),
+        });
+        protocol.data_set_storage(adapter)?;
+        Ok(Self { protocol })
+    }
+
+    /// Creates a document, or does nothing if it already exists.
+    pub fn create_doc(&self, space_id: String, doc_id: String) -> Result<(), ProtocolError> {
+        self.protocol.data_create_doc(space_id, doc_id)
+    }
+
+    /// Deletes a document and every record belonging to it.
+    pub fn delete_doc(&self, space_id: String, doc_id: String) -> Result<(), ProtocolError> {
+        self.protocol.data_delete_doc(space_id, doc_id)
+    }
+
+    /// The documents in a space.
+    pub fn list_docs(&self, space_id: String) -> Result<Vec<String>, ProtocolError> {
+        self.protocol.data_list_docs(space_id)
+    }
+
+    /// Every space that holds at least one document.
+    pub fn list_spaces(&self) -> Result<Vec<String>, ProtocolError> {
+        self.protocol.data_list_spaces()
+    }
+
+    /// Sets a key in a map collection.
+    pub fn map_set(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+        key: String,
+        value_json: String,
+    ) -> Result<(), ProtocolError> {
+        let value = data_value_from_json(&value_json)?;
+        self.protocol
+            .data_map_set(space_id, doc_id, collection, key, value)
+    }
+
+    /// Removes a key from a map collection.
+    pub fn map_delete(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+        key: String,
+    ) -> Result<(), ProtocolError> {
+        self.protocol
+            .data_map_delete(space_id, doc_id, collection, key)
+    }
+
+    /// Reads a key from a map collection, as JSON, or null when absent.
+    pub fn map_get_json(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+        key: String,
+    ) -> Result<Option<String>, ProtocolError> {
+        self.protocol
+            .data_map_get_json(space_id, doc_id, collection, key)
+    }
+
+    /// Appends to a list collection.
+    pub fn list_push(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+        value_json: String,
+    ) -> Result<(), ProtocolError> {
+        let value = data_value_from_json(&value_json)?;
+        self.protocol
+            .data_list_push(space_id, doc_id, collection, value)
+    }
+
+    /// Deletes entries from a list collection.
+    pub fn list_delete(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+        index: u32,
+        count: u32,
+    ) -> Result<(), ProtocolError> {
+        self.protocol
+            .data_list_delete(space_id, doc_id, collection, index, count)
+    }
+
+    /// The number of entries in a list collection.
+    pub fn list_len(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+    ) -> Result<u32, ProtocolError> {
+        self.protocol.data_list_len(space_id, doc_id, collection)
+    }
+
+    /// Inserts into a text collection at a character position.
+    pub fn text_insert(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+        position: u32,
+        text: String,
+    ) -> Result<(), ProtocolError> {
+        self.protocol
+            .data_text_insert(space_id, doc_id, collection, position, text)
+    }
+
+    /// Deletes characters from a text collection.
+    pub fn text_delete(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+        position: u32,
+        count: u32,
+    ) -> Result<(), ProtocolError> {
+        self.protocol
+            .data_text_delete(space_id, doc_id, collection, position, count)
+    }
+
+    /// The contents of a text collection.
+    pub fn text_value(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+    ) -> Result<String, ProtocolError> {
+        self.protocol.data_text_value(space_id, doc_id, collection)
+    }
+
+    /// Adds to a counter collection. Negative amounts subtract.
+    pub fn counter_increment(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+        amount: f64,
+    ) -> Result<(), ProtocolError> {
+        self.protocol
+            .data_counter_increment(space_id, doc_id, collection, amount)
+    }
+
+    /// The value of a counter collection.
+    pub fn counter_value(
+        &self,
+        space_id: String,
+        doc_id: String,
+        collection: String,
+    ) -> Result<f64, ProtocolError> {
+        self.protocol
+            .data_counter_value(space_id, doc_id, collection)
+    }
+
+    /// The document's current state as plain JSON.
+    pub fn doc_json(&self, space_id: String, doc_id: String) -> Result<String, ProtocolError> {
+        self.protocol.data_doc_json(space_id, doc_id)
+    }
+
+    /// The document's full history, engine-encoded.
+    pub fn export_raw(&self, space_id: String, doc_id: String) -> Result<Vec<u8>, ProtocolError> {
+        self.protocol.data_export_raw(space_id, doc_id)
+    }
+
+    /// Persists pending edits to a document.
+    pub fn flush(&self, space_id: String, doc_id: String) -> Result<(), ProtocolError> {
+        self.protocol.data_flush(space_id, doc_id)
+    }
+
+    /// Persists pending edits to every open document.
+    pub fn flush_all(&self) -> Result<(), ProtocolError> {
+        self.protocol.data_flush_all()
+    }
+
+    /// The compacted size of a document, in bytes.
+    pub fn doc_size(&self, space_id: String, doc_id: String) -> Result<u64, ProtocolError> {
+        self.protocol.data_doc_size(space_id, doc_id)
+    }
+
+    /// Deletes every record the data layer owns.
+    pub fn wipe_all(&self) -> Result<(), ProtocolError> {
+        self.protocol.data_wipe_all()
+    }
+}
+
+/// Runs the storage adapter conformance suite and returns the report as JSON.
+///
+/// Instance-less: an application verifies a backend before wiring it into a
+/// running protocol, and a test harness runs it with no protocol at all.
+/// Green is the definition of "this backend is supported".
+pub fn run_storage_conformance(storage: Box<dyn ProtocolStateStorageProvider>) -> String {
+    let adapter = ProtocolStateStorageWrapper {
+        provider: Arc::from(storage),
+    };
+    offline_protocol::storage_conformance::run_json(&adapter)
+}
+
 /// Standalone mesh services interface for UniFFI.
 ///
 /// Holds an `Arc<OfflineProtocol>` and delegates through public wrapper methods,
@@ -6865,7 +7394,7 @@ mod error_mapping_tests {
         // fails you either reordered/removed a variant (never do that) or
         // appended one — extend this list and regenerate every committed
         // binding.
-        const EXPECTED: [&str; 20] = [
+        const EXPECTED: [&str; 24] = [
             "NotStarted",
             "AlreadyStarted",
             "InvalidConfiguration",
@@ -6886,6 +7415,13 @@ mod error_mapping_tests {
             "GroupNotFound",
             "PermissionDenied",
             "InvalidArgument",
+            // Appended for the data layer. Positions 20-23; everything above
+            // keeps the discriminant it shipped with, which is the whole
+            // point of this pin.
+            "DataDisabled",
+            "DataStorageUnavailable",
+            "DocTooLarge",
+            "DataCorrupted",
         ];
         let udl = include_str!("offline_protocol.udl");
         let enum_body = udl
@@ -6914,6 +7450,168 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::thread;
+
+    /// Every `DataStore` method the UDL declares must be reachable from
+    /// React Native, in all four places a method has to appear.
+    ///
+    /// The failure this catches is specific and has happened before: a Swift
+    /// `@objc` method with no matching `RCT_EXTERN_METHOD` in the
+    /// hand-maintained Objective-C bridge compiles perfectly and is simply
+    /// invisible to JavaScript. Nothing in the Rust, Swift, or TypeScript
+    /// build says a word about it; the app gets "method not found" at
+    /// runtime, on a device, in whichever code path reaches it first.
+    #[test]
+    fn react_native_reaches_every_data_store_method() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rn = manifest.join("../../bindings/react-native");
+        let read = |rel: &std::path::Path| -> String {
+            std::fs::read_to_string(rel)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", rel.display()))
+        };
+
+        let udl = read(&manifest.join("src/offline_protocol.udl"));
+        let start = udl
+            .find("interface DataStore {")
+            .expect("the UDL must declare interface DataStore");
+        let body = &udl[start..start + udl[start..].find("\n};").expect("unterminated interface")];
+
+        // Method names out of the UDL: a line of the form `<ret> name(...)`.
+        // Constructors are skipped; they are not React Native methods.
+        let mut udl_methods: Vec<String> = Vec::new();
+        for line in body.lines() {
+            let line = line.trim();
+            if line.starts_with("//") || line.starts_with('[') || line.starts_with("constructor") {
+                continue;
+            }
+            let Some(open) = line.find('(') else { continue };
+            let head = &line[..open];
+            let Some(name) = head.rsplit(' ').next() else {
+                continue;
+            };
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                continue;
+            }
+            udl_methods.push(name.to_string());
+        }
+        assert!(
+            udl_methods.len() >= 15,
+            "only found {} DataStore methods in the UDL; the parser is broken, \
+             not the bindings",
+            udl_methods.len()
+        );
+
+        // The bridge name is the UDL name in camelCase behind a `data` prefix,
+        // which is what keeps 20 methods from colliding with the flat native
+        // module namespace they share with everything else.
+        let bridge_name = |udl_name: &str| -> String {
+            let mut out = String::from("data");
+            let mut upper = true;
+            for ch in udl_name.chars() {
+                if ch == '_' {
+                    upper = true;
+                } else if upper {
+                    out.extend(ch.to_uppercase());
+                    upper = false;
+                } else {
+                    out.push(ch);
+                }
+            }
+            out
+        };
+
+        let kotlin =
+            read(&rn.join("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"));
+        let swift = read(&rn.join("ios/OfflineProtocolModule.swift"));
+        let objc = read(&rn.join("ios/OfflineProtocolModule.m"));
+        let js = read(&rn.join("src/index.ts"));
+
+        for udl_name in &udl_methods {
+            let name = bridge_name(udl_name);
+            assert!(
+                kotlin.contains(&format!("fun {name}(")),
+                "{udl_name}: no `fun {name}(` in the Kotlin native module"
+            );
+            assert!(
+                swift.contains(&format!("@objc func {name}(")),
+                "{udl_name}: no `@objc func {name}(` in the Swift native module"
+            );
+            assert!(
+                objc.contains(&format!("RCT_EXTERN_METHOD({name}:")),
+                "{udl_name}: no `RCT_EXTERN_METHOD({name}:)` in the Objective-C \
+                 bridge — the Swift method exists but JavaScript cannot see it"
+            );
+            assert!(
+                js.contains(&format!("OfflineProtocolNativeModule.{name}(")),
+                "{udl_name}: the JavaScript DataStore never calls {name}"
+            );
+        }
+    }
+
+    /// The data config section must be read by every bridge that parses
+    /// config, in both spellings its JSON can arrive in.
+    ///
+    /// The failure this catches: a section that TypeScript sends, the UDL
+    /// declares, and a native parser never reads. The flag then sits at its
+    /// FFI default forever while the app believes it set it — which is how
+    /// `config.relay` stayed at defaults on mobile for several releases.
+    #[test]
+    fn every_bridge_reads_the_data_config_section() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rn = manifest.join("../../bindings/react-native");
+        let read = |rel: std::path::PathBuf| -> String {
+            std::fs::read_to_string(&rel)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", rel.display()))
+        };
+
+        let udl = read(manifest.join("src/offline_protocol.udl"));
+        assert!(
+            udl.contains("boolean data_enabled = false;"),
+            "the UDL must default data_enabled to false: the layer ships before \
+             its replication half, and a capability advertised with no sync \
+             behind it invites peers to expect a sync that never comes"
+        );
+
+        let kotlin =
+            read(rn.join("android/src/main/java/com/offlineprotocol/ProtocolConfigParser.kt"));
+        assert!(
+            kotlin.contains("optJSONObject(\"data\")")
+                && kotlin.contains("config.dataEnabled = dataEnabled"),
+            "the Kotlin parser must read the data section AND apply it to the \
+             ProtocolConfig; reading it and dropping it is the silent half of \
+             this failure"
+        );
+        assert!(
+            !kotlin.contains("optBooleanCompat(\"enabled\") ?: false"),
+            "the Kotlin parser must not restate the data default as a literal: \
+             an omitted field has to stay omitted so the generated default \
+             governs, or the release that flips the default on keeps forcing \
+             false for every app that omits the section"
+        );
+
+        let swift = read(rn.join("ios/OfflineProtocolModule.swift"));
+        assert!(
+            swift.contains("raw[\"data\"]") && swift.contains("config.dataEnabled = dataEnabled"),
+            "the Swift parser must read the data section AND apply it to the \
+             ProtocolConfig"
+        );
+        assert!(
+            !swift.contains("dataSection?[\"enabled\"] as? Bool ?? false"),
+            "the Swift parser must not restate the data default as a literal; \
+             see the Kotlin assertion above for what that costs"
+        );
+
+        let ts = read(rn.join("src/index.ts"));
+        assert!(
+            ts.contains("nativeConfig.data = dataConfig"),
+            "transformConfigForNative must forward the data section"
+        );
+        assert!(
+            !ts.contains("enabled: this.config.data.enabled ?? false"),
+            "the bridge must not restate the default: an omitted field has to \
+             stay omitted all the way to the core, or the Rust default becomes \
+             unreachable"
+        );
+    }
 
     /// Backing store for [`TestMlsStorageProvider`], shareable so two protocol
     /// instances can stand in for two launches of one device.
@@ -7009,6 +7707,7 @@ mod tests {
     fn create_test_config() -> ProtocolConfig {
         ProtocolConfig {
             mesh_relay: None,
+            data_enabled: false,
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
@@ -7044,6 +7743,7 @@ mod tests {
     fn create_ble_only_config() -> ProtocolConfig {
         ProtocolConfig {
             mesh_relay: None,
+            data_enabled: false,
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,
@@ -7356,6 +8056,7 @@ mod tests {
     fn create_reticulum_config() -> ProtocolConfig {
         ProtocolConfig {
             mesh_relay: None,
+            data_enabled: false,
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
             nostr_cold_contact_enabled: true,

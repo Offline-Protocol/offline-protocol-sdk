@@ -86,4 +86,58 @@ ignore = [
     "RUSTSEC-2026-0190",
     # RUSTSEC-2026-0097 — rand unsound with a custom logger using `rand::rng()`.
     "RUSTSEC-2026-0097",
+
+    # --- Target-conditional: never compiled for a shipped target -----------
+    #
+    # Mirrors deny.toml. `atomic-polyfill` is unmaintained (no fixed release
+    # exists; the successor is portable-atomic). It enters Cargo.lock beneath
+    # heapless 0.7.17, which arrives through the CRDT engine:
+    #
+    #     offline-protocol-data -> loro -> loro-internal -> serde_columnar
+    #                           -> postcard (DEFAULT features) -> heapless 0.7
+    #
+    # heapless 0.7.17 declares atomic-polyfill only for riscv32i, riscv32imc
+    # and xtensa-esp32s2 (required) and thumbv6m / avr (optional). None is a
+    # target this SDK builds for, so the crate is recorded by the resolver and
+    # never compiled. Verify before renewing:
+    #
+    #     cargo tree --workspace --target aarch64-apple-ios -i atomic-polyfill
+    #     cargo tree --workspace --target aarch64-linux-android -i atomic-polyfill
+    #
+    # Both print "nothing to print". Note that `--target all` DOES show it,
+    # because it unions the embedded targets in — that is the tool being
+    # literal, not a reachable path.
+    #
+    # The workspace's own `postcard = { default-features = false }` opt-out is
+    # unchanged and still correct; cargo unifies features across the graph, so
+    # it cannot take effect while serde_columnar 0.3.14 still asks for
+    # postcard's defaults. Upstream fix is drafted but unreleased
+    # (loro-dev/columnar#48, tracked by loro-dev/loro#818). Drop this waiver
+    # when a serde_columnar release carries it.
+    "RUSTSEC-2023-0089",
+
+    # --- Compiled and shipped: an unmaintained crate with no upgrade -------
+    #
+    # Mirrors deny.toml, and unlike every other entry in this file it is NOT
+    # a "never compiled" or "unreachable path" claim. `sized-chunks` is real
+    # code on the shipped path:
+    #
+    #     offline-protocol-data -> loro -> loro-internal -> im -> sized-chunks
+    #
+    # RUSTSEC-2026-0251 is an unmaintained-crate notice (repository archived
+    # 2026-05-03), not a vulnerability, and the advisory states no safe
+    # upgrade exists. The recommended successor (`imbl-sized-chunks`) is a
+    # fork that only reaches us if loro-internal adopts it.
+    #
+    # Re-check at every loro bump, with the MSRV check and the binary-size
+    # measurement that bump already requires. All three crates below are the
+    # same archived upstream family (`im` and the two collections it is built
+    # on), flagged together in 2026.
+    #
+    # RUSTSEC-2026-0247 — bitmaps unmaintained.
+    "RUSTSEC-2026-0247",
+    # RUSTSEC-2026-0248 — im unmaintained.
+    "RUSTSEC-2026-0248",
+    # RUSTSEC-2026-0251 — sized-chunks unmaintained.
+    "RUSTSEC-2026-0251",
 ]

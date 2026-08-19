@@ -648,7 +648,7 @@ jobs:
             | jq -r '.packages[] | select(.name == "offline-protocol") | .version')"
 
           if [ "$TAG_CORE" != "$CARGO_VERSION" ]; then
-            echo "::error title=Workspace version does not match the tag::Tag v$TAG_VERSION wants crates at $TAG_CORE, but [workspace.package].version is $CARGO_VERSION. Bump it together with the seven internal-dependency versions in [workspace.dependencies], refresh Cargo.lock, then delete and re-push the tag. This gate runs ahead of both publish jobs, so nothing has shipped yet and re-tagging is still safe — which it stops being the moment a release publishes."
+            echo "::error title=Workspace version does not match the tag::Tag v$TAG_VERSION wants crates at $TAG_CORE, but [workspace.package].version is $CARGO_VERSION. Bump it together with the eight internal-dependency versions in [workspace.dependencies], refresh Cargo.lock, then delete and re-push the tag. This gate runs ahead of both publish jobs, so nothing has shipped yet and re-tagging is still safe — which it stops being the moment a release publishes."
             exit 1
           fi
 

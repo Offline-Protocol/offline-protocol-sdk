@@ -197,7 +197,7 @@ See [Message Delivery](message-delivery.md) for retry-queue semantics and [DORS 
 
 With `scrubIds: true` (the default), identifiers that persist across sessions are hashed before they reach your sink:
 
-- **Scrubbed**: `peer_id`, `user_id`, `group_id`, `sender`, `recipient`, `added_by`, `removed_by`, and similar actor fields.
+- **Scrubbed**: `peer_id`, `user_id`, `group_id`, `sender`, `recipient`, `added_by`, `removed_by`, and similar actor fields. `space_id` and `doc_id` on the data-layer events are in this group: a space id *is* the peer or group the space rides on, and a document name is application content.
 - **Not scrubbed**: `message_id`, `file_id` (single-use UUIDs), message `content`, enum values (`transport`, `status`, etc.).
 
 The hash is `SHA-256(secret || raw)` truncated to 16 bytes / 32 hex chars. The same raw ID always maps to the same hash within one protocol instance, so you can still correlate events for a given peer without ever seeing the raw identifier. Session-derived tokens are always hashed regardless of this flag.

@@ -75,6 +75,12 @@ define_internal_prefixes! {
     /// here so user content can never impersonate a sealed rich body through
     /// the public send APIs.
     RICH_V1 = "__RICH_V1__",
+    /// Prefix for replicated-document sync frames inside a decrypted MLS
+    /// plaintext. Reserved ahead of the replication half of the data layer:
+    /// the marker is registered before any frame uses it so that no user
+    /// message sent in the meantime can ever occupy the name, which is the
+    /// only window in which that collision is cheap to prevent.
+    DATA_V1 = "__DATA_V1__",
     /// Prefix for connection request messages.
     CONN_REQUEST = "__CONN_REQ__",
     /// Prefix for connection accepted messages.

@@ -28,6 +28,7 @@ silently undo it. Decisions that follow from the obvious default do not need one
 | [0015](0015-relay-hint-frames-unacked-and-pinned.md) | Relay hint frames are unacknowledged and transport-pinned | Accepted |
 | [0016](0016-gateways-are-provisioned-not-emergent.md) | Gateways are provisioned, never emergent | Accepted |
 | [0017](0017-nostr-is-a-carrier-not-a-gateway.md) | Nostr is a carrier, never a gateway | Accepted |
+| [0018](0018-data-layer-engine-and-storage-seams.md) | The data layer has two seams: the engine and the backend | Accepted |
 
 ## Format
 

@@ -92,6 +92,29 @@ internal fun mapProtocolBridgeError(error: Throwable): BridgeProtocolError? {
             code = "InvalidArgument",
             message = error.message ?: "Invalid argument"
         )
+        // Data-layer conditions, each distinct because the app's next move
+        // differs. DataDisabled and DataStorageUnavailable are setup mistakes
+        // that no retry fixes; DocTooLarge is recoverable by deleting content
+        // (deletions keep working while growth is refused); DataCorrupted is
+        // permanent for that document. Without these arms they would all land
+        // on the caller's fallback code and read as one undifferentiated
+        // failure.
+        is ProtocolException.DataDisabled -> BridgeProtocolError(
+            code = "DataDisabled",
+            message = error.message ?: "Data layer is disabled"
+        )
+        is ProtocolException.DataStorageUnavailable -> BridgeProtocolError(
+            code = "DataStorageUnavailable",
+            message = error.message ?: "Data layer has no storage; initializeMls must run first"
+        )
+        is ProtocolException.DocTooLarge -> BridgeProtocolError(
+            code = "DocTooLarge",
+            message = error.message ?: "Document is over the size cap"
+        )
+        is ProtocolException.DataCorrupted -> BridgeProtocolError(
+            code = "DataCorrupted",
+            message = error.message ?: "Document data is corrupt"
+        )
         else -> null
     }
 }

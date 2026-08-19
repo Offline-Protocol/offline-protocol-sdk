@@ -32,6 +32,18 @@ namespace offline_protocol {
     // signature does not verify. Every case means refuse, not warn.
     [Throws=ProtocolError]
     InviteInfo parse_invite(string blob);
+
+    // Run the storage adapter conformance suite against a provider and return
+    // the report as JSON: {"passed":[...],"failures":[{"check","detail"}]}.
+    //
+    // Instance-less on purpose: an application verifies its backend before
+    // wiring it into a running protocol, and a test harness runs it with no
+    // protocol at all. Green is the definition of "this backend is supported"
+    // — swappability that cannot be verified is a promise, not a property.
+    //
+    // The suite writes only under its own probe key types and deletes
+    // everything it wrote, so it is safe against a live store.
+    string run_storage_conformance(ProtocolStateStorageProvider storage);
 };
 
 // A decoded and verified invite.
@@ -219,6 +231,10 @@ enum ProtocolError {
     "GroupNotFound",
     "PermissionDenied",
     "InvalidArgument",
+    "DataDisabled",
+    "DataStorageUnavailable",
+    "DocTooLarge",
+    "DataCorrupted",
 };
 
 // Message priority levels
@@ -800,6 +816,11 @@ dictionary ProtocolConfig {
     // inside it — see MeshRelayConfig. Applied at construction: the governor
     // takes its snapshot there, and there is no runtime update path.
     MeshRelayConfig? mesh_relay = null;
+    // Whether the replicated-document layer accepts work. Off by default:
+    // the layer ships before its replication half, and a capability
+    // advertised with no sync behind it invites peers to expect a sync that
+    // never comes. Defaulted so existing callers keep compiling.
+    boolean data_enabled = false;
 };
 
 // ========================================================================
@@ -1823,6 +1844,120 @@ interface MeshServices {
 
     [Throws=ProtocolError]
     string respond_to_service_request(string request_id, string requester, string service_id, string status, string body);
+};
+
+// ========================================================================
+// REPLICATED DOCUMENTS (data layer)
+// ========================================================================
+
+// A document store over the protocol's spaces.
+//
+// Construction follows MeshServices: it wraps a live OfflineProtocol rather
+// than being handed out by one, because a returned-object pattern exists
+// nowhere else in this UDL and would be a new lifetime contract to maintain
+// in three bindings.
+//
+// Requires initialize_mls to have run and data_enabled to be set. Documents
+// are sealed at rest with the same per-install record key as every other
+// protocol-state category, and that key is minted during initialize_mls.
+//
+// Values cross as a JSON-encoded kind/value pair (see map_set below), rather
+// than as a variant type or as six parallel optional scalars, so the surface
+// stays flat and adding a value kind later does not reshape every binding.
+interface DataStore {
+    [Throws=ProtocolError]
+    constructor(OfflineProtocol protocol);
+
+    // Point documents at a backend of the application's choosing.
+    //
+    // The whole bring-your-own-storage path. Protocol secrets stay where
+    // they are; only documents move. Sealing sits above this seam, so the
+    // adapter is handed sealed bytes and never sees document content.
+    //
+    // An application that uses this must call wipe_all() on logout:
+    // wipePersistedState clears the account directory of the DEFAULT
+    // provider, which a custom backend is not inside.
+    [Name=with_storage, Throws=ProtocolError]
+    constructor(OfflineProtocol protocol, ProtocolStateStorageProvider storage);
+
+    [Throws=ProtocolError]
+    void create_doc(string space_id, string doc_id);
+
+    [Throws=ProtocolError]
+    void delete_doc(string space_id, string doc_id);
+
+    [Throws=ProtocolError]
+    sequence<string> list_docs(string space_id);
+
+    [Throws=ProtocolError]
+    sequence<string> list_spaces();
+
+    // Values cross as JSON, symmetric with map_get_json below and with the
+    // way events cross this boundary. Shape: {"kind":"text","value":"..."}
+    // where kind is one of null, bool, int, float, text, bytes (a bytes value
+    // is a JSON array of byte values). A flat scalar surface would have meant
+    // six parallel optional arguments in four languages.
+    [Throws=ProtocolError]
+    void map_set(string space_id, string doc_id, string collection, string key, string value_json);
+
+    [Throws=ProtocolError]
+    void map_delete(string space_id, string doc_id, string collection, string key);
+
+    // The value as JSON, or null when the key is absent.
+    [Throws=ProtocolError]
+    string? map_get_json(string space_id, string doc_id, string collection, string key);
+
+    // Same JSON value shape as map_set.
+    [Throws=ProtocolError]
+    void list_push(string space_id, string doc_id, string collection, string value_json);
+
+    [Throws=ProtocolError]
+    void list_delete(string space_id, string doc_id, string collection, u32 index, u32 count);
+
+    [Throws=ProtocolError]
+    u32 list_len(string space_id, string doc_id, string collection);
+
+    // Positions are character offsets, not byte offsets.
+    [Throws=ProtocolError]
+    void text_insert(string space_id, string doc_id, string collection, u32 position, string text);
+
+    [Throws=ProtocolError]
+    void text_delete(string space_id, string doc_id, string collection, u32 position, u32 count);
+
+    [Throws=ProtocolError]
+    string text_value(string space_id, string doc_id, string collection);
+
+    [Throws=ProtocolError]
+    void counter_increment(string space_id, string doc_id, string collection, double amount);
+
+    [Throws=ProtocolError]
+    double counter_value(string space_id, string doc_id, string collection);
+
+    // The document's current state as plain JSON. Half of the escape hatch:
+    // an application can always take its data and leave.
+    [Throws=ProtocolError]
+    string doc_json(string space_id, string doc_id);
+
+    // The document's full history, engine-encoded. The other half.
+    [Throws=ProtocolError]
+    bytes export_raw(string space_id, string doc_id);
+
+    // Persist pending edits. Edits batch before they reach a record, so an
+    // application that must know a change is durable calls this.
+    [Throws=ProtocolError]
+    void flush(string space_id, string doc_id);
+
+    [Throws=ProtocolError]
+    void flush_all();
+
+    // The compacted size of a document, in bytes.
+    [Throws=ProtocolError]
+    u64 doc_size(string space_id, string doc_id);
+
+    // Delete every record the data layer owns. The logout path for an
+    // application that configured its own backend.
+    [Throws=ProtocolError]
+    void wipe_all();
 };
 
 // BLE fragment for outgoing data

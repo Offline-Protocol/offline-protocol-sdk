@@ -643,6 +643,66 @@ const config = {
 };
 ```
 
+### Data Layer Configuration
+
+Replicated documents: offline-first state any member of a space can edit while
+disconnected, merging deterministically when replicas meet again. Messaging is
+synced events; this is synced state.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `data.enabled` | boolean | `false` | Whether the data layer accepts work |
+
+```typescript
+const config: ProtocolConfig = {
+  appId: 'my-app',
+  profile: 'default',
+  data: { enabled: true },
+};
+```
+
+`enabled` is off by default. The layer ships before its replication half, and a
+capability advertised with no sync behind it invites peers to expect a sync that
+never comes. The default flips in the release that ships replication, with a
+CHANGELOG entry.
+
+**Storage.** Documents persist through the same seam as the rest of protocol
+state, so there is nothing to configure: every binding ships a default provider
+and the layer works out of the box. To put documents somewhere else, construct
+the store with a backend instead of assigning a config field:
+
+```typescript
+// Default: documents live wherever protocol state already does.
+const store = new DataStore();
+```
+
+```rust
+// Rust consumers assign the backend directly.
+let config = ProtocolConfig::builder("my-app", "default")
+    .data_enabled(true)
+    .data_storage(Arc::new(MyBackend::open("documents.db")?))
+    .build()?;
+```
+
+Swapping the backend is a runtime choice: no rebuild, no build flag, no change
+to any data API. Protocol secrets stay where they are; only documents move.
+Sealing sits above the seam, so a custom backend is handed sealed bytes and
+never sees document content.
+
+Two obligations come with a custom backend:
+
+- Verify it. `runStorageConformance(provider)` returns a JSON report; empty
+  `failures` is the definition of supported. See
+  [storage adapter references](../examples/storage-adapters/README.md).
+- Wipe it on logout. `wipePersistedState()` clears the **default** provider's
+  account directory, which a custom backend is not inside, so call
+  `DataStore.wipeAll()` as well or documents outlive the account.
+
+**Limits.** A document is capped at 1 MiB compacted, with a
+`data_doc_size_warning` event at 768 KiB. Passing the cap raises `DocTooLarge`;
+the breaching change is still durable, and deletions keep working while growth
+is refused, so a document can be brought back under the cap.
+
 ### Network Configuration
 
 | Parameter | Type | Default | Description |

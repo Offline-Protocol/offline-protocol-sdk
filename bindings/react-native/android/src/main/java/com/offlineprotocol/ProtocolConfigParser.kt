@@ -187,6 +187,15 @@ internal object ProtocolConfigParser {
             )
         }
 
+        // Data layer section (nested home under `data`, both cases). Same
+        // rule as meshRelay: absent stays absent, so the Rust default is the
+        // only default. The flag is read out of the section rather than as a
+        // top-level `dataEnabled`, because the section is where the layer's
+        // other knobs will land and one home is easier to keep correct than
+        // two spellings.
+        val dataJson = json.optJSONObject("data")
+        val dataEnabled = dataJson?.optBooleanCompat("enabled")
+
         val config = ProtocolConfig(
             appId = json.safeOptString("appId", json.safeOptString("app_id")),
             profile = json.safeOptString("profile"),
@@ -222,6 +231,16 @@ internal object ProtocolConfigParser {
             cryptoRecoveryEnabled = cryptoRecoveryEnabled,
             meshRelay = meshRelay
         )
+
+        // Assigned only when the app actually sent it. Writing
+        // `dataEnabled = dataEnabled ?: false` above would restate the
+        // default as a literal here, and the literal is what survives a
+        // change to the real default: the release that flips it on would
+        // keep forcing `false` for every app that omits the section, exactly
+        // as `config.relay` sat at its defaults for several releases.
+        if (dataEnabled != null) {
+            config.dataEnabled = dataEnabled
+        }
 
         return ParsedConfig(config, json)
     }

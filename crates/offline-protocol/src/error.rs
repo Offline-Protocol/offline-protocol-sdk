@@ -254,6 +254,40 @@ pub enum Error {
     #[error("{0}")]
     InvalidArgument(String),
 
+    /// The data layer is switched off in configuration.
+    #[error("Data layer is disabled")]
+    DataDisabled,
+
+    /// The data layer has no storage backend to work with.
+    ///
+    /// Raised when the engine has no protocol-state store yet, which means
+    /// `initialize_mls` has not run: documents are sealed at rest, and the
+    /// record key that seals them is minted during that call.
+    #[error("Data layer has no storage; initialize_mls must run first")]
+    DataStorageUnavailable,
+
+    /// A document has grown past the per-document cap.
+    ///
+    /// The change that breached it is already durable, so nothing is lost.
+    /// What is refused is further growth: deletions still apply, so a
+    /// document can be brought back under the cap and resume accepting
+    /// edits.
+    #[error("Document is {actual} bytes compacted, over the {limit} byte cap")]
+    DocTooLarge {
+        /// The compacted size that breached the cap.
+        actual: usize,
+        /// The cap in force.
+        limit: usize,
+    },
+
+    /// Document data could not be decoded.
+    ///
+    /// Documents are read back out of sealed records, so their bytes have
+    /// already been authenticated. This therefore reports a permanent
+    /// verdict, not a transient read failure worth retrying.
+    #[error("Document data is corrupt: {0}")]
+    DataCorrupted(String),
+
     /// Generic error.
     #[error("{0}")]
     Other(String),

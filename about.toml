@@ -11,6 +11,12 @@ accepted = [
     "MPL-2.0",
     "Unicode-DFS-2016",
     "Unicode-3.0",
+    # BSL-1.0 (Boost Software License) arrives with `xxhash-rust`, a hashing
+    # dependency of the CRDT engine. It is a permissive, OSI-approved,
+    # GPL-compatible license with no attribution requirement on binaries;
+    # the notices file lists it anyway, because listing costs nothing and a
+    # missing entry is the expensive direction.
+    "BSL-1.0",
 ]
 
 # Attribution covers what we redistribute: the compiled cdylib/staticlib
