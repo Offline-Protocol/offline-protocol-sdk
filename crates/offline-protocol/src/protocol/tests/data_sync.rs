@@ -692,6 +692,69 @@ fn a_partial_offer_does_not_snapshot_the_documents_it_leaves_out() {
 }
 
 #[test]
+fn a_document_named_only_in_a_reply_is_asked_for_rather_than_left_empty() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut bob, &bob_space, "notes", "k", "from bob");
+    let theirs = bob
+        .protocol
+        .data_doc_version(&bob_space, "notes")
+        .expect("version");
+
+    // Drop the push that writing produced. What is left is the case that
+    // matters: a document Alice has never heard of, learned about on the one
+    // leg that sends no counter-offer, from a peer that has now said
+    // everything it intends to say.
+    bob.transport.clear_sent_messages();
+    alice.transport.clear_sent_messages();
+
+    alice.protocol.handle_data_sync_frame(
+        &bob.address,
+        &format!(
+            r#"{{"v":1,"k":"vv","reply":true,"partial":false,"docs":{{"notes":"{theirs}"}}}}"#
+        ),
+    );
+
+    assert!(
+        !alice.transport.sent_messages().is_empty(),
+        "the document Alice created from the reply was never asked about, so \
+         nothing will ever fill it: the peer does not repeat an offer it has \
+         already answered, and a link that never drops fires no other trigger"
+    );
+
+    settle(&mut alice, &mut bob);
+    assert_eq!(
+        read(&mut alice, &alice_space, "notes", "k"),
+        Some(DataValue::text("from bob")),
+        "the document stayed empty on the replica that created it"
+    );
+}
+
+#[test]
+fn a_document_created_on_the_offering_leg_is_not_asked_for_twice() {
+    let (mut alice, bob) = pair();
+
+    // The other half of the invariant above. This leg does send a
+    // counter-offer, and that counter-offer already names everything the
+    // leg created, so asking separately would put a second frame on the
+    // mesh for a question already on it.
+    alice.transport.clear_sent_messages();
+    alice.protocol.handle_data_sync_frame(
+        &bob.address,
+        r#"{"v":1,"k":"vv","reply":false,"partial":false,"docs":{"notes":"AA=="}}"#,
+    );
+
+    assert_eq!(
+        alice.transport.sent_messages().len(),
+        1,
+        "the offering leg answers with one counter-offer naming what it \
+         created; a second frame is the same question asked twice"
+    );
+}
+
+#[test]
 fn a_peer_cannot_name_unlimited_documents_into_our_storage() {
     let (mut alice, bob) = pair();
     let alice_space = Node::space_for(&bob);

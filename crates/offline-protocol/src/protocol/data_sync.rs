@@ -32,13 +32,16 @@
 //! # Every leg ends
 //!
 //! An inbound frame produces at most one kind of outbound answer, and every
-//! answer is itself terminal: an offer provokes one reply and the reply
-//! provokes nothing, a delta that cannot apply provokes one request, and the
-//! snapshot that request is answered with provokes nothing at all. That is
-//! the property to preserve when adding a frame kind. Two replicas that
-//! answer each other's answers converge perfectly well and then talk until
-//! the battery dies, and the failure has no symptom on either device except
-//! traffic.
+//! chain of answers is finite: an offer provokes one reply, a delta that
+//! cannot apply provokes one request, and the snapshot that request is
+//! answered with provokes nothing at all. The one chain longer than a single
+//! hop is a reply naming a document this device has never seen: it is asked
+//! for, and the answer is the document. That ends too, because the question
+//! names only documents the peer has just offered, so the peer creates
+//! nothing from it and has nothing further to ask. That is the property to
+//! preserve when adding a frame kind. Two replicas that answer each other's
+//! answers converge perfectly well and then talk until the battery dies, and
+//! the failure has no symptom on either device except traffic.
 //!
 //! # Remote bytes are not our bytes
 //!
@@ -263,11 +266,23 @@ impl OfflineProtocol {
             }
         };
         debug!(peer = %peer, cause, docs = docs.len(), "Offering document versions");
-        self.send_version_frames(peer, docs, false);
+        self.send_version_frames(peer, docs, false, false);
     }
 
     /// Send one version frame per batch of documents.
-    fn send_version_frames(&mut self, peer: &str, docs: BTreeMap<String, String>, reply: bool) {
+    ///
+    /// `force_partial` marks the frames as carrying less than everything we
+    /// hold even when they fit in one, which is what a question about
+    /// particular documents needs: without it the peer reads the names it
+    /// does not see as documents we have never seen, and answers a question
+    /// about one document with the whole space.
+    fn send_version_frames(
+        &mut self,
+        peer: &str,
+        docs: BTreeMap<String, String>,
+        reply: bool,
+        force_partial: bool,
+    ) {
         // A space with no documents still says so on the offering leg: that
         // is what tells a peer holding documents to send them to a replica
         // that has never seen any.
@@ -287,7 +302,7 @@ impl OfflineProtocol {
         // inference that needs the complete list cannot be drawn from any
         // one of them, and there is nowhere to accumulate them that a
         // restart would not have to reconcile.
-        let partial = batches.len() > 1;
+        let partial = force_partial || batches.len() > 1;
         for batch in batches {
             self.send_sync_frame(
                 peer,
@@ -316,13 +331,11 @@ impl OfflineProtocol {
             }
         };
         let peer = space.to_string();
-        self.send_sync_frame(
+        self.send_version_frames(
             &peer,
-            &SyncBody::Versions {
-                reply: true,
-                partial: true,
-                docs: BTreeMap::from([(doc.to_string(), version)]),
-            },
+            BTreeMap::from([(doc.to_string(), version)]),
+            true,
+            true,
         );
     }
 
@@ -524,18 +537,23 @@ impl OfflineProtocol {
         partial: bool,
         theirs: BTreeMap<String, String>,
     ) -> Result<()> {
-        let ours = self.data_sync_versions(space).unwrap_or_default();
+        let mut ours = self.data_sync_versions(space).unwrap_or_default();
 
-        // Documents they have and we do not: created here so the next leg
-        // offers a version for them and they send the content. Counted
-        // rather than merely created, because every name in this loop is a
-        // document a peer talked this device into storing.
-        let mut held = ours.len();
+        // Documents they have and we do not. A created document is empty,
+        // and the only thing that ever fills it is this device asking for
+        // its contents, so what is created here has to be asked about
+        // before this frame is done with: the peer has already told us
+        // everything it intends to and will not volunteer it again.
+        let mut created = BTreeMap::new();
         for doc in theirs.keys() {
             if ours.contains_key(doc) || offline_protocol_data::validate_name(doc).is_err() {
                 continue;
             }
-            if held >= MAX_DOCS_PER_SPACE {
+            // The same door a blob for an unknown document goes through,
+            // and the same ceiling. Counting the versions read above
+            // instead would undercount by every document whose version
+            // could not be read, which is how a space gets past its cap.
+            if !self.data_space_admits_doc(space, doc, MAX_DOCS_PER_SPACE) {
                 warn!(
                     space,
                     cap = MAX_DOCS_PER_SPACE,
@@ -543,8 +561,20 @@ impl OfflineProtocol {
                 );
                 break;
             }
-            if self.data_create_doc(space, doc).is_ok() {
-                held = held.saturating_add(1);
+            if self.data_create_doc(space, doc).is_err() {
+                continue;
+            }
+            // Folded into `ours` rather than re-read from the whole space
+            // below: one version read per frame instead of two, and the
+            // answer then describes exactly the documents this leg judged.
+            match self.data_doc_version(space, doc) {
+                Ok(version) => {
+                    ours.insert(doc.clone(), version.clone());
+                    created.insert(doc.clone(), version);
+                }
+                Err(err) => {
+                    warn!(space, doc, error = %err, "Created a document from an offer but cannot read its version");
+                }
             }
         }
 
@@ -573,10 +603,19 @@ impl OfflineProtocol {
 
         // One answer, and the exchange is over. Answering an answer is how a
         // pair of replicas talk to each other forever.
+        //
+        // Either way the documents created above are asked about, which is
+        // the invariant to keep: the counter-offer names them when there is
+        // one, and when there is not they are asked for on their own. An
+        // answering leg that skipped the question would leave a document
+        // created from it empty for as long as the link stays up, because
+        // the peer has said everything it had to say and nothing else here
+        // ever asks.
+        let peer = space.to_string();
         if !reply {
-            let ours = self.data_sync_versions(space).unwrap_or_default();
-            let peer = space.to_string();
-            self.send_version_frames(&peer, ours, true);
+            self.send_version_frames(&peer, ours, true, false);
+        } else {
+            self.send_version_frames(&peer, created, true, true);
         }
         Ok(())
     }

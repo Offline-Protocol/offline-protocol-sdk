@@ -189,7 +189,14 @@ followed by one offer of its own carrying `reply: true`. An offer marked
 replicas converge correctly and then exchange offers forever.
 
 A document named in an offer that the receiver has never seen is created
-locally, so the next leg asks for its contents.
+locally, and created empty. Whatever created it MUST also ask for its contents
+on the same leg, because the peer will not volunteer them again: it has
+already named everything it holds. The counter-offer carries that question
+when the frame provoked one. When it did not, which is any offer marked
+`reply`, the receiver MUST send a targeted offer naming exactly the documents
+it created, marked `reply: true` and `partial: true`. A receiver that creates
+a document and asks for nothing leaves it empty for as long as the link stays
+up, and nothing on either device reports it.
 
 A document *absent* from an offer is read as one the sender has never seen,
 and answered with the whole document. That inference needs the complete list,
@@ -202,20 +209,24 @@ perfectly in sync.
 
 ### Every leg ends
 
-An inbound frame produces at most one kind of outbound answer, and each
-answer is itself terminal. This is a MUST for any frame kind added later,
-because the failure it prevents has no symptom on either device except
-traffic that never stops.
+Every chain of answers is finite, and no answer restarts an exchange. This is
+a MUST for any frame kind added later, because the failure it prevents has no
+symptom on either device except traffic that never stops.
 
 | Inbound | Answer |
 |---------|--------|
 | Offer (`reply: false`) | Catch-up for each stale document, then one `reply: true` offer |
-| Offer (`reply: true`) | Catch-up only |
+| Offer (`reply: true`) | Catch-up for each stale document, plus one targeted offer naming any document this frame caused the receiver to create |
 | `delta` that applies, is already held, or is unreadable | Nothing |
 | `delta` held behind a missing predecessor | One targeted offer (`reply: true`, `partial: true`) for that document |
 | `delta` needing trimmed history | `need_snap` for that document |
 | `snap` | Nothing, in every outcome |
 | `need_snap` | One `snap`, and only for a document already held |
+
+The one chain longer than a single hop is that targeted offer: it draws
+catch-up and nothing further. It terminates because it names only documents
+the peer has itself just offered, so the peer creates nothing from it and has
+nothing to ask for in turn.
 
 `need_snap` says that no run of changes can close the gap, because the
 receiver compacted away the history the changes are built on. Answering such
@@ -246,6 +257,18 @@ frame's own JSON, the sealed envelope, and the message header.
 A document that cannot be caught up inside that budget in any form is reported
 rather than sent. Carrying one over the media transfer path is not yet
 specified.
+
+A space whose version list does not fit in one frame costs more than
+proportional traffic: every frame of a split offer is answered on its own, so
+an offer split into *k* frames draws *k* answers, each itself split when the
+answering side holds more than one frame's worth. Both replicas still
+converge, and a space of 128 documents or fewer never splits at all.
+
+A receiver MUST NOT trim that cost by scoping its answer to the documents the
+inbound frame named. A document the receiver holds that the sender has never
+seen is announced only by the receiver's complete list, and an answer scoped
+to the names it was sent drops that document silently, leaving a replica that
+simply never receives it.
 
 ### Acknowledgement
 
