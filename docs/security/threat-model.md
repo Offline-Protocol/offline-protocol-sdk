@@ -374,6 +374,23 @@ a verdict, five for a presence answer) rather than letting it stand
 indefinitely. These hold against a hostile relay right now, which is why an A7
 gateway inherits a bounded blast radius rather than a new one.
 
+**Mitigations specified but not yet implemented**, and therefore not yet
+protecting anyone: address-bound attach under `offline-gateway-addr-v1` (the
+domain is [reserved, not emitted](../spec/username-discovery.md#signing-domains)),
+and per-device and per-peer token-bucket budgets at the gateway against
+exhaustion. They are listed apart from the others on purpose: a threat model
+that reads as protection when the protection is still prose is the failure this
+document exists to prevent.
+
+**What would close it:** nothing closes the lying-gateway case, because the lie
+is about someone else's state. Provisioning is the real control: gateways are
+installed by a person ([ADR 0016](../adr/0016-gateways-are-provisioned-not-emergent.md)),
+so "which gateways can my device attach to" is an operational decision rather
+than an emergent one. Multiple gateways per zone reduce the blast radius of any
+single hostile or broken one. Zone-membership exposure would need a design that
+does not name recipients to the bridge at all, which no addressing scheme here
+provides; it is the same open problem as relay-side metadata.
+
 ### R11. A space member can abort the process with a crafted document blob
 
 Replicated documents merge changes that arrive from peers, and merging means
@@ -408,24 +425,14 @@ rather than a crash loop driven by the delivery ladder faithfully doing its
 job. See
 [ADR 0019](../adr/0019-remote-document-imports-are-contained-not-trusted.md).
 
+**A smaller cost at the same boundary:** every version offer a peer sends
+makes this device read the version of each document in that space, and a peer
+may send offers as fast as the link carries them. The work is bounded by the
+space's document ceiling and attributable to a member the user has already
+accepted, which is why it is recorded here rather than raised as a residual of
+its own.
+
 This shrinks when the engine's import hardening reaches its Rust release.
-
-**Mitigations specified but not yet implemented**, and therefore not yet
-protecting anyone: address-bound attach under `offline-gateway-addr-v1` (the
-domain is [reserved, not emitted](../spec/username-discovery.md#signing-domains)),
-and per-device and per-peer token-bucket budgets at the gateway against
-exhaustion. They are listed apart from the others on purpose: a threat model
-that reads as protection when the protection is still prose is the failure this
-document exists to prevent.
-
-**What would close it:** nothing closes the lying-gateway case, because the lie
-is about someone else's state. Provisioning is the real control: gateways are
-installed by a person ([ADR 0016](../adr/0016-gateways-are-provisioned-not-emergent.md)),
-so "which gateways can my device attach to" is an operational decision rather
-than an emergent one. Multiple gateways per zone reduce the blast radius of any
-single hostile or broken one. Zone-membership exposure would need a design that
-does not name recipients to the bridge at all, which no addressing scheme here
-provides; it is the same open problem as relay-side metadata.
 
 ## The telemetry producer rule
 
