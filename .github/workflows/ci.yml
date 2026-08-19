@@ -129,6 +129,17 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --locked -- -D warnings
 
+      # The messaging-only build. `data` is a default-on feature so that a
+      # native consumer can drop the CRDT engine and its ~1.5 MB, and every
+      # other gate in this file builds default features only — without this
+      # step the opt-out path we promise crates.io consumers would never be
+      # compiled at all, and would rot behind a `#[cfg]` nobody exercises.
+      - name: Clippy (no default features)
+        # No `--all-targets`, matching the workspace job above: the lint set
+        # includes `unwrap_used = deny`, which test code across the workspace
+        # does not satisfy, so linting test targets fails on main today.
+        run: cargo clippy --package offline-protocol --no-default-features --locked -- -D warnings
+
   docs:
     name: Rustdoc
     runs-on: ubuntu-latest

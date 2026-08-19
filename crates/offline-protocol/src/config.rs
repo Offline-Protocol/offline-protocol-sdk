@@ -5,6 +5,7 @@ use crate::protocol::mesh_relay::{MeshRelayConfig, RELAY_QUEUE_MAX_OVERDUE};
 use offline_protocol_reliability::{AckConfig, DeduplicatorConfig, RetryConfig};
 use offline_protocol_router::{DorsConfig, RelayConfig};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Overflow policy for bounded pending encrypted message queues.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -562,6 +563,64 @@ impl Default for GroupConfig {
     }
 }
 
+/// Configuration for the replicated-document data layer.
+///
+/// The layer is inert until [`Self::enabled`] is set: no documents are
+/// opened, nothing is persisted, and (from the release that adds
+/// replication) no capability is advertised to peers.
+// `Default` is derived rather than hand-written, unlike the other sections
+// here: both fields want their type's default (`false` and `None`), so a
+// hand-written impl would only restate them. Give this a hand-written impl
+// the moment a field's default stops being the type's.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct DataConfig {
+    /// Whether the data layer accepts work at all.
+    ///
+    /// **Defaults to `false`.** The layer ships before its replication half
+    /// does, and a capability advertised with no sync machinery behind it
+    /// invites peers to expect a sync that never comes. The default flips in
+    /// the release that ships replication, with a CHANGELOG entry, rather
+    /// than arriving quietly with a version bump.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Where documents are stored, when the application wants them somewhere
+    /// other than the store protocol state already uses.
+    ///
+    /// `None` — the default — means documents live in the same backend as the
+    /// rest of protocol state, which is what makes the layer work with zero
+    /// storage setup: every binding already ships a default provider.
+    ///
+    /// Setting it points documents at SQLite, RocksDB, files, a corporate
+    /// store, or anything else implementing the same trait, while protocol
+    /// secrets stay exactly where they are. The two concerns swap
+    /// independently and the swap is a runtime choice: no rebuild, no cargo
+    /// feature, and no change to any data API. Anything that makes this
+    /// harder than assigning this field is a design regression.
+    ///
+    /// Sealing sits above this seam. An adapter is handed sealed bytes and
+    /// never sees document content, so a custom backend cannot weaken the
+    /// at-rest posture even by accident.
+    ///
+    /// # Logout
+    ///
+    /// `wipePersistedState` clears the account directory of the *default*
+    /// provider. A custom backend is somewhere the bindings cannot know
+    /// about, so an application that sets this must call the data layer's
+    /// own wipe on logout, or documents outlive the account that made them.
+    #[serde(skip)]
+    pub storage: Option<Arc<dyn crate::protocol_state_storage::ProtocolStateStorage>>,
+}
+
+impl std::fmt::Debug for DataConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DataConfig")
+            .field("enabled", &self.enabled)
+            .field("storage", &self.storage.as_ref().map(|_| "<custom>"))
+            .finish()
+    }
+}
+
 /// Main configuration for the Offline Protocol.
 #[derive(Debug, Clone)]
 pub struct ProtocolConfig {
@@ -626,6 +685,9 @@ pub struct ProtocolConfig {
 
     /// Security configuration for transport and control-message hardening.
     pub security: SecurityConfig,
+
+    /// Replicated-document data layer configuration.
+    pub data: DataConfig,
 }
 
 impl ProtocolConfig {
@@ -648,6 +710,7 @@ impl ProtocolConfig {
             initial_ttl: DEFAULT_INITIAL_TTL,
             group: GroupConfig::default(),
             security: SecurityConfig::default(),
+            data: DataConfig::default(),
         }
     }
 
@@ -1173,6 +1236,30 @@ impl ProtocolConfigBuilder {
     /// Sets whether transport identity is required for control messages.
     pub fn require_transport_identity(mut self, required: bool) -> Self {
         self.config.security.require_transport_identity = required;
+        self
+    }
+
+    /// Configures the replicated-document data layer.
+    pub fn data(mut self, config: DataConfig) -> Self {
+        self.config.data = config;
+        self
+    }
+
+    /// Sets whether the data layer accepts work. See [`DataConfig::enabled`].
+    pub fn data_enabled(mut self, enabled: bool) -> Self {
+        self.config.data.enabled = enabled;
+        self
+    }
+
+    /// Points documents at a storage backend of the application's choosing.
+    ///
+    /// The whole bring-your-own-backend path, in one call. See
+    /// [`DataConfig::storage`], including what it means for logout.
+    pub fn data_storage(
+        mut self,
+        storage: Arc<dyn crate::protocol_state_storage::ProtocolStateStorage>,
+    ) -> Self {
+        self.config.data.storage = Some(storage);
         self
     }
 

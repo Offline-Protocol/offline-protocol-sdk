@@ -175,6 +175,8 @@ mod tests {
         "protocol.message.relayed",
         "protocol.user.blocked",
         "protocol.user.unblocked",
+        "protocol.data.changed",
+        "protocol.data.doc_size_warning",
         // MlsLifecycleEvent::*
         "mls.initialized",
         "mls.encryption_used",
@@ -353,7 +355,9 @@ mod tests {
             | Event::SecurityWarning { .. }
             | Event::MessageRelayed { .. }
             | Event::UserBlocked { .. }
-            | Event::UserUnblocked { .. } => (),
+            | Event::UserUnblocked { .. }
+            | Event::DataChanged { .. }
+            | Event::DataDocSizeWarning { .. } => (),
         }
     }
 
@@ -768,6 +772,17 @@ mod tests {
             },
             Event::UserUnblocked {
                 user_id: String::new(),
+            },
+            Event::DataChanged {
+                space_id: String::new(),
+                doc_id: String::new(),
+                delta_bytes: 0,
+            },
+            Event::DataDocSizeWarning {
+                space_id: String::new(),
+                doc_id: String::new(),
+                compacted_bytes: 0,
+                cap_bytes: 0,
             },
         ]
     }

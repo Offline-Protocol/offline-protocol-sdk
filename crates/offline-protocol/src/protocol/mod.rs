@@ -2,6 +2,8 @@
 
 mod blocking;
 mod config_accessors;
+#[cfg(feature = "data")]
+pub(crate) mod data;
 mod decryption_queue;
 pub(crate) mod mesh_relay;
 mod message_dispatch;
@@ -368,6 +370,10 @@ pub struct OfflineProtocol {
     /// re-derived, never carried across a storage swap.
     state_record_cipher: Option<state_crypto::StateRecordCipher>,
 
+    /// Open replicated documents and their per-space indexes.
+    #[cfg(feature = "data")]
+    pub(crate) data: data::DataLayer,
+
     /// Lamport logical clock for causal message ordering.
     /// Ticked on send, merged on receive.
     lamport_clock: LamportClock,
@@ -649,6 +655,11 @@ impl Drop for OfflineProtocol {
         // protocol is dropped without an explicit stop() call.
         self.flush_lamport_clock();
         self.flush_nostr_watermark();
+        // Same reason: edits batch before they reach a record, so without a
+        // flush here the debounce window between an edit and its delta is a
+        // window in which work is lost.
+        #[cfg(feature = "data")]
+        let _ = self.data_flush_all();
     }
 }
 
@@ -769,6 +780,8 @@ impl OfflineProtocol {
             secure_storage: None,
             protocol_state_storage: None,
             state_record_cipher: None,
+            #[cfg(feature = "data")]
+            data: data::DataLayer::default(),
             lamport_clock: LamportClock::new(),
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),

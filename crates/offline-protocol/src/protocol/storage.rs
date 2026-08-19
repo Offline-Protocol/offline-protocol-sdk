@@ -72,6 +72,19 @@ pub(crate) enum StateCategory {
     /// protocol-state storage, so it belongs to the sealing decision like
     /// every other category.
     StateAdoption,
+    /// Compacted replicated documents. Post-split only, like
+    /// [`Self::StateAdoption`] — deliberately absent from
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split
+    /// data to inherit for it.
+    DataDocs,
+    /// The uncompacted commit log of a replicated document. Post-split only,
+    /// like [`Self::DataDocs`], and absent from
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] for the same reason.
+    DataDeltaLog,
+    /// Per-space document indexes and compaction bookkeeping. Post-split
+    /// only, like [`Self::DataDocs`], and absent from
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] for the same reason.
+    DataSpaces,
 }
 
 impl StateCategory {
@@ -94,8 +107,71 @@ impl StateCategory {
             storage_keys::NOSTR_KEY_PACKAGE_SLOTS => Self::NostrKeyPackageSlots,
             storage_keys::NOSTR_DISCOVERY_CLAIM => Self::NostrDiscoveryClaim,
             storage_keys::STATE_ADOPTION => Self::StateAdoption,
+            storage_keys::DATA_DOCS => Self::DataDocs,
+            storage_keys::DATA_DELTA_LOG => Self::DataDeltaLog,
+            storage_keys::DATA_SPACES => Self::DataSpaces,
             _ => return None,
         })
+    }
+
+    /// Every category, for tests that must cover the whole set.
+    ///
+    /// [`Self::requires_sealing`] is an exhaustive `match`, so a new variant
+    /// cannot be added without deciding its sensitivity. Nothing forces the
+    /// [`Self::from_key_type`] arm the same way: a variant with a
+    /// `storage_keys` constant but no arm compiles, and every write to it
+    /// then fails at runtime with "unknown protocol-state category". This
+    /// list plus `every_category_maps_back_from_its_key_type` closes that
+    /// gap, so the omission is a failing test rather than a production
+    /// write path that never worked.
+    #[cfg(test)]
+    pub(crate) const ALL: &'static [Self] = &[
+        Self::PendingMessages,
+        Self::PendingMessageEntries,
+        Self::Outbox,
+        Self::MediaDescriptors,
+        Self::PeerKeyPackages,
+        Self::PeerCapabilities,
+        Self::SessionStates,
+        Self::WelcomeLifecycles,
+        Self::BlockedUsers,
+        Self::BothCreateAwaitingDecrypt,
+        Self::LamportClock,
+        Self::NostrWatermark,
+        Self::NostrKeyPackageSlots,
+        Self::NostrDiscoveryClaim,
+        Self::StateAdoption,
+        Self::DataDocs,
+        Self::DataDeltaLog,
+        Self::DataSpaces,
+    ];
+
+    /// The storage key type this category is written under.
+    ///
+    /// The inverse of [`Self::from_key_type`], and an exhaustive `match`, so
+    /// a new variant has to name its key type here before it compiles.
+    #[cfg(test)]
+    pub(crate) fn key_type(self) -> &'static str {
+        match self {
+            Self::PendingMessages => storage_keys::PENDING_MESSAGES,
+            Self::PendingMessageEntries => storage_keys::PENDING_MESSAGE_ENTRIES,
+            Self::Outbox => storage_keys::OUTBOX,
+            Self::MediaDescriptors => storage_keys::MEDIA_DESCRIPTORS,
+            Self::PeerKeyPackages => storage_keys::PEER_KEY_PACKAGES,
+            Self::PeerCapabilities => storage_keys::PEER_CAPABILITIES,
+            Self::SessionStates => storage_keys::SESSION_STATES,
+            Self::WelcomeLifecycles => storage_keys::WELCOME_LIFECYCLES,
+            Self::BlockedUsers => storage_keys::BLOCKED_USERS,
+            Self::BothCreateAwaitingDecrypt => storage_keys::BOTH_CREATE_AWAITING_DECRYPT,
+            Self::LamportClock => storage_keys::LAMPORT_CLOCK,
+            Self::NostrWatermark => storage_keys::NOSTR_WATERMARK,
+            Self::NostrKeyPackageSlots => storage_keys::NOSTR_KEY_PACKAGE_SLOTS,
+            Self::NostrDiscoveryClaim => storage_keys::NOSTR_DISCOVERY_CLAIM,
+            Self::StateAdoption => storage_keys::STATE_ADOPTION,
+            Self::DataDocs => storage_keys::DATA_DOCS,
+            Self::DataDeltaLog => storage_keys::DATA_DELTA_LOG,
+            Self::DataSpaces => storage_keys::DATA_SPACES,
+        }
     }
 
     /// Whether this category's values must be sealed before they reach the
@@ -177,7 +253,10 @@ impl StateCategory {
             | Self::MediaDescriptors
             | Self::PeerKeyPackages
             | Self::NostrKeyPackageSlots
-            | Self::NostrDiscoveryClaim => true,
+            | Self::NostrDiscoveryClaim
+            | Self::DataDocs
+            | Self::DataDeltaLog
+            | Self::DataSpaces => true,
             Self::PeerCapabilities
             | Self::SessionStates
             | Self::WelcomeLifecycles
@@ -4692,6 +4771,80 @@ impl OfflineProtocol {
                     "Corrupted Lamport clock in storage (expected 8 bytes), starting fresh"
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod category_registration_tests {
+    use super::*;
+
+    /// Every category must round-trip through its key type.
+    ///
+    /// The gap this closes: `requires_sealing` is exhaustive, so a new
+    /// variant cannot skip the sealing decision, but `from_key_type` matches
+    /// on strings and happily compiles with an arm missing. A category in
+    /// that state fails only at runtime, on the first write, with "unknown
+    /// protocol-state category" — and only in whatever test happens to
+    /// exercise that particular write path. Here it fails in `cargo test`.
+    #[test]
+    fn every_category_maps_back_from_its_key_type() {
+        for category in StateCategory::ALL {
+            let key_type = category.key_type();
+            assert_eq!(
+                StateCategory::from_key_type(key_type),
+                Some(*category),
+                "{category:?} has no from_key_type arm for {key_type:?}"
+            );
+        }
+    }
+
+    /// Key types are the on-disk names of directories in every shipped
+    /// provider, so a duplicate would silently merge two categories.
+    #[test]
+    fn key_types_are_unique_across_categories() {
+        let mut seen = std::collections::HashSet::new();
+        for category in StateCategory::ALL {
+            assert!(
+                seen.insert(category.key_type()),
+                "{:?} reuses key type {:?}",
+                category,
+                category.key_type()
+            );
+        }
+    }
+
+    /// Documents carry user content, so all three data categories are sealed.
+    /// Stated as a test because the failure it prevents (plaintext documents
+    /// at rest) is silent: nothing observable changes when sealing is lost.
+    #[test]
+    fn data_categories_are_sealed_at_rest() {
+        for category in [
+            StateCategory::DataDocs,
+            StateCategory::DataDeltaLog,
+            StateCategory::DataSpaces,
+        ] {
+            assert!(
+                category.requires_sealing(),
+                "{category:?} must be sealed: it carries document content"
+            );
+        }
+    }
+
+    /// The data categories are post-split: there is no pre-split data for
+    /// them to inherit, and listing them would only cost a pointless
+    /// enumeration of the credential store on every launch.
+    #[test]
+    fn data_categories_are_not_adoptable() {
+        for key_type in [
+            storage_keys::DATA_DOCS,
+            storage_keys::DATA_DELTA_LOG,
+            storage_keys::DATA_SPACES,
+        ] {
+            assert!(
+                !storage_keys::ADOPTABLE_STATE_KEY_TYPES.contains(&key_type),
+                "{key_type} must not be adoptable"
+            );
         }
     }
 }

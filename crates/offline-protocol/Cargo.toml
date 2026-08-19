@@ -18,6 +18,14 @@ description = "Main protocol engine for the Offline Protocol SDK"
 [lints]
 workspace = true
 
+[features]
+default = ["data"]
+# Replicated documents. Gates the engine dependency and the store, never the
+# configuration section, the storage categories, or the events: those are
+# inert without the engine and gating them would fork the config surface and
+# the events guard test for no binary saving.
+data = ["dep:offline-protocol-data"]
+
 [dependencies]
 offline-protocol-core = { workspace = true }
 offline-protocol-transport = { workspace = true }
@@ -25,6 +33,12 @@ offline-protocol-router = { workspace = true }
 offline-protocol-reliability = { workspace = true }
 offline-protocol-mls = { workspace = true }
 offline-protocol-services = { workspace = true }
+# Optional: the replicated-document layer. Default on, because the mobile
+# bindings ship one FFI artifact and a feature-gated UDL object would be a
+# runtime checksum mismatch rather than a build error. Native consumers that
+# only want messaging opt out with `default-features = false` and pay none of
+# the engine's bytes.
+offline-protocol-data = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

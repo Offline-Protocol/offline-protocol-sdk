@@ -245,6 +245,16 @@ pub(crate) fn send_failure_token(err: &crate::Error) -> &'static str {
         E::UserBlocked(_) => "recipient_blocked",
         E::MediaTransferLimit(_) => "media_transfer_limit",
         E::GroupNotFound(_) => "group_not_found",
+        // Data-layer failures cannot reach a send path today: nothing in the
+        // data layer sends. They are classified anyway because this match is
+        // where the privacy decision is forced, and "unreachable" is a claim
+        // that stops being true the moment replication lands. Each token is
+        // locally minted and carries no identifier: the errors themselves
+        // interpolate only byte counts and a decode detail, never a space,
+        // document or peer.
+        E::DataDisabled | E::DataStorageUnavailable => "data_unavailable",
+        E::DocTooLarge { .. } => "data_doc_too_large",
+        E::DataCorrupted(_) => "data_corrupt",
         E::Other(_) => SEND_FAIL_REASON_TRANSPORT,
     }
 }
@@ -1653,6 +1663,39 @@ pub(crate) mod storage_keys {
     pub const STATE_ADOPTION: &str = "protocol_state_adoption";
     /// Key ID for the single state-adoption marker entry.
     pub const STATE_ADOPTION_ID: &str = "v1";
+
+    /// Key type for compacted replicated documents, one record per document.
+    ///
+    /// Key ID is `{space}/{doc}`. Both halves are validated by
+    /// `offline_protocol_data::validate_name`, whose charset excludes the
+    /// separator, so the composed key always parses back into the two parts
+    /// it was built from.
+    ///
+    /// Post-split only: deliberately absent from
+    /// [`ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split data to inherit
+    /// for it.
+    pub const DATA_DOCS: &str = "data_docs";
+    /// Key type for the uncompacted commit log of a replicated document.
+    ///
+    /// Key ID is `{space}/{doc}/{seq:016x}`, one record per persisted commit
+    /// batch. Append-only by construction: a commit writes a new record and
+    /// never rewrites an existing one, which is what keeps flash churn
+    /// proportional to what changed rather than to document size.
+    ///
+    /// Post-split only: deliberately absent from
+    /// [`ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split data to inherit
+    /// for it.
+    pub const DATA_DELTA_LOG: &str = "data_delta_log";
+    /// Key type for per-space document indexes and compaction bookkeeping.
+    ///
+    /// Key ID is the space id. Sync watermarks join this record when
+    /// replication lands; today it carries the document list and the
+    /// per-document commit sequence high-water mark.
+    ///
+    /// Post-split only: deliberately absent from
+    /// [`ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split data to inherit
+    /// for it.
+    pub const DATA_SPACES: &str = "data_spaces";
 
     /// Every key type that moved from secure storage into protocol-state
     /// storage when the two domains were split.

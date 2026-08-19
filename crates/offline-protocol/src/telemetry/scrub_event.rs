@@ -791,6 +791,28 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
         Event::UserUnblocked { user_id } => {
             hash_string(user_id, scrubber);
         }
+        // A space id IS the MLS scope the space rides on: a peer address or a
+        // group id, which is exactly the long-lived pseudonymous identifier
+        // this scrubber exists to hash. The document name is application
+        // content and can name whatever the app names it, so it hashes for
+        // the same reason a group name would.
+        Event::DataChanged {
+            space_id,
+            doc_id,
+            delta_bytes: _,
+        } => {
+            hash_string(space_id, scrubber);
+            hash_string(doc_id, scrubber);
+        }
+        Event::DataDocSizeWarning {
+            space_id,
+            doc_id,
+            compacted_bytes: _,
+            cap_bytes: _,
+        } => {
+            hash_string(space_id, scrubber);
+            hash_string(doc_id, scrubber);
+        }
     }
 }
 
@@ -871,7 +893,9 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::SecurityWarning { .. }
         | Event::MessageRelayed { .. }
         | Event::UserBlocked { .. }
-        | Event::UserUnblocked { .. } => (),
+        | Event::UserUnblocked { .. }
+        | Event::DataChanged { .. }
+        | Event::DataDocSizeWarning { .. } => (),
     }
 }
 
