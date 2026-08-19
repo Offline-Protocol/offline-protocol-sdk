@@ -8,7 +8,7 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use loro::{ExportMode, LoroDoc, LoroValue, VersionVector};
+use loro::{EncodedBlobMode, ExportMode, LoroDoc, LoroValue, VersionVector};
 
 use crate::error::{DataError, DataResult};
 use crate::policy;
@@ -78,6 +78,90 @@ impl ImportOutcome {
     pub fn is_parked(self) -> bool {
         matches!(self, Self::Parked)
     }
+}
+
+/// What a blob claims about itself, judged against one document.
+///
+/// Every field is a verdict rather than a measurement, because the engine's
+/// own metadata types must not cross this crate's boundary: pinning them in
+/// a caller would pin the engine. The verdicts exist so a caller can decide
+/// *not* to import, which is the only decision that helps when the bytes
+/// came off a network rather than out of a sealed record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobMeta {
+    already_applied: bool,
+    spans_trimmed_history: bool,
+    is_snapshot: bool,
+    change_count: u32,
+}
+
+impl BlobMeta {
+    /// Whether this document already holds every change the blob carries.
+    ///
+    /// True for the ordinary redelivery a ladder promising at-least-once
+    /// produces. Importing anyway would be merely wasteful for a fresh
+    /// document and actively dangerous for a compacted one, which is why
+    /// this is checked before anything reaches the engine.
+    pub fn already_applied(self) -> bool {
+        self.already_applied
+    }
+
+    /// Whether the blob carries changes from a range this document has
+    /// compacted away.
+    ///
+    /// A shallow snapshot trims history below a point, and the engine has an
+    /// open defect where changes referring below that point panic instead of
+    /// erroring, poisoning the document's lock as they go. Under the
+    /// `minisize` profile the SDK ships with `panic = "abort"`, so there is
+    /// no unwinding to catch: the only defense is never handing such a blob
+    /// over. A caller seeing this asks for a snapshot instead.
+    pub fn spans_trimmed_history(self) -> bool {
+        self.spans_trimmed_history
+    }
+
+    /// Whether the blob is a snapshot rather than a run of updates.
+    pub fn is_snapshot(self) -> bool {
+        self.is_snapshot
+    }
+
+    /// How many changes the blob claims to carry.
+    pub fn change_count(self) -> u32 {
+        self.change_count
+    }
+}
+
+/// The outcome of importing a blob that arrived from a peer.
+///
+/// Distinct from [`ImportOutcome`] because two of the four outcomes never
+/// reach the engine at all, and a caller has to tell "we already had this"
+/// apart from "this applied" to keep its own bookkeeping honest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteImport {
+    /// Applied and readable now.
+    Applied,
+    /// Accepted but parked behind a predecessor that has not arrived.
+    Parked,
+    /// Every change in it was already present; the engine was not touched.
+    AlreadyHave,
+    /// Refused: it refers to history this document has compacted away.
+    /// The caller should ask the sender for a snapshot instead.
+    RefusedTrimmedHistory,
+}
+
+/// What a peer needs in order to catch up with this document.
+///
+/// The ladder is deliberately explicit rather than "here are some bytes":
+/// only the caller knows the frame budget, and only this crate knows whether
+/// the updates it would have to send still exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatchUp {
+    /// The peer already has everything this document holds.
+    UpToDate,
+    /// The changes the peer is missing, encoded.
+    Updates(Vec<u8>),
+    /// The peer is missing changes this document has compacted away, so no
+    /// run of updates can express the gap. Send a snapshot.
+    NeedsSnapshot,
 }
 
 /// A replicated document.
@@ -183,6 +267,101 @@ impl DataDoc {
                 ))
             }
         }
+    }
+
+    /// Judge a blob against this document without letting the engine touch
+    /// it.
+    ///
+    /// The whole point is that this runs *first*. Header decoding with the
+    /// checksum on is the cheap part; the verdicts it produces are what let
+    /// a caller refuse the two blob shapes that are known to end a process
+    /// rather than return an error.
+    pub fn inspect(&self, bytes: &[u8]) -> DataResult<BlobMeta> {
+        self.check_live()?;
+        let meta = LoroDoc::decode_import_blob_meta(bytes, true)
+            .map_err(|err| DataError::Corrupt(err.to_string()))?;
+
+        let is_snapshot = matches!(
+            meta.mode,
+            EncodedBlobMode::Snapshot
+                | EncodedBlobMode::OutdatedSnapshot
+                | EncodedBlobMode::ShallowSnapshot
+        );
+        let already_applied = self.inner.oplog_vv().includes_vv(&meta.partial_end_vv);
+
+        // A snapshot carries its own base, so the trim question does not
+        // arise for one. For a run of updates it does: if this document's
+        // history starts at or after where the blob's does, the blob is
+        // describing changes on top of ops that are no longer here.
+        let shallow_since = self.inner.shallow_since_vv();
+        let spans_trimmed_history = !is_snapshot
+            && !shallow_since.is_empty()
+            && shallow_since.to_vv().includes_vv(&meta.partial_start_vv);
+
+        Ok(BlobMeta {
+            already_applied,
+            spans_trimmed_history,
+            is_snapshot,
+            change_count: meta.change_num,
+        })
+    }
+
+    /// Apply a blob that arrived from a peer.
+    ///
+    /// [`DataDoc::import`] exists for bytes that came back out of a sealed
+    /// record, where an AEAD tag has already established that this SDK wrote
+    /// them. Nothing of the sort is true here: a peer is authenticated, which
+    /// says who sent the bytes and nothing at all about their shape. So this
+    /// path re-judges every blob with [`DataDoc::inspect`] and declines the
+    /// two shapes the engine is known to abort on, rather than relying on an
+    /// unwinding catch that the shipped mobile profile does not have.
+    ///
+    /// Refusing is not a failure: a duplicate is the ladder keeping its
+    /// at-least-once promise, and a trimmed-history gap is answered by asking
+    /// for a snapshot. Both are recorded outcomes, not errors.
+    pub fn import_remote(&mut self, bytes: &[u8]) -> DataResult<RemoteImport> {
+        let meta = self.inspect(bytes)?;
+        if meta.already_applied() {
+            return Ok(RemoteImport::AlreadyHave);
+        }
+        if meta.spans_trimmed_history() {
+            return Ok(RemoteImport::RefusedTrimmedHistory);
+        }
+        Ok(match self.import(bytes)? {
+            ImportOutcome::Applied => RemoteImport::Applied,
+            ImportOutcome::Parked => RemoteImport::Parked,
+        })
+    }
+
+    /// Encode what a replica at `from` is missing.
+    ///
+    /// `from` is a token that replica produced with [`DataDoc::version`].
+    /// A token this document cannot decode is treated as corrupt rather than
+    /// as "send everything": on the sync path the token is remote input, and
+    /// answering a malformed one with the whole document would make a garbled
+    /// byte an amplification lever.
+    pub fn export_since(&self, from: &VersionToken) -> DataResult<CatchUp> {
+        self.check_live()?;
+        let from_vv = VersionVector::decode(from.as_bytes())
+            .map_err(|err| DataError::Corrupt(err.to_string()))?;
+
+        if from_vv.includes_vv(&self.inner.oplog_vv()) {
+            return Ok(CatchUp::UpToDate);
+        }
+
+        // The mirror of the refusal in `import_remote`: if this document's
+        // history no longer reaches back to where the peer is, no run of
+        // updates can express the gap, and asking the engine for one is the
+        // same defect from the sending side.
+        let shallow_since = self.inner.shallow_since_vv();
+        if !shallow_since.is_empty() && !from_vv.includes_vv(&shallow_since.to_vv()) {
+            return Ok(CatchUp::NeedsSnapshot);
+        }
+
+        self.inner
+            .export(ExportMode::updates(&from_vv))
+            .map(CatchUp::Updates)
+            .map_err(|err| DataError::Engine(err.to_string()))
     }
 
     /// Declare everything currently in the document as already persisted.

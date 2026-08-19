@@ -1,6 +1,6 @@
 //! Unit tests for the replicated-document layer.
 
-use crate::doc::{DataDoc, ImportOutcome};
+use crate::doc::{CatchUp, DataDoc, ImportOutcome, RemoteImport};
 use crate::error::DataError;
 use crate::policy;
 use crate::value::DataValue;
@@ -583,4 +583,304 @@ fn a_value_larger_than_any_document_is_refused() {
     // The refusal is at the operation, so nothing reached the document.
     assert_eq!(doc.map_get("m", "k").expect("get"), None);
     assert!(doc.commit().expect("commit").is_none());
+}
+
+/// A document holding `commits` separate commits, plus the deltas it made,
+/// in commit order.
+fn source_with_commits(commits: usize) -> (DataDoc, Vec<Vec<u8>>) {
+    let mut doc = DataDoc::new();
+    let mut deltas = Vec::new();
+    for n in 0..commits {
+        doc.map_set("m", &format!("k{n}"), DataValue::int(n as i64))
+            .expect("set");
+        deltas.push(doc.commit().expect("commit").expect("a delta").bytes);
+    }
+    (doc, deltas)
+}
+
+/// A replica that has applied `deltas` and then compacted, so its history is
+/// trimmed at its current frontier: the shape a document has after every
+/// ordinary compaction pass, and the shape the engine mishandles.
+fn compacted_replica(deltas: &[Vec<u8>]) -> DataDoc {
+    let mut staging = DataDoc::new();
+    for delta in deltas {
+        staging.import(delta).expect("import");
+    }
+    let compacted = staging.export_compacted().expect("compact");
+
+    let mut replica = DataDoc::new();
+    replica.import(&compacted).expect("import compacted");
+    replica
+}
+
+#[test]
+fn a_redelivered_delta_never_reaches_a_compacted_document() {
+    let (_source, deltas) = source_with_commits(2);
+    let mut replica = compacted_replica(&deltas);
+
+    // The ladder promises at-least-once, so this redelivery is ordinary
+    // traffic and not an attack. It is also the exact shape that refers to
+    // history the compaction trimmed away, which the engine answers with a
+    // panic rather than an error (loro #1068) and which `panic = "abort"`
+    // turns into a dead process on mobile.
+    let meta = replica.inspect(&deltas[1]).expect("inspect");
+    assert!(
+        meta.already_applied(),
+        "a delta already folded into the snapshot was not recognized"
+    );
+    assert_eq!(
+        replica.import_remote(&deltas[1]).expect("import remote"),
+        RemoteImport::AlreadyHave,
+        "a redelivered delta was handed to the engine"
+    );
+
+    // The document is untouched and still readable, which is the point.
+    assert_eq!(
+        replica.map_get("m", "k1").expect("get"),
+        Some(DataValue::int(1))
+    );
+    assert!(!replica.is_poisoned());
+}
+
+#[test]
+fn a_blob_spanning_compacted_history_is_refused_rather_than_imported() {
+    let (mut source, deltas) = source_with_commits(2);
+    let mut replica = compacted_replica(&deltas);
+
+    // A third change the replica has not seen, encoded from the beginning of
+    // history: partly new, but reaching back below the replica's trim point.
+    // No run of updates can express that gap, so the only safe answer is to
+    // decline and ask for a snapshot.
+    source.map_set("m", "k2", DataValue::int(2)).expect("set");
+    source.commit().expect("commit").expect("a delta");
+    let from_scratch = match source
+        .export_since(&DataDoc::new().version())
+        .expect("export since nothing")
+    {
+        CatchUp::Updates(bytes) => bytes,
+        other => panic!("expected updates, got {other:?}"),
+    };
+
+    let meta = replica.inspect(&from_scratch).expect("inspect");
+    assert!(
+        !meta.already_applied(),
+        "the blob carries a change the replica lacks"
+    );
+    assert!(
+        meta.spans_trimmed_history(),
+        "a blob reaching below the trim point was not recognized"
+    );
+    assert_eq!(
+        replica.import_remote(&from_scratch).expect("import remote"),
+        RemoteImport::RefusedTrimmedHistory,
+        "a blob spanning trimmed history was handed to the engine"
+    );
+    assert!(!replica.is_poisoned());
+
+    // A snapshot carries its own base, so it is the answer to that refusal.
+    let snapshot = source.export_raw().expect("snapshot");
+    assert!(replica.inspect(&snapshot).expect("inspect").is_snapshot());
+    assert_eq!(
+        replica.import_remote(&snapshot).expect("import snapshot"),
+        RemoteImport::Applied
+    );
+    assert_eq!(
+        replica.map_get("m", "k2").expect("get"),
+        Some(DataValue::int(2)),
+        "the snapshot did not close the gap"
+    );
+}
+
+#[test]
+fn a_fresh_remote_delta_applies_and_a_parked_one_is_reported() {
+    let (_source, deltas) = source_with_commits(2);
+
+    let mut replica = DataDoc::new();
+    assert_eq!(
+        replica.import_remote(&deltas[1]).expect("import"),
+        RemoteImport::Parked,
+        "an orphan remote delta was reported as applied"
+    );
+    assert_eq!(
+        replica.import_remote(&deltas[0]).expect("import"),
+        RemoteImport::Applied
+    );
+    assert_eq!(
+        replica.map_get("m", "k1").expect("get"),
+        Some(DataValue::int(1)),
+        "the parked change did not apply once its predecessor arrived"
+    );
+}
+
+#[test]
+fn corrupt_remote_bytes_are_refused_without_poisoning_the_document() {
+    let (_source, deltas) = source_with_commits(1);
+    let mut replica = DataDoc::new();
+
+    let mut corrupt = deltas[0].clone();
+    let last = corrupt.len() - 1;
+    corrupt[last] ^= 0xff;
+    assert!(matches!(
+        replica.import_remote(&corrupt),
+        Err(DataError::Corrupt(_))
+    ));
+    assert!(matches!(
+        replica.inspect(b"not a blob at all"),
+        Err(DataError::Corrupt(_))
+    ));
+
+    // Refusing junk must leave the handle usable: a peer that can poison a
+    // document by sending one bad frame has a denial of service.
+    assert!(!replica.is_poisoned());
+    assert_eq!(
+        replica.import_remote(&deltas[0]).expect("import"),
+        RemoteImport::Applied
+    );
+}
+
+#[test]
+fn catch_up_serves_exactly_what_a_peer_is_missing() {
+    let (mut source, deltas) = source_with_commits(1);
+
+    let mut peer = DataDoc::new();
+    peer.import(&deltas[0]).expect("import");
+    let peer_version = peer.version();
+
+    // Nothing new yet.
+    assert_eq!(
+        source.export_since(&peer_version).expect("export since"),
+        CatchUp::UpToDate
+    );
+
+    source
+        .map_set("m", "later", DataValue::int(9))
+        .expect("set");
+    source.commit().expect("commit").expect("a delta");
+
+    let updates = match source.export_since(&peer_version).expect("export since") {
+        CatchUp::Updates(bytes) => bytes,
+        other => panic!("expected updates, got {other:?}"),
+    };
+    assert_eq!(
+        peer.import_remote(&updates).expect("import"),
+        RemoteImport::Applied,
+        "catch-up updates did not apply cleanly"
+    );
+    assert_eq!(
+        peer.map_get("m", "later").expect("get"),
+        Some(DataValue::int(9))
+    );
+
+    // And a peer that already has everything is told so rather than being
+    // sent bytes: on a mesh the difference is a frame per idle reconnect.
+    assert_eq!(
+        source.export_since(&peer.version()).expect("export since"),
+        CatchUp::UpToDate
+    );
+}
+
+#[test]
+fn catch_up_from_before_a_compaction_asks_for_a_snapshot() {
+    let (_source, deltas) = source_with_commits(2);
+    let mut replica = compacted_replica(&deltas);
+    replica.map_set("m", "own", DataValue::int(5)).expect("set");
+    replica.commit().expect("commit").expect("a delta");
+
+    // A peer that has nothing cannot be served from a document whose early
+    // history was compacted away. Answering with updates anyway is the
+    // sending half of the same defect `import_remote` declines.
+    assert_eq!(
+        replica
+            .export_since(&DataDoc::new().version())
+            .expect("export since nothing"),
+        CatchUp::NeedsSnapshot
+    );
+}
+
+#[test]
+fn a_malformed_version_token_is_refused_rather_than_answered_with_everything() {
+    let (source, _deltas) = source_with_commits(1);
+    let garbled = crate::doc::VersionToken::from_bytes(vec![0xff; 16]);
+
+    // Treating an undecodable token as "knows nothing" would make one
+    // corrupt byte an amplification lever on the sync path.
+    assert!(matches!(
+        source.export_since(&garbled),
+        Err(DataError::Corrupt(_))
+    ));
+}
+
+#[test]
+fn a_branch_forked_below_the_trim_point_never_reaches_the_engine() {
+    // The shape loro #1068 names, and the reason this gate is structural
+    // rather than defensive. Verified on 1.13.9 by removing the refusal:
+    // the engine panics in `pending_changes.rs` and the retry panics again
+    // on the mutex that first panic poisoned. Under the `minisize` profile
+    // the SDK ships with `panic = "abort"`, so there is no catch to reach.
+    let (_source, deltas) = source_with_commits(2);
+
+    // A replica that saw only the first change, then edited concurrently.
+    // Its change depends on history the compacted replica has trimmed and
+    // is not an ancestor of anything that replica holds.
+    let mut fork = DataDoc::new();
+    fork.import(&deltas[0]).expect("seed the fork");
+    fork.map_set("m", "fork", DataValue::int(42)).expect("set");
+    let fork_delta = fork.commit().expect("commit").expect("a delta").bytes;
+
+    let mut replica = compacted_replica(&deltas);
+    assert!(
+        replica
+            .inspect(&fork_delta)
+            .expect("inspect")
+            .spans_trimmed_history(),
+        "a branch forked below the trim point was not recognized"
+    );
+    assert_eq!(
+        replica.import_remote(&fork_delta).expect("import remote"),
+        RemoteImport::RefusedTrimmedHistory,
+        "a branch forked below the trim point was handed to the engine"
+    );
+
+    // The document survives, which is the whole point: refusing costs one
+    // extra round trip, and importing costs the process.
+    assert!(!replica.is_poisoned());
+    assert_eq!(
+        replica.map_get("m", "k1").expect("get"),
+        Some(DataValue::int(1))
+    );
+}
+
+#[test]
+fn an_ordinary_delta_after_a_compaction_still_applies() {
+    // The other half of the trim gate: it must refuse the forked branch
+    // above without refusing steady-state traffic. A gate that answered
+    // "send a snapshot" to every delta a synced peer produces after the
+    // first compaction would be correct and useless.
+    let mut alice = DataDoc::new();
+    alice.map_set("m", "a", DataValue::int(0)).expect("set");
+    let from_alice = alice.commit().expect("commit").expect("a delta").bytes;
+
+    let mut bob = DataDoc::new();
+    bob.import(&from_alice).expect("import");
+    bob.map_set("m", "b", DataValue::int(1)).expect("set");
+    let from_bob = bob.commit().expect("commit").expect("a delta").bytes;
+    alice.import(&from_bob).expect("import");
+
+    // Alice compacts, as every flush eventually does.
+    let compacted = alice.export_compacted().expect("compact");
+    let mut alice = DataDoc::new();
+    alice.import(&compacted).expect("reopen compacted");
+
+    bob.map_set("m", "b2", DataValue::int(2)).expect("set");
+    let next = bob.commit().expect("commit").expect("a delta").bytes;
+
+    assert_eq!(
+        alice.import_remote(&next).expect("import remote"),
+        RemoteImport::Applied,
+        "an ordinary delta was refused because the receiver had compacted"
+    );
+    assert_eq!(
+        alice.map_get("m", "b2").expect("get"),
+        Some(DataValue::int(2))
+    );
 }

@@ -32,7 +32,9 @@ pub mod policy;
 /// Values stored in collections.
 pub mod value;
 
-pub use doc::{DataDoc, Delta, DocStats, ImportOutcome, VersionToken};
+pub use doc::{
+    BlobMeta, CatchUp, DataDoc, Delta, DocStats, ImportOutcome, RemoteImport, VersionToken,
+};
 pub use error::{DataError, DataResult};
 pub use policy::{
     should_compact, size_verdict, SizeVerdict, COMPACT_DELTA_LOG_RATIO, COMPACT_MAX_COMMITS,
