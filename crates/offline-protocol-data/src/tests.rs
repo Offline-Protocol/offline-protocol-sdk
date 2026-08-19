@@ -884,3 +884,50 @@ fn an_ordinary_delta_after_a_compaction_still_applies() {
         Some(DataValue::int(2))
     );
 }
+
+#[test]
+fn a_snapshot_closes_a_trim_gap_only_when_the_sender_holds_what_we_kept() {
+    // The two halves of what refusing a blob can and cannot buy, pinned
+    // together because the difference is invisible from the frame and
+    // decides whether the peers ever agree again.
+
+    // Healable: the sender's history contains everything the compacted
+    // replica retained, so its snapshot connects to what is left.
+    let (mut source, deltas) = source_with_commits(2);
+    let mut replica = compacted_replica(&deltas);
+    source.map_set("m", "k2", DataValue::int(2)).expect("set");
+    source.commit().expect("commit").expect("a delta");
+    let snapshot = source.export_raw().expect("snapshot");
+    assert_eq!(
+        replica.import_remote(&snapshot).expect("import"),
+        RemoteImport::Applied,
+        "a snapshot from a sender that is strictly ahead must close the gap"
+    );
+
+    // Unhealable: a replica that forked *below* the trim point holds
+    // changes whose ancestors this one deleted. No blob can carry them,
+    // including a whole document, because the dependencies are gone from
+    // the receiver rather than missing from the message. The refusal is
+    // still right — the alternative is aborting the process — but it buys
+    // termination, not convergence, and a caller must not report otherwise.
+    let mut fork = DataDoc::new();
+    fork.import(&deltas[0]).expect("seed the fork");
+    fork.map_set("m", "fork", DataValue::int(42)).expect("set");
+    fork.commit().expect("commit").expect("a delta");
+
+    let mut compacted = compacted_replica(&deltas);
+    assert_eq!(
+        compacted
+            .import_remote(&fork.export_raw().expect("snapshot"))
+            .expect("import remote"),
+        RemoteImport::RefusedTrimmedHistory,
+        "a snapshot of a branch forked below the trim point was handed to \
+         the engine, which aborts on it exactly as it does on a delta"
+    );
+    assert!(!compacted.is_poisoned());
+    assert_eq!(
+        compacted.map_get("m", "k1").expect("get"),
+        Some(DataValue::int(1)),
+        "refusing must leave the document readable"
+    );
+}

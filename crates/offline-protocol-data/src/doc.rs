@@ -106,15 +106,28 @@ impl BlobMeta {
         self.already_applied
     }
 
-    /// Whether the blob carries changes from a range this document has
-    /// compacted away.
+    /// Whether the blob needs history this document has compacted away.
     ///
     /// A shallow snapshot trims history below a point, and the engine has an
     /// open defect where changes referring below that point panic instead of
     /// erroring, poisoning the document's lock as they go. Under the
     /// `minisize` profile the SDK ships with `panic = "abort"`, so there is
     /// no unwinding to catch: the only defense is never handing such a blob
-    /// over. A caller seeing this asks for a snapshot instead.
+    /// over.
+    ///
+    /// It is asked of a whole document as well as of a run of changes, and
+    /// the two are asked differently. A snapshot carries its own base, so
+    /// the question for one is not where it starts but whether it still
+    /// covers what this document kept: a replica that trimmed history can
+    /// merge a snapshot that contains the ops it retained, and aborts on one
+    /// that does not. Exempting snapshots because they are self contained
+    /// reads well and is wrong, because the missing ancestors are missing
+    /// from the *receiver*.
+    ///
+    /// A caller seeing this on a run of changes asks for a snapshot. A
+    /// caller seeing it on a snapshot has reached the end of what
+    /// replication can do: the peer forked below a point this replica
+    /// deleted, and nothing either side can send carries the ancestors back.
     pub fn spans_trimmed_history(self) -> bool {
         self.spans_trimmed_history
     }
@@ -289,14 +302,26 @@ impl DataDoc {
         );
         let already_applied = self.inner.oplog_vv().includes_vv(&meta.partial_end_vv);
 
-        // A snapshot carries its own base, so the trim question does not
-        // arise for one. For a run of updates it does: if this document's
-        // history starts at or after where the blob's does, the blob is
-        // describing changes on top of ops that are no longer here.
+        // A document that has never been trimmed can take anything.
         let shallow_since = self.inner.shallow_since_vv();
-        let spans_trimmed_history = !is_snapshot
-            && !shallow_since.is_empty()
-            && shallow_since.to_vv().includes_vv(&meta.partial_start_vv);
+        let spans_trimmed_history = if shallow_since.is_empty() {
+            false
+        } else if is_snapshot {
+            // A trimmed document cannot merge a branch at all: the ops the
+            // branch depends on were deleted here, and supplying them in
+            // the snapshot does not help, because they sit below this
+            // document's own base. The only snapshot it can take is one
+            // that supersedes it outright, so that is the test: everything
+            // held here has to be in there too. Anything less is a fork,
+            // and handing one over aborts the process exactly as a run of
+            // changes of the same shape does.
+            !meta.partial_end_vv.includes_vv(&self.inner.oplog_vv())
+        } else {
+            // If this document's history starts at or after where the blob's
+            // does, the blob describes changes on top of ops that are no
+            // longer here.
+            shallow_since.to_vv().includes_vv(&meta.partial_start_vv)
+        };
 
         Ok(BlobMeta {
             already_applied,
@@ -317,8 +342,11 @@ impl DataDoc {
     /// unwinding catch that the shipped mobile profile does not have.
     ///
     /// Refusing is not a failure: a duplicate is the ladder keeping its
-    /// at-least-once promise, and a trimmed-history gap is answered by asking
-    /// for a snapshot. Both are recorded outcomes, not errors.
+    /// at-least-once promise, and a trimmed-history gap in a run of changes
+    /// is answered by asking for a snapshot. Both are recorded outcomes, not
+    /// errors. The same refusal on a snapshot is the exception: it means the
+    /// replicas have diverged past anything a frame can carry, and the
+    /// caller has nothing left to ask for.
     pub fn import_remote(&mut self, bytes: &[u8]) -> DataResult<RemoteImport> {
         let meta = self.inspect(bytes)?;
         if meta.already_applied() {
