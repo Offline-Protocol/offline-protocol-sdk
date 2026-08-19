@@ -65,6 +65,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   sent; carrying one over the media transfer path is not yet implemented.
   Group spaces are not yet replicated — this release is 1:1 only.
 
+  **One known gap.** Replicas that stay in contact converge. Replicas
+  separated by a partition that outlives a compaction may not: compaction
+  deletes history, and a peer that edited from below the deleted point holds
+  changes whose ancestors are gone on the other side, which no frame can
+  carry back. Both sides keep their own edits, the refusal is logged, and
+  neither aborts. It closes when the engine's import hardening lands.
+
 - **Replicated documents: a second application class on the protocol.** A new
   `offline-protocol-data` crate adds offline-first documents that any member of
   a space can edit while disconnected, merging deterministically when replicas

@@ -618,15 +618,58 @@ impl OfflineProtocol {
 
     /// Every document in a space with the version we hold of it.
     pub(crate) fn data_sync_versions(&mut self, space: &str) -> Result<BTreeMap<String, String>> {
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-
         let docs = self.data_list_docs(space)?;
         let mut versions = BTreeMap::new();
         for doc in docs {
-            let token = self.read_doc(space, &doc, |document| Ok(document.version()))?;
-            versions.insert(doc, BASE64.encode(token.as_bytes()));
+            let encoded = self.data_doc_version(space, &doc)?;
+            versions.insert(doc, encoded);
         }
         Ok(versions)
+    }
+
+    /// The version we hold of one document, encoded as a frame carries it.
+    pub(crate) fn data_doc_version(&mut self, space: &str, doc: &str) -> Result<String> {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+        let token = self.read_doc(space, doc, |document| Ok(document.version()))?;
+        Ok(BASE64.encode(token.as_bytes()))
+    }
+
+    /// The names a space holds, or `None` if there is nothing to read.
+    ///
+    /// Answered off the space index, which `load_space` has already
+    /// reconciled against the records themselves and cached. Opening a
+    /// document to find out would defeat both callers, whose whole question
+    /// is whether opening one is allowed.
+    fn space_docs(&mut self, space: &str) -> Option<&BTreeSet<String>> {
+        if offline_protocol_data::validate_name(space).is_err() {
+            return None;
+        }
+        let storage = self.data_storage_for_sync()?;
+        self.load_space(storage.as_ref(), space).ok()?;
+        self.data.spaces.get(space).map(|record| &record.docs)
+    }
+
+    /// Whether `space` already holds `doc`.
+    pub(crate) fn data_holds_doc(&mut self, space: &str, doc: &str) -> bool {
+        self.space_docs(space)
+            .is_some_and(|docs| docs.contains(doc))
+    }
+
+    /// Whether a document a peer named may be stored in `space`.
+    ///
+    /// One already held always may; a new one only while the space is under
+    /// `cap`. The cap is a parameter rather than a constant here because it
+    /// bounds what a *peer* can talk this device into storing, which is a
+    /// replication policy: an application creating its own documents is not
+    /// subject to it.
+    ///
+    /// A space that cannot be read admits, rather than refusing on a storage
+    /// hiccup: whatever follows fails on the same storage and reports it
+    /// where the failure actually is.
+    pub(crate) fn data_space_admits_doc(&mut self, space: &str, doc: &str, cap: usize) -> bool {
+        self.space_docs(space)
+            .is_none_or(|docs| docs.contains(doc) || docs.len() < cap)
     }
 
     /// What a replica at `theirs` is missing from a document.
@@ -1062,9 +1105,13 @@ impl OfflineProtocol {
         // something already on disk.
         //
         // The oversized branch wrote a compacted snapshot instead of a delta
-        // record, so there is no delta to push; the peer's next version
-        // offer finds the gap and the catch-up ladder answers it.
-        if !oversized {
+        // record, so there is no delta to push. Offering versions is how the
+        // peer finds the gap: waiting for its next offer would leave both
+        // replicas believing they agree for as long as the link holds, since
+        // a link that never drops never fires a trigger.
+        if oversized {
+            self.nudge_data_sync(space, origin, "oversized_commit");
+        } else {
             self.push_data_delta(space, doc, &delta.bytes, origin);
         }
 

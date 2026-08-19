@@ -71,12 +71,23 @@ rather than errors:
 - **Already applied.** The document holds everything the blob carries. This
   is the ordinary redelivery an at-least-once ladder produces, and on a
   compacted document it is also the #1068 shape.
-- **Reaches below the trim point.** No run of changes can express the gap, so
-  the answer is to ask for a snapshot instead.
+- **Needs history this replica trimmed.** Asked of a whole document as well
+  as of a run of changes, and asked differently for each. For a run of
+  changes: does it start below this document's base. For a snapshot: does it
+  still contain everything this document holds.
 
-The second refusal has to be narrow as well as safe. Refusing every change a
-synced peer sends after the first compaction would be sound and useless, so
-that half is pinned by its own test.
+Exempting snapshots from the second verdict is the mistake this design made
+first, on the reasoning that a snapshot carries its own base so the trim
+question cannot arise for one. It reads well and it is wrong, because the
+missing ancestors are missing from the *receiver*. A trimmed replica deleted
+the ops a forked branch depends on, and supplying them inside the snapshot
+does not help: they sit below the replica's own base. Handing one over aborts
+the process exactly as a run of changes of the same shape does, which is what
+the test now asserts by failing with `SIGABRT` when the verdict is removed.
+
+The verdict has to be narrow as well as safe. Refusing every change a synced
+peer sends after the first compaction would be sound and useless, so that
+half is pinned by its own test.
 
 **Failure prevented:** an aborted process, or an unrecoverable document, from
 bytes that are perfectly ordinary traffic.
@@ -119,9 +130,28 @@ crash, to solve a problem the anti-entropy exchange already solves.
   contents, abort the process once per unique blob on a `panic = "abort"`
   build. It is attributable, it is bounded by layer 4, and it requires
   someone the user has already accepted into a shared document.
-- The refusals cost round trips, never convergence. Every one of them is
-  answered by the version exchange, which is why they can be conservative
-  without stalling.
+- A refusal on a run of changes costs a round trip. The receiver names what
+  would work (`need_snap`), and a sender holding a superset of what the
+  receiver kept answers with a snapshot that closes the gap.
+
+  Answering with a version offer instead does not work, and the failure is
+  not a slow one: the peer recomputes changes since our version, which is the
+  same refused delta, and the two sides trade it for as long as both keep at
+  it. That is why the request is its own frame rather than a reuse of the
+  offer.
+
+- **A refusal on a snapshot costs convergence, and this is a real limit
+  rather than a round trip.** When two replicas fork below a point one of
+  them has compacted away, the ancestors the branch depends on were deleted
+  on that side. No frame carries them back, including the whole document, so
+  the two stay apart and the divergence is logged rather than retried. It
+  takes a partition that outlives a compaction, which is ordinary, so this is
+  a known gap in 1:1 replication and not a corner. Refusing is still correct:
+  the alternative is not convergence, it is an aborted process.
+
+  It shrinks the same way the rest of this does, and in the meantime the
+  honest shape of the guarantee is: replicas that stay in contact converge,
+  and replicas separated across a compaction may not.
 - This is a workaround for engine defects, and it should shrink. When loro's
   import hardening reaches the Rust release, the pin moves (re-running the
   MSRV check and the binary size measurement, per ADR 0018) and layer 3's

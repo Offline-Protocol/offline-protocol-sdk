@@ -29,6 +29,17 @@
 //! reconciled after a crash is state that can be wrong, and the version
 //! exchange already answers the only question that matters.
 //!
+//! # Every leg ends
+//!
+//! An inbound frame produces at most one kind of outbound answer, and every
+//! answer is itself terminal: an offer provokes one reply and the reply
+//! provokes nothing, a delta that cannot apply provokes one request, and the
+//! snapshot that request is answered with provokes nothing at all. That is
+//! the property to preserve when adding a frame kind. Two replicas that
+//! answer each other's answers converge perfectly well and then talk until
+//! the battery dies, and the failure has no symptom on either device except
+//! traffic.
+//!
 //! # Remote bytes are not our bytes
 //!
 //! Everywhere else in the data layer, the argument for handing bytes to the
@@ -83,6 +94,17 @@ const MAX_DOCS_PER_VERSION_FRAME: usize = 128;
 /// repeats it anyway.
 const DATA_SYNC_OFFER_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Documents one space may hold on a peer's say-so.
+///
+/// Every name in an offer that this device does not recognise becomes a
+/// stored document, and nothing else bounds how many names one exchange can
+/// carry. The ceiling is far above what two people sharing documents reach
+/// and far below what a peer streaming fresh names could otherwise spend, so
+/// it is a bound on abuse rather than a product limit. It applies only to
+/// documents a peer names: an application creating its own is not restricted
+/// by it, and those still replicate outward.
+pub(crate) const MAX_DOCS_PER_SPACE: usize = 1024;
+
 /// Blob digests remembered per space after a crash.
 ///
 /// Small on purpose. The list only has to outlive the sender's retries of
@@ -102,6 +124,19 @@ enum SyncBody {
     Versions {
         #[serde(default)]
         reply: bool,
+        /// Whether this frame carries less than everything the sender holds:
+        /// one frame of an offer split across several, or a single document
+        /// named because something about it needs answering.
+        ///
+        /// It exists because a receiver reads a document's *absence* from an
+        /// offer as "they have never seen this", and answers with the whole
+        /// document. That inference needs the complete list. Drawn from one
+        /// frame of a split offer it fires on every document the frame did
+        /// not happen to carry, so a peer holding more documents than one
+        /// frame fits would be sent the entire space, in full, on every
+        /// exchange, while perfectly in sync.
+        #[serde(default)]
+        partial: bool,
         /// Document name to base64 of its version token.
         docs: BTreeMap<String, String>,
     },
@@ -112,6 +147,27 @@ enum SyncBody {
     /// express.
     #[serde(rename = "snap")]
     Snapshot { doc: String, blob: String },
+    /// "No run of changes can close my gap in this document; send the whole
+    /// thing."
+    ///
+    /// The frame that makes a refusal recoverable. Without it a receiver
+    /// that declines a delta for reaching below its trim point has no way to
+    /// say what would work: answering with a version offer instead asks the
+    /// sender to compute changes since our version, which is the same
+    /// refused delta again, for as long as both sides keep at it.
+    #[serde(rename = "need_snap")]
+    NeedSnapshot { doc: String },
+}
+
+/// Which frame a blob arrived in.
+///
+/// Carried into the import so a rung of the catch-up ladder knows whether
+/// there is a rung above it. A delta that cannot apply has one; a snapshot
+/// is already the top, and asking again returns the same bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlobKind {
+    Delta,
+    Snapshot,
 }
 
 /// Per-space replication bookkeeping.
@@ -159,13 +215,40 @@ impl OfflineProtocol {
         if !self.data_sync_active(peer) {
             return;
         }
-        let now = Instant::now();
         if let Some(last) = self.last_data_sync_offer.get(peer) {
-            if now.duration_since(*last) < DATA_SYNC_OFFER_INTERVAL {
+            if Instant::now().duration_since(*last) < DATA_SYNC_OFFER_INTERVAL {
                 return;
             }
         }
-        self.last_data_sync_offer.insert(peer.to_string(), now);
+        self.offer_versions(peer, cause);
+    }
+
+    /// Offer our versions because a change happened that no frame carried,
+    /// without waiting for the rate limit.
+    ///
+    /// `origin` names the peer a change arrived from, so one applied from
+    /// the very peer this space replicates with is not announced back.
+    ///
+    /// The limiter damps discovery flapping, where the offer it suppresses
+    /// is a sweep the next trigger repeats anyway. Nothing repeats this one.
+    /// A change too large to inline left no trace on the wire at all, so
+    /// until somebody asks, both sides hold documents they believe agree;
+    /// on a link that never drops there is no next trigger to ask.
+    pub(crate) fn nudge_data_sync(&mut self, space: &str, origin: Option<&str>, cause: &str) {
+        if origin == Some(space) || !self.data_sync_active(space) {
+            return;
+        }
+        self.offer_versions(space, cause);
+    }
+
+    /// Send our version of every document in a space to the peer that names
+    /// it, and start the window that suppresses the next sweep.
+    fn offer_versions(&mut self, peer: &str, cause: &str) {
+        // Stamped before the read rather than after the send. A version read
+        // that fails will still fail a millisecond from now, and retrying it
+        // at discovery speed is the traffic the window exists to prevent.
+        self.last_data_sync_offer
+            .insert(peer.to_string(), Instant::now());
 
         let docs = match self.data_sync_versions(peer) {
             Ok(docs) => docs,
@@ -195,9 +278,47 @@ impl OfflineProtocol {
                 .map(|chunk| chunk.iter().cloned().collect())
                 .collect()
         };
+        // Every frame of a split offer is partial, including the last: the
+        // inference that needs the complete list cannot be drawn from any
+        // one of them, and there is nowhere to accumulate them that a
+        // restart would not have to reconcile.
+        let partial = batches.len() > 1;
         for batch in batches {
-            self.send_sync_frame(peer, &SyncBody::Versions { reply, docs: batch });
+            self.send_sync_frame(
+                peer,
+                &SyncBody::Versions {
+                    reply,
+                    partial,
+                    docs: batch,
+                },
+            );
         }
+    }
+
+    /// Ask the peer for what we are missing in one document, without
+    /// starting an exchange.
+    ///
+    /// Both flags are load-bearing. `reply` collects the catch-up while
+    /// suppressing the counter-offer, so a request cannot start a chain of
+    /// its own; `partial` keeps the peer from reading one name as the
+    /// complete list and answering with every other document in the space.
+    fn request_doc_catch_up(&mut self, space: &str, doc: &str) {
+        let version = match self.data_doc_version(space, doc) {
+            Ok(version) => version,
+            Err(err) => {
+                warn!(space, doc, error = %err, "Could not read our version to ask for the gap");
+                return;
+            }
+        };
+        let peer = space.to_string();
+        self.send_sync_frame(
+            &peer,
+            &SyncBody::Versions {
+                reply: true,
+                partial: true,
+                docs: BTreeMap::from([(doc.to_string(), version)]),
+            },
+        );
     }
 
     /// Seal one frame and put it on the ladder.
@@ -242,11 +363,17 @@ impl OfflineProtocol {
             }
         };
 
+        if self.deduplicator.is_duplicate(&message.id) {
+            return;
+        }
+        self.deduplicator.mark_seen(message.id.clone());
+
         // Tier 2: keep the plaintext so a resend after a re-key seals against
         // the peer's current epoch instead of replaying ciphertext they can
         // no longer open. The analogous session-confirm sender does not do
         // this and spends its whole retry budget on dead bytes; there is no
-        // reason to inherit that.
+        // reason to inherit that. Staged after the duplicate check so the
+        // entry belongs to a frame that is actually on the ladder.
         self.stage_outbox_reseal(
             &message.id,
             crate::protocol::types::OutboxReseal {
@@ -259,11 +386,6 @@ impl OfflineProtocol {
                 rich: None,
             },
         );
-
-        if self.deduplicator.is_duplicate(&message.id) {
-            return;
-        }
-        self.deduplicator.mark_seen(message.id.clone());
 
         let previous_transport = self.transport_manager.current_transport();
         match self.transport_manager.send(&message) {
@@ -297,15 +419,19 @@ impl OfflineProtocol {
             return;
         }
         if blob.len() > MAX_SYNC_BLOB_BYTES {
-            // Too big to inline. The peer's next version offer sees the gap
-            // and asks for it through the catch-up ladder, which can answer
-            // with a compacted snapshot instead of raw history.
+            // Too big to inline, so the catch-up ladder has to fetch it: it
+            // can answer with a compacted snapshot instead of raw history.
+            // Offering now rather than waiting is what makes that happen. On
+            // a link that never drops, "the peer's next version offer" is
+            // not a time, and until it arrives both replicas believe they
+            // agree.
             debug!(
                 space,
                 doc,
                 bytes = blob.len(),
-                "Change too large to push inline; leaving it to the version exchange"
+                "Change too large to push inline; offering versions instead"
             );
+            self.nudge_data_sync(space, origin, "oversized_delta");
             return;
         }
         let peer = space.to_string();
@@ -367,10 +493,18 @@ impl OfflineProtocol {
         // with somebody else.
         let space = sender.to_string();
         let outcome = match frame {
-            SyncBody::Versions { reply, docs } => self.answer_version_offer(&space, reply, docs),
-            SyncBody::Delta { doc, blob } | SyncBody::Snapshot { doc, blob } => {
-                self.accept_remote_blob(&space, &doc, &blob)
+            SyncBody::Versions {
+                reply,
+                partial,
+                docs,
+            } => self.answer_version_offer(&space, reply, partial, docs),
+            SyncBody::Delta { doc, blob } => {
+                self.accept_remote_blob(&space, &doc, &blob, BlobKind::Delta)
             }
+            SyncBody::Snapshot { doc, blob } => {
+                self.accept_remote_blob(&space, &doc, &blob, BlobKind::Snapshot)
+            }
+            SyncBody::NeedSnapshot { doc } => self.answer_snapshot_request(&space, &doc),
         };
         if let Err(err) = outcome {
             warn!(peer = %sender, error = %err, "Sync frame could not be handled");
@@ -382,22 +516,43 @@ impl OfflineProtocol {
         &mut self,
         space: &str,
         reply: bool,
+        partial: bool,
         theirs: BTreeMap<String, String>,
     ) -> Result<()> {
         let ours = self.data_sync_versions(space).unwrap_or_default();
 
         // Documents they have and we do not: created here so the next leg
-        // offers a version for them and they send the content.
+        // offers a version for them and they send the content. Counted
+        // rather than merely created, because every name in this loop is a
+        // document a peer talked this device into storing.
+        let mut held = ours.len();
         for doc in theirs.keys() {
-            if !ours.contains_key(doc) && offline_protocol_data::validate_name(doc).is_ok() {
-                let _ = self.data_create_doc(space, doc);
+            if ours.contains_key(doc) || offline_protocol_data::validate_name(doc).is_err() {
+                continue;
+            }
+            if held >= MAX_DOCS_PER_SPACE {
+                warn!(
+                    space,
+                    cap = MAX_DOCS_PER_SPACE,
+                    "Space is at its document ceiling; ignoring the rest of the offer"
+                );
+                break;
+            }
+            if self.data_create_doc(space, doc).is_ok() {
+                held = held.saturating_add(1);
             }
         }
 
         for (doc, ours_encoded) in &ours {
             let Some(theirs_encoded) = theirs.get(doc) else {
-                // They have never seen this document at all.
-                self.offer_catch_up(space, doc, None);
+                // They did not name this document. On a complete offer that
+                // means they have never seen it and the whole document is
+                // the answer. On a partial one it means nothing: the name
+                // may be in a frame that has not arrived, or in no frame at
+                // all because the offer was about a single document.
+                if !partial {
+                    self.offer_catch_up(space, doc, None);
+                }
                 continue;
             };
             if theirs_encoded == ours_encoded {
@@ -453,6 +608,15 @@ impl OfflineProtocol {
             }
         }
 
+        self.send_snapshot(space, doc);
+    }
+
+    /// Send a whole document, the top rung and the answer to every refusal
+    /// below it.
+    ///
+    /// Terminal by construction: a snapshot provokes no answer of its own,
+    /// which is what lets the refusals underneath it ask for one freely.
+    fn send_snapshot(&mut self, space: &str, doc: &str) {
         match self.data_export_snapshot(space, doc) {
             Ok(bytes) if bytes.len() <= MAX_SYNC_BLOB_BYTES => {
                 let peer = space.to_string();
@@ -478,10 +642,46 @@ impl OfflineProtocol {
         }
     }
 
+    /// Answer a peer that cannot apply what we sent it.
+    ///
+    /// Only a document already held is served. A request naming an unknown
+    /// one would otherwise create it, which is a way to spend this device's
+    /// storage that does not even require a blob.
+    fn answer_snapshot_request(&mut self, space: &str, doc: &str) -> Result<()> {
+        if offline_protocol_data::validate_name(doc).is_err() {
+            warn!(space, doc, "Snapshot request names an invalid document");
+            return Ok(());
+        }
+        if !self.data_holds_doc(space, doc) {
+            debug!(space, doc, "Snapshot request for a document we do not hold");
+            return Ok(());
+        }
+        debug!(space, doc, "Serving a snapshot the peer asked for");
+        self.send_snapshot(space, doc);
+        Ok(())
+    }
+
     /// Apply a blob from a peer, with the containment the engine needs.
-    fn accept_remote_blob(&mut self, space: &str, doc: &str, encoded: &str) -> Result<()> {
+    fn accept_remote_blob(
+        &mut self,
+        space: &str,
+        doc: &str,
+        encoded: &str,
+        kind: BlobKind,
+    ) -> Result<()> {
         if offline_protocol_data::validate_name(doc).is_err() {
             warn!(space, doc, "Sync frame names an invalid document");
+            return Ok(());
+        }
+        // A blob for a document this device does not hold creates one, so
+        // this path is bounded by the same ceiling the offer loop is.
+        if !self.data_space_admits_doc(space, doc, MAX_DOCS_PER_SPACE) {
+            warn!(
+                space,
+                doc,
+                cap = MAX_DOCS_PER_SPACE,
+                "Space is at its document ceiling; refusing a new one"
+            );
             return Ok(());
         }
         // Bound the decode by the frame budget: base64 grows by a third, so
@@ -537,26 +737,75 @@ impl OfflineProtocol {
                 debug!(space, doc, "Applied a remote change");
             }
             Ok(RemoteImport::AlreadyHave) => {}
-            Ok(RemoteImport::Parked) => {
+            Ok(RemoteImport::Parked) => match kind {
                 // The change is held behind a predecessor that has not
                 // arrived. Asking for the gap now is what makes the parked
                 // change durable: it lives only in the engine's memory, so a
                 // restart before the predecessor lands would lose it, and
-                // the version exchange is what brings both back.
-                debug!(space, doc, "Remote change parked; asking for the gap");
-                let peer = space.to_string();
-                let ours = self.data_sync_versions(&peer).unwrap_or_default();
-                self.send_version_frames(&peer, ours, false);
-            }
-            Ok(RemoteImport::RefusedTrimmedHistory) => {
-                debug!(space, doc, "Remote change needs a snapshot; asking for one");
-                let peer = space.to_string();
-                let ours = self.data_sync_versions(&peer).unwrap_or_default();
-                self.send_version_frames(&peer, ours, false);
-            }
-            Err(err) => {
-                warn!(space, doc, error = %err, "Remote change refused");
-            }
+                // the version exchange is what brings both back. Scoped to
+                // this document, because this document is what is missing
+                // something.
+                BlobKind::Delta => {
+                    debug!(space, doc, "Remote change parked; asking for the gap");
+                    self.request_doc_catch_up(space, doc);
+                }
+                // A snapshot is the top of the ladder. Asking again returns
+                // the same bytes, so this is reported and left, rather than
+                // retried until one side gives up or the battery does.
+                BlobKind::Snapshot => {
+                    warn!(
+                        space,
+                        doc,
+                        "A snapshot from the peer did not apply; these replicas cannot be \
+                         reconciled inline"
+                    );
+                }
+            },
+            Ok(RemoteImport::RefusedTrimmedHistory) => match kind {
+                // Nothing the peer can compute from our version closes this
+                // gap: they would recompute the same refused delta, and
+                // answering with a version offer is how that becomes an
+                // exchange neither side can end. Name what would work.
+                BlobKind::Delta => {
+                    debug!(space, doc, "Remote change needs a snapshot; asking for one");
+                    let peer = space.to_string();
+                    self.send_sync_frame(
+                        &peer,
+                        &SyncBody::NeedSnapshot {
+                            doc: doc.to_string(),
+                        },
+                    );
+                }
+                // The end of the line, and the one outcome this layer
+                // cannot recover from. The peer forked below a point this
+                // replica compacted away, so the ancestors their changes
+                // need were deleted here rather than left out of the
+                // message: no frame carries them back, including the whole
+                // document, which is what just arrived. Reported plainly
+                // rather than retried, because a retry returns these same
+                // bytes and refusing them is the only thing keeping the
+                // process alive.
+                BlobKind::Snapshot => {
+                    warn!(
+                        space,
+                        doc,
+                        "A snapshot from the peer cannot merge into this replica; the two \
+                         have diverged past what replication can reconcile"
+                    );
+                }
+            },
+            Err(err) => match kind {
+                BlobKind::Delta => {
+                    warn!(space, doc, error = %err, "Remote change refused");
+                }
+                // The top of the ladder, so there is nothing above it to
+                // ask for. Unreconcilable divergence is refused before it
+                // gets here rather than failing here, which leaves this for
+                // bytes that are simply bad.
+                BlobKind::Snapshot => {
+                    warn!(space, doc, error = %err, "A snapshot from the peer was unreadable");
+                }
+            },
         }
         Ok(())
     }
@@ -640,17 +889,59 @@ mod tests {
     fn a_version_frame_round_trips() {
         let body = SyncBody::Versions {
             reply: true,
+            partial: true,
             docs: BTreeMap::from([("notes".to_string(), "dgA=".to_string())]),
         };
         let json = serde_json::to_string(&body).unwrap();
         let parsed: SyncBody = serde_json::from_str(&json).unwrap();
         match parsed {
-            SyncBody::Versions { reply, docs } => {
+            SyncBody::Versions {
+                reply,
+                partial,
+                docs,
+            } => {
                 assert!(reply);
+                assert!(partial);
                 assert_eq!(docs.get("notes").map(String::as_str), Some("dgA="));
             }
             other => panic!("expected a version frame, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_offer_that_says_nothing_about_completeness_is_read_as_complete() {
+        // The two flags default to the shape an ordinary whole-space offer
+        // has, so a frame that omits them behaves like one. Getting this
+        // backwards would silence the inference that carries a document a
+        // peer has never seen.
+        let parsed: SyncBody = serde_json::from_str(r#"{"k":"vv","docs":{}}"#).unwrap();
+        match parsed {
+            SyncBody::Versions {
+                reply,
+                partial,
+                docs,
+            } => {
+                assert!(!reply);
+                assert!(!partial);
+                assert!(docs.is_empty());
+            }
+            other => panic!("expected a version frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_snapshot_request_round_trips_and_carries_no_bytes() {
+        // It names a document and nothing else: the request exists because
+        // the asker cannot express its own gap, so anything it added would
+        // be the thing that was already refused.
+        let body = SyncBody::NeedSnapshot {
+            doc: "notes".to_string(),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert_eq!(json, r#"{"k":"need_snap","doc":"notes"}"#);
+
+        let parsed: SyncBody = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, SyncBody::NeedSnapshot { doc } if doc == "notes"));
     }
 
     #[test]

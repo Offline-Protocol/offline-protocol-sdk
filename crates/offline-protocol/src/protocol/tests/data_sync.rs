@@ -15,15 +15,20 @@ use offline_protocol_transport::{MockTransport, Transport, TransportType};
 
 use crate::constants::ACK_FOR_KEY;
 use crate::mls::InMemoryStorage;
+use crate::protocol::data_sync::MAX_DOCS_PER_SPACE;
 use crate::protocol::tests::{create_test_config_for_user, id};
-use crate::protocol::types::SessionState;
+use crate::protocol::types::{storage_keys, SessionState};
 use crate::protocol::{OfflineProtocol, TestProtocolStateStorage};
+use offline_protocol_mls::MlsStorage;
 
 /// One replica, with the transport its frames actually go through.
 struct Node {
     protocol: OfflineProtocol,
     transport: MockTransport,
     address: String,
+    label: String,
+    secure: Arc<InMemoryStorage>,
+    state: Arc<InMemoryStorage>,
 }
 
 impl Node {
@@ -34,11 +39,12 @@ impl Node {
 
         let mut protocol = OfflineProtocol::new(config).expect("protocol");
         let secure = crate::test_identity::seeded_storage(label);
+        let state = Arc::new(InMemoryStorage::new());
         protocol
             .initialize_mls(
                 secure.clone(),
                 Arc::new(TestProtocolStateStorage {
-                    storage: Arc::new(InMemoryStorage::new()),
+                    storage: state.clone(),
                 }),
             )
             .expect("initialize_mls");
@@ -56,12 +62,67 @@ impl Node {
             protocol,
             transport,
             address,
+            label: label.to_string(),
+            secure,
+            state,
         }
+    }
+
+    /// Relaunch on the same storage, as an application does between two
+    /// sessions.
+    ///
+    /// This is not a convenience. Compaction writes a trimmed snapshot to
+    /// disk but leaves the open document holding its full history, so the
+    /// trim point only becomes real for a document that is opened again,
+    /// and a replica that has never been relaunched cannot refuse anything.
+    ///
+    /// `peer` is re-announced because the pair fixture records the sync
+    /// capability directly rather than through a key-package exchange, so
+    /// there is no durable record for the relaunch to restore.
+    fn restart(&mut self, peer: &str) {
+        let mut config = create_test_config_for_user(&self.label);
+        config.encryption.enabled = true;
+        config.data.enabled = true;
+
+        let mut protocol = OfflineProtocol::new(config).expect("protocol");
+        protocol
+            .initialize_mls(
+                self.secure.clone(),
+                Arc::new(TestProtocolStateStorage {
+                    storage: self.state.clone(),
+                }),
+            )
+            .expect("initialize_mls");
+        protocol.peer_data_sync.insert(peer.to_string());
+
+        let mock = MockTransport::new(TransportType::BLE);
+        mock.start().expect("transport start");
+        self.transport = mock.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        protocol.start().expect("start");
+        self.protocol = protocol;
     }
 
     /// The space this node replicates with `peer`: the peer's own address.
     fn space_for(peer: &Node) -> String {
         peer.address.clone()
+    }
+
+    /// Delta records still on disk for one document.
+    ///
+    /// Compaction is what trims a document's history, and it deletes these
+    /// as it folds them in. There is no API that says "compaction ran", so
+    /// this is how a test asserts that the thing it depends on happened.
+    fn delta_records(&self, space: &str, doc: &str) -> usize {
+        let prefix = format!("{space}/{doc}/");
+        self.state
+            .list_keys(storage_keys::DATA_DELTA_LOG)
+            .unwrap_or_default()
+            .iter()
+            .filter(|key| key.starts_with(&prefix))
+            .count()
     }
 }
 
@@ -414,3 +475,234 @@ fn the_startup_sweep_sees_a_space_that_has_only_ever_been_written_to() {
         "the startup sweep cannot see a space that has only ever been written to"
     );
 }
+
+/// Write until compaction folds the delta log away, and say so.
+///
+/// Compaction is triggered by the size of the log rather than by a call, so
+/// a test that needs a trimmed history has to earn one. The return value is
+/// asserted rather than ignored: without the trim there is no gap to refuse,
+/// and every test below would pass while exercising nothing.
+fn write_until_compacted(node: &mut Node, space: &str, doc: &str) -> bool {
+    let filler = "x".repeat(8 * 1024);
+    for n in 0..32 {
+        write(node, space, doc, &format!("filler{n}"), &filler);
+        if node.delta_records(space, doc) == 0 {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn a_fork_below_the_peers_trim_point_converges_instead_of_talking_forever() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    // A base both replicas hold.
+    write(&mut alice, &alice_space, "notes", "seed", "0");
+    settle(&mut alice, &mut bob);
+    assert_eq!(
+        read(&mut bob, &bob_space, "notes", "seed"),
+        Some(DataValue::text("0")),
+        "precondition: the replicas have to share a base for one to fork below it"
+    );
+
+    // Partitioned. Alice writes enough to trip compaction, which trims her
+    // history above that shared base, and Bob never sees any of it.
+    assert!(
+        write_until_compacted(&mut alice, &alice_space, "notes"),
+        "compaction never fired, so there is no trimmed history to fork below"
+    );
+    // The trim is only real for a document that has been opened again, so
+    // without this the refusal below never happens and this test passes
+    // while exercising nothing. It failed exactly that way first.
+    alice.restart(&bob.address);
+    alice.transport.clear_sent_messages();
+
+    // Bob edits from the base, which is now below Alice's trim point. His
+    // delta is ordinary partition traffic and it is exactly the shape the
+    // engine aborts on, so Alice must refuse it — and then be able to say
+    // what would work instead. Answering with her versions cannot: Bob would
+    // recompute the same refused delta from them, for as long as both sides
+    // kept at it.
+    write(&mut bob, &bob_space, "notes", "from_bob", "B");
+
+    let rounds = settle(&mut alice, &mut bob);
+
+    // What this cannot promise is convergence. A replica that trimmed its
+    // history deleted the ancestors this branch depends on, and no frame
+    // brings them back: not a run of changes, and not the whole document
+    // either. Both are refused, which is the only thing keeping the process
+    // alive, and the replicas stay apart.
+    //
+    // What it must promise is that the attempt ends. Answering the refusal
+    // with our versions instead makes the peer recompute the same refused
+    // delta from them, and the two sides trade it until something stops
+    // them, which on a mesh is the battery.
+    assert_eq!(
+        rounds.last().copied(),
+        Some(0),
+        "the exchange never went quiet: {rounds:?}"
+    );
+
+    // And nothing was lost to the attempt: a refusal is not a rollback.
+    assert_eq!(
+        read(&mut alice, &alice_space, "notes", "seed"),
+        Some(DataValue::text("0")),
+        "the refused exchange damaged the document it could not merge"
+    );
+    assert_eq!(
+        read(&mut bob, &bob_space, "notes", "from_bob"),
+        Some(DataValue::text("B")),
+        "the peer lost its own edit to a refusal on the other side"
+    );
+}
+
+#[test]
+fn a_snapshot_request_for_an_unknown_document_creates_nothing() {
+    let (mut alice, bob) = pair();
+    let alice_space = Node::space_for(&bob);
+
+    // Serving this would mean opening a document to export it, which is a
+    // way to spend a peer's storage that does not even need a blob.
+    alice.transport.clear_sent_messages();
+    alice.protocol.handle_data_sync_frame(
+        &bob.address,
+        r#"{"v":1,"k":"need_snap","doc":"never-heard-of-it"}"#,
+    );
+
+    assert!(
+        alice
+            .protocol
+            .data_list_docs(&alice_space)
+            .expect("list")
+            .is_empty(),
+        "a snapshot request created a document"
+    );
+    assert!(
+        alice.transport.sent_messages().is_empty(),
+        "a snapshot request for an unknown document was answered"
+    );
+}
+
+#[test]
+fn a_partial_offer_does_not_snapshot_the_documents_it_leaves_out() {
+    let (mut alice, bob) = pair();
+    let alice_space = Node::space_for(&bob);
+
+    write(&mut alice, &alice_space, "one", "k", "1");
+    write(&mut alice, &alice_space, "two", "k", "2");
+    let ours = alice
+        .protocol
+        .data_doc_version(&alice_space, "one")
+        .expect("version");
+
+    // An offer naming `one` at the version Alice already holds. Marked
+    // partial, because a space with more documents than one frame carries
+    // sends several and no single frame is the whole list.
+    let offer = |reply: bool, partial: bool| {
+        format!(
+            r#"{{"v":1,"k":"vv","reply":{reply},"partial":{partial},"docs":{{"one":"{ours}"}}}}"#
+        )
+    };
+
+    alice.transport.clear_sent_messages();
+    alice
+        .protocol
+        .handle_data_sync_frame(&bob.address, &offer(true, true));
+    assert!(
+        alice.transport.sent_messages().is_empty(),
+        "a partial offer was read as the complete list, so every document \
+         missing from it was sent in full"
+    );
+
+    // The control: the identical frame claiming to be complete does mean the
+    // peer has never seen `two`, and answering with the whole document is
+    // then correct. Without this half the assertion above would pass with
+    // the inference deleted outright.
+    alice
+        .protocol
+        .handle_data_sync_frame(&bob.address, &offer(true, false));
+    assert!(
+        !alice.transport.sent_messages().is_empty(),
+        "a complete offer must still carry a document the peer has never seen"
+    );
+}
+
+#[test]
+fn a_peer_cannot_name_unlimited_documents_into_our_storage() {
+    let (mut alice, bob) = pair();
+    let alice_space = Node::space_for(&bob);
+
+    // Every unknown name in an offer becomes a stored document, and one
+    // exchange can carry as many names as the peer cares to send.
+    let mut sent = 0usize;
+    while sent < MAX_DOCS_PER_SPACE + 64 {
+        let docs: Vec<String> = (sent..sent + 128)
+            .map(|n| format!(r#""doc{n}":"""#))
+            .collect();
+        alice.protocol.handle_data_sync_frame(
+            &bob.address,
+            &format!(
+                r#"{{"v":1,"k":"vv","reply":true,"partial":true,"docs":{{{}}}}}"#,
+                docs.join(",")
+            ),
+        );
+        sent += 128;
+    }
+
+    assert_eq!(
+        alice
+            .protocol
+            .data_list_docs(&alice_space)
+            .expect("list")
+            .len(),
+        MAX_DOCS_PER_SPACE,
+        "a peer talked this device past its document ceiling"
+    );
+
+    // The other door into the same storage: a blob for a document nobody
+    // has heard of creates one too, so it is bounded by the same ceiling.
+    alice.protocol.handle_data_sync_frame(
+        &bob.address,
+        r#"{"v":1,"k":"delta","doc":"one-more","blob":"AAAA"}"#,
+    );
+    assert!(
+        !alice
+            .protocol
+            .data_list_docs(&alice_space)
+            .expect("list")
+            .contains(&"one-more".to_string()),
+        "a blob created a document past the ceiling"
+    );
+}
+
+#[test]
+fn a_change_too_large_to_inline_still_tells_the_peer_it_happened() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    // Over the frame budget, so no delta can carry it. Leaving it at that
+    // would be silence: on a link that never drops there is no rediscovery
+    // and no restart, so nothing would ever ask, and both replicas would go
+    // on believing they agree.
+    write(
+        &mut alice,
+        &alice_space,
+        "notes",
+        "huge",
+        &"x".repeat(48 * 1024),
+    );
+    settle(&mut alice, &mut bob);
+
+    assert!(
+        bob.protocol
+            .data_list_docs(&bob_space)
+            .expect("list")
+            .contains(&"notes".to_string()),
+        "the peer was never told the document exists, so nothing will ask for it"
+    );
+}
+

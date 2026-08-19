@@ -398,10 +398,12 @@ would mean maintaining a second parser that has to agree with the first one
 forever.
 
 **Mitigations in place today:** blobs are judged before the engine sees them,
-which refuses both shapes we have been able to reproduce; frames are bounded at
-32 KiB before decoding; and the digest of a blob about to be imported is
-written to disk first, so a blob that does end the process is refused when the
-sender retries it. That last one is what bounds the damage to a single abort
+which refuses every shape we have been able to reproduce, whether it arrives as
+a run of changes or as a whole document; frames are bounded at 32 KiB before
+decoding; a space accepts at most 1024 documents on a peer's say-so, so an
+offer cannot spend unbounded storage; and the digest of a blob about to be
+imported is written to disk first, so a blob that does end the process is
+refused when the sender retries it. That last one is what bounds the damage to a single abort
 rather than a crash loop driven by the delivery ladder faithfully doing its
 job. See
 [ADR 0019](../adr/0019-remote-document-imports-are-contained-not-trusted.md).

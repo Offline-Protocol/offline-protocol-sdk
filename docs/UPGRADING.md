@@ -1536,6 +1536,11 @@ Replication is 1:1 in this release. Group spaces are not yet replicated, and a
 document too large to catch up inside a single frame is reported rather than
 sent.
 
+Replicas that stay in contact converge. Two that are separated by a partition
+outlasting a compaction may not, because compaction deletes the history a
+change made on the other side depends on. Nothing is lost on either device and
+nothing crashes; the documents simply stay apart, and the refusal is logged.
+
 ### Turning it on
 
 ```typescript

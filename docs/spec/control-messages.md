@@ -159,9 +159,10 @@ The body is a JSON object. Its first field is the schema version and its `k`
 field names the kind:
 
 ```
-__DATA_V1__{"v":1,"k":"vv","reply":false,"docs":{"<doc>":"<base64 version>"}}
+__DATA_V1__{"v":1,"k":"vv","reply":false,"partial":false,"docs":{"<doc>":"<base64 version>"}}
 __DATA_V1__{"v":1,"k":"delta","doc":"<name>","blob":"<base64>"}
 __DATA_V1__{"v":1,"k":"snap","doc":"<name>","blob":"<base64>"}
+__DATA_V1__{"v":1,"k":"need_snap","doc":"<name>"}
 ```
 
 A receiver MUST read `v` before attempting to parse the body, and MUST consume
@@ -190,7 +191,52 @@ replicas converge correctly and then exchange offers forever.
 A document named in an offer that the receiver has never seen is created
 locally, so the next leg asks for its contents.
 
+A document *absent* from an offer is read as one the sender has never seen,
+and answered with the whole document. That inference needs the complete list,
+so a sender MUST set `partial` on any frame carrying less than everything it
+holds: every frame of an offer split across several, and a targeted offer
+about a single document. A receiver MUST NOT draw the inference from a frame
+marked `partial`. Without the flag, a peer holding more documents than one
+frame carries is sent the entire space, in full, on every exchange, while
+perfectly in sync.
+
+### Every leg ends
+
+An inbound frame produces at most one kind of outbound answer, and each
+answer is itself terminal. This is a MUST for any frame kind added later,
+because the failure it prevents has no symptom on either device except
+traffic that never stops.
+
+| Inbound | Answer |
+|---------|--------|
+| Offer (`reply: false`) | Catch-up for each stale document, then one `reply: true` offer |
+| Offer (`reply: true`) | Catch-up only |
+| `delta` that applies, is already held, or is unreadable | Nothing |
+| `delta` held behind a missing predecessor | One targeted offer (`reply: true`, `partial: true`) for that document |
+| `delta` needing trimmed history | `need_snap` for that document |
+| `snap` | Nothing, in every outcome |
+| `need_snap` | One `snap`, and only for a document already held |
+
+`need_snap` says that no run of changes can close the gap, because the
+receiver compacted away the history the changes are built on. Answering such
+a refusal with a version offer instead does not terminate: the sender
+recomputes changes since the receiver's version, which is the same refused
+delta, and the two trade it indefinitely.
+
+A `snap` answer closes the gap when the sender holds everything the receiver
+kept. When the two replicas forked below a point the receiver compacted away,
+it does not and cannot: the ancestors were deleted on the receiving side, so
+no frame carries them back. That import is refused and reported, and the
+replicas stay apart. See
+[ADR 0019](../adr/0019-remote-document-imports-are-contained-not-trusted.md).
+
 ### Sizes
+
+A space accepts at most 1024 documents on a peer's say-so. Every unfamiliar
+name in an offer, and every blob naming an unfamiliar document, becomes
+stored state, and nothing else bounds how many names one exchange can carry.
+The ceiling applies only to documents a peer names; an application creating
+its own is not subject to it.
 
 A frame carries at most 32 KiB of document bytes before base64. The figure is
 the mesh ceiling, not the record ceiling: an unnegotiated Bluetooth link caps
