@@ -374,6 +374,40 @@ a verdict, five for a presence answer) rather than letting it stand
 indefinitely. These hold against a hostile relay right now, which is why an A7
 gateway inherits a bounded blast radius rather than a new one.
 
+### R11. A space member can abort the process with a crafted document blob
+
+Replicated documents merge changes that arrive from peers, and merging means
+handing bytes to a CRDT engine. The engine has open defects where a malformed
+or causally impossible change panics rather than returning an error, and one of
+them poisons the document's lock so the retry panics too. The mobile artifact
+ships with `panic = "abort"`, so there is no unwinding to catch.
+
+MLS does not help here, and the reason is worth being precise about:
+authentication establishes who sent the bytes, and the question the engine is
+about to ask is what shape they are. A peer can be exactly who they claim and
+still send a blob that ends the process.
+
+**Impact:** a member of a space can abort the application on a device it
+replicates with. Not silent, not remote-code-execution, and not available to
+anyone outside the space: it requires someone the user has already accepted
+into a shared document, and it is attributable to them.
+
+**Why it stands:** the defects are upstream and the engine is not ours to fix
+on our own schedule. Re-implementing its decoder to predict what it will accept
+would mean maintaining a second parser that has to agree with the first one
+forever.
+
+**Mitigations in place today:** blobs are judged before the engine sees them,
+which refuses both shapes we have been able to reproduce; frames are bounded at
+32 KiB before decoding; and the digest of a blob about to be imported is
+written to disk first, so a blob that does end the process is refused when the
+sender retries it. That last one is what bounds the damage to a single abort
+rather than a crash loop driven by the delivery ladder faithfully doing its
+job. See
+[ADR 0019](../adr/0019-remote-document-imports-are-contained-not-trusted.md).
+
+This shrinks when the engine's import hardening reaches its Rust release.
+
 **Mitigations specified but not yet implemented**, and therefore not yet
 protecting anyone: address-bound attach under `offline-gateway-addr-v1` (the
 domain is [reserved, not emitted](../spec/username-discovery.md#signing-domains)),

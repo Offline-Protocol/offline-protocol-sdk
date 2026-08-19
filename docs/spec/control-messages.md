@@ -18,6 +18,7 @@ in [Message model and wire format](wire-format.md#reserved-metadata-keys)):
 | `__GRP_RELAY_BCAST__` body | JSON payload whose `ciphertext` field is base64 |
 | `__GRP_MLS_WELCOME__` body | JSON payload whose `welcome_data` field is base64 |
 | `__GROUP_MSG__` body | base64 of the MLS ciphertext directly, with no JSON wrapper; a decode failure is treated as legacy plaintext, which is then refused for any group the receiver secures with MLS |
+| `__DATA_V1__` body | JSON payload whose `blob` field is base64, on the frame kinds that carry document bytes |
 
 Two consequences are worth stating, because both have been read the wrong way:
 
@@ -60,7 +61,7 @@ are listed in the registry so application content can never impersonate them.
 |--------|----------------|---------|
 | `__MLS_ENC_CONFIRM__` | Inside an `__MLS_ENC__` envelope | A group-aware decrypt that lets the both-create session owner converge. Consumed on receipt, never surfaced to the application |
 | `__RICH_V1__` | Inside the decrypted MLS plaintext | The sealed rich payload body |
-| `__DATA_V1__` | Inside the decrypted MLS plaintext | Replicated-document sync frames. Reserved, not yet emitted: the marker is registered ahead of the frames so no application message can occupy the name first |
+| `__DATA_V1__` | Inside the decrypted MLS plaintext | Replicated-document sync frames, negotiated as `data_versions`. See [Document sync frames](#document-sync-frames) |
 
 ### Connection lifecycle
 
@@ -144,6 +145,81 @@ They are signature-gated like any control frame, but they are **exempt from the
 encryption requirement**, so discovery gossip and the application-supplied
 request and response bodies are sent in cleartext. See
 [residual risk R9](../security/threat-model.md#r9-service-discovery-and-service-bodies-are-signed-not-encrypted).
+
+## Document sync frames
+
+`__DATA_V1__` frames replicate documents between two peers. They travel only
+inside the decrypted MLS plaintext, never as an outer wire prefix, and only
+toward a peer whose key package advertised `data_versions`
+([capability negotiation](capability-negotiation.md)).
+
+### Shape
+
+The body is a JSON object. Its first field is the schema version and its `k`
+field names the kind:
+
+```
+__DATA_V1__{"v":1,"k":"vv","reply":false,"docs":{"<doc>":"<base64 version>"}}
+__DATA_V1__{"v":1,"k":"delta","doc":"<name>","blob":"<base64>"}
+__DATA_V1__{"v":1,"k":"snap","doc":"<name>","blob":"<base64>"}
+```
+
+A receiver MUST read `v` before attempting to parse the body, and MUST consume
+a frame whose version it does not know without surfacing it. Reversing that
+order makes every future frame format indistinguishable from corruption.
+
+`v` covers the document encoding as well as the frame schema. The engine
+guarantees only that new code reads old encodings, so an encoding change is a
+new version here, and a peer that has not advertised it is not sent one.
+
+### The space is never on the wire
+
+Neither the space nor the peer appears in any frame. A receiver derives the
+space from the authenticated wire sender, and a sender from the recipient. The
+two replicas therefore name the same space differently, each by the other's
+address, and a peer cannot reach a document shared with anybody else.
+
+### The exchange
+
+An offer (`reply: false`) lists every document the sender holds for that peer
+with its version. The receiver answers with what the sender is missing,
+followed by one offer of its own carrying `reply: true`. An offer marked
+`reply` MUST NOT be answered with another offer. Without that rule the
+replicas converge correctly and then exchange offers forever.
+
+A document named in an offer that the receiver has never seen is created
+locally, so the next leg asks for its contents.
+
+### Sizes
+
+A frame carries at most 32 KiB of document bytes before base64. The figure is
+the mesh ceiling, not the record ceiling: an unnegotiated Bluetooth link caps
+one message at roughly 69 KiB, and the remainder is base64 expansion, the
+frame's own JSON, the sealed envelope, and the message header.
+
+A document that cannot be caught up inside that budget in any form is reported
+rather than sent. Carrying one over the media transfer path is not yet
+specified.
+
+### Acknowledgement
+
+Sync frames ride the ordinary ladder and are acknowledged like any message.
+Every data-layer outcome is terminal: a corrupt blob, an unknown version, a
+refused import, or a switched-off layer is acknowledged and dropped, never
+deferred. Deferral means "this same ciphertext will succeed once the session
+is ready" and nothing else, so using it for anything else spends the sender's
+whole retry budget on a frame that can never be accepted.
+
+A frame arriving before the session is ready is not a data-layer outcome: it
+defers un-acknowledged like every other sealed body, and is handled when the
+decryption queue drains.
+
+### Imports are contained
+
+A blob is judged before the document engine sees it, and blobs in flight are
+recorded on disk so one that ends the process cannot end it again on every
+retry. See
+[ADR 0019](../adr/0019-remote-document-imports-are-contained-not-trusted.md).
 
 ## The control-plane signature gate
 

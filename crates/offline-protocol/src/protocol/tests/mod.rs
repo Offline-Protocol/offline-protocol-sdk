@@ -2811,7 +2811,12 @@ fn data_sync_restore_respects_kill_switch_but_keeps_record() {
 
 #[test]
 fn data_sync_is_advertised_only_when_the_layer_is_on() {
-    let off = protocol_with_mls_storage(Arc::new(InMemoryStorage::new()));
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.data.enabled = false;
+    let mut off = OfflineProtocol::new(config).unwrap();
+    off.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
     assert!(
         off.advertised_data_versions().is_empty(),
         "a device with the layer off must advertise nothing: a peer that \

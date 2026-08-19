@@ -469,11 +469,13 @@ class ProtocolConfigParserTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun dataLayerIsOffWhenTheSectionIsAbsent() {
-        // The layer ships before its replication half, so off is the shipped
-        // default and an app that says nothing must get it.
+    fun anAbsentSectionTakesTheGeneratedDefault() {
+        // The default moved when replication landed, and this is the test that
+        // proves the parser did not quietly keep the old one: an omitted
+        // section has to stay omitted all the way down, so whatever the UDL
+        // says is what an app that mentions nothing gets.
         val config = parse("""{"appId":"app","userId":"alice"}""")
-        assertFalse(config.dataEnabled)
+        assertTrue(config.dataEnabled)
     }
 
     @Test
@@ -484,26 +486,30 @@ class ProtocolConfigParserTest {
 
     @Test
     fun dataLayerCanBeExplicitlyDisabled() {
-        // Explicitly off is applied; unset is left alone so the generated
-        // default governs. Both end up false today, which is exactly why the
-        // difference has to be pinned here rather than assumed: the day the
-        // default flips, only one of them is supposed to change.
+        // The discriminating case, and the reason the pair above and below it
+        // were written before there was any difference to see: explicitly off
+        // is applied, unset is left alone, and now that the default is on
+        // those two answers finally differ.
         val config = parse("""{"appId":"app","userId":"alice","data":{"enabled":false}}""")
         assertFalse(config.dataEnabled)
     }
 
     @Test
-    fun aDataSectionWithNothingInItLeavesTheLayerOff() {
+    fun aDataSectionWithNothingInItStillTakesTheGeneratedDefault() {
+        // A present-but-empty section says nothing about the flag, so it must
+        // behave exactly like an absent one rather than like an explicit off.
         val config = parse("""{"appId":"app","userId":"alice","data":{}}""")
-        assertFalse(config.dataEnabled)
+        assertTrue(config.dataEnabled)
     }
 
     @Test
-    fun anUnrelatedSectionDoesNotTurnTheDataLayerOn() {
+    fun anUnrelatedTopLevelFlagIsNotTheDataFlag() {
         // Guards the shape of the lookup: reading the flag from the wrong
-        // place (a top-level `enabled`, say) would make unrelated config
-        // switch the layer on.
-        val config = parse("""{"appId":"app","userId":"alice","enabled":true}""")
-        assertFalse(config.dataEnabled)
+        // place (a top-level `enabled`, say) would let unrelated config drive
+        // the layer. Phrased against an explicit `false` so a wrong-place read
+        // would be visible — with the default on, a top-level `true` would
+        // agree with the default and prove nothing.
+        val config = parse("""{"appId":"app","userId":"alice","enabled":false}""")
+        assertTrue(config.dataEnabled)
     }
 }

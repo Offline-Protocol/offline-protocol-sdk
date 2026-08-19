@@ -66,6 +66,13 @@ alone.
 The drain is downstream of the confirmation **transition**, not of decryption as
 such: a decrypt on a session that is already confirmed does not re-run it.
 
+Anything else that has to happen exactly once when a session becomes usable
+hangs off that same transition rather than off the four call sites that reach
+it. Document replication's version exchange is the current example. Wiring such
+a thing per call site is how a feature ends up silently absent on whichever
+confirmation path somebody forgot, and the session-lifecycle event is not a
+substitute: it does not fire on the probe or acknowledgement paths.
+
 An encrypted confirmation frame travels inside the envelope on the adopt path
 precisely so the owner gets a group-aware decrypt to converge on. It is consumed
 on receipt and never surfaced to the application.

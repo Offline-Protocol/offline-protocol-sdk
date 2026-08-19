@@ -820,7 +820,7 @@ dictionary ProtocolConfig {
     // the layer ships before its replication half, and a capability
     // advertised with no sync behind it invites peers to expect a sync that
     // never comes. Defaulted so existing callers keep compiling.
-    boolean data_enabled = false;
+    boolean data_enabled = true;
 };
 
 // ========================================================================

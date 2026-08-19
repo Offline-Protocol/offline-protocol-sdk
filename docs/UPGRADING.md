@@ -1511,16 +1511,30 @@ config section if present.
 
 ---
 
-## 16. Replicated documents are available, and off by default
+## 16. Replicated documents are available, and replicate 1:1
 
 A new `DataStore` object ships on every binding: offline-first documents any
 member of a space can edit while disconnected, merging deterministically when
-replicas meet again. Messaging is synced events; this is synced state.
+replicas meet again. Messaging is synced events; this is synced state. Two
+peers with a secure session converge on the documents they share.
 
-**Existing applications need no changes.** The layer is inert until
-`data.enabled` is set, nothing is persisted until a document is written, and
-no existing API changed shape. Skip the rest of this section if you are not
-using it.
+**Existing applications need no changes.** `data.enabled` defaults to `true`,
+but nothing is persisted until a document is written, nothing is sent until a
+document is shared, and no existing API changed shape. An application that
+never opens a store pays nothing at rest and nothing on the wire; set
+`data.enabled` to `false` if you would rather the layer refuse outright. Skip
+the rest of this section if you are not using it.
+
+### What replicates, and with whom
+
+A space replicates with the peer whose address names it. Name a space after a
+peer's address and its documents converge with that peer; name it anything else
+and it stays on the device. Nothing else needs configuring, and there is no
+sharing call: the space name *is* the sharing decision.
+
+Replication is 1:1 in this release. Group spaces are not yet replicated, and a
+document too large to catch up inside a single frame is reported rather than
+sent.
 
 ### Turning it on
 

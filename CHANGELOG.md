@@ -27,6 +27,44 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Documents replicate between peers, over the delivery ladder that was
+  already there.** Two devices with a secure session converge on the documents
+  they share: changes made offline on both sides merge on reconnect, and a
+  change committed while connected reaches the other side immediately.
+
+  There is no second delivery path and no sync protocol. A sync frame is an
+  ordinary message, so it inherits the retry ladder, the durable outbox,
+  deduplication, park-and-probe, and re-sealing after a re-key, none of which
+  needed new code: document changes are idempotent and commutative, which
+  makes at-least-once and unordered delivery exactly sufficient rather than
+  something to work around.
+
+  A space replicates with the peer whose address names it. Frames never carry
+  a space name — a receiver derives it from the authenticated sender — so a
+  peer structurally cannot reach a document shared with somebody else. A space
+  named anything else stays local.
+
+  Negotiated as `data_versions` in the key package, the fourth capability in
+  the family after `wire_versions`, `env_versions` and `rich_versions`. A peer
+  that does not advertise it is never sent a frame, and nothing falls back to
+  anything unsealed.
+
+  **Changes arriving from a peer are contained rather than trusted.** MLS
+  establishes who sent a blob and says nothing about its shape, and the CRDT
+  engine has open upstream defects where a malformed change aborts the process
+  instead of returning an error — with no unwinding to catch it on the mobile
+  profile. So blobs are judged before the engine sees them, frames are bounded
+  at 32 KiB, and the digest of a blob about to be imported is written to disk
+  first: one that does end the process is refused when the sender retries it,
+  which is the difference between one crash and a crash on every launch. The
+  reasoning, and the residual risk that remains, are recorded in
+  [ADR 0019](docs/adr/0019-remote-document-imports-are-contained-not-trusted.md)
+  and [threat model R11](docs/security/threat-model.md).
+
+  A document too large to catch up inside one frame is reported rather than
+  sent; carrying one over the media transfer path is not yet implemented.
+  Group spaces are not yet replicated — this release is 1:1 only.
+
 - **Replicated documents: a second application class on the protocol.** A new
   `offline-protocol-data` crate adds offline-first documents that any member of
   a space can edit while disconnected, merging deterministically when replicas
@@ -34,11 +72,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `map`, `list`, `text` and `counter`, reached through a new `DataStore` object
   on every binding.
 
-  This release ships the **local half**: documents, storage, caps and
-  compaction. Replication over the transport ladder comes next, which is why
-  `data.enabled` defaults to `false` — advertising a capability with no sync
-  behind it would invite peers to expect a sync that never comes. The default
-  flips in the release that ships replication.
+  The local half — documents, storage, caps and compaction — landed first, and
+  1:1 replication followed in this same release (see the next entry), so
+  `data.enabled` ships **defaulting to `true`**. It was `false` while the layer
+  could store documents but not replicate them, because advertising a
+  capability with no sync behind it invites peers to expect a sync that never
+  comes. That gap closed before the release did.
 
   Three properties are worth knowing up front:
 
