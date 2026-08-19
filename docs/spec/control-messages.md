@@ -198,6 +198,14 @@ it created, marked `reply: true` and `partial: true`. A receiver that creates
 a document and asks for nothing leaves it empty for as long as the link stays
 up, and nothing on either device reports it.
 
+Deletion has no representation in this version. A document deleted locally is
+absent from the deleting side's next offer and still present on the peer's, so
+the rules above recreate it and refill it: the deletion is undone rather than
+propagated. Removing content from both replicas means emptying the document,
+whose internal deletions replicate as ordinary changes. A future version that
+adds tombstones needs a new `v`, because a peer without them recreates
+everything the peer with them deletes.
+
 A document *absent* from an offer is read as one the sender has never seen,
 and answered with the whole document. That inference needs the complete list,
 so a sender MUST set `partial` on any frame carrying less than everything it
@@ -222,6 +230,11 @@ symptom on either device except traffic that never stops.
 | `delta` needing trimmed history | `need_snap` for that document |
 | `snap` | Nothing, in every outcome |
 | `need_snap` | One `snap`, and only for a document already held |
+
+A receiver MAY also emit a `delta` of its own local changes when a frame
+arrives for a document it holds unflushed edits to, and this does not break
+the property: those changes were owed to the peer before the frame arrived, so
+flushing them is not an answer and cannot recur.
 
 The one chain longer than a single hop is that targeted offer: it draws
 catch-up and nothing further. It terminates because it names only documents

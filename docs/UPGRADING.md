@@ -1541,6 +1541,15 @@ outlasting a compaction may not, because compaction deletes the history a
 change made on the other side depends on. Nothing is lost on either device and
 nothing crashes; the documents simply stay apart, and the refusal is logged.
 
+**Deleting a document does not delete it from the peer, and does not keep it
+deleted here.** There are no deletion tombstones in this release. `deleteDoc`
+removes the records on this device, and the peer's next version offer names the
+document again, so it is recreated and refilled from their copy. In a space
+named after a peer, treat deletion as local cleanup that replication may undo,
+not as a way to remove content: to retire content from both sides, empty the
+document (deletions inside a document replicate like any other change); to stop
+a space replicating at all, use a space name that is not a peer address.
+
 ### Turning it on
 
 ```typescript
@@ -1559,10 +1568,11 @@ await store.mapSet('space-1', 'profile', 'fields', 'name', {
 await store.flush('space-1', 'profile');
 ```
 
-`enabled` defaults to `false` because this release ships the local half only.
-Replication over the transport ladder comes next, and advertising a capability
-with no sync behind it would invite peers to expect a sync that never comes.
-The default flips in the release that ships replication.
+`enabled` defaults to `true`, so the block above is showing you the flag
+rather than requiring it. It was `false` while the layer could store documents
+but not replicate them, because advertising a capability with no sync behind it
+invites peers to expect a sync that never comes; both halves ship together, so
+the switch is on.
 
 ### Storage: nothing to configure, but one thing to know
 

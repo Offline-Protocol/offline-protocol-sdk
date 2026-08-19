@@ -63,7 +63,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
   A document too large to catch up inside one frame is reported rather than
   sent; carrying one over the media transfer path is not yet implemented.
-  Group spaces are not yet replicated — this release is 1:1 only.
+  Group spaces are not yet replicated — this release is 1:1 only. Deletion has
+  no tombstone yet, so deleting a document from a space named after a peer is
+  local cleanup that their next offer undoes; empty the document to retire its
+  contents on both sides.
 
   **One known gap.** Replicas that stay in contact converge. Replicas
   separated by a partition that outlives a compaction may not: compaction
