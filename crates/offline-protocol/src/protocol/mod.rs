@@ -391,6 +391,17 @@ pub struct OfflineProtocol {
     #[cfg(feature = "data")]
     pub(crate) data: data::DataLayer,
 
+    /// When each peer was last offered our document versions.
+    ///
+    /// Neighbour rediscovery is not a rare event: a peer walking in and out
+    /// of Bluetooth range fires it repeatedly, and an offer per discovery
+    /// would put a frame on the mesh every time. The offer is not urgent
+    /// (anything committed locally is pushed as it happens) and it is not
+    /// load-bearing (the next trigger repeats it), so it is exactly the kind
+    /// of traffic that should be rate limited rather than merely small.
+    #[cfg(feature = "data")]
+    pub(crate) last_data_sync_offer: HashMap<String, Instant>,
+
     /// Lamport logical clock for causal message ordering.
     /// Ticked on send, merged on receive.
     lamport_clock: LamportClock,
@@ -800,6 +811,8 @@ impl OfflineProtocol {
             state_record_cipher: None,
             #[cfg(feature = "data")]
             data: data::DataLayer::default(),
+            #[cfg(feature = "data")]
+            last_data_sync_offer: HashMap::new(),
             lamport_clock: LamportClock::new(),
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),
@@ -1494,7 +1507,12 @@ impl OfflineProtocol {
         // ladder doing its job rather than a reason not to try.
         #[cfg(feature = "data")]
         {
-            for space in self.data_sync_spaces() {
+            // The space list is derived from the records themselves rather
+            // than from the space index, because the index is a cache: a
+            // document written without ever being explicitly created leaves
+            // records but no index entry, and those are precisely the
+            // documents no peer has seen yet.
+            for space in self.data_list_spaces().unwrap_or_default() {
                 self.kick_data_sync(&space, "start");
             }
         }

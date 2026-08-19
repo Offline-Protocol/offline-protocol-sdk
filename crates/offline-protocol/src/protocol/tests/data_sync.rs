@@ -367,3 +367,50 @@ fn a_frame_from_a_peer_only_ever_touches_that_peer_s_space() {
         "a private space leaked into the peer's store"
     );
 }
+
+#[test]
+fn rediscovery_flapping_does_not_re_offer_every_time() {
+    let (mut alice, bob) = pair();
+    let alice_space = Node::space_for(&bob);
+
+    write(&mut alice, &alice_space, "notes", "title", "hello");
+    alice.transport.clear_sent_messages();
+
+    // A peer walking in and out of Bluetooth range fires discovery over and
+    // over. The offer is a reconciliation sweep, not a delivery — anything
+    // committed locally was already pushed when it happened — so repeating it
+    // per discovery event is mesh traffic that buys nothing.
+    for _ in 0..5 {
+        alice
+            .protocol
+            .kick_data_sync(&alice_space, "peer_rediscovered");
+    }
+
+    assert_eq!(
+        alice.transport.sent_messages().len(),
+        1,
+        "five rediscoveries produced more than one offer"
+    );
+}
+
+#[test]
+fn the_startup_sweep_sees_a_space_that_has_only_ever_been_written_to() {
+    let (mut alice, bob) = pair();
+    let alice_space = Node::space_for(&bob);
+
+    // Nothing has ever been received in this space: Alice wrote, and that is
+    // all. Sweeping the replication bookkeeping instead of the space index
+    // would miss it, because a bookkeeping record only exists once a blob has
+    // been accepted from a peer — so the documents nobody else has seen are
+    // exactly the ones a cold start would skip.
+    write(&mut alice, &alice_space, "notes", "title", "unshared");
+
+    assert!(
+        alice
+            .protocol
+            .data_list_spaces()
+            .expect("spaces")
+            .contains(&alice_space),
+        "the startup sweep cannot see a space that has only ever been written to"
+    );
+}

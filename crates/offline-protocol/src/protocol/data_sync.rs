@@ -41,7 +41,8 @@
 //! until it has survived, so a blob that kills the process kills it once
 //! rather than every time the sender retries.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use offline_protocol_data::{CatchUp, RemoteImport, VersionToken};
@@ -73,6 +74,14 @@ pub(crate) const MAX_SYNC_BLOB_BYTES: usize = 32 * 1024;
 /// several frames, which converges identically: the exchange is per
 /// document, not per frame.
 const MAX_DOCS_PER_VERSION_FRAME: usize = 128;
+
+/// How long an offer to one peer suppresses the next one.
+///
+/// Sized to discovery flapping rather than to editing: a change made locally
+/// is pushed the moment it is durable and does not wait for this, so the only
+/// thing the window delays is the reconciliation sweep, and the next trigger
+/// repeats it anyway.
+const DATA_SYNC_OFFER_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Blob digests remembered per space after a crash.
 ///
@@ -150,6 +159,14 @@ impl OfflineProtocol {
         if !self.data_sync_active(peer) {
             return;
         }
+        let now = Instant::now();
+        if let Some(last) = self.last_data_sync_offer.get(peer) {
+            if now.duration_since(*last) < DATA_SYNC_OFFER_INTERVAL {
+                return;
+            }
+        }
+        self.last_data_sync_offer.insert(peer.to_string(), now);
+
         let docs = match self.data_sync_versions(peer) {
             Ok(docs) => docs,
             Err(err) => {
@@ -592,18 +609,6 @@ impl OfflineProtocol {
             // while refusing would stop replication on a storage hiccup.
             warn!(space, error = %err, "Could not persist replication bookkeeping");
         }
-    }
-
-    /// Every space that has replication state, for the startup sweep.
-    pub(crate) fn data_sync_spaces(&self) -> BTreeSet<String> {
-        let Some(storage) = self.data_storage_for_sync() else {
-            return BTreeSet::new();
-        };
-        storage
-            .list_keys(storage_keys::DATA_SYNC)
-            .unwrap_or_default()
-            .into_iter()
-            .collect()
     }
 }
 
