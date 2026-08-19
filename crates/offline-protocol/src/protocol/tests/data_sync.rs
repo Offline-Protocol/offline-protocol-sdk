@@ -1098,6 +1098,41 @@ fn the_quarantine_forgets_its_oldest_entry_rather_than_growing() {
     );
 }
 
+#[test]
+fn a_wipe_takes_the_replication_bookkeeping_with_it() {
+    let (alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+
+    // The logout path for an application holding documents in its own
+    // backend. The bookkeeping is keyed by peer address, so a key type left
+    // out of the wipe does not leave a harmless orphan: it leaves a list of
+    // who this account replicated with, for the next account to inherit.
+    write(&mut bob, &bob_space, "notes", "k", "v");
+    seed_sync_record(
+        &mut bob,
+        &bob_space,
+        &serde_json::json!({ "quarantined": [blob_digest(b"something refused")] }),
+    );
+    assert!(
+        !bob.state
+            .list_keys(storage_keys::DATA_SYNC)
+            .unwrap_or_default()
+            .is_empty(),
+        "precondition: there has to be bookkeeping on disk for a wipe to miss it"
+    );
+
+    bob.protocol.data_wipe_all().expect("wipe");
+
+    assert!(
+        bob.state
+            .list_keys(storage_keys::DATA_SYNC)
+            .unwrap_or_default()
+            .is_empty(),
+        "the wipe reported success while leaving the peer-keyed replication \
+         bookkeeping behind"
+    );
+}
+
 /// Storage that cannot answer for one document, the way a backend having a
 /// bad day cannot.
 ///

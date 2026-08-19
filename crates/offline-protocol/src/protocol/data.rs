@@ -1271,6 +1271,11 @@ impl OfflineProtocol {
         };
         self.data.docs.clear();
         self.data.spaces.clear();
+        // The offer window is keyed by peer and outlives nothing else here.
+        // Left behind it would suppress the first offer made after the wipe,
+        // which is the same shape [`Self::forget_data_sync_peer`] exists to
+        // prevent: a window that survives the thing it was measuring.
+        self.last_data_sync_offer.clear();
 
         // Attempt every record and report the first failure, as
         // [`Self::data_delete_doc`] does. Answering `Ok` for a wipe that left
@@ -1284,10 +1289,16 @@ impl OfflineProtocol {
             }
         };
 
+        // Every key type the layer owns, replication bookkeeping included.
+        // A key type missing from this list is not a partial wipe that
+        // reports itself, it is a silent one: the records are keyed by peer
+        // address, so what survives a logout is who this account replicated
+        // with.
         for key_type in [
             storage_keys::DATA_DOCS,
             storage_keys::DATA_DELTA_LOG,
             storage_keys::DATA_SPACES,
+            storage_keys::DATA_SYNC,
         ] {
             match storage.list_keys(key_type) {
                 Ok(keys) => {
