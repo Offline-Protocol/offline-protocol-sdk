@@ -253,7 +253,12 @@ impl OfflineProtocol {
         let docs = match self.data_sync_versions(peer) {
             Ok(docs) => docs,
             Err(err) => {
-                debug!(peer = %peer, cause, error = %err, "Could not read document versions");
+                // A whole space that cannot enumerate its documents stops
+                // replicating with this peer until the storage recovers, and
+                // nothing else reports it. The rate limit above is stamped
+                // before this read precisely so warning here cannot become
+                // discovery-speed noise.
+                warn!(peer = %peer, cause, error = %err, "Could not read document versions");
                 return;
             }
         };

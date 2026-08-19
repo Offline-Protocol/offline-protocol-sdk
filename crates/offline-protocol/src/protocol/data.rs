@@ -617,12 +617,27 @@ impl OfflineProtocol {
     }
 
     /// Every document in a space with the version we hold of it.
+    ///
+    /// A document whose version cannot be read is left out rather than
+    /// failing the whole space. Propagating the error costs every other
+    /// document in the space its replication, and does it silently: one
+    /// unreadable record on either leg would leave the offer empty and both
+    /// replicas believing they had nothing to say to each other. Leaving it
+    /// out instead means the peer reads that document as one we have never
+    /// seen and offers it back, which is the recovery this layer already
+    /// has, and the rest of the space keeps converging meanwhile.
     pub(crate) fn data_sync_versions(&mut self, space: &str) -> Result<BTreeMap<String, String>> {
         let docs = self.data_list_docs(space)?;
         let mut versions = BTreeMap::new();
         for doc in docs {
-            let encoded = self.data_doc_version(space, &doc)?;
-            versions.insert(doc, encoded);
+            match self.data_doc_version(space, &doc) {
+                Ok(encoded) => {
+                    versions.insert(doc, encoded);
+                }
+                Err(err) => {
+                    warn!(space, doc, error = %err, "Leaving a document out of the version offer: its version cannot be read");
+                }
+            }
         }
         Ok(versions)
     }

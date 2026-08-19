@@ -20,7 +20,7 @@ use crate::protocol::data_sync::{blob_digest, MAX_DOCS_PER_SPACE, MAX_QUARANTINE
 use crate::protocol::tests::{create_test_config_for_user, id};
 use crate::protocol::types::{storage_keys, SessionState};
 use crate::protocol::{OfflineProtocol, TestProtocolStateStorage};
-use crate::{ProtocolStateResult, ProtocolStateStorage};
+use crate::{ProtocolStateError, ProtocolStateResult, ProtocolStateStorage};
 use offline_protocol_mls::MlsStorage;
 
 /// One replica, with the transport its frames actually go through.
@@ -1032,5 +1032,82 @@ fn the_quarantine_forgets_its_oldest_entry_rather_than_growing() {
         held.last().map(String::as_str),
         Some(newest.as_str()),
         "the marker left by the previous run is not the newest refusal"
+    );
+}
+
+/// Storage that cannot answer for one document, the way a backend having a
+/// bad day cannot.
+///
+/// `LoadFailed` rather than `Corrupted` on purpose: a record that is
+/// permanently gone leaves the document readable but empty, while one that is
+/// merely unavailable this session is the case that used to fail the read.
+struct OneUnreadableDoc {
+    inner: TestProtocolStateStorage,
+    doc_suffix: String,
+}
+
+impl ProtocolStateStorage for OneUnreadableDoc {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> ProtocolStateResult<()> {
+        self.inner.store(key_type, key_id, data)
+    }
+
+    fn load(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
+        if key_type == storage_keys::DATA_DOCS && key_id.ends_with(&self.doc_suffix) {
+            return Err(ProtocolStateError::LoadFailed(
+                "this document cannot be read this session".to_string(),
+            ));
+        }
+        self.inner.load(key_type, key_id)
+    }
+
+    fn delete(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<()> {
+        self.inner.delete(key_type, key_id)
+    }
+
+    fn list_keys(&self, key_type: &str) -> ProtocolStateResult<Vec<String>> {
+        self.inner.list_keys(key_type)
+    }
+}
+
+#[test]
+fn a_document_that_cannot_be_read_is_left_out_of_the_offer_rather_than_failing_it() {
+    let (mut alice, bob) = pair();
+    let space = Node::space_for(&bob);
+
+    write(&mut alice, &space, "healthy", "k", "v");
+    write(&mut alice, &space, "broken", "k", "v");
+
+    // Relaunched on a store that cannot answer for one of them. Failing the
+    // whole read here is worse than it sounds: the offering leg reports and
+    // gives up, and the answering leg treats the failure as an empty space,
+    // so both replicas conclude they have nothing to say to each other over
+    // one unreadable record.
+    let mut config = create_test_config_for_user("alice");
+    config.encryption.enabled = true;
+    config.data.enabled = true;
+    let mut relaunched = OfflineProtocol::new(config).expect("protocol");
+    relaunched
+        .initialize_mls(
+            alice.secure.clone(),
+            Arc::new(OneUnreadableDoc {
+                inner: TestProtocolStateStorage {
+                    storage: alice.state.clone(),
+                },
+                doc_suffix: "/broken".to_string(),
+            }),
+        )
+        .expect("initialize_mls");
+
+    let versions = relaunched
+        .data_sync_versions(&space)
+        .expect("one unreadable document failed the whole space");
+    assert!(
+        versions.contains_key("healthy"),
+        "the readable document was dropped along with the unreadable one"
+    );
+    assert!(
+        !versions.contains_key("broken"),
+        "precondition: the document has to actually be unreadable, or this \
+         proves nothing about what happens when one is"
     );
 }
