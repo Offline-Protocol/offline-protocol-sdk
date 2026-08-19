@@ -192,6 +192,16 @@ impl OfflineProtocol {
             source_event = %source_event,
             "session_state_transition"
         );
+
+        // Replication starts here rather than at the four callers that reach
+        // this transition, because the four callers are exactly the shape of
+        // bug that keeps happening: one of them forgets, and the feature is
+        // silently absent on whichever confirmation path that caller owned.
+        // This is also the only signal that covers all four — the session
+        // lifecycle event does not fire on the probe and ack paths.
+        #[cfg(feature = "data")]
+        self.kick_data_sync(peer_id, source_event);
+
         Ok(true)
     }
 

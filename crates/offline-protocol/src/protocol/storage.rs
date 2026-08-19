@@ -4,9 +4,9 @@ use super::state_crypto::{StateRecordCipher, SEALED_RECORD_OVERHEAD, STATE_RECOR
 use super::{
     lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
     PeerCapabilities, PendingMessage, PendingMessageRecord, ReceivedKeyPackage, SessionState,
-    WelcomeDeliveryState, WelcomeLifecycleRecord, MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO,
-    MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH, MAX_PENDING_KEY_PACKAGES, MAX_PENDING_MESSAGES_GLOBAL,
-    MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
+    WelcomeDeliveryState, WelcomeLifecycleRecord, DATA_SYNC_V1, MAX_BLOCKED_USERS,
+    MAX_KEY_PACKAGE_SENT_TO, MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH, MAX_PENDING_KEY_PACKAGES,
+    MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
     MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_PERSISTED_CAPABILITY_VERSIONS,
     MAX_PROTOCOL_STATE_RECORD_BYTES, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
     WELCOME_LIFECYCLE_TTL_SECS,
@@ -85,6 +85,10 @@ pub(crate) enum StateCategory {
     /// only, like [`Self::DataDocs`], and absent from
     /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] for the same reason.
     DataSpaces,
+    /// Per-space replication bookkeeping. Post-split only, like
+    /// [`Self::DataDocs`], and absent from
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] for the same reason.
+    DataSync,
 }
 
 impl StateCategory {
@@ -110,6 +114,7 @@ impl StateCategory {
             storage_keys::DATA_DOCS => Self::DataDocs,
             storage_keys::DATA_DELTA_LOG => Self::DataDeltaLog,
             storage_keys::DATA_SPACES => Self::DataSpaces,
+            storage_keys::DATA_SYNC => Self::DataSync,
             _ => return None,
         })
     }
@@ -144,6 +149,7 @@ impl StateCategory {
         Self::DataDocs,
         Self::DataDeltaLog,
         Self::DataSpaces,
+        Self::DataSync,
     ];
 
     /// The storage key type this category is written under.
@@ -171,6 +177,7 @@ impl StateCategory {
             Self::DataDocs => storage_keys::DATA_DOCS,
             Self::DataDeltaLog => storage_keys::DATA_DELTA_LOG,
             Self::DataSpaces => storage_keys::DATA_SPACES,
+            Self::DataSync => storage_keys::DATA_SYNC,
         }
     }
 
@@ -256,7 +263,8 @@ impl StateCategory {
             | Self::NostrDiscoveryClaim
             | Self::DataDocs
             | Self::DataDeltaLog
-            | Self::DataSpaces => true,
+            | Self::DataSpaces
+            | Self::DataSync => true,
             Self::PeerCapabilities
             | Self::SessionStates
             | Self::WelcomeLifecycles
@@ -2968,6 +2976,14 @@ impl OfflineProtocol {
             {
                 self.peer_rich_attested.insert(peer_id.clone());
             }
+            // Skipping this arm is the failure mode this whole record exists
+            // to prevent, in its quietest form: replication would stop at
+            // every restart, both sides would keep accepting edits, and the
+            // documents would diverge with nothing anywhere reporting a
+            // problem.
+            if self.config.data.enabled && caps.data_versions.contains(&DATA_SYNC_V1) {
+                self.peer_data_sync.insert(peer_id.clone());
+            }
             // Not gated on the sealing kill switch: this is a destination
             // address, and the transport decides whether to seal at all. A
             // restore that skipped it would leave the peer addressed by the
@@ -4840,6 +4856,7 @@ mod category_registration_tests {
             storage_keys::DATA_DOCS,
             storage_keys::DATA_DELTA_LOG,
             storage_keys::DATA_SPACES,
+            storage_keys::DATA_SYNC,
         ] {
             assert!(
                 !storage_keys::ADOPTABLE_STATE_KEY_TYPES.contains(&key_type),

@@ -27,7 +27,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use offline_protocol_data::{policy, DataDoc, DataError, DataValue};
+use offline_protocol_data::{
+    policy, CatchUp, DataDoc, DataError, DataValue, RemoteImport, VersionToken,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -596,6 +598,165 @@ impl OfflineProtocol {
         self.persist_space(storage.as_ref(), space)
     }
 
+    // ---- replication seams ------------------------------------------
+    //
+    // The sync module owns the frames and the peer bookkeeping; these are
+    // the four things it needs from the store, and they are here rather
+    // than there so nothing outside this module touches a document handle.
+
+    /// The backend documents live in, when the layer is on.
+    ///
+    /// Unlike `require_data_storage` this answers `None` rather than an
+    /// error: the sync path treats a switched-off layer as "nothing to do",
+    /// not as a failure to report.
+    pub(crate) fn data_storage_for_sync(&self) -> Option<Arc<dyn ProtocolStateStorage>> {
+        if !self.config.data.enabled {
+            return None;
+        }
+        self.data_storage()
+    }
+
+    /// Every document in a space with the version we hold of it.
+    ///
+    /// A document whose version cannot be read is left out rather than
+    /// failing the whole space. Propagating the error costs every other
+    /// document in the space its replication, and does it silently: one
+    /// unreadable record on either leg would leave the offer empty and both
+    /// replicas believing they had nothing to say to each other. Leaving it
+    /// out instead means the peer reads that document as one we have never
+    /// seen and offers it back, which is the recovery this layer already
+    /// has, and the rest of the space keeps converging meanwhile.
+    pub(crate) fn data_sync_versions(&mut self, space: &str) -> Result<BTreeMap<String, String>> {
+        let docs = self.data_list_docs(space)?;
+        let mut versions = BTreeMap::new();
+        for doc in docs {
+            match self.data_doc_version(space, &doc) {
+                Ok(encoded) => {
+                    versions.insert(doc, encoded);
+                }
+                Err(err) => {
+                    warn!(space, doc, error = %err, "Leaving a document out of the version offer: its version cannot be read");
+                }
+            }
+        }
+        Ok(versions)
+    }
+
+    /// The version we hold of one document, encoded as a frame carries it.
+    pub(crate) fn data_doc_version(&mut self, space: &str, doc: &str) -> Result<String> {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+        let token = self.read_doc(space, doc, |document| Ok(document.version()))?;
+        Ok(BASE64.encode(token.as_bytes()))
+    }
+
+    /// The names a space holds, or `None` if there is nothing to read.
+    ///
+    /// Answered off the space index, which `load_space` has already
+    /// reconciled against the records themselves and cached. Opening a
+    /// document to find out would defeat both callers, whose whole question
+    /// is whether opening one is allowed.
+    fn space_docs(&mut self, space: &str) -> Option<&BTreeSet<String>> {
+        if offline_protocol_data::validate_name(space).is_err() {
+            return None;
+        }
+        let storage = self.data_storage_for_sync()?;
+        self.load_space(storage.as_ref(), space).ok()?;
+        self.data.spaces.get(space).map(|record| &record.docs)
+    }
+
+    /// Whether `space` already holds `doc`.
+    pub(crate) fn data_holds_doc(&mut self, space: &str, doc: &str) -> bool {
+        self.space_docs(space)
+            .is_some_and(|docs| docs.contains(doc))
+    }
+
+    /// Whether a document a peer named may be stored in `space`.
+    ///
+    /// One already held always may; a new one only while the space is under
+    /// `cap`. The cap is a parameter rather than a constant here because it
+    /// bounds what a *peer* can talk this device into storing, which is a
+    /// replication policy: an application creating its own documents is not
+    /// subject to it.
+    ///
+    /// A space that cannot be read admits, rather than refusing on a storage
+    /// hiccup: whatever follows fails on the same storage and reports it
+    /// where the failure actually is.
+    pub(crate) fn data_space_admits_doc(&mut self, space: &str, doc: &str, cap: usize) -> bool {
+        self.space_docs(space)
+            .is_none_or(|docs| docs.contains(doc) || docs.len() < cap)
+    }
+
+    /// What a replica at `theirs` is missing from a document.
+    pub(crate) fn data_catch_up(
+        &mut self,
+        space: &str,
+        doc: &str,
+        theirs: &VersionToken,
+    ) -> Result<CatchUp> {
+        self.read_doc(space, doc, |document| document.export_since(theirs))
+    }
+
+    /// A self-contained encoding of a document, for a peer no run of
+    /// changes can catch up.
+    pub(crate) fn data_export_snapshot(&mut self, space: &str, doc: &str) -> Result<Vec<u8>> {
+        self.read_doc(space, doc, |document| document.export_raw())
+    }
+
+    /// Apply a blob that arrived from a peer, and persist what it changed.
+    ///
+    /// The import goes through the engine's remote path, which judges the
+    /// blob before touching it. A change that applies is flushed here rather
+    /// than left in memory: an unflushed remote change would be lost to a
+    /// restart, and the sender has already been told (by the acknowledgement
+    /// the frame rides on) that it arrived.
+    pub(crate) fn data_apply_remote(
+        &mut self,
+        space: &str,
+        doc: &str,
+        blob: &[u8],
+    ) -> Result<RemoteImport> {
+        Self::validate_ids(space, doc)?;
+        let storage = self.require_data_storage()?;
+        self.open_doc(storage.as_ref(), space, doc)?;
+
+        let map_key = (space.to_string(), doc.to_string());
+        let outcome = {
+            let entry = self
+                .data
+                .docs
+                .get_mut(&map_key)
+                .ok_or_else(|| Error::Other("document vanished after open".to_string()))?;
+            let outcome = entry.doc.import_remote(blob).map_err(map_data_error)?;
+            // A parked change is invisible to the engine's own version, so
+            // nothing downstream may fold history while one is outstanding:
+            // compaction would write a snapshot without it and then delete
+            // the records it is waiting for.
+            //
+            // It stays false for the rest of this document's time in memory,
+            // deliberately. The engine reports what one import left pending,
+            // never whether a document still holds anything parked, so a
+            // later import that applies cleanly is not evidence that the
+            // earlier gap closed. Clearing it on that evidence would re-arm
+            // compaction while a change is still waiting, which is the loss
+            // this flag exists to prevent; leaving it set costs a document
+            // its compaction until it is next opened, where the flag is
+            // recomputed from the records themselves.
+            if outcome == RemoteImport::Parked {
+                entry.history_complete = false;
+            }
+            outcome
+        };
+
+        if outcome == RemoteImport::Applied {
+            // Remote work is not this replica's to push onward, so the flush
+            // is told where the change came from.
+            self.flush_doc_from(storage.as_ref(), space, doc, Some(space))?;
+            self.persist_space(storage.as_ref(), space)?;
+        }
+        Ok(outcome)
+    }
+
     /// Delete a document and every record belonging to it.
     pub fn data_delete_doc(&mut self, space: &str, doc: &str) -> Result<()> {
         Self::validate_ids(space, doc)?;
@@ -853,6 +1014,22 @@ impl OfflineProtocol {
         space: &str,
         doc: &str,
     ) -> Result<()> {
+        self.flush_doc_from(storage, space, doc, None)
+    }
+
+    /// [`Self::flush_doc`], told which peer the change came from.
+    ///
+    /// `origin` is `None` for a local edit and the peer's address for one
+    /// applied from a sync frame. It exists so replication does not send a
+    /// change straight back to whoever sent it: the merge would absorb the
+    /// echo, but on a mesh it is a frame nobody needed.
+    fn flush_doc_from(
+        &mut self,
+        storage: &dyn ProtocolStateStorage,
+        space: &str,
+        doc: &str,
+        origin: Option<&str>,
+    ) -> Result<()> {
         let map_key = (space.to_string(), doc.to_string());
 
         let Some(entry) = self.data.docs.get_mut(&map_key) else {
@@ -944,6 +1121,24 @@ impl OfflineProtocol {
                 );
             (verdict, measured, should_compact, entry.compacted_bytes)
         };
+
+        // Replicated here for the same reason the event fires here: the
+        // claim being made is that the change is durable, and that became
+        // true at the write above. Pushing before it would advertise a
+        // change that a crash could still take back, and pushing after
+        // compaction would let a compaction failure suppress replication of
+        // something already on disk.
+        //
+        // The oversized branch wrote a compacted snapshot instead of a delta
+        // record, so there is no delta to push. Offering versions is how the
+        // peer finds the gap: waiting for its next offer would leave both
+        // replicas believing they agree for as long as the link holds, since
+        // a link that never drops never fires a trigger.
+        if oversized {
+            self.nudge_data_sync(space, origin, "oversized_commit");
+        } else {
+            self.push_data_delta(space, doc, &delta.bytes, origin);
+        }
 
         // Emitted here, before compaction: the event's claim is that the
         // change reached storage, and that became true at the write above.
@@ -1076,6 +1271,11 @@ impl OfflineProtocol {
         };
         self.data.docs.clear();
         self.data.spaces.clear();
+        // The offer window is keyed by peer and outlives nothing else here.
+        // Left behind it would suppress the first offer made after the wipe,
+        // which is the same shape [`Self::forget_data_sync_peer`] exists to
+        // prevent: a window that survives the thing it was measuring.
+        self.last_data_sync_offer.clear();
 
         // Attempt every record and report the first failure, as
         // [`Self::data_delete_doc`] does. Answering `Ok` for a wipe that left
@@ -1089,10 +1289,16 @@ impl OfflineProtocol {
             }
         };
 
+        // Every key type the layer owns, replication bookkeeping included.
+        // A key type missing from this list is not a partial wipe that
+        // reports itself, it is a silent one: the records are keyed by peer
+        // address, so what survives a logout is who this account replicated
+        // with.
         for key_type in [
             storage_keys::DATA_DOCS,
             storage_keys::DATA_DELTA_LOG,
             storage_keys::DATA_SPACES,
+            storage_keys::DATA_SYNC,
         ] {
             match storage.list_keys(key_type) {
                 Ok(keys) => {

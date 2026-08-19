@@ -8406,7 +8406,7 @@ data class ProtocolConfig (
     , 
     var `meshRelay`: MeshRelayConfig? = null 
     , 
-    var `dataEnabled`: kotlin.Boolean = false 
+    var `dataEnabled`: kotlin.Boolean = true 
     
 ){
     

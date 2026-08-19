@@ -79,10 +79,21 @@ def test_conformance_suite_catches_a_backend_that_drops_overwrites() -> None:
 
 
 def test_data_store_requires_the_layer_to_be_enabled(default_config) -> None:
-    protocol = OfflineProtocol(default_config)  # data_enabled defaults to False
+    # The layer defaults to on, so switching it off is what this test is
+    # about: an application that does not want documents can say so, and the
+    # refusal names the reason rather than failing somewhere further in.
+    default_config.data_enabled = False
+    protocol = OfflineProtocol(default_config)
     store = DataStore(protocol)
     with pytest.raises(ProtocolError.DataDisabled):
         store.create_doc("space-1", "doc-1")
+
+
+def test_the_data_layer_is_on_by_default(default_config) -> None:
+    # Pinned because the default moved once, when replication landed, and the
+    # bridges restate it: a parser that fills in its own literal would hold
+    # every app that omits the section at the old value forever.
+    assert default_config.data_enabled is True
 
 
 def test_documents_round_trip_through_a_custom_backend(data_config) -> None:

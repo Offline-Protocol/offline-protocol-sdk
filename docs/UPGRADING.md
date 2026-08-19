@@ -1511,16 +1511,44 @@ config section if present.
 
 ---
 
-## 16. Replicated documents are available, and off by default
+## 16. Replicated documents are available, and replicate 1:1
 
 A new `DataStore` object ships on every binding: offline-first documents any
 member of a space can edit while disconnected, merging deterministically when
-replicas meet again. Messaging is synced events; this is synced state.
+replicas meet again. Messaging is synced events; this is synced state. Two
+peers with a secure session converge on the documents they share.
 
-**Existing applications need no changes.** The layer is inert until
-`data.enabled` is set, nothing is persisted until a document is written, and
-no existing API changed shape. Skip the rest of this section if you are not
-using it.
+**Existing applications need no changes.** `data.enabled` defaults to `true`,
+but nothing is persisted until a document is written, nothing is sent until a
+document is shared, and no existing API changed shape. An application that
+never opens a store pays nothing at rest and nothing on the wire; set
+`data.enabled` to `false` if you would rather the layer refuse outright. Skip
+the rest of this section if you are not using it.
+
+### What replicates, and with whom
+
+A space replicates with the peer whose address names it. Name a space after a
+peer's address and its documents converge with that peer; name it anything else
+and it stays on the device. Nothing else needs configuring, and there is no
+sharing call: the space name *is* the sharing decision.
+
+Replication is 1:1 in this release. Group spaces are not yet replicated, and a
+document too large to catch up inside a single frame is reported rather than
+sent.
+
+Replicas that stay in contact converge. Two that are separated by a partition
+outlasting a compaction may not, because compaction deletes the history a
+change made on the other side depends on. Nothing is lost on either device and
+nothing crashes; the documents simply stay apart, and the refusal is logged.
+
+**Deleting a document does not delete it from the peer, and does not keep it
+deleted here.** There are no deletion tombstones in this release. `deleteDoc`
+removes the records on this device, and the peer's next version offer names the
+document again, so it is recreated and refilled from their copy. In a space
+named after a peer, treat deletion as local cleanup that replication may undo,
+not as a way to remove content: to retire content from both sides, empty the
+document (deletions inside a document replicate like any other change); to stop
+a space replicating at all, use a space name that is not a peer address.
 
 ### Turning it on
 
@@ -1540,10 +1568,11 @@ await store.mapSet('space-1', 'profile', 'fields', 'name', {
 await store.flush('space-1', 'profile');
 ```
 
-`enabled` defaults to `false` because this release ships the local half only.
-Replication over the transport ladder comes next, and advertising a capability
-with no sync behind it would invite peers to expect a sync that never comes.
-The default flips in the release that ships replication.
+`enabled` defaults to `true`, so the block above is showing you the flag
+rather than requiring it. It was `false` while the layer could store documents
+but not replicate them, because advertising a capability with no sync behind it
+invites peers to expect a sync that never comes; both halves ship together, so
+the switch is on.
 
 ### Storage: nothing to configure, but one thing to know
 

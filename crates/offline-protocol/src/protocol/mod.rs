@@ -4,6 +4,8 @@ mod blocking;
 mod config_accessors;
 #[cfg(feature = "data")]
 pub(crate) mod data;
+#[cfg(feature = "data")]
+mod data_sync;
 mod decryption_queue;
 pub(crate) mod mesh_relay;
 mod message_dispatch;
@@ -294,6 +296,21 @@ pub struct OfflineProtocol {
     /// rich extras — never a cleartext fallback.
     peer_rich_payload: std::collections::HashSet<String>,
 
+    /// Peers whose key package advertised replicated-document sync
+    /// ([`DATA_SYNC_V1`] in `data_versions`), so the send path may push
+    /// `__DATA_V1__` frames to them. Same lifecycle as the two capability
+    /// sets above: learned from key-package exchange, persisted, restored on
+    /// `initialize_mls`, bounded like `key_package_sent_to`.
+    ///
+    /// Forgetting a peer costs replication with them until the next live
+    /// exchange, which is worse than it sounds: documents stay editable on
+    /// both sides and diverge quietly, so the symptom is not an error but
+    /// two people looking at different text. It is why this set is restored
+    /// rather than relearned.
+    ///
+    /// [`DATA_SYNC_V1`]: crate::protocol::types::DATA_SYNC_V1
+    peer_data_sync: std::collections::HashSet<String>,
+
     /// Peers whose sealed-rich-payload support we learned *indirectly*: a
     /// group inviter attested it on the Add commit (to existing members) or
     /// the Welcome (to the joining member), because the members of a group
@@ -373,6 +390,17 @@ pub struct OfflineProtocol {
     /// Open replicated documents and their per-space indexes.
     #[cfg(feature = "data")]
     pub(crate) data: data::DataLayer,
+
+    /// When each peer was last offered our document versions.
+    ///
+    /// Neighbour rediscovery is not a rare event: a peer walking in and out
+    /// of Bluetooth range fires it repeatedly, and an offer per discovery
+    /// would put a frame on the mesh every time. The offer is not urgent
+    /// (anything committed locally is pushed as it happens) and it is not
+    /// load-bearing (the next trigger repeats it), so it is exactly the kind
+    /// of traffic that should be rate limited rather than merely small.
+    #[cfg(feature = "data")]
+    pub(crate) last_data_sync_offer: HashMap<String, Instant>,
 
     /// Lamport logical clock for causal message ordering.
     /// Ticked on send, merged on receive.
@@ -771,6 +799,7 @@ impl OfflineProtocol {
             encryption_capable_peers: std::collections::HashSet::new(),
             peer_compact_envelope: std::collections::HashSet::new(),
             peer_rich_payload: std::collections::HashSet::new(),
+            peer_data_sync: std::collections::HashSet::new(),
             peer_rich_attested: std::collections::HashSet::new(),
             plaintext_send_warned: std::collections::HashSet::new(),
             plaintext_receive_warned: std::collections::HashSet::new(),
@@ -782,6 +811,8 @@ impl OfflineProtocol {
             state_record_cipher: None,
             #[cfg(feature = "data")]
             data: data::DataLayer::default(),
+            #[cfg(feature = "data")]
+            last_data_sync_offer: HashMap::new(),
             lamport_clock: LamportClock::new(),
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),
@@ -941,6 +972,7 @@ impl OfflineProtocol {
         let previous_outbox = self.outbox.clone();
         let previous_peer_compact_envelope = self.peer_compact_envelope.clone();
         let previous_peer_rich_payload = self.peer_rich_payload.clone();
+        let previous_peer_data_sync = self.peer_data_sync.clone();
         let previous_peer_rich_attested = self.peer_rich_attested.clone();
 
         let previous_local_id = std::mem::replace(&mut self.local_id, local_id.clone());
@@ -1080,6 +1112,7 @@ impl OfflineProtocol {
             self.outbox = previous_outbox;
             self.peer_compact_envelope = previous_peer_compact_envelope;
             self.peer_rich_payload = previous_peer_rich_payload;
+            self.peer_data_sync = previous_peer_data_sync;
             self.peer_rich_attested = previous_peer_rich_attested;
             return Err(err);
         }
@@ -1466,6 +1499,24 @@ impl OfflineProtocol {
         self.drain_deferred_restore_settlements();
 
         self.flush_restored_confirmed_pending_messages();
+
+        // Cold start: sessions restored from storage are already confirmed,
+        // so no confirmation transition will fire for them and nothing else
+        // would offer versions until the peer happened to be rediscovered.
+        // Frames toward an unreachable peer queue in the outbox, which is the
+        // ladder doing its job rather than a reason not to try.
+        #[cfg(feature = "data")]
+        {
+            // The space list is derived from the records themselves rather
+            // than from the space index, because the index is a cache: a
+            // document written without ever being explicitly created leaves
+            // records but no index entry, and those are precisely the
+            // documents no peer has seen yet.
+            for space in self.data_list_spaces().unwrap_or_default() {
+                self.kick_data_sync(&space, "start");
+            }
+        }
+
         self.kick_pending_session_reconciliation("start");
         self.process_welcome_retry_queue()?;
 
@@ -1599,6 +1650,25 @@ impl OfflineProtocol {
         }
     }
 
+    /// Forget that a peer replicates documents.
+    ///
+    /// The capability and the offer window are two halves of one fact, and
+    /// they have to be dropped together: a window left behind outlives the
+    /// capability and then suppresses the first offer to the same peer once
+    /// it is relearned, which is a document that silently does not sync.
+    pub(crate) fn forget_data_sync_peer(&mut self, peer: &str) {
+        self.peer_data_sync.remove(peer);
+        #[cfg(feature = "data")]
+        self.last_data_sync_offer.remove(peer);
+    }
+
+    /// [`Self::forget_data_sync_peer`] for every peer at once.
+    pub(crate) fn forget_every_data_sync_peer(&mut self) {
+        self.peer_data_sync.clear();
+        #[cfg(feature = "data")]
+        self.last_data_sync_offer.clear();
+    }
+
     /// Called when a new neighbor is discovered.
     ///
     /// When auto key exchange is enabled, this method sends our key package
@@ -1659,6 +1729,14 @@ impl OfflineProtocol {
         // has a fresh delivery opportunity over the carrier that surfaced this
         // peer — re-arm it. No-op when there is no pending Welcome for the peer.
         self.rearm_welcome_for_peer(peer_id, "peer_rediscovered");
+
+        // Offer document versions while the peer is in front of us. This has
+        // to sit above the key-package guard below, which returns early for
+        // any peer we have already exchanged with — that is to say, for
+        // exactly the established peers whose documents drifted apart during
+        // the partition this discovery just ended.
+        #[cfg(feature = "data")]
+        self.kick_data_sync(peer_id, "peer_rediscovered");
 
         // Only send key package if encryption is enabled and auto key exchange is on
         if !self.config.encryption.enabled || !self.config.encryption.auto_key_exchange {

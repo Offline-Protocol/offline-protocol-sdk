@@ -7565,10 +7565,12 @@ mod tests {
 
         let udl = read(manifest.join("src/offline_protocol.udl"));
         assert!(
-            udl.contains("boolean data_enabled = false;"),
-            "the UDL must default data_enabled to false: the layer ships before \
-             its replication half, and a capability advertised with no sync \
-             behind it invites peers to expect a sync that never comes"
+            udl.contains("boolean data_enabled = true;"),
+            "the UDL must default data_enabled to true: it defaulted to false \
+             while the layer could store documents but not replicate them, and \
+             replication has now landed. The two defaults have to move \
+             together, because a UDL still saying false would leave every \
+             mobile app opted out of a feature the Rust side considers on"
         );
 
         let kotlin =

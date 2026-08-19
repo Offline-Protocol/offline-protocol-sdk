@@ -18,6 +18,7 @@ in [Message model and wire format](wire-format.md#reserved-metadata-keys)):
 | `__GRP_RELAY_BCAST__` body | JSON payload whose `ciphertext` field is base64 |
 | `__GRP_MLS_WELCOME__` body | JSON payload whose `welcome_data` field is base64 |
 | `__GROUP_MSG__` body | base64 of the MLS ciphertext directly, with no JSON wrapper; a decode failure is treated as legacy plaintext, which is then refused for any group the receiver secures with MLS |
+| `__DATA_V1__` body | JSON payload whose `blob` field is base64, on the frame kinds that carry document bytes |
 
 Two consequences are worth stating, because both have been read the wrong way:
 
@@ -60,7 +61,7 @@ are listed in the registry so application content can never impersonate them.
 |--------|----------------|---------|
 | `__MLS_ENC_CONFIRM__` | Inside an `__MLS_ENC__` envelope | A group-aware decrypt that lets the both-create session owner converge. Consumed on receipt, never surfaced to the application |
 | `__RICH_V1__` | Inside the decrypted MLS plaintext | The sealed rich payload body |
-| `__DATA_V1__` | Inside the decrypted MLS plaintext | Replicated-document sync frames. Reserved, not yet emitted: the marker is registered ahead of the frames so no application message can occupy the name first |
+| `__DATA_V1__` | Inside the decrypted MLS plaintext | Replicated-document sync frames, negotiated as `data_versions`. See [Document sync frames](#document-sync-frames) |
 
 ### Connection lifecycle
 
@@ -144,6 +145,163 @@ They are signature-gated like any control frame, but they are **exempt from the
 encryption requirement**, so discovery gossip and the application-supplied
 request and response bodies are sent in cleartext. See
 [residual risk R9](../security/threat-model.md#r9-service-discovery-and-service-bodies-are-signed-not-encrypted).
+
+## Document sync frames
+
+`__DATA_V1__` frames replicate documents between two peers. They travel only
+inside the decrypted MLS plaintext, never as an outer wire prefix, and only
+toward a peer whose key package advertised `data_versions`
+([capability negotiation](capability-negotiation.md)).
+
+### Shape
+
+The body is a JSON object. Its first field is the schema version and its `k`
+field names the kind:
+
+```
+__DATA_V1__{"v":1,"k":"vv","reply":false,"partial":false,"docs":{"<doc>":"<base64 version>"}}
+__DATA_V1__{"v":1,"k":"delta","doc":"<name>","blob":"<base64>"}
+__DATA_V1__{"v":1,"k":"snap","doc":"<name>","blob":"<base64>"}
+__DATA_V1__{"v":1,"k":"need_snap","doc":"<name>"}
+```
+
+A receiver MUST read `v` before attempting to parse the body, and MUST consume
+a frame whose version it does not know without surfacing it. Reversing that
+order makes every future frame format indistinguishable from corruption.
+
+`v` covers the document encoding as well as the frame schema. The engine
+guarantees only that new code reads old encodings, so an encoding change is a
+new version here, and a peer that has not advertised it is not sent one.
+
+### The space is never on the wire
+
+Neither the space nor the peer appears in any frame. A receiver derives the
+space from the authenticated wire sender, and a sender from the recipient. The
+two replicas therefore name the same space differently, each by the other's
+address, and a peer cannot reach a document shared with anybody else.
+
+### The exchange
+
+An offer (`reply: false`) lists every document the sender holds for that peer
+with its version. The receiver answers with what the sender is missing,
+followed by one offer of its own carrying `reply: true`. An offer marked
+`reply` MUST NOT be answered with another offer. Without that rule the
+replicas converge correctly and then exchange offers forever.
+
+A document named in an offer that the receiver has never seen is created
+locally, and created empty. Whatever created it MUST also ask for its contents
+on the same leg, because the peer will not volunteer them again: it has
+already named everything it holds. The counter-offer carries that question
+when the frame provoked one. When it did not, which is any offer marked
+`reply`, the receiver MUST send a targeted offer naming exactly the documents
+it created, marked `reply: true` and `partial: true`. A receiver that creates
+a document and asks for nothing leaves it empty for as long as the link stays
+up, and nothing on either device reports it.
+
+Deletion has no representation in this version. A document deleted locally is
+absent from the deleting side's next offer and still present on the peer's, so
+the rules above recreate it and refill it: the deletion is undone rather than
+propagated. Removing content from both replicas means emptying the document,
+whose internal deletions replicate as ordinary changes. A future version that
+adds tombstones needs a new `v`, because a peer without them recreates
+everything the peer with them deletes.
+
+A document *absent* from an offer is read as one the sender has never seen,
+and answered with the whole document. That inference needs the complete list,
+so a sender MUST set `partial` on any frame carrying less than everything it
+holds: every frame of an offer split across several, and a targeted offer
+about a single document. A receiver MUST NOT draw the inference from a frame
+marked `partial`. Without the flag, a peer holding more documents than one
+frame carries is sent the entire space, in full, on every exchange, while
+perfectly in sync.
+
+### Every leg ends
+
+Every chain of answers is finite, and no answer restarts an exchange. This is
+a MUST for any frame kind added later, because the failure it prevents has no
+symptom on either device except traffic that never stops.
+
+| Inbound | Answer |
+|---------|--------|
+| Offer (`reply: false`) | Catch-up for each stale document, then one `reply: true` offer |
+| Offer (`reply: true`) | Catch-up for each stale document, plus one targeted offer naming any document this frame caused the receiver to create |
+| `delta` that applies, is already held, or is unreadable | Nothing |
+| `delta` held behind a missing predecessor | One targeted offer (`reply: true`, `partial: true`) for that document |
+| `delta` needing trimmed history | `need_snap` for that document |
+| `snap` | Nothing, in every outcome |
+| `need_snap` | One `snap`, and only for a document already held |
+
+A receiver MAY also emit a `delta` of its own local changes when a frame
+arrives for a document it holds unflushed edits to, and this does not break
+the property: those changes were owed to the peer before the frame arrived, so
+flushing them is not an answer and cannot recur.
+
+The one chain longer than a single hop is that targeted offer: it draws
+catch-up and nothing further. It terminates because it names only documents
+the peer has itself just offered, so the peer creates nothing from it and has
+nothing to ask for in turn.
+
+`need_snap` says that no run of changes can close the gap, because the
+receiver compacted away the history the changes are built on. Answering such
+a refusal with a version offer instead does not terminate: the sender
+recomputes changes since the receiver's version, which is the same refused
+delta, and the two trade it indefinitely.
+
+A `snap` answer closes the gap when the sender holds everything the receiver
+kept. When the two replicas forked below a point the receiver compacted away,
+it does not and cannot: the ancestors were deleted on the receiving side, so
+no frame carries them back. That import is refused and reported, and the
+replicas stay apart. See
+[ADR 0019](../adr/0019-remote-document-imports-are-contained-not-trusted.md).
+
+### Sizes
+
+A space accepts at most 1024 documents on a peer's say-so. Every unfamiliar
+name in an offer, and every blob naming an unfamiliar document, becomes
+stored state, and nothing else bounds how many names one exchange can carry.
+The ceiling applies only to documents a peer names; an application creating
+its own is not subject to it.
+
+A frame carries at most 32 KiB of document bytes before base64. The figure is
+the mesh ceiling, not the record ceiling: an unnegotiated Bluetooth link caps
+one message at roughly 69 KiB, and the remainder is base64 expansion, the
+frame's own JSON, the sealed envelope, and the message header.
+
+A document that cannot be caught up inside that budget in any form is reported
+rather than sent. Carrying one over the media transfer path is not yet
+specified.
+
+A space whose version list does not fit in one frame costs more than
+proportional traffic: every frame of a split offer is answered on its own, so
+an offer split into *k* frames draws *k* answers, each itself split when the
+answering side holds more than one frame's worth. Both replicas still
+converge, and a space of 128 documents or fewer never splits at all.
+
+A receiver MUST NOT trim that cost by scoping its answer to the documents the
+inbound frame named. A document the receiver holds that the sender has never
+seen is announced only by the receiver's complete list, and an answer scoped
+to the names it was sent drops that document silently, leaving a replica that
+simply never receives it.
+
+### Acknowledgement
+
+Sync frames ride the ordinary ladder and are acknowledged like any message.
+Every data-layer outcome is terminal: a corrupt blob, an unknown version, a
+refused import, or a switched-off layer is acknowledged and dropped, never
+deferred. Deferral means "this same ciphertext will succeed once the session
+is ready" and nothing else, so using it for anything else spends the sender's
+whole retry budget on a frame that can never be accepted.
+
+A frame arriving before the session is ready is not a data-layer outcome: it
+defers un-acknowledged like every other sealed body, and is handled when the
+decryption queue drains.
+
+### Imports are contained
+
+A blob is judged before the document engine sees it, and blobs in flight are
+recorded on disk so one that ends the process cannot end it again on every
+retry. See
+[ADR 0019](../adr/0019-remote-document-imports-are-contained-not-trusted.md).
 
 ## The control-plane signature gate
 

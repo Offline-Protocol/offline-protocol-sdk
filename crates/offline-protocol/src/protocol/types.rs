@@ -642,6 +642,33 @@ pub(crate) struct KeyPackagePayload {
     #[serde(default)]
     pub(crate) rich_versions: Vec<u8>,
 
+    /// Replicated-document sync versions the sender speaks (e.g. `[1]` for
+    /// [`DATA_SYNC_V1`]). Absent on legacy nodes and on installs with the
+    /// data layer switched off (`#[serde(default)]` → empty), and toward a
+    /// peer that advertises nothing here no `__DATA_V1__` frame is ever
+    /// sent.
+    ///
+    /// End-to-end like `env_versions` and `rich_versions`: it says what the
+    /// *recipient* parses inside the decrypted MLS plaintext, not what a
+    /// directly connected neighbour decodes on the wire.
+    ///
+    /// The version doubles as the engine's encoding generation. The CRDT
+    /// engine promises that new code reads old encodings and says nothing
+    /// about the reverse, so a future encoding change is a new version byte
+    /// here and a mixed fleet declines what it cannot read instead of
+    /// discovering it at import.
+    ///
+    /// Trust boundary: identical to the two capability lists above — a
+    /// plaintext envelope field, not signature-bound. Stripping it stops
+    /// documents replicating with that peer (they stay editable locally and
+    /// converge whenever a genuine advertisement arrives); forging it onto a
+    /// peer that cannot parse the frames makes us send bodies they consume
+    /// and drop. Neither grants an attacker anything they could not achieve
+    /// by dropping the packets outright. A feature negotiation, never a
+    /// security control.
+    #[serde(default)]
+    pub(crate) data_versions: Vec<u8>,
+
     /// This install's Nostr public key (x-only, 64-char lowercase hex), so a
     /// peer can seal Nostr gift wraps to a key only this install holds.
     ///
@@ -697,6 +724,17 @@ pub(crate) const RICH_PAYLOAD_V1: u8 = 1;
 /// failure there would re-queue the message forever. Bounding at the
 /// boundary means every queued extras blob is already known to seal.
 pub(crate) const MAX_RICH_EXTRAS_BYTES: usize = 32 * 1024;
+
+/// Replicated-document sync version advertised in
+/// [`KeyPackagePayload::data_versions`]: the decrypted MLS plaintext may be
+/// `__DATA_V1__` + JSON of a sync frame (version-vector exchange, delta
+/// push, or snapshot offer).
+///
+/// One number covers both the frame schema and the document encoding the
+/// frames carry. Splitting them would let a peer advertise a frame schema it
+/// speaks around an encoding it cannot read, and the failure would surface
+/// as an unreadable document rather than as a refused negotiation.
+pub(crate) const DATA_SYNC_V1: u8 = 1;
 
 /// Rich fields accepted by the `send_message_with` surface. Only ever
 /// delivered inside the sealed [`RichPayloadV1`] body — toward a recipient
@@ -1133,6 +1171,14 @@ pub(crate) struct PeerCapabilities {
     pub(crate) env_versions: Vec<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) rich_versions: Vec<u8>,
+    /// Sync versions the peer advertised, from
+    /// [`KeyPackagePayload::data_versions`]. Persisted for the same reason
+    /// as the two above: without it a document edited right after relaunch
+    /// would not replicate until the next live key-package exchange, and a
+    /// sync that silently does not happen looks exactly like a peer with
+    /// nothing to say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) data_versions: Vec<u8>,
     /// Rich-payload versions a *group inviter* attested for this peer
     /// (carried on the group Add commit / Welcome), as opposed to the
     /// direct self-advertised `rich_versions` above. Kept separate because
@@ -1186,6 +1232,7 @@ impl PeerCapabilities {
     pub(crate) fn from_advertised(
         env_versions: &[u8],
         rich_versions: &[u8],
+        data_versions: &[u8],
         nostr_pubkey: Option<&str>,
     ) -> Self {
         Self {
@@ -1195,6 +1242,11 @@ impl PeerCapabilities {
                 .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
                 .collect(),
             rich_versions: rich_versions
+                .iter()
+                .copied()
+                .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
+                .collect(),
+            data_versions: data_versions
                 .iter()
                 .copied()
                 .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
@@ -1209,6 +1261,7 @@ impl PeerCapabilities {
     pub(crate) fn is_any(&self) -> bool {
         !self.env_versions.is_empty()
             || !self.rich_versions.is_empty()
+            || !self.data_versions.is_empty()
             || !self.attested_rich_versions.is_empty()
             || self.nostr_pubkey.is_some()
     }
@@ -1697,6 +1750,24 @@ pub(crate) mod storage_keys {
     /// [`ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split data to inherit
     /// for it.
     pub const DATA_SPACES: &str = "data_spaces";
+    /// Key type for per-space replication bookkeeping.
+    ///
+    /// Key ID is the space id. Holds the containment state the sync path
+    /// needs to survive a crash: the digest of the blob currently being
+    /// handed to the document engine, and the digests of blobs that were
+    /// in flight when a previous run died.
+    ///
+    /// Kept out of [`DATA_SPACES`] deliberately. That record is a cache
+    /// reconciled from `list_keys` at open, so anything in it may be
+    /// rebuilt from the store at any time; this one records something the
+    /// store cannot show, and rebuilding it from the listing would silently
+    /// answer "nothing was in flight" after exactly the crash it exists to
+    /// remember.
+    ///
+    /// Post-split only: deliberately absent from
+    /// [`ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split data to inherit
+    /// for it.
+    pub const DATA_SYNC: &str = "data_sync";
 
     /// Every key type that moved from secure storage into protocol-state
     /// storage when the two domains were split.

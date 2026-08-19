@@ -651,7 +651,7 @@ synced events; this is synced state.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `data.enabled` | boolean | `false` | Whether the data layer accepts work |
+| `data.enabled` | boolean | `true` | Whether the data layer accepts work |
 
 ```typescript
 const config: ProtocolConfig = {
@@ -661,10 +661,15 @@ const config: ProtocolConfig = {
 };
 ```
 
-`enabled` is off by default. The layer ships before its replication half, and a
-capability advertised with no sync behind it invites peers to expect a sync that
-never comes. The default flips in the release that ships replication, with a
-CHANGELOG entry.
+`enabled` is on by default. It was off for one release, while the layer could
+store documents but not replicate them: a capability advertised with no sync
+behind it invites peers to expect a sync that never comes. Replication landed,
+so the switch is on.
+
+Leaving it on costs an application that never opens a store nothing at rest and
+nothing on the wire. Set it to `false` to be certain the layer is inert; a
+`DataStore` call then fails with a `DataDisabled` error naming the reason,
+rather than working somewhere unexpected.
 
 **Storage.** Documents persist through the same seam as the rest of protocol
 state, so there is nothing to configure: every binding ships a default provider

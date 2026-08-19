@@ -565,23 +565,24 @@ impl Default for GroupConfig {
 
 /// Configuration for the replicated-document data layer.
 ///
-/// The layer is inert until [`Self::enabled`] is set: no documents are
-/// opened, nothing is persisted, and (from the release that adds
-/// replication) no capability is advertised to peers.
-// `Default` is derived rather than hand-written, unlike the other sections
-// here: both fields want their type's default (`false` and `None`), so a
-// hand-written impl would only restate them. Give this a hand-written impl
-// the moment a field's default stops being the type's.
-#[derive(Clone, Default, Serialize, Deserialize)]
+/// [`Self::enabled`] governs the whole layer: with it off no documents are
+/// opened, nothing is persisted, and no capability is advertised to peers.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DataConfig {
     /// Whether the data layer accepts work at all.
     ///
-    /// **Defaults to `false`.** The layer ships before its replication half
-    /// does, and a capability advertised with no sync machinery behind it
-    /// invites peers to expect a sync that never comes. The default flips in
-    /// the release that ships replication, with a CHANGELOG entry, rather
-    /// than arriving quietly with a version bump.
-    #[serde(default)]
+    /// **Defaults to `true`.** It defaulted to `false` while the layer could
+    /// store documents but not replicate them: advertising a capability with
+    /// no sync behind it invites peers to expect a sync that never comes.
+    /// Both halves land in the same release, so no application ever ran
+    /// against the old default, and the switch is on.
+    ///
+    /// What being on costs an application that ignores documents entirely:
+    /// nothing at rest and nothing on the wire. The layer allocates when a
+    /// store is opened, and a capability is advertised in a key package that
+    /// is sent anyway. What it buys is that an application that *does* open a
+    /// store gets replication without discovering a flag.
+    #[serde(default = "default_data_enabled")]
     pub enabled: bool,
 
     /// Where documents are stored, when the application wants them somewhere
@@ -610,6 +611,21 @@ pub struct DataConfig {
     /// own wipe on logout, or documents outlive the account that made them.
     #[serde(skip)]
     pub storage: Option<Arc<dyn crate::protocol_state_storage::ProtocolStateStorage>>,
+}
+
+/// The default for [`DataConfig::enabled`], needed by name because `serde`
+/// cannot ask a field's type for anything other than its own default.
+fn default_data_enabled() -> bool {
+    true
+}
+
+impl Default for DataConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_data_enabled(),
+            storage: None,
+        }
+    }
 }
 
 impl std::fmt::Debug for DataConfig {

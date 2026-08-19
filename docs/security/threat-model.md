@@ -391,6 +391,49 @@ single hostile or broken one. Zone-membership exposure would need a design that
 does not name recipients to the bridge at all, which no addressing scheme here
 provides; it is the same open problem as relay-side metadata.
 
+### R11. A space member can abort the process with a crafted document blob
+
+Replicated documents merge changes that arrive from peers, and merging means
+handing bytes to a CRDT engine. The engine has open defects where a malformed
+or causally impossible change panics rather than returning an error, and one of
+them poisons the document's lock so the retry panics too. The mobile artifact
+ships with `panic = "abort"`, so there is no unwinding to catch.
+
+MLS does not help here, and the reason is worth being precise about:
+authentication establishes who sent the bytes, and the question the engine is
+about to ask is what shape they are. A peer can be exactly who they claim and
+still send a blob that ends the process.
+
+**Impact:** a member of a space can abort the application on a device it
+replicates with. Not silent, not remote-code-execution, and not available to
+anyone outside the space: it requires someone the user has already accepted
+into a shared document, and it is attributable to them.
+
+**Why it stands:** the defects are upstream and the engine is not ours to fix
+on our own schedule. Re-implementing its decoder to predict what it will accept
+would mean maintaining a second parser that has to agree with the first one
+forever.
+
+**Mitigations in place today:** blobs are judged before the engine sees them,
+which refuses every shape we have been able to reproduce, whether it arrives as
+a run of changes or as a whole document; frames are bounded at 32 KiB before
+decoding; a space accepts at most 1024 documents on a peer's say-so, so an
+offer cannot spend unbounded storage; and the digest of a blob about to be
+imported is written to disk first, so a blob that does end the process is
+refused when the sender retries it. That last one is what bounds the damage to a single abort
+rather than a crash loop driven by the delivery ladder faithfully doing its
+job. See
+[ADR 0019](../adr/0019-remote-document-imports-are-contained-not-trusted.md).
+
+**A smaller cost at the same boundary:** every version offer a peer sends
+makes this device read the version of each document in that space, and a peer
+may send offers as fast as the link carries them. The work is bounded by the
+space's document ceiling and attributable to a member the user has already
+accepted, which is why it is recorded here rather than raised as a residual of
+its own.
+
+This shrinks when the engine's import hardening reaches its Rust release.
+
 ## The telemetry producer rule
 
 Telemetry ships some string fields verbatim by design. The scrubber hashes

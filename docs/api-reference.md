@@ -1000,8 +1000,9 @@ synced state.
 
 Requires `initializeMls` to have run — documents are sealed at rest with the
 same per-install record key as every other protocol category, and that key is
-minted there — and `data.enabled` set in the configuration. Every method
-answers `DataDisabled` until it is.
+minted there — and the data layer switched on. `data.enabled` defaults to
+`true`, so that half needs no action; set it to `false` and every method
+answers `DataDisabled`.
 
 ### DataStore
 

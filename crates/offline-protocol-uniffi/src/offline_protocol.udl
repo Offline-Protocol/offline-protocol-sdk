@@ -816,11 +816,14 @@ dictionary ProtocolConfig {
     // inside it — see MeshRelayConfig. Applied at construction: the governor
     // takes its snapshot there, and there is no runtime update path.
     MeshRelayConfig? mesh_relay = null;
-    // Whether the replicated-document layer accepts work. Off by default:
-    // the layer ships before its replication half, and a capability
-    // advertised with no sync behind it invites peers to expect a sync that
-    // never comes. Defaulted so existing callers keep compiling.
-    boolean data_enabled = false;
+    // Whether the replicated-document layer accepts work. On by default,
+    // now that replication has landed: a space replicates with the peer
+    // whose address names it, and an application that never opens a store
+    // pays nothing at rest and nothing on the wire. This default and the
+    // Rust one move together, because a UDL still saying false would leave
+    // every mobile app opted out of a feature the Rust side considers on.
+    // Defaulted so existing callers keep compiling.
+    boolean data_enabled = true;
 };
 
 // ========================================================================

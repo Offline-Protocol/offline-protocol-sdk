@@ -947,6 +947,54 @@ impl OfflineProtocol {
         Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
     }
 
+    /// The sync versions this device advertises.
+    ///
+    /// Empty unless the data layer is both compiled in and switched on. A
+    /// capability advertised with nothing behind it is worse than silence:
+    /// the peer starts sending frames and waiting for answers that never
+    /// come, and nothing in that exchange looks like an error to either
+    /// side.
+    pub(crate) fn advertised_data_versions(&self) -> Vec<u8> {
+        #[cfg(feature = "data")]
+        {
+            if self.config.data.enabled {
+                return vec![super::types::DATA_SYNC_V1];
+            }
+        }
+        Vec::new()
+    }
+
+    /// Whether document sync is live toward `recipient`: the layer is
+    /// compiled in and enabled here, the peer is not blocked, and they
+    /// advertised [`DATA_SYNC_V1`] in their key package.
+    ///
+    /// Consulted per send rather than cached at session establishment, like
+    /// the two capability gates below it: a peer that downgrades stops
+    /// receiving frames on their next key package, not at their next
+    /// session.
+    ///
+    /// The block check is here rather than at the call sites because this is
+    /// the only gate they share, and because replication is not reached
+    /// through a send API: every public send surface checks blocking for
+    /// itself, while these frames are triggered by a commit or a discovery.
+    /// A blocked peer still holds a live session, so nothing further down
+    /// would have refused the frame. Inbound needs no equivalent: the
+    /// receive path drops a blocked sender before any dispatch.
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(super) fn data_sync_active(&self, recipient: &str) -> bool {
+        #[cfg(feature = "data")]
+        {
+            self.config.data.enabled
+                && self.peer_data_sync.contains(recipient)
+                && !self.is_user_blocked(recipient)
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            let _ = recipient;
+            false
+        }
+    }
+
     /// Whether rich extras seal for `recipient`: our own kill switch is on
     /// and the peer advertised [`RICH_PAYLOAD_V1`] in their key package.
     pub(super) fn rich_seal_active(&self, recipient: &str) -> bool {
@@ -4798,6 +4846,7 @@ impl OfflineProtocol {
             } else {
                 Vec::new()
             },
+            data_versions: self.advertised_data_versions(),
             // Present only when the Nostr transport is installed. Advertised
             // regardless of the sealing kill switch, which gates what *we*
             // publish, not what a peer may seal to us: withholding it would

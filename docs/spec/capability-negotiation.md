@@ -10,6 +10,7 @@ Peers advertise what they can parse in the key package payload, the body of a
 | `wire_versions` | Hop-local | Which frame encodings we may emit to this peer | JSON only |
 | `env_versions` | End to end | Which `__MLS_ENC__` payload forms we may emit | Legacy JSON envelope only |
 | `rich_versions` | End to end | Whether we may seal a `__RICH_V1__` body, and the v2 media envelope | Plain text only, extras dropped |
+| `data_versions` | End to end | Whether we may send `__DATA_V1__` document sync frames, and which document encoding they carry | No replication with that peer |
 | `nostr_pubkey` | End to end | Which key metadata is sealed to on the Nostr path | Seal to the publicly computable key |
 
 The key package payload also carries `user_id`, the MLS key package itself, a
@@ -47,11 +48,17 @@ toward a non-capable recipient are dropped, never sent in cleartext.
 
 ## Persistence
 
-`env_versions` and `rich_versions` are **end to end**: they describe what a
-recipient parses after an arbitrary number of relay hops. They MUST persist
-across restarts and be restored before any queued send flushes. Otherwise a
-restart silently downgrades every established peer until the next key package
-exchange, and the queued sends that flush at startup take the downgrade.
+`env_versions`, `rich_versions` and `data_versions` are **end to end**: they
+describe what a recipient parses after an arbitrary number of relay hops. They
+MUST persist across restarts and be restored before any queued send flushes.
+Otherwise a restart silently downgrades every established peer until the next
+key package exchange, and the queued sends that flush at startup take the
+downgrade.
+
+For `data_versions` the consequence is quieter than a downgrade and worse: both
+sides keep accepting edits to a document neither is replicating, so the symptom
+is not a dropped feature but two replicas that disagree, with nothing anywhere
+reporting a problem.
 
 `wire_versions` is **hop-local** and deliberately in-memory only. It describes
 what the next hop decodes, and it is re-exchanged on connect.

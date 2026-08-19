@@ -6,7 +6,7 @@ use super::{
     GroupMemberAddedPayload, GroupMemberRemovedPayload, GroupMessageReceivedPayload,
     InternalMessageResult, KeyPackagePayload, OfflineProtocol, PeerCapabilities, PresencePayload,
     ReadReceiptPayload, ReceivedKeyPackage, TypingIndicatorPayload, UserGroupsPayload,
-    MAX_KEY_PACKAGE_LIFETIME_MS, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES,
+    DATA_SYNC_V1, MAX_KEY_PACKAGE_LIFETIME_MS, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES,
     MAX_READ_RECEIPT_IDS, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
 };
 use crate::events::{DecryptionFailureCode, Event, SecurityWarningCode};
@@ -110,6 +110,23 @@ impl OfflineProtocol {
                 self.peer_rich_payload.remove(sender);
             }
 
+            // Record whether this peer replicates documents, so the data
+            // layer may push `__DATA_V1__` frames to them. Same shape again:
+            // gated by our own kill switch, removed when a fresh key package
+            // stops advertising it, bounded like `key_package_sent_to`.
+            // Forgetting a peer stops replication until the next exchange and
+            // never falls back to anything unsealed.
+            if self.config.data.enabled && payload.data_versions.contains(&DATA_SYNC_V1) {
+                if !self.peer_data_sync.contains(sender)
+                    && self.peer_data_sync.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.forget_every_data_sync_peer();
+                }
+                self.peer_data_sync.insert(sender.to_string());
+            } else {
+                self.forget_data_sync_peer(sender);
+            }
+
             // A direct key package is authoritative for this peer: drop any
             // inviter-attested rich entry (the durable side happens below —
             // `from_advertised` never carries the attested field, and an
@@ -175,6 +192,7 @@ impl OfflineProtocol {
             let caps = PeerCapabilities::from_advertised(
                 &payload.env_versions,
                 &payload.rich_versions,
+                &payload.data_versions,
                 advertised_nostr_pubkey.as_deref(),
             );
             if caps.is_any() {
@@ -1079,6 +1097,27 @@ impl OfflineProtocol {
                         format!("is_confirm={}", is_session_confirm),
                     ));
                     let surfaced = if is_session_confirm {
+                        Some(InternalMessageResult::Consumed)
+                    } else if let Some(body) = text.strip_prefix(internal_prefixes::DATA_V1) {
+                        // A document sync frame. Consumed either way, and
+                        // never deferred for anything the data layer decides:
+                        // deferral is reserved for "the session will be ready
+                        // and this same ciphertext will then work", so using
+                        // it for a corrupt blob or a switched-off layer would
+                        // spend the sender's whole retry budget on a frame
+                        // that can never be accepted. A frame that arrives
+                        // before the session is ready never reaches here at
+                        // all — it queues undecrypted, like every other
+                        // sealed body, and lands here when the drain runs.
+                        #[cfg(feature = "data")]
+                        {
+                            let body = body.to_string();
+                            self.handle_data_sync_frame(&sender_owned, &body);
+                        }
+                        #[cfg(not(feature = "data"))]
+                        {
+                            let _ = body;
+                        }
                         Some(InternalMessageResult::Consumed)
                     } else {
                         Some(InternalMessageResult::Decrypted(text))
