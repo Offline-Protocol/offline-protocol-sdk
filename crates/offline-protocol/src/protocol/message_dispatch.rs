@@ -6,7 +6,7 @@ use super::{
     GroupMemberAddedPayload, GroupMemberRemovedPayload, GroupMessageReceivedPayload,
     InternalMessageResult, KeyPackagePayload, OfflineProtocol, PeerCapabilities, PresencePayload,
     ReadReceiptPayload, ReceivedKeyPackage, TypingIndicatorPayload, UserGroupsPayload,
-    MAX_KEY_PACKAGE_LIFETIME_MS, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES,
+    DATA_SYNC_V1, MAX_KEY_PACKAGE_LIFETIME_MS, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES,
     MAX_READ_RECEIPT_IDS, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
 };
 use crate::events::{DecryptionFailureCode, Event, SecurityWarningCode};
@@ -110,6 +110,23 @@ impl OfflineProtocol {
                 self.peer_rich_payload.remove(sender);
             }
 
+            // Record whether this peer replicates documents, so the data
+            // layer may push `__DATA_V1__` frames to them. Same shape again:
+            // gated by our own kill switch, removed when a fresh key package
+            // stops advertising it, bounded like `key_package_sent_to`.
+            // Forgetting a peer stops replication until the next exchange and
+            // never falls back to anything unsealed.
+            if self.config.data.enabled && payload.data_versions.contains(&DATA_SYNC_V1) {
+                if !self.peer_data_sync.contains(sender)
+                    && self.peer_data_sync.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.peer_data_sync.clear();
+                }
+                self.peer_data_sync.insert(sender.to_string());
+            } else {
+                self.peer_data_sync.remove(sender);
+            }
+
             // A direct key package is authoritative for this peer: drop any
             // inviter-attested rich entry (the durable side happens below —
             // `from_advertised` never carries the attested field, and an
@@ -175,6 +192,7 @@ impl OfflineProtocol {
             let caps = PeerCapabilities::from_advertised(
                 &payload.env_versions,
                 &payload.rich_versions,
+                &payload.data_versions,
                 advertised_nostr_pubkey.as_deref(),
             );
             if caps.is_any() {

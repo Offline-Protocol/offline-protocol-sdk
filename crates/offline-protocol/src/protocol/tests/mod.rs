@@ -1859,6 +1859,7 @@ fn feed_key_package(protocol: &mut OfflineProtocol, sender: &str, wire_versions:
         wire_versions,
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
+        data_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -1937,6 +1938,7 @@ fn feed_key_package_with_env(protocol: &mut OfflineProtocol, sender: &str, env_v
         wire_versions: Vec::new(),
         env_versions,
         rich_versions: Vec::new(),
+        data_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -2118,6 +2120,7 @@ pub(crate) fn feed_key_package_with_rich(
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions,
+        data_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -2235,6 +2238,7 @@ fn feed_key_package_with_caps(
         wire_versions: Vec::new(),
         env_versions,
         rich_versions,
+        data_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -2375,6 +2379,7 @@ fn key_package_message_with_nostr_pubkey(
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
+        data_versions: Vec::new(),
         nostr_pubkey: nostr_pubkey.map(str::to_string),
     };
     let content = format!(
@@ -2691,6 +2696,157 @@ fn peer_capability_restore_respects_kill_switch_but_keeps_record() {
     assert!(restored.peer_rich_payload.contains(&id("peer")));
 }
 
+/// Feeds a key package advertising `data_versions`, as a peer running the
+/// replication half does.
+#[cfg(test)]
+fn feed_key_package_with_data(
+    protocol: &mut OfflineProtocol,
+    sender: &str,
+    data_versions: Vec<u8>,
+) {
+    let payload = KeyPackagePayload {
+        user_id: sender.to_string(),
+        key_package_data: vec![1, 2, 3, 4],
+        remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
+        timestamp_ms: 0,
+        session_reset: false,
+        wire_versions: Vec::new(),
+        env_versions: Vec::new(),
+        rich_versions: Vec::new(),
+        data_versions,
+        nostr_pubkey: None,
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::KEY_PACKAGE,
+        serde_json::to_string(&payload).unwrap()
+    );
+    let message = signed_frame(sender, &id("user123"), &content);
+    protocol.process_internal_message(&message);
+}
+
+/// A protocol instance with MLS and the data layer both switched on.
+#[cfg(test)]
+fn protocol_with_data_storage(storage: Arc<InMemoryStorage>) -> OfflineProtocol {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.data.enabled = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+    protocol
+}
+
+#[test]
+fn data_sync_capability_is_recorded_and_gates_sending() {
+    let mut protocol = protocol_with_data_storage(Arc::new(InMemoryStorage::new()));
+    assert!(
+        !protocol.data_sync_active(&id("peer")),
+        "sync must be off toward a peer that has advertised nothing"
+    );
+
+    feed_key_package_with_data(&mut protocol, &id("peer"), vec![DATA_SYNC_V1]);
+    assert!(protocol.peer_data_sync.contains(&id("peer")));
+    assert!(protocol.data_sync_active(&id("peer")));
+
+    // An unrelated peer is unaffected: the gate is per recipient, not a
+    // global "someone out there replicates" flag.
+    assert!(!protocol.data_sync_active(&id("stranger")));
+}
+
+#[test]
+fn data_sync_downgrade_removes_capability() {
+    let mut protocol = protocol_with_data_storage(Arc::new(InMemoryStorage::new()));
+    feed_key_package_with_data(&mut protocol, &id("peer"), vec![DATA_SYNC_V1]);
+    assert!(protocol.data_sync_active(&id("peer")));
+
+    // A fresh package advertising nothing is a downgrade, and it has to take
+    // effect: continuing to send frames a peer stopped parsing is how a
+    // downgrade turns into silent traffic nobody reads.
+    feed_key_package_with_data(&mut protocol, &id("peer"), Vec::new());
+    assert!(!protocol.peer_data_sync.contains(&id("peer")));
+    assert!(!protocol.data_sync_active(&id("peer")));
+}
+
+#[test]
+fn data_sync_capability_survives_a_restart() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_data_storage(storage.clone());
+    feed_key_package_with_data(&mut protocol, &id("peer"), vec![DATA_SYNC_V1]);
+    assert!(protocol.data_sync_active(&id("peer")));
+
+    // The cached key package is deleted once a session exists, so without the
+    // durable record a relaunch would stop replicating with a peer it had
+    // been replicating with all along — and both sides would keep accepting
+    // edits while silently diverging.
+    let restarted = protocol_with_data_storage(storage);
+    assert!(
+        restarted.peer_data_sync.contains(&id("peer")),
+        "the sync capability must survive a restart"
+    );
+    assert!(restarted.data_sync_active(&id("peer")));
+}
+
+#[test]
+fn data_sync_restore_respects_kill_switch_but_keeps_record() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_data_storage(storage.clone());
+    feed_key_package_with_data(&mut protocol, &id("peer"), vec![DATA_SYNC_V1]);
+
+    // Restart with the layer switched off: nothing is applied…
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.data.enabled = false;
+    let mut gated = OfflineProtocol::new(config).unwrap();
+    gated.initialize_mls_for_test(storage.clone()).unwrap();
+    assert!(!gated.peer_data_sync.contains(&id("peer")));
+    assert!(!gated.data_sync_active(&id("peer")));
+
+    // …but the record survives, so switching the layer back on restores the
+    // capability rather than waiting for the peer to advertise again.
+    let restored = protocol_with_data_storage(storage);
+    assert!(restored.peer_data_sync.contains(&id("peer")));
+}
+
+#[test]
+fn data_sync_is_advertised_only_when_the_layer_is_on() {
+    let off = protocol_with_mls_storage(Arc::new(InMemoryStorage::new()));
+    assert!(
+        off.advertised_data_versions().is_empty(),
+        "a device with the layer off must advertise nothing: a peer that \
+         believes we replicate waits for answers that never come"
+    );
+
+    let on = protocol_with_data_storage(Arc::new(InMemoryStorage::new()));
+    assert_eq!(on.advertised_data_versions(), vec![DATA_SYNC_V1]);
+}
+
+#[test]
+fn an_unknown_capability_in_a_key_package_is_ignored() {
+    // Rollout safety in both directions: a newer peer advertising a field
+    // this build has never heard of must still be understood for everything
+    // else in the package. Without it, shipping any future capability would
+    // break every older install rather than merely being invisible to it.
+    let mut protocol = protocol_with_data_storage(Arc::new(InMemoryStorage::new()));
+    let mut value = serde_json::json!({
+        "user_id": id("peer"),
+        "key_package_data": [1, 2, 3, 4],
+        "remaining_lifetime_ms": 30u64 * 24 * 60 * 60 * 1000,
+        "session_reset": false,
+        "data_versions": [DATA_SYNC_V1],
+        "capability_from_the_future": ["something", "entirely", "new"],
+    });
+    value["another_unknown_field"] = serde_json::json!(42);
+
+    let content = format!("{}{}", internal_prefixes::KEY_PACKAGE, value);
+    let message = signed_frame(&id("peer"), &id("user123"), &content);
+    protocol.process_internal_message(&message);
+
+    assert!(
+        protocol.data_sync_active(&id("peer")),
+        "an unknown sibling field stopped a known capability being read"
+    );
+}
+
 #[test]
 fn peer_capability_unblock_clears_record() {
     let storage = Arc::new(InMemoryStorage::new());
@@ -2725,6 +2881,7 @@ fn peer_capability_restore_prunes_overflow() {
         attested_rich_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: vec![RICH_PAYLOAD_V1],
+        data_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let encoded = serde_json::to_vec(&caps).unwrap();
@@ -2863,6 +3020,7 @@ fn peer_capability_restore_prefers_session_peers() {
         attested_rich_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: vec![RICH_PAYLOAD_V1],
+        data_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let encoded = serde_json::to_vec(&caps).unwrap();
@@ -3468,6 +3626,7 @@ fn test_process_internal_message_key_package() {
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
+        data_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -13844,6 +14003,7 @@ fn feed_session_reset_key_package(
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
+        data_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -17087,6 +17247,7 @@ fn test_lamport_clock_merge_on_internal_message() {
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
+        data_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -17296,6 +17457,7 @@ fn test_key_package_remaining_lifetime_ms() {
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
+        data_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -17379,6 +17541,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             wire_versions: Vec::new(),
             env_versions: Vec::new(),
             rich_versions: Vec::new(),
+            data_versions: Vec::new(),
             nostr_pubkey: None,
         };
         let content = format!(
@@ -17465,6 +17628,7 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
+        data_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -17514,6 +17678,7 @@ fn test_received_key_package_lifetime_is_clamped() {
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
+        data_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -19034,6 +19199,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             wire_versions: Vec::new(),
             env_versions: Vec::new(),
             rich_versions: Vec::new(),
+            data_versions: Vec::new(),
             nostr_pubkey: None,
         };
         let content = format!(

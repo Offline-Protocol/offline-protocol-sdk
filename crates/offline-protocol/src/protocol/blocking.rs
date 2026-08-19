@@ -1395,6 +1395,7 @@ mod tests {
             wire_versions: Vec::new(),
             env_versions: Vec::new(),
             rich_versions: Vec::new(),
+            data_versions: Vec::new(),
             nostr_pubkey: None,
         };
         let content = serde_json::to_string(&reset_payload).unwrap();

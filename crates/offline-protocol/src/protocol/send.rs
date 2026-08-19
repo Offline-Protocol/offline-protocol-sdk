@@ -6,12 +6,13 @@ use super::{
     MediaTransferDescriptor, OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation,
     OutboxEntry, OutboxReseal, PendingConnectionRequest, PendingMessage, PendingProvenance,
     PresencePayload, ProtocolState, ReadReceiptPayload, RichPayloadV1, RichSendExtras,
-    SendMessageOptions, TypingIndicatorPayload, WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES,
-    MAX_KEY_PACKAGE_SENT_TO, MAX_MESSAGE_CONTENT_BYTES, MAX_PENDING_CONNECTION_REQUESTS,
-    MAX_PENDING_EXPIRIES_PER_PASS, MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER,
-    MAX_PENDING_MESSAGE_BYTES_GLOBAL, MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS,
-    MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL,
-    RICH_PAYLOAD_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, SEND_FAIL_REASON_TRANSPORT,
+    SendMessageOptions, TypingIndicatorPayload, WelcomeDeliveryState, DATA_SYNC_V1,
+    MAX_INITIAL_MESSAGE_BYTES, MAX_KEY_PACKAGE_SENT_TO, MAX_MESSAGE_CONTENT_BYTES,
+    MAX_PENDING_CONNECTION_REQUESTS, MAX_PENDING_EXPIRIES_PER_PASS, MAX_PENDING_MESSAGES_GLOBAL,
+    MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
+    MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS, MAX_RICH_EXTRAS_BYTES,
+    MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL, RICH_PAYLOAD_V1,
+    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, SEND_FAIL_REASON_TRANSPORT,
     WELCOME_NO_CARRIER_RETRY_SECS, WELCOME_UNREACHABLE_RETRY_CAP_SECS,
 };
 use super::{classify_transport_send_error, send_failure_token};
@@ -945,6 +946,44 @@ impl OfflineProtocol {
         let serialized =
             serde_json::to_string(encrypted).map_err(|e| Error::Serialization(e.to_string()))?;
         Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
+    }
+
+    /// The sync versions this device advertises.
+    ///
+    /// Empty unless the data layer is both compiled in and switched on. A
+    /// capability advertised with nothing behind it is worse than silence:
+    /// the peer starts sending frames and waiting for answers that never
+    /// come, and nothing in that exchange looks like an error to either
+    /// side.
+    pub(crate) fn advertised_data_versions(&self) -> Vec<u8> {
+        #[cfg(feature = "data")]
+        {
+            if self.config.data.enabled {
+                return vec![DATA_SYNC_V1];
+            }
+        }
+        Vec::new()
+    }
+
+    /// Whether document sync is live toward `recipient`: the layer is
+    /// compiled in and enabled here, and the peer advertised
+    /// [`DATA_SYNC_V1`] in their key package.
+    ///
+    /// Consulted per send rather than cached at session establishment, like
+    /// the two capability gates below it: a peer that downgrades stops
+    /// receiving frames on their next key package, not at their next
+    /// session.
+    #[allow(dead_code)]
+    pub(super) fn data_sync_active(&self, recipient: &str) -> bool {
+        #[cfg(feature = "data")]
+        {
+            self.config.data.enabled && self.peer_data_sync.contains(recipient)
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            let _ = recipient;
+            false
+        }
     }
 
     /// Whether rich extras seal for `recipient`: our own kill switch is on
@@ -4798,6 +4837,7 @@ impl OfflineProtocol {
             } else {
                 Vec::new()
             },
+            data_versions: self.advertised_data_versions(),
             // Present only when the Nostr transport is installed. Advertised
             // regardless of the sealing kill switch, which gates what *we*
             // publish, not what a peer may seal to us: withholding it would

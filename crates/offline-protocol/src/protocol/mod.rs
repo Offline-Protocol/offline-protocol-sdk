@@ -294,6 +294,21 @@ pub struct OfflineProtocol {
     /// rich extras — never a cleartext fallback.
     peer_rich_payload: std::collections::HashSet<String>,
 
+    /// Peers whose key package advertised replicated-document sync
+    /// ([`DATA_SYNC_V1`] in `data_versions`), so the send path may push
+    /// `__DATA_V1__` frames to them. Same lifecycle as the two capability
+    /// sets above: learned from key-package exchange, persisted, restored on
+    /// `initialize_mls`, bounded like `key_package_sent_to`.
+    ///
+    /// Forgetting a peer costs replication with them until the next live
+    /// exchange, which is worse than it sounds: documents stay editable on
+    /// both sides and diverge quietly, so the symptom is not an error but
+    /// two people looking at different text. It is why this set is restored
+    /// rather than relearned.
+    ///
+    /// [`DATA_SYNC_V1`]: crate::protocol::types::DATA_SYNC_V1
+    peer_data_sync: std::collections::HashSet<String>,
+
     /// Peers whose sealed-rich-payload support we learned *indirectly*: a
     /// group inviter attested it on the Add commit (to existing members) or
     /// the Welcome (to the joining member), because the members of a group
@@ -771,6 +786,7 @@ impl OfflineProtocol {
             encryption_capable_peers: std::collections::HashSet::new(),
             peer_compact_envelope: std::collections::HashSet::new(),
             peer_rich_payload: std::collections::HashSet::new(),
+            peer_data_sync: std::collections::HashSet::new(),
             peer_rich_attested: std::collections::HashSet::new(),
             plaintext_send_warned: std::collections::HashSet::new(),
             plaintext_receive_warned: std::collections::HashSet::new(),
@@ -941,6 +957,7 @@ impl OfflineProtocol {
         let previous_outbox = self.outbox.clone();
         let previous_peer_compact_envelope = self.peer_compact_envelope.clone();
         let previous_peer_rich_payload = self.peer_rich_payload.clone();
+        let previous_peer_data_sync = self.peer_data_sync.clone();
         let previous_peer_rich_attested = self.peer_rich_attested.clone();
 
         let previous_local_id = std::mem::replace(&mut self.local_id, local_id.clone());
@@ -1080,6 +1097,7 @@ impl OfflineProtocol {
             self.outbox = previous_outbox;
             self.peer_compact_envelope = previous_peer_compact_envelope;
             self.peer_rich_payload = previous_peer_rich_payload;
+            self.peer_data_sync = previous_peer_data_sync;
             self.peer_rich_attested = previous_peer_rich_attested;
             return Err(err);
         }
