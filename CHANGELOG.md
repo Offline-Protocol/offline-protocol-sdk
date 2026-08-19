@@ -144,8 +144,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   an offline-created group for the first time, sent no name; the bridge
   translator then substituted the group id, and the relay keeps the first name
   it sees for a mesh group id and echoed it back to every member as the
-  group's title. Every registration frame now carries the name from the
-  locally stored MLS group metadata when the caller has none.
+  group's title. A registration frame now falls back to the name in local MLS
+  group metadata whenever the caller has none.
+- **A member who joined a group by invite held no copy of its name, so its own
+  relay registration could rename the group for everyone.** The bridge sends a
+  `CreateGroup` for every member's registration, not just the creator's, so the
+  member who reconnects first is the one whose name the relay keeps. MLS
+  `join_group` put the Welcome's name on the group info it returned and
+  persisted nothing, leaving a joiner with no name to send and the group titled
+  `group:<uuid>` for the whole roster whenever a joiner reconnected first. The
+  Welcome's name is now stored alongside the roles and the creator of record,
+  which also carries it on down the invite chain: an invite sources the name it
+  sends from the inviter's stored metadata.
 
 ### Removed
 
