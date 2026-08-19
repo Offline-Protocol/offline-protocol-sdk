@@ -43,6 +43,13 @@
 //! answers converge perfectly well and then talk until the battery dies, and
 //! the failure has no symptom on either device except traffic.
 //!
+//! One outbound frame is not an answer and does not count against this: a
+//! blob arriving for a document with local edits still pending flushes them
+//! first, which pushes them. That is work this device already owed the peer
+//! and the frame merely reached it, so it cannot recur: what it sends is
+//! what was pending before the frame arrived, and flushing is what stops it
+//! being pending.
+//!
 //! # Remote bytes are not our bytes
 //!
 //! Everywhere else in the data layer, the argument for handing bytes to the
@@ -762,6 +769,32 @@ impl OfflineProtocol {
             // document change that the sender still holds.
             warn!(space, doc, "Refusing a quarantined blob");
             return Ok(());
+        }
+
+        // Local edits waiting in memory are committed and pushed *before*
+        // the import, so they leave on their own delta.
+        //
+        // A commit exports everything since the last one, regardless of who
+        // authored it. So a local edit still pending when a remote blob
+        // applies is folded into the same delta as the imported change, and
+        // that delta is then suppressed as an echo toward the one peer it
+        // was owed to. The edit is durable and announced to nobody: the next
+        // commit exports only what came after it, and on a link that never
+        // drops there is no reconnect to run an exchange that would notice.
+        // Draining first costs one extra delta record and keeps the echo
+        // suppression judging a delta that really is nothing but the echo.
+        //
+        // Reported and stepped over rather than propagated. This is our own
+        // housekeeping, and a document held over its cap fails here on every
+        // flush while still needing to accept the remote deletions that
+        // bring it back under: refusing the import for it would close the
+        // only door out.
+        //
+        // Ahead of the marker below rather than inside its window, so the
+        // window stays the length of one import. A crash during this flush
+        // would otherwise quarantine a blob the engine never saw.
+        if let Err(err) = self.data_flush(space, doc) {
+            warn!(space, doc, error = %err, "Could not flush local edits before applying a remote change");
         }
 
         // Written *before* the engine is called. That ordering is the whole

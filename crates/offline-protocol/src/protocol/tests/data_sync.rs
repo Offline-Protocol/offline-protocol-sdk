@@ -429,6 +429,56 @@ fn a_change_applied_from_a_peer_is_not_echoed_back() {
 }
 
 #[test]
+fn a_local_edit_pending_when_a_remote_change_arrives_still_reaches_the_peer() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    // A base both replicas hold, and a quiet exchange to start from.
+    write(&mut alice, &alice_space, "notes", "seed", "0");
+    settle(&mut alice, &mut bob);
+    assert_eq!(
+        read(&mut bob, &bob_space, "notes", "seed"),
+        Some(DataValue::text("0")),
+        "precondition: both replicas have to hold the document"
+    );
+
+    // Edited but not flushed. Nothing auto-flushes: an application commits on
+    // its own schedule, so a window where local work sits in memory is the
+    // ordinary case rather than a contrived one.
+    alice
+        .protocol
+        .data_map_set(
+            &alice_space,
+            "notes",
+            "m",
+            "from_alice",
+            DataValue::text("A"),
+        )
+        .expect("set");
+
+    // Bob's change arrives into that window. A commit exports everything
+    // since the last one regardless of who authored it, so without draining
+    // first, Alice's pending edit is folded into the same delta as Bob's
+    // imported change, and that delta is then suppressed as an echo toward
+    // the one peer it was owed to. It would be durable on Alice, announced to
+    // nobody, with no trigger left to notice on a link that never drops.
+    write(&mut bob, &bob_space, "notes", "from_bob", "B");
+    settle(&mut alice, &mut bob);
+
+    assert_eq!(
+        read(&mut bob, &bob_space, "notes", "from_alice"),
+        Some(DataValue::text("A")),
+        "the edit that was pending when a remote change arrived never left the device"
+    );
+    assert_eq!(
+        read(&mut alice, &alice_space, "notes", "from_bob"),
+        Some(DataValue::text("B")),
+        "draining the local edit cost the import it was making room for"
+    );
+}
+
+#[test]
 fn a_replicated_change_survives_a_restart_of_the_receiver() {
     let (mut alice, mut bob) = pair();
     let alice_space = Node::space_for(&bob);
@@ -1026,6 +1076,12 @@ fn the_in_flight_marker_reaches_disk_before_the_engine_sees_the_blob() {
 
     // Only the categories this ordering is about. The space index is written
     // on its own schedule and says nothing either way.
+    //
+    // The receiver holds no unflushed local edits, so the drain that runs
+    // ahead of the marker writes nothing. Give this document pending local
+    // work and a delta record legitimately precedes the marker, and the
+    // assertion below is asking the wrong question rather than catching a
+    // regression.
     let order: Vec<String> = writes
         .lock()
         .unwrap()
