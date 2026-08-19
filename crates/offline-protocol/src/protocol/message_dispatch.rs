@@ -120,11 +120,11 @@ impl OfflineProtocol {
                 if !self.peer_data_sync.contains(sender)
                     && self.peer_data_sync.len() >= MAX_KEY_PACKAGE_SENT_TO
                 {
-                    self.peer_data_sync.clear();
+                    self.forget_every_data_sync_peer();
                 }
                 self.peer_data_sync.insert(sender.to_string());
             } else {
-                self.peer_data_sync.remove(sender);
+                self.forget_data_sync_peer(sender);
             }
 
             // A direct key package is authoritative for this peer: drop any

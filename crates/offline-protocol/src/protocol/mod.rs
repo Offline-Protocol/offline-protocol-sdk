@@ -1650,6 +1650,25 @@ impl OfflineProtocol {
         }
     }
 
+    /// Forget that a peer replicates documents.
+    ///
+    /// The capability and the offer window are two halves of one fact, and
+    /// they have to be dropped together: a window left behind outlives the
+    /// capability and then suppresses the first offer to the same peer once
+    /// it is relearned, which is a document that silently does not sync.
+    pub(crate) fn forget_data_sync_peer(&mut self, peer: &str) {
+        self.peer_data_sync.remove(peer);
+        #[cfg(feature = "data")]
+        self.last_data_sync_offer.remove(peer);
+    }
+
+    /// [`Self::forget_data_sync_peer`] for every peer at once.
+    pub(crate) fn forget_every_data_sync_peer(&mut self) {
+        self.peer_data_sync.clear();
+        #[cfg(feature = "data")]
+        self.last_data_sync_offer.clear();
+    }
+
     /// Called when a new neighbor is discovered.
     ///
     /// When auto key exchange is enabled, this method sends our key package

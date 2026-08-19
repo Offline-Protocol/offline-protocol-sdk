@@ -706,3 +706,32 @@ fn a_change_too_large_to_inline_still_tells_the_peer_it_happened() {
     );
 }
 
+#[test]
+fn nothing_is_sent_to_a_blocked_peer_and_unblocking_forgets_them() {
+    let (mut alice, bob) = pair();
+    let alice_space = Node::space_for(&bob);
+
+    // Every public send surface checks blocking for itself. Replication is
+    // not reached through one: a commit or a discovery triggers it, and a
+    // blocked peer still holds a live session, so without a gate of its own
+    // the frames would go out.
+    alice.protocol.block_user(&bob.address).expect("block");
+    alice.transport.clear_sent_messages();
+
+    write(&mut alice, &alice_space, "notes", "title", "private");
+    alice.protocol.kick_data_sync(&alice_space, "test");
+    assert!(
+        alice.transport.sent_messages().is_empty(),
+        "a document reached a blocked peer"
+    );
+
+    // Unblock runs the clean-slate cleanup, which forgets every advertised
+    // capability so the fresh exchange re-learns them. Skipping this one
+    // would leave the memory disagreeing with the durable record that the
+    // same cleanup just deleted.
+    alice.protocol.unblock_user(&bob.address).expect("unblock");
+    assert!(
+        !alice.protocol.peer_data_sync.contains(&bob.address),
+        "the clean slate kept the sync capability it had just deleted from disk"
+    );
+}

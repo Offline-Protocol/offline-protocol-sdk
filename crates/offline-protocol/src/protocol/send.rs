@@ -965,18 +965,28 @@ impl OfflineProtocol {
     }
 
     /// Whether document sync is live toward `recipient`: the layer is
-    /// compiled in and enabled here, and the peer advertised
-    /// [`DATA_SYNC_V1`] in their key package.
+    /// compiled in and enabled here, the peer is not blocked, and they
+    /// advertised [`DATA_SYNC_V1`] in their key package.
     ///
     /// Consulted per send rather than cached at session establishment, like
     /// the two capability gates below it: a peer that downgrades stops
     /// receiving frames on their next key package, not at their next
     /// session.
-    #[allow(dead_code)]
+    ///
+    /// The block check is here rather than at the call sites because this is
+    /// the only gate they share, and because replication is not reached
+    /// through a send API: every public send surface checks blocking for
+    /// itself, while these frames are triggered by a commit or a discovery.
+    /// A blocked peer still holds a live session, so nothing further down
+    /// would have refused the frame. Inbound needs no equivalent: the
+    /// receive path drops a blocked sender before any dispatch.
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
     pub(super) fn data_sync_active(&self, recipient: &str) -> bool {
         #[cfg(feature = "data")]
         {
-            self.config.data.enabled && self.peer_data_sync.contains(recipient)
+            self.config.data.enabled
+                && self.peer_data_sync.contains(recipient)
+                && !self.is_user_blocked(recipient)
         }
         #[cfg(not(feature = "data"))]
         {
