@@ -27,6 +27,51 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Replicated documents: a second application class on the protocol.** A new
+  `offline-protocol-data` crate adds offline-first documents that any member of
+  a space can edit while disconnected, merging deterministically when replicas
+  meet again. Messaging is synced events; this is synced state. Collections are
+  `map`, `list`, `text` and `counter`, reached through a new `DataStore` object
+  on every binding.
+
+  This release ships the **local half**: documents, storage, caps and
+  compaction. Replication over the transport ladder comes next, which is why
+  `data.enabled` defaults to `false` — advertising a capability with no sync
+  behind it would invite peers to expect a sync that never comes. The default
+  flips in the release that ships replication.
+
+  Three properties are worth knowing up front:
+
+  - **Zero storage setup.** Documents persist through the seam the SDK already
+    runs on, and every binding already ships a default provider, so the layer
+    works out of the box like any embedded database.
+  - **The backend is swappable, in one line.** Construct the store with a
+    provider (or set `DataConfig::storage` in Rust) and documents live in
+    SQLite, RocksDB, files, or a corporate store, while protocol secrets stay
+    where they are. It is a runtime choice: no rebuild and no build flag.
+    Sealing sits above that seam, so a custom backend is handed sealed bytes
+    and never sees document content. An adapter conformance suite ships with
+    it — `runStorageConformance(provider)`, green means supported — plus a
+    SQLite reference adapter per binding under `examples/storage-adapters/`.
+  - **An application can always leave.** `docJson()` (plain JSON) and
+    `exportRaw()` are part of the v1 API, not a courtesy added later.
+
+  Documents are sealed at rest like every other protocol-state category, under
+  three new categories (`data_docs`, `data_delta_log`, `data_spaces`), and are
+  capped at 1 MiB compacted with a `data_doc_size_warning` event at 768 KiB.
+  Passing the cap raises `DocTooLarge`: the breaching change stays durable and
+  deletions keep working, so a document can be brought back under the cap.
+
+  **A custom backend brings one obligation:** `wipePersistedState()` clears the
+  *default* provider's account directory, which a custom backend is not inside,
+  so call `DataStore.wipeAll()` on logout as well.
+
+  Native Rust consumers who only want messaging can opt out of the engine
+  entirely with `default-features = false`; the mobile artifact carries it
+  either way, because two binding flavors would mean a runtime FFI checksum
+  mismatch rather than a build error. See
+  [ADR 0018](./docs/adr/0018-data-layer-engine-and-storage-seams.md).
+
 - **Transport choice can now ask where the recipient is.** The engine keeps a
   per-recipient reachability table: `(recipient, carrier, claim, source,
   recorded_at)`, written by the producers that already existed (a carrier's

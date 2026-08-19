@@ -513,6 +513,54 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_func_parse_invite() != 15865:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() != 20699:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new() != 36671:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage() != 2283:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment() != 25635:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value() != 27166:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc() != 9947:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc() != 4629:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json() != 13895:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size() != 23121:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw() != 4590:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush() != 26356:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all() != 41167:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_delete() != 29548:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_docs() != 23259:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_len() != 51106:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_push() != 38926:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_spaces() != 37361:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete() != 10839:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json() != 48657:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set() != 47637:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete() != 53749:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert() != 3896:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_value() != 468:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all() != 57059:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new() != 61363:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != 65338:
@@ -1112,6 +1160,16 @@ _UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_void.argtypes = (
     ctypes.c_uint64,
 )
 _UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_void.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_datastore.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_datastore.restype = ctypes.c_uint64
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_free_datastore.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_free_datastore.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_meshservices.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -1326,6 +1384,185 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_parse_invite.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_parse_invite.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_new.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_new.restype = ctypes.c_uint64
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_with_storage.argtypes = (
+    ctypes.c_uint64,
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_with_storage.restype = ctypes.c_uint64
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_counter_increment.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.c_double,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_counter_increment.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_counter_value.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_counter_value.restype = ctypes.c_double
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_create_doc.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_create_doc.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_delete_doc.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_delete_doc.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_doc_json.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_doc_json.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_doc_size.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_doc_size.restype = ctypes.c_uint64
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_export_raw.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_export_raw.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_flush.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_flush.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_flush_all.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_flush_all.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_delete.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.c_uint32,
+    ctypes.c_uint32,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_delete.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_docs.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_docs.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_len.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_len.restype = ctypes.c_uint32
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_push.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_push.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_spaces.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_spaces.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_map_delete.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_map_delete.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_map_get_json.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_map_get_json.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_map_set.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_map_set.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_text_delete.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.c_uint32,
+    ctypes.c_uint32,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_text_delete.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_text_insert.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.c_uint32,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_text_insert.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_text_value.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_text_value.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_wipe_all.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_wipe_all.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_meshservices_new.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2363,6 +2600,78 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_derive_address.restype =
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_parse_invite.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_parse_invite.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_delete.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_delete.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_docs.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_docs.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_len.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_len.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_push.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_push.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_spaces.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_spaces.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_value.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_value.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new.restype = ctypes.c_uint16
@@ -5962,7 +6271,7 @@ class _UniffiFfiConverterOptionalTypeMeshRelayConfig(_UniffiConverterRustBuffer)
 
 @dataclass
 class ProtocolConfig:
-    def __init__(self, *, app_id:str, profile:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, max_group_members:int = 256, group_relay_enabled:bool = True, group_relay_broadcast_enabled:bool = True, group_enforce_admin_commits:bool = False, require_transport_identity:bool = False, binary_wire_enabled:bool = True, nostr_sealing_enabled:bool = True, nostr_cold_contact_enabled:bool = True, nostr_username_discovery_enabled:bool = False, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True, crypto_recovery_enabled:bool = True, mesh_relay:typing.Optional[MeshRelayConfig] = _DEFAULT):
+    def __init__(self, *, app_id:str, profile:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, max_group_members:int = 256, group_relay_enabled:bool = True, group_relay_broadcast_enabled:bool = True, group_enforce_admin_commits:bool = False, require_transport_identity:bool = False, binary_wire_enabled:bool = True, nostr_sealing_enabled:bool = True, nostr_cold_contact_enabled:bool = True, nostr_username_discovery_enabled:bool = False, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True, crypto_recovery_enabled:bool = True, mesh_relay:typing.Optional[MeshRelayConfig] = _DEFAULT, data_enabled:bool = False):
         self.app_id = app_id
         self.profile = profile
         self.ble_enabled = ble_enabled
@@ -5996,12 +6305,13 @@ class ProtocolConfig:
             self.mesh_relay = None
         else:
             self.mesh_relay = mesh_relay
+        self.data_enabled = data_enabled
         
         
 
     
     def __str__(self):
-        return "ProtocolConfig(app_id={}, profile={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, max_group_members={}, group_relay_enabled={}, group_relay_broadcast_enabled={}, group_enforce_admin_commits={}, require_transport_identity={}, binary_wire_enabled={}, nostr_sealing_enabled={}, nostr_cold_contact_enabled={}, nostr_username_discovery_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={}, crypto_recovery_enabled={}, mesh_relay={})".format(self.app_id, self.profile, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.max_group_members, self.group_relay_enabled, self.group_relay_broadcast_enabled, self.group_enforce_admin_commits, self.require_transport_identity, self.binary_wire_enabled, self.nostr_sealing_enabled, self.nostr_cold_contact_enabled, self.nostr_username_discovery_enabled, self.compact_envelope_enabled, self.rich_payload_enabled, self.crypto_recovery_enabled, self.mesh_relay)
+        return "ProtocolConfig(app_id={}, profile={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, max_group_members={}, group_relay_enabled={}, group_relay_broadcast_enabled={}, group_enforce_admin_commits={}, require_transport_identity={}, binary_wire_enabled={}, nostr_sealing_enabled={}, nostr_cold_contact_enabled={}, nostr_username_discovery_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={}, crypto_recovery_enabled={}, mesh_relay={}, data_enabled={})".format(self.app_id, self.profile, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.max_group_members, self.group_relay_enabled, self.group_relay_broadcast_enabled, self.group_enforce_admin_commits, self.require_transport_identity, self.binary_wire_enabled, self.nostr_sealing_enabled, self.nostr_cold_contact_enabled, self.nostr_username_discovery_enabled, self.compact_envelope_enabled, self.rich_payload_enabled, self.crypto_recovery_enabled, self.mesh_relay, self.data_enabled)
     def __eq__(self, other):
         if self.app_id != other.app_id:
             return False
@@ -6063,6 +6373,8 @@ class ProtocolConfig:
             return False
         if self.mesh_relay != other.mesh_relay:
             return False
+        if self.data_enabled != other.data_enabled:
+            return False
         return True
 
 class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
@@ -6099,6 +6411,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
             rich_payload_enabled=_UniffiFfiConverterBoolean.read(buf),
             crypto_recovery_enabled=_UniffiFfiConverterBoolean.read(buf),
             mesh_relay=_UniffiFfiConverterOptionalTypeMeshRelayConfig.read(buf),
+            data_enabled=_UniffiFfiConverterBoolean.read(buf),
         )
 
     @staticmethod
@@ -6133,6 +6446,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.check_lower(value.rich_payload_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.crypto_recovery_enabled)
         _UniffiFfiConverterOptionalTypeMeshRelayConfig.check_lower(value.mesh_relay)
+        _UniffiFfiConverterBoolean.check_lower(value.data_enabled)
 
     @staticmethod
     def write(value, buf):
@@ -6166,6 +6480,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.write(value.rich_payload_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.crypto_recovery_enabled, buf)
         _UniffiFfiConverterOptionalTypeMeshRelayConfig.write(value.mesh_relay, buf)
+        _UniffiFfiConverterBoolean.write(value.data_enabled, buf)
 
 @dataclass
 class ProtocolLockDiagnostics:
@@ -7755,6 +8070,22 @@ class ProtocolError:  # type: ignore
         def __repr__(self):
             return "ProtocolError.InvalidArgument({})".format(repr(str(self)))
     _UniffiTempProtocolError.InvalidArgument = InvalidArgument # type: ignore
+    class DataDisabled(_UniffiTempProtocolError):
+        def __repr__(self):
+            return "ProtocolError.DataDisabled({})".format(repr(str(self)))
+    _UniffiTempProtocolError.DataDisabled = DataDisabled # type: ignore
+    class DataStorageUnavailable(_UniffiTempProtocolError):
+        def __repr__(self):
+            return "ProtocolError.DataStorageUnavailable({})".format(repr(str(self)))
+    _UniffiTempProtocolError.DataStorageUnavailable = DataStorageUnavailable # type: ignore
+    class DocTooLarge(_UniffiTempProtocolError):
+        def __repr__(self):
+            return "ProtocolError.DocTooLarge({})".format(repr(str(self)))
+    _UniffiTempProtocolError.DocTooLarge = DocTooLarge # type: ignore
+    class DataCorrupted(_UniffiTempProtocolError):
+        def __repr__(self):
+            return "ProtocolError.DataCorrupted({})".format(repr(str(self)))
+    _UniffiTempProtocolError.DataCorrupted = DataCorrupted # type: ignore
 
 ProtocolError = _UniffiTempProtocolError # type: ignore
 del _UniffiTempProtocolError
@@ -7844,6 +8175,22 @@ class _UniffiFfiConverterTypeProtocolError(_UniffiConverterRustBuffer):
             return ProtocolError.InvalidArgument(
                 _UniffiFfiConverterString.read(buf),
             )
+        if variant == 21:
+            return ProtocolError.DataDisabled(
+                _UniffiFfiConverterString.read(buf),
+            )
+        if variant == 22:
+            return ProtocolError.DataStorageUnavailable(
+                _UniffiFfiConverterString.read(buf),
+            )
+        if variant == 23:
+            return ProtocolError.DocTooLarge(
+                _UniffiFfiConverterString.read(buf),
+            )
+        if variant == 24:
+            return ProtocolError.DataCorrupted(
+                _UniffiFfiConverterString.read(buf),
+            )
         raise InternalError("Raw enum value doesn't match any cases")
 
     @staticmethod
@@ -7888,6 +8235,14 @@ class _UniffiFfiConverterTypeProtocolError(_UniffiConverterRustBuffer):
             return
         if isinstance(value, ProtocolError.InvalidArgument):
             return
+        if isinstance(value, ProtocolError.DataDisabled):
+            return
+        if isinstance(value, ProtocolError.DataStorageUnavailable):
+            return
+        if isinstance(value, ProtocolError.DocTooLarge):
+            return
+        if isinstance(value, ProtocolError.DataCorrupted):
+            return
 
     @staticmethod
     def write(value, buf):
@@ -7931,6 +8286,14 @@ class _UniffiFfiConverterTypeProtocolError(_UniffiConverterRustBuffer):
             buf.write_i32(19)
         if isinstance(value, ProtocolError.InvalidArgument):
             buf.write_i32(20)
+        if isinstance(value, ProtocolError.DataDisabled):
+            buf.write_i32(21)
+        if isinstance(value, ProtocolError.DataStorageUnavailable):
+            buf.write_i32(22)
+        if isinstance(value, ProtocolError.DocTooLarge):
+            buf.write_i32(23)
+        if isinstance(value, ProtocolError.DataCorrupted):
+            buf.write_i32(24)
 
 
 
@@ -8027,6 +8390,581 @@ class _UniffiFfiConverterTypeRelaySyncState(_UniffiConverterRustBuffer):
             buf.write_i32(3)
 
 
+
+class _UniffiFfiConverterBytes(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        size = buf.read_i32()
+        if size < 0:
+            raise InternalError("Unexpected negative byte string length")
+        return buf.read(size)
+
+    @staticmethod
+    def check_lower(value):
+        try:
+            memoryview(value)
+        except TypeError:
+            raise TypeError("a bytes-like object is required, not {!r}".format(type(value).__name__))
+
+    @staticmethod
+    def write(value, buf):
+        buf.write_i32(len(value))
+        buf.write(value)
+
+
+class DataStoreProtocol(typing.Protocol):
+    
+    def counter_increment(self, space_id: str,doc_id: str,collection: str,amount: float) -> None:
+        raise NotImplementedError
+    def counter_value(self, space_id: str,doc_id: str,collection: str) -> float:
+        raise NotImplementedError
+    def create_doc(self, space_id: str,doc_id: str) -> None:
+        raise NotImplementedError
+    def delete_doc(self, space_id: str,doc_id: str) -> None:
+        raise NotImplementedError
+    def doc_json(self, space_id: str,doc_id: str) -> str:
+        raise NotImplementedError
+    def doc_size(self, space_id: str,doc_id: str) -> int:
+        raise NotImplementedError
+    def export_raw(self, space_id: str,doc_id: str) -> bytes:
+        raise NotImplementedError
+    def flush(self, space_id: str,doc_id: str) -> None:
+        raise NotImplementedError
+    def flush_all(self, ) -> None:
+        raise NotImplementedError
+    def list_delete(self, space_id: str,doc_id: str,collection: str,index: int,count: int) -> None:
+        raise NotImplementedError
+    def list_docs(self, space_id: str) -> typing.List[str]:
+        raise NotImplementedError
+    def list_len(self, space_id: str,doc_id: str,collection: str) -> int:
+        raise NotImplementedError
+    def list_push(self, space_id: str,doc_id: str,collection: str,value_json: str) -> None:
+        raise NotImplementedError
+    def list_spaces(self, ) -> typing.List[str]:
+        raise NotImplementedError
+    def map_delete(self, space_id: str,doc_id: str,collection: str,key: str) -> None:
+        raise NotImplementedError
+    def map_get_json(self, space_id: str,doc_id: str,collection: str,key: str) -> typing.Optional[str]:
+        raise NotImplementedError
+    def map_set(self, space_id: str,doc_id: str,collection: str,key: str,value_json: str) -> None:
+        raise NotImplementedError
+    def text_delete(self, space_id: str,doc_id: str,collection: str,position: int,count: int) -> None:
+        raise NotImplementedError
+    def text_insert(self, space_id: str,doc_id: str,collection: str,position: int,text: str) -> None:
+        raise NotImplementedError
+    def text_value(self, space_id: str,doc_id: str,collection: str) -> str:
+        raise NotImplementedError
+    def wipe_all(self, ) -> None:
+        raise NotImplementedError
+
+class DataStore(DataStoreProtocol):
+    
+    _handle: ctypes.c_uint64
+    def __init__(self, protocol: OfflineProtocol):
+        
+        _UniffiFfiConverterTypeOfflineProtocol.check_lower(protocol)
+        _uniffi_lowered_args = (
+            _UniffiFfiConverterTypeOfflineProtocol.lower(protocol),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterTypeDataStore.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_new,
+            *_uniffi_lowered_args,
+        )
+        self._handle = _uniffi_ffi_result
+    @classmethod
+    def with_storage(cls, protocol: OfflineProtocol,storage: ProtocolStateStorageProvider) -> DataStore:
+        
+        _UniffiFfiConverterTypeOfflineProtocol.check_lower(protocol)
+        
+        _UniffiFfiConverterTypeProtocolStateStorageProvider.check_lower(storage)
+        _uniffi_lowered_args = (
+            _UniffiFfiConverterTypeOfflineProtocol.lower(protocol),
+            _UniffiFfiConverterTypeProtocolStateStorageProvider.lower(storage),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterTypeDataStore.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_with_storage,
+            *_uniffi_lowered_args,
+        )
+        return cls._uniffi_make_instance(_uniffi_ffi_result)
+
+    def __del__(self):
+        # In case of partial initialization of instances.
+        handle = getattr(self, "_handle", None)
+        if handle is not None:
+            _uniffi_rust_call(_UniffiLib.uniffi_offline_protocol_uniffi_fn_free_datastore, handle)
+
+    def _uniffi_clone_handle(self):
+        return _uniffi_rust_call(_UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_datastore, self._handle)
+
+    # Used by alternative constructors or any methods which return this type.
+    @classmethod
+    def _uniffi_make_instance(cls, handle):
+        # Lightly yucky way to bypass the usual __init__ logic
+        # and just create a new instance with the required handle.
+        inst = cls.__new__(cls)
+        inst._handle = handle
+        return inst
+    def counter_increment(self, space_id: str,doc_id: str,collection: str,amount: float) -> None:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        
+        _UniffiFfiConverterString.check_lower(collection)
+        
+        _UniffiFfiConverterFloat64.check_lower(amount)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+            _UniffiFfiConverterString.lower(collection),
+            _UniffiFfiConverterFloat64.lower(amount),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_counter_increment,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def counter_value(self, space_id: str,doc_id: str,collection: str) -> float:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        
+        _UniffiFfiConverterString.check_lower(collection)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+            _UniffiFfiConverterString.lower(collection),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterFloat64.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_counter_value,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def create_doc(self, space_id: str,doc_id: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_create_doc,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def delete_doc(self, space_id: str,doc_id: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_delete_doc,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def doc_json(self, space_id: str,doc_id: str) -> str:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterString.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_doc_json,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def doc_size(self, space_id: str,doc_id: str) -> int:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterUInt64.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_doc_size,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def export_raw(self, space_id: str,doc_id: str) -> bytes:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterBytes.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_export_raw,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def flush(self, space_id: str,doc_id: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_flush,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def flush_all(self, ) -> None:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_flush_all,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def list_delete(self, space_id: str,doc_id: str,collection: str,index: int,count: int) -> None:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        
+        _UniffiFfiConverterString.check_lower(collection)
+        
+        _UniffiFfiConverterUInt32.check_lower(index)
+        
+        _UniffiFfiConverterUInt32.check_lower(count)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+            _UniffiFfiConverterString.lower(collection),
+            _UniffiFfiConverterUInt32.lower(index),
+            _UniffiFfiConverterUInt32.lower(count),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_delete,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def list_docs(self, space_id: str) -> typing.List[str]:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterSequenceString.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_docs,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def list_len(self, space_id: str,doc_id: str,collection: str) -> int:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        
+        _UniffiFfiConverterString.check_lower(collection)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+            _UniffiFfiConverterString.lower(collection),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterUInt32.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_len,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def list_push(self, space_id: str,doc_id: str,collection: str,value_json: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        
+        _UniffiFfiConverterString.check_lower(collection)
+        
+        _UniffiFfiConverterString.check_lower(value_json)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+            _UniffiFfiConverterString.lower(collection),
+            _UniffiFfiConverterString.lower(value_json),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_push,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def list_spaces(self, ) -> typing.List[str]:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterSequenceString.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_spaces,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def map_delete(self, space_id: str,doc_id: str,collection: str,key: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        
+        _UniffiFfiConverterString.check_lower(collection)
+        
+        _UniffiFfiConverterString.check_lower(key)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+            _UniffiFfiConverterString.lower(collection),
+            _UniffiFfiConverterString.lower(key),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_map_delete,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def map_get_json(self, space_id: str,doc_id: str,collection: str,key: str) -> typing.Optional[str]:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        
+        _UniffiFfiConverterString.check_lower(collection)
+        
+        _UniffiFfiConverterString.check_lower(key)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+            _UniffiFfiConverterString.lower(collection),
+            _UniffiFfiConverterString.lower(key),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterOptionalString.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_map_get_json,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def map_set(self, space_id: str,doc_id: str,collection: str,key: str,value_json: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        
+        _UniffiFfiConverterString.check_lower(collection)
+        
+        _UniffiFfiConverterString.check_lower(key)
+        
+        _UniffiFfiConverterString.check_lower(value_json)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+            _UniffiFfiConverterString.lower(collection),
+            _UniffiFfiConverterString.lower(key),
+            _UniffiFfiConverterString.lower(value_json),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_map_set,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def text_delete(self, space_id: str,doc_id: str,collection: str,position: int,count: int) -> None:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        
+        _UniffiFfiConverterString.check_lower(collection)
+        
+        _UniffiFfiConverterUInt32.check_lower(position)
+        
+        _UniffiFfiConverterUInt32.check_lower(count)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+            _UniffiFfiConverterString.lower(collection),
+            _UniffiFfiConverterUInt32.lower(position),
+            _UniffiFfiConverterUInt32.lower(count),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_text_delete,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def text_insert(self, space_id: str,doc_id: str,collection: str,position: int,text: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        
+        _UniffiFfiConverterString.check_lower(collection)
+        
+        _UniffiFfiConverterUInt32.check_lower(position)
+        
+        _UniffiFfiConverterString.check_lower(text)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+            _UniffiFfiConverterString.lower(collection),
+            _UniffiFfiConverterUInt32.lower(position),
+            _UniffiFfiConverterString.lower(text),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_text_insert,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def text_value(self, space_id: str,doc_id: str,collection: str) -> str:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(doc_id)
+        
+        _UniffiFfiConverterString.check_lower(collection)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(doc_id),
+            _UniffiFfiConverterString.lower(collection),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterString.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_text_value,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def wipe_all(self, ) -> None:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_wipe_all,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+
+
+
+
+
+class _UniffiFfiConverterTypeDataStore:
+    @staticmethod
+    def lift(value: int) -> DataStore:
+        return DataStore._uniffi_make_instance(value)
+
+    @staticmethod
+    def check_lower(value: DataStore):
+        if not isinstance(value, DataStore):
+            raise TypeError("Expected DataStore instance, {} found".format(type(value).__name__))
+
+    @staticmethod
+    def lower(value: DataStore) -> ctypes.c_uint64:
+        return value._uniffi_clone_handle()
+
+    @classmethod
+    def read(cls, buf: _UniffiRustBuffer) -> DataStore:
+        ptr = buf.read_u64()
+        if ptr == 0:
+            raise InternalError("Raw handle value was null")
+        return cls.lift(ptr)
+
+    @classmethod
+    def write(cls, value: DataStore, buf: _UniffiRustBuffer):
+        buf.write_u64(cls.lower(value))
 
 class _UniffiFfiConverterMapStringString(_UniffiConverterRustBuffer):
     @classmethod
@@ -8520,26 +9458,6 @@ class _UniffiTraitImplMlsStorageProviderImpl:
 
 # The _UniffiConverter which transforms the Callbacks in to Handles to pass to Rust.
 _UniffiFfiConverterTypeMlsStorageProvider = _UniffiCallbackInterfaceFfiConverter()
-
-class _UniffiFfiConverterBytes(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        size = buf.read_i32()
-        if size < 0:
-            raise InternalError("Unexpected negative byte string length")
-        return buf.read(size)
-
-    @staticmethod
-    def check_lower(value):
-        try:
-            memoryview(value)
-        except TypeError:
-            raise TypeError("a bytes-like object is required, not {!r}".format(type(value).__name__))
-
-    @staticmethod
-    def write(value, buf):
-        buf.write_i32(len(value))
-        buf.write(value)
 
 class _UniffiFfiConverterOptionalBytes(_UniffiConverterRustBuffer):
     @classmethod
@@ -12152,6 +13070,20 @@ def parse_invite(blob: str) -> InviteInfo:
         *_uniffi_lowered_args,
     )
     return _uniffi_lift_return(_uniffi_ffi_result)
+def run_storage_conformance(storage: ProtocolStateStorageProvider) -> str:
+    
+    _UniffiFfiConverterTypeProtocolStateStorageProvider.check_lower(storage)
+    _uniffi_lowered_args = (
+        _UniffiFfiConverterTypeProtocolStateStorageProvider.lower(storage),
+    )
+    _uniffi_lift_return = _UniffiFfiConverterString.lift
+    _uniffi_error_converter = None
+    _uniffi_ffi_result = _uniffi_rust_call_with_error(
+        _uniffi_error_converter,
+        _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance,
+        *_uniffi_lowered_args,
+    )
+    return _uniffi_lift_return(_uniffi_ffi_result)
 
 __all__ = [
     "InternalError",
@@ -12222,6 +13154,9 @@ __all__ = [
     "WifiDirectMessage",
     "derive_address",
     "parse_invite",
+    "run_storage_conformance",
+    "DataStore",
+    "DataStoreProtocol",
     "MeshServices",
     "MeshServicesProtocol",
     "OfflineProtocol",

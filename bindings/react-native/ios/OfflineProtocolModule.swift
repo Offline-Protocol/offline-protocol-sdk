@@ -22,6 +22,7 @@ import React
 class OfflineProtocolModule: RCTEventEmitter {
     private var protocolInstance: OfflineProtocol?
     private var meshServicesInstance: MeshServices?
+    private var dataStoreInstance: DataStore?
     private var bleManager: BleManager?
     private var internetManager: InternetManager?
     private var wifiDirectManager: WifiDirectManager?
@@ -419,6 +420,13 @@ class OfflineProtocolModule: RCTEventEmitter {
             )
         }
 
+        // Data layer section (nested home under `data`, both cases). Same
+        // rule as meshRelay: absent stays absent, so the Rust default is the
+        // only default. Kept in step with android/ ProtocolConfigParser —
+        // read order and precedence must match.
+        let dataSection = raw["data"] as? [String: Any]
+        let dataEnabled = dataSection?["enabled"] as? Bool ?? false
+
         let config = ProtocolConfig(
             appId: raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
             profile: raw["profile"] as? String ?? "",
@@ -450,7 +458,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             compactEnvelopeEnabled: encryption.compactEnvelopeEnabled,
             richPayloadEnabled: encryption.richPayloadEnabled,
             cryptoRecoveryEnabled: encryption.cryptoRecoveryEnabled,
-            meshRelay: meshRelay
+            meshRelay: meshRelay,
+            dataEnabled: dataEnabled
         )
 
         return (config, raw)
@@ -638,6 +647,11 @@ class OfflineProtocolModule: RCTEventEmitter {
 
             protocolInstance = proto
             meshServicesInstance = try MeshServices(protocol: proto)
+            // Constructed unconditionally, like MeshServices: the store is
+            // inert until the config enables it, and every method answers
+            // DataDisabled until then. Constructing lazily would only move
+            // that check somewhere less obvious.
+            dataStoreInstance = try DataStore(protocol: proto)
 
             // The native transport managers are still seeded with the profile
             // rather than this device's address. The address does not exist
@@ -1514,6 +1528,408 @@ class OfflineProtocolModule: RCTEventEmitter {
     }
     
     // MARK: - Service Discovery & Request/Response (via MeshServices)
+
+
+    // MARK: - Replicated documents (via DataStore)
+    //
+    // Generated shape, kept deliberately thin: every method resolves the
+    // store or rejects, calls one UniFFI method, and resolves. Anything
+    // smarter belongs in the core, where it is shared by all four bindings
+    // instead of reimplemented in each.
+    //
+    // Every method here needs a matching RCT_EXTERN_METHOD in
+    // OfflineProtocolModule.m — the Objective-C bridge is hand-maintained,
+    // and a missing entry is a method JavaScript simply cannot see.
+
+
+    @objc func dataCreateDoc(_ spaceId: String,
+                             docId: String,
+                             resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.createDoc(spaceId: spaceId, docId: docId)
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATACREATEDOC",
+                                    fallbackMessage: "createDoc failed")
+        }
+    }
+
+    @objc func dataDeleteDoc(_ spaceId: String,
+                             docId: String,
+                             resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.deleteDoc(spaceId: spaceId, docId: docId)
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATADELETEDOC",
+                                    fallbackMessage: "deleteDoc failed")
+        }
+    }
+
+    @objc func dataListDocs(_ spaceId: String,
+                            resolver: @escaping RCTPromiseResolveBlock,
+                            rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            let values = try store.listDocs(spaceId: spaceId)
+            let data = try JSONSerialization.data(withJSONObject: values)
+            resolver(String(data: data, encoding: .utf8) ?? "[]")
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATALISTDOCS",
+                                    fallbackMessage: "listDocs failed")
+        }
+    }
+
+    @objc func dataListSpaces(resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            let values = try store.listSpaces()
+            let data = try JSONSerialization.data(withJSONObject: values)
+            resolver(String(data: data, encoding: .utf8) ?? "[]")
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATALISTSPACES",
+                                    fallbackMessage: "listSpaces failed")
+        }
+    }
+
+    @objc func dataMapSet(_ spaceId: String,
+                          docId: String,
+                          collection: String,
+                          key: String,
+                          valueJson: String,
+                          resolver: @escaping RCTPromiseResolveBlock,
+                          rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.mapSet(spaceId: spaceId, docId: docId, collection: collection, key: key, valueJson: valueJson)
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATAMAPSET",
+                                    fallbackMessage: "mapSet failed")
+        }
+    }
+
+    @objc func dataMapDelete(_ spaceId: String,
+                             docId: String,
+                             collection: String,
+                             key: String,
+                             resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.mapDelete(spaceId: spaceId, docId: docId, collection: collection, key: key)
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATAMAPDELETE",
+                                    fallbackMessage: "mapDelete failed")
+        }
+    }
+
+    @objc func dataMapGetJson(_ spaceId: String,
+                          docId: String,
+                          collection: String,
+                          key: String,
+                          resolver: @escaping RCTPromiseResolveBlock,
+                          rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            resolver(try store.mapGetJson(spaceId: spaceId, docId: docId, collection: collection, key: key))
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATAMAPGETJSON",
+                                    fallbackMessage: "mapGet failed")
+        }
+    }
+
+    @objc func dataListPush(_ spaceId: String,
+                            docId: String,
+                            collection: String,
+                            valueJson: String,
+                            resolver: @escaping RCTPromiseResolveBlock,
+                            rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.listPush(spaceId: spaceId, docId: docId, collection: collection, valueJson: valueJson)
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATALISTPUSH",
+                                    fallbackMessage: "listPush failed")
+        }
+    }
+
+    @objc func dataListDelete(_ spaceId: String,
+                              docId: String,
+                              collection: String,
+                              index: NSNumber,
+                              count: NSNumber,
+                              resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.listDelete(spaceId: spaceId, docId: docId, collection: collection, index: UInt32(truncating: index), count: UInt32(truncating: count))
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATALISTDELETE",
+                                    fallbackMessage: "listDelete failed")
+        }
+    }
+
+    @objc func dataListLen(_ spaceId: String,
+                           docId: String,
+                           collection: String,
+                           resolver: @escaping RCTPromiseResolveBlock,
+                           rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            resolver(try store.listLen(spaceId: spaceId, docId: docId, collection: collection))
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATALISTLEN",
+                                    fallbackMessage: "listLength failed")
+        }
+    }
+
+    @objc func dataTextInsert(_ spaceId: String,
+                              docId: String,
+                              collection: String,
+                              position: NSNumber,
+                              text: String,
+                              resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.textInsert(spaceId: spaceId, docId: docId, collection: collection, position: UInt32(truncating: position), text: text)
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATATEXTINSERT",
+                                    fallbackMessage: "textInsert failed")
+        }
+    }
+
+    @objc func dataTextDelete(_ spaceId: String,
+                              docId: String,
+                              collection: String,
+                              position: NSNumber,
+                              count: NSNumber,
+                              resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.textDelete(spaceId: spaceId, docId: docId, collection: collection, position: UInt32(truncating: position), count: UInt32(truncating: count))
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATATEXTDELETE",
+                                    fallbackMessage: "textDelete failed")
+        }
+    }
+
+    @objc func dataTextValue(_ spaceId: String,
+                             docId: String,
+                             collection: String,
+                             resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            resolver(try store.textValue(spaceId: spaceId, docId: docId, collection: collection))
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATATEXTVALUE",
+                                    fallbackMessage: "textValue failed")
+        }
+    }
+
+    @objc func dataCounterIncrement(_ spaceId: String,
+                                    docId: String,
+                                    collection: String,
+                                    amount: NSNumber,
+                                    resolver: @escaping RCTPromiseResolveBlock,
+                                    rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.counterIncrement(spaceId: spaceId, docId: docId, collection: collection, amount: amount.doubleValue)
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATACOUNTERINCREMENT",
+                                    fallbackMessage: "counterIncrement failed")
+        }
+    }
+
+    @objc func dataCounterValue(_ spaceId: String,
+                                docId: String,
+                                collection: String,
+                                resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            resolver(try store.counterValue(spaceId: spaceId, docId: docId, collection: collection))
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATACOUNTERVALUE",
+                                    fallbackMessage: "counterValue failed")
+        }
+    }
+
+    @objc func dataDocJson(_ spaceId: String,
+                           docId: String,
+                           resolver: @escaping RCTPromiseResolveBlock,
+                           rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            resolver(try store.docJson(spaceId: spaceId, docId: docId))
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATADOCJSON",
+                                    fallbackMessage: "docJson failed")
+        }
+    }
+
+    @objc func dataExportRaw(_ spaceId: String,
+                             docId: String,
+                             resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            resolver(Data(try store.exportRaw(spaceId: spaceId, docId: docId)).base64EncodedString())
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATAEXPORTRAW",
+                                    fallbackMessage: "exportRaw failed")
+        }
+    }
+
+    @objc func dataFlush(_ spaceId: String,
+                         docId: String,
+                         resolver: @escaping RCTPromiseResolveBlock,
+                         rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.flush(spaceId: spaceId, docId: docId)
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATAFLUSH",
+                                    fallbackMessage: "flush failed")
+        }
+    }
+
+    @objc func dataFlushAll(resolver: @escaping RCTPromiseResolveBlock,
+                            rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.flushAll()
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATAFLUSHALL",
+                                    fallbackMessage: "flushAll failed")
+        }
+    }
+
+    @objc func dataDocSize(_ spaceId: String,
+                           docId: String,
+                           resolver: @escaping RCTPromiseResolveBlock,
+                           rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            resolver(try store.docSize(spaceId: spaceId, docId: docId))
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATADOCSIZE",
+                                    fallbackMessage: "docSize failed")
+        }
+    }
+
+    @objc func dataWipeAll(resolver: @escaping RCTPromiseResolveBlock,
+                           rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.wipeAll()
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATAWIPEALL",
+                                    fallbackMessage: "wipeAll failed")
+        }
+    }
 
     @objc func registerService(_ serviceId: String,
                                version: String,

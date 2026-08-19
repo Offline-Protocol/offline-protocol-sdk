@@ -537,6 +537,53 @@ Parse the raw event and check the server frame's `type` before consuming extensi
 
 ---
 
+### 11.11a Replicated Documents (`DataStore`)
+
+Offline-first state any member of a space can edit while disconnected, merging
+deterministically when replicas meet again. Requires
+`initializeMlsWithSecureStorage()` and `data: { enabled: true }` in the config.
+
+```typescript
+import { DataStore } from '@offline-protocol/mesh-sdk';
+
+const store = new DataStore();
+await store.mapSet('space-1', 'profile', 'fields', 'name', {
+  kind: 'text',
+  value: 'Ada',
+});
+await store.flush('space-1', 'profile');
+```
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **createDoc** | `createDoc(spaceId, docId): Promise<void>` | Creates a document, or does nothing if it exists. |
+| **deleteDoc** | `deleteDoc(spaceId, docId): Promise<void>` | Deletes a document and every record it owns. |
+| **listDocs** | `listDocs(spaceId): Promise<string[]>` | Documents in a space. |
+| **listSpaces** | `listSpaces(): Promise<string[]>` | Spaces holding at least one document. |
+| **mapSet** | `mapSet(spaceId, docId, collection, key, value: DataValue): Promise<void>` | Sets a key in a map collection. |
+| **mapDelete** | `mapDelete(spaceId, docId, collection, key): Promise<void>` | Removes a key. |
+| **mapGet** | `mapGet(spaceId, docId, collection, key): Promise<DataValue \| null>` | Reads a key. |
+| **listPush** | `listPush(spaceId, docId, collection, value: DataValue): Promise<void>` | Appends to a list collection. |
+| **listDelete** | `listDelete(spaceId, docId, collection, index, count): Promise<void>` | Deletes list entries. |
+| **listLength** | `listLength(spaceId, docId, collection): Promise<number>` | List length. |
+| **textInsert** | `textInsert(spaceId, docId, collection, position, text): Promise<void>` | Inserts text. `position` is a **character** offset. |
+| **textDelete** | `textDelete(spaceId, docId, collection, position, count): Promise<void>` | Deletes characters. |
+| **textValue** | `textValue(spaceId, docId, collection): Promise<string>` | Text contents. |
+| **counterIncrement** | `counterIncrement(spaceId, docId, collection, amount): Promise<void>` | Adds to a counter; negative subtracts. |
+| **counterValue** | `counterValue(spaceId, docId, collection): Promise<number>` | Counter value. |
+| **docJson** | `docJson(spaceId, docId): Promise<unknown>` | Current state as plain JSON. |
+| **exportRaw** | `exportRaw(spaceId, docId): Promise<string>` | Full history, base64. |
+| **flush** | `flush(spaceId, docId): Promise<void>` | Persists pending edits. |
+| **flushAll** | `flushAll(): Promise<void>` | Persists every open document. |
+| **docSize** | `docSize(spaceId, docId): Promise<number>` | Compacted size in bytes. |
+| **wipeAll** | `wipeAll(): Promise<void>` | Deletes every data-layer record. Needed on logout only when documents were pointed at an app-supplied backend, which `wipePersistedState` cannot reach. |
+
+Edits batch before they reach storage: call `flush()` when the app must know a
+change is durable. The `data_changed` event fires **after** the change is
+durable. A document is capped at 1 MiB compacted, with `data_doc_size_warning`
+at 768 KiB; passing the cap raises `DocTooLarge`, and deletions keep working so
+the document can be brought back under it.
+
 ### 11.12 MLS (End-to-End Encryption)
 
 | Method | Signature | Description |

@@ -1511,6 +1511,88 @@ config section if present.
 
 ---
 
+## 16. Replicated documents are available, and off by default
+
+A new `DataStore` object ships on every binding: offline-first documents any
+member of a space can edit while disconnected, merging deterministically when
+replicas meet again. Messaging is synced events; this is synced state.
+
+**Existing applications need no changes.** The layer is inert until
+`data.enabled` is set, nothing is persisted until a document is written, and
+no existing API changed shape. Skip the rest of this section if you are not
+using it.
+
+### Turning it on
+
+```typescript
+const protocol = new OfflineProtocol({
+  appId: 'my-app',
+  profile: 'default',
+  data: { enabled: true },
+});
+await protocol.start();
+
+const store = new DataStore();
+await store.mapSet('space-1', 'profile', 'fields', 'name', {
+  kind: 'text',
+  value: 'Ada',
+});
+await store.flush('space-1', 'profile');
+```
+
+`enabled` defaults to `false` because this release ships the local half only.
+Replication over the transport ladder comes next, and advertising a capability
+with no sync behind it would invite peers to expect a sync that never comes.
+The default flips in the release that ships replication.
+
+### Storage: nothing to configure, but one thing to know
+
+Documents live wherever protocol state already does, so there is no setup.
+If you point them somewhere else — `DataStore.withStorage(protocol, provider)`,
+or `DataConfig::storage` in Rust — then **`wipePersistedState()` no longer
+covers your documents.** It clears the account directory of the *default*
+provider, which your backend is not inside. Call `DataStore.wipeAll()` on
+logout as well, or documents outlive the account that created them.
+
+Verify any custom backend with `runStorageConformance(provider)`: an empty
+`failures` array is the definition of supported. Reference adapters live in
+[`examples/storage-adapters/`](../examples/storage-adapters/README.md).
+
+### Four new error codes
+
+`DataDisabled`, `DataStorageUnavailable`, `DocTooLarge` and `DataCorrupted`
+are appended to the error enum. Appended, so existing codes keep their
+positions and no existing mapping changes — but a `switch` with an exhaustive
+default may now reach it.
+
+`DocTooLarge` is the one worth handling deliberately: a document is capped at
+1 MiB compacted, with a `data_doc_size_warning` event at 768 KiB. When the cap
+is passed the breaching change **is still durable** (refusing it would lose
+work the user believed they had made), and deletions keep working while growth
+is refused. So the recovery is: hear the warning, prune before the cap; and if
+you hit it, delete content and the document resumes accepting edits.
+
+### Two new events
+
+`data_changed` and `data_doc_size_warning`. Both are ordinary events with no
+one-shot semantics, so a listener that ignores unknown types needs no change.
+`data_changed` fires **after** the change is durable, so a UI that re-renders
+on it is rendering state that survives a restart.
+
+### Rust consumers who only want messaging
+
+The CRDT engine adds roughly 1.5 MB. Native crates.io consumers can drop it:
+
+```toml
+offline-protocol = { version = "0.23", default-features = false }
+```
+
+The mobile artifact carries it either way: two binding flavors would mean a
+runtime FFI checksum mismatch rather than a build error, which is a worse
+failure than the bytes.
+
+---
+
 ## Appendix A: limits reference
 
 | Limit | Value | Where enforced |
@@ -1522,6 +1604,7 @@ config section if present.
 | Pending queue, global | 4096 messages / 16 MiB | eviction + `message_failed` |
 | Pending lifetime | 7 days (configurable) | `pending_message_max_lifetime_ms` |
 | Outbox lifetime | 7 days (configurable) | `outbox_max_lifetime_ms` |
+| One replicated document | 1 MiB compacted | `DocTooLarge` at commit, warning event at 768 KiB |
 | One protocol-state record | 4 MiB | refused on write, dropped on read |
 | Provider transfer ceiling | 8 MiB | `MAX_PROTOCOL_STATE_RECORD_TRANSFER_BYTES`, enforced *inside* each provider |
 | Transport frame | 1 MiB | transport layer (unchanged) |
@@ -1542,6 +1625,11 @@ source files and asserts their literals).
 | Provider destroyed a record | `ProtocolStateError::Corrupted` | `MlsStorageError.CorruptedData` |
 | Provider read failed transiently | `ProtocolStateError::LoadFailed` | `MlsStorageError.LoadFailed` |
 | Provider cannot express absence | `ProtocolStateError::NotFound` | `MlsStorageError.KeyNotFound` |
+| Data layer off in config | `Error::DataDisabled` | `ProtocolError.DataDisabled` |
+| `initialize_mls` has not run | `Error::DataStorageUnavailable` | `ProtocolError.DataStorageUnavailable` |
+| Document past the 1 MiB cap | `Error::DocTooLarge` | `ProtocolError.DocTooLarge` |
+| Document bytes will not decode | `Error::DataCorrupted` | `ProtocolError.DataCorrupted` |
+| Bad space / document / collection name | `Error::InvalidArgument` | `ProtocolError.InvalidArgument` |
 
 No `ProtocolError` variants were added — the FFI error taxonomy is append-only
 and unchanged this release.

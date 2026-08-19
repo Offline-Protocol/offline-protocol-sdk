@@ -174,6 +174,9 @@ interface NativeConfig {
     enforceAdminCommits?: boolean;
   };
   meshRelay?: MeshRelayConfig;
+  data?: {
+    enabled?: boolean;
+  };
   dors?: {
     preferOnline: boolean;
     switchHysteresis: number;
@@ -522,6 +525,20 @@ export class OfflineProtocol {
       });
       if (meshRelayConfig) {
         nativeConfig.meshRelay = meshRelayConfig;
+      }
+    }
+
+    // Data layer section. Same rule as meshRelay above: forwarded
+    // field-for-field with no defaults filled in, so an omitted field stays
+    // omitted all the way to the core and the default lives in exactly one
+    // place. Writing `?? false` here would look harmless and would make the
+    // Rust default unreachable.
+    if (this.config.data) {
+      const dataConfig = sanitize({
+        enabled: this.config.data.enabled,
+      });
+      if (dataConfig) {
+        nativeConfig.data = dataConfig;
       }
     }
 
@@ -3779,6 +3796,295 @@ export class OfflineProtocol {
    */
   async isUserBlocked(userId: string): Promise<boolean> {
     return await OfflineProtocolNativeModule.isUserBlocked(userId);
+  }
+}
+
+/**
+ * A scalar stored in a document collection.
+ *
+ * Structured values go in as JSON strings and merge whole (last write wins
+ * per key). That is the honest description of what v1 replicates: whole
+ * collections within a space, with no nested addressing and no query
+ * language.
+ */
+export type DataValue =
+  | { kind: 'null' }
+  | { kind: 'bool'; value: boolean }
+  | { kind: 'int'; value: number }
+  | { kind: 'float'; value: number }
+  | { kind: 'text'; value: string }
+  | { kind: 'bytes'; value: number[] };
+
+/**
+ * Replicated documents: offline-first state any member of a space can edit
+ * while disconnected, merging deterministically when replicas meet again.
+ *
+ * Messaging is synced events; this is synced state.
+ *
+ * Requires `initializeMlsWithSecureStorage()` to have run — documents are
+ * sealed at rest with the same per-install key as every other protocol
+ * record, and that key is minted there — and `data.enabled` set in the
+ * config. Every method answers `DataDisabled` until it is.
+ *
+ * Edits batch before they reach storage. Call {@link flush} when the app
+ * must know a change is durable; the SDK also flushes on shutdown.
+ *
+ * @example
+ * ```typescript
+ * const store = new DataStore();
+ * await store.mapSet('space-1', 'profile', 'fields', 'name', {
+ *   kind: 'text',
+ *   value: 'Ada',
+ * });
+ * await store.flush('space-1', 'profile');
+ * const state = await store.docJson('space-1', 'profile');
+ * ```
+ */
+export class DataStore {
+  /** Creates a document, or does nothing if it already exists. */
+  async createDoc(spaceId: string, docId: string): Promise<void> {
+    await OfflineProtocolNativeModule.dataCreateDoc(spaceId, docId);
+  }
+
+  /** Deletes a document and every record belonging to it. */
+  async deleteDoc(spaceId: string, docId: string): Promise<void> {
+    await OfflineProtocolNativeModule.dataDeleteDoc(spaceId, docId);
+  }
+
+  /** The documents in a space. */
+  async listDocs(spaceId: string): Promise<string[]> {
+    return JSON.parse(await OfflineProtocolNativeModule.dataListDocs(spaceId));
+  }
+
+  /** Every space that holds at least one document. */
+  async listSpaces(): Promise<string[]> {
+    return JSON.parse(await OfflineProtocolNativeModule.dataListSpaces());
+  }
+
+  /** Sets a key in a map collection. */
+  async mapSet(
+    spaceId: string,
+    docId: string,
+    collection: string,
+    key: string,
+    value: DataValue
+  ): Promise<void> {
+    await OfflineProtocolNativeModule.dataMapSet(
+      spaceId,
+      docId,
+      collection,
+      key,
+      JSON.stringify(value)
+    );
+  }
+
+  /** Removes a key from a map collection. */
+  async mapDelete(
+    spaceId: string,
+    docId: string,
+    collection: string,
+    key: string
+  ): Promise<void> {
+    await OfflineProtocolNativeModule.dataMapDelete(
+      spaceId,
+      docId,
+      collection,
+      key
+    );
+  }
+
+  /** Reads a key from a map collection, or null when it is absent. */
+  async mapGet(
+    spaceId: string,
+    docId: string,
+    collection: string,
+    key: string
+  ): Promise<DataValue | null> {
+    const json = await OfflineProtocolNativeModule.dataMapGetJson(
+      spaceId,
+      docId,
+      collection,
+      key
+    );
+    return json == null ? null : JSON.parse(json);
+  }
+
+  /** Appends to a list collection. */
+  async listPush(
+    spaceId: string,
+    docId: string,
+    collection: string,
+    value: DataValue
+  ): Promise<void> {
+    await OfflineProtocolNativeModule.dataListPush(
+      spaceId,
+      docId,
+      collection,
+      JSON.stringify(value)
+    );
+  }
+
+  /** Deletes entries from a list collection. */
+  async listDelete(
+    spaceId: string,
+    docId: string,
+    collection: string,
+    index: number,
+    count: number
+  ): Promise<void> {
+    await OfflineProtocolNativeModule.dataListDelete(
+      spaceId,
+      docId,
+      collection,
+      index,
+      count
+    );
+  }
+
+  /** The number of entries in a list collection. */
+  async listLength(
+    spaceId: string,
+    docId: string,
+    collection: string
+  ): Promise<number> {
+    return await OfflineProtocolNativeModule.dataListLen(
+      spaceId,
+      docId,
+      collection
+    );
+  }
+
+  /**
+   * Inserts into a text collection.
+   *
+   * `position` is a character offset, not a byte offset.
+   */
+  async textInsert(
+    spaceId: string,
+    docId: string,
+    collection: string,
+    position: number,
+    text: string
+  ): Promise<void> {
+    await OfflineProtocolNativeModule.dataTextInsert(
+      spaceId,
+      docId,
+      collection,
+      position,
+      text
+    );
+  }
+
+  /** Deletes characters from a text collection. */
+  async textDelete(
+    spaceId: string,
+    docId: string,
+    collection: string,
+    position: number,
+    count: number
+  ): Promise<void> {
+    await OfflineProtocolNativeModule.dataTextDelete(
+      spaceId,
+      docId,
+      collection,
+      position,
+      count
+    );
+  }
+
+  /** The contents of a text collection. */
+  async textValue(
+    spaceId: string,
+    docId: string,
+    collection: string
+  ): Promise<string> {
+    return await OfflineProtocolNativeModule.dataTextValue(
+      spaceId,
+      docId,
+      collection
+    );
+  }
+
+  /** Adds to a counter collection. Negative amounts subtract. */
+  async counterIncrement(
+    spaceId: string,
+    docId: string,
+    collection: string,
+    amount: number
+  ): Promise<void> {
+    await OfflineProtocolNativeModule.dataCounterIncrement(
+      spaceId,
+      docId,
+      collection,
+      amount
+    );
+  }
+
+  /** The value of a counter collection. */
+  async counterValue(
+    spaceId: string,
+    docId: string,
+    collection: string
+  ): Promise<number> {
+    return await OfflineProtocolNativeModule.dataCounterValue(
+      spaceId,
+      docId,
+      collection
+    );
+  }
+
+  /**
+   * The document's current state as plain JSON.
+   *
+   * Half of the escape hatch: an app can always take its data and leave,
+   * and this half needs no knowledge of the SDK to read.
+   */
+  async docJson(spaceId: string, docId: string): Promise<unknown> {
+    return JSON.parse(
+      await OfflineProtocolNativeModule.dataDocJson(spaceId, docId)
+    );
+  }
+
+  /**
+   * The document's full history, base64-encoded.
+   *
+   * The other half of the escape hatch. Prefer {@link docJson} unless the
+   * history itself is what you need.
+   */
+  async exportRaw(spaceId: string, docId: string): Promise<string> {
+    return await OfflineProtocolNativeModule.dataExportRaw(spaceId, docId);
+  }
+
+  /**
+   * Persists pending edits to a document.
+   *
+   * Edits batch before they reach a record, so call this when the app must
+   * know a change survives a crash. The SDK also flushes on shutdown.
+   */
+  async flush(spaceId: string, docId: string): Promise<void> {
+    await OfflineProtocolNativeModule.dataFlush(spaceId, docId);
+  }
+
+  /** Persists pending edits to every open document. */
+  async flushAll(): Promise<void> {
+    await OfflineProtocolNativeModule.dataFlushAll();
+  }
+
+  /** The compacted size of a document, in bytes. */
+  async docSize(spaceId: string, docId: string): Promise<number> {
+    return await OfflineProtocolNativeModule.dataDocSize(spaceId, docId);
+  }
+
+  /**
+   * Deletes every record the data layer owns.
+   *
+   * Only needed when documents were pointed at a storage backend the app
+   * supplied: `wipePersistedState()` clears the default provider's account
+   * directory, which a custom backend is not inside. Skipping it there
+   * leaves documents behind after the account that made them is gone.
+   */
+  async wipeAll(): Promise<void> {
+    await OfflineProtocolNativeModule.dataWipeAll();
   }
 }
 

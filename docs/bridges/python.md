@@ -58,6 +58,41 @@ dynamism makes it tempting to consume them ad hoc, and that is fine for tooling,
 but it means the Python surface offers no drift protection at all. It will not
 catch a renamed event field for you.
 
+## P6. Python is where a storage adapter is cheapest to get right
+
+Python is the only binding where an application can hand in its own
+`ProtocolStateStorageProvider` today (`ProtocolManager(state_storage=...)`),
+which makes it the best place to develop and debug an adapter before writing
+the same thing in Swift or Kotlin.
+
+The contract and the gate are the same in every language:
+
+```python
+import json
+from offline_protocol_sdk.offline_protocol import run_storage_conformance
+
+report = json.loads(run_storage_conformance(my_adapter))
+assert report["failures"] == [], report["failures"]
+```
+
+Two Python-specific traps, both of which the suite catches:
+
+- **Values are `bytes`, not `str`.** Sealed records are ciphertext, so a
+  provider that decodes to text anywhere in its path corrupts them. `sqlite3`
+  in particular returns `memoryview` for a BLOB in some configurations — wrap
+  it in `bytes()` before returning.
+- **An absent key returns `None`,** it does not raise. The SDK asks for
+  records that legitimately do not exist yet on every launch, and raising
+  turns a normal startup into an error path.
+
+A worked reference lives in
+[`examples/storage-adapters/python/sqlite_state_storage.py`](../../examples/storage-adapters/python/sqlite_state_storage.py).
+
+Python currently ships **no** `wipePersistedState` equivalent (the mobile
+bindings do). An application that needs logout has to clear its own storage
+root, and if it pointed documents at a separate backend, call
+`DataStore.wipe_all()` too.
+
 ## Testing
 
 ```bash

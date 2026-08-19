@@ -60,6 +60,20 @@ func mapProtocolBridgeError(_ error: Error) -> (code: String, message: String)? 
         return ("PermissionDenied", message)
     case let .InvalidArgument(message):
         return ("InvalidArgument", message)
+    // Data-layer conditions, each distinct because the app's next move
+    // differs. DataDisabled and DataStorageUnavailable are setup mistakes that
+    // no retry fixes; DocTooLarge is recoverable by deleting content
+    // (deletions keep working while growth is refused); DataCorrupted is
+    // permanent for that document. Without these cases they would all fall to
+    // the caller's fallback code and read as one undifferentiated failure.
+    case .DataDisabled:
+        return ("DataDisabled", "Data layer is disabled")
+    case .DataStorageUnavailable:
+        return ("DataStorageUnavailable", "Data layer has no storage; initializeMls must run first")
+    case let .DocTooLarge(message):
+        return ("DocTooLarge", message)
+    case let .DataCorrupted(message):
+        return ("DataCorrupted", message)
     default:
         return nil
     }

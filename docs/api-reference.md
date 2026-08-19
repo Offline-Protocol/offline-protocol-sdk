@@ -850,6 +850,13 @@ GroupRenamed {
 
 Emitted when a group is renamed.
 
+### Data Layer Events
+
+| Event | Fields | When |
+|---|---|---|
+| `data_changed` | `space_id`, `doc_id`, `delta_bytes` | A document change reached storage |
+| `data_doc_size_warning` | `space_id`, `doc_id`, `compacted_bytes`, `cap_bytes` | A document passed 768 KiB, approaching the 1 MiB cap |
+
 ## Group Role Management
 
 The high-level mesh group API includes role-based access control.
@@ -984,6 +991,103 @@ pub struct FileProgress {
     pub percentage: u8,  // 0-100
 }
 ```
+
+## Replicated Documents
+
+Offline-first state any member of a space can edit while disconnected, merging
+deterministically when replicas meet again. Messaging is synced events; this is
+synced state.
+
+Requires `initializeMls` to have run — documents are sealed at rest with the
+same per-install record key as every other protocol category, and that key is
+minted there — and `data.enabled` set in the configuration. Every method
+answers `DataDisabled` until it is.
+
+### DataStore
+
+```typescript
+const store = new DataStore();
+
+await store.mapSet('space-1', 'profile', 'fields', 'name', {
+  kind: 'text',
+  value: 'Ada',
+});
+await store.textInsert('space-1', 'notes', 'body', 0, 'first line');
+await store.counterIncrement('space-1', 'stats', 'views', 1);
+await store.flush('space-1', 'profile');
+```
+
+| Method | Returns | Notes |
+|---|---|---|
+| `createDoc(space, doc)` | `void` | No-op if it already exists |
+| `deleteDoc(space, doc)` | `void` | Removes every record the document owns |
+| `listDocs(space)` | `string[]` | |
+| `listSpaces()` | `string[]` | Spaces holding at least one document |
+| `mapSet(space, doc, collection, key, value)` | `void` | |
+| `mapDelete(space, doc, collection, key)` | `void` | |
+| `mapGet(space, doc, collection, key)` | `DataValue \| null` | |
+| `listPush(space, doc, collection, value)` | `void` | |
+| `listDelete(space, doc, collection, index, count)` | `void` | |
+| `listLength(space, doc, collection)` | `number` | |
+| `textInsert(space, doc, collection, position, text)` | `void` | `position` is a **character** offset |
+| `textDelete(space, doc, collection, position, count)` | `void` | |
+| `textValue(space, doc, collection)` | `string` | |
+| `counterIncrement(space, doc, collection, amount)` | `void` | Negative subtracts |
+| `counterValue(space, doc, collection)` | `number` | |
+| `docJson(space, doc)` | `unknown` | Plain JSON of current state |
+| `exportRaw(space, doc)` | `string` | Full history, base64 |
+| `flush(space, doc)` | `void` | Persist pending edits |
+| `flushAll()` | `void` | |
+| `docSize(space, doc)` | `number` | Compacted size in bytes |
+| `wipeAll()` | `void` | Delete every data-layer record |
+
+A space id is the MLS scope the space rides on: a peer address or a group id.
+Space, document and collection names accept `A-Z a-z 0-9 . _ -` up to 128
+characters, because they are composed into storage record keys.
+
+### DataValue
+
+```typescript
+type DataValue =
+  | { kind: 'null' }
+  | { kind: 'bool'; value: boolean }
+  | { kind: 'int'; value: number }
+  | { kind: 'float'; value: number }
+  | { kind: 'text'; value: string }
+  | { kind: 'bytes'; value: number[] };
+```
+
+Scalars only. Structured values go in as JSON strings and merge whole (last
+write wins per key), which is what v1 replicates: whole collections within a
+space, with no nested addressing and no query language.
+
+### Durability
+
+Edits batch before they reach storage. Call `flush()` when the app must know a
+change survives a crash; the SDK also flushes on shutdown. A `data_changed`
+event fires **after** the change is durable, so a UI that re-renders on it is
+rendering state that survives a restart.
+
+### Limits
+
+A document is capped at 1 MiB compacted, with a `data_doc_size_warning` event
+at 768 KiB. Passing the cap raises `DocTooLarge`. The breaching change is still
+durable — refusing it would lose work the app believed it had made — and
+deletions keep working while growth is refused, so a document can be brought
+back under the cap and resume accepting edits.
+
+### Storage
+
+Documents live wherever protocol state already does, so there is nothing to
+configure. To put them elsewhere, construct the store with a provider
+(`DataStore.withStorage`) or set `DataConfig::storage` in Rust. It is a runtime
+choice: no rebuild and no build flag, and sealing sits above the seam, so a
+custom backend is handed sealed bytes and never sees document content.
+
+Verify a custom backend with `runStorageConformance(provider)`, and call
+`wipeAll()` on logout — `wipePersistedState()` clears the default provider's
+account directory, which a custom backend is not inside. See
+[storage adapter references](../examples/storage-adapters/README.md).
 
 ## UniFFI Bindings
 

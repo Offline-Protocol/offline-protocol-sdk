@@ -91,6 +91,7 @@ offline-protocol-transport     Transport trait + BLE/WiFi Direct/Internet impls,
 offline-protocol-reliability   AckManager, RetryQueue, Deduplicator, AckOptimizer
 offline-protocol-mls           MlsManager, MlsStorage trait, session & group encryption
 offline-protocol-services      MeshServices: registry, discovery (gossip), request/response
+offline-protocol-data          DataDoc: replicated documents (CRDT), caps, compaction
     |
 offline-protocol-router        DORS transport selector, relay role vocabulary
     |
@@ -108,6 +109,10 @@ offline-protocol-bench         Criterion benchmarks
 - **`MlsStorage` trait** (`crates/offline-protocol-mls/src/storage.rs`):
   platform-agnostic secure storage. Apps implement it for iOS Keychain, Android
   Keystore, and so on.
+- **`DataStore`** (`crates/offline-protocol/src/protocol/data.rs`): replicated
+  documents over the storage seam. The backend is swappable at runtime via
+  `DataConfig::storage` (one line, no rebuild), sealing sits above the
+  adapter, and the CRDT engine stays inside `offline-protocol-data`.
 - **`TelemetrySink`**: installed via
   `OfflineProtocol::install_telemetry_sink(sink, config)`.
   `TelemetryConfig::mls_verbosity` gates MLS lifecycle emission at runtime;
@@ -132,6 +137,15 @@ These fail silently if broken. Each is documented in full where it is linked.
 - **Adding a control-message prefix** means adding it to the registry that
   drives injection prevention
   ([spec](docs/spec/control-messages.md#reserved-prefix-registry)).
+- **A storage adapter must pass the conformance suite**
+  (`offline_protocol::storage_conformance::run`). Swappable storage is the
+  data layer's ranked-first property, and an adapter that returns `Ok` from
+  every method can still lose overwrites or merge categories
+  ([C11](docs/bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified)).
+- **Never hand the CRDT engine bytes that did not come out of a sealed
+  record.** Malformed imports can panic upstream, and `minisize` is
+  `panic = "abort"`, so the AEAD tag is the real containment
+  ([ADR 0018](docs/adr/0018-data-layer-engine-and-storage-seams.md)).
 - **Never add a catch-all arm to a telemetry reason classifier that matches on
   an enum** (a classifier over an open wire string may, if the fallback returns
   a fixed token and never the input)

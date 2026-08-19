@@ -211,6 +211,56 @@ Which one applies depends on **where the event fires** relative to subscription,
 not on what the event means. A replay-on-subscribe mechanism alone does not fix
 a one-shot that fires before any subscriber exists.
 
+## C11. A storage adapter is a supported extension point, and is verified
+
+The SDK persists two separate things: MLS and identity secrets, through
+`MlsStorageProvider`, and restartable protocol state, through
+`ProtocolStateStorageProvider`. Every binding ships a working default for
+both, so an application that configures no storage still gets a working SDK.
+
+Replicated documents add a third slot that reuses the second interface.
+`DataStore(protocol)` puts documents in whichever backend protocol state
+already runs on; `DataStore.withStorage(protocol, provider)` puts them
+somewhere the application chooses, while secrets stay where they were. It is
+a runtime choice: no rebuild, no build flag, and no change to any data API.
+
+Four rules govern that seam.
+
+**The interface never forks.** A data backend implements
+`ProtocolStateStorageProvider`, the same trait protocol state uses. One
+interface to implement, one suite to pass. Do not add a data-specific
+storage interface; it would double the surface an application must get
+right and halve the value of the suite below.
+
+**Sealing sits above the adapter.** Records whose category requires sealing
+are encrypted before `store` is called and decrypted after `load` returns,
+inside the core. An adapter is handed sealed bytes and never sees document
+content or message plaintext. This is what makes a custom backend safe by
+construction rather than by the adapter author's care, and it is why an
+adapter must round-trip **bytes**, not text: a backend that passes values
+through a string type corrupts ciphertext, and the symptom is a record that
+will not open much later.
+
+**Green on the conformance suite is the definition of supported.** Run
+`runStorageConformance(provider)` (namespace-level, no protocol instance
+needed) and check that `failures` is empty. It covers the round trip,
+binary and empty values, overwrite semantics, delete idempotence, key-type
+isolation, listing accuracy, composed and long key ids, large records, and
+delete completeness. Each check exists because that defect is invisible
+until data is missing. The suite writes only under its own probe key types
+and deletes everything it wrote, so it is safe to run against a live store.
+
+**A custom backend brings a logout obligation.** `wipePersistedState()`
+removes the account directory of the *default* provider — deliberately one
+unlink rather than a walk over categories, which is also what makes it pick
+up categories a future release adds. A custom backend is not inside that
+directory, so an application that configures one **must** call
+`DataStore.wipeAll()` on logout. Without it, documents outlive the account
+that created them: a privacy failure with no symptom inside the app.
+
+Reference adapters live in `examples/storage-adapters/`, one per binding,
+each with the conformance suite wired into its own test harness.
+
 ## What each binding owes
 
 | Binding | Owes |
@@ -219,3 +269,6 @@ a one-shot that fires before any subscriber exists.
 | Kotlin | Secure storage backed by Keystore; no blocking work on the main looper; awareness that platform callbacks arrive on binder threads |
 | Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change |
 | TypeScript | Config normalization, event typing kept in step with the core, and no assumption that a native method exists in an older binary |
+
+A storage adapter written in any of them owes the same thing: a green
+conformance report (C11).

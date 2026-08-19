@@ -619,6 +619,22 @@ export interface PendingQueueConfig {
 /**
  * Protocol configuration
  */
+/**
+ * Replicated-document data layer configuration.
+ *
+ * Absent leaves every value at its core default — the defaults live in one
+ * place, in Rust, and this bridge does not restate them.
+ */
+export interface DataConfig {
+  /**
+   * Whether the data layer accepts work (default: false).
+   *
+   * Off until the replication half ships: a capability advertised with no
+   * sync behind it invites peers to expect a sync that never comes.
+   */
+  enabled?: boolean;
+}
+
 export interface ProtocolConfig {
   /** Application identifier */
   appId: string;
@@ -760,6 +776,13 @@ export interface ProtocolConfig {
   network?: NetworkConfig;
   /** Reliability configuration (optional) */
   reliability?: ReliabilityConfig;
+  /**
+   * Replicated-document data layer (optional).
+   *
+   * Every field is optional and an omitted one keeps the SDK default — the
+   * defaults live in the Rust core and nowhere else.
+   */
+  data?: DataConfig;
 }
 
 /**
@@ -2359,6 +2382,37 @@ export interface UserUnblockedEvent extends BaseEvent {
 }
 
 /**
+ * A replicated document changed and the change reached storage.
+ *
+ * Emitted after the delta is durable, never before, so a UI that re-renders
+ * on this event is rendering state that survives a crash.
+ */
+export interface DataChangedEvent extends BaseEvent {
+  type: 'data_changed';
+  space_id: string;
+  doc_id: string;
+  /** Size of the change that was persisted. */
+  delta_bytes: number;
+}
+
+/**
+ * A replicated document is approaching the per-document size cap.
+ *
+ * Fires while there is still room to act (archive, split, prune). Without
+ * it the cap would be a cliff the app meets for the first time as a failed
+ * write.
+ */
+export interface DataDocSizeWarningEvent extends BaseEvent {
+  type: 'data_doc_size_warning';
+  space_id: string;
+  doc_id: string;
+  /** Current compacted size of the document. */
+  compacted_bytes: number;
+  /** The cap it is measured against. */
+  cap_bytes: number;
+}
+
+/**
  * A raw relay server frame that apps need outside or in addition to
  * SDK-owned processing — invite-link lifecycle responses (`GroupInviteLinkCreated`,
  * `GroupJoinedViaInvite`, `GroupInviteJoinPending`, …), `GroupRoleChanged`,
@@ -2530,7 +2584,9 @@ export type ProtocolEvent =
   | MediaResendRequiredEvent
   | SecurityWarningEvent
   | UserBlockedEvent
-  | UserUnblockedEvent;
+  | UserUnblockedEvent
+  | DataChangedEvent
+  | DataDocSizeWarningEvent;
 
 /**
  * Event listener type

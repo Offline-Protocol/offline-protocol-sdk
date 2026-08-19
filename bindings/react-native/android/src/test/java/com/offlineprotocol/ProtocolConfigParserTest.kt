@@ -463,4 +463,46 @@ class ProtocolConfigParserTest {
         assertEquals(0, mesh.maxTtl!!.toInt())
         assertEquals(0, mesh.activityIdleWindows!!.toInt())
     }
+
+    // ------------------------------------------------------------------
+    // Data layer section
+    // ------------------------------------------------------------------
+
+    @Test
+    fun dataLayerIsOffWhenTheSectionIsAbsent() {
+        // The layer ships before its replication half, so off is the shipped
+        // default and an app that says nothing must get it.
+        val config = parse("""{"appId":"app","userId":"alice"}""")
+        assertFalse(config.dataEnabled)
+    }
+
+    @Test
+    fun dataLayerReadsItsNestedHome() {
+        val config = parse("""{"appId":"app","userId":"alice","data":{"enabled":true}}""")
+        assertTrue(config.dataEnabled)
+    }
+
+    @Test
+    fun dataLayerCanBeExplicitlyDisabled() {
+        // Explicitly off and unset must both reach the constructor as false.
+        // They differ only in intent, and the constructor is where that
+        // stops mattering.
+        val config = parse("""{"appId":"app","userId":"alice","data":{"enabled":false}}""")
+        assertFalse(config.dataEnabled)
+    }
+
+    @Test
+    fun aDataSectionWithNothingInItLeavesTheLayerOff() {
+        val config = parse("""{"appId":"app","userId":"alice","data":{}}""")
+        assertFalse(config.dataEnabled)
+    }
+
+    @Test
+    fun anUnrelatedSectionDoesNotTurnTheDataLayerOn() {
+        // Guards the shape of the lookup: reading the flag from the wrong
+        // place (a top-level `enabled`, say) would make unrelated config
+        // switch the layer on.
+        val config = parse("""{"appId":"app","userId":"alice","enabled":true}""")
+        assertFalse(config.dataEnabled)
+    }
 }
