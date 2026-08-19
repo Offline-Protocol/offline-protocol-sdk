@@ -137,6 +137,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   stamping helper. Visible only as larger frames on the wire, with no error and
   no event, which is why it survived.
 
+- **A group created offline was titled `group:<uuid>` on the relay once the
+  device reconnected.** Only `create_group` passed the name into the relay
+  registration frame, and it only sends when Internet is up at that moment.
+  The reconnect re-sync and `request_group_relay_registration`, which register
+  an offline-created group for the first time, sent no name; the bridge
+  translator then substituted the group id, and the relay keeps the first name
+  it sees for a mesh group id and echoed it back to every member as the
+  group's title. Every registration frame now carries the name from the
+  locally stored MLS group metadata when the caller has none.
+
 ### Removed
 
 - **The gradient-routing and path-selection layer, in full.** `PathSelector`,

@@ -3220,6 +3220,81 @@ fn test_request_group_relay_registration() {
     protocol.stop().unwrap();
 }
 
+/// A group created without Internet is first registered by a later
+/// re-sync, which does not know the name. The relay keeps the first name it
+/// sees and the bridge substitutes the group id for a missing one, so a
+/// nameless first registration would title the group `group:<uuid>` for
+/// every member. The frame must therefore carry the stored MLS name.
+#[test]
+fn test_deferred_relay_registration_carries_stored_group_name() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+    protocol.start().unwrap();
+
+    // Offline creation: no registration frame can be sent.
+    let info = protocol.create_group("Offline Created").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+
+    let registration_names = |handle: &MockTransport| -> Vec<Option<String>> {
+        handle
+            .sent_messages()
+            .iter()
+            .filter_map(|m| {
+                m.content
+                    .strip_prefix(internal_prefixes::GROUP_RELAY_REGISTER)
+                    .map(str::to_string)
+            })
+            .map(|json| {
+                let payload: serde_json::Value = serde_json::from_str(&json).unwrap();
+                assert_eq!(
+                    payload.get("group_id").and_then(|v| v.as_str()),
+                    Some(group_id.as_str())
+                );
+                payload
+                    .get("group_name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .collect()
+    };
+
+    // Reconnect re-sync (the 0 -> 1 Internet transition) passes no name.
+    assert!(!protocol.group_mesh.internet_was_available);
+    protocol.check_relay_group_sync();
+    assert_eq!(
+        registration_names(&internet_handle),
+        vec![Some("Offline Created".to_string())],
+        "re-sync registration must carry the stored group name"
+    );
+
+    // The explicit registration request passes no name either.
+    protocol.group_mesh.relay_register_pending.remove(&group_id);
+    assert_eq!(
+        protocol.request_group_relay_registration(&group_id).ok(),
+        Some(true)
+    );
+    assert_eq!(
+        registration_names(&internet_handle),
+        vec![
+            Some("Offline Created".to_string()),
+            Some("Offline Created".to_string())
+        ],
+        "requested registration must carry the stored group name"
+    );
+
+    protocol.stop().unwrap();
+}
+
 #[test]
 fn test_relay_sync_disabled_config() {
     use offline_protocol_transport::mock::MockTransport;

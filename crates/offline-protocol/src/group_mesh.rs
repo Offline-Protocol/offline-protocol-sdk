@@ -4507,6 +4507,21 @@ impl OfflineProtocol {
             .map(|creator| creator == &self.local_id)
     }
 
+    /// The group's display name as stored in local MLS metadata, if the
+    /// group is known and has one. Best-effort: any lookup failure reads as
+    /// "no name", the caller decides what that means.
+    fn stored_group_name(&self, group_id: &str) -> Option<String> {
+        let mls_guard = self.read_mls_guard().ok()?;
+        let gid = offline_protocol_mls::GroupId::new(group_id).ok()?;
+        let metadata = mls_guard.get_group_metadata(&gid).ok()??;
+        metadata
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+    }
+
     /// Attempts to register (or update) a group with the relay server.
     ///
     /// Sends a `__GRP_RELAY_REG__` message to the user's own ID via Internet
@@ -4520,6 +4535,18 @@ impl OfflineProtocol {
     /// for the group), never here — otherwise `send_group_message` takes the
     /// O(1) broadcast path and the messages vanish into the echo.
     ///
+    /// Every registration frame carries the group's display name. The
+    /// relay stores the name it sees on the first `CreateGroup` for a mesh
+    /// group id and never rewrites it on later re-syncs, and the bridge
+    /// translator substitutes the group id for a missing name. So the
+    /// first registration to reach the relay decides the name forever:
+    /// a group created offline (creation's own registration skipped) and
+    /// first registered by the reconnect re-sync or by
+    /// `request_group_relay_registration`, both of which know no name,
+    /// would be stored as `group:<uuid>` and echoed back to every member
+    /// as its title. Callers that have the name pass it; otherwise it is
+    /// read from the locally stored MLS group metadata.
+    ///
     /// Fire-and-forget: returns `Ok(true)` if sent, `Ok(false)` if Internet
     /// is unavailable, `Err` on serialization failure.
     fn try_relay_register_group(
@@ -4532,9 +4559,15 @@ impl OfflineProtocol {
             return Ok(false);
         }
 
+        let group_name = group_name
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.stored_group_name(group_id));
+
         let payload = RelayGroupRegistrationPayload {
             group_id: group_id.to_string(),
-            group_name: group_name.map(|s| s.to_string()),
+            group_name,
             members: members.to_vec(),
             is_admin: self.relay_registration_admin_hint(group_id),
         };
