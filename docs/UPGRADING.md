@@ -1552,7 +1552,10 @@ If you point them somewhere else — `DataStore.withStorage(protocol, provider)`
 or `DataConfig::storage` in Rust — then **`wipePersistedState()` no longer
 covers your documents.** It clears the account directory of the *default*
 provider, which your backend is not inside. Call `DataStore.wipeAll()` on
-logout as well, or documents outlive the account that created them.
+logout as well, or documents outlive the account that created them. `wipeAll()`
+throws if the backend refused any delete, and that error is the only signal
+that records survived the wipe: treat it as a failed logout rather than
+logging it, because nothing inside the application will show the difference.
 
 Verify any custom backend with `runStorageConformance(provider)`: an empty
 `failures` array is the definition of supported. Reference adapters live in

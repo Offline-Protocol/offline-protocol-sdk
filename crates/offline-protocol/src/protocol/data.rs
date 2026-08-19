@@ -469,23 +469,79 @@ impl OfflineProtocol {
 
     /// Write every open document into the current backend as a self-contained
     /// snapshot, so nothing depends on history that lives somewhere else.
+    ///
+    /// Two phases, and the split is the correctness. Every write happens
+    /// first; only once all of them are durable does any document's
+    /// bookkeeping move. Interleaving the two would leave a document that
+    /// migrated before the failure claiming a fresh empty log, while the
+    /// caller rolls the swap back to the old backend: its next flush would
+    /// then write sequence zero over the delta already there and park
+    /// everything that followed it, which is permanent loss of exactly the
+    /// kind this migration exists to prevent.
     fn migrate_open_docs_to_data_storage(&mut self) -> Result<()> {
         let Some(storage) = self.data_storage() else {
             return Ok(());
         };
 
         let keys: Vec<(String, String)> = self.data.docs.keys().cloned().collect();
-        for (space, doc) in &keys {
+        let mut committed: Vec<(String, String)> = Vec::new();
+        let mut migrated: Vec<((String, String), usize)> = Vec::new();
+
+        if let Err(err) =
+            self.write_open_docs_into(storage.as_ref(), &keys, &mut committed, &mut migrated)
+        {
+            // Nothing durable is being claimed, so every export marker this
+            // advanced goes back. Leaving one advanced would drop the edits
+            // it covers from every future delta, which is the same silent
+            // loss a failed delta write already rewinds for.
+            for map_key in committed {
+                if let Some(entry) = self.data.docs.get_mut(&map_key) {
+                    entry.doc.rewind_last_commit();
+                }
+            }
+            return Err(err);
+        }
+
+        // Phase two. Every record above is durable, so the swap is going to
+        // stand and the bookkeeping can follow it.
+        for (map_key, compacted_bytes) in migrated {
+            if let Some(entry) = self.data.docs.get_mut(&map_key) {
+                // The new backend holds one snapshot and no delta log.
+                entry.next_seq = 0;
+                entry.log_bytes = 0;
+                entry.compacted_bytes = compacted_bytes;
+                entry.doc.mark_compacted(compacted_bytes);
+            }
+        }
+        Ok(())
+    }
+
+    /// Phase one of a backend swap: every open document and space index
+    /// written into the new backend, with nothing in memory moved yet.
+    ///
+    /// `committed` collects the documents whose export marker this advanced,
+    /// so a failure can put every one of them back. `migrated` collects the
+    /// bookkeeping to apply once every write has succeeded.
+    fn write_open_docs_into(
+        &mut self,
+        storage: &dyn ProtocolStateStorage,
+        keys: &[(String, String)],
+        committed: &mut Vec<(String, String)>,
+        migrated: &mut Vec<((String, String), usize)>,
+    ) -> Result<()> {
+        for (space, doc) in keys {
             let map_key = (space.clone(), doc.clone());
 
             // Fold pending edits in first: the snapshot below has to be the
             // whole document, including what has not been flushed yet.
-            let committed = {
+            {
                 let Some(entry) = self.data.docs.get_mut(&map_key) else {
                     continue;
                 };
-                entry.doc.commit().map_err(map_data_error)?.is_some()
-            };
+                if entry.doc.commit().map_err(map_data_error)?.is_some() {
+                    committed.push(map_key.clone());
+                }
+            }
             let compacted = {
                 let Some(entry) = self.data.docs.get(&map_key) else {
                     continue;
@@ -493,38 +549,41 @@ impl OfflineProtocol {
                 entry.doc.export_compacted().map_err(map_data_error)?
             };
 
-            if let Err(err) = self.write_state_record(
-                storage.as_ref(),
+            self.write_state_record(
+                storage,
                 storage_keys::DATA_DOCS,
                 &doc_key(space, doc),
                 &compacted,
-            ) {
-                // The commit above advanced the export marker. Leaving it
-                // advanced would drop those edits from every future delta.
-                if committed {
-                    if let Some(entry) = self.data.docs.get_mut(&map_key) {
-                        entry.doc.rewind_last_commit();
-                    }
-                }
-                return Err(Error::Other(format!(
+            )
+            .map_err(|err| {
+                Error::Other(format!(
                     "failed to move document {space}/{doc} into the new backend: {err}"
-                )));
+                ))
+            })?;
+
+            // Snapshot first, then drop the log, in that order and for the
+            // same reason as compaction. A delta record already sitting under
+            // this name in the new backend belongs to some earlier document
+            // that held it: the snapshot just written does not descend from
+            // it, so at the next open it parks and switches compaction off
+            // for good. Best-effort, again as compaction: the snapshot is
+            // already durable, and a leftover costs a growing log rather than
+            // a wrong document.
+            let prefix = format!("{space}/{doc}/");
+            if let Ok(stale) = storage.list_keys(storage_keys::DATA_DELTA_LOG) {
+                for key in stale.iter().filter(|key| key.starts_with(&prefix)) {
+                    let _ = storage.delete(storage_keys::DATA_DELTA_LOG, key);
+                }
             }
 
-            if let Some(entry) = self.data.docs.get_mut(&map_key) {
-                // The new backend holds one snapshot and no delta log.
-                entry.next_seq = 0;
-                entry.log_bytes = 0;
-                entry.compacted_bytes = compacted.len();
-                entry.doc.mark_compacted(compacted.len());
-            }
+            migrated.push((map_key, compacted.len()));
         }
 
         // The space indexes carry document names that have no records of
         // their own yet; without them the new backend forgets those names.
         let spaces: Vec<String> = self.data.spaces.keys().cloned().collect();
         for space in spaces {
-            self.persist_space(storage.as_ref(), &space)?;
+            self.persist_space(storage, &space)?;
         }
         Ok(())
     }
@@ -1017,18 +1076,42 @@ impl OfflineProtocol {
         };
         self.data.docs.clear();
         self.data.spaces.clear();
+
+        // Attempt every record and report the first failure, as
+        // [`Self::data_delete_doc`] does. Answering `Ok` for a wipe that left
+        // records behind is the worst shape this call can take: it is the
+        // logout path, so the records it failed to remove outlive the account
+        // that made them, and the application has no symptom to notice it by.
+        let mut first_error: Option<String> = None;
+        let mut record_error = |err: crate::protocol_state_storage::ProtocolStateError| {
+            if first_error.is_none() {
+                first_error = Some(err.to_string());
+            }
+        };
+
         for key_type in [
             storage_keys::DATA_DOCS,
             storage_keys::DATA_DELTA_LOG,
             storage_keys::DATA_SPACES,
         ] {
-            if let Ok(keys) = storage.list_keys(key_type) {
-                for key in keys {
-                    let _ = storage.delete(key_type, &key);
+            match storage.list_keys(key_type) {
+                Ok(keys) => {
+                    for key in keys {
+                        if let Err(err) = storage.delete(key_type, &key) {
+                            record_error(err);
+                        }
+                    }
                 }
+                Err(err) => record_error(err),
             }
         }
-        Ok(())
+
+        match first_error {
+            Some(detail) => Err(Error::Other(format!(
+                "failed to delete every data record: {detail}"
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// The compacted size of a document, in bytes.

@@ -117,6 +117,19 @@ merely kept appending deltas into the new backend would leave its history
 behind in the old one; the orphan delta then parks (see 2a), the document
 reads **empty**, and the next compaction deletes the orphans for good.
 
+The migration runs in two phases, and the split is load-bearing rather than
+tidiness: every document is written into the new backend first, and only once
+all of those writes are durable does any document's in-memory bookkeeping
+move. Interleaving the two makes a partial failure worse than no migration at
+all. A document that migrated before the failure would carry bookkeeping
+claiming a fresh empty log while the swap is rolled back to the old backend,
+so its next flush writes sequence zero over the delta already sitting there
+and everything after that delta parks at the next open. The application was
+told the swap did not happen, which is what makes that loss silent.
+
+**Failure prevented:** a refused backend swap destroying the delta log of
+whichever documents were migrated before the refusal.
+
 Note what the seam does not hide: values are sealed, but record **key ids**
 are not. A backend sees `{space}/{doc}`, so space and document names are
 metadata visible to whoever runs the store, and an application must not put

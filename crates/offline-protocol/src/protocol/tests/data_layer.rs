@@ -956,6 +956,195 @@ fn a_backend_swap_that_cannot_be_written_does_not_happen() {
     protocol.data_flush("space1", "notes").expect("flush");
 }
 
+/// A failed migration must leave every document exactly where it was.
+///
+/// The dangerous half is the document that migrated *before* the failure. Its
+/// bookkeeping would claim a fresh empty log in a backend the swap is about to
+/// abandon, so its next flush writes sequence zero over the delta already in
+/// the old backend, and everything after that delta parks at the next open.
+/// The swap being refused is what makes this silent: the application was told
+/// nothing moved.
+#[test]
+fn a_partly_written_backend_swap_leaves_every_document_intact() {
+    /// Accepts a fixed number of writes and refuses every one after them.
+    struct StopsAfter {
+        allowed: Mutex<usize>,
+    }
+
+    impl ProtocolStateStorage for StopsAfter {
+        fn store(&self, _: &str, _: &str, _: &[u8]) -> ProtocolStateResult<()> {
+            let mut left = self.allowed.lock().expect("lock");
+            if *left == 0 {
+                return Err(crate::ProtocolStateError::StoreFailed("read only".into()));
+            }
+            *left -= 1;
+            Ok(())
+        }
+        fn load(&self, _: &str, _: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn delete(&self, _: &str, _: &str) -> ProtocolStateResult<()> {
+            Ok(())
+        }
+        fn list_keys(&self, _: &str) -> ProtocolStateResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    let device = Device::new();
+    {
+        let mut protocol = device.launch();
+        // Several deltas each, so overwriting sequence zero costs something a
+        // restart can actually see.
+        for doc in ["alpha", "beta"] {
+            for index in 0..3i64 {
+                protocol
+                    .data_map_set(
+                        "space1",
+                        doc,
+                        "m",
+                        &format!("k{index}"),
+                        DataValue::int(index),
+                    )
+                    .expect("set");
+                protocol.data_flush("space1", doc).expect("flush");
+            }
+        }
+
+        // Open documents are ordered, so the first is written and the second
+        // refused: the exact shape that used to strand the first one.
+        assert!(
+            protocol
+                .set_data_storage(Arc::new(StopsAfter {
+                    allowed: Mutex::new(1),
+                }))
+                .is_err(),
+            "a swap whose second document cannot be written must fail"
+        );
+
+        // The flush that used to do the damage, through the restored backend.
+        for doc in ["alpha", "beta"] {
+            protocol
+                .data_map_set("space1", doc, "m", "after", DataValue::int(99))
+                .expect("set after the refused swap");
+            protocol.data_flush("space1", doc).expect("flush");
+        }
+    }
+
+    let mut reopened = device.launch();
+    for doc in ["alpha", "beta"] {
+        for index in 0..3i64 {
+            assert_eq!(
+                reopened
+                    .data_map_get("space1", doc, "m", &format!("k{index}"))
+                    .expect("get"),
+                Some(DataValue::int(index)),
+                "{doc}/k{index} was lost by a swap the application was told did not happen"
+            );
+        }
+        assert_eq!(
+            reopened
+                .data_map_get("space1", doc, "m", "after")
+                .expect("get"),
+            Some(DataValue::int(99)),
+            "{doc} lost the edit made after the refused swap"
+        );
+    }
+}
+
+/// A swap into a backend that already holds records under the same document
+/// name must not leave the earlier lineage's delta log behind.
+#[test]
+fn a_swap_clears_a_stale_delta_log_under_the_same_name() {
+    let device = Device::new();
+    let target = Arc::new(RecordingStorage::default());
+
+    // A delta log left in the target by whatever held this name before. It
+    // does not descend from the snapshot the migration is about to write, so
+    // at the next open it parks and switches compaction off for good.
+    for seq in 0..3u64 {
+        target
+            .store(
+                storage_keys::DATA_DELTA_LOG,
+                &format!("space1/notes/{seq:016x}"),
+                b"stale",
+            )
+            .expect("seed a stale delta");
+    }
+
+    let mut protocol = device.launch();
+    protocol
+        .data_map_set("space1", "notes", "m", "mine", DataValue::text("kept"))
+        .expect("set");
+    protocol.data_flush("space1", "notes").expect("flush");
+    protocol.set_data_storage(target.clone()).expect("swap");
+
+    let left: Vec<String> = target
+        .list_keys(storage_keys::DATA_DELTA_LOG)
+        .expect("list")
+        .into_iter()
+        .filter(|key| key.starts_with("space1/notes/"))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "a stale delta log survived the migration and would park at the next open: {left:?}"
+    );
+    assert_eq!(
+        protocol
+            .data_map_get("space1", "notes", "m", "mine")
+            .expect("get"),
+        Some(DataValue::text("kept")),
+        "the migrated document did not survive its own migration"
+    );
+}
+
+/// A wipe that could not delete everything must say so.
+///
+/// This is the logout path for a custom backend, so a record the wipe failed
+/// to remove outlives the account that made it, and answering `Ok` leaves the
+/// application no symptom to notice that by.
+#[test]
+fn a_wipe_the_backend_refuses_is_reported() {
+    #[derive(Default)]
+    struct RefusingDeletes {
+        inner: RecordingStorage,
+    }
+
+    impl ProtocolStateStorage for RefusingDeletes {
+        fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> ProtocolStateResult<()> {
+            self.inner.store(key_type, key_id, data)
+        }
+        fn load(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
+            self.inner.load(key_type, key_id)
+        }
+        fn delete(&self, _: &str, _: &str) -> ProtocolStateResult<()> {
+            Err(crate::ProtocolStateError::StoreFailed("read only".into()))
+        }
+        fn list_keys(&self, key_type: &str) -> ProtocolStateResult<Vec<String>> {
+            self.inner.list_keys(key_type)
+        }
+    }
+
+    let device = Device::new();
+    let backend = Arc::new(RefusingDeletes::default());
+    let mut protocol = device.launch();
+    protocol.set_data_storage(backend.clone()).expect("swap");
+    protocol
+        .data_map_set("space1", "notes", "m", "k", DataValue::text("secret"))
+        .expect("set");
+    protocol.data_flush("space1", "notes").expect("flush");
+
+    assert!(
+        protocol.data_wipe_all().is_err(),
+        "a wipe whose deletes were refused must not report success"
+    );
+    assert!(
+        backend.inner.len() > 0,
+        "the backend did not keep the records it refused to delete, so the \
+         assertion above proved nothing"
+    );
+}
+
 /// The cap is a contract with three halves, and all three are asserted here
 /// against one built-up document: the warning fires with room left, the cap
 /// refuses growth without discarding the breaching change, and deletion is

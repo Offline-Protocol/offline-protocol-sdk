@@ -66,7 +66,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   the new backend before the call returns, and fails without switching if that
   cannot be written: a delta record only describes the change since the
   previous one, so a document that merely kept writing deltas would leave its
-  history behind and read back empty. Individual values are capped at 1 MiB for
+  history behind and read back empty. A swap that fails partway leaves nothing
+  moved, in storage or in memory, so a document migrated before the failure
+  cannot go on to overwrite its own delta log in the backend the swap was
+  rolled back to. `DataStore.wipeAll()` reports a backend that refused a
+  delete rather than answering success, since it is the logout path and a
+  partial wipe has no other symptom. Individual values are capped at 1 MiB for
   the same family of reasons.
 
   **A custom backend brings one obligation:** `wipePersistedState()` clears the
