@@ -3041,6 +3041,51 @@ fn forgetting_a_peer_reports_the_fetches_it_ends() {
 }
 
 #[test]
+fn evicting_every_peer_reports_the_fetches_it_ends() {
+    // The same duty, on the wholesale road the single-peer fix did not sit
+    // on. Nothing the application did reaches this one: the bound on
+    // remembered peers is hit, and a stranger's key package advertising
+    // replication forgets every capability at once (the
+    // `MAX_KEY_PACKAGE_SENT_TO` arm in `message_dispatch`). A fetch
+    // outstanding at that moment ends for a reason its asker cannot see,
+    // and clearing the record forecloses the expiry that would have
+    // reported it later, so the spinner never ends at all.
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes alice holds");
+
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+    assert_eq!(
+        bob.protocol.pending_attachment_fetches.len(),
+        1,
+        "the fixture must reach a fetch that is actually outstanding"
+    );
+    clear_events(&bob);
+
+    bob.protocol.forget_every_data_sync_peer();
+
+    let unavailable = events_named(&bob, "data_attachment_unavailable");
+    assert_eq!(
+        unavailable.len(),
+        1,
+        "forgetting every peer must report the fetch it ends"
+    );
+    assert_eq!(unavailable[0]["reason"].as_str(), Some("peer_gone"));
+    assert_eq!(unavailable[0]["hash"].as_str(), Some(hash.as_str()));
+    assert_eq!(
+        unavailable[0]["space_id"].as_str(),
+        Some(bob_space.as_str())
+    );
+    assert!(
+        bob.protocol.pending_attachment_fetches.is_empty(),
+        "and release the slot"
+    );
+}
+
+#[test]
 fn a_document_layer_transfer_is_never_sent_unsealed() {
     // The marking exists nowhere but inside the encrypted chunk-0 plaintext.
     // On the plaintext opt-out path it would simply not travel, and the peer
@@ -3307,6 +3352,17 @@ fn the_request_map_is_bounded_across_peers_too() {
     assert!(
         alice.protocol.blob_request_windows.len() <= cap,
         "the map grew to {} against a cap of {cap}",
+        alice.protocol.blob_request_windows.len()
+    );
+    // And that the frames reached the map at all. The bound above is an
+    // upper one, which an empty map satisfies perfectly: were a gate above
+    // this one to start refusing these frames, the cap would read as
+    // enforced by a map nothing ever filled. Holding more than any single
+    // peer's budget could put there is what says the flood crossed.
+    assert!(
+        alice.protocol.blob_request_windows.len() > per_peer,
+        "the map holds {} entries, no more than one peer's budget of {per_peer}: \
+         the frames are being refused before they reach the window",
         alice.protocol.blob_request_windows.len()
     );
 }

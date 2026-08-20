@@ -15234,9 +15234,16 @@ mod tests {
     #[test]
     fn react_native_types_cover_every_data_value_kind() {
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        // Line endings normalised, because what this test reads is source
+        // text and what it looks for in it are multi-line shapes: the `\n}\n`
+        // that ends a declaration, the blank line that separates two. A
+        // Windows checkout is CRLF and contains neither, so without this the
+        // guard fails on the platform it runs on rather than on the drift it
+        // exists to catch, which is the one failure a guard must not have.
         let read = |rel: &std::path::Path| -> String {
             std::fs::read_to_string(rel)
                 .unwrap_or_else(|e| panic!("cannot read {}: {e}", rel.display()))
+                .replace("\r\n", "\n")
         };
 
         // The variant list out of the enum itself, so that adding one is

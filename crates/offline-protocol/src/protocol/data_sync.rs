@@ -1803,6 +1803,19 @@ impl OfflineProtocol {
             .retain(|key, _| !key.starts_with(&prefix));
     }
 
+    /// [`Self::forget_attachment_state`] for every peer at once, for the
+    /// road that forgets every peer at once.
+    ///
+    /// Not a loop over the roster, because the caller has already emptied
+    /// it: the capability sets are cleared wholesale when the bound on
+    /// remembered peers is reached, so by then there is no peer left to name
+    /// and a fetch keyed by one would be swept by nothing.
+    pub(crate) fn end_every_pending_fetch(&mut self) {
+        for key in std::mem::take(&mut self.pending_attachment_fetches).into_keys() {
+            Self::report_fetch_ended(&self.shared_state, &key, "peer_gone");
+        }
+    }
+
     /// Report a fetch this device has given up on, keyed the way
     /// [`Self::attachment_fetch_key`] composes them.
     ///

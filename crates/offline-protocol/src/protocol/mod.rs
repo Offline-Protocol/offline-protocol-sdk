@@ -1825,6 +1825,16 @@ impl OfflineProtocol {
         self.peer_data_group.clear();
         self.peer_data_group_attested.clear();
         self.peer_data_media.clear();
+        // Reported, not merely dropped, exactly as the single-peer road
+        // reports. Nothing the application did reaches this one: the bound
+        // on remembered peers is hit, a stranger's key package forgets every
+        // capability at once, and a fetch outstanding at that moment ends
+        // for a reason its asker has no way to see. Dropping the record
+        // silently also forecloses the expiry that would have reported it
+        // later, so the spinner this event exists to end never ends at all.
+        #[cfg(feature = "data")]
+        self.end_every_pending_fetch();
+        #[cfg(not(feature = "data"))]
         self.pending_attachment_fetches.clear();
         self.blob_request_windows.clear();
         #[cfg(feature = "data")]

@@ -158,6 +158,14 @@ impl OfflineProtocol {
                 }
                 self.peer_data_media.insert(sender.to_string());
             } else {
+                // Only the capability is dropped here. Fetches already put
+                // to this peer are left to their own expiry rather than
+                // ended, which is the opposite of what losing replication
+                // does and is deliberate: the record that bounds a fetch is
+                // also the record that admits its bytes, so ending it while
+                // a key package refreshes mid-carriage would discard a blob
+                // that is still crossing. The wait is bounded either way,
+                // and the timeout is the surface that ends this one.
                 self.peer_data_media.remove(sender);
             }
 

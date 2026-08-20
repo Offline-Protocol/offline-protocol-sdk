@@ -91,10 +91,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   cause it has no way to see.
 
   Every road that ends a fetch without bytes now reports it, including a peer
-  being blocked, forgotten, or coming back without the capability
-  (`peer_gone`). A fetch gets exactly one such report: a decline that races
-  its own arriving bytes is not followed by a second failure for the transfer
-  it abandoned.
+  being blocked, coming back without the replication capability, or being
+  forgotten, whether on its own or in the wholesale eviction that the bound on
+  remembered peers triggers (`peer_gone`). A fetch gets exactly one such
+  report: a decline that races its own arriving bytes is not followed by a
+  second failure for the transfer it abandoned.
 
   The wire contract now has its own chapter, [Document
   replication](./docs/spec/data-sync.md), with frozen conformance vectors

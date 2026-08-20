@@ -2457,8 +2457,8 @@ export interface DataAttachmentUnavailableEvent extends BaseEvent {
   /**
    * `declined` (the peer no longer holds it), `timeout`, `evicted`
    * (displaced by newer fetches), `hash_mismatch`, `peer_gone` (the peer
-   * was blocked, forgotten, or came back without the capability), or a
-   * transfer failure reason.
+   * was blocked, forgotten, or came back without the replication
+   * capability), or a transfer failure reason.
    */
   reason: string;
 }

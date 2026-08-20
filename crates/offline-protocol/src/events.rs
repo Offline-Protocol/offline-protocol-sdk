@@ -1725,7 +1725,8 @@ pub enum Event {
         /// Why it ended: `declined` (the peer answered that it no longer
         /// holds the blob), `timeout`, `evicted` (displaced by newer
         /// fetches), `hash_mismatch`, `peer_gone` (the peer was blocked,
-        /// forgotten, or came back without the capability), or a transfer
+        /// forgotten, or came back without the replication capability), or a
+        /// transfer
         /// failure reason. A fixed token this crate chooses, never a peer's
         /// words.
         reason: String,
