@@ -48,6 +48,22 @@ pub const MAX_NAME_LEN: usize = 128;
 /// Longest accepted map key.
 pub const MAX_KEY_LEN: usize = 256;
 
+/// Number of hex characters in an attachment hash, a SHA-256.
+pub const ATTACHMENT_HASH_LEN: usize = 64;
+
+/// Longest accepted attachment display name.
+///
+/// Shorter than a file system's limit on purpose. This is a label shown
+/// next to the thing, not a path anything opens, and it replicates to every
+/// member of the space whether or not they ever fetch the blob.
+pub const MAX_ATTACHMENT_NAME_LEN: usize = 256;
+
+/// Longest accepted attachment media type.
+///
+/// RFC 6838 bounds a type and a subtype at 127 characters each, so this
+/// accepts every registered name and leaves nothing to argue about.
+pub const MAX_ATTACHMENT_MIME_LEN: usize = 255;
+
 /// Longest accepted single value, equal to the whole-document cap.
 ///
 /// A value at or past this size can never fit inside a document that also
@@ -167,6 +183,16 @@ pub fn validate_value(value: &DataValue) -> DataResult<()> {
     let len = match value {
         DataValue::Text { value } => value.len(),
         DataValue::Bytes { value } => value.len(),
+        // An attachment is bounded by its own rules, which are tighter than
+        // the value cap and check shape rather than size: `size` describes
+        // bytes that are somewhere else, so the value cap says nothing
+        // useful about it.
+        DataValue::Attachment {
+            hash,
+            size,
+            name,
+            mime,
+        } => return validate_attachment(hash, *size, name.as_deref(), mime.as_deref()),
         // Scalars are fixed-width and cannot breach any bound.
         DataValue::Null
         | DataValue::Bool { .. }
@@ -174,6 +200,56 @@ pub fn validate_value(value: &DataValue) -> DataResult<()> {
         | DataValue::Float { .. } => 0,
     };
     validate_value_len(len)
+}
+
+/// Check an attachment reference.
+///
+/// The hash is checked for shape, not for reachability: whether anybody
+/// still holds the bytes is not knowable here, and a reference to a blob
+/// nobody has is a normal, recoverable state. What is not recoverable is a
+/// hash that is not a hash, because no fetch can ever succeed and the
+/// reference replicates to the whole space regardless.
+///
+/// Case matters. The hash is an address, and two spellings of one address
+/// are two addresses: they would fetch twice, store twice, and compare
+/// unequal while naming identical bytes. Lowercase is the canonical form,
+/// and the uppercase spelling is refused rather than folded so that a
+/// writer producing the wrong one hears about it.
+pub fn validate_attachment(
+    hash: &str,
+    size: u64,
+    name: Option<&str>,
+    mime: Option<&str>,
+) -> DataResult<()> {
+    if hash.len() != ATTACHMENT_HASH_LEN {
+        return Err(DataError::InvalidAttachment {
+            reason: "hash must be exactly 64 characters",
+        });
+    }
+    if !hash
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(DataError::InvalidAttachment {
+            reason: "hash must be lowercase hex",
+        });
+    }
+    if size == 0 {
+        return Err(DataError::InvalidAttachment {
+            reason: "size must not be zero",
+        });
+    }
+    if name.is_some_and(|name| name.len() > MAX_ATTACHMENT_NAME_LEN) {
+        return Err(DataError::InvalidAttachment {
+            reason: "name is longer than MAX_ATTACHMENT_NAME_LEN",
+        });
+    }
+    if mime.is_some_and(|mime| mime.len() > MAX_ATTACHMENT_MIME_LEN) {
+        return Err(DataError::InvalidAttachment {
+            reason: "mime is longer than MAX_ATTACHMENT_MIME_LEN",
+        });
+    }
+    Ok(())
 }
 
 /// Check a value length against [`MAX_VALUE_BYTES`].

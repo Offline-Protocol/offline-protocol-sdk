@@ -706,6 +706,20 @@ impl std::fmt::Debug for DataDoc {
     }
 }
 
+/// Field names of an attachment reference inside the engine.
+///
+/// Deliberately the same spelling as the serde representation and the JSON
+/// that crosses the FFI, so a document exported with [`DataDoc::export_json`]
+/// describes its own attachments in the same words the API uses. The export
+/// is the escape hatch for an application leaving this SDK, and an escape
+/// hatch that needs a decoder ring is not one.
+const ATTACHMENT_TAG_KEY: &str = "kind";
+const ATTACHMENT_TAG: &str = "attachment";
+const ATTACHMENT_HASH_KEY: &str = "hash";
+const ATTACHMENT_SIZE_KEY: &str = "size";
+const ATTACHMENT_NAME_KEY: &str = "name";
+const ATTACHMENT_MIME_KEY: &str = "mime";
+
 fn to_engine_value(value: DataValue) -> LoroValue {
     match value {
         DataValue::Null => LoroValue::Null,
@@ -714,6 +728,40 @@ fn to_engine_value(value: DataValue) -> LoroValue {
         DataValue::Float { value } => LoroValue::from(value),
         DataValue::Text { value } => LoroValue::from(value),
         DataValue::Bytes { value } => LoroValue::from(value),
+        // A reference is one engine value, not a container, and that is the
+        // whole of the "replaced, never edited" property: a container would
+        // give two writers a way to merge half of one reference with half of
+        // another and produce a hash that addresses nothing.
+        DataValue::Attachment {
+            hash,
+            size,
+            name,
+            mime,
+        } => {
+            let mut fields: Vec<(String, LoroValue)> = vec![
+                (
+                    ATTACHMENT_TAG_KEY.to_string(),
+                    LoroValue::from(ATTACHMENT_TAG),
+                ),
+                (ATTACHMENT_HASH_KEY.to_string(), LoroValue::from(hash)),
+                (
+                    ATTACHMENT_SIZE_KEY.to_string(),
+                    // The engine has one integer type and it is signed. Sizes
+                    // are bounded far below this by the transfer layer, so the
+                    // saturating cast is unreachable rather than lossy, and it
+                    // is a cast rather than a refusal because a value this
+                    // deep has no way to report one.
+                    LoroValue::from(i64::try_from(size).unwrap_or(i64::MAX)),
+                ),
+            ];
+            if let Some(name) = name {
+                fields.push((ATTACHMENT_NAME_KEY.to_string(), LoroValue::from(name)));
+            }
+            if let Some(mime) = mime {
+                fields.push((ATTACHMENT_MIME_KEY.to_string(), LoroValue::from(mime)));
+            }
+            LoroValue::Map(fields.into())
+        }
     }
 }
 
@@ -725,8 +773,153 @@ fn from_engine_value(value: &LoroValue) -> Option<DataValue> {
         LoroValue::Double(inner) => Some(DataValue::float(*inner)),
         LoroValue::String(inner) => Some(DataValue::text(inner.to_string())),
         LoroValue::Binary(inner) => Some(DataValue::bytes(inner.to_vec())),
+        LoroValue::Map(fields) => {
+            // Only a map carrying the attachment tag is a value this layer
+            // knows. Anything else is read as absent, which is exactly what a
+            // build predating attachments does with this same map: it has no
+            // arm for it and falls through to the wildcard below. That is the
+            // compatibility story, and it is worth stating because it is the
+            // reason a reference is a map rather than an encoded string. A
+            // string would replicate to an older build as text and be shown
+            // to a person as a hash.
+            match fields.get(ATTACHMENT_TAG_KEY) {
+                Some(LoroValue::String(tag)) if tag.as_str() == ATTACHMENT_TAG => {}
+                _ => return None,
+            }
+            let hash = match fields.get(ATTACHMENT_HASH_KEY) {
+                Some(LoroValue::String(hash)) => hash.to_string(),
+                _ => return None,
+            };
+            let size = match fields.get(ATTACHMENT_SIZE_KEY) {
+                Some(LoroValue::I64(size)) if *size >= 0 => *size as u64,
+                _ => return None,
+            };
+            let text_field = |key: &str| match fields.get(key) {
+                Some(LoroValue::String(value)) => Some(value.to_string()),
+                _ => None,
+            };
+            Some(DataValue::Attachment {
+                hash,
+                size,
+                name: text_field(ATTACHMENT_NAME_KEY),
+                mime: text_field(ATTACHMENT_MIME_KEY),
+            })
+        }
         // Nested containers are not part of the v1 value model: a value that
-        // is not a scalar reads as absent rather than as a lossy conversion.
+        // is neither a scalar nor a reference reads as absent rather than as
+        // a lossy conversion.
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod engine_value_tests {
+    use super::*;
+
+    /// Stand in for a build that predates attachments.
+    ///
+    /// Such a build has no `LoroValue::Map` arm at all, so every map falls
+    /// through to the wildcard. This asserts the same outcome from the other
+    /// direction: a map this build does not recognise reads as absent. The
+    /// two are the same path, and it is the path that makes an attachment
+    /// safe to write into a space whose other members are on an older
+    /// release. Had a reference been an encoded string instead of a map,
+    /// those members would read a hash as text and show it to a person.
+    const TEST_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    /// A map that is a complete attachment apart from its tag.
+    ///
+    /// Every field the parse needs is present and well formed, so the only
+    /// thing standing between this value and being read as an attachment is
+    /// the tag gate. That is deliberate: cases missing a hash are refused by
+    /// the hash check no matter what the gate does, and a test built from
+    /// those passes with the gate deleted.
+    fn tagged(tag: Option<&str>) -> LoroValue {
+        let mut fields = vec![
+            (ATTACHMENT_HASH_KEY.to_string(), LoroValue::from(TEST_HASH)),
+            (ATTACHMENT_SIZE_KEY.to_string(), LoroValue::from(4096i64)),
+        ];
+        if let Some(tag) = tag {
+            fields.push((ATTACHMENT_TAG_KEY.to_string(), LoroValue::from(tag)));
+        }
+        LoroValue::Map(fields.into())
+    }
+
+    #[test]
+    fn a_map_without_the_attachment_tag_reads_as_absent() {
+        let cases = [
+            // No tag at all, which is what a nested container's deep value
+            // looks like.
+            tagged(None),
+            // A tag naming something this build does not know, which is what
+            // a future reference kind looks like arriving here.
+            tagged(Some("something-later")),
+            // Close enough to be a typo, far enough to be a different value.
+            tagged(Some("Attachment")),
+        ];
+        for case in cases {
+            assert_eq!(
+                from_engine_value(&case),
+                None,
+                "{case:?} must read as absent"
+            );
+        }
+        // The control: the same map, correctly tagged, IS read. Without this
+        // the test above passes for a parser that reads nothing at all.
+        assert!(matches!(
+            from_engine_value(&tagged(Some(ATTACHMENT_TAG))),
+            Some(DataValue::Attachment { .. })
+        ));
+    }
+
+    #[test]
+    fn an_attachment_without_an_address_reads_as_absent() {
+        // Separate from the tag gate on purpose, so each refusal is pinned
+        // by a case that isolates it.
+        let tagged_only = LoroValue::Map(
+            vec![(
+                ATTACHMENT_TAG_KEY.to_string(),
+                LoroValue::from(ATTACHMENT_TAG),
+            )]
+            .into(),
+        );
+        assert_eq!(from_engine_value(&tagged_only), None);
+    }
+
+    #[test]
+    fn an_attachment_survives_the_engine_conversion_both_ways() {
+        let reference = DataValue::Attachment {
+            hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+            size: 4096,
+            name: Some("plan.pdf".to_string()),
+            mime: Some("application/pdf".to_string()),
+        };
+        let engine = to_engine_value(reference.clone());
+        assert_eq!(from_engine_value(&engine), Some(reference));
+    }
+
+    #[test]
+    fn a_negative_size_is_refused_rather_than_wrapped() {
+        // The engine's integer is signed and this crate's is not. A value
+        // that could only arrive from a corrupted or hostile encoding reads
+        // as absent rather than as a size near u64::MAX, which is what a
+        // cast would produce and what a fetch would then try to allocate.
+        let engine = LoroValue::Map(
+            vec![
+                (
+                    ATTACHMENT_TAG_KEY.to_string(),
+                    LoroValue::from(ATTACHMENT_TAG),
+                ),
+                (
+                    ATTACHMENT_HASH_KEY.to_string(),
+                    LoroValue::from(
+                        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    ),
+                ),
+                (ATTACHMENT_SIZE_KEY.to_string(), LoroValue::from(-1i64)),
+            ]
+            .into(),
+        );
+        assert_eq!(from_engine_value(&engine), None);
     }
 }

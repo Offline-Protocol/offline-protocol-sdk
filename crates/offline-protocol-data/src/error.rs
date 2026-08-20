@@ -68,6 +68,20 @@ pub enum DataError {
         reason: &'static str,
     },
 
+    /// An attachment reference is malformed.
+    ///
+    /// Separate from [`DataError::InvalidName`] because an attachment hash
+    /// is not a name the caller chose, it is the address of the bytes. A
+    /// reference whose hash is not a SHA-256 can never be fetched, and a
+    /// reference that cannot be fetched is worse than no reference at all:
+    /// it replicates to every member of the space, and every one of them
+    /// sees an attachment that will never arrive.
+    #[error("invalid attachment: {reason}")]
+    InvalidAttachment {
+        /// Why it was rejected.
+        reason: &'static str,
+    },
+
     /// A list or text position is outside the current length.
     #[error("position {position} is out of range for length {length}")]
     OutOfRange {

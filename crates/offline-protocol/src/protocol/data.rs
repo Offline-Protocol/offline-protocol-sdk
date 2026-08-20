@@ -108,6 +108,9 @@ fn map_data_error(err: DataError) -> Error {
         DataError::ValueTooLarge { actual, limit } => Error::InvalidArgument(format!(
             "value is {actual} bytes, over the {limit} byte limit"
         )),
+        DataError::InvalidAttachment { reason } => {
+            Error::InvalidArgument(format!("invalid attachment: {reason}"))
+        }
         DataError::OutOfRange { position, length } => Error::InvalidArgument(format!(
             "position {position} is out of range for length {length}"
         )),
