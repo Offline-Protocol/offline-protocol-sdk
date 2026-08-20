@@ -22,7 +22,9 @@ import SQLite3
 ///
 /// Logout: an application that points documents here MUST call
 /// `DataStore.wipeAll()` on logout. `wipePersistedState` clears the default
-/// provider's directory, which this database is not inside.
+/// provider's directory, which this database is not inside. Stop the protocol
+/// first: with the engine running and sessions live, the peer's next version
+/// offer recreates and refills every document it wiped.
 final class SqliteProtocolStateStorage: ProtocolStateStorageProvider {
 
     private var db: OpaquePointer?

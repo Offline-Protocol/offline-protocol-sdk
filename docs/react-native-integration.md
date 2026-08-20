@@ -576,7 +576,7 @@ await store.flush('space-1', 'profile');
 | **flush** | `flush(spaceId, docId): Promise<void>` | Persists pending edits. |
 | **flushAll** | `flushAll(): Promise<void>` | Persists every open document. |
 | **docSize** | `docSize(spaceId, docId): Promise<number>` | Compacted size in bytes. |
-| **wipeAll** | `wipeAll(): Promise<void>` | Deletes every data-layer record. Needed on logout only when documents were pointed at an app-supplied backend, which `wipePersistedState` cannot reach. |
+| **wipeAll** | `wipeAll(): Promise<void>` | Deletes every data-layer record. Needed on logout only when documents were pointed at an app-supplied backend, which `wipePersistedState` cannot reach. Only durable once replication has stopped: with the engine running and sessions live, the peer's next version offer recreates and refills every document. |
 
 Edits batch before they reach storage: call `flush()` when the app must know a
 change is durable. The `data_changed` event fires **after** the change is

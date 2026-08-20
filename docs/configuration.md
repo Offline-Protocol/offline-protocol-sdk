@@ -701,7 +701,10 @@ Two obligations come with a custom backend:
   [storage adapter references](../examples/storage-adapters/README.md).
 - Wipe it on logout. `wipePersistedState()` clears the **default** provider's
   account directory, which a custom backend is not inside, so call
-  `DataStore.wipeAll()` as well or documents outlive the account.
+  `DataStore.wipeAll()` as well or documents outlive the account. Stop the
+  engine first: there are no deletion tombstones, so a wipe on a running
+  engine with live sessions is undone by the peer's next version offer, which
+  recreates and refills every document with no error and no event.
 
 **Limits.** A document is capped at 1 MiB compacted, with a
 `data_doc_size_warning` event at 768 KiB. Passing the cap raises `DocTooLarge`;

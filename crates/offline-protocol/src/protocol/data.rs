@@ -1265,6 +1265,15 @@ impl OfflineProtocol {
     /// backend. `wipePersistedState` clears the account directory of the
     /// *default* provider, which a custom backend is not inside, so without
     /// this call those documents would outlive the account that made them.
+    ///
+    /// **Only durable once replication has stopped.** There are no deletion
+    /// tombstones in this release, so nothing distinguishes a space this
+    /// device wiped from one it has never seen. Called while the engine is
+    /// running with live sessions, every document comes back: the peer's next
+    /// version offer names them and they are recreated and refilled from the
+    /// peer's copy, and an offer of our own naming nothing reads as a replica
+    /// that has never seen the space. On the logout path the engine is being
+    /// torn down anyway. Anywhere else, stop it first.
     pub fn data_wipe_all(&mut self) -> Result<()> {
         let Some(storage) = self.data_storage() else {
             return Ok(());
