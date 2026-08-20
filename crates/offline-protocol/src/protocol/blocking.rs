@@ -755,6 +755,7 @@ mod tests {
         proto.pending_media_metadata.insert(
             "file-from-bob".to_string(),
             PendingMediaMetadataEntry {
+                data_purpose: None,
                 content_type: ContentType::Image,
                 media_metadata: None,
                 last_updated_at: Instant::now(),

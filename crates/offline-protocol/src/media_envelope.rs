@@ -25,6 +25,7 @@
 //! [flags & 0x01: meta_len:4 LE][MediaMetadata JSON]
 //! [flags & 0x02: oct_len:1][original content type string]
 //! [flags & 0x04: rich_len:4 LE][MediaRichExtras JSON]
+//! [flags & 0x08: purpose_len:4 LE][DataPurpose JSON]
 //! [chunk bytes = remainder]   (FileChunk::to_bytes)
 //! ```
 //!
@@ -53,11 +54,25 @@ pub(crate) const MEDIA_ENVELOPE_VERSION_MLS_V1: u8 = 0x01;
 /// anyway, the old decoder rejects the unknown version instead of misparsing.
 pub(crate) const MEDIA_ENVELOPE_VERSION_MLS_V2: u8 = 0x02;
 
+/// Envelope version 3: the decrypted plaintext may carry the data-purpose
+/// field (`FLAG_DATA_PURPOSE`), which says this transfer belongs to the
+/// replicated-document layer rather than to the person using the app.
+///
+/// Emitted only on chunk 0 and only toward recipients that advertised
+/// `DATA_MEDIA_V1` in their key package. The gate matters more here than on
+/// v2: a receiver that does not understand the purpose does not merely lose
+/// a caption, it hands a CRDT snapshot to its user as a downloaded file.
+/// The version is the second line of that defence, and it is the one that
+/// still holds if the capability gate is ever wrong.
+pub(crate) const MEDIA_ENVELOPE_VERSION_MLS_V3: u8 = 0x03;
+
 const FLAG_MEDIA_METADATA: u8 = 0x01;
 const FLAG_ORIGINAL_CONTENT_TYPE: u8 = 0x02;
 const FLAG_RICH_EXTRAS: u8 = 0x04;
+const FLAG_DATA_PURPOSE: u8 = 0x08;
 
-const KNOWN_FLAGS: u8 = FLAG_MEDIA_METADATA | FLAG_ORIGINAL_CONTENT_TYPE | FLAG_RICH_EXTRAS;
+const KNOWN_FLAGS: u8 =
+    FLAG_MEDIA_METADATA | FLAG_ORIGINAL_CONTENT_TYPE | FLAG_RICH_EXTRAS | FLAG_DATA_PURPOSE;
 
 /// MediaMetadata JSON is small (thumbnail ≤ 2 KB base64); 256 KB is generous.
 /// The plaintext is authenticated by MLS before parsing, so this is
@@ -91,7 +106,10 @@ pub(crate) fn decode_media_envelope(data: &[u8]) -> Result<EncryptedMessage, Str
         return Err("missing media envelope magic".to_string());
     }
     let version = data[2];
-    if version != MEDIA_ENVELOPE_VERSION_MLS_V1 && version != MEDIA_ENVELOPE_VERSION_MLS_V2 {
+    if version != MEDIA_ENVELOPE_VERSION_MLS_V1
+        && version != MEDIA_ENVELOPE_VERSION_MLS_V2
+        && version != MEDIA_ENVELOPE_VERSION_MLS_V3
+    {
         return Err(format!("unsupported media envelope version {}", version));
     }
     EncryptedMessage::from_bytes(&data[3..]).map_err(|e| e.to_string())
@@ -138,6 +156,42 @@ impl std::fmt::Debug for MediaRichExtras {
     }
 }
 
+/// Why a media transfer exists, when it exists for the replicated-document
+/// layer rather than for the person using the app.
+///
+/// Present only on transfers this SDK starts on its own behalf. There is no
+/// public API that sets it: an application asking to send a file cannot
+/// produce one, which is the point. A transfer marked this way is routed
+/// into the data layer on arrival and never surfaced as a received file, so
+/// an app able to set it could feed bytes of its choosing to a peer's
+/// document engine while the peer's user saw nothing.
+///
+/// The space is deliberately absent. On a 1:1 session the space is the
+/// authenticated wire sender, exactly as it is for a sync frame, and a space
+/// a peer could name is a space a peer could reach.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "p", rename_all = "snake_case")]
+pub(crate) enum DataPurpose {
+    /// The bytes of an attachment this peer asked for by hash.
+    ///
+    /// The hash is what the requester asked for, and the receiver checks the
+    /// arriving bytes against it rather than against anything the sender
+    /// says about them.
+    Attachment {
+        /// Lowercase hex SHA-256 the requester asked for.
+        hash: String,
+    },
+    /// A whole document, for a replica whose gap no sync frame can close.
+    ///
+    /// The rung above `snap` on the catch-up ladder, reached when the
+    /// document does not fit in a frame. Terminal in the same way: it
+    /// provokes no answer.
+    Snapshot {
+        /// Document the bytes belong to, inside the derived space.
+        doc: String,
+    },
+}
+
 /// The authenticated plaintext of an encrypted media chunk.
 pub(crate) struct MediaChunkPlaintext {
     /// `FileChunk::to_bytes()` of the carried chunk.
@@ -153,6 +207,11 @@ pub(crate) struct MediaChunkPlaintext {
     /// Rich message extras, present on chunk 0 only and only toward
     /// rich-capable recipients. Forces the v2 envelope when set.
     pub rich_extras: Option<MediaRichExtras>,
+
+    /// Why this transfer exists, when it exists for the data layer. Present
+    /// on chunk 0 only and only toward recipients that advertised
+    /// `DATA_MEDIA_V1`. Forces the v3 envelope when set.
+    pub data_purpose: Option<DataPurpose>,
 }
 
 /// Manual Debug: elides chunk bytes and delegates to the field types'
@@ -167,6 +226,7 @@ impl std::fmt::Debug for MediaChunkPlaintext {
             .field("media_metadata", &self.media_metadata.is_some())
             .field("original_content_type", &self.original_content_type)
             .field("rich_extras", &self.rich_extras)
+            .field("data_purpose", &self.data_purpose)
             .finish()
     }
 }
@@ -221,6 +281,23 @@ impl MediaChunkPlaintext {
             }
         }
 
+        let purpose_json = match &self.data_purpose {
+            Some(purpose) => Some(
+                serde_json::to_vec(purpose)
+                    .map_err(|e| format!("failed to serialize data purpose: {}", e))?,
+            ),
+            None => None,
+        };
+        if let Some(purpose) = &purpose_json {
+            if purpose.len() > MAX_METADATA_JSON_LEN {
+                return Err(format!(
+                    "data purpose length {} exceeds maximum {}",
+                    purpose.len(),
+                    MAX_METADATA_JSON_LEN
+                ));
+            }
+        }
+
         let mut flags = 0u8;
         if meta_json.is_some() {
             flags |= FLAG_MEDIA_METADATA;
@@ -231,11 +308,15 @@ impl MediaChunkPlaintext {
         if rich_json.is_some() {
             flags |= FLAG_RICH_EXTRAS;
         }
+        if purpose_json.is_some() {
+            flags |= FLAG_DATA_PURPOSE;
+        }
 
         let mut buf = Vec::with_capacity(
             1 + meta_json.as_ref().map_or(0, |m| 4 + m.len())
                 + oct.as_ref().map_or(0, |s| 1 + s.len())
                 + rich_json.as_ref().map_or(0, |r| 4 + r.len())
+                + purpose_json.as_ref().map_or(0, |p| 4 + p.len())
                 + self.chunk_bytes.len(),
         );
         buf.push(flags);
@@ -252,15 +333,27 @@ impl MediaChunkPlaintext {
             buf.extend_from_slice(&(rich.len() as u32).to_le_bytes());
             buf.extend_from_slice(&rich);
         }
+        // Appended after every field that existed before it, because the
+        // fields are positional and a decoder walks them in this order.
+        if let Some(purpose) = purpose_json {
+            buf.extend_from_slice(&(purpose.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&purpose);
+        }
         buf.extend_from_slice(&self.chunk_bytes);
         Ok(buf)
     }
 
-    /// The envelope version this plaintext must ship under: v2 when rich
-    /// extras are present (so a pre-rich receiver rejects at the version
-    /// check instead of slurping the field as chunk bytes), v1 otherwise.
+    /// The envelope version this plaintext must ship under: v3 when it
+    /// carries a data purpose, v2 when it carries rich extras, v1 otherwise.
+    ///
+    /// Highest wins, and the ordering is what makes the rule safe: a
+    /// plaintext carrying both fields must ship under the version that
+    /// covers the later one, or a v2 receiver would accept the envelope and
+    /// then read the purpose length as chunk bytes.
     pub(crate) fn envelope_version(&self) -> u8 {
-        if self.rich_extras.is_some() {
+        if self.data_purpose.is_some() {
+            MEDIA_ENVELOPE_VERSION_MLS_V3
+        } else if self.rich_extras.is_some() {
             MEDIA_ENVELOPE_VERSION_MLS_V2
         } else {
             MEDIA_ENVELOPE_VERSION_MLS_V1
@@ -348,11 +441,37 @@ impl MediaChunkPlaintext {
             None
         };
 
+        let data_purpose = if flags & FLAG_DATA_PURPOSE != 0 {
+            if pos + 4 > data.len() {
+                return Err("unexpected end of data reading data purpose length".to_string());
+            }
+            let mut length_bytes = [0u8; 4];
+            length_bytes.copy_from_slice(&data[pos..pos + 4]);
+            let purpose_len = u32::from_le_bytes(length_bytes) as usize;
+            pos += 4;
+            if purpose_len > MAX_METADATA_JSON_LEN {
+                return Err(format!(
+                    "data purpose length {} exceeds maximum {}",
+                    purpose_len, MAX_METADATA_JSON_LEN
+                ));
+            }
+            if pos + purpose_len > data.len() {
+                return Err("unexpected end of data reading data purpose".to_string());
+            }
+            let purpose: DataPurpose = serde_json::from_slice(&data[pos..pos + purpose_len])
+                .map_err(|e| format!("invalid data purpose JSON: {}", e))?;
+            pos += purpose_len;
+            Some(purpose)
+        } else {
+            None
+        };
+
         Ok(Self {
             chunk_bytes: data[pos..].to_vec(),
             media_metadata,
             original_content_type,
             rich_extras,
+            data_purpose,
         })
     }
 }
@@ -467,6 +586,7 @@ mod tests {
             media_metadata: None,
             original_content_type: None,
             rich_extras: None,
+            data_purpose: None,
         };
         assert_eq!(plain.envelope_version(), MEDIA_ENVELOPE_VERSION_MLS_V1);
         let decoded = MediaChunkPlaintext::decode(&plain.encode().unwrap()).unwrap();
@@ -483,6 +603,7 @@ mod tests {
             media_metadata: Some(sample_metadata()),
             original_content_type: Some(ContentType::Image),
             rich_extras: None,
+            data_purpose: None,
         };
         let decoded = MediaChunkPlaintext::decode(&plain.encode().unwrap()).unwrap();
 
@@ -501,6 +622,7 @@ mod tests {
             media_metadata: Some(sample_metadata()),
             original_content_type: Some(ContentType::Image),
             rich_extras: Some(sample_rich_extras()),
+            data_purpose: None,
         };
         assert_eq!(plain.envelope_version(), MEDIA_ENVELOPE_VERSION_MLS_V2);
         let decoded = MediaChunkPlaintext::decode(&plain.encode().unwrap()).unwrap();
@@ -512,6 +634,93 @@ mod tests {
     }
 
     #[test]
+    fn test_plaintext_roundtrip_with_data_purpose() {
+        let plain = MediaChunkPlaintext {
+            chunk_bytes: vec![42; 16],
+            media_metadata: None,
+            original_content_type: Some(ContentType::File),
+            rich_extras: None,
+            data_purpose: Some(DataPurpose::Attachment {
+                hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    .to_string(),
+            }),
+        };
+        assert_eq!(plain.envelope_version(), MEDIA_ENVELOPE_VERSION_MLS_V3);
+        let decoded = MediaChunkPlaintext::decode(&plain.encode().unwrap()).unwrap();
+        assert_eq!(decoded.chunk_bytes, vec![42; 16]);
+        assert_eq!(decoded.data_purpose, plain.data_purpose);
+    }
+
+    #[test]
+    fn test_data_purpose_forces_the_v3_envelope_even_beside_rich_extras() {
+        // The flag fields are positional, so a decoder walks them in order
+        // and stops knowing where it is the moment it meets one it cannot
+        // skip. A plaintext carrying both fields must therefore ship under
+        // the version covering the LATER one: under v2 a receiver would
+        // accept the envelope and then read the purpose length as chunk
+        // bytes, corrupting the file rather than refusing it.
+        let plain = MediaChunkPlaintext {
+            chunk_bytes: vec![7; 4],
+            media_metadata: None,
+            original_content_type: None,
+            rich_extras: Some(sample_rich_extras()),
+            data_purpose: Some(DataPurpose::Snapshot {
+                doc: "notes".to_string(),
+            }),
+        };
+        assert_eq!(plain.envelope_version(), MEDIA_ENVELOPE_VERSION_MLS_V3);
+        let decoded = MediaChunkPlaintext::decode(&plain.encode().unwrap()).unwrap();
+        assert_eq!(decoded.rich_extras, plain.rich_extras);
+        assert_eq!(decoded.data_purpose, plain.data_purpose);
+        assert_eq!(decoded.chunk_bytes, vec![7; 4]);
+    }
+
+    #[test]
+    fn test_a_v2_decoder_refuses_a_purpose_it_cannot_skip() {
+        // What a receiver predating this field does with one, and why the
+        // version bump above is the second line of defence rather than the
+        // first: the unknown flag is refused outright, so the chunk is
+        // dropped instead of being misread.
+        let plain = MediaChunkPlaintext {
+            chunk_bytes: vec![1; 4],
+            media_metadata: None,
+            original_content_type: None,
+            rich_extras: None,
+            data_purpose: Some(DataPurpose::Snapshot {
+                doc: "notes".to_string(),
+            }),
+        };
+        let bytes = plain.encode().unwrap();
+        assert_eq!(bytes[0] & FLAG_DATA_PURPOSE, FLAG_DATA_PURPOSE);
+
+        // Stand in for the older decoder by masking the flag out of its
+        // known set, which is exactly what that build's `KNOWN_FLAGS` did.
+        let older_known = FLAG_MEDIA_METADATA | FLAG_ORIGINAL_CONTENT_TYPE | FLAG_RICH_EXTRAS;
+        assert_ne!(
+            bytes[0] & !older_known,
+            0,
+            "an older decoder must see a flag it does not know, and refuse"
+        );
+    }
+
+    #[test]
+    fn test_plaintext_without_a_data_purpose_is_byte_identical_to_before() {
+        // Pay for what you use: a chunk with no purpose encodes exactly as
+        // it did before the field existed, so every shipped transfer is
+        // unchanged on the wire.
+        let plain = MediaChunkPlaintext {
+            chunk_bytes: vec![9; 8],
+            media_metadata: Some(sample_metadata()),
+            original_content_type: Some(ContentType::Image),
+            rich_extras: None,
+            data_purpose: None,
+        };
+        let bytes = plain.encode().unwrap();
+        assert_eq!(bytes[0] & FLAG_DATA_PURPOSE, 0);
+        assert_eq!(plain.envelope_version(), MEDIA_ENVELOPE_VERSION_MLS_V1);
+    }
+
+    #[test]
     fn test_plaintext_without_rich_extras_is_byte_identical_to_v1_encoding() {
         // The rich field must be pay-for-what-you-use: a no-extras chunk
         // encodes exactly as it did before the field existed.
@@ -520,6 +729,7 @@ mod tests {
             media_metadata: Some(sample_metadata()),
             original_content_type: Some(ContentType::Image),
             rich_extras: None,
+            data_purpose: None,
         };
         let bytes = plain.encode().unwrap();
         assert_eq!(bytes[0] & FLAG_RICH_EXTRAS, 0);
@@ -535,6 +745,7 @@ mod tests {
             media_metadata: None,
             original_content_type: None,
             rich_extras: None,
+            data_purpose: None,
         };
         let mut bytes = plain.encode().unwrap();
         bytes[0] |= 0x40;
@@ -573,6 +784,7 @@ mod tests {
             media_metadata: Some(sample_metadata()),
             original_content_type: Some(ContentType::Video),
             rich_extras: Some(sample_rich_extras()),
+            data_purpose: None,
         };
         let bytes = plain.encode().unwrap();
         // Truncations inside the metadata/content-type headers must fail
@@ -599,6 +811,7 @@ mod tests {
             media_metadata: Some(meta),
             original_content_type: None,
             rich_extras: None,
+            data_purpose: None,
         };
         assert!(plain
             .encode()
@@ -615,6 +828,7 @@ mod tests {
             media_metadata: None,
             original_content_type: None,
             rich_extras: Some(rich),
+            data_purpose: None,
         };
         assert!(plain.encode().unwrap_err().contains("rich extras length"));
     }

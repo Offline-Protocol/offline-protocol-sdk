@@ -713,50 +713,52 @@ impl OfflineProtocol {
         // chunks carry them on the wire Message and are accepted only where
         // policy allows. Rich extras (caption, reply, forward) only ever come
         // from the sealed plaintext — never from the wire Message.
-        let (chunk, media_metadata, original_content_type, rich_extras) = if let Some(ref binary) =
-            message.binary_content
-        {
-            if is_media_envelope(binary) {
-                let encrypted = match decode_media_envelope(binary) {
-                    Ok(e) => e,
-                    // A frame whose magic byte still reads as a media envelope
-                    // but whose encoding does not decode — in-transit
-                    // corruption past the magic, or injected garbage. Under
-                    // crypto recovery this is the pre-decrypt sibling of a hard
-                    // decrypt failure: the frame as it stands is dead, but the
-                    // sender's resend carries a fresh encoding that would
-                    // decode, so withhold the ACK (`Deferred`) instead of
-                    // telling the sender "delivered" for a chunk we dropped.
-                    // Do NOT enqueue: an unparseable frame can never become
-                    // parseable, so a queued copy could never drain — the same
-                    // reasoning as the spent-generation arm below.
-                    Err(e) => {
-                        warn!(
-                            message_id = %message.id,
-                            error = %e,
-                            "Failed to decode encrypted media envelope"
-                        );
-                        if !self.config.encryption.crypto_recovery_enabled {
-                            return ChunkOutcome::Handled;
-                        }
-                        // Advisory, not terminal — the chunk was never ACKed, so
-                        // the transfer is *stalled* pending a resend rather than
-                        // failed. The terminal media signal stays
-                        // `FileReceiveFailed`.
-                        if let Ok(state) = lock_shared_state(&self.shared_state) {
-                            state.emit_event(Event::message_decryption_failed(
+        let (chunk, media_metadata, original_content_type, rich_extras, data_purpose) =
+            if let Some(ref binary) = message.binary_content {
+                if is_media_envelope(binary) {
+                    let encrypted = match decode_media_envelope(binary) {
+                        Ok(e) => e,
+                        // A frame whose magic byte still reads as a media envelope
+                        // but whose encoding does not decode — in-transit
+                        // corruption past the magic, or injected garbage. Under
+                        // crypto recovery this is the pre-decrypt sibling of a hard
+                        // decrypt failure: the frame as it stands is dead, but the
+                        // sender's resend carries a fresh encoding that would
+                        // decode, so withhold the ACK (`Deferred`) instead of
+                        // telling the sender "delivered" for a chunk we dropped.
+                        // Do NOT enqueue: an unparseable frame can never become
+                        // parseable, so a queued copy could never drain — the same
+                        // reasoning as the spent-generation arm below.
+                        Err(e) => {
+                            warn!(
+                                message_id = %message.id,
+                                error = %e,
+                                "Failed to decode encrypted media envelope"
+                            );
+                            if !self.config.encryption.crypto_recovery_enabled {
+                                return ChunkOutcome::Handled;
+                            }
+                            // Advisory, not terminal — the chunk was never ACKed, so
+                            // the transfer is *stalled* pending a resend rather than
+                            // failed. The terminal media signal stays
+                            // `FileReceiveFailed`.
+                            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                                state.emit_event(Event::message_decryption_failed(
                                 message.id.clone(),
                                 sender.clone(),
                                 crate::events::DecryptionFailureCode::InvalidPayload,
                                 "encrypted media envelope failed to decode; its file transfer is stalled until the sender resends".to_string(),
                             ));
+                            }
+                            return ChunkOutcome::Deferred;
                         }
-                        return ChunkOutcome::Deferred;
-                    }
-                };
-                let plaintext =
-                    match self.decrypt_media_chunk(&sender, &encrypted, message, arrival_transport)
-                    {
+                    };
+                    let plaintext = match self.decrypt_media_chunk(
+                        &sender,
+                        &encrypted,
+                        message,
+                        arrival_transport,
+                    ) {
                         MediaChunkDecrypt::Plaintext(p) => p,
                         // Not delivered and recoverable by a resend (queued for
                         // delayed decryption, or an undecryptable frame the
@@ -775,34 +777,62 @@ impl OfflineProtocol {
                         // recover it by retrying.
                         MediaChunkDecrypt::Dropped => return ChunkOutcome::Handled,
                     };
-                let inner = match MediaChunkPlaintext::decode(&plaintext) {
-                    Ok(i) => i,
-                    Err(e) => {
+                    let inner = match MediaChunkPlaintext::decode(&plaintext) {
+                        Ok(i) => i,
+                        Err(e) => {
+                            warn!(
+                                message_id = %message.id,
+                                error = %e,
+                                "Failed to parse decrypted media chunk plaintext, dropping"
+                            );
+                            return ChunkOutcome::Handled;
+                        }
+                    };
+                    let chunk = match FileChunk::from_bytes(&inner.chunk_bytes) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(
+                                message_id = %message.id,
+                                error = %e,
+                                "Failed to deserialize decrypted file chunk, dropping"
+                            );
+                            return ChunkOutcome::Handled;
+                        }
+                    };
+                    (
+                        chunk,
+                        inner.media_metadata,
+                        inner.original_content_type,
+                        inner.rich_extras,
+                        inner.data_purpose,
+                    )
+                } else {
+                    if !self.accept_plaintext_content(&sender) {
                         warn!(
                             message_id = %message.id,
-                            error = %e,
-                            "Failed to parse decrypted media chunk plaintext, dropping"
+                            sender = %sender,
+                            "Rejecting unencrypted media chunk (encryption policy)"
                         );
-                        return ChunkOutcome::Handled;
-                    }
-                };
-                let chunk = match FileChunk::from_bytes(&inner.chunk_bytes) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        warn!(
-                            message_id = %message.id,
-                            error = %e,
-                            "Failed to deserialize decrypted file chunk, dropping"
+                        self.warn_plaintext_receive_rejected(
+                            &sender,
+                            "Inbound plaintext media chunk rejected by encryption policy",
                         );
-                        return ChunkOutcome::Handled;
+                        return ChunkOutcome::Rejected;
                     }
-                };
-                (
-                    chunk,
-                    inner.media_metadata,
-                    inner.original_content_type,
-                    inner.rich_extras,
-                )
+                    let chunk = match FileChunk::from_bytes(binary) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(
+                                message_id = %message.id,
+                                error = %e,
+                                "Failed to deserialize binary file chunk, dropping"
+                            );
+                            return ChunkOutcome::Handled;
+                        }
+                    };
+                    let (meta, oct) = Self::wire_media_metadata(message);
+                    (chunk, meta, oct, None, None)
+                }
             } else {
                 if !self.accept_plaintext_content(&sender) {
                     warn!(
@@ -816,47 +846,20 @@ impl OfflineProtocol {
                     );
                     return ChunkOutcome::Rejected;
                 }
-                let chunk = match FileChunk::from_bytes(binary) {
+                let chunk = match FileChunk::from_json(&message.content) {
                     Ok(c) => c,
                     Err(e) => {
                         warn!(
                             message_id = %message.id,
                             error = %e,
-                            "Failed to deserialize binary file chunk, dropping"
+                            "Failed to deserialize file chunk, dropping"
                         );
                         return ChunkOutcome::Handled;
                     }
                 };
                 let (meta, oct) = Self::wire_media_metadata(message);
-                (chunk, meta, oct, None)
-            }
-        } else {
-            if !self.accept_plaintext_content(&sender) {
-                warn!(
-                    message_id = %message.id,
-                    sender = %sender,
-                    "Rejecting unencrypted media chunk (encryption policy)"
-                );
-                self.warn_plaintext_receive_rejected(
-                    &sender,
-                    "Inbound plaintext media chunk rejected by encryption policy",
-                );
-                return ChunkOutcome::Rejected;
-            }
-            let chunk = match FileChunk::from_json(&message.content) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(
-                        message_id = %message.id,
-                        error = %e,
-                        "Failed to deserialize file chunk, dropping"
-                    );
-                    return ChunkOutcome::Handled;
-                }
+                (chunk, meta, oct, None, None)
             };
-            let (meta, oct) = Self::wire_media_metadata(message);
-            (chunk, meta, oct, None)
-        };
 
         let file_id = chunk.file_id.clone();
         let file_name = chunk.file_name.clone();
@@ -877,17 +880,29 @@ impl OfflineProtocol {
                             sender: sender.clone(),
                             rich_extras,
                             timestamp_ms: message.timestamp.as_millis(),
+                            data_purpose,
                         },
                     );
                 } else if let Some(entry) = self.pending_media_metadata.get_mut(&file_id) {
                     entry.last_updated_at = Instant::now();
                 }
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::file_progress(
-                        file_id.clone(),
-                        progress.chunks_completed,
-                        progress.total_chunks,
-                    ));
+                // A data-purposed transfer is invisible to the application
+                // for its whole life, not merely at the end. Reporting
+                // progress on it would put a download nobody started in
+                // front of a person, counting up to a file that never
+                // appears.
+                let carries_data = self
+                    .pending_media_metadata
+                    .get(&file_id)
+                    .is_some_and(|entry| entry.data_purpose.is_some());
+                if !carries_data {
+                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                        state.emit_event(Event::file_progress(
+                            file_id.clone(),
+                            progress.chunks_completed,
+                            progress.total_chunks,
+                        ));
+                    }
                 }
             }
             Err(rejection) if rejection.is_resource_exhaustion() => {
@@ -895,7 +910,11 @@ impl OfflineProtocol {
                 // resource limit. The chunk was already ACKed and will not
                 // be retransmitted, so the transfer is unrecoverable —
                 // surface that to the application instead of going silent.
-                self.pending_media_metadata.remove(&file_id);
+                let dropped = self.pending_media_metadata.remove(&file_id);
+                if let Some(purpose) = dropped.and_then(|entry| entry.data_purpose) {
+                    self.report_data_media_failure(&sender, &purpose, rejection.as_str());
+                    return ChunkOutcome::Handled;
+                }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
                     state.emit_event(Event::file_receive_failed(
                         file_id,
@@ -919,7 +938,11 @@ impl OfflineProtocol {
                     file_id = %file_id,
                     "File transfer marked complete but reassembly or integrity checks failed"
                 );
-                self.pending_media_metadata.remove(&file_id);
+                let dropped = self.pending_media_metadata.remove(&file_id);
+                if let Some(purpose) = dropped.and_then(|entry| entry.data_purpose) {
+                    self.report_data_media_failure(&sender, &purpose, "integrity_check_failed");
+                    return ChunkOutcome::Handled;
+                }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
                     state.emit_event(Event::file_receive_failed(
                         file_id,
@@ -931,6 +954,16 @@ impl OfflineProtocol {
                 return ChunkOutcome::Handled;
             };
             let metadata_entry = self.pending_media_metadata.remove(&file_id);
+            // The one branch that makes a data-purposed transfer worth
+            // having: the bytes go to the document layer and the person is
+            // told nothing, because nothing happened that concerns them.
+            if let Some(purpose) = metadata_entry
+                .as_ref()
+                .and_then(|entry| entry.data_purpose.clone())
+            {
+                self.accept_data_media_payload(&sender, &purpose, file_data);
+                return ChunkOutcome::Handled;
+            }
             let (content_type, media_metadata, rich_extras, timestamp_ms) = metadata_entry
                 .map(|entry| {
                     (

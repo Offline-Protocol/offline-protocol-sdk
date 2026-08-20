@@ -813,6 +813,46 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             hash_string(space_id, scrubber);
             hash_string(doc_id, scrubber);
         }
+        // A blob hash is derived from bytes rather than from a person, so it
+        // is left alone for the same reason a message id is: it is what makes
+        // a telemetry record about one fetch legible, and it names nobody.
+        Event::DataAttachmentRequested {
+            space_id,
+            peer_id,
+            hash: _,
+        } => {
+            hash_string(space_id, scrubber);
+            hash_string(peer_id, scrubber);
+        }
+        Event::DataAttachmentReceived {
+            space_id,
+            peer_id,
+            hash: _,
+            data: _,
+        } => {
+            hash_string(space_id, scrubber);
+            hash_string(peer_id, scrubber);
+        }
+        // `reason` is a fixed token this crate chooses, never a peer's
+        // words: see the producer rule at the top of this file.
+        Event::DataAttachmentUnavailable {
+            space_id,
+            peer_id,
+            hash: _,
+            reason: _,
+        } => {
+            hash_string(space_id, scrubber);
+            hash_string(peer_id, scrubber);
+        }
+        Event::DataDocUnsyncable {
+            space_id,
+            doc_id,
+            bytes: _,
+            reason: _,
+        } => {
+            hash_string(space_id, scrubber);
+            hash_string(doc_id, scrubber);
+        }
     }
 }
 
@@ -895,7 +935,11 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::UserBlocked { .. }
         | Event::UserUnblocked { .. }
         | Event::DataChanged { .. }
-        | Event::DataDocSizeWarning { .. } => (),
+        | Event::DataDocSizeWarning { .. }
+        | Event::DataAttachmentRequested { .. }
+        | Event::DataAttachmentReceived { .. }
+        | Event::DataAttachmentUnavailable { .. }
+        | Event::DataDocUnsyncable { .. } => (),
     }
 }
 

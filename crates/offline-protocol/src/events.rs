@@ -1675,6 +1675,73 @@ pub enum Event {
         /// The cap it is measured against.
         cap_bytes: u64,
     },
+
+    /// A peer asked for the bytes behind an attachment reference.
+    ///
+    /// The SDK does not hold blob bytes, so it cannot answer this on its
+    /// own: the application either supplies them with
+    /// `data_provide_attachment` or says it cannot with
+    /// `data_decline_attachment`. An application that handles neither leaves
+    /// the asking peer with a reference it can see and never open, which is
+    /// why declining is a first-class answer rather than silence.
+    DataAttachmentRequested {
+        /// The space the request arrived in.
+        space_id: String,
+        /// The peer that asked.
+        peer_id: String,
+        /// Lowercase hex SHA-256 of the blob they want.
+        hash: String,
+    },
+
+    /// Attachment bytes arrived and matched the hash that asked for them.
+    ///
+    /// The bytes are handed over rather than stored: blobs never enter
+    /// protocol state, so where this file lives is the application's
+    /// decision and its storage.
+    DataAttachmentReceived {
+        /// The space the attachment arrived in.
+        space_id: String,
+        /// The peer that supplied it.
+        peer_id: String,
+        /// Lowercase hex SHA-256 of the blob, verified against these bytes.
+        hash: String,
+        /// The blob, base64.
+        data: String,
+    },
+
+    /// A fetch ended without bytes.
+    ///
+    /// Either the peer answered that it no longer holds the blob, or the
+    /// transfer carrying it failed. Both are ordinary: an attachment
+    /// reference outlives the bytes it names, because the reference
+    /// replicates and the bytes do not.
+    DataAttachmentUnavailable {
+        /// The space the fetch was made in.
+        space_id: String,
+        /// The peer that was asked.
+        peer_id: String,
+        /// Lowercase hex SHA-256 that was asked for.
+        hash: String,
+        /// Why it ended: `declined`, or a transfer failure reason.
+        reason: String,
+    },
+
+    /// A document cannot be replicated, in any form this protocol has.
+    ///
+    /// The honest report of a real dead end rather than a warning in a log
+    /// nobody reads. It fires when a document is too large for a sync frame
+    /// and the peer cannot carry it over the media path either, which leaves
+    /// two replicas that will not converge and no further rung to try.
+    DataDocUnsyncable {
+        /// The space the document belongs to.
+        space_id: String,
+        /// The document that cannot be sent.
+        doc_id: String,
+        /// Size of the encoding that had nowhere to go.
+        bytes: u64,
+        /// Why it could not be sent.
+        reason: String,
+    },
 }
 
 /// Member entry in GroupInfo.
@@ -2671,6 +2738,10 @@ impl Event {
             Self::UserUnblocked { .. } => "protocol.user.unblocked",
             Self::DataChanged { .. } => "protocol.data.changed",
             Self::DataDocSizeWarning { .. } => "protocol.data.doc_size_warning",
+            Self::DataAttachmentRequested { .. } => "protocol.data.attachment_requested",
+            Self::DataAttachmentReceived { .. } => "protocol.data.attachment_received",
+            Self::DataAttachmentUnavailable { .. } => "protocol.data.attachment_unavailable",
+            Self::DataDocUnsyncable { .. } => "protocol.data.doc_unsyncable",
         }
     }
 }
@@ -3495,6 +3566,55 @@ impl fmt::Debug for Event {
                 .field("doc_id", &"[REDACTED]")
                 .field("compacted_bytes", compacted_bytes)
                 .field("cap_bytes", cap_bytes)
+                .finish(),
+            Self::DataAttachmentRequested {
+                space_id: _,
+                peer_id: _,
+                hash,
+            } => f
+                .debug_struct("DataAttachmentRequested")
+                .field("space_id", &"[REDACTED]")
+                .field("peer_id", &"[REDACTED]")
+                // A blob hash names bytes, not a person, and it is the one
+                // field that makes a report about a fetch actionable.
+                .field("hash", hash)
+                .finish(),
+            Self::DataAttachmentReceived {
+                space_id: _,
+                peer_id: _,
+                hash,
+                data,
+            } => f
+                .debug_struct("DataAttachmentReceived")
+                .field("space_id", &"[REDACTED]")
+                .field("peer_id", &"[REDACTED]")
+                .field("hash", hash)
+                // The blob itself is content and never goes near a log.
+                .field("data", &format!("[{} base64 chars]", data.len()))
+                .finish(),
+            Self::DataAttachmentUnavailable {
+                space_id: _,
+                peer_id: _,
+                hash,
+                reason,
+            } => f
+                .debug_struct("DataAttachmentUnavailable")
+                .field("space_id", &"[REDACTED]")
+                .field("peer_id", &"[REDACTED]")
+                .field("hash", hash)
+                .field("reason", reason)
+                .finish(),
+            Self::DataDocUnsyncable {
+                space_id: _,
+                doc_id: _,
+                bytes,
+                reason,
+            } => f
+                .debug_struct("DataDocUnsyncable")
+                .field("space_id", &"[REDACTED]")
+                .field("doc_id", &"[REDACTED]")
+                .field("bytes", bytes)
+                .field("reason", reason)
                 .finish(),
             Self::GroupRoleChanged {
                 group_id,

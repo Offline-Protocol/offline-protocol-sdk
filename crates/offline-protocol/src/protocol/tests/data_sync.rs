@@ -32,6 +32,7 @@ struct Node {
     label: String,
     secure: Arc<InMemoryStorage>,
     state: Arc<InMemoryStorage>,
+    events: Arc<Mutex<Vec<crate::Event>>>,
 }
 
 impl Node {
@@ -67,6 +68,9 @@ impl Node {
         protocol
             .transport_manager_mut()
             .add_transport(TransportType::BLE, Box::new(mock));
+        let events: Arc<Mutex<Vec<crate::Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        protocol.on_event(move |event| sink.lock().unwrap().push(event));
         protocol.start().expect("start");
 
         let address = id(label);
@@ -77,6 +81,7 @@ impl Node {
             label: label.to_string(),
             secure,
             state,
+            events,
         }
     }
 
@@ -106,6 +111,7 @@ impl Node {
             )
             .expect("initialize_mls");
         protocol.peer_data_sync.insert(peer.to_string());
+        protocol.peer_data_media.insert(peer.to_string());
 
         let mock = MockTransport::new(TransportType::BLE);
         mock.start().expect("transport start");
@@ -113,8 +119,12 @@ impl Node {
         protocol
             .transport_manager_mut()
             .add_transport(TransportType::BLE, Box::new(mock));
+        let events: Arc<Mutex<Vec<crate::Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        protocol.on_event(move |event| sink.lock().unwrap().push(event));
         protocol.start().expect("start");
         self.protocol = protocol;
+        self.events = events;
     }
 
     /// The space this node replicates with `peer`: the peer's own address.
@@ -175,6 +185,8 @@ fn pair_of(mut alice: Node, mut bob: Node) -> (Node, Node) {
     // once it has succeeded.
     alice.protocol.peer_data_sync.insert(bob.address.clone());
     bob.protocol.peer_data_sync.insert(alice.address.clone());
+    alice.protocol.peer_data_media.insert(bob.address.clone());
+    bob.protocol.peer_data_media.insert(alice.address.clone());
 
     (alice, bob)
 }
@@ -213,6 +225,25 @@ fn settle(alice: &mut Node, bob: &mut Node) -> Vec<usize> {
         }
     }
     rounds
+}
+
+/// [`settle`], plus the media window.
+///
+/// A transfer leaves in batches that only refill as chunks are acknowledged,
+/// and the refill happens on the tick loop rather than on receipt. Nothing in
+/// this harness ticks, so a test about anything carried over the media path
+/// has to turn that crank itself. The round count is generous because a
+/// document of this size is many Bluetooth-sized chunks through a window of
+/// two.
+fn settle_media(alice: &mut Node, bob: &mut Node) -> usize {
+    for round in 0..400 {
+        alice.protocol.pump_media_transfers();
+        bob.protocol.pump_media_transfers();
+        if pump(alice, bob) + pump(bob, alice) == 0 {
+            return round;
+        }
+    }
+    400
 }
 
 fn write(node: &mut Node, space: &str, doc: &str, key: &str, value: &str) {
@@ -1601,4 +1632,468 @@ fn a_document_that_cannot_be_read_is_left_out_of_the_offer_rather_than_failing_i
         "precondition: the document has to actually be unreadable, or this \
          proves nothing about what happens when one is"
     );
+}
+
+// ---- attachments ------------------------------------------------------
+//
+// What these cover that a unit test cannot: that a blob really leaves over
+// the media path, arrives as a transfer the receiving application is never
+// told about, and is admitted only against a question this device asked.
+
+/// Events of one kind this node was handed, as JSON for field access.
+fn events_named(node: &Node, name: &str) -> Vec<serde_json::Value> {
+    node.events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| serde_json::to_value(event).ok())
+        .filter(|value| value.get("type").and_then(|t| t.as_str()) == Some(name))
+        .collect()
+}
+
+fn clear_events(node: &Node) {
+    node.events.lock().unwrap().clear();
+}
+
+#[test]
+fn an_attachment_reference_replicates_without_its_bytes() {
+    // The property the whole design rests on: the reference is document
+    // content and travels as an ordinary change, while the bytes it names go
+    // nowhere at all until somebody asks.
+    let (mut alice, mut bob) = pair();
+    let space = Node::space_for(&bob);
+    let blob = b"the bytes themselves".to_vec();
+    let hash = OfflineProtocol::data_attachment_hash(&blob);
+
+    alice
+        .protocol
+        .data_map_set(
+            &space,
+            "notes",
+            "files",
+            "plan",
+            DataValue::Attachment {
+                hash: hash.clone(),
+                size: blob.len() as u64,
+                name: Some("plan.txt".to_string()),
+                mime: None,
+            },
+        )
+        .expect("attach");
+    alice.protocol.data_flush(&space, "notes").expect("flush");
+    settle(&mut alice, &mut bob);
+
+    let bob_space = Node::space_for(&alice);
+    let Some(DataValue::Attachment {
+        hash: seen,
+        size,
+        name,
+        ..
+    }) = bob
+        .protocol
+        .data_map_get(&bob_space, "notes", "files", "plan")
+        .expect("get")
+    else {
+        panic!("the reference did not replicate");
+    };
+    assert_eq!(seen, hash);
+    assert_eq!(size, blob.len() as u64);
+    assert_eq!(name.as_deref(), Some("plan.txt"));
+
+    // And nothing carried the bytes: no file event on either side.
+    assert!(events_named(&bob, "file_received").is_empty());
+    assert!(events_named(&bob, "data_attachment_received").is_empty());
+}
+
+#[test]
+fn a_fetch_travels_the_media_path_and_never_looks_like_a_file() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+    let blob = b"a blob worth fetching, long enough to be interesting".to_vec();
+    let hash = OfflineProtocol::data_attachment_hash(&blob);
+
+    // Bob asks Alice for the bytes.
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+
+    // Alice's application is asked to supply them.
+    let asked = events_named(&alice, "data_attachment_requested");
+    assert_eq!(
+        asked.len(),
+        1,
+        "the holder's app must be asked exactly once"
+    );
+    assert_eq!(asked[0]["hash"].as_str(), Some(hash.as_str()));
+
+    alice
+        .protocol
+        .data_provide_attachment(&alice_space, &bob.address, &hash, blob.clone())
+        .expect("provide");
+    settle_media(&mut alice, &mut bob);
+
+    let received = events_named(&bob, "data_attachment_received");
+    assert_eq!(received.len(), 1, "the asking app must be handed the bytes");
+    assert_eq!(received[0]["hash"].as_str(), Some(hash.as_str()));
+    assert_eq!(
+        BASE64
+            .decode(received[0]["data"].as_str().expect("base64"))
+            .expect("decode"),
+        blob
+    );
+
+    // The transfer must be invisible as a file. This is the whole reason the
+    // purpose exists: without it a person is handed a download they never
+    // started, and for a snapshot that download is a CRDT encoding.
+    assert!(
+        events_named(&bob, "file_received").is_empty(),
+        "a data-purposed transfer must never surface as a received file"
+    );
+    assert!(
+        events_named(&bob, "file_progress").is_empty(),
+        "nor as progress on one"
+    );
+}
+
+#[test]
+fn bytes_nobody_asked_for_are_dropped() {
+    // The bound on unsolicited pushes. Without it a peer can spend this
+    // device's storage and battery for the price of one frame, and the
+    // application is handed files nobody wanted.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let blob = b"unsolicited".to_vec();
+    let hash = OfflineProtocol::data_attachment_hash(&blob);
+
+    alice
+        .protocol
+        .data_provide_attachment(&alice_space, &bob.address, &hash, blob)
+        .expect("provide");
+    settle_media(&mut alice, &mut bob);
+
+    assert!(
+        events_named(&bob, "data_attachment_received").is_empty(),
+        "bytes must be admitted only against a fetch this device made"
+    );
+    assert!(events_named(&bob, "file_received").is_empty());
+}
+
+#[test]
+fn bytes_that_do_not_match_the_hash_are_refused() {
+    // What makes fetching from an authenticated peer safe without trusting
+    // that peer: the address is checked against the bytes, so the worst a
+    // wrong answer achieves is no answer.
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    let wanted = OfflineProtocol::data_attachment_hash(b"what was asked for");
+
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &wanted)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+    clear_events(&bob);
+
+    // Alice's own surface refuses to answer the right question with the
+    // wrong bytes, so the mistake is reported to the app that made it while
+    // it still has the file in hand.
+    let err = alice
+        .protocol
+        .data_provide_attachment(
+            &Node::space_for(&bob),
+            &bob.address,
+            &wanted,
+            b"different bytes entirely".to_vec(),
+        )
+        .expect_err("the sender's own check must refuse this first");
+    assert!(
+        format!("{err}").contains("hash to"),
+        "unexpected refusal: {err}"
+    );
+
+    // But that check is the sender's, and a peer who lies does not run it.
+    // Stage the lie: a transfer whose purpose claims the hash Bob asked for,
+    // carrying bytes that are not it. This is the case the receiving check
+    // exists for, and the only one that can reach it.
+    alice
+        .protocol
+        .send_media_inner(
+            bob.address.clone(),
+            b"different bytes entirely, sent anyway".to_vec(),
+            wanted.clone(),
+            offline_protocol_core::ContentType::File,
+            crate::protocol::types::MediaSendOptions::default(),
+            Some(crate::media_envelope::DataPurpose::Attachment {
+                hash: wanted.clone(),
+            }),
+        )
+        .expect("a lying peer sends whatever it likes");
+    settle_media(&mut alice, &mut bob);
+
+    assert!(
+        events_named(&bob, "data_attachment_received").is_empty(),
+        "bytes that do not hash to what was asked for must never be handed \
+         to an application: the address is checked against the bytes, not \
+         against what the sender says about them"
+    );
+    let unavailable = events_named(&bob, "data_attachment_unavailable");
+    assert_eq!(unavailable.len(), 1, "and the fetch must be told it failed");
+    assert_eq!(unavailable[0]["reason"].as_str(), Some("hash_mismatch"));
+    assert!(events_named(&bob, "file_received").is_empty());
+}
+
+#[test]
+fn a_declined_fetch_ends_rather_than_hanging() {
+    // An attachment reference outlives the bytes it names, so a peer holding
+    // a reference and no blob is ordinary. Without an answer for that case
+    // the asking side cannot tell it from a slow peer, and shows a person a
+    // spinner that never resolves.
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    let hash = OfflineProtocol::data_attachment_hash(b"long gone");
+
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+
+    alice
+        .protocol
+        .data_decline_attachment(&Node::space_for(&bob), &bob.address, &hash)
+        .expect("decline");
+    pump(&mut alice, &mut bob);
+
+    let unavailable = events_named(&bob, "data_attachment_unavailable");
+    assert_eq!(unavailable.len(), 1);
+    assert_eq!(unavailable[0]["reason"].as_str(), Some("declined"));
+    assert_eq!(unavailable[0]["hash"].as_str(), Some(hash.as_str()));
+}
+
+#[test]
+fn a_refusal_for_a_question_we_never_asked_is_ignored() {
+    let (mut alice, mut bob) = pair();
+    let hash = OfflineProtocol::data_attachment_hash(b"never wanted");
+
+    alice
+        .protocol
+        .data_decline_attachment(&Node::space_for(&bob), &bob.address, &hash)
+        .expect("decline");
+    pump(&mut alice, &mut bob);
+
+    assert!(
+        events_named(&bob, "data_attachment_unavailable").is_empty(),
+        "a peer must not be able to report on fetches this device never made"
+    );
+}
+
+#[test]
+fn a_fetch_needs_the_carriage_capability() {
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    let hash = OfflineProtocol::data_attachment_hash(b"anything");
+
+    // Alice keeps replicating but stops carrying blobs.
+    bob.protocol.peer_data_media.remove(&alice.address);
+    let err = bob
+        .protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect_err("a fetch toward a peer that cannot carry must refuse");
+    assert!(
+        format!("{err}").contains("attachment carriage"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(pump(&mut bob, &mut alice), 0, "and no frame may leave");
+}
+
+#[test]
+fn a_malformed_hash_never_reaches_the_wire() {
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    for bad in ["", "abcdef", &"z".repeat(64)] {
+        assert!(
+            bob.protocol.data_fetch_attachment(&bob_space, bad).is_err(),
+            "{bad:?} must be refused"
+        );
+    }
+    assert_eq!(pump(&mut bob, &mut alice), 0);
+}
+
+#[test]
+fn a_document_too_large_to_frame_crosses_over_the_media_path() {
+    // The rung the F3 and F4 records deferred to this stage. Before it, a
+    // document that outgrew every frame was warned about and dropped, so two
+    // replicas stayed apart with nothing on either device reporting it.
+    let (mut alice, mut bob) = pair();
+    let space = Node::space_for(&bob);
+
+    // Varied filler: repeated text compresses inside the engine's encoding,
+    // and a document that compresses back under the budget never reaches the
+    // rung this test is about.
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    for round in 0..24 {
+        let filler: String = (0..4096)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                char::from(b'0' + (seed % 64) as u8)
+            })
+            .collect();
+        alice
+            .protocol
+            .data_map_set(
+                &space,
+                "notes",
+                "m",
+                &format!("k{round}"),
+                DataValue::text(filler),
+            )
+            .expect("set");
+    }
+    alice.protocol.data_flush(&space, "notes").expect("flush");
+    assert!(
+        alice.protocol.data_doc_size(&space, "notes").expect("size")
+            > crate::protocol::data_sync::MAX_SYNC_BLOB_BYTES as u64,
+        "the fixture must build a document no frame can carry"
+    );
+
+    settle_media(&mut alice, &mut bob);
+
+    // It converged, which before this stage it could not.
+    let bob_space = Node::space_for(&alice);
+    assert_eq!(
+        bob.protocol
+            .data_map_get(&bob_space, "notes", "m", "k0")
+            .expect("get")
+            .is_some(),
+        true,
+        "the document must have crossed"
+    );
+    assert!(
+        events_named(&alice, "data_doc_unsyncable").is_empty(),
+        "and nothing may be reported as a dead end"
+    );
+    // The carriage is invisible to the receiving application: a snapshot
+    // handed to a person as a downloaded file is the failure the purpose
+    // field exists to prevent.
+    assert!(events_named(&bob, "file_received").is_empty());
+    assert!(events_named(&bob, "file_progress").is_empty());
+}
+
+#[test]
+fn a_peer_that_cannot_carry_snapshots_is_told_rather_than_left_waiting() {
+    let (mut alice, mut bob) = pair();
+    let space = Node::space_for(&bob);
+    // Bob keeps replicating and stops carrying blobs, which is exactly the
+    // partial downgrade the third capability entry exists to express.
+    alice.protocol.peer_data_media.remove(&bob.address);
+
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    for round in 0..24 {
+        let filler: String = (0..4096)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                char::from(b'0' + (seed % 64) as u8)
+            })
+            .collect();
+        alice
+            .protocol
+            .data_map_set(
+                &space,
+                "notes",
+                "m",
+                &format!("k{round}"),
+                DataValue::text(filler),
+            )
+            .expect("set");
+    }
+    alice.protocol.data_flush(&space, "notes").expect("flush");
+    settle_media(&mut alice, &mut bob);
+
+    let reported = events_named(&alice, "data_doc_unsyncable");
+    assert!(
+        !reported.is_empty(),
+        "a dead end must be reported, not logged and forgotten"
+    );
+    assert_eq!(
+        reported[0]["reason"].as_str(),
+        Some("peer_cannot_carry_snapshots")
+    );
+}
+
+#[test]
+fn the_send_path_refuses_a_data_purpose_toward_a_peer_that_cannot_route_it() {
+    // The last gate rather than the first. Every caller above this already
+    // checks the capability, so this is what still holds if one of them is
+    // ever wrong, and the failure it stops is the loud one: a peer without
+    // the entry hands the bytes to a person as a downloaded file, and for a
+    // snapshot those bytes are a CRDT encoding.
+    let (mut alice, bob) = pair();
+    alice.protocol.peer_data_media.remove(&bob.address);
+
+    let err = alice
+        .protocol
+        .send_media_inner(
+            bob.address.clone(),
+            b"bytes".to_vec(),
+            "name".to_string(),
+            offline_protocol_core::ContentType::File,
+            crate::protocol::types::MediaSendOptions::default(),
+            Some(crate::media_envelope::DataPurpose::Snapshot {
+                doc: "notes".to_string(),
+            }),
+        )
+        .expect_err("a data-purposed send must refuse this peer");
+    assert!(
+        format!("{err}").contains("attachment carriage"),
+        "unexpected error: {err}"
+    );
+
+    // And the same send without a purpose is untouched: this gate must not
+    // become a general restriction on sending files.
+    alice
+        .protocol
+        .send_media_inner(
+            bob.address.clone(),
+            b"bytes".to_vec(),
+            "name".to_string(),
+            offline_protocol_core::ContentType::File,
+            crate::protocol::types::MediaSendOptions::default(),
+            None,
+        )
+        .expect("an ordinary file is unaffected");
+}
+
+#[test]
+fn a_public_media_send_can_never_carry_a_data_purpose() {
+    // The security property stated as a test rather than as a comment: the
+    // public surface has no argument for this, so an application cannot mark
+    // a send as data-purposed and feed bytes of its choosing to a peer's
+    // document engine while that peer's user sees nothing.
+    //
+    // Pinned by behaviour: a file sent through the public API arrives as a
+    // file, on a pair where a data-purposed send would have been routed away
+    // from the application instead.
+    let (mut alice, mut bob) = pair();
+    alice
+        .protocol
+        .send_media_with(
+            bob.address.clone(),
+            b"an ordinary file".to_vec(),
+            "notes.txt".to_string(),
+            offline_protocol_core::ContentType::File,
+            crate::protocol::types::MediaSendOptions::default(),
+        )
+        .expect("send");
+    settle_media(&mut alice, &mut bob);
+
+    assert_eq!(
+        events_named(&bob, "file_received").len(),
+        1,
+        "a file sent through the public surface must arrive as a file"
+    );
+    assert!(events_named(&bob, "data_attachment_received").is_empty());
 }

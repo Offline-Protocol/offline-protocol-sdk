@@ -2770,6 +2770,85 @@ fn data_sync_capability_is_recorded_and_gates_sending() {
 }
 
 #[test]
+fn media_carriage_is_a_separate_entry_from_replication() {
+    // The whole point of a third entry: a peer that replicates 1:1 need not
+    // carry blobs, and toward such a peer a data-purposed media transfer
+    // would arrive as an ordinary received file in somebody's photo roll.
+    let mut protocol = protocol_with_data_storage(Arc::new(InMemoryStorage::new()));
+    feed_key_package_with_data(&mut protocol, &id("peer"), vec![DATA_SYNC_V1]);
+    assert!(
+        protocol.data_sync_active(&id("peer")),
+        "replication is live with a peer advertising the first entry"
+    );
+    assert!(
+        !protocol.data_media_active(&id("peer")),
+        "but blobs are not: that is a different claim and this peer did not \
+         make it"
+    );
+
+    feed_key_package_with_data(
+        &mut protocol,
+        &id("carrier"),
+        vec![DATA_SYNC_V1, DATA_MEDIA_V1],
+    );
+    assert!(protocol.data_media_active(&id("carrier")));
+}
+
+#[test]
+fn media_carriage_needs_replication_too() {
+    // The gate is an addition, never a substitute. A peer advertising blob
+    // carriage without replication has nothing to carry blobs for, and a
+    // build that read this entry alone would send one anyway.
+    let mut protocol = protocol_with_data_storage(Arc::new(InMemoryStorage::new()));
+    feed_key_package_with_data(&mut protocol, &id("peer"), vec![DATA_MEDIA_V1]);
+    assert!(protocol.peer_data_media.contains(&id("peer")));
+    assert!(
+        !protocol.data_media_active(&id("peer")),
+        "replication is the outer gate and it is closed"
+    );
+}
+
+#[test]
+fn media_carriage_capability_survives_a_restart() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_data_storage(storage.clone());
+    feed_key_package_with_data(
+        &mut protocol,
+        &id("peer"),
+        vec![DATA_SYNC_V1, DATA_MEDIA_V1],
+    );
+    assert!(protocol.data_media_active(&id("peer")));
+
+    let restarted = protocol_with_data_storage(storage);
+    assert!(
+        restarted.peer_data_media.contains(&id("peer")),
+        "the media capability must survive a restart like its two siblings"
+    );
+    assert!(restarted.data_media_active(&id("peer")));
+}
+
+#[test]
+fn media_carriage_downgrade_removes_capability() {
+    let mut protocol = protocol_with_data_storage(Arc::new(InMemoryStorage::new()));
+    feed_key_package_with_data(
+        &mut protocol,
+        &id("peer"),
+        vec![DATA_SYNC_V1, DATA_MEDIA_V1],
+    );
+    assert!(protocol.data_media_active(&id("peer")));
+
+    // A peer that keeps replicating but stops carrying blobs is the exact
+    // partial downgrade the separate entries exist to express.
+    feed_key_package_with_data(&mut protocol, &id("peer"), vec![DATA_SYNC_V1]);
+    assert!(!protocol.peer_data_media.contains(&id("peer")));
+    assert!(!protocol.data_media_active(&id("peer")));
+    assert!(
+        protocol.data_sync_active(&id("peer")),
+        "and replication is untouched"
+    );
+}
+
+#[test]
 fn data_sync_downgrade_removes_capability() {
     let mut protocol = protocol_with_data_storage(Arc::new(InMemoryStorage::new()));
     feed_key_package_with_data(&mut protocol, &id("peer"), vec![DATA_SYNC_V1]);
@@ -2840,12 +2919,14 @@ fn data_sync_is_advertised_only_when_the_layer_is_on() {
     let on = protocol_with_data_storage(Arc::new(InMemoryStorage::new()));
     assert_eq!(
         on.advertised_data_versions(),
-        vec![DATA_SYNC_V1, DATA_GROUP_V1],
-        "both entries, and the order is append-only: the group entry says \
-         this build intercepts sync frames arriving inside a group \
-         ciphertext, which a build advertising only the first does not. A \
-         peer reads them independently, so replacing rather than appending \
-         would silently stop 1:1 replication with every shipped install"
+        vec![DATA_SYNC_V1, DATA_GROUP_V1, DATA_MEDIA_V1],
+        "every entry, and the order is append-only. Each says something a \
+         build advertising only its predecessors does not do: intercept a \
+         sync frame inside a group ciphertext, and route a data-purposed \
+         media transfer into the data layer instead of handing it to a \
+         person as a received file. A peer reads them independently, so \
+         replacing rather than appending would silently stop 1:1 \
+         replication with every shipped install"
     );
 }
 
@@ -28036,6 +28117,7 @@ fn test_encrypted_media_chunk_with_mismatched_group_rejected() {
         media_metadata: None,
         original_content_type: None,
         rich_extras: None,
+        data_purpose: None,
     };
     let encrypted = {
         let mls = carol.mls_manager.as_ref().unwrap().clone();

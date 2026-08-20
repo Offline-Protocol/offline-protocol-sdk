@@ -353,6 +353,22 @@ pub struct OfflineProtocol {
     /// `group_data_sync_active`, never by 1:1 sync.
     peer_data_group_attested: std::collections::HashSet<String>,
 
+    /// Peers whose key package advertised attachment and snapshot carriage
+    /// over the media path ([`DATA_MEDIA_V1`] in `data_versions`), so this
+    /// device may ask them for a blob and may hand them a document too large
+    /// to travel inside a sync frame.
+    ///
+    /// A third set rather than a flag on the first, for the same reason
+    /// `peer_data_group` is separate: a peer can advertise 1:1 replication
+    /// without this, and toward such a peer a data-purposed media transfer
+    /// arrives as an ordinary received file. Same lifecycle as every
+    /// capability set: learned from key-package exchange, persisted inside
+    /// `PeerCapabilities`, restored on `initialize_mls`, bounded like
+    /// `key_package_sent_to`.
+    ///
+    /// [`DATA_MEDIA_V1`]: crate::protocol::types::DATA_MEDIA_V1
+    peer_data_media: std::collections::HashSet<String>,
+
     /// Peers already flagged with a `PlaintextSend` security warning, so the
     /// explicit-opt-out plaintext path warns once per peer instead of once
     /// per message.
@@ -428,6 +444,16 @@ pub struct OfflineProtocol {
     /// of traffic that should be rate limited rather than merely small.
     #[cfg(feature = "data")]
     pub(crate) last_data_sync_offer: HashMap<String, Instant>,
+
+    /// Attachment fetches asked for and not yet answered, keyed by space and
+    /// blob hash, valued by when the question went out.
+    ///
+    /// Load-bearing for more than bookkeeping: arriving blob bytes are
+    /// accepted only against an entry here. Without that check a peer could
+    /// push blobs this device never asked for and the application would be
+    /// handed files nobody wanted, which is a way to spend somebody's
+    /// storage and battery that costs the sender one frame.
+    pub(crate) pending_attachment_fetches: HashMap<String, Instant>,
 
     /// Whether the MLS group list has been read into `group_mesh.members`
     /// once this session, so the shared-group rediscovery sweep can see the
@@ -849,6 +875,7 @@ impl OfflineProtocol {
             peer_data_sync: std::collections::HashSet::new(),
             peer_data_group: std::collections::HashSet::new(),
             peer_data_group_attested: std::collections::HashSet::new(),
+            peer_data_media: std::collections::HashSet::new(),
             peer_rich_attested: std::collections::HashSet::new(),
             plaintext_send_warned: std::collections::HashSet::new(),
             plaintext_receive_warned: std::collections::HashSet::new(),
@@ -862,6 +889,7 @@ impl OfflineProtocol {
             data: data::DataLayer::default(),
             #[cfg(feature = "data")]
             last_data_sync_offer: HashMap::new(),
+            pending_attachment_fetches: HashMap::new(),
             #[cfg(feature = "data")]
             group_spaces_enumerated: false,
             lamport_clock: LamportClock::new(),
@@ -1027,6 +1055,7 @@ impl OfflineProtocol {
         let previous_peer_rich_attested = self.peer_rich_attested.clone();
         let previous_peer_data_group = self.peer_data_group.clone();
         let previous_peer_data_group_attested = self.peer_data_group_attested.clone();
+        let previous_peer_data_media = self.peer_data_media.clone();
 
         let previous_local_id = std::mem::replace(&mut self.local_id, local_id.clone());
         let previous_identity_established = self.identity_established;
@@ -1169,6 +1198,7 @@ impl OfflineProtocol {
             self.peer_rich_attested = previous_peer_rich_attested;
             self.peer_data_group = previous_peer_data_group;
             self.peer_data_group_attested = previous_peer_data_group_attested;
+            self.peer_data_media = previous_peer_data_media;
             return Err(err);
         }
 
@@ -1730,6 +1760,12 @@ impl OfflineProtocol {
         self.peer_data_sync.remove(peer);
         self.peer_data_group.remove(peer);
         self.peer_data_group_attested.remove(peer);
+        self.peer_data_media.remove(peer);
+        // A peer we have stopped replicating with cannot answer anything we
+        // asked them for, so the questions go too. Left behind they would
+        // hold slots against the fetch bound until they timed out.
+        self.pending_attachment_fetches
+            .retain(|key, _| !key.starts_with(&format!("{peer}\u{1}")));
         #[cfg(feature = "data")]
         self.forget_data_sync_offer_windows(peer);
     }
@@ -1739,6 +1775,8 @@ impl OfflineProtocol {
         self.peer_data_sync.clear();
         self.peer_data_group.clear();
         self.peer_data_group_attested.clear();
+        self.peer_data_media.clear();
+        self.pending_attachment_fetches.clear();
         #[cfg(feature = "data")]
         self.last_data_sync_offer.clear();
     }

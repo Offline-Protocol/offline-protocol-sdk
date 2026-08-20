@@ -958,7 +958,11 @@ impl OfflineProtocol {
         #[cfg(feature = "data")]
         {
             if self.config.data.enabled {
-                return vec![super::types::DATA_SYNC_V1, super::types::DATA_GROUP_V1];
+                return vec![
+                    super::types::DATA_SYNC_V1,
+                    super::types::DATA_GROUP_V1,
+                    super::types::DATA_MEDIA_V1,
+                ];
             }
         }
         Vec::new()
@@ -987,6 +991,30 @@ impl OfflineProtocol {
             self.config.data.enabled
                 && self.peer_data_sync.contains(recipient)
                 && !self.is_user_blocked(recipient)
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            let _ = recipient;
+            false
+        }
+    }
+
+    /// Whether blobs may travel to `recipient`: 1:1 replication is live with
+    /// them and they advertised [`DATA_MEDIA_V1`], so they understand the
+    /// fetch frames and route a data-purposed media transfer into the data
+    /// layer rather than to their user.
+    ///
+    /// Strictly narrower than [`Self::data_sync_active`] and checked in
+    /// addition to it, never instead: every blob exchange is part of a
+    /// replication that the first gate already had to allow, and a peer who
+    /// stops replicating stops receiving blobs at the same moment.
+    ///
+    /// [`DATA_MEDIA_V1`]: crate::protocol::types::DATA_MEDIA_V1
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(super) fn data_media_active(&self, recipient: &str) -> bool {
+        #[cfg(feature = "data")]
+        {
+            self.data_sync_active(recipient) && self.peer_data_media.contains(recipient)
         }
         #[cfg(not(feature = "data"))]
         {
@@ -2232,6 +2260,31 @@ impl OfflineProtocol {
         content_type: ContentType,
         options: MediaSendOptions,
     ) -> Result<String> {
+        // The public surface never carries a data purpose. Every transfer
+        // reachable from an application is a transfer for its user, and the
+        // one argument that could change that is not in `MediaSendOptions`
+        // and must never be added to it: a caller able to mark a send as
+        // data-purposed could feed bytes of its choosing to a peer's
+        // document engine while that peer's user saw nothing arrive.
+        self.send_media_inner(recipient, file_data, file_name, content_type, options, None)
+    }
+
+    /// The body of [`Self::send_media_with`], plus the one argument the
+    /// public surface may not supply.
+    ///
+    /// `data_purpose` marks a transfer as belonging to the replicated-
+    /// document layer. It is `pub(crate)` and reached only from the data
+    /// layer's own send seams.
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(crate) fn send_media_inner(
+        &mut self,
+        recipient: impl Into<String>,
+        file_data: Vec<u8>,
+        file_name: impl Into<String>,
+        content_type: ContentType,
+        options: MediaSendOptions,
+        data_purpose: Option<crate::media_envelope::DataPurpose>,
+    ) -> Result<String> {
         {
             let state = lock_shared_state(&self.shared_state)?;
             if state.state != ProtocolState::Running {
@@ -2315,6 +2368,16 @@ impl OfflineProtocol {
         // we neither receive from nor send to a blocked peer.
         if self.is_user_blocked(&recipient_str) {
             return Err(Error::UserBlocked(recipient_str));
+        }
+
+        // A data-purposed transfer goes only to a peer that said it routes
+        // one into its document layer. Toward anybody else the bytes would
+        // be handed to a person as a downloaded file, so this refuses rather
+        // than degrading: there is no useful weaker form of this send.
+        if data_purpose.is_some() && !self.data_media_active(&recipient_str) {
+            return Err(Error::InvalidArgument(format!(
+                "peer {recipient_str} did not advertise attachment carriage"
+            )));
         }
 
         // SEC-H1: media rides the same MLS session machinery as text. With
@@ -2428,6 +2491,7 @@ impl OfflineProtocol {
                 last_updated_at: Instant::now(),
                 media_metadata: media_metadata.clone(),
                 rich_extras: rich_extras.clone(),
+                data_purpose: data_purpose.clone(),
             },
         );
 
@@ -2466,6 +2530,7 @@ impl OfflineProtocol {
             content_type,
             media_metadata.as_ref(),
             rich_extras.as_ref(),
+            data_purpose.as_ref(),
         )?;
 
         Ok(file_id)
@@ -2482,6 +2547,7 @@ impl OfflineProtocol {
         content_type: ContentType,
         media_metadata: Option<&MediaMetadata>,
         rich_extras: Option<&MediaRichExtras>,
+        data_purpose: Option<&crate::media_envelope::DataPurpose>,
     ) -> Result<()> {
         for chunk in chunks {
             let chunk_index = chunk.chunk_index;
@@ -2507,6 +2573,11 @@ impl OfflineProtocol {
                     original_content_type: (chunk_index == 0).then_some(content_type),
                     rich_extras: if chunk_index == 0 {
                         rich_extras.cloned()
+                    } else {
+                        None
+                    },
+                    data_purpose: if chunk_index == 0 {
+                        data_purpose.cloned()
                     } else {
                         None
                     },
@@ -2631,6 +2702,7 @@ impl OfflineProtocol {
                 transfer.content_type,
                 transfer.media_metadata.as_ref(),
                 transfer.rich_extras.as_ref(),
+                transfer.data_purpose.as_ref(),
             ) {
                 warn!(
                     file_id = %file_id,
