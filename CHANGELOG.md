@@ -196,6 +196,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   verdict failed, so nothing is pending and the old message said the opposite
   on the one document an operator is most likely to be reading about.
 
+- **A remote change applied into a document over its cap was reported as
+  refused.** The import flushes what it applied, and that flush answers
+  `DocTooLarge` once the document is over its cap: the change is written and
+  the size verdict that follows it is what failed. Reporting it as an error
+  logged an applied change as `Remote change refused`, skipped the space
+  record, and withheld the stranded-edit offer above, which is gated on the
+  import having applied. That is the case the offer matters most in: the one
+  edit a document past its cap still accepts is a deletion, which is its route
+  back under. The import now answers `Applied`, and `Err` means the change is
+  not durable. `flushAll()` drew the same distinction on shutdown, where it
+  logged `Failed to flush document` for a document whose change had reached
+  disk; it no longer does.
+
 - **Messages sent over an explicitly chosen transport skipped the negotiated
   binary wire codec.** `send_via_transport` never stamped it, while the
   selection path did, so a peer known to support the binary codec silently fell

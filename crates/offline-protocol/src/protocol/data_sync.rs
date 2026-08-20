@@ -935,7 +935,22 @@ impl OfflineProtocol {
         // storage failure that is still failing fails that one too, which
         // makes the import answer `Err`. So every nudge costs a fresh
         // transient failure that recovered inside one frame, and the offers
-        // cannot sustain each other.
+        // cannot sustain each other. `Applied` and not "anything but `Err`"
+        // for the same reason: the outcomes that did not apply left the edit
+        // pending, where the next pre-flush still owes it to the peer.
+        //
+        // This is why a document over its cap must answer `Applied` rather
+        // than `DocTooLarge`, and does: its flush wrote the fold and then
+        // refused further growth, so the edit is stranded exactly as here,
+        // on the documents whose only pending edit is the deletion that
+        // brings them back under.
+        //
+        // One residual is left uncompensated on purpose. A `persist_space`
+        // failure after a flush that succeeded also strands a fold, and is
+        // indistinguishable here from a flush that failed. Offering on every
+        // `Err` would cover it and break the argument above: a store that
+        // keeps failing would then emit an offer per frame, and those do
+        // sustain each other. The narrower gap is the better trade.
         //
         // `origin` is `None`, not the space: what may be stranded here is
         // this device's own edit, so naming the space would suppress the

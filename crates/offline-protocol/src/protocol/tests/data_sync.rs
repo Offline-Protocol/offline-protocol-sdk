@@ -590,6 +590,42 @@ fn a_local_edit_stranded_by_a_failed_pre_flush_is_announced_to_the_peer() {
     );
 }
 
+/// Push a document past `MAX_DOC_BYTES` and leave it there.
+///
+/// Two values that are together over the cap, rather than many small ones
+/// that add up to it. The cap is measured over the compacted export, which
+/// includes the delta history a flush has not folded away yet, so a document
+/// nudged over the line by its history drops back under as soon as compaction
+/// runs and the next flush answers `Ok`. Content this size cannot be
+/// compacted back under the cap, which is what makes `DocTooLarge` the answer
+/// every later flush gives.
+///
+/// The bytes are incompressible on purpose: the compacted encoding
+/// compresses, so a megabyte of one repeated byte measures as almost nothing.
+fn grow_past_cap(node: &mut Node, space: &str, doc: &str) {
+    let filler = |seed: u32| -> Vec<u8> {
+        let mut state = 0x9e37_79b9u32.wrapping_mul(seed.wrapping_add(1));
+        (0..600 * 1024)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect()
+    };
+    node.protocol
+        .data_map_set(space, doc, "m", "half", DataValue::bytes(filler(1)))
+        .expect("set");
+    node.protocol.data_flush(space, doc).expect("flush");
+    node.protocol
+        .data_map_set(space, doc, "m", "other_half", DataValue::bytes(filler(2)))
+        .expect("set");
+    let breach = node.protocol.data_flush(space, doc);
+    assert!(
+        matches!(breach, Err(crate::error::Error::DocTooLarge { .. })),
+        "the document answered {breach:?} rather than reaching its cap"
+    );
+}
+
 #[test]
 fn a_document_over_its_cap_still_accepts_a_remote_change() {
     let (mut alice, mut bob) = pair();
@@ -608,56 +644,7 @@ fn a_document_over_its_cap_still_accepts_a_remote_change() {
     // costs no frames and Bob's copy stays small. What is under test is what
     // Alice does with an arriving change, not how a megabyte crosses a link.
     alice.protocol.peer_data_sync.remove(&bob.address);
-
-    // Two values that are together over the cap, rather than many small ones
-    // that add up to it. The cap is measured over the compacted export, which
-    // includes the delta history a flush has not folded away yet, so a
-    // document nudged over the line by its history drops back under as soon
-    // as compaction runs and the next flush answers `Ok`. Content this size
-    // cannot be compacted back under the cap, which is what makes the error
-    // this test is named for the answer every flush gives.
-    //
-    // Incompressible: the compacted encoding compresses, so a megabyte of
-    // one repeated byte measures as almost nothing.
-    let filler = |seed: u32| -> Vec<u8> {
-        let mut state = 0x9e37_79b9u32.wrapping_mul(seed.wrapping_add(1));
-        (0..600 * 1024)
-            .map(|_| {
-                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                (state >> 24) as u8
-            })
-            .collect()
-    };
-    alice
-        .protocol
-        .data_map_set(
-            &alice_space,
-            "notes",
-            "m",
-            "half",
-            DataValue::bytes(filler(1)),
-        )
-        .expect("set");
-    alice
-        .protocol
-        .data_flush(&alice_space, "notes")
-        .expect("flush");
-    alice
-        .protocol
-        .data_map_set(
-            &alice_space,
-            "notes",
-            "m",
-            "other_half",
-            DataValue::bytes(filler(2)),
-        )
-        .expect("set");
-    let breach = alice.protocol.data_flush(&alice_space, "notes");
-    assert!(
-        matches!(breach, Err(crate::error::Error::DocTooLarge { .. })),
-        "the document answered {breach:?} rather than reaching its cap"
-    );
-
+    grow_past_cap(&mut alice, &alice_space, "notes");
     alice.protocol.peer_data_sync.insert(bob.address.clone());
     alice.transport.clear_sent_messages();
 
@@ -717,6 +704,114 @@ fn a_document_over_its_cap_still_accepts_a_remote_change() {
         !pushed.is_empty(),
         "the pending deletion was committed but never sent, so `DocTooLarge` \
          does mean the flush was lost"
+    );
+}
+
+#[test]
+fn a_local_edit_stranded_over_the_cap_is_announced_to_the_peer() {
+    let armed = Arc::new(AtomicBool::new(false));
+    let fired = Arc::new(AtomicBool::new(false));
+    let alice = Node::with_state_storage("alice", |state| {
+        Arc::new(FailOneDeltaWrite {
+            inner: TestProtocolStateStorage { storage: state },
+            armed: armed.clone(),
+            fired: fired.clone(),
+        })
+    });
+    let (mut alice, mut bob) = pair_of(alice, Node::new("bob"));
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut alice, &alice_space, "notes", "shared", "0");
+    settle(&mut alice, &mut bob);
+    assert_eq!(
+        read(&mut bob, &bob_space, "notes", "shared"),
+        Some(DataValue::text("0")),
+        "precondition: both replicas have to hold the document"
+    );
+
+    alice.protocol.peer_data_sync.remove(&bob.address);
+    grow_past_cap(&mut alice, &alice_space, "notes");
+    alice.protocol.peer_data_sync.insert(bob.address.clone());
+
+    // The seed rather than one of the fillers, for the reason the sibling
+    // test gives: dropping a filler brings the document back under the cap,
+    // the flush inside the import then answers `Ok`, and the arm under test
+    // is never reached.
+    alice
+        .protocol
+        .data_map_delete(&alice_space, "notes", "m", "shared")
+        .expect("deletions must keep working past the cap");
+    assert!(
+        alice
+            .protocol
+            .data_doc_size(&alice_space, "notes")
+            .expect("size")
+            > crate::MAX_DOC_BYTES as u64,
+        "precondition: the document has to still be over its cap with the \
+         deletion pending"
+    );
+    alice.transport.clear_sent_messages();
+
+    // Both halves of the loss at once, which is the case neither sibling
+    // test covers. The pre-flush cannot write its delta record, so the
+    // deletion is rewound into the pending set. The import then folds it
+    // into the imported change and suppresses the pair toward the only peer
+    // it was owed to, and the flush that did so answers `DocTooLarge`,
+    // because the document is over its cap either way. That error is raised
+    // after the fold is durable, so reading it as a failed import would
+    // withhold the announcement on exactly the documents whose one pending
+    // edit is the deletion that brings them back under.
+    write(&mut bob, &bob_space, "notes", "from_bob", "B");
+    armed.store(true, Ordering::SeqCst);
+    pump(&mut bob, &mut alice);
+
+    assert!(
+        fired.load(Ordering::SeqCst),
+        "precondition: the pre-flush has to have failed, or this proves nothing \
+         about what happens when it does"
+    );
+    assert_eq!(
+        read(&mut alice, &alice_space, "notes", "from_bob"),
+        Some(DataValue::text("B")),
+        "a document over its cap refused a remote change instead of stepping \
+         over the flush error"
+    );
+    assert_eq!(
+        alice
+            .protocol
+            .data_map_get(&alice_space, "notes", "m", "shared")
+            .expect("get"),
+        None,
+        "precondition: the fold has to have happened, or there is nothing \
+         stranded to announce"
+    );
+
+    // The announcement itself. Nothing else on this path sends: the fold's
+    // own push is suppressed as an echo, which is what strands it, so a
+    // non-acknowledgement frame here is the offer or nothing.
+    let announced: Vec<_> = alice
+        .transport
+        .sent_messages()
+        .into_iter()
+        .filter(|message| !message.metadata.contains_key(ACK_FOR_KEY))
+        .collect();
+    assert!(
+        !announced.is_empty(),
+        "the deletion folded into the import was stranded with no offer, so \
+         nothing is left to tell the peer to ask"
+    );
+
+    // The offer draws catch-up and the catch-up ladder runs out: every rung
+    // is over the frame budget for a document this size, and "nothing" is a
+    // rung. So the exchange still ends. What the peer does with the answer
+    // is the media path's job, not this one's; what is under test is that it
+    // gets to ask at all.
+    let rounds = settle(&mut alice, &mut bob);
+    assert_eq!(
+        rounds.last(),
+        Some(&0),
+        "the compensating offer started an exchange that does not end: {rounds:?}"
     );
 }
 

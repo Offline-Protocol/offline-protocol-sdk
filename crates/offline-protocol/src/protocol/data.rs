@@ -710,6 +710,11 @@ impl OfflineProtocol {
     /// than left in memory: an unflushed remote change would be lost to a
     /// restart, and the sender has already been told (by the acknowledgement
     /// the frame rides on) that it arrived.
+    ///
+    /// `Err` means the change is not durable. A document held over its cap
+    /// still answers `Applied`, because the cap refuses growth *after* the
+    /// change is on disk; the caller cannot tell the two apart from an error
+    /// alone, and one of them is a change it must not report as refused.
     pub(crate) fn data_apply_remote(
         &mut self,
         space: &str,
@@ -751,7 +756,28 @@ impl OfflineProtocol {
         if outcome == RemoteImport::Applied {
             // Remote work is not this replica's to push onward, so the flush
             // is told where the change came from.
-            self.flush_doc_from(storage.as_ref(), space, doc, Some(space))?;
+            //
+            // `DocTooLarge` is not an import failure and is not reported as
+            // one. It is raised after the delta record was written and the
+            // push decided, so the imported change is already durable; what
+            // failed is the size verdict that follows, and what it refuses is
+            // further *growth*. Propagating it would say the change was
+            // refused when it applied, skip the space record below, and cost
+            // the caller the one signal that a local edit may have been
+            // folded into this import and suppressed with it, because that
+            // compensation is gated on hearing `Applied`. A document over its
+            // cap is exactly where that matters: the pending edit it still
+            // accepts is a deletion, which is the route back under.
+            match self.flush_doc_from(storage.as_ref(), space, doc, Some(space)) {
+                Ok(()) => {}
+                Err(Error::DocTooLarge { .. }) => {
+                    debug!(
+                        space,
+                        doc, "Applied a remote change into a document that is over its cap"
+                    );
+                }
+                Err(err) => return Err(err),
+            }
             self.persist_space(storage.as_ref(), space)?;
         }
         Ok(outcome)
@@ -1252,8 +1278,22 @@ impl OfflineProtocol {
         };
         let keys: Vec<(String, String)> = self.data.docs.keys().cloned().collect();
         for (space, doc) in keys {
-            if let Err(err) = self.flush_doc(storage.as_ref(), &space, &doc) {
-                warn!(space, doc, error = %err, "Failed to flush document");
+            match self.flush_doc(storage.as_ref(), &space, &doc) {
+                Ok(()) => {}
+                // Not a failed flush, and not reported as one: the record was
+                // written and only the size verdict after it refused further
+                // growth. On a shutdown path the distinction is the whole
+                // question an operator is asking, which is whether anything
+                // was lost.
+                Err(Error::DocTooLarge { .. }) => {
+                    debug!(
+                        space,
+                        doc, "Flushed a document that is over its cap on shutdown"
+                    );
+                }
+                Err(err) => {
+                    warn!(space, doc, error = %err, "Failed to flush document");
+                }
             }
         }
         Ok(())
