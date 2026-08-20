@@ -1352,7 +1352,7 @@ external fun uniffi_offline_protocol_uniffi_fn_constructor_datastore_new(`protoc
 ): Long
 external fun uniffi_offline_protocol_uniffi_fn_constructor_datastore_with_storage(`protocol`: Long,`storage`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_attachment_hash(`ptr`: Long,`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+external fun uniffi_offline_protocol_uniffi_fn_method_datastore_attachment_hash(`ptr`: Long,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_counter_increment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`amount`: Double,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1392,7 +1392,7 @@ external fun uniffi_offline_protocol_uniffi_fn_method_datastore_map_get_json(`pt
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_map_set(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`valueJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_provide_attachment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`peerId`: RustBuffer.ByValue,`hash`: RustBuffer.ByValue,`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+external fun uniffi_offline_protocol_uniffi_fn_method_datastore_provide_attachment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`peerId`: RustBuffer.ByValue,`hash`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_text_delete(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`position`: Int,`count`: Int,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1896,7 +1896,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() != 20699.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() != 53129.toShort()) {
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() != 20923.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment() != 55977.toShort()) {
@@ -1956,7 +1956,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set() != 53094.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment() != 35833.toShort()) {
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment() != 58573.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete() != 35552.toShort()) {
@@ -3088,7 +3088,7 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 //
 public interface DataStoreInterface {
     
-    fun `attachmentHash`(`bytes`: List<kotlin.UByte>): kotlin.String
+    fun `attachmentHash`(`data`: kotlin.ByteArray): kotlin.String
     
     fun `counterIncrement`(`spaceId`: kotlin.String, `docId`: kotlin.String, `collection`: kotlin.String, `amount`: kotlin.Double)
     
@@ -3128,7 +3128,7 @@ public interface DataStoreInterface {
     
     fun `mapSet`(`spaceId`: kotlin.String, `docId`: kotlin.String, `collection`: kotlin.String, `key`: kotlin.String, `valueJson`: kotlin.String)
     
-    fun `provideAttachment`(`spaceId`: kotlin.String, `peerId`: kotlin.String, `hash`: kotlin.String, `bytes`: List<kotlin.UByte>)
+    fun `provideAttachment`(`spaceId`: kotlin.String, `peerId`: kotlin.String, `hash`: kotlin.String, `data`: kotlin.ByteArray)
     
     fun `textDelete`(`spaceId`: kotlin.String, `docId`: kotlin.String, `collection`: kotlin.String, `position`: kotlin.UInt, `count`: kotlin.UInt)
     
@@ -3245,13 +3245,13 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
         }
     }
 
-    override fun `attachmentHash`(`bytes`: List<kotlin.UByte>): kotlin.String {
+    override fun `attachmentHash`(`data`: kotlin.ByteArray): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_attachment_hash(
         it,
-        FfiConverterSequenceUByte.lower(`bytes`),_status)
+        FfiConverterByteArray.lower(`data`),_status)
 }
     }
     )
@@ -3514,13 +3514,13 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     
 
     
-    @Throws(ProtocolException::class)override fun `provideAttachment`(`spaceId`: kotlin.String, `peerId`: kotlin.String, `hash`: kotlin.String, `bytes`: List<kotlin.UByte>)
+    @Throws(ProtocolException::class)override fun `provideAttachment`(`spaceId`: kotlin.String, `peerId`: kotlin.String, `hash`: kotlin.String, `data`: kotlin.ByteArray)
         = 
     callWithHandle {
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_provide_attachment(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`peerId`),FfiConverterString.lower(`hash`),FfiConverterSequenceUByte.lower(`bytes`),_status)
+        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`peerId`),FfiConverterString.lower(`hash`),FfiConverterByteArray.lower(`data`),_status)
 }
     }
     

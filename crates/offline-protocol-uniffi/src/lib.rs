@@ -4114,11 +4114,11 @@ impl OfflineProtocol {
         space_id: String,
         peer_id: String,
         hash: String,
-        bytes: Vec<u8>,
+        data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
         let mut guard = self.lock_inner()?;
         guard
-            .data_provide_attachment(&space_id, &peer_id, &hash, bytes)
+            .data_provide_attachment(&space_id, &peer_id, &hash, data)
             .map_err(ProtocolError::from)
     }
 
@@ -7235,8 +7235,8 @@ impl DataStore {
     /// Takes no lock and touches no state: it is a hash function, exposed
     /// here so an application writing a reference gets the same spelling
     /// this SDK checks arriving bytes against.
-    pub fn attachment_hash(&self, bytes: Vec<u8>) -> String {
-        CoreProtocol::data_attachment_hash(&bytes)
+    pub fn attachment_hash(&self, data: Vec<u8>) -> String {
+        CoreProtocol::data_attachment_hash(&data)
     }
 
     /// Asks the peer a 1:1 space is named after for the bytes behind a
@@ -7251,10 +7251,10 @@ impl DataStore {
         space_id: String,
         peer_id: String,
         hash: String,
-        bytes: Vec<u8>,
+        data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
         self.protocol
-            .data_provide_attachment(space_id, peer_id, hash, bytes)
+            .data_provide_attachment(space_id, peer_id, hash, data)
     }
 
     /// Tells a peer their request will not be answered.

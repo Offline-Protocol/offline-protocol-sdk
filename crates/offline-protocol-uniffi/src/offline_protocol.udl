@@ -1986,7 +1986,12 @@ interface DataStore {
     // {"kind":"attachment","hash":"...","size":N} via map_set. Computing it
     // anywhere else risks a second spelling of the same hash, and two
     // spellings of one address are two addresses.
-    string attachment_hash(sequence<u8> bytes);
+    //
+    // Blobs are `bytes`, not `sequence<u8>`, for the reason spelled out on
+    // ProtocolStateStorageProvider above: an attachment is the one payload on
+    // this interface that reaches megabytes, and `sequence<u8>` would box
+    // every one of them on Kotlin.
+    string attachment_hash(bytes data);
 
     // Ask the peer a 1:1 space is named after for the bytes behind a
     // reference.
@@ -2007,7 +2012,7 @@ interface DataStore {
     // the application that made it while it still has the file in hand,
     // rather than travelling the whole media path to be refused elsewhere.
     [Throws=ProtocolError]
-    void provide_attachment(string space_id, string peer_id, string hash, sequence<u8> bytes);
+    void provide_attachment(string space_id, string peer_id, string hash, bytes data);
 
     // Tell a peer their request will not be answered.
     //

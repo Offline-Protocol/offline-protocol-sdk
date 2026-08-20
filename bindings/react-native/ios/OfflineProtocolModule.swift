@@ -1942,7 +1942,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                 throw NSError(domain: "OfflineProtocol", code: -1,
                               userInfo: [NSLocalizedDescriptionKey: "bytes must be base64"])
             }
-            resolver(store.attachmentHash(bytes: [UInt8](bytes)))
+            resolver(store.attachmentHash(data: bytes))
         } catch {
             rejectWithProtocolError(error, rejecter,
                                     fallbackCode: "ERROR_DATAATTACHMENTHASH",
@@ -1984,7 +1984,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                               userInfo: [NSLocalizedDescriptionKey: "bytes must be base64"])
             }
             try store.provideAttachment(spaceId: spaceId, peerId: peerId,
-                                        hash: hash, bytes: [UInt8](bytes))
+                                        hash: hash, data: bytes)
             resolver(nil)
         } catch {
             rejectWithProtocolError(error, rejecter,

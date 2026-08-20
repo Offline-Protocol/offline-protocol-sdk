@@ -519,7 +519,7 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage() != 2283:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() != 25169:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() != 53518:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment() != 25635:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -559,7 +559,7 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set() != 47637:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment() != 18356:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment() != 59967:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete() != 53749:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -8464,7 +8464,7 @@ class _UniffiFfiConverterBytes(_UniffiConverterRustBuffer):
 
 class DataStoreProtocol(typing.Protocol):
     
-    def attachment_hash(self, bytes: typing.List[int]) -> str:
+    def attachment_hash(self, data: bytes) -> str:
         raise NotImplementedError
     def counter_increment(self, space_id: str,doc_id: str,collection: str,amount: float) -> None:
         raise NotImplementedError
@@ -8504,7 +8504,7 @@ class DataStoreProtocol(typing.Protocol):
         raise NotImplementedError
     def map_set(self, space_id: str,doc_id: str,collection: str,key: str,value_json: str) -> None:
         raise NotImplementedError
-    def provide_attachment(self, space_id: str,peer_id: str,hash: str,bytes: typing.List[int]) -> None:
+    def provide_attachment(self, space_id: str,peer_id: str,hash: str,data: bytes) -> None:
         raise NotImplementedError
     def text_delete(self, space_id: str,doc_id: str,collection: str,position: int,count: int) -> None:
         raise NotImplementedError
@@ -8568,12 +8568,12 @@ class DataStore(DataStoreProtocol):
         inst = cls.__new__(cls)
         inst._handle = handle
         return inst
-    def attachment_hash(self, bytes: typing.List[int]) -> str:
+    def attachment_hash(self, data: bytes) -> str:
         
-        _UniffiFfiConverterSequenceUInt8.check_lower(bytes)
+        _UniffiFfiConverterBytes.check_lower(data)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
-            _UniffiFfiConverterSequenceUInt8.lower(bytes),
+            _UniffiFfiConverterBytes.lower(data),
         )
         _uniffi_lift_return = _UniffiFfiConverterString.lift
         _uniffi_error_converter = None
@@ -8961,7 +8961,7 @@ class DataStore(DataStoreProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
-    def provide_attachment(self, space_id: str,peer_id: str,hash: str,bytes: typing.List[int]) -> None:
+    def provide_attachment(self, space_id: str,peer_id: str,hash: str,data: bytes) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
         
@@ -8969,13 +8969,13 @@ class DataStore(DataStoreProtocol):
         
         _UniffiFfiConverterString.check_lower(hash)
         
-        _UniffiFfiConverterSequenceUInt8.check_lower(bytes)
+        _UniffiFfiConverterBytes.check_lower(data)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
             _UniffiFfiConverterString.lower(space_id),
             _UniffiFfiConverterString.lower(peer_id),
             _UniffiFfiConverterString.lower(hash),
-            _UniffiFfiConverterSequenceUInt8.lower(bytes),
+            _UniffiFfiConverterBytes.lower(data),
         )
         _uniffi_lift_return = lambda val: None
         _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError

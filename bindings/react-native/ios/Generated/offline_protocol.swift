@@ -622,7 +622,7 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 public protocol DataStoreProtocol: AnyObject, Sendable {
     
-    func attachmentHash(bytes: [UInt8])  -> String
+    func attachmentHash(data: Data)  -> String
     
     func counterIncrement(spaceId: String, docId: String, collection: String, amount: Double) throws 
     
@@ -662,7 +662,7 @@ public protocol DataStoreProtocol: AnyObject, Sendable {
     
     func mapSet(spaceId: String, docId: String, collection: String, key: String, valueJson: String) throws 
     
-    func provideAttachment(spaceId: String, peerId: String, hash: String, bytes: [UInt8]) throws 
+    func provideAttachment(spaceId: String, peerId: String, hash: String, data: Data) throws 
     
     func textDelete(spaceId: String, docId: String, collection: String, position: UInt32, count: UInt32) throws 
     
@@ -738,11 +738,11 @@ public static func withStorage(`protocol`: OfflineProtocol, storage: ProtocolSta
     
 
     
-open func attachmentHash(bytes: [UInt8]) -> String  {
+open func attachmentHash(data: Data) -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_datastore_attachment_hash(
             self.uniffiCloneHandle(),
-        FfiConverterSequenceUInt8.lower(bytes),$0
+        FfiConverterData.lower(data),$0
     )
 })
 }
@@ -938,13 +938,13 @@ open func mapSet(spaceId: String, docId: String, collection: String, key: String
 }
 }
     
-open func provideAttachment(spaceId: String, peerId: String, hash: String, bytes: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+open func provideAttachment(spaceId: String, peerId: String, hash: String, data: Data)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_datastore_provide_attachment(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
         FfiConverterString.lower(peerId),
         FfiConverterString.lower(hash),
-        FfiConverterSequenceUInt8.lower(bytes),$0
+        FfiConverterData.lower(data),$0
     )
 }
 }
@@ -10285,7 +10285,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() != 20699) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() != 53129) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() != 20923) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment() != 55977) {
@@ -10345,7 +10345,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set() != 53094) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment() != 35833) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment() != 58573) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete() != 35552) {
