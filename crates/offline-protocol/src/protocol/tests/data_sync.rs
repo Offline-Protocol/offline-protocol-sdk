@@ -2097,3 +2097,56 @@ fn a_public_media_send_can_never_carry_a_data_purpose() {
     );
     assert!(events_named(&bob, "data_attachment_received").is_empty());
 }
+
+#[test]
+fn a_chunk_arriving_before_chunk_zero_reports_no_phantom_progress() {
+    // The purpose rides chunk 0, so until it lands this device cannot say
+    // what a transfer is. Reading "nothing known yet" as "an ordinary file"
+    // puts a download nobody started in front of a person, counting up to a
+    // file that never appears, on any transport that delivers out of order.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    // Big enough to be several chunks, so there is a chunk 1 to deliver
+    // first. BLE chunks at 4 KiB.
+    let blob = vec![7u8; 12 * 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&blob);
+
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+    alice
+        .protocol
+        .data_provide_attachment(&alice_space, &bob.address, &hash, blob.clone())
+        .expect("provide");
+
+    // Deliver the first batch back to front.
+    let mut first = alice.transport.sent_messages();
+    alice.transport.clear_sent_messages();
+    assert!(
+        first.len() > 1,
+        "the fixture needs a multi-chunk transfer to reorder"
+    );
+    first.reverse();
+    for message in first {
+        bob.transport.queue_message(message);
+    }
+    while bob.protocol.receive_message().is_some() {}
+
+    assert!(
+        events_named(&bob, "file_progress").is_empty(),
+        "a chunk that arrived before the purpose did must not be reported as \
+         progress on a file"
+    );
+
+    settle_media(&mut alice, &mut bob);
+    assert_eq!(
+        events_named(&bob, "data_attachment_received").len(),
+        1,
+        "and the transfer still completes"
+    );
+    assert!(events_named(&bob, "file_progress").is_empty());
+    assert!(events_named(&bob, "file_received").is_empty());
+}

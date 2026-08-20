@@ -891,11 +891,23 @@ impl OfflineProtocol {
                 // progress on it would put a download nobody started in
                 // front of a person, counting up to a file that never
                 // appears.
-                let carries_data = self
+                //
+                // Positive knowledge, not absence of it: the purpose rides
+                // chunk 0, so a chunk arriving before it leaves this device
+                // unable to say what the transfer is. Reading "no entry yet"
+                // as "not data-purposed" would emit exactly the phantom
+                // progress this suppression exists to prevent, on any
+                // transport that delivers chunk 1 first.
+                //
+                // The cost is that an ordinary transfer whose chunk 0 is
+                // delayed loses the progress events until it lands. That is
+                // cheap: progress is advisory and each event supersedes the
+                // last, so the app sees the count resume rather than a gap.
+                let reports_progress = self
                     .pending_media_metadata
                     .get(&file_id)
-                    .is_some_and(|entry| entry.data_purpose.is_some());
-                if !carries_data {
+                    .is_some_and(|entry| entry.data_purpose.is_none());
+                if reports_progress {
                     if let Ok(state) = lock_shared_state(&self.shared_state) {
                         state.emit_event(Event::file_progress(
                             file_id.clone(),
