@@ -1024,9 +1024,17 @@ fn the_escape_hatch_describes_an_attachment_in_the_words_the_api_uses() {
         .expect("set");
 
     let exported = doc.export_json().expect("json");
-    assert!(
-        exported.contains(HASH_A) && exported.contains("attachment"),
-        "the escape hatch must describe the reference: {exported}"
+    // Against the API's own spelling of the same value rather than against
+    // a substring of it. `contains("attachment")` is true of "attachment2"
+    // as well, so it pins none of the key names the claim is about: rename
+    // any of them and the export diverges from the API while a substring
+    // check stays green.
+    let exported: serde_json::Value = serde_json::from_str(&exported).expect("the export is JSON");
+    let reference = &exported["files"]["blob"];
+    assert_eq!(
+        reference,
+        &serde_json::to_value(DataValue::attachment(HASH_A, 10)).expect("encode"),
+        "the escape hatch must describe the reference in the API's own words: {exported}"
     );
 }
 
@@ -1148,4 +1156,36 @@ fn an_attachment_reference_is_a_list_value_too() {
     doc.list_push("gallery", DataValue::attachment(HASH_B, 2))
         .expect("push");
     assert_eq!(doc.list_len("gallery").expect("len"), 2);
+}
+
+#[test]
+fn a_name_or_type_at_the_bound_is_accepted() {
+    // The control the refusal test needs. A check written `>=` refuses the
+    // longest legal name, which the spec says MUST be accepted, and the
+    // refusal test alone cannot tell the two spellings apart.
+    let mut doc = DataDoc::new();
+    doc.map_set(
+        "files",
+        "blob",
+        DataValue::Attachment {
+            hash: HASH_A.to_string(),
+            size: 1,
+            name: Some("n".repeat(crate::MAX_ATTACHMENT_NAME_LEN)),
+            mime: Some("m".repeat(crate::MAX_ATTACHMENT_MIME_LEN)),
+        },
+    )
+    .expect("a name and type exactly at the bound must be accepted");
+
+    let Some(DataValue::Attachment { name, mime, .. }) = doc.map_get("files", "blob").expect("get")
+    else {
+        panic!("expected an attachment");
+    };
+    assert_eq!(
+        name.map(|name| name.len()),
+        Some(crate::MAX_ATTACHMENT_NAME_LEN)
+    );
+    assert_eq!(
+        mime.map(|mime| mime.len()),
+        Some(crate::MAX_ATTACHMENT_MIME_LEN)
+    );
 }

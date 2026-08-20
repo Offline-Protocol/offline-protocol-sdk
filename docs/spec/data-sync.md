@@ -315,6 +315,15 @@ every other value resolves, and neither replica ends holding a hash from one
 beside a size from another. There is no partial-attachment state to represent,
 so this version defines none.
 
+A reader MUST ignore fields it does not know, so that a later version can
+add an optional one without a flag day. A change that alters what an existing
+reference *means* therefore cannot be a new field: it MUST change `kind`, so
+that a reader of this version reads it as absent rather than as a plain
+attachment it can only half understand. A field it does know but whose value
+is of the wrong type is not an unknown field, and the reference reads as
+absent: two readers disagreeing about one delta is the outcome every rule
+here exists to prevent.
+
 An implementation that does not know this value kind MUST read it as absent.
 It MUST NOT render it as text or coerce it to a scalar. This is what lets a
 member on an older build sit in a space where attachments are used: they see a
@@ -470,7 +479,7 @@ Blob bytes and oversized documents are carried by the media transfer path
 rather than by frames, and are marked as belonging to this layer inside the
 sealed chunk-0 plaintext ([encryption envelopes](encryption-envelopes.md)).
 
-Three rules govern the mark.
+Four rules govern the mark.
 
 **It is not application-settable.** An application asking to send a file MUST
 NOT be able to produce one. A caller that could would be able to feed bytes of
@@ -484,7 +493,19 @@ receiver refuse the chunk cleanly instead.
 
 **It is only ever sent to a peer that advertised entry 3.** A peer without it
 routes the transfer to its user, which for a document snapshot means handing
-somebody a CRDT encoding as a downloaded file.
+somebody a CRDT encoding as a downloaded file. A sender that cannot seal the
+chunk at all MUST NOT send the transfer unmarked instead: the mark exists
+nowhere but inside the sealed plaintext, so an unsealed transfer is an
+unmarked one, and the receiver has no way to tell it from a file somebody
+attached.
+
+**It is fixed by the chunk that carries it.** A receiver MUST refuse a
+transfer whose chunk 0 arrives again naming a different purpose, or naming
+none where the first named one, rather than adopting the later value. The mark
+decides whether the bytes reach a document engine or a person, and a field
+that a later duplicate can rewrite is a field the sender chooses the meaning
+of after the receiver has already committed to it. Duplicate chunks are
+otherwise ordinary: what is refused is the contradiction, not the repeat.
 
 The mark names what the bytes are for and, for a document, which document. It
 does not name the space, for the reason every frame here does not: the space

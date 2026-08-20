@@ -2245,8 +2245,8 @@ fn a_peer_asking_for_endless_distinct_blobs_is_budgeted() {
     );
     assert!(
         alice.protocol.blob_request_windows.len()
-            <= crate::protocol::data_sync::MAX_BLOB_REQUEST_WINDOWS,
-        "and the map that remembers them stays bounded"
+            <= crate::protocol::data_sync::MAX_BLOB_REQUESTS_PER_WINDOW,
+        "and one peer's share of the map that remembers them is its budget"
     );
     assert!(
         requested > 0,
@@ -2874,5 +2874,542 @@ fn a_snapshot_larger_than_a_record_is_refused_before_it_is_buffered() {
         bob.protocol.file_transfer_manager.active_transfer_count(),
         1,
         "the same road must admit a snapshot the ceiling allows"
+    );
+}
+
+#[test]
+fn a_duplicate_chunk_zero_cannot_reclassify_a_transfer() {
+    // What a transfer is, is decided by chunk 0 and nothing else. Duplicates
+    // of a chunk are accepted by replacement, and the manager's consistency
+    // check covers only the fields on the chunk itself, so without a rule
+    // here the marking that makes a transfer invisible is a field an
+    // authenticated peer may rewrite mid-flight: send chunk 0 twice, once
+    // marked and once not, and choose afterwards whether the bytes reach the
+    // document layer or the person.
+    let (mut alice, mut bob) = pair();
+    let file_id = "reclassify-me".to_string();
+    // Many chunks, so chunk 0 lands and the assembly is still open behind
+    // it. A single-chunk transfer completes before there is anything left to
+    // reclassify.
+    let blob = vec![0xA5u8; 64 * 1024];
+    let options = || crate::protocol::types::MediaSendOptions {
+        file_id: Some(file_id.clone()),
+        ..Default::default()
+    };
+
+    alice
+        .protocol
+        .send_media_inner(
+            bob.address.clone(),
+            blob.clone(),
+            "snapshot",
+            offline_protocol_core::ContentType::File,
+            options(),
+            Some(crate::media_envelope::DataPurpose::Snapshot {
+                doc: "notes".to_string(),
+            }),
+        )
+        .expect("carry the snapshot");
+    alice.protocol.pump_media_transfers();
+    pump(&mut alice, &mut bob);
+
+    // The fixture reached the state the gate needs: a transfer under way,
+    // known to be the document layer's.
+    assert!(
+        bob.protocol
+            .pending_media_metadata
+            .get(&file_id)
+            .is_some_and(|entry| entry.data_purpose.is_some()),
+        "chunk 0 must have opened a transfer this device knows is internal"
+    );
+    assert!(bob.protocol.file_transfer_manager.active_transfer_count() > 0);
+    clear_events(&bob);
+
+    // The same peer now contradicts itself: chunk 0 again, byte for byte the
+    // same transfer, with the marking dropped. Alice's own bookkeeping is
+    // cleared first because a well-behaved sender cannot do this at all,
+    // which is the point.
+    alice.protocol.outbound_media_transfers.remove(&file_id);
+    alice
+        .protocol
+        .send_media_inner(
+            bob.address.clone(),
+            blob,
+            "snapshot",
+            offline_protocol_core::ContentType::File,
+            options(),
+            None,
+        )
+        .expect("the lie is sendable; it is the receiver that must refuse it");
+    alice.protocol.pump_media_transfers();
+    pump(&mut alice, &mut bob);
+
+    assert_eq!(
+        bob.protocol.file_transfer_manager.active_transfer_count(),
+        0,
+        "a chunk 0 that reclassifies a transfer must end it, not rewrite it"
+    );
+    assert!(
+        bob.protocol.pending_media_metadata.get(&file_id).is_none(),
+        "and leave no state behind"
+    );
+
+    // Which is the outcome that matters: the snapshot never becomes a file
+    // in front of a person, however the transfer is finished.
+    settle_media(&mut alice, &mut bob);
+    assert!(
+        events_named(&bob, "file_received").is_empty(),
+        "document-layer bytes must never surface as a downloaded file"
+    );
+    assert!(
+        events_named(&bob, "file_progress").is_empty(),
+        "nor as progress on one"
+    );
+}
+
+#[test]
+fn every_attachment_surface_answers_data_disabled() {
+    // The kill switch has one spelling across this API, and these three were
+    // answering with the code that means "your argument is wrong, retrying
+    // unchanged can never help". The discriminants are positional over the
+    // FFI, so an app switching on the error to tell a setup mistake from a
+    // permanent refusal is told the wrong thing.
+    let (mut alice, bob) = pair();
+    let space = Node::space_for(&bob);
+    let hash = OfflineProtocol::data_attachment_hash(b"anything");
+    alice.protocol.config.data.enabled = false;
+
+    let disabled = |result: crate::Result<()>, surface: &str| match result {
+        Err(crate::Error::DataDisabled) => {}
+        other => panic!("{surface} must answer DataDisabled, got {other:?}"),
+    };
+
+    disabled(
+        alice.protocol.data_fetch_attachment(&space, &hash),
+        "fetch_attachment",
+    );
+    disabled(
+        alice
+            .protocol
+            .data_provide_attachment(&space, &bob.address, &hash, b"anything".to_vec()),
+        "provide_attachment",
+    );
+    disabled(
+        alice
+            .protocol
+            .data_decline_attachment(&space, &bob.address, &hash),
+        "decline_attachment",
+    );
+}
+
+#[test]
+fn forgetting_a_peer_reports_the_fetches_it_ends() {
+    // Every road that ends a fetch without bytes owes the application the
+    // same event, and this one owed it nothing. It is reached while somebody
+    // is waiting — a peer blocked, forgotten, or come back without the
+    // capability — and removing the record silently also forecloses the
+    // expiry that would have reported it later, so the spinner never ends.
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes alice holds");
+
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+    assert_eq!(
+        bob.protocol.pending_attachment_fetches.len(),
+        1,
+        "the fixture must reach a fetch that is actually outstanding"
+    );
+    clear_events(&bob);
+
+    bob.protocol.forget_data_sync_peer(&alice.address);
+
+    let unavailable = events_named(&bob, "data_attachment_unavailable");
+    assert_eq!(
+        unavailable.len(),
+        1,
+        "forgetting a peer must report the fetch it ends"
+    );
+    assert_eq!(unavailable[0]["reason"].as_str(), Some("peer_gone"));
+    assert_eq!(unavailable[0]["hash"].as_str(), Some(hash.as_str()));
+    assert!(
+        bob.protocol.pending_attachment_fetches.is_empty(),
+        "and release the slot"
+    );
+}
+
+#[test]
+fn a_document_layer_transfer_is_never_sent_unsealed() {
+    // The marking exists nowhere but inside the encrypted chunk-0 plaintext.
+    // On the plaintext opt-out path it would simply not travel, and the peer
+    // would hand its user a downloaded file named by a hash: the exact
+    // outcome the capability gate and the envelope version both exist to
+    // prevent, produced by our own sender.
+    let (mut alice, bob) = pair();
+    let space = Node::space_for(&bob);
+    let blob = b"bytes that must not leave unmarked".to_vec();
+    let hash = OfflineProtocol::data_attachment_hash(&blob);
+
+    // The opt-out an application has to ask for explicitly.
+    alice.protocol.config.encryption.enabled = false;
+    alice.protocol.config.encryption.require_encryption = false;
+
+    let err = alice
+        .protocol
+        .data_provide_attachment(&space, &bob.address, &hash, blob.clone())
+        .expect_err("a purposed transfer that cannot be sealed must be refused");
+    assert!(
+        matches!(err, crate::Error::EncryptFailed(_)),
+        "unexpected refusal: {err:?}"
+    );
+
+    // And the refusal is about the marking, not about media: an ordinary
+    // file still leaves on the plaintext path, which is what the opt-out is
+    // for.
+    alice
+        .protocol
+        .send_media_with(
+            bob.address.clone(),
+            blob,
+            "holiday.jpg",
+            offline_protocol_core::ContentType::Image,
+            crate::protocol::types::MediaSendOptions::default(),
+        )
+        .expect("the opt-out still sends ordinary media");
+}
+
+#[test]
+fn internal_transfers_leave_the_application_a_slot() {
+    // The in-flight dedup stops a second copy of one transfer, not two
+    // different ones, and two different ones are ordinary: a document
+    // snapshot and an answered blob request are separate errands to the same
+    // peer. Both slots filled by them fails the application's own send with
+    // a limit whose cause it cannot see, because what holds the slots is
+    // invisible to it by design.
+    let (mut alice, mut bob) = pair();
+    let space = Node::space_for(&bob);
+
+    fill_past_the_frame_budget(&mut alice, &space, 0x0BAD_F00D_0BAD_F00D);
+    pump(&mut alice, &mut bob);
+    pump(&mut bob, &mut alice);
+    let internal = |node: &Node| {
+        node.protocol
+            .outbound_media_transfers
+            .values()
+            .filter(|transfer| transfer.data_purpose.is_some())
+            .count()
+    };
+    assert_eq!(internal(&alice), 1, "the document must be on its way");
+
+    // A different internal errand to the same peer, which the dedup does not
+    // cover because it is not the same transfer.
+    let blob = vec![7u8; 32 * 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&blob);
+    let err = alice
+        .protocol
+        .data_provide_attachment(&space, &bob.address, &hash, blob)
+        .expect_err("a second internal transfer must not take the app's slot");
+    assert!(
+        matches!(err, crate::Error::MediaTransferLimit(_)),
+        "unexpected refusal: {err:?}"
+    );
+    assert_eq!(internal(&alice), 1);
+
+    // The slot the cap kept is the one that matters.
+    alice
+        .protocol
+        .send_media_with(
+            bob.address.clone(),
+            vec![1u8; 4096],
+            "holiday.jpg",
+            offline_protocol_core::ContentType::Image,
+            crate::protocol::types::MediaSendOptions::default(),
+        )
+        .expect("the app's own media send must still have a slot");
+}
+
+#[test]
+fn a_fetch_that_has_already_ended_is_not_reported_twice() {
+    // A fetch gets one answer. A decline arriving while its own transfer is
+    // still moving ends it, and the transfer failing afterwards is the same
+    // fetch failing again: an application told twice is an application shown
+    // a failure for something it is no longer waiting for.
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    let alice_space = Node::space_for(&bob);
+    // Many chunks, so the answer is still crossing when the peer changes
+    // its mind. A blob that fits in one chunk lands before the decline and
+    // there is no race left to test.
+    let blob = vec![3u8; 64 * 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&blob);
+
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+    clear_events(&bob);
+
+    // The peer answers the question, then changes its mind while the bytes
+    // are still crossing.
+    alice
+        .protocol
+        .data_provide_attachment(&alice_space, &bob.address, &hash, blob)
+        .expect("provide");
+    alice.protocol.pump_media_transfers();
+    pump(&mut alice, &mut bob);
+    assert!(
+        bob.protocol.file_transfer_manager.active_transfer_count() > 0,
+        "the fixture must reach a decline that races bytes still in flight"
+    );
+    alice
+        .protocol
+        .data_decline_attachment(&alice_space, &bob.address, &hash)
+        .expect("decline");
+    pump(&mut alice, &mut bob);
+
+    let after_decline = events_named(&bob, "data_attachment_unavailable");
+    assert_eq!(
+        after_decline.len(),
+        1,
+        "the decline is the one answer this fetch gets"
+    );
+    assert_eq!(after_decline[0]["reason"].as_str(), Some("declined"));
+
+    // Now finish killing the transfer the decline abandoned. Whatever it
+    // reports, it reports about a fetch that is over.
+    bob.protocol.report_data_media_transfer_failure(
+        &alice.address,
+        &crate::media_envelope::DataPurpose::Attachment { hash: hash.clone() },
+        "stale_timeout",
+    );
+
+    assert_eq!(
+        events_named(&bob, "data_attachment_unavailable").len(),
+        1,
+        "a fetch that has already ended must not be reported a second time"
+    );
+}
+
+#[test]
+fn the_requester_bounds_how_often_it_asks() {
+    // The spec makes this a MUST on the asking side, and the holder's own
+    // window cannot substitute for it: an application retrying a spinner on
+    // a timer would otherwise seal and send one frame per retry, and a
+    // holder answering none of them is exactly what provokes the retries.
+    let (alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    let hash = OfflineProtocol::data_attachment_hash(b"asked for repeatedly");
+
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch");
+    let first = bob.transport.sent_messages().len();
+    assert_eq!(first, 1, "the first ask must reach the wire");
+
+    for _ in 0..5 {
+        bob.protocol
+            .data_fetch_attachment(&bob_space, &hash)
+            .expect("a repeat inside the window is not an error");
+    }
+    assert_eq!(
+        bob.transport.sent_messages().len(),
+        first,
+        "a repeat inside the window must not reach the wire"
+    );
+
+    // And the bound is a window rather than a latch: once it passes, the
+    // question can be asked again.
+    let stale = std::time::Instant::now()
+        - crate::protocol::data_sync::DATA_SYNC_OFFER_INTERVAL
+        - std::time::Duration::from_secs(1);
+    for asked_at in bob.protocol.pending_attachment_fetches.values_mut() {
+        *asked_at = stale;
+    }
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch again");
+    assert_eq!(
+        bob.transport.sent_messages().len(),
+        first + 1,
+        "a repeat after the window must reach the wire"
+    );
+}
+
+#[test]
+fn a_holder_bounds_repeats_of_one_request() {
+    // The holder's half of the same rule. Every request it acts on becomes
+    // an application callback and, if answered, a whole transfer, so a peer
+    // repeating one question must not turn into a stream of them.
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    let hash = OfflineProtocol::data_attachment_hash(b"asked for repeatedly");
+
+    let mut asked = 0;
+    for _ in 0..4 {
+        // The requester's own window is a different gate, and leaving it in
+        // the way would mean testing that one instead of this one: forget
+        // the question locally so each repeat genuinely reaches the wire.
+        bob.protocol.pending_attachment_fetches.clear();
+        bob.protocol
+            .data_fetch_attachment(&bob_space, &hash)
+            .expect("ask again");
+        asked += pump(&mut bob, &mut alice);
+    }
+    assert_eq!(
+        asked, 4,
+        "the fixture must have carried four identical questions to the holder"
+    );
+
+    assert_eq!(
+        events_named(&alice, "data_attachment_requested").len(),
+        1,
+        "one question repeated must reach the application once"
+    );
+}
+
+#[test]
+fn the_request_map_is_bounded_across_peers_too() {
+    // The per-peer budget bounds one peer's share of this map, not the map.
+    // Enough peers each staying politely under their own budget reach the
+    // global bound between them, and that bound is the only thing standing
+    // between a roster's worth of distinct hashes and a map that remembers
+    // all of them until the process ends.
+    let (mut alice, bob) = pair();
+    let per_peer = crate::protocol::data_sync::MAX_BLOB_REQUESTS_PER_WINDOW;
+    let cap = crate::protocol::data_sync::MAX_BLOB_REQUEST_WINDOWS;
+    let peers = cap / per_peer + 2;
+
+    for peer in 0..peers {
+        // A peer this device has heard advertise the capability, which is
+        // all the inbound path checks: the flood is distinct senders, not a
+        // handshake.
+        let address = format!("{}{peer:04}", bob.address);
+        alice.protocol.peer_data_sync.insert(address.clone());
+        alice.protocol.peer_data_media.insert(address.clone());
+        for round in 0..per_peer {
+            let hash = OfflineProtocol::data_attachment_hash(format!("{peer}-{round}").as_bytes());
+            alice.protocol.handle_data_sync_frame(
+                &address,
+                &format!(r#"{{"v":1,"k":"need_blob","hash":"{hash}"}}"#),
+            );
+        }
+    }
+
+    // The fixture must actually reach past the bound, or it observes a map
+    // that was never full and says the cap works.
+    assert!(
+        peers * per_peer > cap,
+        "the fixture offered {} entries against a cap of {cap}",
+        peers * per_peer
+    );
+    assert!(
+        alice.protocol.blob_request_windows.len() <= cap,
+        "the map grew to {} against a cap of {cap}",
+        alice.protocol.blob_request_windows.len()
+    );
+}
+
+#[test]
+fn a_stale_document_layer_transfer_reports_to_the_fetch_not_the_app() {
+    // The stale sweep is the third road that ends an inbound transfer, and
+    // it has the same two obligations as the other two: never name a
+    // document-layer transfer as a failed download, and tell the fetch that
+    // is waiting for it to stop waiting.
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    let alice_space = Node::space_for(&bob);
+    // Many chunks, so the transfer is still open when the clock moves.
+    let blob = vec![9u8; 64 * 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&blob);
+
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+    alice
+        .protocol
+        .data_provide_attachment(&alice_space, &bob.address, &hash, blob)
+        .expect("provide");
+    alice.protocol.pump_media_transfers();
+    pump(&mut alice, &mut bob);
+    assert!(
+        bob.protocol.file_transfer_manager.active_transfer_count() > 0,
+        "the fixture must reach a transfer that is open when it goes stale"
+    );
+    clear_events(&bob);
+
+    // The radio goes quiet for longer than the sweep tolerates.
+    bob.protocol
+        .file_transfer_manager
+        .backdate_transfers(std::time::Duration::from_secs(
+            crate::protocol::MEDIA_TRANSFER_STALE_TIMEOUT_SECS + 60,
+        ));
+    bob.protocol.cleanup_expired_entries();
+
+    assert!(
+        events_named(&bob, "file_receive_failed").is_empty(),
+        "a document-layer transfer must never be named as a failed download"
+    );
+    let unavailable = events_named(&bob, "data_attachment_unavailable");
+    assert_eq!(
+        unavailable.len(),
+        1,
+        "the fetch waiting on those bytes must be told to stop waiting"
+    );
+    assert_eq!(unavailable[0]["reason"].as_str(), Some("stale_timeout"));
+}
+
+#[test]
+fn aborting_a_document_layer_transfer_does_not_fail_a_file_nobody_sent() {
+    // The send side's own version of the rule. An abort is where a transfer
+    // that cannot finish is given up on, and reporting one for an internal
+    // transfer would put a failed upload in front of somebody who never
+    // attached anything.
+    let (mut alice, mut bob) = pair();
+    let space = Node::space_for(&bob);
+
+    fill_past_the_frame_budget(&mut alice, &space, 0x5EED_1234_5EED_1234);
+    pump(&mut alice, &mut bob);
+    pump(&mut bob, &mut alice);
+    let file_id = alice
+        .protocol
+        .outbound_media_transfers
+        .iter()
+        .find(|(_, transfer)| transfer.data_purpose.is_some())
+        .map(|(file_id, _)| file_id.clone())
+        .expect("the document must be on its way");
+    clear_events(&alice);
+
+    alice
+        .protocol
+        .abort_outbound_media_transfer(&file_id, "transport gone");
+
+    assert!(
+        events_named(&alice, "media_send_failed").is_empty(),
+        "an internal transfer has no application-facing identity to fail"
+    );
+
+    // And the control, on the same road: an ordinary send aborted the same
+    // way still reports, so what is pinned above is the marking and not a
+    // silent abort path.
+    let app_file_id = alice
+        .protocol
+        .send_media_with(
+            bob.address.clone(),
+            vec![1u8; 4096],
+            "holiday.jpg",
+            offline_protocol_core::ContentType::Image,
+            crate::protocol::types::MediaSendOptions::default(),
+        )
+        .expect("send");
+    alice
+        .protocol
+        .abort_outbound_media_transfer(&app_file_id, "transport gone");
+    assert_eq!(
+        events_named(&alice, "media_send_failed").len(),
+        1,
+        "an ordinary transfer aborted the same way must still report"
     );
 }

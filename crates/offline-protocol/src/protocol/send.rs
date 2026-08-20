@@ -2380,6 +2380,22 @@ impl OfflineProtocol {
             )));
         }
 
+        // And only where it can be sealed. The marking exists nowhere but
+        // inside the encrypted chunk-0 plaintext, so a transfer leaving by
+        // the plaintext opt-out path arrives stripped of it: the receiver
+        // has no way to know what the bytes are and hands its user a
+        // downloaded file named by a hash, which is the outcome the whole
+        // marking exists to prevent. Refused rather than degraded, for the
+        // same reason the capability gate above refuses.
+        if data_purpose.is_some() && !self.should_auto_encrypt() {
+            return Err(Error::EncryptFailed(
+                "a document-layer transfer cannot be sent unsealed: its marking travels \
+                 inside the encrypted chunk, and a receiver would surface the bytes to its \
+                 user as an ordinary file"
+                    .to_string(),
+            ));
+        }
+
         // SEC-H1: media rides the same MLS session machinery as text. With
         // auto-encryption active the session must already be confirmed —
         // files are too large for the pending-message queue, so media is
@@ -2405,7 +2421,10 @@ impl OfflineProtocol {
             // bounded number of generations — cap concurrent transfers so
             // the combined in-flight windows cannot push a delayed chunk
             // beyond that tolerance and permanently stall it.
-            use crate::constants::MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER;
+            use crate::constants::{
+                MAX_CONCURRENT_INTERNAL_MEDIA_TRANSFERS_PER_PEER,
+                MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER,
+            };
             let active_transfers = self
                 .outbound_media_transfers
                 .values()
@@ -2413,6 +2432,29 @@ impl OfflineProtocol {
                 .count();
             if active_transfers >= MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER {
                 return Err(Error::MediaTransferLimit(recipient_str));
+            }
+
+            // An SDK-internal transfer takes at most one of those slots.
+            // The cap above bounds the ratchet gap and so cannot be raised
+            // for our own traffic; what is left is to leave the application
+            // a slot it can account for. The in-flight dedup stops a second
+            // copy of one transfer, not two different ones, and two
+            // different ones are ordinary here: a document snapshot and an
+            // answered blob request are separate errands to the same peer.
+            // Filling both slots with them fails the app's own send with a
+            // limit whose cause it cannot see, because what holds the slots
+            // is invisible to it by design.
+            if data_purpose.is_some() {
+                let internal_transfers = self
+                    .outbound_media_transfers
+                    .values()
+                    .filter(|transfer| {
+                        transfer.recipient == recipient_str && transfer.data_purpose.is_some()
+                    })
+                    .count();
+                if internal_transfers >= MAX_CONCURRENT_INTERNAL_MEDIA_TRANSFERS_PER_PEER {
+                    return Err(Error::MediaTransferLimit(recipient_str));
+                }
             }
         } else if self.config.encryption.require_encryption {
             return Err(Error::EncryptFailed(

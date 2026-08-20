@@ -165,6 +165,12 @@ impl OfflineProtocol {
             // other side of this device waiting for bytes that are no longer
             // coming, so it is told. Ordinary transfers are cancelled
             // silently as before: the block itself is the explanation.
+            //
+            // On this path the fetch has usually been reported already, by
+            // the peer reset further up, and this call then finds nothing
+            // outstanding and stays quiet. It is kept because it is the
+            // general report for a cancelled transfer and this is not the
+            // only road that reaches it.
             if let Some(purpose) = self
                 .pending_media_metadata
                 .remove(file_id)

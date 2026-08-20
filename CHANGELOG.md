@@ -73,6 +73,29 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   pairwise session, and two members of a group need not have one with each
   other. References themselves replicate in groups like any other value.
 
+  What a transfer is, is decided by its first chunk and cannot be revised
+  afterwards. A duplicate chunk 0 that disagrees with the one that opened the
+  transfer ends it rather than rewriting it: the marking that makes a transfer
+  invisible would otherwise be a field an authenticated peer could flip
+  mid-flight, handing a person a CRDT snapshot as a download or turning their
+  own download invisible and never telling them how it ended.
+
+  A document-layer transfer is refused rather than degraded when it cannot be
+  sealed. The marking travels inside the encrypted chunk and nowhere else, so
+  on the plaintext opt-out path it would simply not arrive.
+
+  The SDK's own transfers take at most one of the two per-peer transfer slots,
+  leaving one the application can always reach. A snapshot and an answered
+  blob request are separate errands to the same peer, and both slots filled by
+  invisible transfers would fail the application's own send with a limit whose
+  cause it has no way to see.
+
+  Every road that ends a fetch without bytes now reports it, including a peer
+  being blocked, forgotten, or coming back without the capability
+  (`peer_gone`). A fetch gets exactly one such report: a decline that races
+  its own arriving bytes is not followed by a second failure for the transfer
+  it abandoned.
+
   The wire contract now has its own chapter, [Document
   replication](./docs/spec/data-sync.md), with frozen conformance vectors
   beside it.

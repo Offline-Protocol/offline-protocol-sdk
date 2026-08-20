@@ -85,8 +85,10 @@ pub(crate) fn is_media_envelope(data: &[u8]) -> bool {
 }
 
 /// Wraps an encrypted chunk in the versioned media envelope. `version` is
-/// [`MEDIA_ENVELOPE_VERSION_MLS_V2`] when the plaintext carries rich extras,
-/// [`MEDIA_ENVELOPE_VERSION_MLS_V1`] otherwise.
+/// whatever [`MediaChunkPlaintext::envelope_version`] decided the plaintext
+/// needs: the highest version any field present on it requires, so that a
+/// receiver refuses at the version check rather than misreading a field it
+/// does not know.
 pub(crate) fn encode_media_envelope(encrypted: &EncryptedMessage, version: u8) -> Vec<u8> {
     let payload = encrypted.to_bytes();
     let mut buf = Vec::with_capacity(3 + payload.len());

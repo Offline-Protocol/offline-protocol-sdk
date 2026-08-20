@@ -212,7 +212,7 @@ pub fn validate_value(value: &DataValue) -> DataResult<()> {
     validate_value_len(len)
 }
 
-/// Check an attachment reference.
+/// Check that a string is a well-formed attachment address.
 ///
 /// The hash is checked for shape, not for reachability: whether anybody
 /// still holds the bytes is not knowable here, and a reference to a blob
@@ -225,12 +225,13 @@ pub fn validate_value(value: &DataValue) -> DataResult<()> {
 /// unequal while naming identical bytes. Lowercase is the canonical form,
 /// and the uppercase spelling is refused rather than folded so that a
 /// writer producing the wrong one hears about it.
-pub fn validate_attachment(
-    hash: &str,
-    size: u64,
-    name: Option<&str>,
-    mime: Option<&str>,
-) -> DataResult<()> {
+///
+/// Separate from [`validate_attachment`] because a hash also travels alone:
+/// the frames that ask for a blob and refuse one carry nothing else. Checking
+/// those through the whole-reference validator means inventing a size to
+/// satisfy it, which ties a frame check to a bound that has nothing to do
+/// with it and breaks the day that validator gains a cross-field rule.
+pub fn validate_attachment_hash(hash: &str) -> DataResult<()> {
     if hash.len() != ATTACHMENT_HASH_LEN {
         return Err(DataError::InvalidAttachment {
             reason: "hash must be exactly 64 characters",
@@ -244,6 +245,22 @@ pub fn validate_attachment(
             reason: "hash must be lowercase hex",
         });
     }
+    Ok(())
+}
+
+/// Check an attachment reference.
+///
+/// Every bound this layer places on a reference, in one place, so that the
+/// write path and the read path cannot disagree about what a valid reference
+/// is. A reference that fails any of them reads as absent rather than as an
+/// error on the read path: see [`crate::DataDoc`].
+pub fn validate_attachment(
+    hash: &str,
+    size: u64,
+    name: Option<&str>,
+    mime: Option<&str>,
+) -> DataResult<()> {
+    validate_attachment_hash(hash)?;
     if size == 0 {
         return Err(DataError::InvalidAttachment {
             reason: "size must not be zero",

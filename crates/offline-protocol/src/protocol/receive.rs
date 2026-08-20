@@ -866,6 +866,37 @@ impl OfflineProtocol {
         let file_size = chunk.file_size;
         let is_first_chunk = chunk.chunk_index == 0;
 
+        // A duplicate chunk 0 must not reclassify a transfer already under
+        // way. Duplicates are accepted by replacement, and the manager's
+        // consistency check covers only the fields on the chunk itself: the
+        // purpose rides the sealed envelope, outside them. Without this an
+        // authenticated peer sends chunk 0 twice, once marked and once not,
+        // and chooses afterwards which side of the invisibility rule the
+        // transfer lands on. Either direction is a defect the marking
+        // exists to prevent: a document snapshot surfaced to a person as a
+        // downloaded file, or an app's own download turned invisible and
+        // left with no terminal event ever.
+        //
+        // Scoped to the sender the assembly belongs to. A chunk under
+        // another peer's file_id is refused by the manager's own sender
+        // check, and refusing it here instead would let any peer tombstone
+        // a transfer it merely named.
+        if is_first_chunk
+            && self
+                .pending_media_metadata
+                .get(&file_id)
+                .is_some_and(|entry| entry.sender == sender && entry.data_purpose != data_purpose)
+        {
+            warn!(
+                file_id = %file_id,
+                peer = %sender,
+                "Refusing a chunk 0 that reclassifies a transfer already under way"
+            );
+            self.file_transfer_manager.refuse_transfer(&file_id);
+            self.pending_media_metadata.remove(&file_id);
+            return ChunkOutcome::Handled;
+        }
+
         // Refuse a blob nobody asked for at the door, not at the end.
         //
         // The check also runs on completion, which is where the hash is

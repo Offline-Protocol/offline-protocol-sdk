@@ -109,7 +109,7 @@ const MAX_DOCS_PER_VERSION_FRAME: usize = 128;
 /// is pushed the moment it is durable and does not wait for this, so the only
 /// thing the window delays is the reconciliation sweep, and the next trigger
 /// repeats it anyway.
-const DATA_SYNC_OFFER_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const DATA_SYNC_OFFER_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Documents one space may hold on a peer's say-so.
 ///
@@ -1536,9 +1536,7 @@ impl OfflineProtocol {
     /// of a group need not have one with each other.
     pub fn data_fetch_attachment(&mut self, space: &str, hash: &str) -> Result<()> {
         if !self.config.data.enabled {
-            return Err(Error::InvalidArgument(
-                "the data layer is disabled".to_string(),
-            ));
+            return Err(Error::DataDisabled);
         }
         Self::validate_attachment_hash(hash)?;
         if self.group_space_roster(space).is_some() {
@@ -1620,9 +1618,7 @@ impl OfflineProtocol {
         bytes: Vec<u8>,
     ) -> Result<()> {
         if !self.config.data.enabled {
-            return Err(Error::InvalidArgument(
-                "the data layer is disabled".to_string(),
-            ));
+            return Err(Error::DataDisabled);
         }
         Self::validate_attachment_hash(hash)?;
         if bytes.is_empty() {
@@ -1679,9 +1675,7 @@ impl OfflineProtocol {
     /// merely slow, and shows a person a spinner that never resolves.
     pub fn data_decline_attachment(&mut self, space: &str, peer: &str, hash: &str) -> Result<()> {
         if !self.config.data.enabled {
-            return Err(Error::InvalidArgument(
-                "the data layer is disabled".to_string(),
-            ));
+            return Err(Error::DataDisabled);
         }
         Self::validate_attachment_hash(hash)?;
         if space != peer {
@@ -1765,7 +1759,7 @@ impl OfflineProtocol {
     }
 
     fn validate_attachment_hash(hash: &str) -> Result<()> {
-        offline_protocol_data::validate_attachment(hash, 1, None, None)
+        offline_protocol_data::validate_attachment_hash(hash)
             .map_err(|err| Error::InvalidArgument(err.to_string()))
     }
 
@@ -1788,8 +1782,23 @@ impl OfflineProtocol {
     /// notices until the two spellings diverge.
     pub(crate) fn forget_attachment_state(&mut self, peer: &str) {
         let prefix = Self::attachment_fetch_key(peer, "");
-        self.pending_attachment_fetches
-            .retain(|key, _| !key.starts_with(&prefix));
+        // Reported, not merely dropped. This is a road that ends a fetch
+        // without bytes like any other, and it is reached while an
+        // application is waiting: a peer re-keying without the capability,
+        // an unblock, a peer forgotten to keep a set bounded. Removing the
+        // record silently also forecloses the expiry that would have
+        // reported it later, so the spinner this event exists to end never
+        // ends at all.
+        let ended: Vec<String> = self
+            .pending_attachment_fetches
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect();
+        for key in ended {
+            self.pending_attachment_fetches.remove(&key);
+            Self::report_fetch_ended(&self.shared_state, &key, "peer_gone");
+        }
         self.blob_request_windows
             .retain(|key, _| !key.starts_with(&prefix));
     }
@@ -2087,7 +2096,21 @@ impl OfflineProtocol {
         match purpose {
             DataPurpose::Attachment { hash } => {
                 let key = Self::attachment_fetch_key(sender, hash);
-                self.pending_attachment_fetches.remove(&key);
+                // Only a fetch still outstanding is reported, the same rule
+                // the completion and refusal roads already follow. A fetch
+                // that ended while its transfer was still moving (declined
+                // mid-carriage, evicted, expired) has had its one answer,
+                // and a second one for the same hash reads to an
+                // application as a second failure of a thing it is no
+                // longer waiting for.
+                if self.pending_attachment_fetches.remove(&key).is_none() {
+                    debug!(
+                        peer = %sender,
+                        reason,
+                        "A transfer failed for a fetch that has already ended"
+                    );
+                    return;
+                }
                 if let Ok(state) = crate::protocol::lock_shared_state(&self.shared_state) {
                     state.emit_event(Event::DataAttachmentUnavailable {
                         space_id: sender.to_string(),
@@ -2300,8 +2323,24 @@ mod golden_vectors {
     fn the_vector_file_is_the_size_it_was() {
         // A file silently shortened by a bad merge would make every
         // assertion below pass by not running.
+        //
+        // Every array, not only the frames. The rest are read by `for`
+        // loops and by index, and a loop over an emptied array is the same
+        // green test as a loop over a full one. Counting them here is what
+        // makes "the vectors pass" mean the vectors ran.
         let vectors = vectors();
-        assert_eq!(vectors["frames"].as_array().expect("frames").len(), 8);
+        let len = |name: &str| -> usize {
+            vectors[name]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name} must be an array"))
+                .len()
+        };
+        assert_eq!(len("frames"), 8);
+        assert_eq!(len("parse_defaults"), 1);
+        assert_eq!(len("attachment_hashes"), 3);
+        assert_eq!(len("attachment_references"), 2);
+        assert_eq!(len("data_purposes"), 2);
+        assert_eq!(len("blob_digests"), 1);
         assert_eq!(vectors["version"].as_u64(), Some(DATA_SYNC_V1 as u64));
         assert_eq!(vectors["prefix"].as_str(), Some(internal_prefixes::DATA_V1));
     }

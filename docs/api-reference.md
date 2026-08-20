@@ -858,7 +858,7 @@ Emitted when a group is renamed.
 | `data_doc_size_warning` | `space_id`, `doc_id`, `compacted_bytes`, `cap_bytes` | A document passed 768 KiB, approaching the 1 MiB cap |
 | `data_attachment_requested` | `space_id`, `peer_id`, `hash` | A peer wants the bytes behind a reference. Answer with `provideAttachment` or `declineAttachment` |
 | `data_attachment_received` | `space_id`, `peer_id`, `hash`, `data` | Fetched bytes arrived and matched the hash that asked for them. `data` is the whole blob, base64 |
-| `data_attachment_unavailable` | `space_id`, `peer_id`, `hash`, `reason` | A fetch ended without bytes: `declined`, `timeout`, `evicted`, `hash_mismatch`, or a transfer failure |
+| `data_attachment_unavailable` | `space_id`, `peer_id`, `hash`, `reason` | A fetch ended without bytes: `declined`, `timeout`, `evicted`, `hash_mismatch`, `peer_gone`, or a transfer failure |
 | `data_doc_unsyncable` | `space_id`, `doc_id`, `bytes`, `reason` | A document cannot be replicated in any form: too large to frame, and no media path to the peer |
 
 ## Group Role Management

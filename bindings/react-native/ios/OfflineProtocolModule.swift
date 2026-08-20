@@ -1938,7 +1938,12 @@ class OfflineProtocolModule: RCTEventEmitter {
                 throw NSError(domain: "OfflineProtocol", code: -1,
                               userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
             }
-            guard let bytes = Data(base64Encoded: bytesBase64) else {
+            // Lenient, to match android.util.Base64.DEFAULT on the other
+            // bridge. A JS library that wraps its output at 76 columns is
+            // ordinary, and the same call succeeding on one platform while
+            // rejecting on the other is the worse failure.
+            guard let bytes = Data(base64Encoded: bytesBase64,
+                                   options: .ignoreUnknownCharacters) else {
                 throw NSError(domain: "OfflineProtocol", code: -1,
                               userInfo: [NSLocalizedDescriptionKey: "bytes must be base64"])
             }
@@ -1979,7 +1984,12 @@ class OfflineProtocolModule: RCTEventEmitter {
                 throw NSError(domain: "OfflineProtocol", code: -1,
                               userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
             }
-            guard let bytes = Data(base64Encoded: bytesBase64) else {
+            // Lenient, to match android.util.Base64.DEFAULT on the other
+            // bridge. A JS library that wraps its output at 76 columns is
+            // ordinary, and the same call succeeding on one platform while
+            // rejecting on the other is the worse failure.
+            guard let bytes = Data(base64Encoded: bytesBase64,
+                                   options: .ignoreUnknownCharacters) else {
                 throw NSError(domain: "OfflineProtocol", code: -1,
                               userInfo: [NSLocalizedDescriptionKey: "bytes must be base64"])
             }

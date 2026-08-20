@@ -796,12 +796,24 @@ fn from_engine_value(value: &LoroValue) -> Option<DataValue> {
                 Some(LoroValue::I64(size)) if *size >= 0 => *size as u64,
                 _ => return None,
             };
+            // Present-but-wrong is refused, absent is fine. These two are
+            // optional, so a missing key is an ordinary reference with no
+            // display text; a key holding something that is not text is a
+            // reference that disagrees with this version's shape, and
+            // reading it as though the field were simply missing would have
+            // two members render one delta differently. Absent is the one
+            // answer every reader already agrees on.
             let text_field = |key: &str| match fields.get(key) {
-                Some(LoroValue::String(value)) => Some(value.to_string()),
-                _ => None,
+                Some(LoroValue::String(value)) => Ok(Some(value.to_string())),
+                None => Ok(None),
+                Some(_) => Err(()),
             };
-            let name = text_field(ATTACHMENT_NAME_KEY);
-            let mime = text_field(ATTACHMENT_MIME_KEY);
+            let (Ok(name), Ok(mime)) = (
+                text_field(ATTACHMENT_NAME_KEY),
+                text_field(ATTACHMENT_MIME_KEY),
+            ) else {
+                return None;
+            };
             // Checked on the way out, not only on the way in. A local write
             // is validated at the operation, but a reference can also arrive
             // inside a peer's delta, and nothing on that path has looked at
@@ -889,15 +901,91 @@ mod engine_value_tests {
     #[test]
     fn an_attachment_without_an_address_reads_as_absent() {
         // Separate from the tag gate on purpose, so each refusal is pinned
-        // by a case that isolates it.
-        let tagged_only = LoroValue::Map(
-            vec![(
-                ATTACHMENT_TAG_KEY.to_string(),
-                LoroValue::from(ATTACHMENT_TAG),
-            )]
+        // by a case that isolates it. Everything but the hash is present
+        // and well formed, for the same reason `tagged` carries a hash:
+        // a fixture missing two things is refused by whichever check runs
+        // first and says nothing about the other.
+        let no_hash = LoroValue::Map(
+            vec![
+                (
+                    ATTACHMENT_TAG_KEY.to_string(),
+                    LoroValue::from(ATTACHMENT_TAG),
+                ),
+                (ATTACHMENT_SIZE_KEY.to_string(), LoroValue::from(4096i64)),
+            ]
             .into(),
         );
-        assert_eq!(from_engine_value(&tagged_only), None);
+        assert_eq!(from_engine_value(&no_hash), None);
+    }
+
+    #[test]
+    fn a_display_field_of_the_wrong_type_makes_the_reference_absent() {
+        // Present-but-wrong is not absent. A key holding something that is
+        // not text is a reference disagreeing with this version's shape,
+        // and reading it as though the key were merely missing would leave
+        // two members rendering one delta differently: one an attachment
+        // with no name, the other whatever its own reader made of it.
+        // Absent is the one answer every reader already agrees on, and it
+        // is what an unknown value kind gets.
+        for wrong in [ATTACHMENT_NAME_KEY, ATTACHMENT_MIME_KEY] {
+            let value = LoroValue::Map(
+                vec![
+                    (
+                        ATTACHMENT_TAG_KEY.to_string(),
+                        LoroValue::from(ATTACHMENT_TAG),
+                    ),
+                    (ATTACHMENT_HASH_KEY.to_string(), LoroValue::from(TEST_HASH)),
+                    (ATTACHMENT_SIZE_KEY.to_string(), LoroValue::from(4096i64)),
+                    (wrong.to_string(), LoroValue::from(5i64)),
+                ]
+                .into(),
+            );
+            assert_eq!(
+                from_engine_value(&value),
+                None,
+                "a {wrong} field of the wrong type must make the whole reference absent"
+            );
+        }
+
+        // The control: the same map with that field spelled as text IS
+        // read, so what the cases above pin is the type and not the key.
+        let good = LoroValue::Map(
+            vec![
+                (
+                    ATTACHMENT_TAG_KEY.to_string(),
+                    LoroValue::from(ATTACHMENT_TAG),
+                ),
+                (ATTACHMENT_HASH_KEY.to_string(), LoroValue::from(TEST_HASH)),
+                (ATTACHMENT_SIZE_KEY.to_string(), LoroValue::from(4096i64)),
+                (ATTACHMENT_NAME_KEY.to_string(), LoroValue::from("plan.pdf")),
+            ]
+            .into(),
+        );
+        assert!(matches!(
+            from_engine_value(&good),
+            Some(DataValue::Attachment { .. })
+        ));
+    }
+
+    #[test]
+    fn a_field_this_version_does_not_know_is_ignored() {
+        // The other half of the same rule, and the one that keeps a later
+        // version able to add an optional field without a flag day. A
+        // change that alters what a reference MEANS cannot be a new field
+        // for exactly this reason: it would be silently ignored here.
+        let mut fields = vec![
+            (
+                ATTACHMENT_TAG_KEY.to_string(),
+                LoroValue::from(ATTACHMENT_TAG),
+            ),
+            (ATTACHMENT_HASH_KEY.to_string(), LoroValue::from(TEST_HASH)),
+            (ATTACHMENT_SIZE_KEY.to_string(), LoroValue::from(4096i64)),
+        ];
+        fields.push(("something_later".to_string(), LoroValue::from("v2 field")));
+        assert!(matches!(
+            from_engine_value(&LoroValue::Map(fields.into())),
+            Some(DataValue::Attachment { .. })
+        ));
     }
 
     #[test]

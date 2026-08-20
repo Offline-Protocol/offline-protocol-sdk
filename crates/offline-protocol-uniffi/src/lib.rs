@@ -15215,4 +15215,123 @@ mod tests {
             "NostrQueryTracker.kt must declare COMPLETION_TIMEOUT_MS = {EXPECTED_MS} ms"
         );
     }
+
+    /// Every `DataValue` kind reaches the three places that enumerate them
+    /// by hand.
+    ///
+    /// Values cross this boundary as JSON rather than as a UDL type, which
+    /// is what keeps a new kind from reshaping every binding. The cost is
+    /// that no generator writes the reader: the React Native union is
+    /// hand-maintained, and so are the two strings that tell a caller what
+    /// a kind may be. This has already happened once. `attachment` was
+    /// added to the Rust enum, the UDL and all three generated bindings,
+    /// and missed the TypeScript union, and both `cargo test` and
+    /// `tsc --noEmit` stayed green: a missing member of a union is legal
+    /// TypeScript. The damage is on the read side and it is quiet. A
+    /// `mapGet` returns `{kind:'attachment',...}` at runtime while the
+    /// declared type says that cannot happen, so every exhaustive `switch`
+    /// an application writes is wrong and the compiler certifies it.
+    #[test]
+    fn react_native_types_cover_every_data_value_kind() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let read = |rel: &std::path::Path| -> String {
+            std::fs::read_to_string(rel)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", rel.display()))
+        };
+
+        // The variant list out of the enum itself, so that adding one is
+        // what fails this test rather than remembering to update it here.
+        let value_rs = read(&manifest.join("../offline-protocol-data/src/value.rs"));
+        let start = value_rs
+            .find("pub enum DataValue {")
+            .expect("offline-protocol-data must declare pub enum DataValue");
+        let body = &value_rs[start
+            ..start
+                + value_rs[start..]
+                    .find("\n}\n")
+                    .expect("unterminated enum DataValue")];
+        let kinds: Vec<String> = body
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                // A variant is `Name,` or `Name {` at one level of indent;
+                // field lines are deeper and lowercase, attributes start
+                // with `#`, docs with `/`.
+                let trimmed = line.trim_end();
+                let name = trimmed.strip_prefix("    ")?;
+                if name.starts_with(' ') || name.starts_with('#') || name.starts_with('/') {
+                    return None;
+                }
+                let name = name.strip_suffix(" {").or_else(|| name.strip_suffix(','))?;
+                if !name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                    || !name.chars().all(|c| c.is_ascii_alphanumeric())
+                {
+                    return None;
+                }
+                // `#[serde(rename_all = "snake_case")]` on the enum, so the
+                // wire spelling is the variant lowercased. Every kind here
+                // is a single word; a compound one would need real
+                // conversion and this assertion is what would say so.
+                assert!(
+                    name[1..].chars().all(|c| c.is_ascii_lowercase()),
+                    "DataValue::{name} is a compound name; this test's \
+                     snake_case conversion is too naive for it"
+                );
+                Some(name.to_lowercase())
+            })
+            .collect();
+        assert!(
+            kinds.len() >= 7,
+            "only found {} DataValue variants; the parser is broken, not the bindings",
+            kinds.len()
+        );
+        assert!(
+            kinds.iter().any(|kind| kind == "attachment"),
+            "the parser did not find the attachment kind, so it would not \
+             have found a new one either"
+        );
+
+        let index_ts = read(&manifest.join("../../bindings/react-native/src/index.ts"));
+        let union_start = index_ts
+            .find("export type DataValue =")
+            .expect("index.ts must declare the DataValue union");
+        let union = &index_ts[union_start
+            ..union_start
+                + index_ts[union_start..]
+                    .find("\n\n")
+                    .expect("unterminated DataValue union")];
+
+        // The runtime string a caller is handed when their JSON is not a
+        // value, read from the function rather than from its source: a hint
+        // naming five of six kinds is how somebody learns the sixth exists.
+        let hint = match data_value_from_json("not a data value") {
+            Err(ProtocolError::InvalidArgument(message)) => message,
+            other => panic!("expected an InvalidArgument hint, got {other:?}"),
+        };
+
+        let udl = read(&manifest.join("src/offline_protocol.udl"));
+        let udl_start = udl
+            .find("    // Values cross as JSON")
+            .expect("the UDL must explain the value JSON beside map_set");
+        let udl_comment =
+            &udl[udl_start..udl_start + udl[udl_start..].find("void map_set").unwrap_or(0)];
+
+        for kind in &kinds {
+            assert!(
+                union.contains(&format!("kind: '{kind}'")),
+                "DataValue::{kind} is missing from the React Native union in \
+                 bindings/react-native/src/index.ts. An application switching \
+                 on kind cannot handle a member TypeScript says cannot exist."
+            );
+            assert!(
+                hint.contains(kind.as_str()),
+                "data_value_from_json's error hint does not mention the \
+                 {kind} kind"
+            );
+            assert!(
+                udl_comment.contains(kind.as_str()),
+                "the map_set comment in the UDL does not mention the {kind} kind"
+            );
+        }
+    }
 }
