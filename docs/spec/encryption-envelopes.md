@@ -153,8 +153,19 @@ specific:
   MUST NOT be able to mark it. A caller that could would be able to feed bytes
   of its choosing to a peer's document engine while that peer's user saw
   nothing arrive.
-- **A marked transfer MUST NOT be surfaced as a received file**, and MUST NOT
-  report transfer progress to the application. Nobody started this download.
+- **A marked transfer is invisible to the application on both sides.** A
+  receiver MUST NOT surface it as a received file and MUST NOT report its
+  progress: nobody started this download. A sender MUST NOT report its
+  progress, its completion, or its failure either, for the same reason turned
+  around: nobody attached this file, and an application that renders a
+  completed send in a conversation would show one being sent.
+
+  The rule binds from the first chunk, not from the last. The mark rides
+  chunk 0, so a receiver that has not yet seen chunk 0 does not know what a
+  transfer is, and MUST withhold rather than assume. Treating "not yet known"
+  as "ordinary" reports a download on any path that delivers out of order.
+  Withholding costs an ordinary transfer nothing but the progress events
+  before its chunk 0 lands, and progress is advisory.
 - **It carries no space.** The space is the authenticated wire sender, exactly
   as it is for a sync frame. A space a peer can name is a space a peer can
   reach.

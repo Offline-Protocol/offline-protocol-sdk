@@ -335,9 +335,13 @@ A receiver MUST discard blob bytes it has no outstanding request for. Without
 that rule a peer can spend another device's storage and battery for the price
 of one frame.
 
-An implementation MUST NOT surface a fetched blob as a received file. It is
-document content that arrived on a document-layer request, and a person who
-did not start a download must not be shown one.
+An implementation MUST NOT surface a fetched blob as a received file, and MUST
+NOT report its transfer to the application from either side. It is document
+content moving on a document-layer request: a person who did not start a
+download must not be shown one, and a person who did not attach a file must
+not be shown one being sent. See
+[the data purpose](encryption-envelopes.md#the-data-purpose) for when the rule
+takes effect, which is earlier than it looks.
 
 ### Scope
 

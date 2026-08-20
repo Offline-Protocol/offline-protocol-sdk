@@ -2518,9 +2518,15 @@ impl OfflineProtocol {
         self.outbound_media_windows
             .insert(file_id.clone(), window_state);
 
-        let state = lock_shared_state(&self.shared_state)?;
-        state.emit_event(Event::file_progress(file_id.clone(), 0, total_chunks));
-        drop(state);
+        // A data-purposed transfer is invisible to the application on this
+        // side too. The receiver's user must not be shown a download they did
+        // not start; the sender's must not be shown an upload they did not
+        // make, and `MediaSent` for one would put a file in a conversation.
+        if data_purpose.is_none() {
+            let state = lock_shared_state(&self.shared_state)?;
+            state.emit_event(Event::file_progress(file_id.clone(), 0, total_chunks));
+            drop(state);
+        }
 
         self.send_media_chunk_batch(
             &file_id,
@@ -4086,15 +4092,18 @@ impl OfflineProtocol {
         let content_type = transfer.content_type;
         let recipient = transfer.recipient.clone();
         let completed = delivered_chunks == total_chunks;
+        let carries_data = transfer.data_purpose.is_some();
 
-        if let Ok(state) = lock_shared_state(&self.shared_state) {
-            state.emit_event(Event::file_progress(
-                file_id.clone(),
-                delivered_chunks,
-                total_chunks,
-            ));
-            if completed {
-                state.emit_event(Event::media_sent(file_id.clone(), content_type, recipient));
+        if !carries_data {
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::file_progress(
+                    file_id.clone(),
+                    delivered_chunks,
+                    total_chunks,
+                ));
+                if completed {
+                    state.emit_event(Event::media_sent(file_id.clone(), content_type, recipient));
+                }
             }
         }
 
@@ -4120,6 +4129,10 @@ impl OfflineProtocol {
     /// tracking (freeing its per-peer transfer slot) and emits
     /// [`Event::MediaSendFailed`] so the app learns the transfer will never
     /// complete. Idempotent — a second call for the same `file_id` is a no-op.
+    ///
+    /// A data-purposed transfer is the one exception to the event: it has no
+    /// application-facing identity, so the report is withheld rather than
+    /// naming a `file_id` the app never saw.
     pub(super) fn abort_outbound_media_transfer(&mut self, file_id: &str, reason: &str) {
         let Some(transfer) = self.outbound_media_transfers.remove(file_id) else {
             return;
@@ -4136,6 +4149,19 @@ impl OfflineProtocol {
             reason = %reason,
             "Aborting outbound media transfer"
         );
+        // A data-purposed transfer has no application-facing identity to
+        // fail, so reporting one would name a file_id the app has never
+        // seen. The requester's own fetch expires and can be asked again,
+        // and a snapshot is re-offered by the next anti-entropy exchange, so
+        // nothing is stranded by staying quiet here.
+        if transfer.data_purpose.is_some() {
+            debug!(
+                file_id = %file_id,
+                reason = %reason,
+                "A data-layer transfer was aborted; the asking side will retry"
+            );
+            return;
+        }
         if let Ok(state) = lock_shared_state(&self.shared_state) {
             state.emit_event(Event::media_send_failed(
                 file_id.to_string(),

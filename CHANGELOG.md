@@ -53,6 +53,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   Arriving bytes are checked against the hash that asked for them, not against
   anything the sender says about them, and bytes nobody asked for are dropped.
 
+  Neither side sees these transfers as files. No progress, no completion, no
+  failure, in either direction: nobody started that download and nobody
+  attached that file. The rule binds from the first chunk rather than the
+  last, because the marking rides chunk 0 and a receiver that has not seen it
+  yet has to withhold rather than guess.
+
   The second hole was quieter and worse. A document whose catch-up exceeded
   32 KiB was warned about and dropped, so two replicas sat there accepting
   edits and diverging with a log line as the only evidence. Such a document

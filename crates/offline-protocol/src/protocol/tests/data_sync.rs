@@ -2150,3 +2150,56 @@ fn a_chunk_arriving_before_chunk_zero_reports_no_phantom_progress() {
     assert!(events_named(&bob, "file_progress").is_empty());
     assert!(events_named(&bob, "file_received").is_empty());
 }
+
+#[test]
+fn a_data_purposed_transfer_is_invisible_on_the_sending_side_too() {
+    // The mirror of the receiver's rule, and the worse leak of the two: an
+    // app that renders `media_sent` in a conversation would show a file
+    // being sent that nobody attached, under a file_id it has never seen.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+    let blob = b"bytes the document layer moves on its own behalf".to_vec();
+    let hash = OfflineProtocol::data_attachment_hash(&blob);
+
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+    clear_events(&alice);
+
+    alice
+        .protocol
+        .data_provide_attachment(&alice_space, &bob.address, &hash, blob.clone())
+        .expect("provide");
+    settle_media(&mut alice, &mut bob);
+
+    assert!(
+        events_named(&alice, "file_progress").is_empty(),
+        "the serving side must not report progress on an upload nobody made"
+    );
+    assert!(
+        events_named(&alice, "media_sent").is_empty(),
+        "nor completion of one"
+    );
+    // The control: it really did transfer, so the assertions above are about
+    // suppression rather than about nothing having happened.
+    assert_eq!(events_named(&bob, "data_attachment_received").len(), 1);
+
+    // And an ordinary file through the same pair still reports both, so the
+    // suppression is scoped to data-purposed transfers rather than global.
+    clear_events(&alice);
+    alice
+        .protocol
+        .send_media_with(
+            bob.address.clone(),
+            b"an ordinary file".to_vec(),
+            "notes.txt".to_string(),
+            offline_protocol_core::ContentType::File,
+            crate::protocol::types::MediaSendOptions::default(),
+        )
+        .expect("send");
+    settle_media(&mut alice, &mut bob);
+    assert!(!events_named(&alice, "file_progress").is_empty());
+    assert_eq!(events_named(&alice, "media_sent").len(), 1);
+}
