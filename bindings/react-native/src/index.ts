@@ -3800,12 +3800,22 @@ export class OfflineProtocol {
 }
 
 /**
- * A scalar stored in a document collection.
+ * A value stored in a document collection.
  *
  * Structured values go in as JSON strings and merge whole (last write wins
  * per key). That is the honest description of what v1 replicates: whole
  * collections within a space, with no nested addressing and no query
  * language.
+ *
+ * `attachment` is the one composite, and it is composite because it is a
+ * reference rather than a value: the bytes it names never enter the
+ * document. It is replaced, never edited, so two people attaching different
+ * blobs to one key resolve like any other value and neither replica ends up
+ * holding a hash from one beside a size from another.
+ *
+ * Every member of this union can come back from {@link DataStore.mapGet},
+ * `attachment` included, so a switch over `kind` must handle it. A peer on a
+ * build predating attachments reads such a value as absent instead.
  */
 export type DataValue =
   | { kind: 'null' }
@@ -3813,7 +3823,18 @@ export type DataValue =
   | { kind: 'int'; value: number }
   | { kind: 'float'; value: number }
   | { kind: 'text'; value: string }
-  | { kind: 'bytes'; value: number[] };
+  | { kind: 'bytes'; value: number[] }
+  | {
+      kind: 'attachment';
+      /** Lowercase hex SHA-256 of the blob, exactly 64 characters. */
+      hash: string;
+      /** Length of the blob in bytes. Non-zero. */
+      size: number;
+      /** Display name, if the writer had one. Never treat it as a path. */
+      name?: string;
+      /** Media type, if the writer knew it. */
+      mime?: string;
+    };
 
 /**
  * Replicated documents: offline-first state any member of a space can edit
@@ -4107,13 +4128,14 @@ export class DataStore {
   /**
    * The address of some bytes, in the spelling a reference uses.
    *
-   * Write the result into a document with `mapSet`:
+   * Write the result into a document with `mapSet`, which takes the value
+   * as an object and encodes it for you:
    *
    * ```ts
    * const hash = await store.attachmentHash(bytesBase64);
-   * await store.mapSet(space, 'notes', 'files', 'plan', JSON.stringify({
+   * await store.mapSet(space, 'notes', 'files', 'plan', {
    *   kind: 'attachment', hash, size: byteLength, name: 'plan.pdf',
-   * }));
+   * });
    * ```
    *
    * Compute it here rather than anywhere else. Two spellings of one address

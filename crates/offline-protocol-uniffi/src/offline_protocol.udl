@@ -1900,6 +1900,12 @@ interface DataStore {
     // where kind is one of null, bool, int, float, text, bytes (a bytes value
     // is a JSON array of byte values). A flat scalar surface would have meant
     // six parallel optional arguments in four languages.
+    //
+    // An attachment is the one kind that is not {kind, value}, because it is
+    // a reference rather than a value:
+    // {"kind":"attachment","hash":"<64 lowercase hex>","size":N} with
+    // optional "name" and "mime". It can come back out of map_get_json too,
+    // so a reader switching on kind has to handle it.
     [Throws=ProtocolError]
     void map_set(string space_id, string doc_id, string collection, string key, string value_json);
 

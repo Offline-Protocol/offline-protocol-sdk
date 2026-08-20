@@ -45,7 +45,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
   Fetching is pull, and the application is in it, because the SDK never kept
   the bytes: a peer's request surfaces as `DataAttachmentRequested`, answered
-  with `dataProvideAttachment` or refused with `dataDeclineAttachment`. Please
+  with `provideAttachment` or refused with `declineAttachment`. Please
   answer it either way. A reference outlives the bytes it names, and without a
   refusal the asking side cannot tell a peer that lost the file from one on a
   slow radio, so it shows somebody a spinner forever.

@@ -6989,7 +6989,8 @@ fn data_value_from_json(value_json: &str) -> Result<offline_protocol::DataValue,
         ProtocolError::InvalidArgument(format!(
             "value_json is not a data value: {err}; expected \
              {{\"kind\":\"text\",\"value\":\"...\"}} with kind one of \
-             null, bool, int, float, text, bytes"
+             null, bool, int, float, text, bytes, or \
+             {{\"kind\":\"attachment\",\"hash\":\"...\",\"size\":N}}"
         ))
     })
 }

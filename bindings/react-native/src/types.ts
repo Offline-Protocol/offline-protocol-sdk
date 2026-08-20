@@ -2416,9 +2416,9 @@ export interface DataDocSizeWarningEvent extends BaseEvent {
  * A peer asked for the bytes behind an attachment reference.
  *
  * The SDK never holds blob bytes, so it cannot answer this on its own:
- * answer with `dataProvideAttachment`, or say you cannot with
- * `dataDeclineAttachment`. An app that handles neither leaves the asking
- * peer with a reference it can see and never open.
+ * answer with `DataStore.provideAttachment`, or say you cannot with
+ * `DataStore.declineAttachment`. An app that handles neither leaves the
+ * asking peer with a reference it can see and never open.
  */
 export interface DataAttachmentRequestedEvent extends BaseEvent {
   type: 'data_attachment_requested';
