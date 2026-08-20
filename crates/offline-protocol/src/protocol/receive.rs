@@ -947,8 +947,29 @@ impl OfflineProtocol {
                 // be retransmitted, so the transfer is unrecoverable —
                 // surface that to the application instead of going silent.
                 let dropped = self.pending_media_metadata.remove(&file_id);
-                if let Some(purpose) = dropped.and_then(|entry| entry.data_purpose) {
+                // Positive knowledge, the same rule the progress event
+                // follows, reached by a different road. On chunk 0 the
+                // purpose is in hand right here and the stored entry is not:
+                // an entry is written only once the manager accepts a chunk,
+                // which is exactly what did not happen. Off chunk 0 the
+                // stored entry is the only knowledge there is.
+                let identified = is_first_chunk || dropped.is_some();
+                let purpose = if is_first_chunk { data_purpose } else { None }
+                    .or_else(|| dropped.and_then(|entry| entry.data_purpose));
+                if let Some(purpose) = purpose {
                     self.report_data_media_transfer_failure(&sender, &purpose, rejection.as_str());
+                    return ChunkOutcome::Handled;
+                }
+                if !identified {
+                    // A transfer whose chunk 0 has not landed cannot be named
+                    // as anything, so it must not be failed in front of a
+                    // person: it may be the document layer's. The app has
+                    // heard nothing about it either (progress is withheld by
+                    // the same rule), so there is no report to correct.
+                    debug!(
+                        file_id = %file_id,
+                        "Dropping a transfer whose purpose is not yet known; no failure reported"
+                    );
                     return ChunkOutcome::Handled;
                 }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
@@ -975,11 +996,23 @@ impl OfflineProtocol {
                     "File transfer marked complete but reassembly or integrity checks failed"
                 );
                 let dropped = self.pending_media_metadata.remove(&file_id);
+                // Completion implies chunk 0 was accepted, so this is
+                // normally `true`. Checked anyway, and for the same reason as
+                // the arm above: the alternative is naming a transfer this
+                // device cannot identify as a file the app never saw begin.
+                let identified = dropped.is_some();
                 if let Some(purpose) = dropped.and_then(|entry| entry.data_purpose) {
                     self.report_data_media_transfer_failure(
                         &sender,
                         &purpose,
                         "integrity_check_failed",
+                    );
+                    return ChunkOutcome::Handled;
+                }
+                if !identified {
+                    debug!(
+                        file_id = %file_id,
+                        "Dropping a transfer whose purpose is not yet known; no failure reported"
                     );
                     return ChunkOutcome::Handled;
                 }

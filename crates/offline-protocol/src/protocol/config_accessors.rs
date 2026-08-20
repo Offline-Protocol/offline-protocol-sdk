@@ -315,12 +315,25 @@ impl OfflineProtocol {
             .cleanup_stale_transfers(StdDuration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS));
         for stale in stale_transfers {
             let dropped = self.pending_media_metadata.remove(&stale.file_id);
+            // An entry exists only once chunk 0 was accepted, and chunk 0 is
+            // what says whose transfer this is. Without one there is no
+            // knowledge to report from: the transfer may be the document
+            // layer's, and the app has heard nothing about it either, because
+            // progress is withheld under the same rule.
+            let identified = dropped.is_some();
             // A document-layer transfer has no file to report failing, and
             // saying otherwise hands somebody a failed download they never
             // started. It is reported to the layer that asked for it
             // instead, which is what tells a waiting fetch to stop waiting.
             if let Some(purpose) = dropped.and_then(|entry| entry.data_purpose) {
                 self.report_data_media_transfer_failure(&stale.sender, &purpose, "stale_timeout");
+                continue;
+            }
+            if !identified {
+                tracing::debug!(
+                    file_id = %stale.file_id,
+                    "A transfer expired before its purpose was known; no failure reported"
+                );
                 continue;
             }
             // Like the resource-limit drops, a stale transfer is

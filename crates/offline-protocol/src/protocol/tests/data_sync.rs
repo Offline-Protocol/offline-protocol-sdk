@@ -1927,36 +1927,7 @@ fn a_document_too_large_to_frame_crosses_over_the_media_path() {
     let (mut alice, mut bob) = pair();
     let space = Node::space_for(&bob);
 
-    // Varied filler: repeated text compresses inside the engine's encoding,
-    // and a document that compresses back under the budget never reaches the
-    // rung this test is about.
-    let mut seed = 0x2545_F491_4F6C_DD1Du64;
-    for round in 0..24 {
-        let filler: String = (0..4096)
-            .map(|_| {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
-                char::from(b'0' + (seed % 64) as u8)
-            })
-            .collect();
-        alice
-            .protocol
-            .data_map_set(
-                &space,
-                "notes",
-                "m",
-                &format!("k{round}"),
-                DataValue::text(filler),
-            )
-            .expect("set");
-    }
-    alice.protocol.data_flush(&space, "notes").expect("flush");
-    assert!(
-        alice.protocol.data_doc_size(&space, "notes").expect("size")
-            > crate::protocol::data_sync::MAX_SYNC_BLOB_BYTES as u64,
-        "the fixture must build a document no frame can carry"
-    );
+    fill_past_the_frame_budget(&mut alice, &space, 0x2545_F491_4F6C_DD1D);
 
     settle_media(&mut alice, &mut bob);
 
@@ -1989,28 +1960,7 @@ fn a_peer_that_cannot_carry_snapshots_is_told_rather_than_left_waiting() {
     // partial downgrade the third capability entry exists to express.
     alice.protocol.peer_data_media.remove(&bob.address);
 
-    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
-    for round in 0..24 {
-        let filler: String = (0..4096)
-            .map(|_| {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
-                char::from(b'0' + (seed % 64) as u8)
-            })
-            .collect();
-        alice
-            .protocol
-            .data_map_set(
-                &space,
-                "notes",
-                "m",
-                &format!("k{round}"),
-                DataValue::text(filler),
-            )
-            .expect("set");
-    }
-    alice.protocol.data_flush(&space, "notes").expect("flush");
+    fill_past_the_frame_budget(&mut alice, &space, 0x9E37_79B9_7F4A_7C15);
     settle_media(&mut alice, &mut bob);
 
     let reported = events_named(&alice, "data_doc_unsyncable");
@@ -2272,7 +2222,7 @@ fn a_peer_asking_for_endless_distinct_blobs_is_budgeted() {
     // The per-hash window cannot see this as a flood, because every hash in
     // it is new. Without a budget each frame buys a permanent map entry and
     // an application callback, and a hash is 32 bytes the sender chooses.
-    let (mut alice, mut bob) = pair();
+    let (mut alice, bob) = pair();
     let space = Node::space_for(&bob);
 
     let asks = crate::protocol::data_sync::MAX_BLOB_REQUESTS_PER_WINDOW + 40;
@@ -2557,7 +2507,7 @@ fn a_fetch_evicted_by_a_newer_one_is_reported_rather_than_forgotten() {
     // fetch is over and no bytes will ever be admitted for it. An application
     // told nothing is left showing the spinner the whole refusal mechanism
     // exists to end.
-    let (mut bob, mut alice) = pair();
+    let (mut bob, alice) = pair();
     let space = Node::space_for(&alice);
     let cap = crate::protocol::data_sync::MAX_PENDING_ATTACHMENT_FETCHES;
 
@@ -2626,4 +2576,101 @@ fn a_request_this_device_could_not_answer_is_never_put_to_the_application() {
     let asked = events_named(&alice, "data_attachment_requested");
     assert_eq!(asked.len(), 1, "the answerable request must be raised");
     assert_eq!(asked[0]["hash"].as_str(), Some(other.as_str()));
+}
+
+#[test]
+fn a_transfer_that_failed_before_its_purpose_arrived_reports_no_file_failure() {
+    // The other half of the phantom-progress rule, on the failure paths.
+    // Progress already withholds until chunk 0 says what a transfer is; the
+    // failure arms read the same absence and used to answer "an ordinary
+    // file", which names a data-layer transfer as a failed download in front
+    // of a person. The app has heard nothing about such a transfer either
+    // way, so there is no report to correct by staying quiet.
+    let (mut alice, mut bob) = pair();
+
+    // One assembly slot on Bob, so the second transfer to reach him is
+    // refused for resource exhaustion rather than admitted.
+    bob.protocol.file_transfer_manager = crate::file_transfer::FileTransferManager::with_config(
+        crate::file_transfer::FileTransferConfig {
+            max_concurrent_assemblies: 1,
+            ..Default::default()
+        },
+    );
+
+    /// Send one ordinary file and hand back its chunks, without leaving a
+    /// transfer open on the sending side: a sender may hold only
+    /// `MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER` at once, and this test needs
+    /// three transfers to reach one receiver. Aborting is Alice's business
+    /// alone and touches nothing Bob has.
+    fn chunks_of(
+        alice: &mut Node,
+        bob: &Node,
+        name: &str,
+        fill: u8,
+    ) -> Vec<offline_protocol_core::Message> {
+        let file_id = alice
+            .protocol
+            .send_media_with(
+                bob.address.clone(),
+                vec![fill; 12 * 1024],
+                name.to_string(),
+                offline_protocol_core::ContentType::File,
+                crate::protocol::types::MediaSendOptions::default(),
+            )
+            .expect("send");
+        let chunks = alice.transport.sent_messages();
+        alice.transport.clear_sent_messages();
+        alice
+            .protocol
+            .abort_outbound_media_transfer(&file_id, "test is done sending");
+        assert!(
+            chunks.len() > 1,
+            "the fixture needs a multi-chunk transfer for {name}"
+        );
+        chunks
+    }
+
+    // Occupy Bob's only slot with an ordinary transfer, chunk 0 alone, so it
+    // stays open and identified.
+    let holding = chunks_of(&mut alice, &bob, "holding.bin", 1);
+    bob.transport.queue_message(holding[0].clone());
+    while bob.protocol.receive_message().is_some() {}
+    assert_eq!(
+        bob.protocol.file_transfer_manager.active_transfer_count(),
+        1,
+        "the slot must really be occupied, or nothing below is refused"
+    );
+
+    // A second transfer whose chunk 0 has not landed. Its chunk 1 is refused
+    // for the occupied slot, and at that moment Bob cannot say what the
+    // transfer is: chunk 0 carries the purpose and it is not here.
+    let unidentified = chunks_of(&mut alice, &bob, "unidentified.bin", 2);
+    clear_events(&bob);
+    bob.transport.queue_message(unidentified[1].clone());
+    while bob.protocol.receive_message().is_some() {}
+
+    assert!(
+        events_named(&bob, "file_receive_failed").is_empty(),
+        "a transfer whose purpose has not arrived must not be failed as a \
+         file: it may be the document layer's, and no progress was ever \
+         reported for it either"
+    );
+
+    // The control, through the same refusal on the same occupied slot: a
+    // transfer whose chunk 0 DID arrive is identified as ordinary, and its
+    // failure is reported exactly as before. Without this the assertion
+    // above passes for a build that reports no failures at all.
+    let identified = chunks_of(&mut alice, &bob, "identified.bin", 3);
+    clear_events(&bob);
+    bob.transport.queue_message(identified[0].clone());
+    while bob.protocol.receive_message().is_some() {}
+
+    let failed = events_named(&bob, "file_receive_failed");
+    assert_eq!(
+        failed.len(),
+        1,
+        "an ordinary transfer refused after its chunk 0 arrived must still \
+         report: {failed:?}"
+    );
+    assert_eq!(failed[0]["file_name"].as_str(), Some("identified.bin"));
 }
