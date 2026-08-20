@@ -170,7 +170,7 @@ impl OfflineProtocol {
     }
 
     fn validate_ids(space: &str, doc: &str) -> Result<()> {
-        offline_protocol_data::validate_name(space).map_err(map_data_error)?;
+        offline_protocol_data::validate_space_name(space).map_err(map_data_error)?;
         offline_protocol_data::validate_name(doc).map_err(map_data_error)?;
         Ok(())
     }
@@ -657,7 +657,7 @@ impl OfflineProtocol {
     /// document to find out would defeat both callers, whose whole question
     /// is whether opening one is allowed.
     fn space_docs(&mut self, space: &str) -> Option<&BTreeSet<String>> {
-        if offline_protocol_data::validate_name(space).is_err() {
+        if offline_protocol_data::validate_space_name(space).is_err() {
             return None;
         }
         let storage = self.data_storage_for_sync()?;
@@ -832,7 +832,7 @@ impl OfflineProtocol {
 
     /// The documents in a space.
     pub fn data_list_docs(&mut self, space: &str) -> Result<Vec<String>> {
-        offline_protocol_data::validate_name(space).map_err(map_data_error)?;
+        offline_protocol_data::validate_space_name(space).map_err(map_data_error)?;
         let storage = self.require_data_storage()?;
         self.load_space(storage.as_ref(), space)?;
         Ok(self

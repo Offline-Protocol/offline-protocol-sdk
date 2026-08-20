@@ -153,6 +153,7 @@ fn test_group_welcome_cannot_squat_session_slot() {
     // 1:1 session slot.
     let squat = GroupMlsWelcomePayload {
         member_rich: HashMap::new(),
+        member_data: HashMap::new(),
         created_by: None,
         group_id: session_slot("alice", "bob"),
         group_name: None,
@@ -397,6 +398,7 @@ fn test_group_mls_process_commit_empty_ciphertext_no_event() {
     // MLS processing will fail, so no membership event should be emitted.
     let commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Add,
         ciphertext: String::new(),
@@ -533,6 +535,7 @@ fn test_group_mls_payload_serialization_roundtrip() {
 
     let welcome_payload = GroupMlsWelcomePayload {
         member_rich: HashMap::new(),
+        member_data: HashMap::new(),
         created_by: None,
         group_id: "group:def".to_string(),
         group_name: Some("Test Group".to_string()),
@@ -548,6 +551,7 @@ fn test_group_mls_payload_serialization_roundtrip() {
 
     let commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: "group:ghi".to_string(),
         commit_type: GroupCommitType::Add,
         ciphertext: "Y29tbWl0".to_string(),
@@ -726,6 +730,7 @@ fn test_group_mls_commit_with_spoofed_sender_rejected_not_buffered() {
 
     let commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::KeyUpdate,
         ciphertext: base64_encode(&commit.ciphertext),
@@ -825,6 +830,7 @@ fn test_group_mls_commit_unknown_group() {
     // Simulate receiving a commit for a group we don't belong to
     let commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: "group:nonexistent".to_string(),
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"fake-commit-data"),
@@ -1143,6 +1149,7 @@ fn test_group_mls_welcome_bad_data_no_panic() {
     // Send a Welcome with invalid base64 welcome_data
     let welcome_payload = GroupMlsWelcomePayload {
         member_rich: HashMap::new(),
+        member_data: HashMap::new(),
         created_by: None,
         group_id: "group:bad-welcome".to_string(),
         group_name: Some("Bad Group".to_string()),
@@ -1178,6 +1185,7 @@ fn test_group_mls_welcome_valid_base64_bad_mls_no_panic() {
     // Send a Welcome with valid base64 but garbage MLS data
     let welcome_payload = GroupMlsWelcomePayload {
         member_rich: HashMap::new(),
+        member_data: HashMap::new(),
         created_by: None,
         group_id: "group:garbage-mls".to_string(),
         group_name: Some("Garbage MLS".to_string()),
@@ -1244,6 +1252,7 @@ fn test_group_mls_commit_oversized_ciphertext_rejected() {
     let oversized = "A".repeat(MAX_BASE64_PAYLOAD_SIZE + 1);
     let commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: "group:oversized".to_string(),
         commit_type: GroupCommitType::Add,
         ciphertext: oversized,
@@ -1445,6 +1454,7 @@ fn test_group_mls_commit_failure_buffers_for_retry() {
         message_id: "test-mid-1".to_string(),
         data: serde_json::to_string(&GroupMlsCommitPayload {
             affected_member_rich: None,
+            affected_member_data: None,
             group_id: group_id.clone(),
             commit_type: GroupCommitType::Add,
             ciphertext: base64_encode(b"commit-data"),
@@ -1491,6 +1501,7 @@ fn test_group_mls_pending_commit_buffer_cap() {
     for i in 0..(MAX_PENDING_COMMITS_PER_GROUP + 4) {
         let data = serde_json::to_string(&GroupMlsCommitPayload {
             affected_member_rich: None,
+            affected_member_data: None,
             group_id: group_id.clone(),
             commit_type: GroupCommitType::Add,
             ciphertext: base64_encode(format!("commit-{}", i).as_bytes()),
@@ -1565,6 +1576,7 @@ fn test_group_mls_commit_empty_ciphertext_not_buffered() {
     // Empty ciphertext — this is a malformed commit, not an ordering issue
     let commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Remove,
         ciphertext: String::new(),
@@ -1782,6 +1794,7 @@ fn test_group_mls_drain_pending_commits_no_double_buffering() {
     // Manually insert pending commits with garbage ciphertext.
     let bad_commit = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: real_group_id.clone(),
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"not-a-real-mls-commit"),
@@ -1837,6 +1850,7 @@ fn test_group_mls_drain_pending_commits_expired_entries_dropped() {
     // Insert an expired pending commit
     let bad_commit = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"stale-commit"),
@@ -1879,6 +1893,7 @@ fn test_group_mls_handle_commit_permanent_failure_not_buffered() {
     // Simulate receiving a commit with valid base64 but garbage MLS bytes.
     let commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"fake-but-decodable-commit"),
@@ -1916,6 +1931,7 @@ fn test_group_mls_commit_rejected_not_buffered() {
     // Empty ciphertext — should be rejected, not buffered
     let commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: "group:reject-test".to_string(),
         commit_type: GroupCommitType::Add,
         ciphertext: String::new(),
@@ -2388,6 +2404,7 @@ fn test_group_mls_commit_group_not_found_is_buffered_for_welcome_race() {
     // bounded by the per-group/global caps and the TTL sweep.
     let commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: "group:does-not-exist".to_string(),
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"some-commit-data"),
@@ -2426,6 +2443,7 @@ fn test_group_mls_commit_bad_deserialization_is_rejected_not_retriable() {
     // Valid base64 but garbage MLS bytes
     let commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"this-is-not-mls"),
@@ -2671,6 +2689,7 @@ fn test_group_mls_pending_commit_drain_cascades() {
         message_id: "test-mid-7".to_string(),
         data: serde_json::to_string(&GroupMlsCommitPayload {
             affected_member_rich: None,
+            affected_member_data: None,
             group_id: group_id.clone(),
             commit_type: GroupCommitType::Add,
             ciphertext: base64_encode(b"commit-1"),
@@ -2687,6 +2706,7 @@ fn test_group_mls_pending_commit_drain_cascades() {
         message_id: "test-mid-8".to_string(),
         data: serde_json::to_string(&GroupMlsCommitPayload {
             affected_member_rich: None,
+            affected_member_data: None,
             group_id: group_id.clone(),
             commit_type: GroupCommitType::Add,
             ciphertext: base64_encode(b"commit-2"),
@@ -5569,6 +5589,7 @@ fn test_epoch_fork_cleared_on_successful_commit() {
     // Build a protocol-layer commit message from bob to alice
     let commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::KeyUpdate,
         ciphertext: base64_encode(&bob_commit.ciphertext),
@@ -5844,6 +5865,7 @@ fn test_key_update_commit_type_serialization() {
     // Verify KeyUpdate serializes/deserializes correctly
     let payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: "test-group".to_string(),
         commit_type: GroupCommitType::KeyUpdate,
         ciphertext: "abc".to_string(),
@@ -6553,6 +6575,7 @@ fn test_non_key_update_commit_does_not_clear_fork_state() {
     // succeed in process_commit_core, but the commit_type is Add.
     let add_commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(&bob_update.ciphertext),
@@ -6595,6 +6618,7 @@ fn test_key_update_commit_clears_fork_state() {
 
     let ku_commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::KeyUpdate,
         ciphertext: base64_encode(&bob_update.ciphertext),
@@ -7811,6 +7835,7 @@ fn test_welcome_payload_carries_roles() {
 
     let payload = GroupMlsWelcomePayload {
         member_rich: HashMap::new(),
+        member_data: HashMap::new(),
         created_by: None,
         group_id: "group:test".to_string(),
         group_name: Some("Test".to_string()),
@@ -7828,6 +7853,7 @@ fn test_welcome_payload_carries_roles() {
 fn test_commit_payload_carries_role() {
     let payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: "group:test".to_string(),
         commit_type: GroupCommitType::Add,
         ciphertext: "abc".to_string(),
@@ -7842,6 +7868,7 @@ fn test_commit_payload_carries_role() {
     // None role should be omitted from JSON
     let payload_no_role = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: "group:test".to_string(),
         commit_type: GroupCommitType::Remove,
         ciphertext: "abc".to_string(),
@@ -8526,6 +8553,7 @@ fn test_self_removal_commit_from_admin_emits_event_and_cleans_up() {
     // the self-removal fallback path.
     let commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Remove,
         ciphertext: base64_encode(b"undecryptable-commit-ciphertext"),
@@ -8576,6 +8604,7 @@ fn test_self_removal_commit_from_non_admin_is_rejected() {
     // Eve (non-admin) sends a forged commit claiming to remove &id("user123")
     let commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Remove,
         ciphertext: base64_encode(b"garbage-ciphertext"),
@@ -13827,6 +13856,7 @@ fn test_group_invite_with_an_unprovable_member_is_declined_and_reported() {
 
     let payload = GroupMlsWelcomePayload {
         member_rich: HashMap::new(),
+        member_data: HashMap::new(),
         created_by: None,
         group_id: group_info.group_id.to_string(),
         group_name: Some("mallory-group".to_string()),
@@ -13919,6 +13949,7 @@ fn test_forged_leaf_commit_is_rejected_permanently_and_not_buffered() {
 
     let commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
+        affected_member_data: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(&commit_bytes),
@@ -14056,6 +14087,7 @@ fn test_repeated_unprovable_invites_from_one_sender_are_rate_limited() {
         };
         let payload = GroupMlsWelcomePayload {
             member_rich: HashMap::new(),
+            member_data: HashMap::new(),
             created_by: None,
             group_id: group_info.group_id.to_string(),
             group_name: Some("mallory-group".to_string()),

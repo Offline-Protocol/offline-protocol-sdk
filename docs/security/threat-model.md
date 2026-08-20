@@ -409,6 +409,19 @@ replicates with. Not silent, not remote-code-execution, and not available to
 anyone outside the space: it requires someone the user has already accepted
 into a shared document, and it is attributable to them.
 
+**Group spaces widen who this is, not what it does.** A 1:1 space has exactly
+one other member; a group space has as many as the roster, and every one of
+them can reach this path. The population is still people the user accepted
+into the group, and a frame is still attributable to the member whose leaf
+signed it, so the class does not change. What changes is that "someone the
+user accepted" now includes members somebody *else* added, which is a
+membership decision the group's admins make and the containment below does
+not depend on.
+
+The quarantine that bounds this is per space, so one crafted blob is refused
+for the whole group rather than per sender. A second member sending the same
+blob is refused by the same record.
+
 **Why it stands:** the defects are upstream and the engine is not ours to fix
 on our own schedule. Re-implementing its decoder to predict what it will accept
 would mean maintaining a second parser that has to agree with the first one

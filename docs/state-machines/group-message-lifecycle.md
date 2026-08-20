@@ -239,6 +239,33 @@ Three rules that are easy to get wrong:
 The full reasoning for report-by-default and the fail-open enforcement rule is in
 [Group protocol](../spec/group-protocol.md#membership-authorization).
 
+## Replication frames take the same three paths
+
+A group space replicates over this exact machinery: a `__DATA_V1__` frame is
+encrypted for the group and fanned out per member like any group message. It
+therefore arrives by all three inbound paths above, and **all three intercept
+it** after the decrypt succeeds and before anything is emitted to the
+application. A path that missed the interception would surface the frame to
+the user as a chat message whose body is literal `__DATA_V1__` JSON.
+
+On the drain path the interception still owes the deferred ACK: a frame
+buffered until group state caught up was never acknowledged, so the sender is
+retransmitting until the drain settles it.
+
+What differs from a group message:
+
+| | Group message | Replication frame |
+|---|---|---|
+| Relay broadcast | Taken when the v3 gate holds | Never: a replication frame has no app-facing id for a delivery report to name |
+| Emitted to the app | `GroupMessageReceived` | Nothing; `DataChanged` fires from the store when a change lands |
+| Logical id | Used for cross-path dedup | None |
+| Gate | Roster | Roster, **and** every member advertising `data_versions` entry 2 |
+| Answers | n/a | Addressed to the one member that asked, not broadcast |
+
+A change arriving from the group is never pushed back into it: the group
+ciphertext already reached every member, so re-broadcasting would make one
+edit cost N² frames.
+
 ## Bounds
 
 | Bound | Value |
@@ -248,6 +275,7 @@ The full reasoning for report-by-default and the fail-open enforcement rule is i
 | Broadcast report timeout | 60 s |
 | Unauthorized-change report suppression | 300 s per (group, committer, enforced) |
 | Unproven-leaf report suppression | 300 s per (group, sender, site) |
+| Replication offer suppression | 30 s per (member, group) |
 
 The `enforced` component of the first key is load-bearing. Dropping it lets an
 earlier report-only event suppress the refusal alarm for the same committer,

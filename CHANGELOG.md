@@ -27,6 +27,48 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Documents replicate in groups, encrypted once for the whole roster.** A
+  space named after a group id replicates with that group: the roster is the
+  replica set, membership is the existing MLS roster, and there is no second
+  membership system to disagree with it. A change is encrypted once and fanned
+  out per member on the same ladder a group message takes, so a group of ten
+  costs one encryption rather than ten.
+
+  Everything the 1:1 layer established carries over unchanged, because it is
+  the same code: the same frame family, the same version exchange, the same
+  catch-up ladder, and the same import containment. What is new is that a
+  space now has more than one other replica in it, which the three rules below
+  exist to handle.
+
+  **A change received from the group is never pushed back into it.** One group
+  ciphertext already reached every member; re-broadcasting would turn a single
+  edit into N² frames and get worse as the group grows.
+
+  **Version offers and their answers are addressed to one member.** Reconciling
+  with a peer is a conversation between two devices even inside a group, so
+  every other member is spared traffic about a question they did not ask. Only
+  a local commit goes to the roster.
+
+  **A member that cannot intercept these frames closes the gate for
+  everyone.** This is negotiated as a second `data_versions` entry rather than
+  a version bump, and the distinction matters: an install shipping the 1:1
+  layer replicates 1:1 perfectly well and has no group interception at all, so
+  a group replication frame would surface to its user as literal text. One
+  ciphertext serves the roster, so one such member means nobody is sent one.
+  Because members of a group never exchange key packages with each other, an
+  inviter attests the capability on the Add commit and in the Welcome, the way
+  it already attests rich-payload support; a later direct exchange always
+  overrides an attestation.
+
+  A group space reconciles when a member is invited, when this device joins,
+  and whenever a member is rediscovered. There is no cold-start sweep: a local
+  commit is already pushed when it happens and the per-member outbox carries it
+  across a restart.
+
+  Replication frames are never sent over the relay broadcast path, which exists
+  to produce a per-recipient delivery report about an application-facing
+  message; a replication frame has no such identity to report on.
+
 - **Documents replicate between peers, over the delivery ladder that was
   already there.** Two devices with a secure session converge on the documents
   they share: changes made offline on both sides merge on reconnect, and a
@@ -63,10 +105,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
   A document too large to catch up inside one frame is reported rather than
   sent; carrying one over the media transfer path is not yet implemented.
-  Group spaces are not yet replicated — this release is 1:1 only. Deletion has
-  no tombstone yet, so deleting a document from a space named after a peer is
-  local cleanup that their next offer undoes; empty the document to retire its
-  contents on both sides.
+  Deletion has no tombstone yet, so deleting a document from a replicated
+  space is local cleanup that the next offer undoes; empty the document to
+  retire its contents on both sides.
 
   **One known gap.** Replicas that stay in contact converge. Replicas
   separated by a partition that outlives a compaction may not: compaction

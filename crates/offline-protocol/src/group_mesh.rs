@@ -11,7 +11,8 @@
 
 use crate::protocol::{
     base64_decode, base64_encode, internal_prefixes, GroupMemberRemovedPayload,
-    InternalMessageResult, OfflineProtocol, RichPayloadV1, RichSendExtras, RICH_PAYLOAD_V1,
+    InternalMessageResult, OfflineProtocol, RichPayloadV1, RichSendExtras, DATA_GROUP_V1,
+    RICH_PAYLOAD_V1,
 };
 use crate::{Error, Event, Result};
 use chrono::{DateTime, Utc};
@@ -561,6 +562,20 @@ pub(crate) struct GroupMlsWelcomePayload {
     /// overrides its attested entry.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub(crate) member_rich: HashMap<String, Vec<u8>>,
+    /// Group-replication versions the inviter attests per existing member,
+    /// the [`DATA_GROUP_V1`] sibling of [`Self::member_rich`] and additive
+    /// in the same way (absent from old SDKs, absence means "no
+    /// information").
+    ///
+    /// Without it a joiner replicates documents only with members it has
+    /// separately exchanged key packages with, which on a group it was
+    /// invited into is typically just the inviter. Identical recipient-side
+    /// trust bounds: entries outside the joined MLS roster are ignored, and
+    /// a later direct key-package exchange overrides an attested entry.
+    ///
+    /// [`DATA_GROUP_V1`]: crate::protocol::types::DATA_GROUP_V1
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub(crate) member_data: HashMap<String, Vec<u8>>,
     /// The group creator the inviter has on record (additive; absent from
     /// old SDKs and from inviters whose own metadata never learned it).
     ///
@@ -622,6 +637,15 @@ pub(crate) struct GroupMlsCommitPayload {
     /// later direct key-package exchange overrides it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) affected_member_rich: Option<Vec<u8>>,
+    /// Group-replication versions the inviter attests for the added member,
+    /// the [`DATA_GROUP_V1`] sibling of [`Self::affected_member_rich`],
+    /// with the same trust bounds: honored only for the member the MLS
+    /// state delta actually added, only from an admin sender, and
+    /// overridden by a later direct key-package exchange.
+    ///
+    /// [`DATA_GROUP_V1`]: crate::protocol::types::DATA_GROUP_V1
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) affected_member_data: Option<Vec<u8>>,
 }
 
 /// Payload for group leave notifications sent via mesh.
@@ -1135,6 +1159,17 @@ impl OfflineProtocol {
                 // message dedups against this one, and emit it as the
                 // app-facing id so every member sees the same id for this
                 // logical message regardless of arrival path.
+                // Replication rides the group ciphertext, so it surfaces
+                // here, in the one place a group plaintext is known to be
+                // authentic and attributed. Consumed rather than emitted:
+                // an app that received this as a message would render the
+                // frame as text.
+                #[cfg(feature = "data")]
+                if let Some(body) = text.strip_prefix(internal_prefixes::DATA_V1) {
+                    let body = body.to_string();
+                    self.handle_group_data_sync_frame(&payload.group_id, sender, &body);
+                    return InternalMessageResult::Consumed;
+                }
                 let msg_id = logical_key.unwrap_or_else(|| message.id.as_str().to_string());
                 if msg_id != message.id.as_str() {
                     self.group_mesh
@@ -1483,6 +1518,14 @@ impl OfflineProtocol {
                     self.record_attested_rich(user_id, versions);
                 }
             }
+            // Same bound, same reason, for group replication: without these
+            // this device would edit documents in its new group and send
+            // them to nobody but the inviter.
+            for (user_id, versions) in &payload.member_data {
+                if members.contains(user_id) {
+                    self.record_attested_data(user_id, versions);
+                }
+            }
 
             self.group_mesh.members.insert(group_id.clone(), members);
 
@@ -1544,6 +1587,13 @@ impl OfflineProtocol {
                     "Failed to send fresh key package to inviter after Welcome (will retry on discovery)"
                 );
             }
+
+            // Ask the inviter for the group's documents. An empty offer
+            // is the request: a space this device has never seen lists no
+            // documents, and a peer reading a complete offer that omits
+            // theirs answers with the whole of each one.
+            #[cfg(feature = "data")]
+            self.kick_group_data_sync(&group_id, sender, "group_joined");
 
             self.emit_event(Event::group_member_added(
                 group_id.clone(),
@@ -1991,6 +2041,16 @@ impl OfflineProtocol {
             {
                 if member == affected && metadata_sender_is_admin {
                     self.record_attested_rich(member, versions);
+                }
+            }
+            // The group-replication half, on the same gate: without it the
+            // newcomer is invisible to this member's document sync, and the
+            // whole group's replication gate stays closed on their account.
+            if let (Some(versions), Some(affected)) =
+                (&payload.affected_member_data, &payload.affected_member)
+            {
+                if member == affected && metadata_sender_is_admin {
+                    self.record_attested_data(member, versions);
                 }
             }
             self.emit_event(Event::group_member_added(
@@ -2617,6 +2677,24 @@ impl OfflineProtocol {
                             );
                             continue;
                         };
+                        // Same interception on the drain, and the ACK is
+                        // still owed: a frame buffered until group state
+                        // caught up was deferred, so the sender is still
+                        // retransmitting it until this ACK lands.
+                        #[cfg(feature = "data")]
+                        if let Some(body) = text.strip_prefix(internal_prefixes::DATA_V1) {
+                            let body = body.to_string();
+                            let ack_sender = entry.sender.clone();
+                            let ack_message_id = entry.message_id.clone();
+                            delivered_here.insert(ack_message_id.clone());
+                            self.handle_group_data_sync_frame(group_id, &entry.sender, &body);
+                            self.ack_drained_group_message(
+                                &ack_sender,
+                                &ack_message_id,
+                                entry.received_via,
+                            );
+                            continue;
+                        }
                         info!(
                             group_id = %group_id,
                             msg_id = %entry.message_id,
@@ -3198,6 +3276,25 @@ impl OfflineProtocol {
             })
             .collect();
 
+        // The same two directions again for group replication. Documents
+        // are worse than rich extras to get wrong here: extras degrade to
+        // text the recipient still reads, whereas a member outside the
+        // attestation web simply never receives anyone's edits and has no
+        // way to notice.
+        let invitee_data = self.attestable_data_versions(invitee_user_id);
+        let member_data: HashMap<String, Vec<u8>> = members
+            .iter()
+            .filter(|m| m.as_str() != invitee_user_id)
+            .filter_map(|m| {
+                if *m == self_id {
+                    (!self.advertised_data_versions().is_empty())
+                        .then(|| (m.clone(), vec![DATA_GROUP_V1]))
+                } else {
+                    self.attestable_data_versions(m).map(|v| (m.clone(), v))
+                }
+            })
+            .collect();
+
         // Send Welcome to invitee
         let welcome_payload = GroupMlsWelcomePayload {
             group_id: group_id.to_string(),
@@ -3206,6 +3303,7 @@ impl OfflineProtocol {
             member_list: members.clone(),
             member_roles,
             member_rich,
+            member_data,
             // Carries our creator of record so the joiner's `check_is_admin`
             // has a fallback when the role snapshot above is incomplete.
             // Absent when we never learned it ourselves (joined via an older
@@ -3230,6 +3328,7 @@ impl OfflineProtocol {
             affected_member: Some(invitee_user_id.to_string()),
             role: Some(GroupRole::Member),
             affected_member_rich: invitee_rich,
+            affected_member_data: invitee_data,
         };
         let commit_content = format!(
             "{}{}",
@@ -3271,6 +3370,14 @@ impl OfflineProtocol {
 
         // Sync membership update to relay
         let _ = self.try_relay_register_group(group_id, None, &members);
+
+        // Hand the newcomer what this device holds in the group's space.
+        // Their own offer (sent when the Welcome lands) covers the same
+        // ground from the other side; both exist because either frame can
+        // be the one that is lost, and a redundant offer costs one frame
+        // that a current replica answers with nothing.
+        #[cfg(feature = "data")]
+        self.kick_group_data_sync(group_id, invitee_user_id, "member_added");
 
         info!(group_id = %group_id, invitee = %invitee_user_id, "Invited member to group");
         Ok(())
@@ -3360,6 +3467,7 @@ impl OfflineProtocol {
             affected_member: Some(member_id.to_string()),
             role: None,
             affected_member_rich: None,
+            affected_member_data: None,
         };
         let commit_content = format!(
             "{}{}",
@@ -4864,6 +4972,123 @@ impl OfflineProtocol {
         Ok((message_ids, succeeded_members, failed_members))
     }
 
+    /// Encrypts one internally-consumed plaintext for a group and delivers
+    /// it, either to the whole roster or to a single member.
+    ///
+    /// The carrier the data layer replicates over. Everything about it is
+    /// the group message path minus the parts that make a message a
+    /// message: no app-facing `GroupMessageSent` event, no logical id, no
+    /// rich extras, no reply threading. What it keeps is the part that
+    /// matters — one MLS encryption for the whole roster, and the ordinary
+    /// per-member ladder (outbox, retry, dedup, park) underneath.
+    ///
+    /// `target` is `None` for a change every member needs and `Some(member)`
+    /// for the answer to one member's question. A directed frame is still
+    /// encrypted under the group key: two members of a group need not have
+    /// a 1:1 session with each other, and making replication wait for one
+    /// would make it depend on a handshake that may never happen. The cost
+    /// is that the roster could read a directed frame if it were delivered
+    /// to them, which is not a confidentiality question — every member is
+    /// entitled to the contents — but a traffic one, and it is why the
+    /// answer legs are addressed rather than broadcast.
+    ///
+    /// Deliberately without `stage_outbox_reseal`, unlike the 1:1 sync
+    /// sender. Re-sealing stages *plaintext* to be re-encrypted for a
+    /// recipient, and this ciphertext belongs to a group epoch rather than
+    /// to a pairwise session; a staged reseal here would re-seal a group
+    /// frame as a 1:1 payload, which is worse than the retry it would
+    /// rescue. Group messaging makes the same trade for the same reason.
+    ///
+    /// Relay broadcast is deliberately not taken even for the roster-wide
+    /// case. The broadcast path arms a delivery-report correlation that
+    /// re-sends per member and emits app-facing group events; a replication
+    /// frame has no app-facing identity to report on, and the report would
+    /// name message ids the app never saw. Per-member fan-out is the
+    /// always-correct path and the one a mesh-only group takes anyway.
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(crate) fn send_group_internal_frame(
+        &mut self,
+        group_id: &str,
+        target: Option<&str>,
+        plaintext: &str,
+    ) -> Result<()> {
+        let members = match target {
+            Some(member) => vec![member.to_string()],
+            None => self.group_roster(group_id)?,
+        };
+        if members.iter().all(|m| m == &self.local_id) {
+            return Ok(());
+        }
+
+        let encrypted = {
+            let mls_guard = self.read_mls_guard()?;
+            let gid = offline_protocol_mls::GroupId::new(group_id)?;
+            mls_guard.encrypt_for_group(&gid, plaintext.as_bytes())?
+        };
+        let ciphertext_b64 = base64_encode(&encrypted.ciphertext);
+
+        let (_ids, _ok, failed) = self.fanout_group_frames_per_member(
+            group_id,
+            &members,
+            None,
+            &ciphertext_b64,
+            encrypted.epoch,
+            None,
+            None,
+            MessagePriority::Low,
+        )?;
+        if !failed.is_empty() {
+            // Not an error: a member that could not be reached now has the
+            // frame in their outbox entry's place in the ladder, and the
+            // version exchange on their next reconnect closes any gap the
+            // ladder does not. Logged because a persistent failure here is
+            // a group that quietly stops converging.
+            debug!(
+                group_id = %group_id,
+                failed = failed.len(),
+                "Some members could not be handed a replication frame"
+            );
+        }
+        Ok(())
+    }
+
+    /// The roster of a group this device is a member of, cache first.
+    ///
+    /// The cache is authoritative when populated and empty after a restart,
+    /// so a miss is not an answer: MLS is consulted and the cache filled,
+    /// which is the same fallback [`Self::send_group_message_inner`] makes
+    /// for the same reason.
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(crate) fn group_roster(&mut self, group_id: &str) -> Result<Vec<String>> {
+        if let Some(members) = self.group_mesh.members.get(group_id) {
+            return Ok(members.clone());
+        }
+        self.refresh_group_members(group_id)
+    }
+
+    /// The roster of `space`, when `space` names a group this device is in.
+    ///
+    /// The question every replication decision starts from: is this space a
+    /// group, a peer, or neither. Answered structurally rather than by
+    /// parsing the name, so a space is a group space exactly when MLS says
+    /// this device holds that group.
+    ///
+    /// The MLS lookup behind a cache miss is not free, and it is affordable
+    /// because of where this is called from: a flush that has just written
+    /// a sealed record, or a frame that has just been decrypted. Both are
+    /// dominated by work an order of magnitude larger than a group-state
+    /// read.
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(crate) fn group_space_roster(&mut self, space: &str) -> Option<Vec<String>> {
+        if let Some(members) = self.group_mesh.members.get(space) {
+            return Some(members.clone());
+        }
+        if offline_protocol_mls::GroupId::new(space).is_err() {
+            return None;
+        }
+        self.refresh_group_members(space).ok()
+    }
+
     /// Replaces the set of capability tokens advertised by the connected
     /// relay.
     ///
@@ -5161,6 +5386,7 @@ impl OfflineProtocol {
                         affected_member: None,
                         role: None,
                         affected_member_rich: None,
+                        affected_member_data: None,
                     };
                     let commit_content = match serde_json::to_string(&commit_payload) {
                         Ok(json) => format!("{}{}", internal_prefixes::GROUP_MLS_COMMIT, json),
@@ -5755,6 +5981,17 @@ impl OfflineProtocol {
         match self.decrypt_group_application(group_id, ciphertext_bytes, sender) {
             GroupDecryptOutcome::Plaintext(pt) => match String::from_utf8(pt) {
                 Ok(text) => {
+                    // The third and last arm a decrypted group plaintext can
+                    // reach. Missing one of them is the failure class this
+                    // repository has already paid for once: a hardening fix
+                    // that landed on a single inbound path while its sibling
+                    // stayed broken.
+                    #[cfg(feature = "data")]
+                    if let Some(body) = text.strip_prefix(internal_prefixes::DATA_V1) {
+                        let body = body.to_string();
+                        self.handle_group_data_sync_frame(group_id, sender, &body);
+                        return;
+                    }
                     let (content, media_metadata, content_type, forward_info_event) =
                         Self::restore_group_rich(text, forward_info, sender);
                     self.emit_event(Event::group_message_received(

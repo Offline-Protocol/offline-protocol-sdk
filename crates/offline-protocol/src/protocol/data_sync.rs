@@ -173,6 +173,40 @@ enum SyncBody {
     NeedSnapshot { doc: String },
 }
 
+/// Where a sync frame goes and what it is sealed under.
+///
+/// The one thing F4 added to this module. 1:1 replication could treat the
+/// space, the peer, and the reply address as a single value because they
+/// genuinely were one; a group space is one scope with many members, so the
+/// space no longer names the recipient and the two have to be carried
+/// separately.
+#[derive(Debug, Clone)]
+pub(crate) enum SyncChannel {
+    /// A 1:1 space, sealed to the peer the space is named after.
+    Peer,
+    /// A group space, sealed once for the whole roster.
+    ///
+    /// Used only for changes every member needs: a local commit. Group MLS
+    /// produces one ciphertext for everyone, which is what makes group
+    /// replication cheap, and it is also why this must never be used for an
+    /// answer to one member's question — the other members would each
+    /// receive, decrypt, and import a blob they already had.
+    GroupBroadcast,
+    /// A group space, sealed for the roster but delivered to one member.
+    ///
+    /// The reply leg. Anti-entropy between two members of a group is still
+    /// a conversation between two devices: an offer is answered by the
+    /// member that received it and by nobody else. Every other member is
+    /// spared the traffic, and the terminating 1.5-round-trip exchange the
+    /// 1:1 path relies on keeps working unchanged.
+    ///
+    /// Sealed under the group key rather than the pair's 1:1 session on
+    /// purpose: two members of a group need not have a 1:1 session at all,
+    /// and requiring one would make replication depend on a handshake that
+    /// may never happen.
+    GroupDirected(String),
+}
+
 /// Which frame a blob arrived in.
 ///
 /// Carried into the import so a rung of the catch-up ladder knows whether
@@ -213,6 +247,17 @@ pub(crate) fn blob_digest(blob: &[u8]) -> String {
     hex_encode(&hasher.finalize()[..16])
 }
 
+/// The rate-limit key for offers toward one member of one group.
+///
+/// A group space and a 1:1 space share one window map, so the two key
+/// spaces must not overlap: a bare peer address is the 1:1 key, and this
+/// one is deliberately built with a character no validated peer id, group
+/// id or address can contain, so no composed key can ever collide with a
+/// peer's own.
+fn group_offer_key(member: &str, group_id: &str) -> String {
+    format!("{member}\x01{group_id}")
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -229,12 +274,82 @@ impl OfflineProtocol {
         if !self.data_sync_active(peer) {
             return;
         }
-        if let Some(last) = self.last_data_sync_offer.get(peer) {
-            if Instant::now().duration_since(*last) < DATA_SYNC_OFFER_INTERVAL {
-                return;
-            }
+        if !self.data_sync_offer_due(peer) {
+            return;
         }
         self.offer_versions(peer, cause);
+    }
+
+    /// Offer our versions of every document in `group_id` to one member.
+    ///
+    /// The group counterpart of [`Self::kick_data_sync`], and addressed for
+    /// the same reason its answers are: a member coming back into range is
+    /// a conversation with that member. Broadcasting the offer to the whole
+    /// roster would have every other member answer a question nobody asked
+    /// them.
+    ///
+    /// Rate-limited per (member, group) rather than per member, so a peer
+    /// shared across several groups reconciles all of them rather than
+    /// whichever one its rediscovery happened to reach first.
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(crate) fn kick_group_data_sync(&mut self, group_id: &str, member: &str, cause: &str) {
+        let members = match self.group_roster(group_id) {
+            Ok(members) => members,
+            Err(_) => return,
+        };
+        if !self.group_data_sync_active(&members) {
+            return;
+        }
+        let key = group_offer_key(member, group_id);
+        if !self.data_sync_offer_due(&key) {
+            return;
+        }
+        self.offer_versions_over(
+            group_id,
+            &SyncChannel::GroupDirected(member.to_string()),
+            cause,
+        );
+    }
+
+    /// Whether the reconciliation sweep keyed by `key` is outside its
+    /// suppression window, stamping it when it is.
+    ///
+    /// Stamped here rather than after the send for the reason
+    /// [`Self::offer_versions_over`] gives: a read that fails will still
+    /// fail a moment later, and retrying it at discovery speed is the
+    /// traffic the window exists to prevent.
+    fn data_sync_offer_due(&mut self, key: &str) -> bool {
+        if let Some(last) = self.last_data_sync_offer.get(key) {
+            if Instant::now().duration_since(*last) < DATA_SYNC_OFFER_INTERVAL {
+                return false;
+            }
+        }
+        self.last_data_sync_offer
+            .insert(key.to_string(), Instant::now());
+        true
+    }
+
+    /// Offer versions of every group space this device shares with `peer`.
+    ///
+    /// Wired to the same rediscovery seam as [`Self::kick_data_sync`], and
+    /// needed because a group space has no 1:1 trigger to ride: two members
+    /// may never establish a session with each other, so without this the
+    /// only thing that ever reconciles them is a fresh local commit.
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(crate) fn kick_shared_group_data_sync(&mut self, peer: &str, cause: &str) {
+        if !self.config.data.enabled {
+            return;
+        }
+        let shared: Vec<String> = self
+            .group_mesh
+            .members
+            .iter()
+            .filter(|(_, members)| members.iter().any(|m| m == peer))
+            .map(|(group_id, _)| group_id.clone())
+            .collect();
+        for group_id in shared {
+            self.kick_group_data_sync(&group_id, peer, cause);
+        }
     }
 
     /// Offer our versions because a change happened that no frame carried,
@@ -249,21 +364,85 @@ impl OfflineProtocol {
     /// until somebody asks, both sides hold documents they believe agree;
     /// on a link that never drops there is no next trigger to ask.
     pub(crate) fn nudge_data_sync(&mut self, space: &str, origin: Option<&str>, cause: &str) {
-        if origin == Some(space) || !self.data_sync_active(space) {
-            return;
+        match self.space_channel(space, origin) {
+            Some(SyncChannel::Peer) => self.offer_versions(space, cause),
+            // The roster-wide leg, and the one place a group offer is not
+            // addressed to one member. What went unsent was a change every
+            // member needs, and there is no single member to ask: each of
+            // them answers with what they are missing, and a member that is
+            // already current answers with nothing.
+            Some(channel @ SyncChannel::GroupBroadcast) => {
+                self.offer_versions_over(space, &channel, cause)
+            }
+            Some(SyncChannel::GroupDirected(_)) | None => {}
         }
-        self.offer_versions(space, cause);
+    }
+
+    /// How a space replicates, or `None` when it does not.
+    ///
+    /// The single place the three kinds of space are told apart. A space is
+    /// a group space when MLS says this device holds a group by that name,
+    /// a 1:1 space when the name is a peer that advertised replication, and
+    /// local-only otherwise — and "local-only" is the honest answer for a
+    /// space whose peer never advertised, whose group is gone, or whose
+    /// members are not all group-capable.
+    ///
+    /// `origin`, when set, names the peer a change was just applied from,
+    /// and suppresses announcing that change back to them.
+    fn space_channel(&mut self, space: &str, origin: Option<&str>) -> Option<SyncChannel> {
+        if let Some(members) = self.group_space_roster(space) {
+            // A change that arrived over the group reached every member at
+            // once, because that is what one group ciphertext does. Pushing
+            // it on would have every member push every change to every
+            // other member: N times the frames for nothing, and worse as
+            // the group grows. Anti-entropy still closes real gaps.
+            if origin.is_some() {
+                return None;
+            }
+            if self.group_data_sync_active(&members) {
+                return Some(SyncChannel::GroupBroadcast);
+            }
+            // The gate is closed, and for a group the usual reason is not
+            // that somebody opted out but that we have never heard from
+            // them: members added by a third party exchange no key packages
+            // with us, and an inviter running an SDK from before
+            // attestation forwards none. Sending them ours makes their
+            // automatic reply teach us what they support. Guarded by
+            // `key_package_sent_to`, so a group that stays closed does not
+            // re-probe on every commit.
+            let unknown = self.group_data_unknown_members(&members);
+            if !unknown.is_empty() {
+                debug!(
+                    space,
+                    unknown = unknown.len(),
+                    "Group replication is held closed by members of unknown capability; probing"
+                );
+                self.backfill_group_rich_capabilities(&unknown);
+            }
+            return None;
+        }
+        if origin == Some(space) || !self.data_sync_active(space) {
+            return None;
+        }
+        Some(SyncChannel::Peer)
     }
 
     /// Send our version of every document in a space to the peer that names
     /// it, and start the window that suppresses the next sweep.
     fn offer_versions(&mut self, peer: &str, cause: &str) {
-        // Stamped before the read rather than after the send. A version read
-        // that fails will still fail a millisecond from now, and retrying it
-        // at discovery speed is the traffic the window exists to prevent.
+        // Stamped even on the unlimited path so an offer sent right now
+        // still suppresses the next sweep: the sweep would re-send what
+        // this frame already carried.
         self.last_data_sync_offer
             .insert(peer.to_string(), Instant::now());
+        self.offer_versions_over(peer, &SyncChannel::Peer, cause);
+    }
 
+    /// [`Self::offer_versions`] over an explicit channel, which is what a
+    /// group space needs: the offer is addressed to one member, not
+    /// broadcast to the roster.
+    fn offer_versions_over(&mut self, space: &str, channel: &SyncChannel, cause: &str) {
+        let peer = space;
         let docs = match self.data_sync_versions(peer) {
             Ok(docs) => docs,
             Err(err) => {
@@ -276,8 +455,8 @@ impl OfflineProtocol {
                 return;
             }
         };
-        debug!(peer = %peer, cause, docs = docs.len(), "Offering document versions");
-        self.send_version_frames(peer, docs, false, false);
+        debug!(space = %peer, cause, docs = docs.len(), "Offering document versions");
+        self.send_version_frames(peer, channel, docs, false, false);
     }
 
     /// Send one version frame per batch of documents.
@@ -289,7 +468,8 @@ impl OfflineProtocol {
     /// about one document with the whole space.
     fn send_version_frames(
         &mut self,
-        peer: &str,
+        space: &str,
+        channel: &SyncChannel,
         docs: BTreeMap<String, String>,
         reply: bool,
         force_partial: bool,
@@ -316,7 +496,8 @@ impl OfflineProtocol {
         let partial = force_partial || batches.len() > 1;
         for batch in batches {
             self.send_sync_frame(
-                peer,
+                space,
+                channel,
                 &SyncBody::Versions {
                     reply,
                     partial,
@@ -333,7 +514,7 @@ impl OfflineProtocol {
     /// suppressing the counter-offer, so a request cannot start a chain of
     /// its own; `partial` keeps the peer from reading one name as the
     /// complete list and answering with every other document in the space.
-    fn request_doc_catch_up(&mut self, space: &str, doc: &str) {
+    fn request_doc_catch_up(&mut self, space: &str, channel: &SyncChannel, doc: &str) {
         let version = match self.data_doc_version(space, doc) {
             Ok(version) => version,
             Err(err) => {
@@ -341,9 +522,9 @@ impl OfflineProtocol {
                 return;
             }
         };
-        let peer = space.to_string();
         self.send_version_frames(
-            &peer,
+            space,
+            channel,
             BTreeMap::from([(doc.to_string(), version)]),
             true,
             true,
@@ -352,15 +533,22 @@ impl OfflineProtocol {
 
     /// Seal one frame and put it on the ladder.
     ///
-    /// Deliberately the strict encryptor: a sync frame never initiates
-    /// session establishment. Documents converge when the peers next talk,
-    /// and provoking a handshake for an offer nobody asked for would make
-    /// every reconnect noisier than the messaging it rides on.
-    fn send_sync_frame(&mut self, peer: &str, body: &SyncBody) {
+    /// The channel decides what "seal" means: a 1:1 space seals to its
+    /// peer, a group space seals once under the group key. Everything
+    /// above this function is written in terms of a space and a channel and
+    /// does not know which of the two it is driving, which is what keeps
+    /// one implementation of the exchange, the catch-up ladder and the
+    /// import containment serving both.
+    fn send_sync_frame(&mut self, space: &str, channel: &SyncChannel, body: &SyncBody) {
         let plaintext = match serde_json::to_string(body) {
             Ok(json) => format!(
                 "{}{{\"v\":{},{}",
                 internal_prefixes::DATA_V1,
+                // The frame schema is the 1:1 version in both cases. The
+                // group entry advertises that a peer *intercepts* these
+                // frames inside a group ciphertext; it does not describe a
+                // second frame shape, and minting one would mean two
+                // parsers for identical bodies.
                 DATA_SYNC_V1,
                 // The body serializes as an object; splice the version in as
                 // its first field rather than nesting, so a future version
@@ -368,11 +556,34 @@ impl OfflineProtocol {
                 &json[1..]
             ),
             Err(err) => {
-                warn!(peer = %peer, error = %err, "Failed to encode sync frame");
+                warn!(space, error = %err, "Failed to encode sync frame");
                 return;
             }
         };
 
+        match channel {
+            SyncChannel::Peer => self.send_sync_frame_to_peer(space, plaintext),
+            SyncChannel::GroupBroadcast => {
+                if let Err(err) = self.send_group_internal_frame(space, None, &plaintext) {
+                    debug!(space, error = %err, "Group replication frame not sent");
+                }
+            }
+            SyncChannel::GroupDirected(member) => {
+                let member = member.clone();
+                if let Err(err) = self.send_group_internal_frame(space, Some(&member), &plaintext) {
+                    debug!(space, error = %err, "Directed replication frame not sent");
+                }
+            }
+        }
+    }
+
+    /// The 1:1 leg: seal to the peer the space is named after.
+    ///
+    /// Deliberately the strict encryptor: a sync frame never initiates
+    /// session establishment. Documents converge when the peers next talk,
+    /// and provoking a handshake for an offer nobody asked for would make
+    /// every reconnect noisier than the messaging it rides on.
+    fn send_sync_frame_to_peer(&mut self, peer: &str, plaintext: String) {
         let encrypted = match self.encrypt_content_for_recipient_strict(peer, &plaintext) {
             Ok(content) => content,
             Err(err) => {
@@ -444,9 +655,9 @@ impl OfflineProtocol {
         blob: &[u8],
         origin: Option<&str>,
     ) {
-        if origin == Some(space) || !self.data_sync_active(space) {
+        let Some(channel) = self.space_channel(space, origin) else {
             return;
-        }
+        };
         if blob.len() > MAX_SYNC_BLOB_BYTES {
             // Too big to inline, so the catch-up ladder has to fetch it: it
             // can answer with a compacted snapshot instead of raw history.
@@ -463,9 +674,9 @@ impl OfflineProtocol {
             self.nudge_data_sync(space, origin, "oversized_delta");
             return;
         }
-        let peer = space.to_string();
         self.send_sync_frame(
-            &peer,
+            space,
+            &channel,
             &SyncBody::Delta {
                 doc: doc.to_string(),
                 blob: BASE64.encode(blob),
@@ -483,6 +694,46 @@ impl OfflineProtocol {
     /// corrupt blob or a disabled layer would spend the sender's whole retry
     /// budget on a frame that cannot ever be accepted.
     pub(crate) fn handle_data_sync_frame(&mut self, sender: &str, body: &str) {
+        // The space is the sender. Never a field on the frame: a peer that
+        // could name the space could write into a document it replicates
+        // with somebody else.
+        self.handle_data_sync_frame_over(sender, &SyncChannel::Peer, sender, body);
+    }
+
+    /// A `__DATA_V1__` frame that arrived inside a *group* ciphertext.
+    ///
+    /// The space is the group, and the same structural argument holds as
+    /// for 1:1: the group is not named by the frame, it is the group whose
+    /// key opened the ciphertext. A member of one group cannot reach
+    /// another group's documents without being a member of that group too,
+    /// and the decrypt already proved membership and authenticated the
+    /// sender.
+    ///
+    /// Answers go back to `sender` alone rather than to the roster. Every
+    /// other member either has what was asked for or will ask for it
+    /// themselves.
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(crate) fn handle_group_data_sync_frame(
+        &mut self,
+        group_id: &str,
+        sender: &str,
+        body: &str,
+    ) {
+        self.handle_data_sync_frame_over(
+            group_id,
+            &SyncChannel::GroupDirected(sender.to_string()),
+            sender,
+            body,
+        );
+    }
+
+    fn handle_data_sync_frame_over(
+        &mut self,
+        space: &str,
+        channel: &SyncChannel,
+        sender: &str,
+        body: &str,
+    ) {
         if !self.config.data.enabled {
             // Parsing is never capability-gated, but applying is: the layer
             // is off, so the frame is dropped. Nothing is lost permanently —
@@ -517,23 +768,20 @@ impl OfflineProtocol {
             }
         };
 
-        // The space is the sender. Never a field on the frame: a peer that
-        // could name the space could write into a document it replicates
-        // with somebody else.
-        let space = sender.to_string();
+        let space = space.to_string();
         let outcome = match frame {
             SyncBody::Versions {
                 reply,
                 partial,
                 docs,
-            } => self.answer_version_offer(&space, reply, partial, docs),
+            } => self.answer_version_offer(&space, channel, reply, partial, docs),
             SyncBody::Delta { doc, blob } => {
-                self.accept_remote_blob(&space, &doc, &blob, BlobKind::Delta)
+                self.accept_remote_blob(&space, channel, &doc, &blob, BlobKind::Delta)
             }
             SyncBody::Snapshot { doc, blob } => {
-                self.accept_remote_blob(&space, &doc, &blob, BlobKind::Snapshot)
+                self.accept_remote_blob(&space, channel, &doc, &blob, BlobKind::Snapshot)
             }
-            SyncBody::NeedSnapshot { doc } => self.answer_snapshot_request(&space, &doc),
+            SyncBody::NeedSnapshot { doc } => self.answer_snapshot_request(&space, channel, &doc),
         };
         if let Err(err) = outcome {
             warn!(peer = %sender, error = %err, "Sync frame could not be handled");
@@ -544,6 +792,7 @@ impl OfflineProtocol {
     fn answer_version_offer(
         &mut self,
         space: &str,
+        channel: &SyncChannel,
         reply: bool,
         partial: bool,
         theirs: BTreeMap<String, String>,
@@ -597,7 +846,7 @@ impl OfflineProtocol {
                 // may be in a frame that has not arrived, or in no frame at
                 // all because the offer was about a single document.
                 if !partial {
-                    self.offer_catch_up(space, doc, None);
+                    self.offer_catch_up(space, channel, doc, None);
                 }
                 continue;
             };
@@ -605,7 +854,9 @@ impl OfflineProtocol {
                 continue;
             }
             match BASE64.decode(theirs_encoded) {
-                Ok(token) => self.offer_catch_up(space, doc, Some(VersionToken::from_bytes(token))),
+                Ok(token) => {
+                    self.offer_catch_up(space, channel, doc, Some(VersionToken::from_bytes(token)))
+                }
                 Err(err) => {
                     warn!(space, doc, error = %err, "Undecodable version token in a sync frame");
                 }
@@ -622,11 +873,10 @@ impl OfflineProtocol {
         // created from it empty for as long as the link stays up, because
         // the peer has said everything it had to say and nothing else here
         // ever asks.
-        let peer = space.to_string();
         if !reply {
-            self.send_version_frames(&peer, ours, true, false);
+            self.send_version_frames(space, channel, ours, true, false);
         } else {
-            self.send_version_frames(&peer, created, true, true);
+            self.send_version_frames(space, channel, created, true, true);
         }
         Ok(())
     }
@@ -638,14 +888,20 @@ impl OfflineProtocol {
     /// reported rather than retried: a document too large for every inline
     /// form needs the media path, which the attachment stage brings, and a
     /// silent stall would be indistinguishable from a peer with no changes.
-    fn offer_catch_up(&mut self, space: &str, doc: &str, theirs: Option<VersionToken>) {
+    fn offer_catch_up(
+        &mut self,
+        space: &str,
+        channel: &SyncChannel,
+        doc: &str,
+        theirs: Option<VersionToken>,
+    ) {
         if let Some(token) = theirs {
             match self.data_catch_up(space, doc, &token) {
                 Ok(CatchUp::UpToDate) => return,
                 Ok(CatchUp::Updates(bytes)) if bytes.len() <= MAX_SYNC_BLOB_BYTES => {
-                    let peer = space.to_string();
                     self.send_sync_frame(
-                        &peer,
+                        space,
+                        channel,
                         &SyncBody::Delta {
                             doc: doc.to_string(),
                             blob: BASE64.encode(bytes),
@@ -663,7 +919,7 @@ impl OfflineProtocol {
             }
         }
 
-        self.send_snapshot(space, doc);
+        self.send_snapshot(space, channel, doc);
     }
 
     /// Send a whole document, the top rung and the answer to every refusal
@@ -671,12 +927,12 @@ impl OfflineProtocol {
     ///
     /// Terminal by construction: a snapshot provokes no answer of its own,
     /// which is what lets the refusals underneath it ask for one freely.
-    fn send_snapshot(&mut self, space: &str, doc: &str) {
+    fn send_snapshot(&mut self, space: &str, channel: &SyncChannel, doc: &str) {
         match self.data_export_snapshot(space, doc) {
             Ok(bytes) if bytes.len() <= MAX_SYNC_BLOB_BYTES => {
-                let peer = space.to_string();
                 self.send_sync_frame(
-                    &peer,
+                    space,
+                    channel,
                     &SyncBody::Snapshot {
                         doc: doc.to_string(),
                         blob: BASE64.encode(bytes),
@@ -702,7 +958,12 @@ impl OfflineProtocol {
     /// Only a document already held is served. A request naming an unknown
     /// one would otherwise create it, which is a way to spend this device's
     /// storage that does not even require a blob.
-    fn answer_snapshot_request(&mut self, space: &str, doc: &str) -> Result<()> {
+    fn answer_snapshot_request(
+        &mut self,
+        space: &str,
+        channel: &SyncChannel,
+        doc: &str,
+    ) -> Result<()> {
         if offline_protocol_data::validate_name(doc).is_err() {
             warn!(space, doc, "Snapshot request names an invalid document");
             return Ok(());
@@ -712,7 +973,7 @@ impl OfflineProtocol {
             return Ok(());
         }
         debug!(space, doc, "Serving a snapshot the peer asked for");
-        self.send_snapshot(space, doc);
+        self.send_snapshot(space, channel, doc);
         Ok(())
     }
 
@@ -720,6 +981,7 @@ impl OfflineProtocol {
     fn accept_remote_blob(
         &mut self,
         space: &str,
+        channel: &SyncChannel,
         doc: &str,
         encoded: &str,
         kind: BlobKind,
@@ -861,7 +1123,7 @@ impl OfflineProtocol {
                 // something.
                 BlobKind::Delta => {
                     debug!(space, doc, "Remote change parked; asking for the gap");
-                    self.request_doc_catch_up(space, doc);
+                    self.request_doc_catch_up(space, channel, doc);
                 }
                 // A snapshot is the top of the ladder. Asking again returns
                 // the same bytes, so this is reported and left, rather than
@@ -882,9 +1144,9 @@ impl OfflineProtocol {
                 // exchange neither side can end. Name what would work.
                 BlobKind::Delta => {
                     debug!(space, doc, "Remote change needs a snapshot; asking for one");
-                    let peer = space.to_string();
                     self.send_sync_frame(
-                        &peer,
+                        space,
+                        channel,
                         &SyncBody::NeedSnapshot {
                             doc: doc.to_string(),
                         },

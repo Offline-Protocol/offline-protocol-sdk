@@ -10,7 +10,7 @@ Peers advertise what they can parse in the key package payload, the body of a
 | `wire_versions` | Hop-local | Which frame encodings we may emit to this peer | JSON only |
 | `env_versions` | End to end | Which `__MLS_ENC__` payload forms we may emit | Legacy JSON envelope only |
 | `rich_versions` | End to end | Whether we may seal a `__RICH_V1__` body, and the v2 media envelope | Plain text only, extras dropped |
-| `data_versions` | End to end | Whether we may send `__DATA_V1__` document sync frames, and which document encoding they carry | No replication with that peer |
+| `data_versions` | End to end | Whether we may send `__DATA_V1__` document sync frames, and which document encoding they carry. Entry 1 is 1:1 replication; entry 2 additionally means the peer intercepts these frames inside a *group* ciphertext | No replication with that peer |
 | `nostr_pubkey` | End to end | Which key metadata is sealed to on the Nostr path | Seal to the publicly computable key |
 
 The key package payload also carries `user_id`, the MLS key package itself, a
@@ -59,6 +59,20 @@ For `data_versions` the consequence is quieter than a downgrade and worse: both
 sides keep accepting edits to a document neither is replicating, so the symptom
 is not a dropped feature but two replicas that disagree, with nothing anywhere
 reporting a problem.
+
+`data_versions` entries are read independently and the list is append-only. A
+peer advertising `[1]` is not a peer advertising `[1, 2]` with something
+missing: it is an implementation that replicates 1:1 and would render a group
+replication frame as literal text. Treating the two as one flag either sends
+that peer a frame it cannot read or stops replicating with it altogether.
+
+Entry 2 has a second source, because members of a group never exchange key
+packages with each other: a group inviter MAY attest it for a member on the
+Add commit and in the Welcome, exactly as it attests `rich_versions`. An
+attestation opens the *group* gate only, never 1:1 replication, and any
+directly received key package from that peer overrides it in both
+directions. Absence of an attestation means "no information" and MUST NOT be
+read as a downgrade.
 
 `wire_versions` is **hop-local** and deliberately in-memory only. It describes
 what the next hop decodes, and it is re-exchanged on connect.

@@ -1042,9 +1042,15 @@ await store.flush('space-1', 'profile');
 | `docSize(space, doc)` | `number` | Compacted size in bytes |
 | `wipeAll()` | `void` | Delete every data-layer record. Only durable once replication has stopped |
 
-A space id is the MLS scope the space rides on: a peer address or a group id.
-Space, document and collection names accept `A-Z a-z 0-9 . _ -` up to 128
-characters, because they are composed into storage record keys.
+A space id is the MLS scope the space rides on: a peer address (replicates
+1:1 with that peer), a group id from `createGroup` (replicates with every
+member of that group), or any other name (stays on the device).
+
+Document and collection names accept `A-Z a-z 0-9 . _ -` up to 128 characters,
+because they are composed into storage record keys. A space name additionally
+accepts `:`, so that a group id can name its own space; the separator itself
+is excluded from both, which is what keeps a composed key parsing back into
+the parts it was built from.
 
 ### DataValue
 

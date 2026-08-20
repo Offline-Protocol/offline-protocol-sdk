@@ -958,7 +958,7 @@ impl OfflineProtocol {
         #[cfg(feature = "data")]
         {
             if self.config.data.enabled {
-                return vec![super::types::DATA_SYNC_V1];
+                return vec![super::types::DATA_SYNC_V1, super::types::DATA_GROUP_V1];
             }
         }
         Vec::new()
@@ -1058,6 +1058,100 @@ impl OfflineProtocol {
     pub(crate) fn attestable_rich_versions(&self, peer_id: &str) -> Option<Vec<u8>> {
         (self.peer_rich_payload.contains(peer_id) || self.peer_rich_attested.contains(peer_id))
             .then(|| vec![RICH_PAYLOAD_V1])
+    }
+
+    /// Whether documents may replicate into a group: the layer is enabled
+    /// here and every non-self member is known to intercept group sync
+    /// frames — either self-advertised in a directly received key package
+    /// (`peer_data_group`) or attested by a group inviter on the Add commit
+    /// / Welcome (`peer_data_group_attested`).
+    ///
+    /// All-members rather than per-member, and that is not a convenience.
+    /// Group MLS encryption produces one ciphertext for everyone, so a
+    /// frame sent for the capable members is also delivered to the rest;
+    /// one member that cannot intercept it renders it to its user as
+    /// literal `__DATA_V1__` text. The gate is therefore closed by a single
+    /// unknown member, which is the same conservatism
+    /// [`Self::group_rich_seal_active`] applies to sealed rich bodies, for
+    /// the same reason and with a worse symptom if skipped.
+    ///
+    /// Blocking is deliberately not consulted here. A blocked *peer* is a
+    /// 1:1 relationship; a group send is one ciphertext to a roster, and
+    /// dropping the whole group's replication because one member is blocked
+    /// would be a surprising amount of collateral. The 1:1 gate keeps its
+    /// block check because there the recipient and the relationship are the
+    /// same thing.
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(crate) fn group_data_sync_active(&self, members: &[String]) -> bool {
+        #[cfg(feature = "data")]
+        {
+            self.config.data.enabled
+                && members
+                    .iter()
+                    .filter(|m| m.as_str() != self.local_id)
+                    .all(|m| {
+                        self.peer_data_group.contains(m.as_str())
+                            || self.peer_data_group_attested.contains(m.as_str())
+                    })
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            let _ = members;
+            false
+        }
+    }
+
+    /// Group members (non-self) not known to intercept group sync frames.
+    ///
+    /// These are the members holding [`Self::group_data_sync_active`]
+    /// closed. Handed to [`Self::backfill_group_rich_capabilities`], whose
+    /// probe is capability-agnostic: it sends our key package so the peer's
+    /// reply teaches us everything they advertise at once.
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(crate) fn group_data_unknown_members(&self, members: &[String]) -> Vec<String> {
+        #[cfg(feature = "data")]
+        {
+            members
+                .iter()
+                .filter(|m| {
+                    m.as_str() != self.local_id
+                        && !self.peer_data_group.contains(m.as_str())
+                        && !self.peer_data_group_attested.contains(m.as_str())
+                })
+                .cloned()
+                .collect()
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            let _ = members;
+            Vec::new()
+        }
+    }
+
+    /// The sync versions we can attest for a peer when inviting it into (or
+    /// welcoming it to) a group.
+    ///
+    /// [`DATA_GROUP_V1`] when the peer is known group-capable, directly or
+    /// itself attested — attestation chains transitively, which is how
+    /// knowledge reaches members several adds removed from any direct
+    /// exchange. `None` when unknown, and `None` is deliberately not a
+    /// downgrade signal: absence of knowledge must never evict what another
+    /// member learned first-hand.
+    ///
+    /// [`DATA_GROUP_V1`]: crate::protocol::types::DATA_GROUP_V1
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(crate) fn attestable_data_versions(&self, peer_id: &str) -> Option<Vec<u8>> {
+        #[cfg(feature = "data")]
+        {
+            (self.peer_data_group.contains(peer_id)
+                || self.peer_data_group_attested.contains(peer_id))
+            .then(|| vec![super::types::DATA_GROUP_V1])
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            let _ = peer_id;
+            None
+        }
     }
 
     /// Best-effort capability backfill for group members whose rich support
