@@ -1017,6 +1017,19 @@ impl FileTransferManager {
         self.active_assemblies.remove(file_id).is_some()
     }
 
+    /// Refuses a transfer outright: releases anything already buffered for
+    /// it and drops every further chunk.
+    ///
+    /// Stronger than [`Self::cancel_transfer`], and the difference is the
+    /// tombstone. A caller refuses a transfer because of something it
+    /// learned from one chunk, and chunks do not have to arrive in order, so
+    /// cancelling alone would let the ones behind it rebuild the assembly it
+    /// just released. The refusal has to outlive the chunk that prompted it.
+    pub(crate) fn refuse_transfer(&mut self, file_id: &str) {
+        self.active_assemblies.remove(file_id);
+        self.tombstone(file_id);
+    }
+
     /// Gets the number of active file transfers.
     pub fn active_transfer_count(&self) -> usize {
         self.active_assemblies.len()

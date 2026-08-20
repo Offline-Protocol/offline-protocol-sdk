@@ -449,11 +449,30 @@ pub struct OfflineProtocol {
     /// blob hash, valued by when the question went out.
     ///
     /// Load-bearing for more than bookkeeping: arriving blob bytes are
-    /// accepted only against an entry here. Without that check a peer could
-    /// push blobs this device never asked for and the application would be
-    /// handed files nobody wanted, which is a way to spend somebody's
-    /// storage and battery that costs the sender one frame.
+    /// admitted only against an entry here, checked when the transfer's
+    /// chunk 0 identifies it and again before the bytes reach the
+    /// application. Without it a peer could push blobs this device never
+    /// asked for and the application would be handed files nobody wanted.
+    ///
+    /// The bound it gives is on delivery and on the bulk of the buffering,
+    /// not on every byte: chunks need not arrive in order, so any that land
+    /// before chunk 0 are buffered before there is anything to judge, and
+    /// are released when it arrives. What remains is bounded by the media
+    /// layer's own resource caps, the same ones every unsolicited file
+    /// transfer has always been subject to.
     pub(crate) pending_attachment_fetches: HashMap<String, Instant>,
+
+    /// Blob requests recently acted on, keyed by asking peer and blob hash.
+    ///
+    /// Its own map rather than a corner of `last_data_sync_offer`, because
+    /// this is the only rate-limit key a peer chooses freely: every other one
+    /// is a peer or a peer-and-group, bounded by a roster. Bounded here by
+    /// [`MAX_BLOB_REQUESTS_PER_WINDOW`] per peer and
+    /// [`MAX_BLOB_REQUEST_WINDOWS`] overall, and swept on every read.
+    ///
+    /// [`MAX_BLOB_REQUESTS_PER_WINDOW`]: crate::protocol::data_sync::MAX_BLOB_REQUESTS_PER_WINDOW
+    /// [`MAX_BLOB_REQUEST_WINDOWS`]: crate::protocol::data_sync::MAX_BLOB_REQUEST_WINDOWS
+    pub(crate) blob_request_windows: HashMap<String, Instant>,
 
     /// Whether the MLS group list has been read into `group_mesh.members`
     /// once this session, so the shared-group rediscovery sweep can see the
@@ -890,6 +909,7 @@ impl OfflineProtocol {
             #[cfg(feature = "data")]
             last_data_sync_offer: HashMap::new(),
             pending_attachment_fetches: HashMap::new(),
+            blob_request_windows: HashMap::new(),
             #[cfg(feature = "data")]
             group_spaces_enumerated: false,
             lamport_clock: LamportClock::new(),
@@ -1634,7 +1654,29 @@ impl OfflineProtocol {
         // pipeline is live. The descriptors stay parked (and persisted)
         // until the resend consumes them or the restore TTL prunes them,
         // so an app that misses this signal gets it again next restart.
-        for descriptor in self.restored_media_descriptors.values() {
+        //
+        // Except the layer's own. An application cannot answer one of those:
+        // the only surface that takes a caller-supplied `file_id` is
+        // `send_media_with`, which forces the purpose to `None`, so a
+        // well-behaved app re-supplying the bytes would deliver a document
+        // snapshot to the peer's user as a downloaded file. They are dropped
+        // instead, and nothing is stranded: the requester's fetch expires and
+        // can be asked again, and a snapshot is re-offered by the next
+        // anti-entropy exchange.
+        let (recoverable, internal): (Vec<_>, Vec<_>) = self
+            .restored_media_descriptors
+            .values()
+            .cloned()
+            .partition(|descriptor| descriptor.data_purpose.is_none());
+        for descriptor in &internal {
+            debug!(
+                file_id = %descriptor.file_id,
+                "Dropping an interrupted document-layer transfer; the asking side will retry"
+            );
+            self.restored_media_descriptors.remove(&descriptor.file_id);
+            self.remove_media_descriptor(&descriptor.file_id);
+        }
+        for descriptor in recoverable {
             self.emit_event(Event::media_resend_required(
                 descriptor.file_id.clone(),
                 descriptor.recipient.clone(),
@@ -1764,8 +1806,8 @@ impl OfflineProtocol {
         // A peer we have stopped replicating with cannot answer anything we
         // asked them for, so the questions go too. Left behind they would
         // hold slots against the fetch bound until they timed out.
-        self.pending_attachment_fetches
-            .retain(|key, _| !key.starts_with(&format!("{peer}\u{1}")));
+        #[cfg(feature = "data")]
+        self.forget_attachment_state(peer);
         #[cfg(feature = "data")]
         self.forget_data_sync_offer_windows(peer);
     }
@@ -1777,6 +1819,7 @@ impl OfflineProtocol {
         self.peer_data_group_attested.clear();
         self.peer_data_media.clear();
         self.pending_attachment_fetches.clear();
+        self.blob_request_windows.clear();
         #[cfg(feature = "data")]
         self.last_data_sync_offer.clear();
     }

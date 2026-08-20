@@ -2203,3 +2203,203 @@ fn a_data_purposed_transfer_is_invisible_on_the_sending_side_too() {
     assert!(!events_named(&alice, "file_progress").is_empty());
     assert_eq!(events_named(&alice, "media_sent").len(), 1);
 }
+
+// ---- what a review found ----------------------------------------------
+
+#[test]
+fn an_interrupted_document_transfer_is_never_handed_back_to_the_app() {
+    // A descriptor outlives the process so an app can re-supply the bytes.
+    // For a document-layer transfer that recovery is a trap: the only
+    // surface that takes a caller-supplied file_id is `send_media_with`,
+    // which forces the purpose to None, so a well-behaved app answering
+    // MediaResendRequired would deliver a snapshot to the peer's user as a
+    // downloaded file. The exact outcome the capability gate exists to
+    // prevent, reached through this SDK's own recovery path.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+    let blob = vec![3u8; 40 * 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&blob);
+
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+    alice
+        .protocol
+        .data_provide_attachment(&alice_space, &bob.address, &hash, blob)
+        .expect("provide");
+    // Die mid-transfer: nothing is delivered, so the descriptor survives.
+    alice.transport.clear_sent_messages();
+
+    alice.restart(&bob.address);
+
+    assert!(
+        events_named(&alice, "media_resend_required").is_empty(),
+        "an app cannot answer this without stripping the purpose, so it must \
+         not be asked"
+    );
+}
+
+#[test]
+fn an_interrupted_ordinary_transfer_is_still_handed_back() {
+    // The control for the test above: the recovery path itself must keep
+    // working, or the fix has removed a feature instead of a trap.
+    let (mut alice, bob) = pair();
+    alice
+        .protocol
+        .send_media_with(
+            bob.address.clone(),
+            vec![4u8; 40 * 1024],
+            "holiday.jpg".to_string(),
+            offline_protocol_core::ContentType::File,
+            crate::protocol::types::MediaSendOptions::default(),
+        )
+        .expect("send");
+    alice.transport.clear_sent_messages();
+
+    alice.restart(&bob.address);
+
+    assert_eq!(
+        events_named(&alice, "media_resend_required").len(),
+        1,
+        "an ordinary interrupted transfer must still ask the app to re-supply"
+    );
+}
+
+#[test]
+fn a_peer_asking_for_endless_distinct_blobs_is_budgeted() {
+    // The per-hash window cannot see this as a flood, because every hash in
+    // it is new. Without a budget each frame buys a permanent map entry and
+    // an application callback, and a hash is 32 bytes the sender chooses.
+    let (mut alice, mut bob) = pair();
+    let space = Node::space_for(&bob);
+
+    let asks = crate::protocol::data_sync::MAX_BLOB_REQUESTS_PER_WINDOW + 40;
+    for round in 0..asks {
+        let hash = OfflineProtocol::data_attachment_hash(format!("blob-{round}").as_bytes());
+        // Straight into the handler, because a peer sending these is not
+        // using our fetch surface and is not subject to its bounds.
+        alice.protocol.handle_data_sync_frame(
+            &bob.address,
+            &format!(r#"{{"v":1,"k":"need_blob","hash":"{hash}"}}"#),
+        );
+    }
+    let _ = space;
+
+    let requested = events_named(&alice, "data_attachment_requested").len();
+    assert!(
+        requested <= crate::protocol::data_sync::MAX_BLOB_REQUESTS_PER_WINDOW,
+        "the application saw {requested} requests; the budget is {}",
+        crate::protocol::data_sync::MAX_BLOB_REQUESTS_PER_WINDOW
+    );
+    assert!(
+        alice.protocol.blob_request_windows.len()
+            <= crate::protocol::data_sync::MAX_BLOB_REQUEST_WINDOWS,
+        "and the map that remembers them stays bounded"
+    );
+    assert!(
+        requested > 0,
+        "a legitimate request must still get through, or this bounds nothing"
+    );
+}
+
+#[test]
+fn declining_toward_a_peer_that_cannot_read_it_is_refused() {
+    // The one frame in this file that had no gate. A refusal a peer cannot
+    // parse is worse than none: the caller believes they answered, and the
+    // asking side keeps waiting.
+    let (mut alice, mut bob) = pair();
+    let space = Node::space_for(&bob);
+    let hash = OfflineProtocol::data_attachment_hash(b"gone");
+
+    alice.protocol.peer_data_media.remove(&bob.address);
+    let err = alice
+        .protocol
+        .data_decline_attachment(&space, &bob.address, &hash)
+        .expect_err("a decline toward an incapable peer must refuse");
+    assert!(
+        format!("{err}").contains("attachment carriage"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(pump(&mut alice, &mut bob), 0, "and no frame may leave");
+}
+
+#[test]
+fn a_fetch_nobody_answers_eventually_reports() {
+    // The spinner the whole refusal mechanism exists to kill. Declining is
+    // only a SHOULD for a holder, so an app that implements neither answer
+    // leaves the asking side with no event at all unless expiry reports.
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    let hash = OfflineProtocol::data_attachment_hash(b"never answered");
+
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+    // Alice's app implements neither answer.
+    clear_events(&bob);
+
+    // Age the question past the timeout, then run the sweep the tick runs.
+    let stale = std::time::Instant::now()
+        - crate::protocol::data_sync::ATTACHMENT_FETCH_TIMEOUT
+        - std::time::Duration::from_secs(1);
+    for asked_at in bob.protocol.pending_attachment_fetches.values_mut() {
+        *asked_at = stale;
+    }
+    bob.protocol.expire_attachment_fetches();
+
+    let unavailable = events_named(&bob, "data_attachment_unavailable");
+    assert_eq!(unavailable.len(), 1, "expiry must report, not just recycle");
+    assert_eq!(unavailable[0]["reason"].as_str(), Some("timeout"));
+    assert!(
+        bob.protocol.pending_attachment_fetches.is_empty(),
+        "and release the slot"
+    );
+}
+
+#[test]
+fn unsolicited_blob_bytes_are_refused_at_the_door() {
+    // Refusing on completion still refuses, but only after the whole
+    // transfer has been buffered, reassembled and checksummed. That is the
+    // storage and the battery the rule exists to protect.
+    let (mut alice, mut bob) = pair();
+    let blob = vec![9u8; 40 * 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&blob);
+
+    // Bob asked for nothing. Alice pushes anyway.
+    let file_id = alice
+        .protocol
+        .send_media_inner(
+            bob.address.clone(),
+            blob,
+            hash.clone(),
+            offline_protocol_core::ContentType::File,
+            crate::protocol::types::MediaSendOptions::default(),
+            Some(crate::media_envelope::DataPurpose::Attachment { hash }),
+        )
+        .expect("a peer sends whatever it likes");
+
+    // One round only, so the transfer is still in flight. Asserting after it
+    // completes would prove nothing: the completion check refuses too, and
+    // finalize clears the assembly either way. What this fix changes is
+    // whether the bytes were ever buffered, and that is only observable
+    // while they would still be sitting there.
+    pump(&mut alice, &mut bob);
+    assert!(
+        bob.protocol
+            .file_transfer_manager
+            .get_progress(&file_id)
+            .is_none(),
+        "no assembly may be opened for bytes nobody asked for: refusing at \
+         the end still spends the storage and the battery this rule protects"
+    );
+
+    settle_media(&mut alice, &mut bob);
+    assert!(
+        events_named(&bob, "data_attachment_received").is_empty(),
+        "and unsolicited bytes must never reach the application"
+    );
+    assert!(events_named(&bob, "file_received").is_empty());
+}

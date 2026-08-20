@@ -798,11 +798,23 @@ fn from_engine_value(value: &LoroValue) -> Option<DataValue> {
                 Some(LoroValue::String(value)) => Some(value.to_string()),
                 _ => None,
             };
+            let name = text_field(ATTACHMENT_NAME_KEY);
+            let mime = text_field(ATTACHMENT_MIME_KEY);
+            // Checked on the way out, not only on the way in. A local write
+            // is validated at the operation, but a reference can also arrive
+            // inside a peer's delta, and nothing on that path has looked at
+            // it: the engine merges bytes, it does not know what an
+            // attachment is. A malformed reference reads as absent, which is
+            // what an implementation without attachments does with it
+            // anyway.
+            if crate::validate_attachment(&hash, size, name.as_deref(), mime.as_deref()).is_err() {
+                return None;
+            }
             Some(DataValue::Attachment {
                 hash,
                 size,
-                name: text_field(ATTACHMENT_NAME_KEY),
-                mime: text_field(ATTACHMENT_MIME_KEY),
+                name,
+                mime,
             })
         }
         // Nested containers are not part of the v1 value model: a value that

@@ -866,6 +866,30 @@ impl OfflineProtocol {
         let file_size = chunk.file_size;
         let is_first_chunk = chunk.chunk_index == 0;
 
+        // Refuse a blob nobody asked for at the door, not at the end.
+        //
+        // The check also runs on completion, which is where the hash is
+        // verified, but by then the whole transfer has been buffered,
+        // reassembled and checksummed. That is the storage and the battery
+        // this rule exists to protect: an authenticated peer could otherwise
+        // open as many transfers as the resource caps allow, hold them for
+        // the stale timeout, and pay one frame per transfer to do it.
+        //
+        // Chunk 0 carries the purpose, so this is where the question can
+        // first be asked. Answered with an ACK rather than silence: the
+        // sender is wrong rather than unlucky, and a retry would be refused
+        // exactly the same way.
+        if is_first_chunk && !self.admits_data_media_transfer(&sender, data_purpose.as_ref()) {
+            // Refused, not merely skipped. Chunks need not arrive in order,
+            // so any that landed before this one already opened an assembly,
+            // and any behind it would open another. The refusal has to
+            // outlive the chunk that prompted it, which is what the
+            // tombstone is for.
+            self.file_transfer_manager.refuse_transfer(&file_id);
+            self.pending_media_metadata.remove(&file_id);
+            return ChunkOutcome::Handled;
+        }
+
         // Metadata is recorded only for chunks the manager accepts — a
         // rejected chunk must leave no state behind (SEC-H2).
         match self.file_transfer_manager.process_chunk(&sender, chunk) {
@@ -924,7 +948,7 @@ impl OfflineProtocol {
                 // surface that to the application instead of going silent.
                 let dropped = self.pending_media_metadata.remove(&file_id);
                 if let Some(purpose) = dropped.and_then(|entry| entry.data_purpose) {
-                    self.report_data_media_failure(&sender, &purpose, rejection.as_str());
+                    self.report_data_media_transfer_failure(&sender, &purpose, rejection.as_str());
                     return ChunkOutcome::Handled;
                 }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
@@ -952,7 +976,11 @@ impl OfflineProtocol {
                 );
                 let dropped = self.pending_media_metadata.remove(&file_id);
                 if let Some(purpose) = dropped.and_then(|entry| entry.data_purpose) {
-                    self.report_data_media_failure(&sender, &purpose, "integrity_check_failed");
+                    self.report_data_media_transfer_failure(
+                        &sender,
+                        &purpose,
+                        "integrity_check_failed",
+                    );
                     return ChunkOutcome::Handled;
                 }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
@@ -973,7 +1001,7 @@ impl OfflineProtocol {
                 .as_ref()
                 .and_then(|entry| entry.data_purpose.clone())
             {
-                self.accept_data_media_payload(&sender, &purpose, file_data);
+                self.route_data_media_payload(&sender, &purpose, file_data);
                 return ChunkOutcome::Handled;
             }
             let (content_type, media_metadata, rich_extras, timestamp_ms) = metadata_entry
@@ -1007,6 +1035,96 @@ impl OfflineProtocol {
         }
 
         ChunkOutcome::Handled
+    }
+
+    /// Whether a data-purposed transfer may be admitted at all.
+    ///
+    /// Only the attachment case is answerable here: an attachment is bytes
+    /// this device asked a named peer for, so the request either exists or
+    /// it does not. A snapshot is unsolicited by design (it answers a version
+    /// exchange rather than a fetch) and is bounded instead by the size check
+    /// and the containment on the import path.
+    fn admits_data_media_transfer(
+        &self,
+        sender: &str,
+        purpose: Option<&crate::media_envelope::DataPurpose>,
+    ) -> bool {
+        let Some(purpose) = purpose else {
+            return true;
+        };
+        #[cfg(feature = "data")]
+        {
+            if let crate::media_envelope::DataPurpose::Attachment { hash } = purpose {
+                if !self.awaiting_attachment(sender, hash) {
+                    warn!(
+                        peer = %sender,
+                        "Refusing attachment bytes for a fetch this device never made"
+                    );
+                    return false;
+                }
+            }
+            true
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            let _ = (sender, purpose);
+            // Nothing here can use these bytes, so nothing here should buffer
+            // them either.
+            false
+        }
+    }
+
+    /// Hand a completed data-purposed transfer to the document layer.
+    ///
+    /// Split behind a feature gate because the layer is optional and the
+    /// bytes are not: a build compiled without it still has to recognise
+    /// such a transfer, since recognising it is what keeps a document
+    /// snapshot from being handed to a person as a downloaded file. It has
+    /// nowhere to put the bytes, so it drops them. A conforming peer never
+    /// sends one, because a build without the layer never advertises the
+    /// capability that permits it.
+    pub(super) fn route_data_media_payload(
+        &mut self,
+        sender: &str,
+        purpose: &crate::media_envelope::DataPurpose,
+        bytes: Vec<u8>,
+    ) {
+        #[cfg(feature = "data")]
+        {
+            self.accept_data_media_payload(sender, purpose, bytes);
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            let _ = bytes;
+            warn!(
+                peer = %sender,
+                ?purpose,
+                "Dropping a document-layer transfer: this build has no data layer"
+            );
+        }
+    }
+
+    /// Report a failed data-purposed transfer, where there is anything to
+    /// report it to. See [`Self::route_data_media_payload`] for the gate.
+    pub(super) fn report_data_media_transfer_failure(
+        &mut self,
+        sender: &str,
+        purpose: &crate::media_envelope::DataPurpose,
+        reason: &str,
+    ) {
+        #[cfg(feature = "data")]
+        {
+            self.report_data_media_failure(sender, purpose, reason);
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            debug!(
+                peer = %sender,
+                ?purpose,
+                reason,
+                "A document-layer transfer failed; this build has no data layer"
+            );
+        }
     }
 
     /// Extracts the chunk-0 metadata a legacy (unencrypted) chunk carries on

@@ -2067,6 +2067,20 @@ pub(crate) struct MediaTransferDescriptor {
     /// Wall-clock start of the transfer; restore prunes by
     /// `outbox_max_lifetime_ms` age.
     pub(crate) queued_at: DateTime<Utc>,
+    /// Set when the transfer belonged to the replicated-document layer.
+    ///
+    /// Persisted for one reason: so restore can tell these apart and NOT ask
+    /// an application to re-supply them. There is no public API that could
+    /// answer such a request without stripping the purpose, and a resend
+    /// with the purpose stripped is a document snapshot delivered to the
+    /// peer's user as a downloaded file, which is the exact outcome the
+    /// capability gate and the envelope version exist to prevent, reached
+    /// through this SDK's own recovery path.
+    ///
+    /// Serde-defaulted, so a descriptor written before this field existed
+    /// still parses and reads as an ordinary transfer, which is what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) data_purpose: Option<crate::media_envelope::DataPurpose>,
 }
 
 pub(crate) enum OutboundSendPreparation {

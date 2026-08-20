@@ -1326,7 +1326,7 @@ impl OfflineProtocol {
         };
         self.data.docs.clear();
         self.data.spaces.clear();
-        // The offer window is keyed by peer and outlives nothing else here.
+        // The offer windows are keyed by peer, by member and group, and by peer and blob hash and outlives nothing else here.
         // Left behind it would suppress the first offer made after the wipe,
         // which is the same shape [`Self::forget_data_sync_peer`] exists to
         // prevent: a window that survives the thing it was measuring.

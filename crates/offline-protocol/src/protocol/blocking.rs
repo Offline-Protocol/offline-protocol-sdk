@@ -161,7 +161,17 @@ impl OfflineProtocol {
             .collect();
         for file_id in &file_ids_to_cancel {
             self.file_transfer_manager.cancel_transfer(file_id);
-            self.pending_media_metadata.remove(file_id);
+            // A document-layer transfer cancelled here leaves a fetch on the
+            // other side of this device waiting for bytes that are no longer
+            // coming, so it is told. Ordinary transfers are cancelled
+            // silently as before: the block itself is the explanation.
+            if let Some(purpose) = self
+                .pending_media_metadata
+                .remove(file_id)
+                .and_then(|entry| entry.data_purpose)
+            {
+                self.report_data_media_transfer_failure(user_id, &purpose, "cancelled");
+            }
         }
         if !file_ids_to_cancel.is_empty() {
             debug!(

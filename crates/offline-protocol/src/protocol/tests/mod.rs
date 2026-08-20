@@ -27600,6 +27600,7 @@ fn test_media_descriptor_restore_prunes_expired() {
         file_checksum: "00".repeat(32),
         content_type: ContentType::File,
         queued_at: chrono::Utc::now() - ChronoDuration::days(8),
+        data_purpose: None,
     };
     alice.persist_media_descriptor(&stale);
 

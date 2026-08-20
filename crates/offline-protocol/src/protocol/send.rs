@@ -2508,6 +2508,7 @@ impl OfflineProtocol {
                 file_checksum: first_chunk.file_checksum.clone(),
                 content_type,
                 queued_at: Utc::now(),
+                data_purpose: data_purpose.clone(),
             };
             self.restored_media_descriptors.remove(&file_id);
             self.persist_media_descriptor(&descriptor);

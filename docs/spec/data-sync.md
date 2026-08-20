@@ -331,9 +331,15 @@ discard them otherwise. Authentication answers who sent bytes, never what they
 are, so this check is what makes fetching from an authenticated peer safe
 without trusting that peer.
 
-A receiver MUST discard blob bytes it has no outstanding request for. Without
-that rule a peer can spend another device's storage and battery for the price
-of one frame.
+A receiver MUST discard blob bytes it has no outstanding request for, and
+SHOULD refuse the transfer as soon as it can identify it rather than at the
+end. Discarding only on completion still discards, but the storage and the
+battery have already been spent, and the sender paid one frame to spend them.
+
+Where the identifying information rides a particular part of the transfer, a
+receiver cannot judge what arrives before it. Such a receiver SHOULD release
+what it buffered once it can judge, and MUST NOT let the rest of the transfer
+proceed.
 
 An implementation MUST NOT surface a fetched blob as a received file, and MUST
 NOT report its transfer to the application from either side. It is document

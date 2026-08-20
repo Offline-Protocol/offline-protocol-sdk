@@ -154,6 +154,25 @@ pub(crate) const MAX_PENDING_ATTACHMENT_FETCHES: usize = 64;
 /// again; the cost of no timeout at all is a map that only grows.
 pub(crate) const ATTACHMENT_FETCH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
+/// Blob requests one peer may have acted on inside a window.
+///
+/// A budget rather than only a per-hash window, because the two bound
+/// different things and only one of them is a hash we have seen before. The
+/// per-hash window stops a peer re-asking for the same blob; nothing in it
+/// stops a peer asking for a different one every time, and each of those
+/// costs a durable map entry and an application callback. A hash is 32 bytes
+/// the sender chooses, so without a budget the key space is the whole output
+/// of SHA-256 and the cost of exhausting this device's memory is one frame
+/// per entry.
+pub(crate) const MAX_BLOB_REQUESTS_PER_WINDOW: usize = 32;
+
+/// Blob-request windows remembered across all peers.
+///
+/// The hard bound under the per-peer budget above, and the one that holds
+/// when a peer's budget resets. Oldest out first: a window that has been
+/// held longer than 255 others has almost certainly expired anyway.
+pub(crate) const MAX_BLOB_REQUEST_WINDOWS: usize = 256;
+
 /// One sync frame's body, inside the decrypted MLS plaintext.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "k")]
@@ -911,7 +930,7 @@ impl OfflineProtocol {
             }
             SyncBody::NeedSnapshot { doc } => self.answer_snapshot_request(&space, channel, &doc),
             SyncBody::NeedBlob { hash } => self.answer_blob_request(&space, channel, &hash),
-            SyncBody::BlobGone { hash } => self.report_blob_gone(&space, &hash),
+            SyncBody::BlobGone { hash } => self.report_blob_gone(channel, &space, &hash),
         };
         if let Err(err) = outcome {
             warn!(peer = %sender, error = %err, "Sync frame could not be handled");
@@ -1514,6 +1533,20 @@ impl OfflineProtocol {
 
         let key = Self::attachment_fetch_key(space, hash);
         self.expire_attachment_fetches();
+        // The requester's own bound, which the spec makes a MUST and which
+        // the holder's window cannot substitute for: an application retrying
+        // a spinner on a timer would otherwise seal and send one frame per
+        // retry, and the holder answering none of them is the case that
+        // provokes the retries.
+        if let Some(asked_at) = self.pending_attachment_fetches.get(&key) {
+            if Instant::now().duration_since(*asked_at) < DATA_SYNC_OFFER_INTERVAL {
+                debug!(
+                    space,
+                    "Blob fetch repeated inside its window; already asked"
+                );
+                return Ok(());
+            }
+        }
         if self.pending_attachment_fetches.len() >= MAX_PENDING_ATTACHMENT_FETCHES
             && !self.pending_attachment_fetches.contains_key(&key)
         {
@@ -1600,10 +1633,25 @@ impl OfflineProtocol {
     /// otherwise tell a peer that no longer holds the bytes from one that is
     /// merely slow, and shows a person a spinner that never resolves.
     pub fn data_decline_attachment(&mut self, space: &str, peer: &str, hash: &str) -> Result<()> {
+        if !self.config.data.enabled {
+            return Err(Error::InvalidArgument(
+                "the data layer is disabled".to_string(),
+            ));
+        }
         Self::validate_attachment_hash(hash)?;
         if space != peer {
             return Err(Error::InvalidArgument(format!(
                 "space {space} is not the 1:1 space with {peer}"
+            )));
+        }
+        // Gated like every other frame in this file, and it is the one that
+        // was not. A refusal toward a peer that never advertised the
+        // capability is unreadable to them, so the caller believes they
+        // answered and the asking side keeps waiting; toward a blocked peer
+        // it is a liveness signal blocking exists to withhold.
+        if !self.data_media_active(peer) {
+            return Err(Error::InvalidArgument(format!(
+                "peer {peer} did not advertise attachment carriage"
             )));
         }
         self.send_sync_frame(
@@ -1616,16 +1664,122 @@ impl OfflineProtocol {
         Ok(())
     }
 
+    /// Whether a peer's request for one blob should reach the application.
+    ///
+    /// Two bounds, because a peer controls both how often it asks and what it
+    /// asks for. The per-hash window stops a repeat; the per-peer budget
+    /// stops a flood of distinct hashes, which the window alone cannot see as
+    /// a flood at all because every hash in it is new.
+    ///
+    /// Kept out of the version-offer window map deliberately. Every other key
+    /// in that map is a peer or a peer-and-group, both bounded by a roster.
+    /// This one would be bounded by nothing, and that map has no cap and no
+    /// sweep.
+    fn blob_request_due(&mut self, peer: &str, hash: &str) -> bool {
+        let now = Instant::now();
+        self.blob_request_windows
+            .retain(|_, seen| now.duration_since(*seen) < DATA_SYNC_OFFER_INTERVAL);
+
+        let key = format!("{peer}{GROUP_OFFER_KEY_SEP}{hash}");
+        if self.blob_request_windows.contains_key(&key) {
+            debug!(peer, "Blob request repeated inside its window; ignoring");
+            return false;
+        }
+
+        let live_for_peer = self
+            .blob_request_windows
+            .keys()
+            .filter(|key| {
+                key.split_once(GROUP_OFFER_KEY_SEP)
+                    .is_some_and(|(asker, _)| asker == peer)
+            })
+            .count();
+        if live_for_peer >= MAX_BLOB_REQUESTS_PER_WINDOW {
+            warn!(
+                peer,
+                budget = MAX_BLOB_REQUESTS_PER_WINDOW,
+                "Peer is over its blob-request budget; ignoring"
+            );
+            return false;
+        }
+
+        // The global bound, which holds when a peer's budget resets and when
+        // many peers each stay under theirs.
+        if self.blob_request_windows.len() >= MAX_BLOB_REQUEST_WINDOWS {
+            if let Some(oldest) = self
+                .blob_request_windows
+                .iter()
+                .min_by_key(|(_, seen)| **seen)
+                .map(|(key, _)| key.clone())
+            {
+                self.blob_request_windows.remove(&oldest);
+            }
+        }
+        self.blob_request_windows.insert(key, now);
+        true
+    }
+
     fn validate_attachment_hash(hash: &str) -> Result<()> {
         offline_protocol_data::validate_attachment(hash, 1, None, None)
             .map_err(|err| Error::InvalidArgument(err.to_string()))
     }
 
-    /// Drop fetches nobody answered, so the bound counts live questions.
-    fn expire_attachment_fetches(&mut self) {
-        let now = Instant::now();
+    /// Whether this device is waiting for the blob behind `hash` from `peer`.
+    ///
+    /// Read before a transfer is admitted rather than after it completes.
+    /// Refusing at the end still refuses, but only once the bytes have been
+    /// buffered, reassembled and checksummed, which is the storage and the
+    /// battery the check exists to protect.
+    pub(crate) fn awaiting_attachment(&self, peer: &str, hash: &str) -> bool {
         self.pending_attachment_fetches
-            .retain(|_, asked_at| now.duration_since(*asked_at) < ATTACHMENT_FETCH_TIMEOUT);
+            .contains_key(&Self::attachment_fetch_key(peer, hash))
+    }
+
+    /// Forget everything remembered about attachments with one peer.
+    ///
+    /// Composed through [`Self::attachment_fetch_key`] rather than by
+    /// re-spelling the separator, which is what the separator constant exists
+    /// for: a key built one way and matched another is a leak that no test
+    /// notices until the two spellings diverge.
+    pub(crate) fn forget_attachment_state(&mut self, peer: &str) {
+        let prefix = Self::attachment_fetch_key(peer, "");
+        self.pending_attachment_fetches
+            .retain(|key, _| !key.starts_with(&prefix));
+        self.blob_request_windows
+            .retain(|key, _| !key.starts_with(&prefix));
+    }
+
+    /// Give up on fetches nobody answered, and say so.
+    ///
+    /// The reporting half is the point. A holder is only asked to answer
+    /// `need_blob`, never required to, so a fetch can go unanswered forever
+    /// with nothing wrong anywhere. Expiring the entry silently would leave
+    /// the asking application exactly where the whole refusal mechanism
+    /// exists to stop it being: showing somebody a spinner that never
+    /// resolves.
+    pub(crate) fn expire_attachment_fetches(&mut self) {
+        let now = Instant::now();
+        let expired: Vec<String> = self
+            .pending_attachment_fetches
+            .iter()
+            .filter(|(_, asked_at)| now.duration_since(**asked_at) >= ATTACHMENT_FETCH_TIMEOUT)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in expired {
+            self.pending_attachment_fetches.remove(&key);
+            let Some((space, hash)) = key.split_once(GROUP_OFFER_KEY_SEP) else {
+                continue;
+            };
+            debug!(space, "A blob fetch expired with no answer");
+            if let Ok(state) = crate::protocol::lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::DataAttachmentUnavailable {
+                    space_id: space.to_string(),
+                    peer_id: space.to_string(),
+                    hash: hash.to_string(),
+                    reason: "timeout".to_string(),
+                });
+            }
+        }
     }
 
     /// A peer wants the bytes behind a reference.
@@ -1652,9 +1806,7 @@ impl OfflineProtocol {
             warn!(space, "Blob request names something that is not a hash");
             return Ok(());
         }
-        let window = format!("{space}{GROUP_OFFER_KEY_SEP}blob{GROUP_OFFER_KEY_SEP}{hash}");
-        if !self.data_sync_offer_due(&window) {
-            debug!(space, "Blob request repeated inside its window; ignoring");
+        if !self.blob_request_due(space, hash) {
             return Ok(());
         }
         if let Ok(state) = crate::protocol::lock_shared_state(&self.shared_state) {
@@ -1668,7 +1820,24 @@ impl OfflineProtocol {
     }
 
     /// A peer says the bytes are gone. End the fetch.
-    fn report_blob_gone(&mut self, space: &str, hash: &str) -> Result<()> {
+    ///
+    /// Checked the same way [`Self::answer_blob_request`] is, and for the
+    /// same reason rather than a hypothetical one: a fetch is 1:1 state, and
+    /// a frame arriving over a group would compose a key from a group id.
+    /// Unreachable today because a group id cannot collide with an address,
+    /// which is exactly the kind of accident a later refactor removes.
+    fn report_blob_gone(&mut self, channel: &SyncChannel, space: &str, hash: &str) -> Result<()> {
+        if !matches!(channel, SyncChannel::Peer) {
+            warn!(
+                space,
+                "A blob refusal arrived inside a group; attachment carriage is 1:1"
+            );
+            return Ok(());
+        }
+        if Self::validate_attachment_hash(hash).is_err() {
+            warn!(space, "Blob refusal names something that is not a hash");
+            return Ok(());
+        }
         let key = Self::attachment_fetch_key(space, hash);
         // Only a fetch this device actually made is reported. Otherwise a
         // peer could emit refusals for blobs nobody asked about.
