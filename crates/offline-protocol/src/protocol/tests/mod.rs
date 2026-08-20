@@ -3033,7 +3033,7 @@ fn peer_capability_restore_prunes_overflow() {
 /// manager level (import + create), without needing the peer to process the
 /// Welcome — `has_session`/`list_sessions` are local.
 #[cfg(test)]
-fn create_local_session_with(protocol: &OfflineProtocol, peer_label: &str) {
+pub(crate) fn create_local_session_with(protocol: &OfflineProtocol, peer_label: &str) {
     let peer = id(peer_label);
     let peer = peer.as_str();
     let peer_mgr = crate::test_identity::manager_for(

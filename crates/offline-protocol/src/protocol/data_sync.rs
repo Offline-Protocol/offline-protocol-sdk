@@ -335,11 +335,19 @@ impl OfflineProtocol {
     /// needed because a group space has no 1:1 trigger to ride: two members
     /// may never establish a session with each other, so without this the
     /// only thing that ever reconciles them is a fresh local commit.
+    ///
+    /// Which groups this device is in comes from MLS, not from the roster
+    /// cache alone. The cache is filled on demand and is empty after a
+    /// restart, so reading only it would make this sweep silently do nothing
+    /// on a cold process, which is the launch where it matters most: two
+    /// members that drifted apart and are not editing have no other trigger
+    /// left.
     #[cfg_attr(not(feature = "data"), allow(dead_code))]
     pub(crate) fn kick_shared_group_data_sync(&mut self, peer: &str, cause: &str) {
         if !self.config.data.enabled {
             return;
         }
+        self.enumerate_group_spaces_once();
         let shared: Vec<String> = self
             .group_mesh
             .members
@@ -349,6 +357,35 @@ impl OfflineProtocol {
             .collect();
         for group_id in shared {
             self.kick_group_data_sync(&group_id, peer, cause);
+        }
+    }
+
+    /// Fill the roster cache from MLS once per session, so
+    /// [`Self::kick_shared_group_data_sync`] can see a group that nothing has
+    /// touched yet.
+    ///
+    /// Costs one key listing, plus a group-state read for each group not
+    /// already cached — the same read the next send to that group would have
+    /// paid. Marked done even when a group read fails: the failure is per
+    /// group and retrying the whole enumeration on every discovery is the
+    /// traffic the offer window exists to prevent. An MLS that is not ready
+    /// yet is not a failure of this kind and leaves the flag alone, so the
+    /// next discovery tries again.
+    fn enumerate_group_spaces_once(&mut self) {
+        if self.group_spaces_enumerated {
+            return;
+        }
+        let Ok(groups) = self.list_groups() else {
+            return;
+        };
+        self.group_spaces_enumerated = true;
+        for group_id in groups {
+            if self.group_mesh.members.contains_key(&group_id) {
+                continue;
+            }
+            if let Err(err) = self.refresh_group_members(&group_id) {
+                debug!(group_id = %group_id, error = %err, "Group roster unreadable while enumerating group spaces");
+            }
         }
     }
 

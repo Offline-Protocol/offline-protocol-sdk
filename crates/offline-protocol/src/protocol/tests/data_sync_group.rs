@@ -737,3 +737,68 @@ fn the_group_capability_is_advertised_and_recorded() {
          will ever send it one"
     );
 }
+
+#[test]
+fn the_shared_group_sweep_finds_a_group_on_a_cold_roster_cache() {
+    // Rediscovery is the only trigger a group space has for closing a gap
+    // that no live frame carried, and the launch it matters on is the one
+    // where nothing has touched the group yet. The roster cache is filled on
+    // demand, so a sweep that read only it would find nothing here and the
+    // two replicas would sit apart until somebody happened to edit.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    write(&mut alice, &group, "notes", "title", "hello");
+    settle(&mut alice, &mut bob, &mut carol);
+    alice.transport.clear_sent_messages();
+
+    // What a relaunch leaves behind: MLS still holds the group, and nothing
+    // has refilled the caches that live only in memory.
+    alice.protocol.group_mesh.members.clear();
+    alice.protocol.last_data_sync_offer.clear();
+    alice.protocol.group_spaces_enumerated = false;
+
+    alice
+        .protocol
+        .kick_shared_group_data_sync(&bob.address, "peer_rediscovered");
+
+    assert!(
+        data_frames_sent(&alice, &mut bob, &group) > 0,
+        "a rediscovered member of a group this device is in has to be \
+         offered its documents, and which groups those are comes from MLS, \
+         not from a cache that a restart emptied"
+    );
+}
+
+#[test]
+fn a_space_named_after_a_one_to_one_session_slot_is_not_a_group_space() {
+    // MLS stores every 1:1 session as a group, and the group-info read that
+    // classifies a space answers for one. Left unguarded, a space named
+    // after a session slot is treated as a group space and then filed in
+    // `group_mesh.members` — the cache that leaving a group, admin
+    // auto-promotion and the shared-group sweep all read as the set of real
+    // groups. A space name is never wire-supplied, so this is a local
+    // footgun rather than a reachable attack, and it costs one prefix test.
+    let alice = Member::new("alice");
+    crate::protocol::tests::create_local_session_with(&alice.protocol, "bob");
+    let slot = crate::test_identity::session_slot("alice", "bob");
+
+    // Non-vacuity: without this the assertions below would pass on a name
+    // MLS simply does not know, which is the wrong reason.
+    {
+        let mls = alice.protocol.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&slot).unwrap();
+        assert!(
+            mls.has_group(&gid).unwrap(),
+            "precondition: MLS really does hold a group at the session slot"
+        );
+    }
+
+    let mut alice = alice;
+    assert!(
+        alice.protocol.group_space_roster(&slot).is_none(),
+        "a session slot must never classify as a group space"
+    );
+    assert!(
+        !alice.protocol.group_mesh.members.contains_key(&slot),
+        "and classifying it must not have filed it in the roster cache"
+    );
+}

@@ -429,6 +429,26 @@ pub struct OfflineProtocol {
     #[cfg(feature = "data")]
     pub(crate) last_data_sync_offer: HashMap<String, Instant>,
 
+    /// Whether the MLS group list has been read into `group_mesh.members`
+    /// once this session, so the shared-group rediscovery sweep can see the
+    /// groups this device is in.
+    ///
+    /// That cache is filled on demand by group traffic and is empty after a
+    /// restart, so a sweep that only read it would find nothing on exactly
+    /// the launch where two members have drifted apart and neither is
+    /// editing. Enumerating is one key listing plus, per group not already
+    /// cached, the group-state read the next group send would have paid
+    /// anyway.
+    ///
+    /// One shot rather than per sweep because the cache stays complete once
+    /// filled: creating a group inserts, a Welcome inserts, and leaving
+    /// removes. Deliberately not a cold-start sweep, which was rejected for
+    /// putting an offer per member per group on the mesh at every launch;
+    /// this is per peer, only when that peer is actually in front of us, and
+    /// still behind the offer window.
+    #[cfg(feature = "data")]
+    pub(crate) group_spaces_enumerated: bool,
+
     /// Lamport logical clock for causal message ordering.
     /// Ticked on send, merged on receive.
     lamport_clock: LamportClock,
@@ -842,6 +862,8 @@ impl OfflineProtocol {
             data: data::DataLayer::default(),
             #[cfg(feature = "data")]
             last_data_sync_offer: HashMap::new(),
+            #[cfg(feature = "data")]
+            group_spaces_enumerated: false,
             lamport_clock: LamportClock::new(),
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),
@@ -1151,6 +1173,13 @@ impl OfflineProtocol {
         }
 
         self.mls_manager = Some(manager);
+        // A re-init can swap the identity, and with it which groups exist, so
+        // the one-shot group enumeration has to run again. Past the last
+        // `return Err` above, so a failed init leaves the flag alone.
+        #[cfg(feature = "data")]
+        {
+            self.group_spaces_enumerated = false;
+        }
         self.emit_mls_initialized();
 
         // Announced only here, past the last `return Err` — a restore failure
@@ -2417,7 +2446,7 @@ impl OfflineProtocol {
         Ok(plaintext)
     }
 
-    fn is_session_group_id(group_id: &str) -> bool {
+    pub(crate) fn is_session_group_id(group_id: &str) -> bool {
         group_id.starts_with("session:")
     }
 

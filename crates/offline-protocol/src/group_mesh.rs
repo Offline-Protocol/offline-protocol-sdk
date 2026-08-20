@@ -5078,8 +5078,21 @@ impl OfflineProtocol {
     /// a sealed record, or a frame that has just been decrypted. Both are
     /// dominated by work an order of magnitude larger than a group-state
     /// read.
+    ///
+    /// The `session:` namespace is refused before either lookup. MLS holds a
+    /// group per 1:1 session, and unlike [`Self::list_groups`], the
+    /// group-info read underneath answers for one — so a space named after a
+    /// session slot would otherwise be classified as a group space, and
+    /// `refresh_group_members` would then file that slot in
+    /// `group_mesh.members`, which leave, auto-promotion and the shared-group
+    /// sweep all read as the set of real groups. A space name is never
+    /// wire-supplied, so this is a local-caller footgun rather than a reachable
+    /// attack, and it costs one prefix test to make structurally impossible.
     #[cfg_attr(not(feature = "data"), allow(dead_code))]
     pub(crate) fn group_space_roster(&mut self, space: &str) -> Option<Vec<String>> {
+        if Self::is_session_group_id(space) {
+            return None;
+        }
         if let Some(members) = self.group_mesh.members.get(space) {
             return Some(members.clone());
         }
