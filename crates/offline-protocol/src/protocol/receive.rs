@@ -713,50 +713,52 @@ impl OfflineProtocol {
         // chunks carry them on the wire Message and are accepted only where
         // policy allows. Rich extras (caption, reply, forward) only ever come
         // from the sealed plaintext — never from the wire Message.
-        let (chunk, media_metadata, original_content_type, rich_extras) = if let Some(ref binary) =
-            message.binary_content
-        {
-            if is_media_envelope(binary) {
-                let encrypted = match decode_media_envelope(binary) {
-                    Ok(e) => e,
-                    // A frame whose magic byte still reads as a media envelope
-                    // but whose encoding does not decode — in-transit
-                    // corruption past the magic, or injected garbage. Under
-                    // crypto recovery this is the pre-decrypt sibling of a hard
-                    // decrypt failure: the frame as it stands is dead, but the
-                    // sender's resend carries a fresh encoding that would
-                    // decode, so withhold the ACK (`Deferred`) instead of
-                    // telling the sender "delivered" for a chunk we dropped.
-                    // Do NOT enqueue: an unparseable frame can never become
-                    // parseable, so a queued copy could never drain — the same
-                    // reasoning as the spent-generation arm below.
-                    Err(e) => {
-                        warn!(
-                            message_id = %message.id,
-                            error = %e,
-                            "Failed to decode encrypted media envelope"
-                        );
-                        if !self.config.encryption.crypto_recovery_enabled {
-                            return ChunkOutcome::Handled;
-                        }
-                        // Advisory, not terminal — the chunk was never ACKed, so
-                        // the transfer is *stalled* pending a resend rather than
-                        // failed. The terminal media signal stays
-                        // `FileReceiveFailed`.
-                        if let Ok(state) = lock_shared_state(&self.shared_state) {
-                            state.emit_event(Event::message_decryption_failed(
+        let (chunk, media_metadata, original_content_type, rich_extras, data_purpose) =
+            if let Some(ref binary) = message.binary_content {
+                if is_media_envelope(binary) {
+                    let encrypted = match decode_media_envelope(binary) {
+                        Ok(e) => e,
+                        // A frame whose magic byte still reads as a media envelope
+                        // but whose encoding does not decode — in-transit
+                        // corruption past the magic, or injected garbage. Under
+                        // crypto recovery this is the pre-decrypt sibling of a hard
+                        // decrypt failure: the frame as it stands is dead, but the
+                        // sender's resend carries a fresh encoding that would
+                        // decode, so withhold the ACK (`Deferred`) instead of
+                        // telling the sender "delivered" for a chunk we dropped.
+                        // Do NOT enqueue: an unparseable frame can never become
+                        // parseable, so a queued copy could never drain — the same
+                        // reasoning as the spent-generation arm below.
+                        Err(e) => {
+                            warn!(
+                                message_id = %message.id,
+                                error = %e,
+                                "Failed to decode encrypted media envelope"
+                            );
+                            if !self.config.encryption.crypto_recovery_enabled {
+                                return ChunkOutcome::Handled;
+                            }
+                            // Advisory, not terminal — the chunk was never ACKed, so
+                            // the transfer is *stalled* pending a resend rather than
+                            // failed. The terminal media signal stays
+                            // `FileReceiveFailed`.
+                            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                                state.emit_event(Event::message_decryption_failed(
                                 message.id.clone(),
                                 sender.clone(),
                                 crate::events::DecryptionFailureCode::InvalidPayload,
                                 "encrypted media envelope failed to decode; its file transfer is stalled until the sender resends".to_string(),
                             ));
+                            }
+                            return ChunkOutcome::Deferred;
                         }
-                        return ChunkOutcome::Deferred;
-                    }
-                };
-                let plaintext =
-                    match self.decrypt_media_chunk(&sender, &encrypted, message, arrival_transport)
-                    {
+                    };
+                    let plaintext = match self.decrypt_media_chunk(
+                        &sender,
+                        &encrypted,
+                        message,
+                        arrival_transport,
+                    ) {
                         MediaChunkDecrypt::Plaintext(p) => p,
                         // Not delivered and recoverable by a resend (queued for
                         // delayed decryption, or an undecryptable frame the
@@ -775,34 +777,62 @@ impl OfflineProtocol {
                         // recover it by retrying.
                         MediaChunkDecrypt::Dropped => return ChunkOutcome::Handled,
                     };
-                let inner = match MediaChunkPlaintext::decode(&plaintext) {
-                    Ok(i) => i,
-                    Err(e) => {
+                    let inner = match MediaChunkPlaintext::decode(&plaintext) {
+                        Ok(i) => i,
+                        Err(e) => {
+                            warn!(
+                                message_id = %message.id,
+                                error = %e,
+                                "Failed to parse decrypted media chunk plaintext, dropping"
+                            );
+                            return ChunkOutcome::Handled;
+                        }
+                    };
+                    let chunk = match FileChunk::from_bytes(&inner.chunk_bytes) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(
+                                message_id = %message.id,
+                                error = %e,
+                                "Failed to deserialize decrypted file chunk, dropping"
+                            );
+                            return ChunkOutcome::Handled;
+                        }
+                    };
+                    (
+                        chunk,
+                        inner.media_metadata,
+                        inner.original_content_type,
+                        inner.rich_extras,
+                        inner.data_purpose,
+                    )
+                } else {
+                    if !self.accept_plaintext_content(&sender) {
                         warn!(
                             message_id = %message.id,
-                            error = %e,
-                            "Failed to parse decrypted media chunk plaintext, dropping"
+                            sender = %sender,
+                            "Rejecting unencrypted media chunk (encryption policy)"
                         );
-                        return ChunkOutcome::Handled;
-                    }
-                };
-                let chunk = match FileChunk::from_bytes(&inner.chunk_bytes) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        warn!(
-                            message_id = %message.id,
-                            error = %e,
-                            "Failed to deserialize decrypted file chunk, dropping"
+                        self.warn_plaintext_receive_rejected(
+                            &sender,
+                            "Inbound plaintext media chunk rejected by encryption policy",
                         );
-                        return ChunkOutcome::Handled;
+                        return ChunkOutcome::Rejected;
                     }
-                };
-                (
-                    chunk,
-                    inner.media_metadata,
-                    inner.original_content_type,
-                    inner.rich_extras,
-                )
+                    let chunk = match FileChunk::from_bytes(binary) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(
+                                message_id = %message.id,
+                                error = %e,
+                                "Failed to deserialize binary file chunk, dropping"
+                            );
+                            return ChunkOutcome::Handled;
+                        }
+                    };
+                    let (meta, oct) = Self::wire_media_metadata(message);
+                    (chunk, meta, oct, None, None)
+                }
             } else {
                 if !self.accept_plaintext_content(&sender) {
                     warn!(
@@ -816,52 +846,82 @@ impl OfflineProtocol {
                     );
                     return ChunkOutcome::Rejected;
                 }
-                let chunk = match FileChunk::from_bytes(binary) {
+                let chunk = match FileChunk::from_json(&message.content) {
                     Ok(c) => c,
                     Err(e) => {
                         warn!(
                             message_id = %message.id,
                             error = %e,
-                            "Failed to deserialize binary file chunk, dropping"
+                            "Failed to deserialize file chunk, dropping"
                         );
                         return ChunkOutcome::Handled;
                     }
                 };
                 let (meta, oct) = Self::wire_media_metadata(message);
-                (chunk, meta, oct, None)
-            }
-        } else {
-            if !self.accept_plaintext_content(&sender) {
-                warn!(
-                    message_id = %message.id,
-                    sender = %sender,
-                    "Rejecting unencrypted media chunk (encryption policy)"
-                );
-                self.warn_plaintext_receive_rejected(
-                    &sender,
-                    "Inbound plaintext media chunk rejected by encryption policy",
-                );
-                return ChunkOutcome::Rejected;
-            }
-            let chunk = match FileChunk::from_json(&message.content) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(
-                        message_id = %message.id,
-                        error = %e,
-                        "Failed to deserialize file chunk, dropping"
-                    );
-                    return ChunkOutcome::Handled;
-                }
+                (chunk, meta, oct, None, None)
             };
-            let (meta, oct) = Self::wire_media_metadata(message);
-            (chunk, meta, oct, None)
-        };
 
         let file_id = chunk.file_id.clone();
         let file_name = chunk.file_name.clone();
         let file_size = chunk.file_size;
         let is_first_chunk = chunk.chunk_index == 0;
+
+        // A duplicate chunk 0 must not reclassify a transfer already under
+        // way. Duplicates are accepted by replacement, and the manager's
+        // consistency check covers only the fields on the chunk itself: the
+        // purpose rides the sealed envelope, outside them. Without this an
+        // authenticated peer sends chunk 0 twice, once marked and once not,
+        // and chooses afterwards which side of the invisibility rule the
+        // transfer lands on. Either direction is a defect the marking
+        // exists to prevent: a document snapshot surfaced to a person as a
+        // downloaded file, or an app's own download turned invisible and
+        // left with no terminal event ever.
+        //
+        // Scoped to the sender the assembly belongs to. A chunk under
+        // another peer's file_id is refused by the manager's own sender
+        // check, and refusing it here instead would let any peer tombstone
+        // a transfer it merely named.
+        if is_first_chunk
+            && self
+                .pending_media_metadata
+                .get(&file_id)
+                .is_some_and(|entry| entry.sender == sender && entry.data_purpose != data_purpose)
+        {
+            warn!(
+                file_id = %file_id,
+                peer = %sender,
+                "Refusing a chunk 0 that reclassifies a transfer already under way"
+            );
+            self.file_transfer_manager.refuse_transfer(&file_id);
+            self.pending_media_metadata.remove(&file_id);
+            return ChunkOutcome::Handled;
+        }
+
+        // Refuse a blob nobody asked for at the door, not at the end.
+        //
+        // The check also runs on completion, which is where the hash is
+        // verified, but by then the whole transfer has been buffered,
+        // reassembled and checksummed. That is the storage and the battery
+        // this rule exists to protect: an authenticated peer could otherwise
+        // open as many transfers as the resource caps allow, hold them for
+        // the stale timeout, and pay one frame per transfer to do it.
+        //
+        // Chunk 0 carries the purpose, so this is where the question can
+        // first be asked. Answered with an ACK rather than silence: the
+        // sender is wrong rather than unlucky, and a retry would be refused
+        // exactly the same way.
+        if is_first_chunk
+            && !self.admits_data_media_transfer(&sender, data_purpose.as_ref(), file_size)
+        {
+            // Refused, not merely skipped. Chunks need not arrive in order,
+            // so any that landed before this one already opened an assembly,
+            // and any behind it would open another. The refusal has to
+            // outlive the chunk that prompted it, which is what the
+            // tombstone is for.
+            self.file_transfer_manager.refuse_transfer(&file_id);
+            self.pending_media_metadata.remove(&file_id);
+            return ChunkOutcome::Handled;
+        }
 
         // Metadata is recorded only for chunks the manager accepts — a
         // rejected chunk must leave no state behind (SEC-H2).
@@ -877,17 +937,55 @@ impl OfflineProtocol {
                             sender: sender.clone(),
                             rich_extras,
                             timestamp_ms: message.timestamp.as_millis(),
+                            data_purpose,
                         },
                     );
                 } else if let Some(entry) = self.pending_media_metadata.get_mut(&file_id) {
                     entry.last_updated_at = Instant::now();
                 }
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::file_progress(
-                        file_id.clone(),
-                        progress.chunks_completed,
-                        progress.total_chunks,
-                    ));
+                // What this transfer is, as far as this device can tell
+                // right now. Read once and used twice below.
+                let arriving = self
+                    .pending_media_metadata
+                    .get(&file_id)
+                    .and_then(|entry| entry.data_purpose.clone());
+                // A chunk landing is the sign that an answer is coming, so
+                // the question it answers is kept alive. The fetch record is
+                // what admits the bytes at the end, and it expires on a
+                // clock that a large blob over a slow radio outlives: without
+                // this the record dies mid-carriage and the completed
+                // transfer is then dropped as unsolicited, forever, because
+                // every retry takes just as long.
+                if let Some(purpose) = &arriving {
+                    self.note_data_media_progress(&sender, purpose);
+                }
+                // A data-purposed transfer is invisible to the application
+                // for its whole life, not merely at the end. Reporting
+                // progress on it would put a download nobody started in
+                // front of a person, counting up to a file that never
+                // appears.
+                //
+                // Positive knowledge, not absence of it: the purpose rides
+                // chunk 0, so a chunk arriving before it leaves this device
+                // unable to say what the transfer is. Reading "no entry yet"
+                // as "not data-purposed" would emit exactly the phantom
+                // progress this suppression exists to prevent, on any
+                // transport that delivers chunk 1 first.
+                //
+                // The cost is that an ordinary transfer whose chunk 0 is
+                // delayed loses the progress events until it lands. That is
+                // cheap: progress is advisory and each event supersedes the
+                // last, so the app sees the count resume rather than a gap.
+                let reports_progress =
+                    arriving.is_none() && self.pending_media_metadata.contains_key(&file_id);
+                if reports_progress {
+                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                        state.emit_event(Event::file_progress(
+                            file_id.clone(),
+                            progress.chunks_completed,
+                            progress.total_chunks,
+                        ));
+                    }
                 }
             }
             Err(rejection) if rejection.is_resource_exhaustion() => {
@@ -895,7 +993,32 @@ impl OfflineProtocol {
                 // resource limit. The chunk was already ACKed and will not
                 // be retransmitted, so the transfer is unrecoverable —
                 // surface that to the application instead of going silent.
-                self.pending_media_metadata.remove(&file_id);
+                let dropped = self.pending_media_metadata.remove(&file_id);
+                // Positive knowledge, the same rule the progress event
+                // follows, reached by a different road. On chunk 0 the
+                // purpose is in hand right here and the stored entry is not:
+                // an entry is written only once the manager accepts a chunk,
+                // which is exactly what did not happen. Off chunk 0 the
+                // stored entry is the only knowledge there is.
+                let identified = is_first_chunk || dropped.is_some();
+                let purpose = if is_first_chunk { data_purpose } else { None }
+                    .or_else(|| dropped.and_then(|entry| entry.data_purpose));
+                if let Some(purpose) = purpose {
+                    self.report_data_media_transfer_failure(&sender, &purpose, rejection.as_str());
+                    return ChunkOutcome::Handled;
+                }
+                if !identified {
+                    // A transfer whose chunk 0 has not landed cannot be named
+                    // as anything, so it must not be failed in front of a
+                    // person: it may be the document layer's. The app has
+                    // heard nothing about it either (progress is withheld by
+                    // the same rule), so there is no report to correct.
+                    debug!(
+                        file_id = %file_id,
+                        "Dropping a transfer whose purpose is not yet known; no failure reported"
+                    );
+                    return ChunkOutcome::Handled;
+                }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
                     state.emit_event(Event::file_receive_failed(
                         file_id,
@@ -919,7 +1042,27 @@ impl OfflineProtocol {
                     file_id = %file_id,
                     "File transfer marked complete but reassembly or integrity checks failed"
                 );
-                self.pending_media_metadata.remove(&file_id);
+                let dropped = self.pending_media_metadata.remove(&file_id);
+                // Completion implies chunk 0 was accepted, so this is
+                // normally `true`. Checked anyway, and for the same reason as
+                // the arm above: the alternative is naming a transfer this
+                // device cannot identify as a file the app never saw begin.
+                let identified = dropped.is_some();
+                if let Some(purpose) = dropped.and_then(|entry| entry.data_purpose) {
+                    self.report_data_media_transfer_failure(
+                        &sender,
+                        &purpose,
+                        "integrity_check_failed",
+                    );
+                    return ChunkOutcome::Handled;
+                }
+                if !identified {
+                    debug!(
+                        file_id = %file_id,
+                        "Dropping a transfer whose purpose is not yet known; no failure reported"
+                    );
+                    return ChunkOutcome::Handled;
+                }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
                     state.emit_event(Event::file_receive_failed(
                         file_id,
@@ -931,6 +1074,16 @@ impl OfflineProtocol {
                 return ChunkOutcome::Handled;
             };
             let metadata_entry = self.pending_media_metadata.remove(&file_id);
+            // The one branch that makes a data-purposed transfer worth
+            // having: the bytes go to the document layer and the person is
+            // told nothing, because nothing happened that concerns them.
+            if let Some(purpose) = metadata_entry
+                .as_ref()
+                .and_then(|entry| entry.data_purpose.clone())
+            {
+                self.route_data_media_payload(&sender, &purpose, file_data);
+                return ChunkOutcome::Handled;
+            }
             let (content_type, media_metadata, rich_extras, timestamp_ms) = metadata_entry
                 .map(|entry| {
                     (
@@ -962,6 +1115,156 @@ impl OfflineProtocol {
         }
 
         ChunkOutcome::Handled
+    }
+
+    /// Whether a data-purposed transfer may be admitted at all.
+    ///
+    /// Only the attachment case is answerable by the fetch record: an
+    /// attachment is bytes this device asked a named peer for, so the request
+    /// either exists or it does not. A snapshot is unsolicited by design (it
+    /// answers a version exchange rather than a fetch) and is bounded instead
+    /// by the size check and the containment on the import path.
+    ///
+    /// The runtime kill switch is checked ahead of both, and what it saves is
+    /// the buffering rather than the import. A device with the layer off was
+    /// never going to write anything: `require_data_storage` fails closed
+    /// with `DataDisabled` further down. But a transfer admitted at chunk 0
+    /// is reassembled in full before it reaches that seam, so without this
+    /// gate a device that opted out still holds a peer's whole blob in memory
+    /// on its way to a refusal that was certain from the start.
+    ///
+    /// A conforming peer never sends one, because a build with the layer off
+    /// never advertises the capability that permits it. This is the arm for
+    /// the peer whose knowledge of us is stale or wrong.
+    fn admits_data_media_transfer(
+        &self,
+        sender: &str,
+        purpose: Option<&crate::media_envelope::DataPurpose>,
+        declared_size: u64,
+    ) -> bool {
+        let Some(purpose) = purpose else {
+            return true;
+        };
+        #[cfg(feature = "data")]
+        {
+            if !self.config.data.enabled {
+                warn!(
+                    peer = %sender,
+                    "Refusing a document-layer transfer: the data layer is off"
+                );
+                return false;
+            }
+            match purpose {
+                crate::media_envelope::DataPurpose::Attachment { hash } => {
+                    if !self.awaiting_attachment(sender, hash) {
+                        warn!(
+                            peer = %sender,
+                            "Refusing attachment bytes for a fetch this device never made"
+                        );
+                        return false;
+                    }
+                }
+                // A snapshot has no fetch record to judge it by, so the size
+                // it declares is the only thing that can be judged here. It
+                // is judged here rather than at the end because the ceiling
+                // is certain: a document past it cannot be persisted by this
+                // device even if every byte arrives, so admitting one spends
+                // a whole reassembly to reach a refusal that was decided
+                // before the first chunk. The completion check stays as the
+                // backstop against a header that lied.
+                crate::media_envelope::DataPurpose::Snapshot { .. } => {
+                    if declared_size > crate::protocol::data_sync::MAX_MEDIA_SNAPSHOT_BYTES as u64 {
+                        warn!(
+                            peer = %sender,
+                            declared = declared_size,
+                            "Refusing a carried snapshot larger than a record can hold"
+                        );
+                        return false;
+                    }
+                }
+            }
+            true
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            let _ = (sender, purpose, declared_size);
+            // Nothing here can use these bytes, so nothing here should buffer
+            // them either.
+            false
+        }
+    }
+
+    /// Hand a completed data-purposed transfer to the document layer.
+    ///
+    /// Split behind a feature gate because the layer is optional and the
+    /// bytes are not: a build compiled without it still has to recognise
+    /// such a transfer, since recognising it is what keeps a document
+    /// snapshot from being handed to a person as a downloaded file. It has
+    /// nowhere to put the bytes, so it drops them. A conforming peer never
+    /// sends one, because a build without the layer never advertises the
+    /// capability that permits it.
+    pub(super) fn route_data_media_payload(
+        &mut self,
+        sender: &str,
+        purpose: &crate::media_envelope::DataPurpose,
+        bytes: Vec<u8>,
+    ) {
+        #[cfg(feature = "data")]
+        {
+            self.accept_data_media_payload(sender, purpose, bytes);
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            let _ = bytes;
+            warn!(
+                peer = %sender,
+                ?purpose,
+                "Dropping a document-layer transfer: this build has no data layer"
+            );
+        }
+    }
+
+    /// Note that a data-purposed transfer is still arriving, so whatever
+    /// this device is waiting on does not expire underneath it. See
+    /// [`Self::route_data_media_payload`] for the gate.
+    pub(super) fn note_data_media_progress(
+        &mut self,
+        sender: &str,
+        purpose: &crate::media_envelope::DataPurpose,
+    ) {
+        #[cfg(feature = "data")]
+        {
+            self.refresh_attachment_fetch(sender, purpose);
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            // A build with no data layer never admitted this transfer, so
+            // there is nothing here that could be waiting on it.
+            let _ = (sender, purpose);
+        }
+    }
+
+    /// Report a failed data-purposed transfer, where there is anything to
+    /// report it to. See [`Self::route_data_media_payload`] for the gate.
+    pub(super) fn report_data_media_transfer_failure(
+        &mut self,
+        sender: &str,
+        purpose: &crate::media_envelope::DataPurpose,
+        reason: &str,
+    ) {
+        #[cfg(feature = "data")]
+        {
+            self.report_data_media_failure(sender, purpose, reason);
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            debug!(
+                peer = %sender,
+                ?purpose,
+                reason,
+                "A document-layer transfer failed; this build has no data layer"
+            );
+        }
     }
 
     /// Extracts the chunk-0 metadata a legacy (unencrypted) chunk carries on

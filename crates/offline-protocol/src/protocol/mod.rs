@@ -353,6 +353,22 @@ pub struct OfflineProtocol {
     /// `group_data_sync_active`, never by 1:1 sync.
     peer_data_group_attested: std::collections::HashSet<String>,
 
+    /// Peers whose key package advertised attachment and snapshot carriage
+    /// over the media path ([`DATA_MEDIA_V1`] in `data_versions`), so this
+    /// device may ask them for a blob and may hand them a document too large
+    /// to travel inside a sync frame.
+    ///
+    /// A third set rather than a flag on the first, for the same reason
+    /// `peer_data_group` is separate: a peer can advertise 1:1 replication
+    /// without this, and toward such a peer a data-purposed media transfer
+    /// arrives as an ordinary received file. Same lifecycle as every
+    /// capability set: learned from key-package exchange, persisted inside
+    /// `PeerCapabilities`, restored on `initialize_mls`, bounded like
+    /// `key_package_sent_to`.
+    ///
+    /// [`DATA_MEDIA_V1`]: crate::protocol::types::DATA_MEDIA_V1
+    peer_data_media: std::collections::HashSet<String>,
+
     /// Peers already flagged with a `PlaintextSend` security warning, so the
     /// explicit-opt-out plaintext path warns once per peer instead of once
     /// per message.
@@ -428,6 +444,42 @@ pub struct OfflineProtocol {
     /// of traffic that should be rate limited rather than merely small.
     #[cfg(feature = "data")]
     pub(crate) last_data_sync_offer: HashMap<String, Instant>,
+
+    /// Attachment fetches asked for and not yet answered, keyed by space and
+    /// blob hash, valued by the last sign that an answer is coming: the
+    /// moment the question went out, or the arrival of a chunk of its
+    /// answer.
+    ///
+    /// The refresh is what keeps this record's two jobs consistent. It bounds
+    /// how long a question is remembered, and it is also what admits the
+    /// bytes when they finally land, so a record that expired while its own
+    /// answer was arriving would discard a blob that fully crossed.
+    ///
+    /// Load-bearing for more than bookkeeping: arriving blob bytes are
+    /// admitted only against an entry here, checked when the transfer's
+    /// chunk 0 identifies it and again before the bytes reach the
+    /// application. Without it a peer could push blobs this device never
+    /// asked for and the application would be handed files nobody wanted.
+    ///
+    /// The bound it gives is on delivery and on the bulk of the buffering,
+    /// not on every byte: chunks need not arrive in order, so any that land
+    /// before chunk 0 are buffered before there is anything to judge, and
+    /// are released when it arrives. What remains is bounded by the media
+    /// layer's own resource caps, the same ones every unsolicited file
+    /// transfer has always been subject to.
+    pub(crate) pending_attachment_fetches: HashMap<String, Instant>,
+
+    /// Blob requests recently acted on, keyed by asking peer and blob hash.
+    ///
+    /// Its own map rather than a corner of `last_data_sync_offer`, because
+    /// this is the only rate-limit key a peer chooses freely: every other one
+    /// is a peer or a peer-and-group, bounded by a roster. Bounded here by
+    /// [`MAX_BLOB_REQUESTS_PER_WINDOW`] per peer and
+    /// [`MAX_BLOB_REQUEST_WINDOWS`] overall, and swept on every read.
+    ///
+    /// [`MAX_BLOB_REQUESTS_PER_WINDOW`]: crate::protocol::data_sync::MAX_BLOB_REQUESTS_PER_WINDOW
+    /// [`MAX_BLOB_REQUEST_WINDOWS`]: crate::protocol::data_sync::MAX_BLOB_REQUEST_WINDOWS
+    pub(crate) blob_request_windows: HashMap<String, Instant>,
 
     /// Whether the MLS group list has been read into `group_mesh.members`
     /// once this session, so the shared-group rediscovery sweep can see the
@@ -849,6 +901,7 @@ impl OfflineProtocol {
             peer_data_sync: std::collections::HashSet::new(),
             peer_data_group: std::collections::HashSet::new(),
             peer_data_group_attested: std::collections::HashSet::new(),
+            peer_data_media: std::collections::HashSet::new(),
             peer_rich_attested: std::collections::HashSet::new(),
             plaintext_send_warned: std::collections::HashSet::new(),
             plaintext_receive_warned: std::collections::HashSet::new(),
@@ -862,6 +915,8 @@ impl OfflineProtocol {
             data: data::DataLayer::default(),
             #[cfg(feature = "data")]
             last_data_sync_offer: HashMap::new(),
+            pending_attachment_fetches: HashMap::new(),
+            blob_request_windows: HashMap::new(),
             #[cfg(feature = "data")]
             group_spaces_enumerated: false,
             lamport_clock: LamportClock::new(),
@@ -1027,6 +1082,7 @@ impl OfflineProtocol {
         let previous_peer_rich_attested = self.peer_rich_attested.clone();
         let previous_peer_data_group = self.peer_data_group.clone();
         let previous_peer_data_group_attested = self.peer_data_group_attested.clone();
+        let previous_peer_data_media = self.peer_data_media.clone();
 
         let previous_local_id = std::mem::replace(&mut self.local_id, local_id.clone());
         let previous_identity_established = self.identity_established;
@@ -1169,6 +1225,7 @@ impl OfflineProtocol {
             self.peer_rich_attested = previous_peer_rich_attested;
             self.peer_data_group = previous_peer_data_group;
             self.peer_data_group_attested = previous_peer_data_group_attested;
+            self.peer_data_media = previous_peer_data_media;
             return Err(err);
         }
 
@@ -1604,7 +1661,29 @@ impl OfflineProtocol {
         // pipeline is live. The descriptors stay parked (and persisted)
         // until the resend consumes them or the restore TTL prunes them,
         // so an app that misses this signal gets it again next restart.
-        for descriptor in self.restored_media_descriptors.values() {
+        //
+        // Except the layer's own. An application cannot answer one of those:
+        // the only surface that takes a caller-supplied `file_id` is
+        // `send_media_with`, which forces the purpose to `None`, so a
+        // well-behaved app re-supplying the bytes would deliver a document
+        // snapshot to the peer's user as a downloaded file. They are dropped
+        // instead, and nothing is stranded: the requester's fetch expires and
+        // can be asked again, and a snapshot is re-offered by the next
+        // anti-entropy exchange.
+        let (recoverable, internal): (Vec<_>, Vec<_>) = self
+            .restored_media_descriptors
+            .values()
+            .cloned()
+            .partition(|descriptor| descriptor.data_purpose.is_none());
+        for descriptor in &internal {
+            debug!(
+                file_id = %descriptor.file_id,
+                "Dropping an interrupted document-layer transfer; the asking side will retry"
+            );
+            self.restored_media_descriptors.remove(&descriptor.file_id);
+            self.remove_media_descriptor(&descriptor.file_id);
+        }
+        for descriptor in recoverable {
             self.emit_event(Event::media_resend_required(
                 descriptor.file_id.clone(),
                 descriptor.recipient.clone(),
@@ -1730,6 +1809,12 @@ impl OfflineProtocol {
         self.peer_data_sync.remove(peer);
         self.peer_data_group.remove(peer);
         self.peer_data_group_attested.remove(peer);
+        self.peer_data_media.remove(peer);
+        // A peer we have stopped replicating with cannot answer anything we
+        // asked them for, so the questions go too. Left behind they would
+        // hold slots against the fetch bound until they timed out.
+        #[cfg(feature = "data")]
+        self.forget_attachment_state(peer);
         #[cfg(feature = "data")]
         self.forget_data_sync_offer_windows(peer);
     }
@@ -1739,6 +1824,19 @@ impl OfflineProtocol {
         self.peer_data_sync.clear();
         self.peer_data_group.clear();
         self.peer_data_group_attested.clear();
+        self.peer_data_media.clear();
+        // Reported, not merely dropped, exactly as the single-peer road
+        // reports. Nothing the application did reaches this one: the bound
+        // on remembered peers is hit, a stranger's key package forgets every
+        // capability at once, and a fetch outstanding at that moment ends
+        // for a reason its asker has no way to see. Dropping the record
+        // silently also forecloses the expiry that would have reported it
+        // later, so the spinner this event exists to end never ends at all.
+        #[cfg(feature = "data")]
+        self.end_every_pending_fetch();
+        #[cfg(not(feature = "data"))]
+        self.pending_attachment_fetches.clear();
+        self.blob_request_windows.clear();
         #[cfg(feature = "data")]
         self.last_data_sync_offer.clear();
     }

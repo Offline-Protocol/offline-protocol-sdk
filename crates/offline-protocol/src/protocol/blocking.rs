@@ -161,7 +161,23 @@ impl OfflineProtocol {
             .collect();
         for file_id in &file_ids_to_cancel {
             self.file_transfer_manager.cancel_transfer(file_id);
-            self.pending_media_metadata.remove(file_id);
+            // A document-layer transfer cancelled here leaves a fetch on the
+            // other side of this device waiting for bytes that are no longer
+            // coming, so it is told. Ordinary transfers are cancelled
+            // silently as before: the block itself is the explanation.
+            //
+            // On this path the fetch has usually been reported already, by
+            // the peer reset further up, and this call then finds nothing
+            // outstanding and stays quiet. It is kept because it is the
+            // general report for a cancelled transfer and this is not the
+            // only road that reaches it.
+            if let Some(purpose) = self
+                .pending_media_metadata
+                .remove(file_id)
+                .and_then(|entry| entry.data_purpose)
+            {
+                self.report_data_media_transfer_failure(user_id, &purpose, "cancelled");
+            }
         }
         if !file_ids_to_cancel.is_empty() {
             debug!(
@@ -755,6 +771,7 @@ mod tests {
         proto.pending_media_metadata.insert(
             "file-from-bob".to_string(),
             PendingMediaMetadataEntry {
+                data_purpose: None,
                 content_type: ContentType::Image,
                 media_metadata: None,
                 last_updated_at: Instant::now(),

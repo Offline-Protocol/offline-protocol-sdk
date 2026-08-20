@@ -18,7 +18,7 @@ use crate::group_mesh::{RosterRatchetGap, MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS
 use crate::mls::InMemoryStorage;
 use crate::protocol::prefixes::internal_prefixes;
 use crate::protocol::tests::{create_test_config_for_user, id};
-use crate::protocol::types::{DATA_GROUP_V1, DATA_SYNC_V1};
+use crate::protocol::types::{DATA_GROUP_V1, DATA_MEDIA_V1, DATA_SYNC_V1};
 use crate::protocol::{OfflineProtocol, TestProtocolStateStorage};
 
 /// One member of the group, with the transport its frames go through.
@@ -733,9 +733,11 @@ fn the_group_capability_is_advertised_and_recorded() {
     let (alice, _bob, _carol, _group) = trio();
     assert_eq!(
         alice.protocol.advertised_data_versions(),
-        vec![DATA_SYNC_V1, DATA_GROUP_V1],
+        vec![DATA_SYNC_V1, DATA_GROUP_V1, DATA_MEDIA_V1],
         "a build that intercepts group frames has to say so, or no peer \
-         will ever send it one"
+         will ever send it one. The media entry rides the same list and is \
+         read independently: it says nothing about groups, because v1 \
+         carries blobs on 1:1 sessions only"
     );
 }
 
@@ -1148,5 +1150,96 @@ fn forgetting_a_peer_drops_its_group_offer_windows_too() {
             .any(|k| k.starts_with(bob.address.as_str())),
         "every window belonging to the forgotten peer has to go, the group \
          ones included"
+    );
+}
+
+#[test]
+fn a_group_space_refuses_attachment_carriage_in_this_version() {
+    // The honest limit rather than a silent one. A blob rides the media
+    // path, which is a transfer to a confirmed 1:1 session, and two members
+    // of a group need not have one with each other: requiring one would make
+    // an attachment depend on a handshake that may never happen.
+    //
+    // Written against a real group, because the refusal is the group arm of
+    // `data_fetch_attachment` and a space this device is not in would be
+    // refused a rung lower, by the capability gate, and prove nothing.
+    let (mut alice, _bob, _carol, group) = trio();
+    let err = alice
+        .protocol
+        .data_fetch_attachment(
+            &group,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+        .expect_err("a group fetch must refuse");
+    assert!(
+        format!("{err}").contains("1:1"),
+        "the refusal must name the reason: {err}"
+    );
+}
+
+#[test]
+fn a_group_document_too_large_to_frame_is_reported_not_carried() {
+    // The group arm of the media escalation, driven through the real ladder
+    // rather than by calling the rung directly. A 1:1 space answers a
+    // document this size by carrying it over the media path; a group space
+    // has no such path, because a blob transfer needs a confirmed 1:1
+    // session and two members need not have one. So it says so.
+    let (mut alice, mut bob, mut carol, group) = trio();
+
+    // Past the 32 KiB frame budget, in one document, so every rung below the
+    // media path is exhausted by the time the ladder reaches the top.
+    //
+    // The filler varies per key on purpose: repeated text compresses inside
+    // the engine's encoding, and a document that compresses back under the
+    // budget never reaches the rung this test is about.
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    for round in 0..24 {
+        let filler: String = (0..4096)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                char::from(b'0' + (seed % 64) as u8)
+            })
+            .collect();
+        alice
+            .protocol
+            .data_map_set(
+                &group,
+                "notes",
+                "m",
+                &format!("k{round}"),
+                DataValue::text(filler),
+            )
+            .expect("set");
+    }
+    // One flush for everything, so the catch-up a peer asks for is the whole
+    // document rather than a run of small deltas it already has.
+    alice.protocol.data_flush(&group, "notes").expect("flush");
+    assert!(
+        alice.protocol.data_doc_size(&group, "notes").expect("size")
+            > crate::protocol::data_sync::MAX_SYNC_BLOB_BYTES as u64,
+        "the fixture must build a document no frame can carry"
+    );
+    settle(&mut alice, &mut bob, &mut carol);
+
+    let reported: Vec<_> = alice
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| serde_json::to_value(event).ok())
+        .filter(|value| value.get("type").and_then(|t| t.as_str()) == Some("data_doc_unsyncable"))
+        .collect();
+    assert!(
+        !reported.is_empty(),
+        "the document must actually have outgrown every frame, or this test \
+         asserts nothing"
+    );
+    assert!(
+        reported
+            .iter()
+            .all(|event| event["reason"].as_str() == Some("group_space_has_no_media_path")),
+        "a group dead end must name itself: {reported:?}"
     );
 }

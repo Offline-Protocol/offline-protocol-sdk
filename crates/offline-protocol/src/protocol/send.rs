@@ -958,7 +958,11 @@ impl OfflineProtocol {
         #[cfg(feature = "data")]
         {
             if self.config.data.enabled {
-                return vec![super::types::DATA_SYNC_V1, super::types::DATA_GROUP_V1];
+                return vec![
+                    super::types::DATA_SYNC_V1,
+                    super::types::DATA_GROUP_V1,
+                    super::types::DATA_MEDIA_V1,
+                ];
             }
         }
         Vec::new()
@@ -987,6 +991,30 @@ impl OfflineProtocol {
             self.config.data.enabled
                 && self.peer_data_sync.contains(recipient)
                 && !self.is_user_blocked(recipient)
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            let _ = recipient;
+            false
+        }
+    }
+
+    /// Whether blobs may travel to `recipient`: 1:1 replication is live with
+    /// them and they advertised [`DATA_MEDIA_V1`], so they understand the
+    /// fetch frames and route a data-purposed media transfer into the data
+    /// layer rather than to their user.
+    ///
+    /// Strictly narrower than [`Self::data_sync_active`] and checked in
+    /// addition to it, never instead: every blob exchange is part of a
+    /// replication that the first gate already had to allow, and a peer who
+    /// stops replicating stops receiving blobs at the same moment.
+    ///
+    /// [`DATA_MEDIA_V1`]: crate::protocol::types::DATA_MEDIA_V1
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(super) fn data_media_active(&self, recipient: &str) -> bool {
+        #[cfg(feature = "data")]
+        {
+            self.data_sync_active(recipient) && self.peer_data_media.contains(recipient)
         }
         #[cfg(not(feature = "data"))]
         {
@@ -2232,6 +2260,31 @@ impl OfflineProtocol {
         content_type: ContentType,
         options: MediaSendOptions,
     ) -> Result<String> {
+        // The public surface never carries a data purpose. Every transfer
+        // reachable from an application is a transfer for its user, and the
+        // one argument that could change that is not in `MediaSendOptions`
+        // and must never be added to it: a caller able to mark a send as
+        // data-purposed could feed bytes of its choosing to a peer's
+        // document engine while that peer's user saw nothing arrive.
+        self.send_media_inner(recipient, file_data, file_name, content_type, options, None)
+    }
+
+    /// The body of [`Self::send_media_with`], plus the one argument the
+    /// public surface may not supply.
+    ///
+    /// `data_purpose` marks a transfer as belonging to the replicated-
+    /// document layer. It is `pub(crate)` and reached only from the data
+    /// layer's own send seams.
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(crate) fn send_media_inner(
+        &mut self,
+        recipient: impl Into<String>,
+        file_data: Vec<u8>,
+        file_name: impl Into<String>,
+        content_type: ContentType,
+        options: MediaSendOptions,
+        data_purpose: Option<crate::media_envelope::DataPurpose>,
+    ) -> Result<String> {
         {
             let state = lock_shared_state(&self.shared_state)?;
             if state.state != ProtocolState::Running {
@@ -2317,6 +2370,32 @@ impl OfflineProtocol {
             return Err(Error::UserBlocked(recipient_str));
         }
 
+        // A data-purposed transfer goes only to a peer that said it routes
+        // one into its document layer. Toward anybody else the bytes would
+        // be handed to a person as a downloaded file, so this refuses rather
+        // than degrading: there is no useful weaker form of this send.
+        if data_purpose.is_some() && !self.data_media_active(&recipient_str) {
+            return Err(Error::InvalidArgument(format!(
+                "peer {recipient_str} did not advertise attachment carriage"
+            )));
+        }
+
+        // And only where it can be sealed. The marking exists nowhere but
+        // inside the encrypted chunk-0 plaintext, so a transfer leaving by
+        // the plaintext opt-out path arrives stripped of it: the receiver
+        // has no way to know what the bytes are and hands its user a
+        // downloaded file named by a hash, which is the outcome the whole
+        // marking exists to prevent. Refused rather than degraded, for the
+        // same reason the capability gate above refuses.
+        if data_purpose.is_some() && !self.should_auto_encrypt() {
+            return Err(Error::EncryptFailed(
+                "a document-layer transfer cannot be sent unsealed: its marking travels \
+                 inside the encrypted chunk, and a receiver would surface the bytes to its \
+                 user as an ordinary file"
+                    .to_string(),
+            ));
+        }
+
         // SEC-H1: media rides the same MLS session machinery as text. With
         // auto-encryption active the session must already be confirmed —
         // files are too large for the pending-message queue, so media is
@@ -2342,7 +2421,10 @@ impl OfflineProtocol {
             // bounded number of generations — cap concurrent transfers so
             // the combined in-flight windows cannot push a delayed chunk
             // beyond that tolerance and permanently stall it.
-            use crate::constants::MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER;
+            use crate::constants::{
+                MAX_CONCURRENT_INTERNAL_MEDIA_TRANSFERS_PER_PEER,
+                MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER,
+            };
             let active_transfers = self
                 .outbound_media_transfers
                 .values()
@@ -2350,6 +2432,29 @@ impl OfflineProtocol {
                 .count();
             if active_transfers >= MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER {
                 return Err(Error::MediaTransferLimit(recipient_str));
+            }
+
+            // An SDK-internal transfer takes at most one of those slots.
+            // The cap above bounds the ratchet gap and so cannot be raised
+            // for our own traffic; what is left is to leave the application
+            // a slot it can account for. The in-flight dedup stops a second
+            // copy of one transfer, not two different ones, and two
+            // different ones are ordinary here: a document snapshot and an
+            // answered blob request are separate errands to the same peer.
+            // Filling both slots with them fails the app's own send with a
+            // limit whose cause it cannot see, because what holds the slots
+            // is invisible to it by design.
+            if data_purpose.is_some() {
+                let internal_transfers = self
+                    .outbound_media_transfers
+                    .values()
+                    .filter(|transfer| {
+                        transfer.recipient == recipient_str && transfer.data_purpose.is_some()
+                    })
+                    .count();
+                if internal_transfers >= MAX_CONCURRENT_INTERNAL_MEDIA_TRANSFERS_PER_PEER {
+                    return Err(Error::MediaTransferLimit(recipient_str));
+                }
             }
         } else if self.config.encryption.require_encryption {
             return Err(Error::EncryptFailed(
@@ -2428,6 +2533,7 @@ impl OfflineProtocol {
                 last_updated_at: Instant::now(),
                 media_metadata: media_metadata.clone(),
                 rich_extras: rich_extras.clone(),
+                data_purpose: data_purpose.clone(),
             },
         );
 
@@ -2444,6 +2550,7 @@ impl OfflineProtocol {
                 file_checksum: first_chunk.file_checksum.clone(),
                 content_type,
                 queued_at: Utc::now(),
+                data_purpose: data_purpose.clone(),
             };
             self.restored_media_descriptors.remove(&file_id);
             self.persist_media_descriptor(&descriptor);
@@ -2454,9 +2561,15 @@ impl OfflineProtocol {
         self.outbound_media_windows
             .insert(file_id.clone(), window_state);
 
-        let state = lock_shared_state(&self.shared_state)?;
-        state.emit_event(Event::file_progress(file_id.clone(), 0, total_chunks));
-        drop(state);
+        // A data-purposed transfer is invisible to the application on this
+        // side too. The receiver's user must not be shown a download they did
+        // not start; the sender's must not be shown an upload they did not
+        // make, and `MediaSent` for one would put a file in a conversation.
+        if data_purpose.is_none() {
+            let state = lock_shared_state(&self.shared_state)?;
+            state.emit_event(Event::file_progress(file_id.clone(), 0, total_chunks));
+            drop(state);
+        }
 
         self.send_media_chunk_batch(
             &file_id,
@@ -2466,6 +2579,7 @@ impl OfflineProtocol {
             content_type,
             media_metadata.as_ref(),
             rich_extras.as_ref(),
+            data_purpose.as_ref(),
         )?;
 
         Ok(file_id)
@@ -2482,6 +2596,7 @@ impl OfflineProtocol {
         content_type: ContentType,
         media_metadata: Option<&MediaMetadata>,
         rich_extras: Option<&MediaRichExtras>,
+        data_purpose: Option<&crate::media_envelope::DataPurpose>,
     ) -> Result<()> {
         for chunk in chunks {
             let chunk_index = chunk.chunk_index;
@@ -2507,6 +2622,11 @@ impl OfflineProtocol {
                     original_content_type: (chunk_index == 0).then_some(content_type),
                     rich_extras: if chunk_index == 0 {
                         rich_extras.cloned()
+                    } else {
+                        None
+                    },
+                    data_purpose: if chunk_index == 0 {
+                        data_purpose.cloned()
                     } else {
                         None
                     },
@@ -2631,6 +2751,7 @@ impl OfflineProtocol {
                 transfer.content_type,
                 transfer.media_metadata.as_ref(),
                 transfer.rich_extras.as_ref(),
+                transfer.data_purpose.as_ref(),
             ) {
                 warn!(
                     file_id = %file_id,
@@ -4014,15 +4135,18 @@ impl OfflineProtocol {
         let content_type = transfer.content_type;
         let recipient = transfer.recipient.clone();
         let completed = delivered_chunks == total_chunks;
+        let carries_data = transfer.data_purpose.is_some();
 
-        if let Ok(state) = lock_shared_state(&self.shared_state) {
-            state.emit_event(Event::file_progress(
-                file_id.clone(),
-                delivered_chunks,
-                total_chunks,
-            ));
-            if completed {
-                state.emit_event(Event::media_sent(file_id.clone(), content_type, recipient));
+        if !carries_data {
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::file_progress(
+                    file_id.clone(),
+                    delivered_chunks,
+                    total_chunks,
+                ));
+                if completed {
+                    state.emit_event(Event::media_sent(file_id.clone(), content_type, recipient));
+                }
             }
         }
 
@@ -4048,6 +4172,10 @@ impl OfflineProtocol {
     /// tracking (freeing its per-peer transfer slot) and emits
     /// [`Event::MediaSendFailed`] so the app learns the transfer will never
     /// complete. Idempotent — a second call for the same `file_id` is a no-op.
+    ///
+    /// A data-purposed transfer is the one exception to the event: it has no
+    /// application-facing identity, so the report is withheld rather than
+    /// naming a `file_id` the app never saw.
     pub(super) fn abort_outbound_media_transfer(&mut self, file_id: &str, reason: &str) {
         let Some(transfer) = self.outbound_media_transfers.remove(file_id) else {
             return;
@@ -4064,6 +4192,19 @@ impl OfflineProtocol {
             reason = %reason,
             "Aborting outbound media transfer"
         );
+        // A data-purposed transfer has no application-facing identity to
+        // fail, so reporting one would name a file_id the app has never
+        // seen. The requester's own fetch expires and can be asked again,
+        // and a snapshot is re-offered by the next anti-entropy exchange, so
+        // nothing is stranded by staying quiet here.
+        if transfer.data_purpose.is_some() {
+            debug!(
+                file_id = %file_id,
+                reason = %reason,
+                "A data-layer transfer was aborted; the asking side will retry"
+            );
+            return;
+        }
         if let Ok(state) = lock_shared_state(&self.shared_state) {
             state.emit_event(Event::media_send_failed(
                 file_id.to_string(),

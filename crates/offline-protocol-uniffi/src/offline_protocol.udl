@@ -1900,6 +1900,12 @@ interface DataStore {
     // where kind is one of null, bool, int, float, text, bytes (a bytes value
     // is a JSON array of byte values). A flat scalar surface would have meant
     // six parallel optional arguments in four languages.
+    //
+    // An attachment is the one kind that is not {kind, value}, because it is
+    // a reference rather than a value:
+    // {"kind":"attachment","hash":"<64 lowercase hex>","size":N} with
+    // optional "name" and "mime". It can come back out of map_get_json too,
+    // so a reader switching on kind has to handle it.
     [Throws=ProtocolError]
     void map_set(string space_id, string doc_id, string collection, string key, string value_json);
 
@@ -1968,6 +1974,60 @@ interface DataStore {
     // when replication resumes. This clears the device, not the content.
     [Throws=ProtocolError]
     void wipe_all();
+
+    // ---- attachments ---------------------------------------------------
+    //
+    // Blob bytes never enter a document and never enter protocol state. A
+    // document holds a reference (a SHA-256, a size, a name) and the bytes
+    // travel the media path, which already does windowing, per-transport
+    // chunk sizing, ACK and retry.
+    //
+    // The consequence for an application is that IT owns the bytes. The SDK
+    // cannot answer a peer's request on its own, because it never kept a
+    // copy; it asks, through DataAttachmentRequested.
+
+    // The address of some bytes, in the spelling a reference uses.
+    //
+    // Write the result into a document as
+    // {"kind":"attachment","hash":"...","size":N} via map_set. Computing it
+    // anywhere else risks a second spelling of the same hash, and two
+    // spellings of one address are two addresses.
+    //
+    // Blobs are `bytes`, not `sequence<u8>`, for the reason spelled out on
+    // ProtocolStateStorageProvider above: an attachment is the one payload on
+    // this interface that reaches megabytes, and `sequence<u8>` would box
+    // every one of them on Kotlin.
+    string attachment_hash(bytes data);
+
+    // Ask the peer a 1:1 space is named after for the bytes behind a
+    // reference.
+    //
+    // Pull rather than push, because a space may reference more bytes than a
+    // phone wants over Bluetooth: the decision to spend that belongs to the
+    // application, per blob, when somebody opens one. The answer arrives as
+    // DataAttachmentReceived or DataAttachmentUnavailable, never inline.
+    //
+    // Group spaces are refused in this version: a blob rides a transfer to a
+    // confirmed 1:1 session, and two group members need not have one.
+    [Throws=ProtocolError]
+    void fetch_attachment(string space_id, string hash);
+
+    // Answer a peer's request with the bytes.
+    //
+    // Refuses bytes that do not hash to `hash`, so a mistake is reported to
+    // the application that made it while it still has the file in hand,
+    // rather than travelling the whole media path to be refused elsewhere.
+    [Throws=ProtocolError]
+    void provide_attachment(string space_id, string peer_id, string hash, bytes data);
+
+    // Tell a peer their request will not be answered.
+    //
+    // A real answer rather than silence. A reference outlives the bytes it
+    // names, so a peer holding a reference and no blob is ordinary; without
+    // this the asking side cannot tell that from a slow peer and shows
+    // somebody a spinner that never resolves.
+    [Throws=ProtocolError]
+    void decline_attachment(string space_id, string peer_id, string hash);
 };
 
 // BLE fragment for outgoing data

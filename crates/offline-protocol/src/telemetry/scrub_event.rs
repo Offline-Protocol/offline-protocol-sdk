@@ -42,9 +42,14 @@
 //! - **Content and display fields are left raw**: `content`, `file_data`,
 //!   `name`, `new_name`/`old_name`, `group_name`, `file_name`,
 //!   `initial_message`, `reason`/`reason_detail`, `method`, `body`,
-//!   `version`. Scrubbing payload is out of scope for `scrub_ids`; if that
-//!   ever needs to change it belongs behind a separate `emit_content` knob
-//!   so the two concerns don't get conflated.
+//!   `version`, and [`Event::DataAttachmentReceived::data`]. Scrubbing
+//!   payload is out of scope for `scrub_ids`; if that ever needs to change
+//!   it belongs behind a separate `emit_content` knob so the two concerns
+//!   don't get conflated.
+//!
+//!   `data` deserves naming rather than filing quietly under "content": it
+//!   is a whole blob, base64, and it is the largest single value a sink can
+//!   be handed. A sink that persists raw events persists the file itself.
 //!
 //!   Group and file names stay here on purpose even though petnames moved
 //!   out. A group name is a label several parties share and agree on, and a
@@ -813,6 +818,46 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             hash_string(space_id, scrubber);
             hash_string(doc_id, scrubber);
         }
+        // A blob hash is derived from bytes rather than from a person, so it
+        // is left alone for the same reason a message id is: it is what makes
+        // a telemetry record about one fetch legible, and it names nobody.
+        Event::DataAttachmentRequested {
+            space_id,
+            peer_id,
+            hash: _,
+        } => {
+            hash_string(space_id, scrubber);
+            hash_string(peer_id, scrubber);
+        }
+        Event::DataAttachmentReceived {
+            space_id,
+            peer_id,
+            hash: _,
+            data: _,
+        } => {
+            hash_string(space_id, scrubber);
+            hash_string(peer_id, scrubber);
+        }
+        // `reason` is a fixed token this crate chooses, never a peer's
+        // words: see the producer rule at the top of this file.
+        Event::DataAttachmentUnavailable {
+            space_id,
+            peer_id,
+            hash: _,
+            reason: _,
+        } => {
+            hash_string(space_id, scrubber);
+            hash_string(peer_id, scrubber);
+        }
+        Event::DataDocUnsyncable {
+            space_id,
+            doc_id,
+            bytes: _,
+            reason: _,
+        } => {
+            hash_string(space_id, scrubber);
+            hash_string(doc_id, scrubber);
+        }
     }
 }
 
@@ -895,7 +940,11 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::UserBlocked { .. }
         | Event::UserUnblocked { .. }
         | Event::DataChanged { .. }
-        | Event::DataDocSizeWarning { .. } => (),
+        | Event::DataDocSizeWarning { .. }
+        | Event::DataAttachmentRequested { .. }
+        | Event::DataAttachmentReceived { .. }
+        | Event::DataAttachmentUnavailable { .. }
+        | Event::DataDocUnsyncable { .. } => (),
     }
 }
 

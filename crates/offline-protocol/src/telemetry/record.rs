@@ -177,6 +177,10 @@ mod tests {
         "protocol.user.unblocked",
         "protocol.data.changed",
         "protocol.data.doc_size_warning",
+        "protocol.data.attachment_requested",
+        "protocol.data.attachment_received",
+        "protocol.data.attachment_unavailable",
+        "protocol.data.doc_unsyncable",
         // MlsLifecycleEvent::*
         "mls.initialized",
         "mls.encryption_used",
@@ -357,7 +361,11 @@ mod tests {
             | Event::UserBlocked { .. }
             | Event::UserUnblocked { .. }
             | Event::DataChanged { .. }
-            | Event::DataDocSizeWarning { .. } => (),
+            | Event::DataDocSizeWarning { .. }
+            | Event::DataAttachmentRequested { .. }
+            | Event::DataAttachmentReceived { .. }
+            | Event::DataAttachmentUnavailable { .. }
+            | Event::DataDocUnsyncable { .. } => (),
         }
     }
 
@@ -783,6 +791,29 @@ mod tests {
                 doc_id: String::new(),
                 compacted_bytes: 0,
                 cap_bytes: 0,
+            },
+            Event::DataAttachmentRequested {
+                space_id: String::new(),
+                peer_id: String::new(),
+                hash: String::new(),
+            },
+            Event::DataAttachmentReceived {
+                space_id: String::new(),
+                peer_id: String::new(),
+                hash: String::new(),
+                data: String::new(),
+            },
+            Event::DataAttachmentUnavailable {
+                space_id: String::new(),
+                peer_id: String::new(),
+                hash: String::new(),
+                reason: String::new(),
+            },
+            Event::DataDocUnsyncable {
+                space_id: String::new(),
+                doc_id: String::new(),
+                bytes: 0,
+                reason: String::new(),
             },
         ]
     }

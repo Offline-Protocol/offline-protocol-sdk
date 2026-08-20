@@ -94,6 +94,7 @@ can tell them from legacy plaintext chunks and apply policy.
 |---------|---------|
 | `0x01` | Payload is an MLS encrypted message; plaintext carries metadata and original content type |
 | `0x02` | Same payload; the plaintext may additionally carry rich extras |
+| `0x03` | Same payload; the plaintext may additionally carry a data purpose |
 
 ### Disambiguation from legacy plaintext chunks
 
@@ -109,6 +110,7 @@ therefore the high byte of that length, at most `0x10`, which can never equal
 [if flags & 0x01: u32le meta_len][media metadata JSON]
 [if flags & 0x02: u8 oct_len][original content type string]
 [if flags & 0x04: u32le rich_len][media rich extras JSON]
+[if flags & 0x08: u32le purpose_len][data purpose JSON]
 [chunk bytes: remainder]
 ```
 
@@ -126,6 +128,47 @@ attribution) ship only on chunk 0, only under envelope v2, and only toward
 recipients that advertised rich payload support. Additive fields go inside the
 rich extras structure itself, which is self-describing JSON and needs no new
 flag bit or envelope version.
+
+A plaintext carrying more than one versioned field ships under the version
+covering the **latest** of them. The fields are positional, so under an earlier
+version a receiver would accept the envelope and then read the later field's
+length as chunk content, corrupting the file rather than refusing it.
+
+### The data purpose
+
+A transfer may belong to the [document replication](data-sync.md) layer rather
+than to the person using the application: the bytes of an attachment a peer
+asked for by hash, or a document too large to fit inside a sync frame.
+
+```json
+{"p":"attachment","hash":"<64 lowercase hex>"}
+{"p":"snapshot","doc":"<document name>"}
+```
+
+Chunk 0 only, envelope v3, and only toward peers that advertised
+`data_versions` entry 3. Three rules govern it, each preventing something
+specific:
+
+- **No public send surface may set it.** An application asking to send a file
+  MUST NOT be able to mark it. A caller that could would be able to feed bytes
+  of its choosing to a peer's document engine while that peer's user saw
+  nothing arrive.
+- **A marked transfer is invisible to the application on both sides.** A
+  receiver MUST NOT surface it as a received file and MUST NOT report its
+  progress: nobody started this download. A sender MUST NOT report its
+  progress, its completion, or its failure either, for the same reason turned
+  around: nobody attached this file, and an application that renders a
+  completed send in a conversation would show one being sent.
+
+  The rule binds from the first chunk, not from the last. The mark rides
+  chunk 0, so a receiver that has not yet seen chunk 0 does not know what a
+  transfer is, and MUST withhold rather than assume. Treating "not yet known"
+  as "ordinary" reports a download on any path that delivers out of order.
+  Withholding costs an ordinary transfer nothing but the progress events
+  before its chunk 0 lands, and progress is advisory.
+- **It carries no space.** The space is the authenticated wire sender, exactly
+  as it is for a sync frame. A space a peer can name is a space a peer can
+  reach.
 
 ### What the envelope moved inside the AEAD boundary
 

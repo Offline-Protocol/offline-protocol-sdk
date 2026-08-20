@@ -27,6 +27,80 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Documents can carry attachments, and a document too large for a frame now
+  gets across.** Two holes closed by the same seam.
+
+  A document can hold a reference to a blob it does not contain: a SHA-256, a
+  size, and enough to display the thing. The bytes never enter the document
+  and never enter protocol state, because a document is bounded by one sealed
+  record and a layer that inlined blobs could not carry the blobs people
+  actually send. They travel the media path instead, which already does
+  windowing, per-transport chunk sizing, ACK and retry.
+
+  The reference is one whole value, replaced rather than edited, so two people
+  attaching different blobs to the same key resolve like any other value and
+  neither replica ends up holding a hash from one beside a size from another.
+  A member on an older build reads the value as absent rather than rendering a
+  hash to a person as text.
+
+  Fetching is pull, and the application is in it, because the SDK never kept
+  the bytes: a peer's request surfaces as `DataAttachmentRequested`, answered
+  with `provideAttachment` or refused with `declineAttachment`. Please
+  answer it either way. A reference outlives the bytes it names, and without a
+  refusal the asking side cannot tell a peer that lost the file from one on a
+  slow radio, so it shows somebody a spinner forever.
+
+  Arriving bytes are checked against the hash that asked for them, not against
+  anything the sender says about them, and bytes nobody asked for are dropped.
+
+  Neither side sees these transfers as files. No progress, no completion, no
+  failure, in either direction: nobody started that download and nobody
+  attached that file. The rule binds from the first chunk rather than the
+  last, because the marking rides chunk 0 and a receiver that has not seen it
+  yet has to withhold rather than guess.
+
+  The second hole was quieter and worse. A document whose catch-up exceeded
+  32 KiB was warned about and dropped, so two replicas sat there accepting
+  edits and diverging with a log line as the only evidence. Such a document
+  now travels the same media path, and one that genuinely cannot be replicated
+  is reported through the new `DataDocUnsyncable` event instead of vanishing
+  into a log.
+
+  Negotiated as a third `data_versions` entry, appended, never a bump. A peer
+  without it replicates perfectly well and has no idea what a data-purposed
+  transfer is, so it would hand its user a CRDT snapshot as a downloaded file.
+  Blob carriage is 1:1 in this release: it rides a transfer to a confirmed
+  pairwise session, and two members of a group need not have one with each
+  other. References themselves replicate in groups like any other value.
+
+  What a transfer is, is decided by its first chunk and cannot be revised
+  afterwards. A duplicate chunk 0 that disagrees with the one that opened the
+  transfer ends it rather than rewriting it: the marking that makes a transfer
+  invisible would otherwise be a field an authenticated peer could flip
+  mid-flight, handing a person a CRDT snapshot as a download or turning their
+  own download invisible and never telling them how it ended.
+
+  A document-layer transfer is refused rather than degraded when it cannot be
+  sealed. The marking travels inside the encrypted chunk and nowhere else, so
+  on the plaintext opt-out path it would simply not arrive.
+
+  The SDK's own transfers take at most one of the two per-peer transfer slots,
+  leaving one the application can always reach. A snapshot and an answered
+  blob request are separate errands to the same peer, and both slots filled by
+  invisible transfers would fail the application's own send with a limit whose
+  cause it has no way to see.
+
+  Every road that ends a fetch without bytes now reports it, including a peer
+  being blocked, coming back without the replication capability, or being
+  forgotten, whether on its own or in the wholesale eviction that the bound on
+  remembered peers triggers (`peer_gone`). A fetch gets exactly one such
+  report: a decline that races its own arriving bytes is not followed by a
+  second failure for the transfer it abandoned.
+
+  The wire contract now has its own chapter, [Document
+  replication](./docs/spec/data-sync.md), with frozen conformance vectors
+  beside it.
+
 - **Documents replicate in groups, encrypted once for the whole roster.** A
   space named after a group id replicates with that group: the roster is the
   replica set, membership is the existing MLS roster, and there is no second

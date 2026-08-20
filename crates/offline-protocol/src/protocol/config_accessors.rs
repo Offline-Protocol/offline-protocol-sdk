@@ -314,7 +314,28 @@ impl OfflineProtocol {
             .file_transfer_manager
             .cleanup_stale_transfers(StdDuration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS));
         for stale in stale_transfers {
-            self.pending_media_metadata.remove(&stale.file_id);
+            let dropped = self.pending_media_metadata.remove(&stale.file_id);
+            // An entry exists only once chunk 0 was accepted, and chunk 0 is
+            // what says whose transfer this is. Without one there is no
+            // knowledge to report from: the transfer may be the document
+            // layer's, and the app has heard nothing about it either, because
+            // progress is withheld under the same rule.
+            let identified = dropped.is_some();
+            // A document-layer transfer has no file to report failing, and
+            // saying otherwise hands somebody a failed download they never
+            // started. It is reported to the layer that asked for it
+            // instead, which is what tells a waiting fetch to stop waiting.
+            if let Some(purpose) = dropped.and_then(|entry| entry.data_purpose) {
+                self.report_data_media_transfer_failure(&stale.sender, &purpose, "stale_timeout");
+                continue;
+            }
+            if !identified {
+                tracing::debug!(
+                    file_id = %stale.file_id,
+                    "A transfer expired before its purpose was known; no failure reported"
+                );
+                continue;
+            }
             // Like the resource-limit drops, a stale transfer is
             // unrecoverable (its chunks were ACKed and will not be
             // retransmitted) — tell the app instead of going silent.
@@ -326,6 +347,8 @@ impl OfflineProtocol {
             ));
         }
         self.cleanup_stale_media_state(StdDuration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS));
+        #[cfg(feature = "data")]
+        self.expire_attachment_fetches();
         // Prune old timed-out ACKs that weren't cleaned up by normal retry flow
         self.ack_manager
             .prune_old_timeouts(std::time::Duration::from_secs(300)); // 5 minutes

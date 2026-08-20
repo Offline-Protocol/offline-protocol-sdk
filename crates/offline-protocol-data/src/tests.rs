@@ -230,6 +230,13 @@ fn every_value_kind_survives_a_round_trip() {
         ("float", DataValue::float(1.5)),
         ("text", DataValue::text("hello")),
         ("bytes", DataValue::bytes(vec![0u8, 1, 255])),
+        (
+            "attachment",
+            DataValue::attachment(
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                4096,
+            ),
+        ),
     ];
     for (key, value) in &cases {
         doc.map_set("values", key, value.clone()).expect("set");
@@ -929,5 +936,256 @@ fn a_snapshot_closes_a_trim_gap_only_when_the_sender_holds_what_we_kept() {
         compacted.map_get("m", "k1").expect("get"),
         Some(DataValue::int(1)),
         "refusing must leave the document readable"
+    );
+}
+
+// ---- attachments ------------------------------------------------------
+
+const HASH_A: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+const HASH_B: &str = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03";
+
+#[test]
+fn an_attachment_reference_round_trips_through_a_commit() {
+    let mut doc = DataDoc::new();
+    let reference = DataValue::Attachment {
+        hash: HASH_A.to_string(),
+        size: 4096,
+        name: Some("plan.pdf".to_string()),
+        mime: Some("application/pdf".to_string()),
+    };
+    doc.map_set("files", "plan", reference.clone())
+        .expect("set");
+    doc.commit().expect("commit").expect("a change");
+
+    let mut replica = DataDoc::new();
+    replica
+        .import(&doc.export_compacted().expect("export"))
+        .expect("import");
+    assert_eq!(
+        replica.map_get("files", "plan").expect("get"),
+        Some(reference)
+    );
+}
+
+#[test]
+fn an_attachment_with_no_name_or_type_round_trips_as_absent_fields() {
+    let mut doc = DataDoc::new();
+    doc.map_set("files", "blob", DataValue::attachment(HASH_A, 12))
+        .expect("set");
+    assert_eq!(
+        doc.map_get("files", "blob").expect("get"),
+        Some(DataValue::attachment(HASH_A, 12))
+    );
+}
+
+#[test]
+fn attaching_over_a_key_replaces_the_whole_reference() {
+    // The single property that makes "no multi-writer attachment mutation"
+    // true by construction: a reference is one value, so the second write
+    // cannot leave a hash from one blob beside a size from another.
+    let mut doc = DataDoc::new();
+    doc.map_set("files", "blob", DataValue::attachment(HASH_A, 10))
+        .expect("set");
+    doc.map_set(
+        "files",
+        "blob",
+        DataValue::Attachment {
+            hash: HASH_B.to_string(),
+            size: 20,
+            name: Some("second".to_string()),
+            mime: None,
+        },
+    )
+    .expect("set");
+
+    let Some(DataValue::Attachment {
+        hash,
+        size,
+        name,
+        mime,
+    }) = doc.map_get("files", "blob").expect("get")
+    else {
+        panic!("expected an attachment");
+    };
+    assert_eq!(hash, HASH_B);
+    assert_eq!(size, 20);
+    assert_eq!(name.as_deref(), Some("second"));
+    assert_eq!(mime, None);
+}
+
+#[test]
+fn the_escape_hatch_describes_an_attachment_in_the_words_the_api_uses() {
+    // `export_json` is what an application leaving this SDK reads, so a
+    // reference has to describe itself there without a decoder ring. The
+    // matching claim about older builds reading the value as absent is
+    // pinned against the conversion itself, in `doc.rs`.
+    let mut doc = DataDoc::new();
+    doc.map_set("files", "blob", DataValue::attachment(HASH_A, 10))
+        .expect("set");
+
+    let exported = doc.export_json().expect("json");
+    // Against the API's own spelling of the same value rather than against
+    // a substring of it. `contains("attachment")` is true of "attachment2"
+    // as well, so it pins none of the key names the claim is about: rename
+    // any of them and the export diverges from the API while a substring
+    // check stays green.
+    let exported: serde_json::Value = serde_json::from_str(&exported).expect("the export is JSON");
+    let reference = &exported["files"]["blob"];
+    assert_eq!(
+        reference,
+        &serde_json::to_value(DataValue::attachment(HASH_A, 10)).expect("encode"),
+        "the escape hatch must describe the reference in the API's own words: {exported}"
+    );
+}
+
+#[test]
+fn a_hash_that_is_not_a_hash_is_refused_at_the_operation() {
+    let mut doc = DataDoc::new();
+    for bad in [
+        "",
+        "abc",
+        // Uppercase is refused rather than folded: two spellings of one
+        // address would fetch twice and compare unequal.
+        &HASH_A.to_uppercase(),
+        // 64 characters, but not hex.
+        &"z".repeat(64),
+    ] {
+        let err = doc
+            .map_set("files", "blob", DataValue::attachment(bad, 1))
+            .expect_err("a malformed hash must be refused");
+        assert!(
+            matches!(err, DataError::InvalidAttachment { .. }),
+            "unexpected error for {bad:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn an_attachment_with_no_bytes_is_refused() {
+    let mut doc = DataDoc::new();
+    let err = doc
+        .map_set("files", "blob", DataValue::attachment(HASH_A, 0))
+        .expect_err("a zero-length attachment must be refused");
+    assert!(matches!(err, DataError::InvalidAttachment { .. }), "{err}");
+}
+
+#[test]
+fn an_over_long_name_or_type_is_refused() {
+    let mut doc = DataDoc::new();
+    let err = doc
+        .map_set(
+            "files",
+            "blob",
+            DataValue::Attachment {
+                hash: HASH_A.to_string(),
+                size: 1,
+                name: Some("n".repeat(crate::MAX_ATTACHMENT_NAME_LEN + 1)),
+                mime: None,
+            },
+        )
+        .expect_err("an over-long name must be refused");
+    assert!(matches!(err, DataError::InvalidAttachment { .. }), "{err}");
+
+    let err = doc
+        .map_set(
+            "files",
+            "blob",
+            DataValue::Attachment {
+                hash: HASH_A.to_string(),
+                size: 1,
+                name: None,
+                mime: Some("m".repeat(crate::MAX_ATTACHMENT_MIME_LEN + 1)),
+            },
+        )
+        .expect_err("an over-long media type must be refused");
+    assert!(matches!(err, DataError::InvalidAttachment { .. }), "{err}");
+}
+
+#[test]
+fn a_size_the_engine_cannot_hold_is_refused_rather_than_clamped() {
+    // The engine's integer is signed and this crate's is not, so a size past
+    // `MAX_ATTACHMENT_SIZE` cannot survive the conversion. Refused at the
+    // operation rather than clamped inside it: a clamped size replicates to
+    // the whole space as a number its writer never wrote, and every member
+    // then decides whether to fetch against it.
+    let mut doc = DataDoc::new();
+    let err = doc
+        .map_set(
+            "files",
+            "blob",
+            DataValue::attachment(HASH_A, crate::MAX_ATTACHMENT_SIZE + 1),
+        )
+        .expect_err("a size past the engine's integer must be refused");
+    assert!(matches!(err, DataError::InvalidAttachment { .. }), "{err}");
+
+    // The control: the largest size that DOES fit is accepted and reads back
+    // unchanged. Without it the assertion above passes for a bound that
+    // refuses everything.
+    doc.map_set(
+        "files",
+        "blob",
+        DataValue::attachment(HASH_A, crate::MAX_ATTACHMENT_SIZE),
+    )
+    .expect("the largest representable size must be accepted");
+    assert_eq!(
+        doc.map_get("files", "blob").expect("get"),
+        Some(DataValue::attachment(HASH_A, crate::MAX_ATTACHMENT_SIZE))
+    );
+}
+
+#[test]
+fn an_attachment_reference_serializes_in_the_shape_the_ffi_carries() {
+    // The canonical FFI and wire spelling. Absent name and type are absent,
+    // not null: a golden vector pins this same shape, and a reader that has
+    // to tell `null` from missing has been given two spellings of one value.
+    let json = serde_json::to_string(&DataValue::attachment(HASH_A, 7)).expect("json");
+    assert_eq!(
+        json,
+        format!(r#"{{"kind":"attachment","hash":"{HASH_A}","size":7}}"#)
+    );
+
+    let round_tripped: DataValue = serde_json::from_str(&json).expect("parse");
+    assert_eq!(round_tripped, DataValue::attachment(HASH_A, 7));
+}
+
+#[test]
+fn an_attachment_reference_is_a_list_value_too() {
+    let mut doc = DataDoc::new();
+    doc.list_push("gallery", DataValue::attachment(HASH_A, 1))
+        .expect("push");
+    doc.list_push("gallery", DataValue::attachment(HASH_B, 2))
+        .expect("push");
+    assert_eq!(doc.list_len("gallery").expect("len"), 2);
+}
+
+#[test]
+fn a_name_or_type_at_the_bound_is_accepted() {
+    // The control the refusal test needs. A check written `>=` refuses the
+    // longest legal name, which the spec says MUST be accepted, and the
+    // refusal test alone cannot tell the two spellings apart.
+    let mut doc = DataDoc::new();
+    doc.map_set(
+        "files",
+        "blob",
+        DataValue::Attachment {
+            hash: HASH_A.to_string(),
+            size: 1,
+            name: Some("n".repeat(crate::MAX_ATTACHMENT_NAME_LEN)),
+            mime: Some("m".repeat(crate::MAX_ATTACHMENT_MIME_LEN)),
+        },
+    )
+    .expect("a name and type exactly at the bound must be accepted");
+
+    let Some(DataValue::Attachment { name, mime, .. }) = doc.map_get("files", "blob").expect("get")
+    else {
+        panic!("expected an attachment");
+    };
+    assert_eq!(
+        name.map(|name| name.len()),
+        Some(crate::MAX_ATTACHMENT_NAME_LEN)
+    );
+    assert_eq!(
+        mime.map(|mime| mime.len()),
+        Some(crate::MAX_ATTACHMENT_MIME_LEN)
     );
 }

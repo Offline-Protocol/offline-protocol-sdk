@@ -94,6 +94,17 @@ pub const MAX_MEDIA_DESCRIPTORS: usize = 16;
 /// tolerance and permanently stall its transfer.
 pub const MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER: usize = 2;
 
+/// How many of a peer's transfer slots the SDK's own document-layer traffic
+/// may occupy at once.
+///
+/// Strictly below [`MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER`], and that is
+/// the whole point. A document-layer transfer is invisible to the
+/// application on both sides, so an application whose own `send_media` fails
+/// with [`crate::Error::MediaTransferLimit`] cannot see what is holding the
+/// slots or wait for it to finish. Leaving one slot always reachable keeps
+/// that error explainable by what the application itself is doing.
+pub const MAX_CONCURRENT_INTERNAL_MEDIA_TRANSFERS_PER_PEER: usize = 1;
+
 /// Metadata key indicating preferred transport for a message.
 pub const TRANSPORT_PREFERENCE_KEY: &str = "transport_preference";
 

@@ -751,6 +751,26 @@ pub(crate) const DATA_SYNC_V1: u8 = 1;
 /// what keeps 1:1 replication working with those same peers.
 pub(crate) const DATA_GROUP_V1: u8 = 2;
 
+/// Attachment and snapshot carriage over the media path, advertised in
+/// [`KeyPackagePayload::data_versions`] alongside [`DATA_SYNC_V1`]: the
+/// sender understands the `need_blob` and `blob_gone` frame kinds, and
+/// routes a media transfer marked as data-purposed into the data layer
+/// instead of surfacing it to its user as a received file.
+///
+/// A third entry rather than a bump, for the reason the second one exists.
+/// A build speaking only [`DATA_SYNC_V1`] replicates documents correctly and
+/// has no arm for either new frame kind; it consumes them (the parser reads
+/// the version first and the body second, so an unknown kind is dropped
+/// rather than surfaced) but answers nothing, so a fetch aimed at it waits
+/// forever. Worse, such a build receiving a data-purposed media transfer
+/// emits `FileReceived` and hands a person a CRDT snapshot as a downloaded
+/// file. Gating on this entry is what stops both.
+///
+/// v1 carries blobs on 1:1 sessions only, so this entry has no attested
+/// sibling: group members never exchange key packages with each other, and
+/// there is nothing about group carriage for an inviter to attest.
+pub(crate) const DATA_MEDIA_V1: u8 = 3;
+
 /// Rich fields accepted by the `send_message_with` surface. Only ever
 /// delivered inside the sealed [`RichPayloadV1`] body — toward a recipient
 /// that did not advertise [`RICH_PAYLOAD_V1`] they are silently dropped,
@@ -1992,6 +2012,14 @@ pub(crate) struct PendingMediaMetadataEntry {
     /// The chunk-0 outer `Message` timestamp (wall-clock ms) — the sender's
     /// send time, surfaced on `FileReceived` for display ordering.
     pub(crate) timestamp_ms: i64,
+    /// Set when the sealed chunk-0 plaintext said this transfer belongs to
+    /// the replicated-document layer. Its presence is what keeps every
+    /// file-facing event of this transfer from firing: progress, completion
+    /// and failure alike are the data layer's business, not a person's.
+    ///
+    /// Never populated from a legacy plaintext chunk. The field lives inside
+    /// the sealed body precisely so an unauthenticated chunk cannot claim it.
+    pub(crate) data_purpose: Option<crate::media_envelope::DataPurpose>,
 }
 
 #[derive(Clone)]
@@ -2007,6 +2035,13 @@ pub(crate) struct OutboundMediaTransfer {
     /// `send_media_with` boundary). Kept on the transfer because chunk
     /// batches are (re-)encoded via `pump_media_transfers` too.
     pub(crate) rich_extras: Option<crate::media_envelope::MediaRichExtras>,
+    /// Set when this SDK started the transfer for the replicated-document
+    /// layer rather than on an application's behalf, and kept here for the
+    /// same reason as the extras above: `pump_media_transfers` re-encodes
+    /// later batches and has only the transfer to read from.
+    ///
+    /// No public send surface can produce one.
+    pub(crate) data_purpose: Option<crate::media_envelope::DataPurpose>,
 }
 
 /// Crash-scoped descriptor of an in-flight outbound media transfer.
@@ -2032,6 +2067,20 @@ pub(crate) struct MediaTransferDescriptor {
     /// Wall-clock start of the transfer; restore prunes by
     /// `outbox_max_lifetime_ms` age.
     pub(crate) queued_at: DateTime<Utc>,
+    /// Set when the transfer belonged to the replicated-document layer.
+    ///
+    /// Persisted for one reason: so restore can tell these apart and NOT ask
+    /// an application to re-supply them. There is no public API that could
+    /// answer such a request without stripping the purpose, and a resend
+    /// with the purpose stripped is a document snapshot delivered to the
+    /// peer's user as a downloaded file, which is the exact outcome the
+    /// capability gate and the envelope version exist to prevent, reached
+    /// through this SDK's own recovery path.
+    ///
+    /// Serde-defaulted, so a descriptor written before this field existed
+    /// still parses and reads as an ordinary transfer, which is what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) data_purpose: Option<crate::media_envelope::DataPurpose>,
 }
 
 pub(crate) enum OutboundSendPreparation {

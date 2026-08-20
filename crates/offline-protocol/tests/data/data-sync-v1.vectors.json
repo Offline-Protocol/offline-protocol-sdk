@@ -1,0 +1,123 @@
+{
+  "_comment": [
+    "Frozen wire vectors for __DATA_V1__ (data_versions entry 1 and entry 3).",
+    "",
+    "These are the conformance surface for docs/spec/data-sync.md. A second",
+    "implementation that produces these strings from these inputs, and reads",
+    "these strings back into these values, interoperates on this layer.",
+    "",
+    "If a test asserting one of these fails, the wire format has changed:",
+    "bump the frame version and negotiate a new data_versions entry. Do NOT",
+    "edit the expected values here to make the test pass. Everything in this",
+    "file was computed independently of the implementation it pins."
+  ],
+  "version": 1,
+  "prefix": "__DATA_V1__",
+  "frames": [
+    {
+      "name": "version offer, complete, asking",
+      "kind": "vv",
+      "wire": "__DATA_V1__{\"v\":1,\"k\":\"vv\",\"reply\":false,\"partial\":false,\"docs\":{\"notes\":\"AQID\"}}",
+      "note": "Field order is fixed: v, k, reply, partial, docs. `docs` keys are sorted."
+    },
+    {
+      "name": "version offer, answering leg",
+      "kind": "vv",
+      "wire": "__DATA_V1__{\"v\":1,\"k\":\"vv\",\"reply\":true,\"partial\":true,\"docs\":{\"a\":\"\",\"b\":\"Zg==\"}}",
+      "note": "Sorted keys again: a before b, whatever order the sender holds them in."
+    },
+    {
+      "name": "version offer with no documents",
+      "kind": "vv",
+      "wire": "__DATA_V1__{\"v\":1,\"k\":\"vv\",\"reply\":false,\"partial\":false,\"docs\":{}}"
+    },
+    {
+      "name": "delta",
+      "kind": "delta",
+      "wire": "__DATA_V1__{\"v\":1,\"k\":\"delta\",\"doc\":\"notes\",\"blob\":\"AAECAwQFBgc=\"}",
+      "blob_hex": "0001020304050607",
+      "note": "Standard base64 alphabet, with padding."
+    },
+    {
+      "name": "snapshot",
+      "kind": "snap",
+      "wire": "__DATA_V1__{\"v\":1,\"k\":\"snap\",\"doc\":\"notes\",\"blob\":\"AAECAwQFBgc=\"}",
+      "blob_hex": "0001020304050607"
+    },
+    {
+      "name": "snapshot request",
+      "kind": "need_snap",
+      "wire": "__DATA_V1__{\"v\":1,\"k\":\"need_snap\",\"doc\":\"notes\"}",
+      "note": "Carries no bytes at all."
+    },
+    {
+      "name": "blob request",
+      "kind": "need_blob",
+      "wire": "__DATA_V1__{\"v\":1,\"k\":\"need_blob\",\"hash\":\"d73deca5a2a317edda0925823c6c775c9acefea1d69889f22b27566b403d8a1c\"}",
+      "note": "Entry 3. Carries no document name: a blob is addressed by what it is, not by where a reference to it sits."
+    },
+    {
+      "name": "blob refusal",
+      "kind": "blob_gone",
+      "wire": "__DATA_V1__{\"v\":1,\"k\":\"blob_gone\",\"hash\":\"d73deca5a2a317edda0925823c6c775c9acefea1d69889f22b27566b403d8a1c\"}",
+      "note": "Entry 3."
+    }
+  ],
+  "parse_defaults": [
+    {
+      "name": "an offer that says nothing about completeness is complete",
+      "body": "{\"v\":1,\"k\":\"vv\",\"docs\":{}}",
+      "expect": {
+        "reply": false,
+        "partial": false
+      }
+    }
+  ],
+  "attachment_hashes": [
+    {
+      "input_utf8": "offline-protocol attachment vector",
+      "sha256": "d73deca5a2a317edda0925823c6c775c9acefea1d69889f22b27566b403d8a1c",
+      "size": 34
+    },
+    {
+      "input_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "sha256": "40aff2e9d2d8922e47afd4648e6967497158785fbd1da870e7110266bf944880",
+      "size": 256
+    },
+    {
+      "input_utf8": "",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "note": "A pure hash vector. Zero-length is not a valid attachment: `size` must be non-zero."
+    }
+  ],
+  "attachment_references": [
+    {
+      "name": "every field",
+      "json": "{\"kind\":\"attachment\",\"hash\":\"d73deca5a2a317edda0925823c6c775c9acefea1d69889f22b27566b403d8a1c\",\"size\":34,\"name\":\"plan.pdf\",\"mime\":\"application/pdf\"}",
+      "note": "Field order is fixed: kind, hash, size, name, mime. Bounds a reader must also enforce: `size` in 1..=9223372036854775807, `name` at most 256 bytes, `mime` at most 255. A reference breaching any of them reads as absent, exactly as an unknown value kind does."
+    },
+    {
+      "name": "no display name and no media type",
+      "json": "{\"kind\":\"attachment\",\"hash\":\"d73deca5a2a317edda0925823c6c775c9acefea1d69889f22b27566b403d8a1c\",\"size\":34}",
+      "note": "Optional fields are ABSENT, never null. Two spellings of one value is one too many."
+    }
+  ],
+  "data_purposes": [
+    {
+      "name": "attachment",
+      "json": "{\"p\":\"attachment\",\"hash\":\"d73deca5a2a317edda0925823c6c775c9acefea1d69889f22b27566b403d8a1c\"}"
+    },
+    {
+      "name": "snapshot",
+      "json": "{\"p\":\"snapshot\",\"doc\":\"notes\"}"
+    }
+  ],
+  "blob_digests": [
+    {
+      "input_hex": "0001020304050607",
+      "digest": "8a851ff82ee7048ad09ec3847f1ddf44",
+      "note": "The crash-quarantine digest: first 16 bytes of the SHA-256, lowercase hex, 32 characters."
+    }
+  ]
+}

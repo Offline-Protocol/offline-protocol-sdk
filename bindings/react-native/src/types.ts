@@ -2413,6 +2413,71 @@ export interface DataDocSizeWarningEvent extends BaseEvent {
 }
 
 /**
+ * A peer asked for the bytes behind an attachment reference.
+ *
+ * The SDK never holds blob bytes, so it cannot answer this on its own:
+ * answer with `DataStore.provideAttachment`, or say you cannot with
+ * `DataStore.declineAttachment`. An app that handles neither leaves the
+ * asking peer with a reference it can see and never open.
+ */
+export interface DataAttachmentRequestedEvent extends BaseEvent {
+  type: 'data_attachment_requested';
+  space_id: string;
+  peer_id: string;
+  /** Lowercase hex SHA-256 of the blob they want. */
+  hash: string;
+}
+
+/**
+ * Attachment bytes arrived and matched the hash that asked for them.
+ *
+ * The bytes are handed over rather than stored: blobs never enter protocol
+ * state, so where the file lives is the app's decision and its storage.
+ */
+export interface DataAttachmentReceivedEvent extends BaseEvent {
+  type: 'data_attachment_received';
+  space_id: string;
+  peer_id: string;
+  /** Lowercase hex SHA-256, verified against the bytes. */
+  hash: string;
+  /** The blob, base64. */
+  data: string;
+}
+
+/**
+ * A fetch ended without bytes: the peer no longer holds the blob, or the
+ * transfer failed. Both are ordinary — an attachment reference outlives the
+ * bytes it names, because the reference replicates and the bytes do not.
+ */
+export interface DataAttachmentUnavailableEvent extends BaseEvent {
+  type: 'data_attachment_unavailable';
+  space_id: string;
+  peer_id: string;
+  hash: string;
+  /**
+   * `declined` (the peer no longer holds it), `timeout`, `evicted`
+   * (displaced by newer fetches), `hash_mismatch`, `peer_gone` (the peer
+   * was blocked, forgotten, or came back without the replication
+   * capability), or a transfer failure reason.
+   */
+  reason: string;
+}
+
+/**
+ * A document cannot be replicated in any form this protocol has: too large
+ * for a sync frame, and the peer cannot carry it over the media path either.
+ * The two replicas will not converge until the document gets smaller.
+ */
+export interface DataDocUnsyncableEvent extends BaseEvent {
+  type: 'data_doc_unsyncable';
+  space_id: string;
+  doc_id: string;
+  /** Size of the encoding that had nowhere to go. */
+  bytes: number;
+  reason: string;
+}
+
+/**
  * A raw relay server frame that apps need outside or in addition to
  * SDK-owned processing — invite-link lifecycle responses (`GroupInviteLinkCreated`,
  * `GroupJoinedViaInvite`, `GroupInviteJoinPending`, …), `GroupRoleChanged`,
@@ -2586,7 +2651,11 @@ export type ProtocolEvent =
   | UserBlockedEvent
   | UserUnblockedEvent
   | DataChangedEvent
-  | DataDocSizeWarningEvent;
+  | DataDocSizeWarningEvent
+  | DataAttachmentRequestedEvent
+  | DataAttachmentReceivedEvent
+  | DataAttachmentUnavailableEvent
+  | DataDocUnsyncableEvent;
 
 /**
  * Event listener type

@@ -6,8 +6,9 @@ use super::{
     GroupMemberAddedPayload, GroupMemberRemovedPayload, GroupMessageReceivedPayload,
     InternalMessageResult, KeyPackagePayload, OfflineProtocol, PeerCapabilities, PresencePayload,
     ReadReceiptPayload, ReceivedKeyPackage, TypingIndicatorPayload, UserGroupsPayload,
-    DATA_GROUP_V1, DATA_SYNC_V1, MAX_KEY_PACKAGE_LIFETIME_MS, MAX_KEY_PACKAGE_SENT_TO,
-    MAX_PENDING_KEY_PACKAGES, MAX_READ_RECEIPT_IDS, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
+    DATA_GROUP_V1, DATA_MEDIA_V1, DATA_SYNC_V1, MAX_KEY_PACKAGE_LIFETIME_MS,
+    MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES, MAX_READ_RECEIPT_IDS,
+    MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
 };
 use crate::events::{DecryptionFailureCode, Event, SecurityWarningCode};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
@@ -142,6 +143,30 @@ impl OfflineProtocol {
                 self.peer_data_group.insert(sender.to_string());
             } else {
                 self.peer_data_group.remove(sender);
+            }
+
+            // The media entry is recorded independently of both, and the
+            // trap it avoids is the loudest of the three: a peer that
+            // replicates but does not speak this entry surfaces a
+            // data-purposed transfer to its user as a received file, so a
+            // snapshot sent to one arrives in somebody's photo roll.
+            if self.config.data.enabled && payload.data_versions.contains(&DATA_MEDIA_V1) {
+                if !self.peer_data_media.contains(sender)
+                    && self.peer_data_media.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.peer_data_media.clear();
+                }
+                self.peer_data_media.insert(sender.to_string());
+            } else {
+                // Only the capability is dropped here. Fetches already put
+                // to this peer are left to their own expiry rather than
+                // ended, which is the opposite of what losing replication
+                // does and is deliberate: the record that bounds a fetch is
+                // also the record that admits its bytes, so ending it while
+                // a key package refreshes mid-carriage would discard a blob
+                // that is still crossing. The wait is bounded either way,
+                // and the timeout is the surface that ends this one.
+                self.peer_data_media.remove(sender);
             }
 
             // Direct knowledge is authoritative for the group capability

@@ -76,9 +76,12 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
 use crate::error::{Error, Result};
+use crate::events::Event;
+use crate::media_envelope::DataPurpose;
 use crate::protocol::prefixes::internal_prefixes;
-use crate::protocol::types::{storage_keys, DATA_SYNC_V1};
+use crate::protocol::types::{storage_keys, MediaSendOptions, DATA_SYNC_V1};
 use crate::protocol::OfflineProtocol;
+use offline_protocol_core::ContentType;
 
 /// Largest document blob carried inside one sync frame, before base64.
 ///
@@ -106,7 +109,7 @@ const MAX_DOCS_PER_VERSION_FRAME: usize = 128;
 /// is pushed the moment it is durable and does not wait for this, so the only
 /// thing the window delays is the reconciliation sweep, and the next trigger
 /// repeats it anyway.
-const DATA_SYNC_OFFER_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const DATA_SYNC_OFFER_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Documents one space may hold on a peer's say-so.
 ///
@@ -125,6 +128,58 @@ pub(crate) const MAX_DOCS_PER_SPACE: usize = 1024;
 /// one blob, and every entry in it is a document change we have decided
 /// never to apply, so a long list is a liability rather than a safety net.
 pub(crate) const MAX_QUARANTINED_BLOBS: usize = 32;
+
+/// Largest document encoding this device will carry over the media path.
+///
+/// The record ceiling, because that is the real limit: a document larger
+/// than one sealed protocol-state record cannot be persisted by the receiver
+/// even if every byte arrives, so carrying it would spend a long transfer to
+/// fail at the end. Well above the 1 MiB compacted cap a document is held
+/// to, which leaves room for the history a raw snapshot carries.
+pub(crate) const MAX_MEDIA_SNAPSHOT_BYTES: usize = super::types::MAX_PROTOCOL_STATE_RECORD_BYTES;
+
+/// Attachment fetches one device may have outstanding at once.
+///
+/// Bounded because each entry is created by a local call and cleared by a
+/// remote answer that may never come. Passing the bound evicts the oldest:
+/// a fetch that has been waiting longer than sixty-three others is not the
+/// one still worth remembering.
+pub(crate) const MAX_PENDING_ATTACHMENT_FETCHES: usize = 64;
+
+/// How long a fetch stays outstanding with no sign of an answer.
+///
+/// Measured from the last sign of life rather than from the question, and
+/// the difference is the whole of it: chunks of the answer refresh the
+/// entry, so a blob slower to arrive than this does not have its own record
+/// expire underneath it. That record is what admits the bytes at the end, so
+/// an expiry mid-carriage discards a blob that fully arrived, and the retry
+/// it invites takes just as long and dies exactly the same way.
+///
+/// Generous even so, because a holder may take a while to answer at all and
+/// the media path may be Bluetooth. The cost of being slow here is a
+/// reference that reports unavailable while somebody is still deciding, and
+/// the app can ask again; the cost of no timeout at all is a map that only
+/// grows.
+pub(crate) const ATTACHMENT_FETCH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// Blob requests one peer may have acted on inside a window.
+///
+/// A budget rather than only a per-hash window, because the two bound
+/// different things and only one of them is a hash we have seen before. The
+/// per-hash window stops a peer re-asking for the same blob; nothing in it
+/// stops a peer asking for a different one every time, and each of those
+/// costs a durable map entry and an application callback. A hash is 32 bytes
+/// the sender chooses, so without a budget the key space is the whole output
+/// of SHA-256 and the cost of exhausting this device's memory is one frame
+/// per entry.
+pub(crate) const MAX_BLOB_REQUESTS_PER_WINDOW: usize = 32;
+
+/// Blob-request windows remembered across all peers.
+///
+/// The hard bound under the per-peer budget above, and the one that holds
+/// when a peer's budget resets. Oldest out first: a window that has been
+/// held longer than 255 others has almost certainly expired anyway.
+pub(crate) const MAX_BLOB_REQUEST_WINDOWS: usize = 256;
 
 /// One sync frame's body, inside the decrypted MLS plaintext.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +226,24 @@ enum SyncBody {
     /// refused delta again, for as long as both sides keep at it.
     #[serde(rename = "need_snap")]
     NeedSnapshot { doc: String },
+    /// "I hold a reference to these bytes and not the bytes; do you have
+    /// them?"
+    ///
+    /// Carries no document name. A blob is addressed by what it is rather
+    /// than by where a reference to it happens to sit, so the same bytes
+    /// referenced from three documents are one blob and one request.
+    #[serde(rename = "need_blob")]
+    NeedBlob { hash: String },
+    /// "I do not have those bytes, and asking again will not change that."
+    ///
+    /// The frame that lets a fetch end. An attachment reference outlives the
+    /// bytes it names, because the reference replicates and the bytes do
+    /// not, so a peer holding a reference and no blob is ordinary rather
+    /// than broken. Without an answer for it the asking side cannot tell
+    /// that case from a peer that is merely slow, and shows a spinner
+    /// forever.
+    #[serde(rename = "blob_gone")]
+    BlobGone { hash: String },
 }
 
 /// Where a sync frame goes and what it is sealed under.
@@ -864,6 +937,8 @@ impl OfflineProtocol {
                 self.accept_remote_blob(&space, channel, &doc, &blob, BlobKind::Snapshot)
             }
             SyncBody::NeedSnapshot { doc } => self.answer_snapshot_request(&space, channel, &doc),
+            SyncBody::NeedBlob { hash } => self.answer_blob_request(&space, channel, &hash),
+            SyncBody::BlobGone { hash } => self.report_blob_gone(channel, &space, &hash),
         };
         if let Err(err) = outcome {
             warn!(peer = %sender, error = %err, "Sync frame could not be handled");
@@ -1021,17 +1096,100 @@ impl OfflineProtocol {
                     },
                 );
             }
-            Ok(bytes) => {
-                warn!(
-                    space,
-                    doc,
-                    bytes = bytes.len(),
-                    "Document is too large to replicate in one frame; it needs the media path"
-                );
-            }
+            // Too large for any frame. The rung above every frame is the
+            // media path, which is where a document this size goes.
+            Ok(bytes) => self.carry_snapshot_over_media(space, channel, doc, bytes),
             Err(err) => {
                 warn!(space, doc, error = %err, "Could not export document for catch-up");
             }
+        }
+    }
+
+    /// Send a document the media path carries, because no frame can.
+    ///
+    /// The top rung of the catch-up ladder and the last one. A document that
+    /// cannot go this way either is reported rather than retried: nothing
+    /// above this exists to try, and the two replicas stay apart until
+    /// somebody makes the document smaller.
+    ///
+    /// Only ever 1:1 in this version. The media path is a transfer to a
+    /// confirmed session and two members of a group need not have one with
+    /// each other, so a group space that reaches this rung reports instead.
+    fn carry_snapshot_over_media(
+        &mut self,
+        space: &str,
+        channel: &SyncChannel,
+        doc: &str,
+        bytes: Vec<u8>,
+    ) {
+        let size = bytes.len();
+        let report = |protocol: &mut Self, reason: &str| {
+            warn!(
+                space,
+                doc,
+                bytes = size,
+                reason,
+                "Document cannot be replicated"
+            );
+            if let Ok(state) = crate::protocol::lock_shared_state(&protocol.shared_state) {
+                state.emit_event(Event::DataDocUnsyncable {
+                    space_id: space.to_string(),
+                    doc_id: doc.to_string(),
+                    bytes: size as u64,
+                    reason: reason.to_string(),
+                });
+            }
+        };
+
+        if !matches!(channel, SyncChannel::Peer) {
+            report(self, "group_space_has_no_media_path");
+            return;
+        }
+        if size > MAX_MEDIA_SNAPSHOT_BYTES {
+            report(self, "over_record_ceiling");
+            return;
+        }
+        if !self.data_media_active(space) {
+            report(self, "peer_cannot_carry_snapshots");
+            return;
+        }
+
+        // Not a dead end and not reported as one: the document is already on
+        // its way. This rung is re-entered on its own while a carriage runs,
+        // because the peer stays stale for the whole of it and says so on
+        // every exchange.
+        let purpose = DataPurpose::Snapshot {
+            doc: doc.to_string(),
+        };
+        if self.data_media_transfer_in_flight(space, &purpose) {
+            debug!(
+                space,
+                doc, "This document is already crossing to the peer; not starting a second copy"
+            );
+            return;
+        }
+
+        debug!(
+            space,
+            doc,
+            bytes = size,
+            "Carrying a snapshot over the media path"
+        );
+        if let Err(err) = self.send_media_inner(
+            space.to_string(),
+            bytes,
+            doc.to_string(),
+            ContentType::File,
+            MediaSendOptions::default(),
+            Some(purpose),
+        ) {
+            // Transient by nature: no confirmed session yet, the per-peer
+            // transfer slots are full, or the protocol is not running.
+            // Reported at debug and left for anti-entropy, which asks again
+            // on the next exchange. Raising it as unsyncable would tell an
+            // application a document is permanently stuck when it is merely
+            // busy.
+            debug!(space, doc, error = %err, "Snapshot carriage deferred");
         }
     }
 
@@ -1103,6 +1261,42 @@ impl OfflineProtocol {
                 doc,
                 bytes = blob.len(),
                 "Sync blob over the frame budget"
+            );
+            return Ok(());
+        }
+
+        self.apply_contained_blob(space, channel, doc, blob, kind)
+    }
+
+    /// Apply remote document bytes with the containment the engine needs.
+    ///
+    /// Split from [`Self::accept_remote_blob`] so bytes that arrived over
+    /// the media path go through exactly this, rather than through a second
+    /// copy of it. The road the bytes travelled says nothing about what they
+    /// are: both roads carry an import that can still end the process, from
+    /// a peer who is authenticated and may still be wrong.
+    ///
+    /// The frame budget is deliberately not checked here. It bounds what one
+    /// frame may carry, which is a fact about frames; the media path has its
+    /// own, larger bound because it has no such limit.
+    fn apply_contained_blob(
+        &mut self,
+        space: &str,
+        channel: &SyncChannel,
+        doc: &str,
+        blob: Vec<u8>,
+        kind: BlobKind,
+    ) -> Result<()> {
+        if offline_protocol_data::validate_name(doc).is_err() {
+            warn!(space, doc, "A remote blob names an invalid document");
+            return Ok(());
+        }
+        if !self.data_space_admits_doc(space, doc, MAX_DOCS_PER_SPACE) {
+            warn!(
+                space,
+                doc,
+                cap = MAX_DOCS_PER_SPACE,
+                "Space is at its document ceiling; refusing a new one"
             );
             return Ok(());
         }
@@ -1306,6 +1500,648 @@ impl OfflineProtocol {
         Ok(())
     }
 
+    // ---- attachments -------------------------------------------------
+
+    /// Key of a pending fetch: the space asked in, then the blob wanted.
+    ///
+    /// Composed rather than keyed by hash alone because the same bytes may
+    /// be referenced from two spaces, and an answer from one peer must not
+    /// close a question put to another.
+    fn attachment_fetch_key(space: &str, hash: &str) -> String {
+        format!("{space}{GROUP_OFFER_KEY_SEP}{hash}")
+    }
+
+    /// The SHA-256 of `bytes`, in the spelling an attachment reference uses.
+    ///
+    /// Exposed because an application writing a reference needs the address
+    /// of its own bytes, and computing it anywhere else risks a second
+    /// spelling of the same hash.
+    pub fn data_attachment_hash(bytes: &[u8]) -> String {
+        hex_encode(&Sha256::digest(bytes))
+    }
+
+    /// Ask the peer a 1:1 space is named after for the bytes behind a
+    /// reference.
+    ///
+    /// Pull rather than push, and the reason is bandwidth somebody else
+    /// pays for: a space may hold references to more bytes than a phone
+    /// wants over Bluetooth, so the decision to spend that belongs to the
+    /// application, taken per blob, at the moment somebody opens one.
+    ///
+    /// The answer arrives later as [`Event::DataAttachmentReceived`] or
+    /// [`Event::DataAttachmentUnavailable`], never inline.
+    ///
+    /// Group spaces are refused in this version. A blob travels the media
+    /// path, which is a 1:1 transfer to a confirmed session, and two members
+    /// of a group need not have one with each other.
+    pub fn data_fetch_attachment(&mut self, space: &str, hash: &str) -> Result<()> {
+        if !self.config.data.enabled {
+            return Err(Error::DataDisabled);
+        }
+        Self::validate_attachment_hash(hash)?;
+        if self.group_space_roster(space).is_some() {
+            return Err(Error::InvalidArgument(format!(
+                "space {space} is a group; attachment carriage is 1:1 in this version"
+            )));
+        }
+        if !self.data_media_active(space) {
+            return Err(Error::InvalidArgument(format!(
+                "peer {space} did not advertise attachment carriage"
+            )));
+        }
+
+        let key = Self::attachment_fetch_key(space, hash);
+        self.expire_attachment_fetches();
+        // The requester's own bound, which the spec makes a MUST and which
+        // the holder's window cannot substitute for: an application retrying
+        // a spinner on a timer would otherwise seal and send one frame per
+        // retry, and the holder answering none of them is the case that
+        // provokes the retries.
+        if let Some(asked_at) = self.pending_attachment_fetches.get(&key) {
+            if Instant::now().duration_since(*asked_at) < DATA_SYNC_OFFER_INTERVAL {
+                debug!(
+                    space,
+                    "Blob fetch repeated inside its window; already asked"
+                );
+                return Ok(());
+            }
+        }
+        if self.pending_attachment_fetches.len() >= MAX_PENDING_ATTACHMENT_FETCHES
+            && !self.pending_attachment_fetches.contains_key(&key)
+        {
+            // Oldest by last sign of life rather than by age, which is what
+            // keeps a fetch whose bytes are actively arriving out of this:
+            // every chunk of an answer refreshes its entry, so a live
+            // carriage sits among the newest and is never the one displaced.
+            if let Some(oldest) = self
+                .pending_attachment_fetches
+                .iter()
+                .min_by_key(|(_, seen_at)| **seen_at)
+                .map(|(key, _)| key.clone())
+            {
+                self.pending_attachment_fetches.remove(&oldest);
+                // Reported, exactly as an expiry is. Eviction reaches the
+                // same end state by a different road: the fetch is over and
+                // no bytes will ever be admitted for it, so an application
+                // told nothing is left showing the spinner that the whole
+                // refusal mechanism exists to end.
+                Self::report_fetch_ended(&self.shared_state, &oldest, "evicted");
+            }
+        }
+        self.pending_attachment_fetches.insert(key, Instant::now());
+
+        self.send_sync_frame(
+            space,
+            &SyncChannel::Peer,
+            &SyncBody::NeedBlob {
+                hash: hash.to_string(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Answer a peer's request with the bytes.
+    ///
+    /// The bytes come from the application because this SDK never held them:
+    /// a blob does not enter a document and does not enter protocol state,
+    /// so the only copy is wherever the app put it.
+    ///
+    /// Refuses bytes that do not hash to `hash`. That check is here rather
+    /// than only on the receiving side so a mistake is reported to the app
+    /// that made it, while it still has the file in hand, instead of
+    /// travelling the whole media path to be refused by somebody else.
+    pub fn data_provide_attachment(
+        &mut self,
+        space: &str,
+        peer: &str,
+        hash: &str,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
+        if !self.config.data.enabled {
+            return Err(Error::DataDisabled);
+        }
+        Self::validate_attachment_hash(hash)?;
+        if bytes.is_empty() {
+            return Err(Error::InvalidArgument(
+                "an attachment must have bytes".to_string(),
+            ));
+        }
+        if space != peer {
+            return Err(Error::InvalidArgument(format!(
+                "space {space} is not the 1:1 space with {peer}"
+            )));
+        }
+        let actual = Self::data_attachment_hash(&bytes);
+        if actual != hash {
+            return Err(Error::InvalidArgument(format!(
+                "these bytes hash to {actual}, not to {hash}"
+            )));
+        }
+
+        // Answering twice is not an error to report back: the app did as it
+        // was asked, and the bytes are on their way. Idempotent rather than
+        // refused, because a request repeated after its window reopens is
+        // ordinary and an app has no way to see that its first answer is
+        // still in flight.
+        let purpose = DataPurpose::Attachment {
+            hash: hash.to_string(),
+        };
+        if self.data_media_transfer_in_flight(peer, &purpose) {
+            debug!(
+                peer,
+                "These bytes are already crossing to this peer; not starting a second copy"
+            );
+            return Ok(());
+        }
+
+        self.send_media_inner(
+            peer.to_string(),
+            bytes,
+            // The media layer wants a file name and an attachment has none
+            // that is load-bearing: the display name lives on the reference
+            // in the document, where every replica can already read it.
+            hash.to_string(),
+            ContentType::File,
+            MediaSendOptions::default(),
+            Some(purpose),
+        )?;
+        Ok(())
+    }
+
+    /// Tell a peer their fetch will not be answered.
+    ///
+    /// A first-class answer rather than silence. The asking side cannot
+    /// otherwise tell a peer that no longer holds the bytes from one that is
+    /// merely slow, and shows a person a spinner that never resolves.
+    pub fn data_decline_attachment(&mut self, space: &str, peer: &str, hash: &str) -> Result<()> {
+        if !self.config.data.enabled {
+            return Err(Error::DataDisabled);
+        }
+        Self::validate_attachment_hash(hash)?;
+        if space != peer {
+            return Err(Error::InvalidArgument(format!(
+                "space {space} is not the 1:1 space with {peer}"
+            )));
+        }
+        // Gated like every other frame in this file, and it is the one that
+        // was not. A refusal toward a peer that never advertised the
+        // capability is unreadable to them, so the caller believes they
+        // answered and the asking side keeps waiting; toward a blocked peer
+        // it is a liveness signal blocking exists to withhold.
+        if !self.data_media_active(peer) {
+            return Err(Error::InvalidArgument(format!(
+                "peer {peer} did not advertise attachment carriage"
+            )));
+        }
+        self.send_sync_frame(
+            space,
+            &SyncChannel::Peer,
+            &SyncBody::BlobGone {
+                hash: hash.to_string(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Whether a peer's request for one blob should reach the application.
+    ///
+    /// Two bounds, because a peer controls both how often it asks and what it
+    /// asks for. The per-hash window stops a repeat; the per-peer budget
+    /// stops a flood of distinct hashes, which the window alone cannot see as
+    /// a flood at all because every hash in it is new.
+    ///
+    /// Kept out of the version-offer window map deliberately. Every other key
+    /// in that map is a peer or a peer-and-group, both bounded by a roster.
+    /// This one would be bounded by nothing, and that map has no cap and no
+    /// sweep.
+    fn blob_request_due(&mut self, peer: &str, hash: &str) -> bool {
+        let now = Instant::now();
+        self.blob_request_windows
+            .retain(|_, seen| now.duration_since(*seen) < DATA_SYNC_OFFER_INTERVAL);
+
+        let key = format!("{peer}{GROUP_OFFER_KEY_SEP}{hash}");
+        if self.blob_request_windows.contains_key(&key) {
+            debug!(peer, "Blob request repeated inside its window; ignoring");
+            return false;
+        }
+
+        let live_for_peer = self
+            .blob_request_windows
+            .keys()
+            .filter(|key| {
+                key.split_once(GROUP_OFFER_KEY_SEP)
+                    .is_some_and(|(asker, _)| asker == peer)
+            })
+            .count();
+        if live_for_peer >= MAX_BLOB_REQUESTS_PER_WINDOW {
+            warn!(
+                peer,
+                budget = MAX_BLOB_REQUESTS_PER_WINDOW,
+                "Peer is over its blob-request budget; ignoring"
+            );
+            return false;
+        }
+
+        // The global bound, which holds when a peer's budget resets and when
+        // many peers each stay under theirs.
+        if self.blob_request_windows.len() >= MAX_BLOB_REQUEST_WINDOWS {
+            if let Some(oldest) = self
+                .blob_request_windows
+                .iter()
+                .min_by_key(|(_, seen)| **seen)
+                .map(|(key, _)| key.clone())
+            {
+                self.blob_request_windows.remove(&oldest);
+            }
+        }
+        self.blob_request_windows.insert(key, now);
+        true
+    }
+
+    fn validate_attachment_hash(hash: &str) -> Result<()> {
+        offline_protocol_data::validate_attachment_hash(hash)
+            .map_err(|err| Error::InvalidArgument(err.to_string()))
+    }
+
+    /// Whether this device is waiting for the blob behind `hash` from `peer`.
+    ///
+    /// Read before a transfer is admitted rather than after it completes.
+    /// Refusing at the end still refuses, but only once the bytes have been
+    /// buffered, reassembled and checksummed, which is the storage and the
+    /// battery the check exists to protect.
+    pub(crate) fn awaiting_attachment(&self, peer: &str, hash: &str) -> bool {
+        self.pending_attachment_fetches
+            .contains_key(&Self::attachment_fetch_key(peer, hash))
+    }
+
+    /// Forget everything remembered about attachments with one peer.
+    ///
+    /// Composed through [`Self::attachment_fetch_key`] rather than by
+    /// re-spelling the separator, which is what the separator constant exists
+    /// for: a key built one way and matched another is a leak that no test
+    /// notices until the two spellings diverge.
+    pub(crate) fn forget_attachment_state(&mut self, peer: &str) {
+        let prefix = Self::attachment_fetch_key(peer, "");
+        // Reported, not merely dropped. This is a road that ends a fetch
+        // without bytes like any other, and it is reached while an
+        // application is waiting: a peer re-keying without the capability,
+        // an unblock, a peer forgotten to keep a set bounded. Removing the
+        // record silently also forecloses the expiry that would have
+        // reported it later, so the spinner this event exists to end never
+        // ends at all.
+        let ended: Vec<String> = self
+            .pending_attachment_fetches
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect();
+        for key in ended {
+            self.pending_attachment_fetches.remove(&key);
+            Self::report_fetch_ended(&self.shared_state, &key, "peer_gone");
+        }
+        self.blob_request_windows
+            .retain(|key, _| !key.starts_with(&prefix));
+    }
+
+    /// [`Self::forget_attachment_state`] for every peer at once, for the
+    /// road that forgets every peer at once.
+    ///
+    /// Not a loop over the roster, because the caller has already emptied
+    /// it: the capability sets are cleared wholesale when the bound on
+    /// remembered peers is reached, so by then there is no peer left to name
+    /// and a fetch keyed by one would be swept by nothing.
+    pub(crate) fn end_every_pending_fetch(&mut self) {
+        for key in std::mem::take(&mut self.pending_attachment_fetches).into_keys() {
+            Self::report_fetch_ended(&self.shared_state, &key, "peer_gone");
+        }
+    }
+
+    /// Report a fetch this device has given up on, keyed the way
+    /// [`Self::attachment_fetch_key`] composes them.
+    ///
+    /// Shared by every road that ends a fetch without bytes, because they all
+    /// owe the application the same thing and a second spelling of this event
+    /// is a road that quietly owes it nothing. `reason` is a fixed token this
+    /// crate chooses, never a peer's words: see the producer rule in
+    /// `telemetry::scrub_event`.
+    fn report_fetch_ended(
+        shared_state: &std::sync::Arc<std::sync::Mutex<crate::protocol::SharedState>>,
+        key: &str,
+        reason: &str,
+    ) {
+        let Some((space, hash)) = key.split_once(GROUP_OFFER_KEY_SEP) else {
+            return;
+        };
+        debug!(space, reason, "A blob fetch ended with no bytes");
+        if let Ok(state) = crate::protocol::lock_shared_state(shared_state) {
+            state.emit_event(Event::DataAttachmentUnavailable {
+                // A 1:1 space IS the peer, which is why one key composes
+                // both: a fetch is only ever made in a space named after the
+                // peer that can answer it.
+                space_id: space.to_string(),
+                peer_id: space.to_string(),
+                hash: hash.to_string(),
+                reason: reason.to_string(),
+            });
+        }
+    }
+
+    /// Note that the answer to a fetch is on its way.
+    ///
+    /// A transfer that is visibly progressing is the answer this device is
+    /// waiting for, so the question must not expire while it arrives. Without
+    /// this the record times out mid-carriage and
+    /// [`Self::accept_data_media_payload`] then drops a blob that fully
+    /// arrived as one nobody asked for, which no retry can fix: the retry
+    /// carries the same bytes over the same radio and expires at the same
+    /// point.
+    ///
+    /// Only an attachment has a record to refresh. A snapshot is unsolicited
+    /// by design and keeps none.
+    pub(crate) fn refresh_attachment_fetch(&mut self, peer: &str, purpose: &DataPurpose) {
+        let DataPurpose::Attachment { hash } = purpose else {
+            return;
+        };
+        let key = Self::attachment_fetch_key(peer, hash);
+        if let Some(seen_at) = self.pending_attachment_fetches.get_mut(&key) {
+            *seen_at = Instant::now();
+        }
+    }
+
+    /// Whether a transfer for exactly this purpose is already on its way to
+    /// this peer.
+    ///
+    /// Both roads onto the media path are re-entered by things that recur on
+    /// their own: a peer stays stale for the whole multi-minute carriage of a
+    /// document, so every anti-entropy exchange in that window reaches the
+    /// top rung again, and an application answering a repeated request has no
+    /// way to know its first answer is still in flight.
+    ///
+    /// Without this check those repeats become second copies of one transfer.
+    /// A peer may hold only [`MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER`] at
+    /// once, so the duplicates halve the throughput of the transfer that
+    /// matters and then fill the slots, and the next thing to fail is the
+    /// application's own media send, with a limit error whose cause it cannot
+    /// see: the transfers holding those slots are invisible to it by design.
+    ///
+    /// [`MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER`]: crate::constants::MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER
+    fn data_media_transfer_in_flight(&self, recipient: &str, purpose: &DataPurpose) -> bool {
+        self.outbound_media_transfers.values().any(|transfer| {
+            transfer.recipient == recipient && transfer.data_purpose.as_ref() == Some(purpose)
+        })
+    }
+
+    /// Give up on fetches nobody answered, and say so.
+    ///
+    /// The reporting half is the point. A holder is only asked to answer
+    /// `need_blob`, never required to, so a fetch can go unanswered forever
+    /// with nothing wrong anywhere. Expiring the entry silently would leave
+    /// the asking application exactly where the whole refusal mechanism
+    /// exists to stop it being: showing somebody a spinner that never
+    /// resolves.
+    pub(crate) fn expire_attachment_fetches(&mut self) {
+        let now = Instant::now();
+        let expired: Vec<String> = self
+            .pending_attachment_fetches
+            .iter()
+            .filter(|(_, asked_at)| now.duration_since(**asked_at) >= ATTACHMENT_FETCH_TIMEOUT)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in expired {
+            self.pending_attachment_fetches.remove(&key);
+            Self::report_fetch_ended(&self.shared_state, &key, "timeout");
+        }
+    }
+
+    /// A peer wants the bytes behind a reference.
+    ///
+    /// Handed straight to the application, because the application is the
+    /// only party that has them. Rate limited per blob on the window that
+    /// suppresses version offers: a peer retrying a fetch must not turn into
+    /// a stream of events, and the answer to the second ask within the
+    /// window is the same as the answer to the first.
+    fn answer_blob_request(
+        &mut self,
+        space: &str,
+        channel: &SyncChannel,
+        hash: &str,
+    ) -> Result<()> {
+        if !matches!(channel, SyncChannel::Peer) {
+            warn!(
+                space,
+                "A blob request arrived inside a group; attachment carriage is 1:1"
+            );
+            return Ok(());
+        }
+        if Self::validate_attachment_hash(hash).is_err() {
+            warn!(space, "Blob request names something that is not a hash");
+            return Ok(());
+        }
+        // A request this device could not answer is not put to the
+        // application. Both answers to `DataAttachmentRequested` refuse
+        // toward a peer that never advertised carriage: `provide` cannot
+        // reach the media path and `decline` cannot reach the wire. Emitting
+        // it anyway hands an app a question with no legal reply, which reads
+        // to whoever handles it as an SDK that rejects its own events.
+        //
+        // Ahead of the rate limiter rather than behind it, so a peer that
+        // cannot be answered spends no window slot: the budget exists to
+        // bound work this device would otherwise do, and there is none here.
+        if !self.data_media_active(space) {
+            warn!(
+                space,
+                "A blob request came from a peer that never advertised carriage; ignoring"
+            );
+            return Ok(());
+        }
+        if !self.blob_request_due(space, hash) {
+            return Ok(());
+        }
+        if let Ok(state) = crate::protocol::lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::DataAttachmentRequested {
+                space_id: space.to_string(),
+                peer_id: space.to_string(),
+                hash: hash.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// A peer says the bytes are gone. End the fetch.
+    ///
+    /// Checked the same way [`Self::answer_blob_request`] is, and for the
+    /// same reason rather than a hypothetical one: a fetch is 1:1 state, and
+    /// a frame arriving over a group would compose a key from a group id.
+    /// Unreachable today because a group id cannot collide with an address,
+    /// which is exactly the kind of accident a later refactor removes.
+    fn report_blob_gone(&mut self, channel: &SyncChannel, space: &str, hash: &str) -> Result<()> {
+        if !matches!(channel, SyncChannel::Peer) {
+            warn!(
+                space,
+                "A blob refusal arrived inside a group; attachment carriage is 1:1"
+            );
+            return Ok(());
+        }
+        if Self::validate_attachment_hash(hash).is_err() {
+            warn!(space, "Blob refusal names something that is not a hash");
+            return Ok(());
+        }
+        let key = Self::attachment_fetch_key(space, hash);
+        // Only a fetch this device actually made is reported. Otherwise a
+        // peer could emit refusals for blobs nobody asked about.
+        if self.pending_attachment_fetches.remove(&key).is_none() {
+            debug!(space, "A blob refusal answers no question we asked");
+            return Ok(());
+        }
+        if let Ok(state) = crate::protocol::lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::DataAttachmentUnavailable {
+                space_id: space.to_string(),
+                peer_id: space.to_string(),
+                hash: hash.to_string(),
+                reason: "declined".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    // ---- what arrives over the media path ------------------------------
+
+    /// A data-purposed media transfer completed. Route it by its purpose.
+    ///
+    /// The space is the authenticated wire sender, never anything the
+    /// transfer said about itself, which is the same rule every sync frame
+    /// follows and for the same reason: a space a peer can name is a space a
+    /// peer can reach.
+    ///
+    /// Gated on the kill switch, which is belt to the storage seam's braces
+    /// rather than the thing that stops an import: `require_data_storage`
+    /// already fails closed with `DataDisabled`, so a device with the layer
+    /// off writes nothing regardless. This makes the refusal local and free,
+    /// and keeps the rule uniform across both roads into this layer. The
+    /// admission check in `receive` is the one that earns its keep, because
+    /// it is the one that refuses before a whole blob is buffered.
+    pub(crate) fn accept_data_media_payload(
+        &mut self,
+        sender: &str,
+        purpose: &DataPurpose,
+        bytes: Vec<u8>,
+    ) {
+        if !self.config.data.enabled {
+            debug!(
+                peer = %sender,
+                "Document-layer transfer dropped: the data layer is off"
+            );
+            return;
+        }
+        match purpose {
+            DataPurpose::Attachment { hash } => {
+                let key = Self::attachment_fetch_key(sender, hash);
+                if self.pending_attachment_fetches.remove(&key).is_none() {
+                    warn!(
+                        peer = %sender,
+                        "Attachment bytes arrived for a fetch this device never made; dropping"
+                    );
+                    return;
+                }
+                // The address is checked against the bytes, not against what
+                // the sender says about them. This is what makes fetching
+                // from an authenticated peer safe without trusting that
+                // peer: the worst a wrong answer achieves is no answer.
+                let actual = Self::data_attachment_hash(&bytes);
+                if &actual != hash {
+                    warn!(
+                        peer = %sender,
+                        "Attachment bytes do not hash to what was asked for; dropping"
+                    );
+                    if let Ok(state) = crate::protocol::lock_shared_state(&self.shared_state) {
+                        state.emit_event(Event::DataAttachmentUnavailable {
+                            space_id: sender.to_string(),
+                            peer_id: sender.to_string(),
+                            hash: hash.clone(),
+                            reason: "hash_mismatch".to_string(),
+                        });
+                    }
+                    return;
+                }
+                if let Ok(state) = crate::protocol::lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::DataAttachmentReceived {
+                        space_id: sender.to_string(),
+                        peer_id: sender.to_string(),
+                        hash: hash.clone(),
+                        data: BASE64.encode(&bytes),
+                    });
+                }
+            }
+            DataPurpose::Snapshot { doc } => {
+                if bytes.len() > MAX_MEDIA_SNAPSHOT_BYTES {
+                    warn!(
+                        peer = %sender,
+                        bytes = bytes.len(),
+                        "A carried snapshot is larger than a record can hold; refusing"
+                    );
+                    return;
+                }
+                // Straight into the containment every remote blob goes
+                // through. Arriving by a longer road changes nothing about
+                // what these bytes are: an import that can still end the
+                // process, from a peer who is exactly who they say they are.
+                let doc = doc.clone();
+                if let Err(err) = self.apply_contained_blob(
+                    sender,
+                    &SyncChannel::Peer,
+                    &doc,
+                    bytes,
+                    BlobKind::Snapshot,
+                ) {
+                    warn!(peer = %sender, doc, error = %err, "A carried snapshot was refused");
+                }
+            }
+        }
+    }
+
+    /// A data-purposed media transfer failed. Say so where it can be acted on.
+    pub(crate) fn report_data_media_failure(
+        &mut self,
+        sender: &str,
+        purpose: &DataPurpose,
+        reason: &str,
+    ) {
+        match purpose {
+            DataPurpose::Attachment { hash } => {
+                let key = Self::attachment_fetch_key(sender, hash);
+                // Only a fetch still outstanding is reported, the same rule
+                // the completion and refusal roads already follow. A fetch
+                // that ended while its transfer was still moving (declined
+                // mid-carriage, evicted, expired) has had its one answer,
+                // and a second one for the same hash reads to an
+                // application as a second failure of a thing it is no
+                // longer waiting for.
+                if self.pending_attachment_fetches.remove(&key).is_none() {
+                    debug!(
+                        peer = %sender,
+                        reason,
+                        "A transfer failed for a fetch that has already ended"
+                    );
+                    return;
+                }
+                if let Ok(state) = crate::protocol::lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::DataAttachmentUnavailable {
+                        space_id: sender.to_string(),
+                        peer_id: sender.to_string(),
+                        hash: hash.clone(),
+                        reason: reason.to_string(),
+                    });
+                }
+            }
+            // Nothing to report to an application: a snapshot that did not
+            // arrive is a gap anti-entropy will find again, and the next
+            // exchange asks for it afresh.
+            DataPurpose::Snapshot { doc } => {
+                debug!(peer = %sender, doc, reason, "A carried snapshot did not arrive");
+            }
+        }
+    }
+
     // ---- the crash record -------------------------------------------
 
     /// Read a space's replication bookkeeping, promoting anything left in
@@ -1445,5 +2281,324 @@ mod tests {
         assert_eq!(blob_digest(b"one"), blob_digest(b"one"));
         assert_ne!(blob_digest(b"one"), blob_digest(b"two"));
         assert_eq!(blob_digest(b"one").len(), 32);
+    }
+}
+
+/// The frozen wire vectors for `__DATA_V1__`.
+///
+/// The conformance surface a second implementation is written against, and
+/// the reason this layer is a protocol rather than an SDK feature. The file
+/// was computed independently of the code it pins, so a mismatch is evidence
+/// about the code rather than a disagreement between two copies of the same
+/// mistake.
+///
+/// When one of these fails the wire format has changed. Bump the frame
+/// version and negotiate a new `data_versions` entry. Do NOT edit the
+/// expected values to make the test pass: every shipped install still speaks
+/// the old ones, and a silent change here is a silent break there.
+#[cfg(test)]
+mod golden_vectors {
+    use super::*;
+
+    const VECTORS: &str = include_str!("../../tests/data/data-sync-v1.vectors.json");
+
+    fn vectors() -> serde_json::Value {
+        serde_json::from_str(VECTORS).expect("the vector file is JSON")
+    }
+
+    /// Frame the way [`OfflineProtocol::send_sync_frame`] does, which is the
+    /// only place the version is spliced in. Reproduced rather than called
+    /// because calling it needs a whole protocol, and what is pinned here is
+    /// the encoding, not the send path.
+    fn framed(body: &SyncBody) -> String {
+        let json = serde_json::to_string(body).expect("encode");
+        format!(
+            "{}{{\"v\":{},{}",
+            internal_prefixes::DATA_V1,
+            DATA_SYNC_V1,
+            &json[1..]
+        )
+    }
+
+    fn wire(vectors: &serde_json::Value, name: &str) -> String {
+        vectors["frames"]
+            .as_array()
+            .expect("frames")
+            .iter()
+            .find(|frame| frame["name"] == name)
+            .unwrap_or_else(|| panic!("no vector named {name}"))["wire"]
+            .as_str()
+            .expect("wire is a string")
+            .to_string()
+    }
+
+    #[test]
+    fn the_vector_file_is_the_size_it_was() {
+        // A file silently shortened by a bad merge would make every
+        // assertion below pass by not running.
+        //
+        // Every array, not only the frames. The rest are read by `for`
+        // loops and by index, and a loop over an emptied array is the same
+        // green test as a loop over a full one. Counting them here is what
+        // makes "the vectors pass" mean the vectors ran.
+        let vectors = vectors();
+        let len = |name: &str| -> usize {
+            vectors[name]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name} must be an array"))
+                .len()
+        };
+        assert_eq!(len("frames"), 8);
+        assert_eq!(len("parse_defaults"), 1);
+        assert_eq!(len("attachment_hashes"), 3);
+        assert_eq!(len("attachment_references"), 2);
+        assert_eq!(len("data_purposes"), 2);
+        assert_eq!(len("blob_digests"), 1);
+        assert_eq!(vectors["version"].as_u64(), Some(DATA_SYNC_V1 as u64));
+        assert_eq!(vectors["prefix"].as_str(), Some(internal_prefixes::DATA_V1));
+    }
+
+    #[test]
+    fn every_frame_kind_encodes_to_its_vector() {
+        let vectors = vectors();
+
+        let mut docs = BTreeMap::new();
+        docs.insert("notes".to_string(), "AQID".to_string());
+        assert_eq!(
+            framed(&SyncBody::Versions {
+                reply: false,
+                partial: false,
+                docs,
+            }),
+            wire(&vectors, "version offer, complete, asking")
+        );
+
+        // Inserted out of order on purpose: the map is ordered, so the wire
+        // does not depend on what order a sender happened to hold them in.
+        let mut docs = BTreeMap::new();
+        docs.insert("b".to_string(), "Zg==".to_string());
+        docs.insert("a".to_string(), String::new());
+        assert_eq!(
+            framed(&SyncBody::Versions {
+                reply: true,
+                partial: true,
+                docs,
+            }),
+            wire(&vectors, "version offer, answering leg")
+        );
+
+        assert_eq!(
+            framed(&SyncBody::Versions {
+                reply: false,
+                partial: false,
+                docs: BTreeMap::new(),
+            }),
+            wire(&vectors, "version offer with no documents")
+        );
+
+        let blob = BASE64.encode([0u8, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(
+            framed(&SyncBody::Delta {
+                doc: "notes".to_string(),
+                blob: blob.clone(),
+            }),
+            wire(&vectors, "delta")
+        );
+        assert_eq!(
+            framed(&SyncBody::Snapshot {
+                doc: "notes".to_string(),
+                blob,
+            }),
+            wire(&vectors, "snapshot")
+        );
+        assert_eq!(
+            framed(&SyncBody::NeedSnapshot {
+                doc: "notes".to_string(),
+            }),
+            wire(&vectors, "snapshot request")
+        );
+
+        let hash = vectors["attachment_hashes"][0]["sha256"]
+            .as_str()
+            .expect("hash")
+            .to_string();
+        assert_eq!(
+            framed(&SyncBody::NeedBlob { hash: hash.clone() }),
+            wire(&vectors, "blob request")
+        );
+        assert_eq!(
+            framed(&SyncBody::BlobGone { hash }),
+            wire(&vectors, "blob refusal")
+        );
+    }
+
+    #[test]
+    fn every_vector_parses_back_into_the_kind_it_names() {
+        // The other direction, and the one a second implementation's sender
+        // is judged by. Encoding-only vectors would let a decoder drift.
+        let vectors = vectors();
+        for frame in vectors["frames"].as_array().expect("frames") {
+            let wire = frame["wire"].as_str().expect("wire");
+            let body = wire
+                .strip_prefix(internal_prefixes::DATA_V1)
+                .expect("every vector carries the marker");
+            let value: serde_json::Value = serde_json::from_str(body).expect("the body is JSON");
+            assert_eq!(
+                value["v"].as_u64(),
+                Some(DATA_SYNC_V1 as u64),
+                "{}: version",
+                frame["name"]
+            );
+            assert_eq!(
+                value["k"].as_str(),
+                frame["kind"].as_str(),
+                "{}: kind",
+                frame["name"]
+            );
+            let parsed: SyncBody =
+                serde_json::from_value(value).expect("the body parses into a frame");
+            let kind = match parsed {
+                SyncBody::Versions { .. } => "vv",
+                SyncBody::Delta { .. } => "delta",
+                SyncBody::Snapshot { .. } => "snap",
+                SyncBody::NeedSnapshot { .. } => "need_snap",
+                SyncBody::NeedBlob { .. } => "blob",
+                SyncBody::BlobGone { .. } => "gone",
+            };
+            let expected = match frame["kind"].as_str().expect("kind") {
+                "need_blob" => "blob",
+                "blob_gone" => "gone",
+                other => other,
+            };
+            assert_eq!(kind, expected, "{}: round trip", frame["name"]);
+        }
+    }
+
+    #[test]
+    fn absent_flags_parse_as_false() {
+        let vectors = vectors();
+        for case in vectors["parse_defaults"]
+            .as_array()
+            .expect("parse_defaults")
+        {
+            let value: serde_json::Value =
+                serde_json::from_str(case["body"].as_str().expect("body")).expect("JSON");
+            let SyncBody::Versions { reply, partial, .. } =
+                serde_json::from_value(value).expect("parses")
+            else {
+                panic!("{}: expected a version offer", case["name"]);
+            };
+            assert_eq!(reply, case["expect"]["reply"].as_bool().expect("reply"));
+            assert_eq!(
+                partial,
+                case["expect"]["partial"].as_bool().expect("partial")
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_hashes_match_their_vectors() {
+        let vectors = vectors();
+        for case in vectors["attachment_hashes"]
+            .as_array()
+            .expect("attachment_hashes")
+        {
+            let bytes = match (case.get("input_utf8"), case.get("input_hex")) {
+                (Some(text), _) => text.as_str().expect("utf8").as_bytes().to_vec(),
+                (_, Some(hex)) => {
+                    let hex = hex.as_str().expect("hex");
+                    (0..hex.len())
+                        .step_by(2)
+                        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex byte"))
+                        .collect()
+                }
+                _ => panic!("a hash vector needs an input"),
+            };
+            assert_eq!(
+                bytes.len() as u64,
+                case["size"].as_u64().expect("size"),
+                "the vector's own size must describe its own input"
+            );
+            assert_eq!(
+                OfflineProtocol::data_attachment_hash(&bytes),
+                case["sha256"].as_str().expect("sha256").to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_references_encode_to_their_vectors() {
+        use offline_protocol_data::DataValue;
+        let vectors = vectors();
+        let hash = vectors["attachment_hashes"][0]["sha256"]
+            .as_str()
+            .expect("hash")
+            .to_string();
+        let size = vectors["attachment_hashes"][0]["size"]
+            .as_u64()
+            .expect("size");
+
+        let full = DataValue::Attachment {
+            hash: hash.clone(),
+            size,
+            name: Some("plan.pdf".to_string()),
+            mime: Some("application/pdf".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_string(&full).expect("encode"),
+            vectors["attachment_references"][0]["json"]
+                .as_str()
+                .expect("json")
+        );
+
+        // Absent, not null. A reader that has to tell one from the other has
+        // been given two spellings of one value.
+        let bare = DataValue::attachment(hash, size);
+        assert_eq!(
+            serde_json::to_string(&bare).expect("encode"),
+            vectors["attachment_references"][1]["json"]
+                .as_str()
+                .expect("json")
+        );
+        assert!(!vectors["attachment_references"][1]["json"]
+            .as_str()
+            .expect("json")
+            .contains("null"));
+    }
+
+    #[test]
+    fn data_purposes_encode_to_their_vectors() {
+        let vectors = vectors();
+        let hash = vectors["attachment_hashes"][0]["sha256"]
+            .as_str()
+            .expect("hash")
+            .to_string();
+        assert_eq!(
+            serde_json::to_string(&DataPurpose::Attachment { hash }).expect("encode"),
+            vectors["data_purposes"][0]["json"].as_str().expect("json")
+        );
+        assert_eq!(
+            serde_json::to_string(&DataPurpose::Snapshot {
+                doc: "notes".to_string(),
+            })
+            .expect("encode"),
+            vectors["data_purposes"][1]["json"].as_str().expect("json")
+        );
+    }
+
+    #[test]
+    fn blob_digests_match_their_vectors() {
+        let vectors = vectors();
+        for case in vectors["blob_digests"].as_array().expect("blob_digests") {
+            let hex = case["input_hex"].as_str().expect("hex");
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex byte"))
+                .collect();
+            assert_eq!(
+                blob_digest(&bytes),
+                case["digest"].as_str().expect("digest")
+            );
+        }
     }
 }

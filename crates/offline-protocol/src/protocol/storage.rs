@@ -4,12 +4,12 @@ use super::state_crypto::{StateRecordCipher, SEALED_RECORD_OVERHEAD, STATE_RECOR
 use super::{
     lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
     PeerCapabilities, PendingMessage, PendingMessageRecord, ReceivedKeyPackage, SessionState,
-    WelcomeDeliveryState, WelcomeLifecycleRecord, DATA_GROUP_V1, DATA_SYNC_V1, MAX_BLOCKED_USERS,
-    MAX_KEY_PACKAGE_SENT_TO, MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH, MAX_PENDING_KEY_PACKAGES,
-    MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
-    MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_PERSISTED_CAPABILITY_VERSIONS,
-    MAX_PROTOCOL_STATE_RECORD_BYTES, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
-    WELCOME_LIFECYCLE_TTL_SECS,
+    WelcomeDeliveryState, WelcomeLifecycleRecord, DATA_GROUP_V1, DATA_MEDIA_V1, DATA_SYNC_V1,
+    MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO, MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH,
+    MAX_PENDING_KEY_PACKAGES, MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER,
+    MAX_PENDING_MESSAGE_BYTES_GLOBAL, MAX_PENDING_MESSAGE_BYTES_PER_PEER,
+    MAX_PERSISTED_CAPABILITY_VERSIONS, MAX_PROTOCOL_STATE_RECORD_BYTES, MLS_ENVELOPE_COMPACT_V1,
+    RICH_PAYLOAD_V1, WELCOME_LIFECYCLE_TTL_SECS,
 };
 use crate::constants::{MAX_MEDIA_DESCRIPTORS, MAX_OUTBOX_ENTRIES};
 use crate::{Error, Event, ProtocolStateError, ProtocolStateResult, ProtocolStateStorage, Result};
@@ -3043,6 +3043,13 @@ impl OfflineProtocol {
             }
             if self.config.data.enabled && caps.attested_data_versions.contains(&DATA_GROUP_V1) {
                 self.peer_data_group_attested.insert(peer_id.clone());
+            }
+            // And the media half. Skipping it costs less than the two above
+            // (a fetch that finds nobody is reported, where a stalled
+            // replication is silent), but it costs it on every restart, and
+            // the record is already here.
+            if self.config.data.enabled && caps.data_versions.contains(&DATA_MEDIA_V1) {
+                self.peer_data_media.insert(peer_id.clone());
             }
             // Not gated on the sealing kill switch: this is a destination
             // address, and the transport decides whether to seal at all. A

@@ -108,6 +108,9 @@ fn map_data_error(err: DataError) -> Error {
         DataError::ValueTooLarge { actual, limit } => Error::InvalidArgument(format!(
             "value is {actual} bytes, over the {limit} byte limit"
         )),
+        DataError::InvalidAttachment { reason } => {
+            Error::InvalidArgument(format!("invalid attachment: {reason}"))
+        }
         DataError::OutOfRange { position, length } => Error::InvalidArgument(format!(
             "position {position} is out of range for length {length}"
         )),
@@ -1323,11 +1326,19 @@ impl OfflineProtocol {
         };
         self.data.docs.clear();
         self.data.spaces.clear();
-        // The offer window is keyed by peer and outlives nothing else here.
-        // Left behind it would suppress the first offer made after the wipe,
-        // which is the same shape [`Self::forget_data_sync_peer`] exists to
-        // prevent: a window that survives the thing it was measuring.
+        // Every window and every outstanding question goes with the content
+        // they were about. Left behind, a window suppresses the first offer
+        // or the first blob request made after the wipe, which is the same
+        // shape [`Self::forget_data_sync_peer`] exists to prevent: a window
+        // that survives the thing it was measuring.
+        //
+        // The pending fetches are not bookkeeping. An entry there is what
+        // admits arriving attachment bytes, so one surviving a wipe would let
+        // bytes land for a space this device no longer has, and hand them to
+        // the application as an answer to a question the wipe erased.
         self.last_data_sync_offer.clear();
+        self.pending_attachment_fetches.clear();
+        self.blob_request_windows.clear();
 
         // Attempt every record and report the first failure, as
         // [`Self::data_delete_doc`] does. Answering `Ok` for a wipe that left
