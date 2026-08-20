@@ -48,7 +48,11 @@
 //! first, which pushes them. That is work this device already owed the peer
 //! and the frame merely reached it, so it cannot recur: what it sends is
 //! what was pending before the frame arrived, and flushing is what stops it
-//! being pending.
+//! being pending. When that flush fails and the import then applies, the
+//! edit may have been folded into the imported change and suppressed with
+//! it, so a version offer is sent instead of the delta. That one is not an
+//! answer either, and it cannot recur for the same reason: it costs a
+//! storage failure that recovered inside a single frame.
 //!
 //! # Remote bytes are not our bytes
 //!
@@ -71,7 +75,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::protocol::prefixes::internal_prefixes;
 use crate::protocol::types::{storage_keys, DATA_SYNC_V1};
 use crate::protocol::OfflineProtocol;
@@ -793,8 +797,38 @@ impl OfflineProtocol {
         // Ahead of the marker below rather than inside its window, so the
         // window stays the length of one import. A crash during this flush
         // would otherwise quarantine a blob the engine never saw.
-        if let Err(err) = self.data_flush(space, doc) {
-            warn!(space, doc, error = %err, "Could not flush local edits before applying a remote change");
+        //
+        // The two errors say opposite things about what is still pending, so
+        // they are told apart. `DocTooLarge` is raised after the delta record
+        // was written, pushed and announced, and only the size verdict that
+        // follows it failed: nothing is left in the pending set and there is
+        // nothing to compensate for. Any other error may have left the commit
+        // un-exported, because the delta-write failure rewinds it back into
+        // the pending set. The import's own flush would then fold that edit
+        // into the imported change and suppress the pair toward the one peer
+        // it was owed to, which is exactly the loss this pre-flush exists to
+        // prevent.
+        let mut preflush_left_edits_pending = false;
+        match self.data_flush(space, doc) {
+            Ok(()) => {}
+            Err(Error::DocTooLarge { .. }) => {
+                debug!(
+                    space,
+                    doc,
+                    "Local edits were flushed and pushed before applying a remote change; the \
+                     document is over its cap and refuses further growth"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    space,
+                    doc,
+                    error = %err,
+                    "Could not flush local edits before applying a remote change; they may \
+                     still be pending"
+                );
+                preflush_left_edits_pending = true;
+            }
         }
 
         // Written *before* the engine is called. That ordering is the whole
@@ -808,6 +842,9 @@ impl OfflineProtocol {
 
         record.in_flight = None;
         self.persist_sync_record(space, &record);
+
+        // Read before the match below consumes the outcome.
+        let applied = matches!(outcome, Ok(RemoteImport::Applied));
 
         match outcome {
             Ok(RemoteImport::Applied) => {
@@ -884,6 +921,29 @@ impl OfflineProtocol {
                 }
             },
         }
+
+        // A pre-flush that failed followed by an import that applied is the
+        // one combination where a local edit can have been folded into the
+        // imported change and then suppressed toward the peer it was owed
+        // to. Nothing on the wire carries it and no trigger is left to
+        // notice, so the gap is announced and the peer asks for what it is
+        // missing. The alternative, sending the fold on with the suppression
+        // lifted, would hand the peer its own change back.
+        //
+        // Gated on `Applied` for the reason that also makes it terminate.
+        // The fold needs the import's own flush to have succeeded, and a
+        // storage failure that is still failing fails that one too, which
+        // makes the import answer `Err`. So every nudge costs a fresh
+        // transient failure that recovered inside one frame, and the offers
+        // cannot sustain each other.
+        //
+        // `origin` is `None`, not the space: what may be stranded here is
+        // this device's own edit, so naming the space would suppress the
+        // announcement toward the only peer that could act on it.
+        if preflush_left_edits_pending && applied {
+            self.nudge_data_sync(space, None, "preflush_failure");
+        }
+
         Ok(())
     }
 
