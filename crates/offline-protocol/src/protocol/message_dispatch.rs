@@ -6,8 +6,8 @@ use super::{
     GroupMemberAddedPayload, GroupMemberRemovedPayload, GroupMessageReceivedPayload,
     InternalMessageResult, KeyPackagePayload, OfflineProtocol, PeerCapabilities, PresencePayload,
     ReadReceiptPayload, ReceivedKeyPackage, TypingIndicatorPayload, UserGroupsPayload,
-    DATA_SYNC_V1, MAX_KEY_PACKAGE_LIFETIME_MS, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES,
-    MAX_READ_RECEIPT_IDS, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
+    DATA_GROUP_V1, DATA_SYNC_V1, MAX_KEY_PACKAGE_LIFETIME_MS, MAX_KEY_PACKAGE_SENT_TO,
+    MAX_PENDING_KEY_PACKAGES, MAX_READ_RECEIPT_IDS, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
 };
 use crate::events::{DecryptionFailureCode, Event, SecurityWarningCode};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
@@ -126,6 +126,31 @@ impl OfflineProtocol {
             } else {
                 self.forget_data_sync_peer(sender);
             }
+
+            // The group entry is recorded independently of the 1:1 one,
+            // because a peer can honestly advertise the first without the
+            // second: an install from before group spaces replicates 1:1
+            // perfectly well and would render a group sync frame to its
+            // user as literal `__DATA_V1__` text. Collapsing the two into
+            // one flag is exactly how that frame gets sent.
+            if self.config.data.enabled && payload.data_versions.contains(&DATA_GROUP_V1) {
+                if !self.peer_data_group.contains(sender)
+                    && self.peer_data_group.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.peer_data_group.clear();
+                }
+                self.peer_data_group.insert(sender.to_string());
+            } else {
+                self.peer_data_group.remove(sender);
+            }
+
+            // Direct knowledge is authoritative for the group capability
+            // too: a key package from the peer itself evicts whatever an
+            // inviter attested about them, in either direction. The durable
+            // side happens below — `from_advertised` never carries an
+            // attested field, so persisting the fresh advertisement drops
+            // it from the record as well.
+            self.peer_data_group_attested.remove(sender);
 
             // A direct key package is authoritative for this peer: drop any
             // inviter-attested rich entry (the durable side happens below —
@@ -1766,6 +1791,9 @@ impl OfflineProtocol {
                         }
                     }
                     self.group_mesh.members.remove(&payload.group_id);
+                    self.group_mesh
+                        .roster_invisible_generations
+                        .remove(&payload.group_id);
                     let was_synced = self.group_mesh.relay_synced.remove(&payload.group_id);
                     // The outstanding-registration correlation goes too, as
                     // in every other membership-teardown path: a pending

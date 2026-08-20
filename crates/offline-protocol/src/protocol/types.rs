@@ -736,6 +736,21 @@ pub(crate) const MAX_RICH_EXTRAS_BYTES: usize = 32 * 1024;
 /// as an unreadable document rather than as a refused negotiation.
 pub(crate) const DATA_SYNC_V1: u8 = 1;
 
+/// Group-space replication, advertised in
+/// [`KeyPackagePayload::data_versions`] alongside [`DATA_SYNC_V1`]: the
+/// sender intercepts `__DATA_V1__` frames arriving inside a *group*
+/// ciphertext, not only inside a 1:1 one.
+///
+/// A separate entry rather than a bump, and the reason is a compatibility
+/// trap rather than tidiness. A build that speaks only [`DATA_SYNC_V1`]
+/// advertises it, holds group sessions, and has no group interception at
+/// all: every group path emits whatever decrypts as a chat message, so a
+/// group sync frame sent to one would surface to its user as literal
+/// `__DATA_V1__{...}` text. Gating group sends on this entry is what keeps
+/// that frame from ever being sent, and appending rather than replacing is
+/// what keeps 1:1 replication working with those same peers.
+pub(crate) const DATA_GROUP_V1: u8 = 2;
+
 /// Rich fields accepted by the `send_message_with` surface. Only ever
 /// delivered inside the sealed [`RichPayloadV1`] body — toward a recipient
 /// that did not advertise [`RICH_PAYLOAD_V1`] they are silently dropped,
@@ -1189,6 +1204,21 @@ pub(crate) struct PeerCapabilities {
     /// selection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) attested_rich_versions: Vec<u8>,
+    /// Sync versions a *group inviter* attested for this peer, carried on
+    /// the group Add commit / Welcome exactly like
+    /// [`Self::attested_rich_versions`] and kept separate from the direct
+    /// `data_versions` above for the same reason: attestation is
+    /// third-party and may be stale, so a direct key-package exchange
+    /// overwrites the whole record and clears this field.
+    ///
+    /// Group members never exchange key packages with each other, so
+    /// without this a group would replicate only among the subset of
+    /// members that happen to have met directly, and the rest would sit
+    /// there editing documents nobody receives. Consulted only by the
+    /// group replication gate, never by 1:1 sync (which always has direct
+    /// knowledge: session establishment exchanges key packages).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) attested_data_versions: Vec<u8>,
 
     /// The peer's Nostr public key, from [`KeyPackagePayload::nostr_pubkey`].
     ///
@@ -1252,6 +1282,7 @@ impl PeerCapabilities {
                 .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
                 .collect(),
             attested_rich_versions: Vec::new(),
+            attested_data_versions: Vec::new(),
             nostr_pubkey: nostr_pubkey.and_then(normalize_nostr_pubkey),
         }
     }
@@ -1263,6 +1294,7 @@ impl PeerCapabilities {
             || !self.rich_versions.is_empty()
             || !self.data_versions.is_empty()
             || !self.attested_rich_versions.is_empty()
+            || !self.attested_data_versions.is_empty()
             || self.nostr_pubkey.is_some()
     }
 }
@@ -1719,10 +1751,13 @@ pub(crate) mod storage_keys {
 
     /// Key type for compacted replicated documents, one record per document.
     ///
-    /// Key ID is `{space}/{doc}`. Both halves are validated by
-    /// `offline_protocol_data::validate_name`, whose charset excludes the
-    /// separator, so the composed key always parses back into the two parts
-    /// it was built from.
+    /// Key ID is `{space}/{doc}`. The space is validated by
+    /// `offline_protocol_data::validate_space_name` and the document by
+    /// `validate_name`; neither charset includes the separator, so the
+    /// composed key always parses back into the two parts it was built
+    /// from. (The space charset additionally allows `:`, so a group space
+    /// can be named by its `group:<uuid>` id — inert here, since keys are
+    /// parsed by stripping the space prefix and splitting on `/`.)
     ///
     /// Post-split only: deliberately absent from
     /// [`ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split data to inherit

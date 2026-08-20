@@ -4,7 +4,7 @@ use super::state_crypto::{StateRecordCipher, SEALED_RECORD_OVERHEAD, STATE_RECOR
 use super::{
     lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
     PeerCapabilities, PendingMessage, PendingMessageRecord, ReceivedKeyPackage, SessionState,
-    WelcomeDeliveryState, WelcomeLifecycleRecord, DATA_SYNC_V1, MAX_BLOCKED_USERS,
+    WelcomeDeliveryState, WelcomeLifecycleRecord, DATA_GROUP_V1, DATA_SYNC_V1, MAX_BLOCKED_USERS,
     MAX_KEY_PACKAGE_SENT_TO, MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH, MAX_PENDING_KEY_PACKAGES,
     MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
     MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_PERSISTED_CAPABILITY_VERSIONS,
@@ -2859,6 +2859,57 @@ impl OfflineProtocol {
         self.persist_peer_capabilities(peer_id, &caps);
     }
 
+    /// Records an inviter-attested *group replication* capability, the
+    /// [`DATA_GROUP_V1`] sibling of [`Self::record_attested_rich`].
+    ///
+    /// Every rule there applies here for the same reasons: skip self, skip
+    /// peers already known directly, gate the in-memory set on our own kill
+    /// switch, bound it like `key_package_sent_to`, and never write an
+    /// attested-only record over a capability record that could not be read
+    /// this session.
+    ///
+    /// What differs is only what is at stake. Without this, a group
+    /// replicates among whichever members happen to have exchanged key
+    /// packages directly and quietly does not replicate with the rest —
+    /// members of a group never exchange key packages with each other, so
+    /// on a group nobody built out of existing 1:1 contacts that subset can
+    /// easily be empty.
+    ///
+    /// [`DATA_GROUP_V1`]: crate::protocol::types::DATA_GROUP_V1
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(crate) fn record_attested_data(&mut self, peer_id: &str, versions: &[u8]) {
+        if peer_id == self.local_id || !versions.contains(&DATA_GROUP_V1) {
+            return;
+        }
+        // Direct self-advertisement already covers this peer; an attested
+        // duplicate would only go stale.
+        if self.peer_data_group.contains(peer_id) {
+            return;
+        }
+        if self.config.data.enabled {
+            if !self.peer_data_group_attested.contains(peer_id)
+                && self.peer_data_group_attested.len() >= MAX_KEY_PACKAGE_SENT_TO
+            {
+                self.peer_data_group_attested.clear();
+            }
+            self.peer_data_group_attested.insert(peer_id.to_string());
+        }
+        let Ok(existing) = self.load_peer_capabilities(peer_id) else {
+            warn!(
+                peer_id = %peer_id,
+                "Peer capability record unreadable this session; not persisting the attested capability"
+            );
+            return;
+        };
+        let mut caps = existing.unwrap_or_default();
+        caps.attested_data_versions = versions
+            .iter()
+            .copied()
+            .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
+            .collect();
+        self.persist_peer_capabilities(peer_id, &caps);
+    }
+
     /// Repopulates the in-memory capability sets (`peer_compact_envelope`,
     /// `peer_rich_payload`) from the durable per-peer records, so a send
     /// right after relaunch — before any live key-package exchange — keeps
@@ -2983,6 +3034,15 @@ impl OfflineProtocol {
             // problem.
             if self.config.data.enabled && caps.data_versions.contains(&DATA_SYNC_V1) {
                 self.peer_data_sync.insert(peer_id.clone());
+            }
+            // The group half of the same failure, and a quieter one: a group
+            // space that stops replicating after a restart looks to every
+            // member like a group where nobody happens to be editing.
+            if self.config.data.enabled && caps.data_versions.contains(&DATA_GROUP_V1) {
+                self.peer_data_group.insert(peer_id.clone());
+            }
+            if self.config.data.enabled && caps.attested_data_versions.contains(&DATA_GROUP_V1) {
+                self.peer_data_group_attested.insert(peer_id.clone());
             }
             // Not gated on the sealing kill switch: this is a destination
             // address, and the transport decides whether to seal at all. A

@@ -326,6 +326,33 @@ pub struct OfflineProtocol {
     /// on `initialize_mls`, bounded like `key_package_sent_to`.
     peer_rich_attested: std::collections::HashSet<String>,
 
+    /// Peers whose key package advertised *group* document replication
+    /// ([`DATA_GROUP_V1`] in `data_versions`), so a group they share with
+    /// this device may carry `__DATA_V1__` frames.
+    ///
+    /// Separate from `peer_data_sync` because the two entries mean
+    /// different things and a peer can advertise the first without the
+    /// second: an install predating group spaces replicates 1:1 perfectly
+    /// well and would render a group sync frame as chat text. Same
+    /// lifecycle as every capability set: learned from key-package
+    /// exchange, persisted, restored on `initialize_mls`, bounded like
+    /// `key_package_sent_to`.
+    ///
+    /// [`DATA_GROUP_V1`]: crate::protocol::types::DATA_GROUP_V1
+    peer_data_group: std::collections::HashSet<String>,
+
+    /// Peers whose *group* replication support we learned indirectly, from
+    /// an inviter's attestation on the Add commit or Welcome.
+    ///
+    /// The group analogue of `peer_rich_attested`, and load-bearing for the
+    /// same structural reason: members of a group never exchange key
+    /// packages with each other, so without attestation a group would
+    /// replicate only among whichever members happened to have met
+    /// directly. Direct knowledge stays authoritative — a key package from
+    /// the peer evicts its attested entry. Consulted only by
+    /// `group_data_sync_active`, never by 1:1 sync.
+    peer_data_group_attested: std::collections::HashSet<String>,
+
     /// Peers already flagged with a `PlaintextSend` security warning, so the
     /// explicit-opt-out plaintext path warns once per peer instead of once
     /// per message.
@@ -401,6 +428,26 @@ pub struct OfflineProtocol {
     /// of traffic that should be rate limited rather than merely small.
     #[cfg(feature = "data")]
     pub(crate) last_data_sync_offer: HashMap<String, Instant>,
+
+    /// Whether the MLS group list has been read into `group_mesh.members`
+    /// once this session, so the shared-group rediscovery sweep can see the
+    /// groups this device is in.
+    ///
+    /// That cache is filled on demand by group traffic and is empty after a
+    /// restart, so a sweep that only read it would find nothing on exactly
+    /// the launch where two members have drifted apart and neither is
+    /// editing. Enumerating is one key listing plus, per group not already
+    /// cached, the group-state read the next group send would have paid
+    /// anyway.
+    ///
+    /// One shot rather than per sweep because the cache stays complete once
+    /// filled: creating a group inserts, a Welcome inserts, and leaving
+    /// removes. Deliberately not a cold-start sweep, which was rejected for
+    /// putting an offer per member per group on the mesh at every launch;
+    /// this is per peer, only when that peer is actually in front of us, and
+    /// still behind the offer window.
+    #[cfg(feature = "data")]
+    pub(crate) group_spaces_enumerated: bool,
 
     /// Lamport logical clock for causal message ordering.
     /// Ticked on send, merged on receive.
@@ -800,6 +847,8 @@ impl OfflineProtocol {
             peer_compact_envelope: std::collections::HashSet::new(),
             peer_rich_payload: std::collections::HashSet::new(),
             peer_data_sync: std::collections::HashSet::new(),
+            peer_data_group: std::collections::HashSet::new(),
+            peer_data_group_attested: std::collections::HashSet::new(),
             peer_rich_attested: std::collections::HashSet::new(),
             plaintext_send_warned: std::collections::HashSet::new(),
             plaintext_receive_warned: std::collections::HashSet::new(),
@@ -813,6 +862,8 @@ impl OfflineProtocol {
             data: data::DataLayer::default(),
             #[cfg(feature = "data")]
             last_data_sync_offer: HashMap::new(),
+            #[cfg(feature = "data")]
+            group_spaces_enumerated: false,
             lamport_clock: LamportClock::new(),
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),
@@ -974,6 +1025,8 @@ impl OfflineProtocol {
         let previous_peer_rich_payload = self.peer_rich_payload.clone();
         let previous_peer_data_sync = self.peer_data_sync.clone();
         let previous_peer_rich_attested = self.peer_rich_attested.clone();
+        let previous_peer_data_group = self.peer_data_group.clone();
+        let previous_peer_data_group_attested = self.peer_data_group_attested.clone();
 
         let previous_local_id = std::mem::replace(&mut self.local_id, local_id.clone());
         let previous_identity_established = self.identity_established;
@@ -1114,10 +1167,19 @@ impl OfflineProtocol {
             self.peer_rich_payload = previous_peer_rich_payload;
             self.peer_data_sync = previous_peer_data_sync;
             self.peer_rich_attested = previous_peer_rich_attested;
+            self.peer_data_group = previous_peer_data_group;
+            self.peer_data_group_attested = previous_peer_data_group_attested;
             return Err(err);
         }
 
         self.mls_manager = Some(manager);
+        // A re-init can swap the identity, and with it which groups exist, so
+        // the one-shot group enumeration has to run again. Past the last
+        // `return Err` above, so a failed init leaves the flag alone.
+        #[cfg(feature = "data")]
+        {
+            self.group_spaces_enumerated = false;
+        }
         self.emit_mls_initialized();
 
         // Announced only here, past the last `return Err` — a restore failure
@@ -1512,6 +1574,14 @@ impl OfflineProtocol {
             // document written without ever being explicitly created leaves
             // records but no index entry, and those are precisely the
             // documents no peer has seen yet.
+            // Group spaces appear in this list and are deliberately not
+            // swept: `kick_data_sync` answers only for a space named after
+            // a peer, so a group space falls through it. A cold-start sweep
+            // for groups would mean an offer per member per group at every
+            // launch, and what it would recover is narrow — a local commit
+            // is already pushed to the roster when it happens, and the
+            // per-member outbox carries it across a restart. Rediscovery
+            // and joins reconcile the rest.
             for space in self.data_list_spaces().unwrap_or_default() {
                 self.kick_data_sync(&space, "start");
             }
@@ -1658,13 +1728,17 @@ impl OfflineProtocol {
     /// it is relearned, which is a document that silently does not sync.
     pub(crate) fn forget_data_sync_peer(&mut self, peer: &str) {
         self.peer_data_sync.remove(peer);
+        self.peer_data_group.remove(peer);
+        self.peer_data_group_attested.remove(peer);
         #[cfg(feature = "data")]
-        self.last_data_sync_offer.remove(peer);
+        self.forget_data_sync_offer_windows(peer);
     }
 
     /// [`Self::forget_data_sync_peer`] for every peer at once.
     pub(crate) fn forget_every_data_sync_peer(&mut self) {
         self.peer_data_sync.clear();
+        self.peer_data_group.clear();
+        self.peer_data_group_attested.clear();
         #[cfg(feature = "data")]
         self.last_data_sync_offer.clear();
     }
@@ -1737,6 +1811,14 @@ impl OfflineProtocol {
         // the partition this discovery just ended.
         #[cfg(feature = "data")]
         self.kick_data_sync(peer_id, "peer_rediscovered");
+
+        // The same reconciliation for every group space shared with this
+        // peer. A group space cannot ride the 1:1 trigger above: two
+        // members of a group need not have a session with each other at
+        // all, so for them this discovery is the only moment anything knows
+        // they are both reachable.
+        #[cfg(feature = "data")]
+        self.kick_shared_group_data_sync(peer_id, "peer_rediscovered");
 
         // Only send key package if encryption is enabled and auto key exchange is on
         if !self.config.encryption.enabled || !self.config.encryption.auto_key_exchange {
@@ -2364,7 +2446,7 @@ impl OfflineProtocol {
         Ok(plaintext)
     }
 
-    fn is_session_group_id(group_id: &str) -> bool {
+    pub(crate) fn is_session_group_id(group_id: &str) -> bool {
         group_id.starts_with("session:")
     }
 

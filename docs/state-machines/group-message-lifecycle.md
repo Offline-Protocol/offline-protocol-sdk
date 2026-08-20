@@ -239,6 +239,87 @@ Three rules that are easy to get wrong:
 The full reasoning for report-by-default and the fail-open enforcement rule is in
 [Group protocol](../spec/group-protocol.md#membership-authorization).
 
+## Replication frames take the same three paths
+
+A group space replicates over this exact machinery: a `__DATA_V1__` frame is
+encrypted for the group and fanned out per member like any group message. It
+therefore arrives by all three inbound paths above, and **all three intercept
+it** after the decrypt succeeds and before anything is emitted to the
+application. A path that missed the interception would surface the frame to
+the user as a chat message whose body is literal `__DATA_V1__` JSON.
+
+On the drain path the interception still owes the deferred ACK: a frame
+buffered until group state caught up was never acknowledged, so the sender is
+retransmitting until the drain settles it.
+
+What differs from a group message:
+
+| | Group message | Replication frame |
+|---|---|---|
+| Relay broadcast | Taken when the v3 gate holds | Never: a replication frame has no app-facing id for a delivery report to name |
+| Emitted to the app | `GroupMessageReceived` | Nothing; `DataChanged` fires from the store when a change lands |
+| Logical id | Used for cross-path dedup | None |
+| Gate | Roster | Roster, **and** every member advertising `data_versions` entry 2 |
+| Answers | n/a | Addressed to the one member that asked, not broadcast |
+
+A change arriving from the group is never pushed back into it: the group
+ciphertext already reached every member, so re-broadcasting would make one
+edit cost N² frames.
+
+### Addressed frames still advance everyone's ratchet
+
+A group has one sender ratchet per epoch, so a frame addressed to a single
+member advances the generation *every* member must reach to decrypt anything
+later from that sender. MLS refuses a generation more than 1000 ahead of the
+highest a receiver has seen, and a receiver that cannot decrypt does not
+advance, so once the gap opens it never closes on its own: the skipped member
+stops receiving that sender's frames entirely, chat included, until a commit
+rotates the epoch. A stable group produces no commits.
+
+Directed replication answers are the first traffic here that advances the
+ratchet without every member observing it, and rediscovery produces them
+without the user doing anything. A sender therefore counts the frames it has
+encrypted for a group without giving the whole roster one, and at the bound
+below sends the next frame to the roster instead. That costs the other
+members one redundant import, which the CRDT absorbs and the no-echo rule
+stops there, and it leaves each of them a rung they can still decrypt.
+
+Ordinary group chat clears this count, so a talking group never promotes
+anything; the promotion is what covers a group that only replicates
+documents. It does not rescue a member absent long enough for the outbox to
+expire every rung, which predates group replication and is bounded by the
+epoch instead.
+
+The count is scoped to one epoch and one process, because those are the only
+spans it can speak for:
+
+- **A commit rebases it.** Every member restarts the ratchet at zero when the
+  epoch rotates, so a count carried across a rotation describes a gap that no
+  longer exists, and promoting on it would spend a roster-wide frame to close
+  nothing. The count is therefore stored against the epoch it was taken in
+  rather than cleared at each rotation site, so a rotation site added later
+  cannot forget to clear it.
+- **A relaunch does not reset the gap it is counting.** The sender ratchet is
+  persisted with the group state; this count is not. Reading a missing count
+  as zero would let a device that restarts often accumulate the true gap
+  across sessions and strand a member without the bound ever tripping. A
+  missing count therefore reads as *spent*: the first directed frame per
+  group per process goes to the whole roster, which re-bases every member's
+  reachable window at the cost of one frame per group per launch.
+
+**A promotion is still a roster-wide delivery, so it answers to the
+all-members gate.** A directed frame needs no capability check, because the
+member it answers asked for it; handing that same frame to the whole roster
+is exactly the send the gate refuses.
+
+When the bound is reached and the gate is closed, the frame is withheld
+rather than sent addressed. Every directed encryption spends a generation
+only its target observes, so continuing past the bound trades a document
+convergence that is already stalled group-wide (the closed gate stops local
+commits too) for the permanent loss of this device's group *chat* to every
+other member. Either an ordinary group message or the gate opening releases
+it, and the member holding the gate shut is being probed meanwhile.
+
 ## Bounds
 
 | Bound | Value |
@@ -248,6 +329,9 @@ The full reasoning for report-by-default and the fail-open enforcement rule is i
 | Broadcast report timeout | 60 s |
 | Unauthorized-change report suppression | 300 s per (group, committer, enforced) |
 | Unproven-leaf report suppression | 300 s per (group, sender, site) |
+| Replication offer suppression | 30 s per (member, group) |
+| Roster-invisible group generations | 256 per group per epoch, then the next frame goes to the whole roster (gate permitting) |
+| First directed frame per group per process | Always roster-wide: the inherited generation is unreadable |
 
 The `enforced` component of the first key is load-bearing. Dropping it lets an
 earlier report-only event suppress the refusal alarm for the same committer,

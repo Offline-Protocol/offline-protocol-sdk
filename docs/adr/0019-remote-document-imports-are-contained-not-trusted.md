@@ -1,7 +1,8 @@
 # 0019. Remote document imports are contained, not trusted
 
 **Status:** Accepted
-**Shipped in:** unreleased (F3, 1:1 replication)
+**Shipped in:** unreleased (F3, 1:1 replication; extended to group spaces
+by F4)
 
 ## Context
 
@@ -45,15 +46,24 @@ partition-and-reconnect traffic, which is the entire point of this layer.
 Remote blobs are contained in layers, each of which stops something specific.
 None of them is "the peer is authenticated, so this is fine".
 
-### 1. MLS scopes the surface; the space is the sender
+### 1. MLS scopes the surface; the space is derived, never declared
 
 A blob reaches the import path only from an authenticated member of the space,
-and the space is derived from the wire sender rather than read off the frame.
-A peer therefore cannot name a space, which means they cannot reach a document
-shared with somebody else.
+and the space is derived rather than read off the frame. On a 1:1 session it
+is the wire sender. In a group it is the group whose key opened the
+ciphertext, so reaching a group's documents requires being able to encrypt
+under that group's key, which is membership.
 
-**Failure prevented:** cross-peer writes, and an authorization table that has
+A peer therefore cannot name a space in either scope, which means they cannot
+reach a document shared with somebody else.
+
+**Failure prevented:** cross-space writes, and an authorization table that has
 to be right for that to hold.
+
+**What group spaces change:** the number of members who can reach this path,
+and nothing else. Every layer below is per space rather than per sender, so a
+group is contained by the same machinery as a pair, and a blob refused because
+one member sent it stays refused when the next one does.
 
 ### 2. Frames are bounded before they are decoded
 

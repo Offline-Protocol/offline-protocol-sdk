@@ -148,10 +148,18 @@ request and response bodies are sent in cleartext. See
 
 ## Document sync frames
 
-`__DATA_V1__` frames replicate documents between two peers. They travel only
-inside the decrypted MLS plaintext, never as an outer wire prefix, and only
-toward a peer whose key package advertised `data_versions`
+`__DATA_V1__` frames replicate documents. They travel only inside the
+decrypted MLS plaintext, never as an outer wire prefix, and only toward peers
+whose key package advertised `data_versions`
 ([capability negotiation](capability-negotiation.md)).
+
+A frame rides one of two scopes, and the frame shape is identical in both:
+
+- **A 1:1 session**, sealed to the peer the space is named after.
+- **A group**, sealed once under the group key and carried by the group
+  message path. This requires `data_versions` entry 2 from *every* member,
+  not just the recipient, for the reason given under
+  [Group scope](#group-scope).
 
 ### Shape
 
@@ -175,10 +183,64 @@ new version here, and a peer that has not advertised it is not sent one.
 
 ### The space is never on the wire
 
-Neither the space nor the peer appears in any frame. A receiver derives the
-space from the authenticated wire sender, and a sender from the recipient. The
-two replicas therefore name the same space differently, each by the other's
-address, and a peer cannot reach a document shared with anybody else.
+Neither the space nor the peer appears in any frame. On a 1:1 session a
+receiver derives the space from the authenticated wire sender, and a sender
+from the recipient; the two replicas therefore name the same space
+differently, each by the other's address. In a group the space is the group
+whose key opened the ciphertext, so both replicas name it identically.
+
+In both cases the space is derived, never declared, and that is what bounds
+reach: a peer cannot name a space, so it cannot reach a document shared with
+anybody else. Reaching a group's documents requires being able to encrypt
+under that group's key, which is membership.
+
+### Group scope
+
+A group space replicates over the group send path: one MLS encryption serves
+the whole roster, and the frame is delivered per member on the ordinary
+ladder.
+
+Three rules make that safe and bounded.
+
+**Every member must advertise entry 2.** An implementation that advertises
+only entry 1 replicates 1:1 correctly and does not intercept `__DATA_V1__`
+inside a group ciphertext, so it would surface the frame to its user as
+literal text. Because one ciphertext reaches the whole roster, a single such
+member means no member may be sent a group replication frame. A sender MUST
+NOT send one unless every other member is known to speak entry 2.
+
+**A change received from a group MUST NOT be pushed back into it.** The group
+ciphertext already reached every member. Re-broadcasting turns one edit into
+N² frames and gets worse as the group grows; anti-entropy still closes real
+gaps.
+
+**Offers and answers are addressed to one member.** Anti-entropy between two
+members is a conversation between two devices. A sender MUST address version
+offers, deltas answering them, and snapshots to the member that asked, so the
+1.5-round-trip termination rule below holds unchanged. Only a local commit is
+sent to the whole roster.
+
+With one exception, which a sender MUST implement: a group has a single
+sender ratchet per epoch, so an addressed frame advances the generation every
+*other* member has to reach, and a member that never observes one falls out
+of MLS's forward-distance window and stops decrypting that sender entirely.
+A sender MUST therefore bound how many frames it encrypts for a group without
+delivering one to the whole roster, and deliver the next one roster-wide when
+that bound is reached. A promoted frame is an ordinary roster-wide delivery
+and is subject to the all-members gate above like any other. Where the bound
+is reached and the gate is closed, a sender MUST withhold the frame rather
+than send it addressed: a roster-wide frame some member renders as text is
+the worse outcome, and spending further generations that only one member can
+observe strands the rest for messaging as well as replication. Receivers need no special
+handling, since every body is either idempotent or answerable with nothing.
+See [the group message lifecycle](../state-machines/group-message-lifecycle.md#addressed-frames-still-advance-everyones-ratchet)
+for the bound this implementation uses.
+
+Directed frames are still encrypted under the group key rather than a
+pairwise session: two members of a group need not have a 1:1 session with
+each other, and requiring one would make replication depend on a handshake
+that may never happen. Every member is entitled to the contents, so
+addressing is a traffic decision, not a confidentiality one.
 
 ### The exchange
 

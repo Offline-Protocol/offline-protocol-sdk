@@ -1511,12 +1511,13 @@ config section if present.
 
 ---
 
-## 16. Replicated documents are available, and replicate 1:1
+## 16. Replicated documents are available, 1:1 and in groups
 
 A new `DataStore` object ships on every binding: offline-first documents any
 member of a space can edit while disconnected, merging deterministically when
 replicas meet again. Messaging is synced events; this is synced state. Two
-peers with a secure session converge on the documents they share.
+peers with a secure session converge on the documents they share, and so does
+every member of a group.
 
 **Existing applications need no changes.** `data.enabled` defaults to `true`,
 but nothing is persisted until a document is written, nothing is sent until a
@@ -1527,13 +1528,31 @@ the rest of this section if you are not using it.
 
 ### What replicates, and with whom
 
-A space replicates with the peer whose address names it. Name a space after a
-peer's address and its documents converge with that peer; name it anything else
-and it stays on the device. Nothing else needs configuring, and there is no
-sharing call: the space name *is* the sharing decision.
+A space replicates with the scope its name refers to:
 
-Replication is 1:1 in this release. Group spaces are not yet replicated, and a
-document too large to catch up inside a single frame is reported rather than
+| Space name | Replicates with |
+|---|---|
+| A peer's address | That peer |
+| A group id (`groupId` from `createGroup`) | Every member of that group |
+| Anything else | Nobody; it stays on the device |
+
+Nothing else needs configuring, and there is no sharing call: the space name
+*is* the sharing decision.
+
+A group space uses the group's own roster, so adding or removing a member
+changes who replicates without any second membership list to maintain. A
+change is encrypted once for the whole group rather than once per member.
+
+**A group replicates only when every member is running a build that supports
+it.** Group replication is negotiated separately from 1:1, because an install
+shipping only the 1:1 layer would display a group replication frame to its
+user as raw text. A single member on such a build stops the group's documents
+replicating for everyone until they upgrade, and the SDK will keep probing
+them. 1:1 spaces are unaffected. There is no event for this today; if a
+group's documents are not converging, check that every member is on a current
+build.
+
+A document too large to catch up inside a single frame is reported rather than
 sent.
 
 Replicas that stay in contact converge. Two that are separated by a partition
@@ -1548,7 +1567,8 @@ document again, so it is recreated and refilled from their copy. In a space
 named after a peer, treat deletion as local cleanup that replication may undo,
 not as a way to remove content: to retire content from both sides, empty the
 document (deletions inside a document replicate like any other change); to stop
-a space replicating at all, use a space name that is not a peer address. The
+a space replicating at all, use a space name that is neither a peer address
+nor a group id. The
 same is true of `wipeAll()` on a running engine, for the same missing
 tombstone: see the storage section below.
 

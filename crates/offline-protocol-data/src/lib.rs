@@ -90,6 +90,52 @@ pub fn validate_name(name: &str) -> DataResult<()> {
     Ok(())
 }
 
+/// Check a space name.
+///
+/// Looser than [`validate_name`] by exactly one character, the colon, and
+/// the reason is that a space is named after the MLS scope it replicates
+/// in. A 1:1 space is named by a peer address; a group space is named by
+/// the group id, which is minted as `group:<uuid>`. Refusing the colon
+/// would mean either giving group spaces a second, translated name — one
+/// more mapping to keep consistent and to get wrong — or refusing group
+/// replication outright.
+///
+/// The colon is safe here in a way it would not be in a document name.
+/// Record keys are composed as `{space}/{doc}` and `{space}/{doc}/{seq}`
+/// and are parsed by stripping the space prefix and splitting the
+/// remainder on `/`, so only the separator itself can make a key parse
+/// back into different parts than it was built from, and that stays
+/// forbidden.
+///
+/// Document names deliberately keep the narrow charset: a peer names those
+/// on the wire, and this one is never wire-supplied. A 1:1 space is derived
+/// from the authenticated sender of the frame and a group space from the
+/// group whose key decrypted it, so a peer cannot choose either.
+pub fn validate_space_name(name: &str) -> DataResult<()> {
+    if name.is_empty() {
+        return Err(DataError::InvalidName {
+            name: name.to_string(),
+            reason: "must not be empty",
+        });
+    }
+    if name.len() > MAX_NAME_LEN {
+        return Err(DataError::InvalidName {
+            name: name.to_string(),
+            reason: "longer than MAX_NAME_LEN",
+        });
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':'))
+    {
+        return Err(DataError::InvalidName {
+            name: name.to_string(),
+            reason: "may only contain A-Z a-z 0-9 . _ - :",
+        });
+    }
+    Ok(())
+}
+
 /// Check a map key.
 ///
 /// Keys are looser than names because they never enter a record key: they

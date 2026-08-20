@@ -2,6 +2,7 @@
 mod data_layer;
 #[cfg(feature = "data")]
 mod data_sync;
+mod data_sync_group;
 
 use super::*;
 use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY};
@@ -2113,6 +2114,19 @@ pub(crate) fn feed_key_package_with_rich(
     sender: &str,
     rich_versions: Vec<u8>,
 ) {
+    feed_key_package_with_capabilities(protocol, sender, rich_versions, Vec::new());
+}
+
+/// One key package advertising both capability families at once, which is
+/// what a real one does: `rich_versions` and `data_versions` are separate
+/// fields of the same payload, and a fixture that could only feed one of
+/// them makes a peer that supports both impossible to express.
+pub(crate) fn feed_key_package_with_capabilities(
+    protocol: &mut OfflineProtocol,
+    sender: &str,
+    rich_versions: Vec<u8>,
+    data_versions: Vec<u8>,
+) {
     let payload = KeyPackagePayload {
         user_id: sender.to_string(),
         key_package_data: vec![1, 2, 3, 4],
@@ -2122,7 +2136,7 @@ pub(crate) fn feed_key_package_with_rich(
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions,
-        data_versions: Vec::new(),
+        data_versions,
         nostr_pubkey: None,
     };
     let content = format!(
@@ -2824,7 +2838,120 @@ fn data_sync_is_advertised_only_when_the_layer_is_on() {
     );
 
     let on = protocol_with_data_storage(Arc::new(InMemoryStorage::new()));
-    assert_eq!(on.advertised_data_versions(), vec![DATA_SYNC_V1]);
+    assert_eq!(
+        on.advertised_data_versions(),
+        vec![DATA_SYNC_V1, DATA_GROUP_V1],
+        "both entries, and the order is append-only: the group entry says \
+         this build intercepts sync frames arriving inside a group \
+         ciphertext, which a build advertising only the first does not. A \
+         peer reads them independently, so replacing rather than appending \
+         would silently stop 1:1 replication with every shipped install"
+    );
+}
+
+#[test]
+fn the_group_capability_survives_a_restart() {
+    // The group half of `data_sync_capability_survives_a_restart`, and a
+    // quieter failure than the 1:1 one: a group space that stops
+    // replicating after a relaunch looks to every member exactly like a
+    // group where nobody happens to be editing.
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_data_storage(storage.clone());
+    feed_key_package_with_data(
+        &mut protocol,
+        &id("peer"),
+        vec![DATA_SYNC_V1, DATA_GROUP_V1],
+    );
+    let members = vec![id("user123"), id("peer")];
+    assert!(protocol.group_data_sync_active(&members));
+
+    let restarted = protocol_with_data_storage(storage);
+    assert!(
+        restarted.peer_data_group.contains(&id("peer")),
+        "the group capability must survive a restart"
+    );
+    assert!(restarted.group_data_sync_active(&members));
+}
+
+#[test]
+fn a_peer_that_advertises_only_one_to_one_sync_holds_the_group_gate_closed() {
+    // The whole reason the group entry is separate. This peer replicates
+    // 1:1 correctly and would render a group replication frame to its user
+    // as literal `__DATA_V1__` text.
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_data_storage(storage.clone());
+    feed_key_package_with_data(&mut protocol, &id("peer"), vec![DATA_SYNC_V1]);
+
+    assert!(protocol.data_sync_active(&id("peer")));
+    assert!(!protocol.peer_data_group.contains(&id("peer")));
+    assert!(!protocol.group_data_sync_active(&[id("user123"), id("peer")]));
+
+    let restarted = protocol_with_data_storage(storage);
+    assert!(
+        restarted.data_sync_active(&id("peer")),
+        "1:1 replication has to survive the restart too"
+    );
+    assert!(!restarted.group_data_sync_active(&[id("user123"), id("peer")]));
+}
+
+#[test]
+fn attested_group_sync_opens_the_group_gate_only_and_persists() {
+    // Members of a group never exchange key packages with each other, so
+    // without attestation a group replicates only among whichever members
+    // happened to have met directly — a subset that can easily be empty.
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_data_storage(storage.clone());
+    let members = vec![id("user123"), id("peer")];
+    assert!(!protocol.group_data_sync_active(&members));
+
+    protocol.record_attested_data(&id("peer"), &[DATA_GROUP_V1]);
+    assert!(protocol.peer_data_group_attested.contains(&id("peer")));
+    assert!(protocol.group_data_sync_active(&members));
+    assert!(
+        !protocol.data_sync_active(&id("peer")),
+        "an attestation must never open 1:1 replication: that path always \
+         has direct knowledge, and a third party's claim is not it"
+    );
+
+    let restarted = protocol_with_data_storage(storage);
+    assert!(
+        restarted.peer_data_group_attested.contains(&id("peer")),
+        "an attested group capability must survive a restart"
+    );
+    assert!(restarted.group_data_sync_active(&members));
+}
+
+#[test]
+fn attested_group_sync_ignores_non_v2_and_self() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_data_storage(storage);
+    protocol.record_attested_data(&id("peer"), &[DATA_SYNC_V1]);
+    assert!(
+        !protocol.peer_data_group_attested.contains(&id("peer")),
+        "the 1:1 entry says nothing about group interception"
+    );
+    protocol.record_attested_data(&id("user123"), &[DATA_GROUP_V1]);
+    assert!(!protocol.peer_data_group_attested.contains(&id("user123")));
+}
+
+#[test]
+fn a_direct_key_package_overrides_an_attested_group_capability() {
+    // Direct knowledge is authoritative in both directions, memory and
+    // disk, exactly as it is for the rich attestation.
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_data_storage(storage.clone());
+    let members = vec![id("user123"), id("peer")];
+
+    protocol.record_attested_data(&id("peer"), &[DATA_GROUP_V1]);
+    feed_key_package_with_data(&mut protocol, &id("peer"), Vec::new());
+    assert!(!protocol.peer_data_group_attested.contains(&id("peer")));
+    assert!(!protocol.group_data_sync_active(&members));
+
+    let restarted = protocol_with_data_storage(storage);
+    assert!(
+        !restarted.peer_data_group_attested.contains(&id("peer")),
+        "a direct downgrade must kill the durable attested record too"
+    );
 }
 
 #[test]
@@ -2886,6 +3013,7 @@ fn peer_capability_restore_prunes_overflow() {
     let storage = Arc::new(InMemoryStorage::new());
     let caps = PeerCapabilities {
         attested_rich_versions: Vec::new(),
+        attested_data_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: vec![RICH_PAYLOAD_V1],
         data_versions: Vec::new(),
@@ -2918,7 +3046,7 @@ fn peer_capability_restore_prunes_overflow() {
 /// manager level (import + create), without needing the peer to process the
 /// Welcome — `has_session`/`list_sessions` are local.
 #[cfg(test)]
-fn create_local_session_with(protocol: &OfflineProtocol, peer_label: &str) {
+pub(crate) fn create_local_session_with(protocol: &OfflineProtocol, peer_label: &str) {
     let peer = id(peer_label);
     let peer = peer.as_str();
     let peer_mgr = crate::test_identity::manager_for(
@@ -3025,6 +3153,7 @@ fn peer_capability_restore_prefers_session_peers() {
     // forged leftovers.
     let caps = PeerCapabilities {
         attested_rich_versions: Vec::new(),
+        attested_data_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: vec![RICH_PAYLOAD_V1],
         data_versions: Vec::new(),
