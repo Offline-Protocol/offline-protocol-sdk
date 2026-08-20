@@ -1,5 +1,6 @@
 use super::group_mesh::*;
 use crate::protocol::tests::{create_test_config, create_test_config_for_user};
+use crate::protocol::DATA_GROUP_V1;
 use crate::protocol::{base64_decode, base64_encode, internal_prefixes, InternalMessageResult};
 use crate::test_identity::{id, session_slot};
 use crate::{Event, OfflineProtocol};
@@ -11947,8 +11948,8 @@ fn group_send_rejects_internal_prefix_content() {
 /// Returns (alice, bob, carol, group_id) with the invite already performed
 /// and alice's outbox holding the Welcome (to carol) + Commit (to bob).
 fn setup_three_party_invite(
-    bob_rich_known: bool,
-    carol_rich_known: bool,
+    bob_known: bool,
+    carol_known: bool,
 ) -> (OfflineProtocol, OfflineProtocol, OfflineProtocol, String) {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
     let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
@@ -11981,11 +11982,16 @@ fn setup_three_party_invite(
             local_expires_at_ms: now_ms + 600_000,
         },
     );
-    if bob_rich_known {
-        crate::protocol::tests::feed_key_package_with_rich(
+    if bob_known {
+        // Both families from one key package, because that is what a real
+        // exchange carries: rich extras and document replication are
+        // separate fields of the same payload, and Alice attests each of
+        // them to the group from the same knowledge.
+        crate::protocol::tests::feed_key_package_with_capabilities(
             &mut alice,
             &id("bob"),
             vec![crate::protocol::RICH_PAYLOAD_V1],
+            vec![crate::protocol::DATA_SYNC_V1, DATA_GROUP_V1],
         );
         // The synthetic capability advertisement clobbered the pending key
         // package with junk bytes; restore the real one for the invite.
@@ -12025,11 +12031,12 @@ fn setup_three_party_invite(
         let carol_mls = carol.mls_manager_for_testing().read().unwrap();
         carol_mls.generate_key_package().unwrap()
     };
-    if carol_rich_known {
-        crate::protocol::tests::feed_key_package_with_rich(
+    if carol_known {
+        crate::protocol::tests::feed_key_package_with_capabilities(
             &mut alice,
             &id("carol"),
             vec![crate::protocol::RICH_PAYLOAD_V1],
+            vec![crate::protocol::DATA_SYNC_V1, DATA_GROUP_V1],
         );
     }
     alice.pending_key_packages.insert(
@@ -12262,6 +12269,234 @@ fn non_admin_commit_attestation_is_ignored() {
 
     assert!(
         !bob.group_rich_seal_active(&members),
+        "an attestation from a non-admin sender must be ignored"
+    );
+}
+
+// ----------------------------------------------------------------------------
+// The same four seams for group replication.
+//
+// `member_data` / `affected_member_data` are the `DATA_GROUP_V1` siblings of
+// the rich attestation above, and they are load-bearing in a way the rich
+// half is not: rich extras degrade to text the recipient still reads, whereas
+// a member outside the attestation web receives nobody's document edits and
+// has no way to notice. Because the group gate is all-members, one such
+// member closes replication for the whole group.
+// ----------------------------------------------------------------------------
+
+#[test]
+fn invite_attests_group_replication_on_commit_and_welcome() {
+    let (alice, _bob, _carol, _group_id) = setup_three_party_invite(true, true);
+
+    let commit = alice
+        .outbox_messages()
+        .find(|m| {
+            m.recipient.as_str() == &id("bob")
+                && m.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT)
+        })
+        .expect("commit to bob must be queued");
+    let commit_payload: GroupMlsCommitPayload = serde_json::from_str(
+        commit
+            .content
+            .strip_prefix(internal_prefixes::GROUP_MLS_COMMIT)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        commit_payload.affected_member_data,
+        Some(vec![DATA_GROUP_V1]),
+        "the commit must tell the existing members what the newcomer \
+         supports, or the group's gate stays closed on her account"
+    );
+
+    let welcome = alice
+        .outbox_messages()
+        .find(|m| {
+            m.recipient.as_str() == &id("carol")
+                && m.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
+        })
+        .expect("welcome to carol must be queued");
+    let welcome_payload: GroupMlsWelcomePayload = serde_json::from_str(
+        welcome
+            .content
+            .strip_prefix(internal_prefixes::GROUP_MLS_WELCOME)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        welcome_payload.member_data.get(&id("alice")),
+        Some(&vec![DATA_GROUP_V1]),
+        "the welcome must self-attest the inviter"
+    );
+    assert_eq!(
+        welcome_payload.member_data.get(&id("bob")),
+        Some(&vec![DATA_GROUP_V1]),
+        "Carol will never exchange key packages with Bob, so this map is the \
+         only way she learns he replicates"
+    );
+    assert!(
+        !welcome_payload.member_data.contains_key(&id("carol")),
+        "the joiner needs no entry about itself"
+    );
+}
+
+#[test]
+fn invite_omits_group_replication_attestation_for_unknown_members() {
+    // Absence of knowledge must propagate as absence here too. Claiming
+    // support for a member the inviter never heard from is the one error
+    // that puts `__DATA_V1__` frames in front of an install that renders
+    // them as chat text.
+    let (alice, _bob, _carol, _group_id) = setup_three_party_invite(false, false);
+
+    let commit = alice
+        .outbox_messages()
+        .find(|m| {
+            m.recipient.as_str() == &id("bob")
+                && m.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT)
+        })
+        .expect("commit to bob must be queued");
+    let commit_payload: GroupMlsCommitPayload = serde_json::from_str(
+        commit
+            .content
+            .strip_prefix(internal_prefixes::GROUP_MLS_COMMIT)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(commit_payload.affected_member_data, None);
+
+    let welcome = alice
+        .outbox_messages()
+        .find(|m| {
+            m.recipient.as_str() == &id("carol")
+                && m.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
+        })
+        .expect("welcome to carol must be queued");
+    let welcome_payload: GroupMlsWelcomePayload = serde_json::from_str(
+        welcome
+            .content
+            .strip_prefix(internal_prefixes::GROUP_MLS_WELCOME)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        welcome_payload.member_data.get(&id("alice")),
+        Some(&vec![DATA_GROUP_V1]),
+        "the inviter still self-attests from what it actually advertises"
+    );
+    assert!(!welcome_payload.member_data.contains_key(&id("bob")));
+}
+
+#[test]
+fn commit_attestation_opens_the_group_replication_gate() {
+    // Bob (an existing member) never exchanges key packages with carol. Until
+    // the commit lands she is a member of unknown capability, and because one
+    // group ciphertext reaches the whole roster, that one unknown holds Bob's
+    // gate shut for every document in the group.
+    let (alice, mut bob, _carol, _group_id) = setup_three_party_invite(true, true);
+    let members = vec![id("alice"), id("bob"), id("carol")];
+    assert!(
+        !bob.group_data_sync_active(&members),
+        "precondition: carol is unknown to bob until the commit arrives"
+    );
+
+    let commit = alice
+        .outbox_messages()
+        .find(|m| {
+            m.recipient.as_str() == &id("bob")
+                && m.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT)
+        })
+        .expect("commit to bob must be queued")
+        .clone();
+    bob.process_internal_message(&make_message(&id("alice"), &id("bob"), &commit.content));
+
+    assert!(
+        bob.group_data_sync_active(&members),
+        "the admin's attested commit must teach bob that the newcomer \
+         replicates, or the group quietly stops converging for everyone"
+    );
+}
+
+#[test]
+fn welcome_group_replication_attestation_is_bounded_to_the_roster() {
+    let (alice, _bob, mut carol, group_id) = setup_three_party_invite(true, true);
+
+    let welcome = alice
+        .outbox_messages()
+        .find(|m| {
+            m.recipient.as_str() == &id("carol")
+                && m.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
+        })
+        .expect("welcome to carol must be queued")
+        .clone();
+
+    // An inviter can put any name in this map. Only the MLS roster the
+    // joiner actually joined bounds who an attestation may be recorded for.
+    let mut payload: GroupMlsWelcomePayload = serde_json::from_str(
+        welcome
+            .content
+            .strip_prefix(internal_prefixes::GROUP_MLS_WELCOME)
+            .unwrap(),
+    )
+    .unwrap();
+    payload
+        .member_data
+        .insert(id("mallory"), vec![DATA_GROUP_V1]);
+    let tampered = format!(
+        "{}{}",
+        internal_prefixes::GROUP_MLS_WELCOME,
+        serde_json::to_string(&payload).unwrap()
+    );
+    carol.process_internal_message(&make_message(&id("alice"), &id("carol"), &tampered));
+    assert!(
+        carol.group_mesh.members.contains_key(&group_id),
+        "carol must have joined via the Welcome"
+    );
+
+    assert!(
+        carol.group_data_sync_active(&vec![id("alice"), id("bob"), id("carol")]),
+        "the welcome attestation must let the joiner replicate with members \
+         it never directly exchanged with"
+    );
+    assert!(
+        !carol.group_data_sync_active(&vec![id("carol"), id("mallory")]),
+        "a non-roster map entry must not be recorded"
+    );
+}
+
+#[test]
+fn non_admin_commit_group_replication_attestation_is_ignored() {
+    // Same trust bound as the role and the rich attestation: honored only
+    // from an admin sender, because adds are admin-only and a non-admin
+    // sender means the metadata is forged by construction.
+    let (alice, mut bob, _carol, group_id) = setup_three_party_invite(true, true);
+    let members = vec![id("alice"), id("bob"), id("carol")];
+
+    // Demote alice and promote bob in bob's own metadata, for the reason the
+    // rich sibling above spells out: demoting alice alone would leave her
+    // resolving as admin through the group-creator fallback.
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        bob_mls
+            .set_member_role(&gid, &id("alice"), GroupRole::Member)
+            .unwrap();
+        bob_mls
+            .set_member_role(&gid, &id("bob"), GroupRole::Admin)
+            .unwrap();
+    }
+
+    let commit = alice
+        .outbox_messages()
+        .find(|m| {
+            m.recipient.as_str() == &id("bob")
+                && m.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT)
+        })
+        .expect("commit to bob must be queued")
+        .clone();
+    bob.process_internal_message(&make_message(&id("alice"), &id("bob"), &commit.content));
+
+    assert!(
+        !bob.group_data_sync_active(&members),
         "an attestation from a non-admin sender must be ignored"
     );
 }

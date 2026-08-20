@@ -2114,6 +2114,19 @@ pub(crate) fn feed_key_package_with_rich(
     sender: &str,
     rich_versions: Vec<u8>,
 ) {
+    feed_key_package_with_capabilities(protocol, sender, rich_versions, Vec::new());
+}
+
+/// One key package advertising both capability families at once, which is
+/// what a real one does: `rich_versions` and `data_versions` are separate
+/// fields of the same payload, and a fixture that could only feed one of
+/// them makes a peer that supports both impossible to express.
+pub(crate) fn feed_key_package_with_capabilities(
+    protocol: &mut OfflineProtocol,
+    sender: &str,
+    rich_versions: Vec<u8>,
+    data_versions: Vec<u8>,
+) {
     let payload = KeyPackagePayload {
         user_id: sender.to_string(),
         key_package_data: vec![1, 2, 3, 4],
@@ -2123,7 +2136,7 @@ pub(crate) fn feed_key_package_with_rich(
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions,
-        data_versions: Vec::new(),
+        data_versions,
         nostr_pubkey: None,
     };
     let content = format!(
