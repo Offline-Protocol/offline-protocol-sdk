@@ -52,6 +52,7 @@ implementation written against these documents should interoperate.
 | [Identity and addressing](spec/identity.md) | Address derivation, canonical form, session and group identifiers |
 | [Message model and wire format](spec/wire-format.md) | The abstract message, the JSON floor, binary v1, the extension TLV registry |
 | [Control messages](spec/control-messages.md) | Reserved prefix registry, control-plane signing, the two exemption classes |
+| [Document replication](spec/data-sync.md) | Sync frames, anti-entropy, attachment references, blobs over the media path |
 | [Encryption envelopes](spec/encryption-envelopes.md) | MLS envelope forms, media chunk envelope, sealed rich payload |
 | [Group protocol](spec/group-protocol.md) | Group frames, membership commits, leaf identity binding, relay broadcast |
 | [Capability negotiation](spec/capability-negotiation.md) | What peers advertise, what it gates, what absence means |

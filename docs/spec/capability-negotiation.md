@@ -10,7 +10,7 @@ Peers advertise what they can parse in the key package payload, the body of a
 | `wire_versions` | Hop-local | Which frame encodings we may emit to this peer | JSON only |
 | `env_versions` | End to end | Which `__MLS_ENC__` payload forms we may emit | Legacy JSON envelope only |
 | `rich_versions` | End to end | Whether we may seal a `__RICH_V1__` body, and the v2 media envelope | Plain text only, extras dropped |
-| `data_versions` | End to end | Whether we may send `__DATA_V1__` document sync frames, and which document encoding they carry. Entry 1 is 1:1 replication; entry 2 additionally means the peer intercepts these frames inside a *group* ciphertext | No replication with that peer |
+| `data_versions` | End to end | Whether we may send `__DATA_V1__` document sync frames, and which document encoding they carry. Entry 1 is 1:1 replication; entry 2 additionally means the peer intercepts these frames inside a *group* ciphertext; entry 3 additionally means the peer speaks the blob-fetch frames and routes a data-purposed media transfer into its document layer | No replication with that peer |
 | `nostr_pubkey` | End to end | Which key metadata is sealed to on the Nostr path | Seal to the publicly computable key |
 
 The key package payload also carries `user_id`, the MLS key package itself, a
@@ -65,6 +65,15 @@ peer advertising `[1]` is not a peer advertising `[1, 2]` with something
 missing: it is an implementation that replicates 1:1 and would render a group
 replication frame as literal text. Treating the two as one flag either sends
 that peer a frame it cannot read or stops replicating with it altogether.
+
+Entry 3 is the same argument with a louder failure. A peer without it
+replicates perfectly well and has no idea what a data-purposed media transfer
+is, so it hands the bytes to its user as a downloaded file. For an attachment
+that is a file nobody asked for; for a document too large to fit a frame it is
+a CRDT encoding presented as a document. Entry 3 gates both the `need_blob` and
+`blob_gone` frames and every transfer marked for the data layer. It has no
+attested sibling: blob carriage is 1:1 in this version, so there is nothing
+about it for a group inviter to attest.
 
 Entry 2 has a second source, because members of a group never exchange key
 packages with each other: a group inviter MAY attest it for a member on the

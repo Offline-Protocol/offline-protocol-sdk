@@ -1041,6 +1041,10 @@ await store.flush('space-1', 'profile');
 | `flushAll()` | `void` | |
 | `docSize(space, doc)` | `number` | Compacted size in bytes |
 | `wipeAll()` | `void` | Delete every data-layer record. Only durable once replication has stopped |
+| `attachmentHash(bytesBase64)` | `string` | The address of some bytes, for writing a reference |
+| `fetchAttachment(space, hash)` | `void` | Ask the peer for a blob. Answers arrive as events |
+| `provideAttachment(space, peer, hash, bytesBase64)` | `void` | Answer a peer's request |
+| `declineAttachment(space, peer, hash)` | `void` | Tell a peer the bytes are gone |
 
 A space id is the MLS scope the space rides on: a peer address (replicates
 1:1 with that peer), a group id from `createGroup` (replicates with every
@@ -1061,12 +1065,60 @@ type DataValue =
   | { kind: 'int'; value: number }
   | { kind: 'float'; value: number }
   | { kind: 'text'; value: string }
-  | { kind: 'bytes'; value: number[] };
+  | { kind: 'bytes'; value: number[] }
+  | { kind: 'attachment'; hash: string; size: number; name?: string; mime?: string };
 ```
 
-Scalars only. Structured values go in as JSON strings and merge whole (last
-write wins per key), which is what v1 replicates: whole collections within a
-space, with no nested addressing and no query language.
+Scalars, plus one reference. Structured values go in as JSON strings and merge
+whole (last write wins per key), which is what v1 replicates: whole collections
+within a space, with no nested addressing and no query language.
+
+### Attachments
+
+An attachment is a blob the document refers to and does not contain. The
+document holds the reference; the bytes ride the media path.
+
+**Your app owns the bytes.** They never enter a document and never enter
+protocol state, so the SDK has no copy to serve. When a peer asks for one you
+are asked, and if you do not answer, nobody does.
+
+```typescript
+// Writing a reference. The size is yours to supply: it describes bytes that
+// live in your storage, not ours.
+const hash = await store.attachmentHash(bytesBase64);
+await store.mapSet(space, 'notes', 'files', 'plan', {
+  kind: 'attachment', hash, size: byteLength, name: 'plan.pdf',
+});
+
+// Serving one.
+proto.on('data_attachment_requested', async ({ space_id, peer_id, hash }) => {
+  const bytes = await myStore.load(hash);
+  if (bytes) await store.provideAttachment(space_id, peer_id, hash, bytes);
+  else await store.declineAttachment(space_id, peer_id, hash);
+});
+
+// Fetching one.
+await store.fetchAttachment(space, hash);
+proto.on('data_attachment_received', ({ hash, data }) => myStore.save(hash, data));
+proto.on('data_attachment_unavailable', ({ hash, reason }) => showMissing(hash, reason));
+```
+
+Four things worth knowing before you build on this:
+
+- **Declining is a real answer.** A reference outlives the bytes it names, so
+  a peer holding a reference and no blob is normal. Stay silent and the asking
+  side cannot tell you from a slow radio, and shows a person a spinner that
+  never resolves.
+- **A reference is replaced, never edited.** Two people attaching different
+  blobs to one key resolve like any other value; there is no half-attachment
+  state to handle.
+- **`size` describes bytes somewhere else.** Do not use it to size a buffer.
+  It exists so a person can decide whether they want the thing before it comes
+  over Bluetooth.
+- **1:1 only in this release.** References replicate in group spaces like any
+  other value, but fetching the bytes from a group member is refused: the
+  transfer needs a confirmed pairwise session and two members of a group need
+  not have one.
 
 ### Durability
 
@@ -1076,6 +1128,11 @@ event fires **after** the change is durable, so a UI that re-renders on it is
 rendering state that survives a restart.
 
 ### Limits
+
+A document that outgrows a 32 KiB sync frame is carried over the media path
+instead. One that cannot be replicated at all raises `data_doc_unsyncable`,
+which is worth handling: the two replicas will not converge, both sides keep
+accepting edits, and nothing else about that state looks like a problem.
 
 A document is capped at 1 MiB compacted, with a `data_doc_size_warning` event
 at 768 KiB. Passing the cap raises `DocTooLarge`. The breaching change is still

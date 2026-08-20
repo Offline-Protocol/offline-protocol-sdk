@@ -1937,3 +1937,306 @@ mod tests {
         assert_eq!(blob_digest(b"one").len(), 32);
     }
 }
+
+/// The frozen wire vectors for `__DATA_V1__`.
+///
+/// The conformance surface a second implementation is written against, and
+/// the reason this layer is a protocol rather than an SDK feature. The file
+/// was computed independently of the code it pins, so a mismatch is evidence
+/// about the code rather than a disagreement between two copies of the same
+/// mistake.
+///
+/// When one of these fails the wire format has changed. Bump the frame
+/// version and negotiate a new `data_versions` entry. Do NOT edit the
+/// expected values to make the test pass: every shipped install still speaks
+/// the old ones, and a silent change here is a silent break there.
+#[cfg(test)]
+mod golden_vectors {
+    use super::*;
+
+    const VECTORS: &str = include_str!("../../tests/data/data-sync-v1.vectors.json");
+
+    fn vectors() -> serde_json::Value {
+        serde_json::from_str(VECTORS).expect("the vector file is JSON")
+    }
+
+    /// Frame the way [`OfflineProtocol::send_sync_frame`] does, which is the
+    /// only place the version is spliced in. Reproduced rather than called
+    /// because calling it needs a whole protocol, and what is pinned here is
+    /// the encoding, not the send path.
+    fn framed(body: &SyncBody) -> String {
+        let json = serde_json::to_string(body).expect("encode");
+        format!(
+            "{}{{\"v\":{},{}",
+            internal_prefixes::DATA_V1,
+            DATA_SYNC_V1,
+            &json[1..]
+        )
+    }
+
+    fn wire(vectors: &serde_json::Value, name: &str) -> String {
+        vectors["frames"]
+            .as_array()
+            .expect("frames")
+            .iter()
+            .find(|frame| frame["name"] == name)
+            .unwrap_or_else(|| panic!("no vector named {name}"))["wire"]
+            .as_str()
+            .expect("wire is a string")
+            .to_string()
+    }
+
+    #[test]
+    fn the_vector_file_is_the_size_it_was() {
+        // A file silently shortened by a bad merge would make every
+        // assertion below pass by not running.
+        let vectors = vectors();
+        assert_eq!(vectors["frames"].as_array().expect("frames").len(), 8);
+        assert_eq!(vectors["version"].as_u64(), Some(DATA_SYNC_V1 as u64));
+        assert_eq!(vectors["prefix"].as_str(), Some(internal_prefixes::DATA_V1));
+    }
+
+    #[test]
+    fn every_frame_kind_encodes_to_its_vector() {
+        let vectors = vectors();
+
+        let mut docs = BTreeMap::new();
+        docs.insert("notes".to_string(), "AQID".to_string());
+        assert_eq!(
+            framed(&SyncBody::Versions {
+                reply: false,
+                partial: false,
+                docs,
+            }),
+            wire(&vectors, "version offer, complete, asking")
+        );
+
+        // Inserted out of order on purpose: the map is ordered, so the wire
+        // does not depend on what order a sender happened to hold them in.
+        let mut docs = BTreeMap::new();
+        docs.insert("b".to_string(), "Zg==".to_string());
+        docs.insert("a".to_string(), String::new());
+        assert_eq!(
+            framed(&SyncBody::Versions {
+                reply: true,
+                partial: true,
+                docs,
+            }),
+            wire(&vectors, "version offer, answering leg")
+        );
+
+        assert_eq!(
+            framed(&SyncBody::Versions {
+                reply: false,
+                partial: false,
+                docs: BTreeMap::new(),
+            }),
+            wire(&vectors, "version offer with no documents")
+        );
+
+        let blob = BASE64.encode([0u8, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(
+            framed(&SyncBody::Delta {
+                doc: "notes".to_string(),
+                blob: blob.clone(),
+            }),
+            wire(&vectors, "delta")
+        );
+        assert_eq!(
+            framed(&SyncBody::Snapshot {
+                doc: "notes".to_string(),
+                blob,
+            }),
+            wire(&vectors, "snapshot")
+        );
+        assert_eq!(
+            framed(&SyncBody::NeedSnapshot {
+                doc: "notes".to_string(),
+            }),
+            wire(&vectors, "snapshot request")
+        );
+
+        let hash = vectors["attachment_hashes"][0]["sha256"]
+            .as_str()
+            .expect("hash")
+            .to_string();
+        assert_eq!(
+            framed(&SyncBody::NeedBlob { hash: hash.clone() }),
+            wire(&vectors, "blob request")
+        );
+        assert_eq!(
+            framed(&SyncBody::BlobGone { hash }),
+            wire(&vectors, "blob refusal")
+        );
+    }
+
+    #[test]
+    fn every_vector_parses_back_into_the_kind_it_names() {
+        // The other direction, and the one a second implementation's sender
+        // is judged by. Encoding-only vectors would let a decoder drift.
+        let vectors = vectors();
+        for frame in vectors["frames"].as_array().expect("frames") {
+            let wire = frame["wire"].as_str().expect("wire");
+            let body = wire
+                .strip_prefix(internal_prefixes::DATA_V1)
+                .expect("every vector carries the marker");
+            let value: serde_json::Value = serde_json::from_str(body).expect("the body is JSON");
+            assert_eq!(
+                value["v"].as_u64(),
+                Some(DATA_SYNC_V1 as u64),
+                "{}: version",
+                frame["name"]
+            );
+            assert_eq!(
+                value["k"].as_str(),
+                frame["kind"].as_str(),
+                "{}: kind",
+                frame["name"]
+            );
+            let parsed: SyncBody =
+                serde_json::from_value(value).expect("the body parses into a frame");
+            let kind = match parsed {
+                SyncBody::Versions { .. } => "vv",
+                SyncBody::Delta { .. } => "delta",
+                SyncBody::Snapshot { .. } => "snap",
+                SyncBody::NeedSnapshot { .. } => "need_snap",
+                SyncBody::NeedBlob { .. } => "blob",
+                SyncBody::BlobGone { .. } => "gone",
+            };
+            let expected = match frame["kind"].as_str().expect("kind") {
+                "need_blob" => "blob",
+                "blob_gone" => "gone",
+                other => other,
+            };
+            assert_eq!(kind, expected, "{}: round trip", frame["name"]);
+        }
+    }
+
+    #[test]
+    fn absent_flags_parse_as_false() {
+        let vectors = vectors();
+        for case in vectors["parse_defaults"]
+            .as_array()
+            .expect("parse_defaults")
+        {
+            let value: serde_json::Value =
+                serde_json::from_str(case["body"].as_str().expect("body")).expect("JSON");
+            let SyncBody::Versions { reply, partial, .. } =
+                serde_json::from_value(value).expect("parses")
+            else {
+                panic!("{}: expected a version offer", case["name"]);
+            };
+            assert_eq!(reply, case["expect"]["reply"].as_bool().expect("reply"));
+            assert_eq!(
+                partial,
+                case["expect"]["partial"].as_bool().expect("partial")
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_hashes_match_their_vectors() {
+        let vectors = vectors();
+        for case in vectors["attachment_hashes"]
+            .as_array()
+            .expect("attachment_hashes")
+        {
+            let bytes = match (case.get("input_utf8"), case.get("input_hex")) {
+                (Some(text), _) => text.as_str().expect("utf8").as_bytes().to_vec(),
+                (_, Some(hex)) => {
+                    let hex = hex.as_str().expect("hex");
+                    (0..hex.len())
+                        .step_by(2)
+                        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex byte"))
+                        .collect()
+                }
+                _ => panic!("a hash vector needs an input"),
+            };
+            assert_eq!(
+                bytes.len() as u64,
+                case["size"].as_u64().expect("size"),
+                "the vector's own size must describe its own input"
+            );
+            assert_eq!(
+                OfflineProtocol::data_attachment_hash(&bytes),
+                case["sha256"].as_str().expect("sha256").to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_references_encode_to_their_vectors() {
+        use offline_protocol_data::DataValue;
+        let vectors = vectors();
+        let hash = vectors["attachment_hashes"][0]["sha256"]
+            .as_str()
+            .expect("hash")
+            .to_string();
+        let size = vectors["attachment_hashes"][0]["size"]
+            .as_u64()
+            .expect("size");
+
+        let full = DataValue::Attachment {
+            hash: hash.clone(),
+            size,
+            name: Some("plan.pdf".to_string()),
+            mime: Some("application/pdf".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_string(&full).expect("encode"),
+            vectors["attachment_references"][0]["json"]
+                .as_str()
+                .expect("json")
+        );
+
+        // Absent, not null. A reader that has to tell one from the other has
+        // been given two spellings of one value.
+        let bare = DataValue::attachment(hash, size);
+        assert_eq!(
+            serde_json::to_string(&bare).expect("encode"),
+            vectors["attachment_references"][1]["json"]
+                .as_str()
+                .expect("json")
+        );
+        assert!(!vectors["attachment_references"][1]["json"]
+            .as_str()
+            .expect("json")
+            .contains("null"));
+    }
+
+    #[test]
+    fn data_purposes_encode_to_their_vectors() {
+        let vectors = vectors();
+        let hash = vectors["attachment_hashes"][0]["sha256"]
+            .as_str()
+            .expect("hash")
+            .to_string();
+        assert_eq!(
+            serde_json::to_string(&DataPurpose::Attachment { hash }).expect("encode"),
+            vectors["data_purposes"][0]["json"].as_str().expect("json")
+        );
+        assert_eq!(
+            serde_json::to_string(&DataPurpose::Snapshot {
+                doc: "notes".to_string(),
+            })
+            .expect("encode"),
+            vectors["data_purposes"][1]["json"].as_str().expect("json")
+        );
+    }
+
+    #[test]
+    fn blob_digests_match_their_vectors() {
+        let vectors = vectors();
+        for case in vectors["blob_digests"].as_array().expect("blob_digests") {
+            let hex = case["input_hex"].as_str().expect("hex");
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex byte"))
+                .collect();
+            assert_eq!(
+                blob_digest(&bytes),
+                case["digest"].as_str().expect("digest")
+            );
+        }
+    }
+}

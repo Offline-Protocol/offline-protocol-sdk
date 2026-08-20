@@ -16,11 +16,29 @@ document says which reading is normative for the wire.
 | [Identity and addressing](identity.md) | Address derivation, canonical form, self-certification, session and group identifiers |
 | [Message model and wire format](wire-format.md) | The abstract message, the JSON encoding floor, the binary v1 encoding, the extension TLV registry |
 | [Control messages](control-messages.md) | The reserved prefix registry, control-plane signing, and the two exemption classes |
+| [Document replication](data-sync.md) | Document sync frames, the anti-entropy exchange, attachment references, and what travels the media path |
 | [Encryption envelopes](encryption-envelopes.md) | The `__MLS_ENC__` envelope forms, the media chunk envelope, and the sealed rich payload |
 | [Group protocol](group-protocol.md) | Group frames, membership commits, leaf identity binding, relay broadcast and the delivery report |
 | [Capability negotiation](capability-negotiation.md) | What peers advertise, what each capability gates, and what happens on absence |
 | [Username discovery and invites](username-discovery.md) | The self-certifying invite payload, and the non-authoritative username directory |
 | [The gateway contract](gateway-contract.md) | What a gateway is, the five verbs it implements, the gateway-daemon wire protocol, and the backbone |
+
+## Conformance vectors
+
+Frozen test vectors accompany the chapters that have them, and are the
+practical definition of interoperating with this implementation. They live in
+the crate whose code they pin, so a packaged build carries its own vectors:
+
+| Vectors | Chapter |
+|---------|---------|
+| `crates/offline-protocol/tests/data/data-sync-v1.vectors.json` | [Document replication](data-sync.md) |
+| `crates/offline-protocol-transport/tests/data/nip44.vectors.json` | The NIP-44 sealing used on the Nostr carrier |
+
+A vector is computed independently of the code it pins wherever that is
+possible, so a mismatch is evidence about the code rather than a disagreement
+between two copies of the same mistake. When one fails, the wire format has
+changed and needs a new version identifier. Editing the expected value to make
+a test pass converts a caught break into a shipped one.
 
 ## Conformance language
 
