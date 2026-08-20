@@ -1731,7 +1731,7 @@ impl OfflineProtocol {
         self.peer_data_group.remove(peer);
         self.peer_data_group_attested.remove(peer);
         #[cfg(feature = "data")]
-        self.last_data_sync_offer.remove(peer);
+        self.forget_data_sync_offer_windows(peer);
     }
 
     /// [`Self::forget_data_sync_peer`] for every peer at once.

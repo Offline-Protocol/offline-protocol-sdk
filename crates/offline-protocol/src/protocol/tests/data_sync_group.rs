@@ -898,3 +898,38 @@ fn a_roster_wide_frame_clears_the_ratchet_gap_budget() {
          promotion"
     );
 }
+
+#[test]
+fn forgetting_a_peer_drops_its_group_offer_windows_too() {
+    // The offer window and the capability are two halves of one fact. A
+    // group window is keyed by (member, group), so dropping the bare peer
+    // key leaves one behind per shared group, and each of those suppresses
+    // the first offer to that peer after the capability is relearned —
+    // which is a document that silently does not sync, one space at a time.
+    let (mut alice, mut bob, _carol, group) = trio();
+
+    alice
+        .protocol
+        .kick_group_data_sync(&group, &bob.address, "rediscovered");
+    alice.protocol.kick_data_sync(&bob.address, "rediscovered");
+    assert!(
+        alice
+            .protocol
+            .last_data_sync_offer
+            .keys()
+            .any(|k| k.contains(&group)),
+        "precondition: the group offer has to have stamped a window"
+    );
+
+    alice.protocol.forget_data_sync_peer(&bob.address);
+
+    assert!(
+        !alice
+            .protocol
+            .last_data_sync_offer
+            .keys()
+            .any(|k| k.starts_with(bob.address.as_str())),
+        "every window belonging to the forgotten peer has to go, the group \
+         ones included"
+    );
+}

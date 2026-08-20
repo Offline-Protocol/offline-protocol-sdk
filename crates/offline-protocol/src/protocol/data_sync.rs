@@ -255,8 +255,12 @@ pub(crate) fn blob_digest(blob: &[u8]) -> String {
 /// id or address can contain, so no composed key can ever collide with a
 /// peer's own.
 fn group_offer_key(member: &str, group_id: &str) -> String {
-    format!("{member}\x01{group_id}")
+    format!("{member}{GROUP_OFFER_KEY_SEP}{group_id}")
 }
+
+/// The separator [`group_offer_key`] composes with, named so the split that
+/// takes a key back apart cannot drift from the format that built it.
+const GROUP_OFFER_KEY_SEP: char = '\x01';
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -309,6 +313,30 @@ impl OfflineProtocol {
             &SyncChannel::GroupDirected(member.to_string()),
             cause,
         );
+    }
+
+    /// Drop every offer window belonging to `peer`: the 1:1 one, and the
+    /// group one for each group shared with them.
+    ///
+    /// The group windows are keyed by (member, group), so removing the bare
+    /// peer key leaves them all behind, and each of them suppresses the
+    /// first group offer to that peer for a further window once the
+    /// capability is relearned. That is the same silent non-sync
+    /// [`Self::forget_data_sync_peer`] exists to prevent, one space at a
+    /// time.
+    ///
+    /// Windows left by a group this device *left* are deliberately not
+    /// swept here: they name a scope that no longer replicates at all, and
+    /// on a re-join the worst they can cost is one suppressed offer that
+    /// the next discovery re-sends.
+    #[cfg(feature = "data")]
+    pub(crate) fn forget_data_sync_offer_windows(&mut self, peer: &str) {
+        self.last_data_sync_offer.retain(|key, _| {
+            key != peer
+                && !key
+                    .split_once(GROUP_OFFER_KEY_SEP)
+                    .is_some_and(|(member, _)| member == peer)
+        });
     }
 
     /// Whether the reconciliation sweep keyed by `key` is outside its
