@@ -2454,7 +2454,11 @@ export interface DataAttachmentUnavailableEvent extends BaseEvent {
   space_id: string;
   peer_id: string;
   hash: string;
-  /** `declined`, `hash_mismatch`, or a transfer failure reason. */
+  /**
+   * `declined` (the peer no longer holds it), `timeout`, `evicted`
+   * (displaced by newer fetches), `hash_mismatch`, or a transfer failure
+   * reason.
+   */
   reason: string;
 }
 

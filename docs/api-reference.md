@@ -1103,6 +1103,23 @@ proto.on('data_attachment_received', ({ hash, data }) => myStore.save(hash, data
 proto.on('data_attachment_unavailable', ({ hash, reason }) => showMissing(hash, reason));
 ```
 
+**Answer every request, either way.** A reference outlives the bytes it names,
+so a peer holding a reference and no blob is ordinary rather than broken.
+Without a refusal the asking side cannot tell that from a slow radio, and shows
+somebody a spinner that never resolves. A fetch that nobody answers ends by
+itself after fifteen minutes with `reason: 'timeout'`, and one displaced by
+newer fetches ends with `reason: 'evicted'`.
+
+**Keep blobs to a size you are willing to hold in memory.** A fetched blob
+arrives whole, in one event, base64 encoded. The protocol's own ceiling is the
+media transfer limit and it is far larger than a phone wants to materialise at
+once, so pick your own limit rather than inheriting that one.
+
+**`name` and `mime` are untrusted.** Whoever wrote the reference chose them,
+and they replicate to everyone in the space whether or not anybody fetches the
+blob. Render `name` as inert text and never treat it as a path: the bytes are
+addressed by `hash` alone.
+
 Four things worth knowing before you build on this:
 
 - **Declining is a real answer.** A reference outlives the bytes it names, so

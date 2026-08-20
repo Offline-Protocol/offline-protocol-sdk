@@ -1557,6 +1557,12 @@ impl OfflineProtocol {
                 .map(|(key, _)| key.clone())
             {
                 self.pending_attachment_fetches.remove(&oldest);
+                // Reported, exactly as an expiry is. Eviction reaches the
+                // same end state by a different road: the fetch is over and
+                // no bytes will ever be admitted for it, so an application
+                // told nothing is left showing the spinner that the whole
+                // refusal mechanism exists to end.
+                Self::report_fetch_ended(&self.shared_state, &oldest, "evicted");
             }
         }
         self.pending_attachment_fetches.insert(key, Instant::now());
@@ -1749,6 +1755,36 @@ impl OfflineProtocol {
             .retain(|key, _| !key.starts_with(&prefix));
     }
 
+    /// Report a fetch this device has given up on, keyed the way
+    /// [`Self::attachment_fetch_key`] composes them.
+    ///
+    /// Shared by every road that ends a fetch without bytes, because they all
+    /// owe the application the same thing and a second spelling of this event
+    /// is a road that quietly owes it nothing. `reason` is a fixed token this
+    /// crate chooses, never a peer's words: see the producer rule in
+    /// `telemetry::scrub_event`.
+    fn report_fetch_ended(
+        shared_state: &std::sync::Arc<std::sync::Mutex<crate::protocol::SharedState>>,
+        key: &str,
+        reason: &str,
+    ) {
+        let Some((space, hash)) = key.split_once(GROUP_OFFER_KEY_SEP) else {
+            return;
+        };
+        debug!(space, reason, "A blob fetch ended with no bytes");
+        if let Ok(state) = crate::protocol::lock_shared_state(shared_state) {
+            state.emit_event(Event::DataAttachmentUnavailable {
+                // A 1:1 space IS the peer, which is why one key composes
+                // both: a fetch is only ever made in a space named after the
+                // peer that can answer it.
+                space_id: space.to_string(),
+                peer_id: space.to_string(),
+                hash: hash.to_string(),
+                reason: reason.to_string(),
+            });
+        }
+    }
+
     /// Give up on fetches nobody answered, and say so.
     ///
     /// The reporting half is the point. A holder is only asked to answer
@@ -1767,18 +1803,7 @@ impl OfflineProtocol {
             .collect();
         for key in expired {
             self.pending_attachment_fetches.remove(&key);
-            let Some((space, hash)) = key.split_once(GROUP_OFFER_KEY_SEP) else {
-                continue;
-            };
-            debug!(space, "A blob fetch expired with no answer");
-            if let Ok(state) = crate::protocol::lock_shared_state(&self.shared_state) {
-                state.emit_event(Event::DataAttachmentUnavailable {
-                    space_id: space.to_string(),
-                    peer_id: space.to_string(),
-                    hash: hash.to_string(),
-                    reason: "timeout".to_string(),
-                });
-            }
+            Self::report_fetch_ended(&self.shared_state, &key, "timeout");
         }
     }
 
@@ -1804,6 +1829,23 @@ impl OfflineProtocol {
         }
         if Self::validate_attachment_hash(hash).is_err() {
             warn!(space, "Blob request names something that is not a hash");
+            return Ok(());
+        }
+        // A request this device could not answer is not put to the
+        // application. Both answers to `DataAttachmentRequested` refuse
+        // toward a peer that never advertised carriage: `provide` cannot
+        // reach the media path and `decline` cannot reach the wire. Emitting
+        // it anyway hands an app a question with no legal reply, which reads
+        // to whoever handles it as an SDK that rejects its own events.
+        //
+        // Ahead of the rate limiter rather than behind it, so a peer that
+        // cannot be answered spends no window slot: the budget exists to
+        // bound work this device would otherwise do, and there is none here.
+        if !self.data_media_active(space) {
+            warn!(
+                space,
+                "A blob request came from a peer that never advertised carriage; ignoring"
+            );
             return Ok(());
         }
         if !self.blob_request_due(space, hash) {
@@ -1864,12 +1906,27 @@ impl OfflineProtocol {
     /// transfer said about itself, which is the same rule every sync frame
     /// follows and for the same reason: a space a peer can name is a space a
     /// peer can reach.
+    ///
+    /// Gated on the kill switch, which is belt to the storage seam's braces
+    /// rather than the thing that stops an import: `require_data_storage`
+    /// already fails closed with `DataDisabled`, so a device with the layer
+    /// off writes nothing regardless. This makes the refusal local and free,
+    /// and keeps the rule uniform across both roads into this layer. The
+    /// admission check in `receive` is the one that earns its keep, because
+    /// it is the one that refuses before a whole blob is buffered.
     pub(crate) fn accept_data_media_payload(
         &mut self,
         sender: &str,
         purpose: &DataPurpose,
         bytes: Vec<u8>,
     ) {
+        if !self.config.data.enabled {
+            debug!(
+                peer = %sender,
+                "Document-layer transfer dropped: the data layer is off"
+            );
+            return;
+        }
         match purpose {
             DataPurpose::Attachment { hash } => {
                 let key = Self::attachment_fetch_key(sender, hash);

@@ -1039,11 +1039,23 @@ impl OfflineProtocol {
 
     /// Whether a data-purposed transfer may be admitted at all.
     ///
-    /// Only the attachment case is answerable here: an attachment is bytes
-    /// this device asked a named peer for, so the request either exists or
-    /// it does not. A snapshot is unsolicited by design (it answers a version
-    /// exchange rather than a fetch) and is bounded instead by the size check
-    /// and the containment on the import path.
+    /// Only the attachment case is answerable by the fetch record: an
+    /// attachment is bytes this device asked a named peer for, so the request
+    /// either exists or it does not. A snapshot is unsolicited by design (it
+    /// answers a version exchange rather than a fetch) and is bounded instead
+    /// by the size check and the containment on the import path.
+    ///
+    /// The runtime kill switch is checked ahead of both, and what it saves is
+    /// the buffering rather than the import. A device with the layer off was
+    /// never going to write anything: `require_data_storage` fails closed
+    /// with `DataDisabled` further down. But a transfer admitted at chunk 0
+    /// is reassembled in full before it reaches that seam, so without this
+    /// gate a device that opted out still holds a peer's whole blob in memory
+    /// on its way to a refusal that was certain from the start.
+    ///
+    /// A conforming peer never sends one, because a build with the layer off
+    /// never advertises the capability that permits it. This is the arm for
+    /// the peer whose knowledge of us is stale or wrong.
     fn admits_data_media_transfer(
         &self,
         sender: &str,
@@ -1054,6 +1066,13 @@ impl OfflineProtocol {
         };
         #[cfg(feature = "data")]
         {
+            if !self.config.data.enabled {
+                warn!(
+                    peer = %sender,
+                    "Refusing a document-layer transfer: the data layer is off"
+                );
+                return false;
+            }
             if let crate::media_envelope::DataPurpose::Attachment { hash } = purpose {
                 if !self.awaiting_attachment(sender, hash) {
                     warn!(

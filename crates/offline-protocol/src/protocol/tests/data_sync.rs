@@ -2403,3 +2403,227 @@ fn unsolicited_blob_bytes_are_refused_at_the_door() {
     );
     assert!(events_named(&bob, "file_received").is_empty());
 }
+
+/// Fill a document past the frame budget, so the catch-up ladder has no rung
+/// left below the media path.
+///
+/// The filler varies per key on purpose: repeated text compresses inside the
+/// engine's encoding, and a document that compresses back under the budget
+/// never reaches the rung these tests are about.
+fn fill_past_the_frame_budget(node: &mut Node, space: &str, mut seed: u64) {
+    for round in 0..24 {
+        let filler: String = (0..4096)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                char::from(b'0' + (seed % 64) as u8)
+            })
+            .collect();
+        node.protocol
+            .data_map_set(
+                space,
+                "notes",
+                "m",
+                &format!("k{round}"),
+                DataValue::text(filler),
+            )
+            .expect("set");
+    }
+    node.protocol.data_flush(space, "notes").expect("flush");
+    assert!(
+        node.protocol.data_doc_size(space, "notes").expect("size")
+            > crate::protocol::data_sync::MAX_SYNC_BLOB_BYTES as u64,
+        "the fixture must build a document no frame can carry"
+    );
+}
+
+#[test]
+fn the_kill_switch_refuses_a_carried_transfer_before_it_is_buffered() {
+    // What the switch is worth here, stated exactly. It is NOT what stops
+    // the import: `require_data_storage` already fails closed with
+    // `DataDisabled`, so a device with the layer off writes nothing and
+    // creates no document either way. What it stops is the buffering. A
+    // transfer admitted at chunk 0 is reassembled in full before anything
+    // downstream gets a say, so without this a device that opted out still
+    // holds a peer's whole blob in memory to reach a seam that was always
+    // going to refuse it.
+    //
+    // The peer here is nonconforming by construction: it learned the
+    // capability while the layer was on and kept sending after it went off,
+    // which is the case the envelope-version comment calls "if the capability
+    // gate is ever wrong".
+    let (mut alice, mut bob) = pair();
+    bob.protocol.config.data.enabled = false;
+
+    // Large enough that one window cannot finish it, so the assembly is
+    // observably open at the point the gate either refused it or did not.
+    let payload = vec![7u8; 2 * 1024 * 1024];
+    alice
+        .protocol
+        .send_media_inner(
+            bob.address.clone(),
+            payload,
+            "notes".to_string(),
+            offline_protocol_core::ContentType::File,
+            crate::protocol::types::MediaSendOptions::default(),
+            Some(crate::media_envelope::DataPurpose::Snapshot {
+                doc: "notes".to_string(),
+            }),
+        )
+        .expect("a peer that advertised carriage accepts the send");
+    pump(&mut alice, &mut bob);
+
+    assert_eq!(
+        bob.protocol.file_transfer_manager.active_transfer_count(),
+        0,
+        "a device with the layer off must buffer nothing for it"
+    );
+    assert!(events_named(&bob, "file_received").is_empty());
+    assert!(events_named(&bob, "file_progress").is_empty());
+
+    // The control, over the same send and the same chunk count: with the
+    // layer on, the transfer IS admitted and the assembly IS open. Without
+    // this the assertion above passes for a fixture that never sent anything,
+    // or for a chunk 0 that never arrived.
+    let (mut alice, mut bob) = pair();
+    let payload = vec![7u8; 2 * 1024 * 1024];
+    alice
+        .protocol
+        .send_media_inner(
+            bob.address.clone(),
+            payload,
+            "notes".to_string(),
+            offline_protocol_core::ContentType::File,
+            crate::protocol::types::MediaSendOptions::default(),
+            Some(crate::media_envelope::DataPurpose::Snapshot {
+                doc: "notes".to_string(),
+            }),
+        )
+        .expect("send");
+    pump(&mut alice, &mut bob);
+    assert_eq!(
+        bob.protocol.file_transfer_manager.active_transfer_count(),
+        1,
+        "the same transfer must be admitted when the layer is on"
+    );
+}
+
+#[test]
+fn a_wipe_takes_the_outstanding_questions_with_it() {
+    // A pending fetch is not bookkeeping: it is what admits arriving bytes.
+    // One surviving a wipe would let an answer land for a space the wipe
+    // erased, and hand it to the application as a reply to a question that no
+    // longer exists.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+    let blob = b"bytes the wipe should make irrelevant".to_vec();
+    let hash = OfflineProtocol::data_attachment_hash(&blob);
+
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+    assert!(
+        bob.protocol.awaiting_attachment(&bob_space, &hash),
+        "the fixture must leave a real question outstanding"
+    );
+
+    bob.protocol.data_wipe_all().expect("wipe");
+    assert!(
+        !bob.protocol.awaiting_attachment(&bob_space, &hash),
+        "the wipe must take the question with the content it was about"
+    );
+
+    // And the consequence, which is the part worth pinning: bytes that would
+    // have been admitted before the wipe are refused after it.
+    clear_events(&bob);
+    alice
+        .protocol
+        .data_provide_attachment(&alice_space, &bob.address, &hash, blob)
+        .expect("provide");
+    settle_media(&mut alice, &mut bob);
+    assert!(
+        events_named(&bob, "data_attachment_received").is_empty(),
+        "an answer to a wiped question must not reach the application"
+    );
+    assert!(events_named(&bob, "file_received").is_empty());
+}
+
+#[test]
+fn a_fetch_evicted_by_a_newer_one_is_reported_rather_than_forgotten() {
+    // Eviction reaches the same end state as expiry by a different road: the
+    // fetch is over and no bytes will ever be admitted for it. An application
+    // told nothing is left showing the spinner the whole refusal mechanism
+    // exists to end.
+    let (mut bob, mut alice) = pair();
+    let space = Node::space_for(&alice);
+    let cap = crate::protocol::data_sync::MAX_PENDING_ATTACHMENT_FETCHES;
+
+    let hash_of = |n: usize| OfflineProtocol::data_attachment_hash(format!("blob {n}").as_bytes());
+    for n in 0..cap {
+        bob.protocol
+            .data_fetch_attachment(&space, &hash_of(n))
+            .expect("fetch");
+    }
+    clear_events(&bob);
+    assert!(
+        bob.protocol.awaiting_attachment(&space, &hash_of(0)),
+        "the oldest fetch must still be outstanding before the one that evicts it"
+    );
+
+    // One past the bound. The oldest goes, and has to say so.
+    bob.protocol
+        .data_fetch_attachment(&space, &hash_of(cap))
+        .expect("fetch");
+
+    let ended = events_named(&bob, "data_attachment_unavailable");
+    assert_eq!(
+        ended.len(),
+        1,
+        "exactly the evicted fetch is reported: {ended:?}"
+    );
+    assert_eq!(ended[0]["reason"].as_str(), Some("evicted"));
+    assert_eq!(ended[0]["hash"].as_str(), Some(hash_of(0).as_str()));
+    assert!(
+        !bob.protocol.awaiting_attachment(&space, &hash_of(0)),
+        "and the entry it named is really gone"
+    );
+}
+
+#[test]
+fn a_request_this_device_could_not_answer_is_never_put_to_the_application() {
+    // Both answers refuse toward a peer that never advertised carriage:
+    // `provide` cannot reach the media path and `decline` cannot reach the
+    // wire. Emitting the request anyway hands an app a question with no legal
+    // reply, which reads to whoever handles it as an SDK rejecting its own
+    // events.
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    let hash = OfflineProtocol::data_attachment_hash(b"something asked for");
+
+    // Alice stops believing Bob can carry blobs, while Bob still asks.
+    alice.protocol.peer_data_media.remove(&bob.address);
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+    assert!(
+        events_named(&alice, "data_attachment_requested").is_empty(),
+        "a request that cannot be answered must not be raised"
+    );
+
+    // The control, over the same wire and the same handler: with the
+    // capability back, a request IS raised. Without it this test passes for a
+    // frame that never arrived.
+    alice.protocol.peer_data_media.insert(bob.address.clone());
+    let other = OfflineProtocol::data_attachment_hash(b"asked for later");
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &other)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+    let asked = events_named(&alice, "data_attachment_requested");
+    assert_eq!(asked.len(), 1, "the answerable request must be raised");
+    assert_eq!(asked[0]["hash"].as_str(), Some(other.as_str()));
+}

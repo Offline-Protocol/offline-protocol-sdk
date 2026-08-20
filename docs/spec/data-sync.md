@@ -304,6 +304,29 @@ and MUST NOT be trusted as an allocation hint. It exists so an application can
 decide whether it wants the thing before asking for it over a radio that may
 be Bluetooth.
 
+`name` and `mime` are untrusted display text written by whoever wrote the
+reference, and they replicate to every member of the space whether or not
+anybody fetches the blob. An implementation MUST NOT treat `name` as a path,
+and SHOULD render it as inert text: it is written by a peer, and a name
+carrying control characters or bidirectional overrides is the cheapest way to
+make one thing look like another to a person deciding whether to open it. The
+bytes are addressed by `hash` alone, so nothing about carriage depends on
+either field.
+
+### How large a blob may be
+
+A blob rides the media path and is bounded by it, not by the document layer:
+the transfer layer's own file-size limit is the ceiling, and it is generous
+(hundreds of megabytes) because it was sized for the files people send each
+other.
+
+That ceiling is not a recommendation. A fetched blob is delivered to the
+application whole, in one event, so its bytes are held in memory on the
+receiving side at least once, and on a phone the practical limit is well below
+the protocol's. An implementation SHOULD keep attachments to a size it is
+willing to materialise in memory, and an application writing references SHOULD
+choose that limit deliberately rather than inheriting the transfer maximum.
+
 ### The fetch
 
 Fetching is pull. A reference replicates to every member of a space; the bytes

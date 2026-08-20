@@ -1722,7 +1722,10 @@ pub enum Event {
         peer_id: String,
         /// Lowercase hex SHA-256 that was asked for.
         hash: String,
-        /// Why it ended: `declined`, or a transfer failure reason.
+        /// Why it ended: `declined` (the peer answered that it no longer
+        /// holds the blob), `timeout`, `evicted` (displaced by newer
+        /// fetches), `hash_mismatch`, or a transfer failure reason. A fixed
+        /// token this crate chooses, never a peer's words.
         reason: String,
     },
 
