@@ -302,6 +302,13 @@ impl OfflineProtocol {
             Err(_) => return,
         };
         if !self.group_data_sync_active(&members) {
+            // Rediscovery is the one trigger a group space has that does
+            // not require somebody to be editing, so it is also the only
+            // moment a device that never writes anything will notice the
+            // gate is shut. Probing only from the local-commit path would
+            // leave a member that merely reads waiting for someone else to
+            // do it.
+            self.probe_group_data_capabilities(group_id, &members);
             return;
         }
         let key = group_offer_key(member, group_id);
@@ -313,6 +320,32 @@ impl OfflineProtocol {
             &SyncChannel::GroupDirected(member.to_string()),
             cause,
         );
+    }
+
+    /// Ask the members holding a group's replication gate closed what they
+    /// support.
+    ///
+    /// For a group the usual reason the gate is shut is not that somebody
+    /// opted out but that we have never heard from them: members added by a
+    /// third party exchange no key packages with us, and an inviter running
+    /// an SDK from before attestation forwards none. Sending them ours
+    /// makes their automatic reply teach us what they support.
+    ///
+    /// The probe itself is capability-agnostic and guarded by
+    /// `key_package_sent_to`, so a group that stays closed does not re-probe
+    /// on every commit or every rediscovery.
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    fn probe_group_data_capabilities(&mut self, space: &str, members: &[String]) {
+        let unknown = self.group_data_unknown_members(members);
+        if unknown.is_empty() {
+            return;
+        }
+        debug!(
+            space,
+            unknown = unknown.len(),
+            "Group replication is held closed by members of unknown capability; probing"
+        );
+        self.backfill_group_rich_capabilities(&unknown);
     }
 
     /// Drop every offer window belonging to `peer`: the 1:1 one, and the
@@ -467,23 +500,7 @@ impl OfflineProtocol {
             if self.group_data_sync_active(&members) {
                 return Some(SyncChannel::GroupBroadcast);
             }
-            // The gate is closed, and for a group the usual reason is not
-            // that somebody opted out but that we have never heard from
-            // them: members added by a third party exchange no key packages
-            // with us, and an inviter running an SDK from before
-            // attestation forwards none. Sending them ours makes their
-            // automatic reply teach us what they support. Guarded by
-            // `key_package_sent_to`, so a group that stays closed does not
-            // re-probe on every commit.
-            let unknown = self.group_data_unknown_members(&members);
-            if !unknown.is_empty() {
-                debug!(
-                    space,
-                    unknown = unknown.len(),
-                    "Group replication is held closed by members of unknown capability; probing"
-                );
-                self.backfill_group_rich_capabilities(&unknown);
-            }
+            self.probe_group_data_capabilities(space, &members);
             return None;
         }
         if origin == Some(space) || !self.data_sync_active(space) {

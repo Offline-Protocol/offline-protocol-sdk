@@ -1094,6 +1094,29 @@ fn a_promotion_never_crosses_a_closed_replication_gate() {
 }
 
 #[test]
+fn a_closed_gate_probes_the_member_holding_it_shut() {
+    // Rediscovery is the only trigger a group space has that does not
+    // require somebody to be editing, so on a device that only reads it is
+    // the only moment anything notices the gate is shut. Probing from the
+    // local-commit path alone would leave that device waiting for another
+    // member to do it.
+    let (mut alice, bob, _carol, group) = trio();
+    alice.protocol.peer_data_group.remove(&bob.address);
+    alice.protocol.key_package_sent_to.clear();
+
+    alice
+        .protocol
+        .kick_group_data_sync(&group, &bob.address, "rediscovered");
+
+    assert!(
+        alice.protocol.key_package_sent_to.contains(&bob.address),
+        "a member of unknown capability has to be asked what it supports; \
+         our key package is the question, and its automatic reply is the \
+         answer"
+    );
+}
+
+#[test]
 fn forgetting_a_peer_drops_its_group_offer_windows_too() {
     // The offer window and the capability are two halves of one fact. A
     // group window is keyed by (member, group), so dropping the bare peer
