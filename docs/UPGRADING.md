@@ -1548,7 +1548,9 @@ document again, so it is recreated and refilled from their copy. In a space
 named after a peer, treat deletion as local cleanup that replication may undo,
 not as a way to remove content: to retire content from both sides, empty the
 document (deletions inside a document replicate like any other change); to stop
-a space replicating at all, use a space name that is not a peer address.
+a space replicating at all, use a space name that is not a peer address. The
+same is true of `wipeAll()` on a running engine, for the same missing
+tombstone: see the storage section below.
 
 ### Turning it on
 
@@ -1585,6 +1587,18 @@ logout as well, or documents outlive the account that created them. `wipeAll()`
 throws if the backend refused any delete, and that error is the only signal
 that records survived the wipe: treat it as a failed logout rather than
 logging it, because nothing inside the application will show the difference.
+
+**A wipe is only durable once replication has stopped.** It is the same
+missing tombstone described above: nothing distinguishes a space this device
+wiped from one it has never seen. Called while the engine is still running
+with live sessions, every document comes back, from both directions. The
+peer's next version offer names the documents and they are recreated and
+refilled from the peer's copy, and an offer of our own naming nothing reads to
+the peer as a replica that has never seen the space, which it answers with all
+of it. There is no error and no event; the documents simply return. On the
+logout path this does not bite, because the engine is being torn down anyway.
+Anywhere else, stop it before wiping, and read `wipeAll()` as clearing this
+device rather than as deleting content.
 
 Verify any custom backend with `runStorageConformance(provider)`: an empty
 `failures` array is the definition of supported. Reference adapters live in

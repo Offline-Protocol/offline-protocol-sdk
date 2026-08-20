@@ -236,6 +236,13 @@ arrives for a document it holds unflushed edits to, and this does not break
 the property: those changes were owed to the peer before the frame arrived, so
 flushing them is not an answer and cannot recur.
 
+A receiver MAY also emit one version offer when that flush failed and the
+frame's change then applied. The failure can leave the local edit pending, in
+which case the import folds it into the imported change and suppresses the
+pair as an echo, so the offer is what tells the peer to ask. It cannot recur
+either: it costs a storage failure that recovered inside one frame, since a
+failure still in force fails the import too and no offer is sent.
+
 The one chain longer than a single hop is that targeted offer: it draws
 catch-up and nothing further. It terminates because it names only documents
 the peer has itself just offered, so the peer creates nothing from it and has

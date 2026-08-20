@@ -1959,6 +1959,13 @@ interface DataStore {
 
     // Delete every record the data layer owns. The logout path for an
     // application that configured its own backend.
+    //
+    // Only durable once replication has stopped. There are no deletion
+    // tombstones, so a peer cannot tell a wiped space from one this device
+    // has never seen, and on a running engine with live sessions its next
+    // version offer recreates and refills every document. Stopping covers it
+    // only while it stays stopped: the peer still holds them, so they return
+    // when replication resumes. This clears the device, not the content.
     [Throws=ProtocolError]
     void wipe_all();
 };

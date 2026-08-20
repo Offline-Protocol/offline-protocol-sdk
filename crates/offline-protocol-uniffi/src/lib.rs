@@ -6989,7 +6989,8 @@ impl DataStore {
     ///
     /// An application that uses this must call [`DataStore::wipe_all`] on
     /// logout. `wipePersistedState` clears the account directory of the
-    /// *default* provider, which a custom backend is not inside.
+    /// *default* provider, which a custom backend is not inside. Stop the
+    /// engine before wiping: [`DataStore::wipe_all`] says why.
     pub fn with_storage(
         protocol: Arc<OfflineProtocol>,
         storage: Box<dyn ProtocolStateStorageProvider>,
@@ -7180,6 +7181,15 @@ impl DataStore {
     }
 
     /// Deletes every record the data layer owns.
+    ///
+    /// Only durable once replication has stopped. There are no deletion
+    /// tombstones, so a peer cannot tell a wiped space from one this device
+    /// has never seen, and on a running engine with live sessions its next
+    /// version offer recreates and refills every document. The logout path
+    /// tears the engine down anyway; anywhere else, stop it first, and only
+    /// for as long as it stays stopped: the peer still holds the documents,
+    /// so they return when replication resumes. This clears the device, it
+    /// does not delete content.
     pub fn wipe_all(&self) -> Result<(), ProtocolError> {
         self.protocol.data_wipe_all()
     }

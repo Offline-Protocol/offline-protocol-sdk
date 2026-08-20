@@ -4082,6 +4082,15 @@ export class DataStore {
    * supplied: `wipePersistedState()` clears the default provider's account
    * directory, which a custom backend is not inside. Skipping it there
    * leaves documents behind after the account that made them is gone.
+   *
+   * Only durable once replication has stopped. There are no deletion
+   * tombstones, so a peer cannot tell a wiped space from one this device has
+   * never seen, and with the engine running and sessions live its next
+   * version offer recreates and refills every document, with no error and no
+   * event. Logout tears the engine down anyway; call `destroy()` first if you
+   * are wiping for any other reason, and only for as long as it stays stopped:
+   * the peer still holds the documents, so they return when replication
+   * resumes. This clears the device, it does not delete content.
    */
   async wipeAll(): Promise<void> {
     await OfflineProtocolNativeModule.dataWipeAll();

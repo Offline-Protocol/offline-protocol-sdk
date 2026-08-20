@@ -125,7 +125,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
   **A custom backend brings one obligation:** `wipePersistedState()` clears the
   *default* provider's account directory, which a custom backend is not inside,
-  so call `DataStore.wipeAll()` on logout as well.
+  so call `DataStore.wipeAll()` on logout as well. Stop the engine before
+  wiping: there are no deletion tombstones, so a wipe on a running engine with
+  live sessions is undone by the peer's next version offer, which recreates and
+  refills every document with no error and no event.
 
   Native Rust consumers who only want messaging can opt out of the engine
   entirely with `default-features = false`; the mobile artifact carries it
@@ -178,6 +181,33 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   behaviour a gateway's Verdict verb plugs into.
 
 ### Fixed
+
+- **A local document edit could be stranded by a storage write that failed
+  once and then recovered.** Edits pending when a remote change arrives are
+  flushed first, so they leave on their own delta rather than being folded
+  into the imported change and suppressed as an echo toward the one peer they
+  were owed to. That pre-flush was reported and stepped over for every error
+  alike, but the delta-write failure rewinds the commit back into the pending
+  set, and the import's own flush then performs exactly the fold the pre-flush
+  exists to prevent. A failed pre-flush followed by an import that applied now
+  offers versions, so the peer asks for what it is missing instead of both
+  replicas believing they agree. `DocTooLarge` is told apart from the rest: on
+  that path the delta was written, pushed and announced before the size
+  verdict failed, so nothing is pending and the old message said the opposite
+  on the one document an operator is most likely to be reading about.
+
+- **A remote change applied into a document over its cap was reported as
+  refused.** The import flushes what it applied, and that flush answers
+  `DocTooLarge` once the document is over its cap: the change is written and
+  the size verdict that follows it is what failed. Reporting it as an error
+  logged an applied change as `Remote change refused`, skipped the space
+  record, and withheld the stranded-edit offer above, which is gated on the
+  import having applied. That is the case the offer matters most in: the one
+  edit a document past its cap still accepts is a deletion, which is its route
+  back under. The import now answers `Applied`, and `Err` means the change is
+  not durable. `flushAll()` drew the same distinction on shutdown, where it
+  logged `Failed to flush document` for a document whose change had reached
+  disk; it no longer does.
 
 - **Messages sent over an explicitly chosen transport skipped the negotiated
   binary wire codec.** `send_via_transport` never stamped it, while the
@@ -232,6 +262,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   the same 30-second cadence.
 
 ### Documentation
+
+- **`DataStore.wipeAll()` says that it is only durable once replication has
+  stopped.** There are no deletion tombstones, so nothing distinguishes a
+  space this device wiped from one it has never seen: called on a running
+  engine with live sessions, the peer's next version offer recreates and
+  refills every document, and an offer of our own naming nothing reads to the
+  peer as a replica that has never seen the space. Every mention of the call
+  framed it as the logout path, where the engine is being torn down anyway,
+  and none said what happens anywhere else. Stated at the API reference, the
+  upgrade guide, the configuration guide, the React Native and Python bridge
+  docs, the bridge contracts, the storage adapter references and the method's
+  own documentation.
 
 - **`docs/mesh.md` no longer documents the dormant layer as the delivery path.**
   The "Path Scoring" section and everything under it (route entries, the

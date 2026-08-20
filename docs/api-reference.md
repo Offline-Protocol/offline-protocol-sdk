@@ -1040,7 +1040,7 @@ await store.flush('space-1', 'profile');
 | `flush(space, doc)` | `void` | Persist pending edits |
 | `flushAll()` | `void` | |
 | `docSize(space, doc)` | `number` | Compacted size in bytes |
-| `wipeAll()` | `void` | Delete every data-layer record |
+| `wipeAll()` | `void` | Delete every data-layer record. Only durable once replication has stopped |
 
 A space id is the MLS scope the space rides on: a peer address or a group id.
 Space, document and collection names accept `A-Z a-z 0-9 . _ -` up to 128
@@ -1086,9 +1086,18 @@ choice: no rebuild and no build flag, and sealing sits above the seam, so a
 custom backend is handed sealed bytes and never sees document content.
 
 Verify a custom backend with `runStorageConformance(provider)`, and call
-`wipeAll()` on logout — `wipePersistedState()` clears the default provider's
+`wipeAll()` on logout: `wipePersistedState()` clears the default provider's
 account directory, which a custom backend is not inside. See
 [storage adapter references](../examples/storage-adapters/README.md).
+
+`wipeAll()` is only durable once replication has stopped. There are no
+deletion tombstones, so a peer cannot tell a wiped space from one this device
+has never seen, and on a running engine with live sessions its next version
+offer recreates and refills every document, with no error and no event. On the
+logout path the engine is being torn down anyway; anywhere else, stop it
+first, and only for as long as it stays stopped: the peer still holds the
+documents, so they return when replication resumes. Read `wipeAll()` as
+clearing this device rather than as deleting content.
 
 ## UniFFI Bindings
 

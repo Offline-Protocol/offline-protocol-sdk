@@ -61,4 +61,9 @@ provider. A custom backend is not inside it, so an application that
 configures one must call `DataStore.wipeAll()` on logout. Skipping it leaves
 documents behind after the account that made them is gone.
 
+Stop the protocol before wiping. There are no deletion tombstones, so a peer
+cannot tell a wiped space from one this device has never seen, and on a
+running engine with live sessions its next version offer recreates and refills
+every document.
+
 See [C11 in the bridge contracts](../../docs/bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified).

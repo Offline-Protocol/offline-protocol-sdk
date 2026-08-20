@@ -21,7 +21,9 @@ is empty. Green is the definition of "this backend is supported".
 
 Logout: an application that points documents here **must** call
 ``DataStore.wipe_all()`` on logout. ``wipePersistedState`` clears the
-default provider's directory, which this database is not inside.
+default provider's directory, which this database is not inside. Stop the
+protocol first: with the engine running and sessions live, the peer's next
+version offer recreates and refills every document it wiped.
 """
 
 from __future__ import annotations

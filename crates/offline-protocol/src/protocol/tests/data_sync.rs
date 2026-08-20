@@ -8,6 +8,7 @@
 //! have to build, and a test that shortcuts any of it would be testing
 //! something else.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -35,6 +36,20 @@ struct Node {
 
 impl Node {
     fn new(label: &str) -> Self {
+        Node::with_state_storage(label, |state| {
+            Arc::new(TestProtocolStateStorage { storage: state })
+        })
+    }
+
+    /// [`Self::new`] with the state store wrapped.
+    ///
+    /// `wrap` is handed the same in-memory store the node keeps, so a test
+    /// can watch or fail individual records and still read the ones it did
+    /// not interfere with.
+    fn with_state_storage(
+        label: &str,
+        wrap: impl FnOnce(Arc<InMemoryStorage>) -> Arc<dyn ProtocolStateStorage>,
+    ) -> Self {
         let mut config = create_test_config_for_user(label);
         config.encryption.enabled = true;
         config.data.enabled = true;
@@ -43,12 +58,7 @@ impl Node {
         let secure = crate::test_identity::seeded_storage(label);
         let state = Arc::new(InMemoryStorage::new());
         protocol
-            .initialize_mls(
-                secure.clone(),
-                Arc::new(TestProtocolStateStorage {
-                    storage: state.clone(),
-                }),
-            )
+            .initialize_mls(secure.clone(), wrap(state.clone()))
             .expect("initialize_mls");
 
         let mock = MockTransport::new(TransportType::BLE);
@@ -131,9 +141,12 @@ impl Node {
 /// Two replicas with a real MLS session and the sync capability recorded on
 /// both sides, as a key-package exchange would leave them.
 fn pair() -> (Node, Node) {
-    let mut alice = Node::new("alice");
-    let mut bob = Node::new("bob");
+    pair_of(Node::new("alice"), Node::new("bob"))
+}
 
+/// [`pair`] over nodes a test has already built, for one that needs a
+/// particular store underneath a replica.
+fn pair_of(mut alice: Node, mut bob: Node) -> (Node, Node) {
     // A genuine 1:1 group: Alice imports Bob's key package, creates the
     // session, and Bob joins the Welcome it produced. Both managers now hold
     // the same group, which is what makes the frames below real ciphertext
@@ -475,6 +488,330 @@ fn a_local_edit_pending_when_a_remote_change_arrives_still_reaches_the_peer() {
         read(&mut alice, &alice_space, "notes", "from_bob"),
         Some(DataValue::text("B")),
         "draining the local edit cost the import it was making room for"
+    );
+}
+
+/// Storage that fails one `DATA_DELTA_LOG` write and then behaves, the way a
+/// backend that is briefly unavailable does.
+///
+/// One write rather than all of them on purpose: a store that never recovers
+/// fails the import's own flush too, and the fold this arms for needs that
+/// second flush to succeed.
+struct FailOneDeltaWrite {
+    inner: TestProtocolStateStorage,
+    armed: Arc<AtomicBool>,
+    fired: Arc<AtomicBool>,
+}
+
+impl ProtocolStateStorage for FailOneDeltaWrite {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> ProtocolStateResult<()> {
+        if key_type == storage_keys::DATA_DELTA_LOG && self.armed.swap(false, Ordering::SeqCst) {
+            self.fired.store(true, Ordering::SeqCst);
+            return Err(ProtocolStateError::StoreFailed(
+                "the backend is briefly unavailable".to_string(),
+            ));
+        }
+        self.inner.store(key_type, key_id, data)
+    }
+
+    fn load(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
+        self.inner.load(key_type, key_id)
+    }
+
+    fn delete(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<()> {
+        self.inner.delete(key_type, key_id)
+    }
+
+    fn list_keys(&self, key_type: &str) -> ProtocolStateResult<Vec<String>> {
+        self.inner.list_keys(key_type)
+    }
+}
+
+#[test]
+fn a_local_edit_stranded_by_a_failed_pre_flush_is_announced_to_the_peer() {
+    let armed = Arc::new(AtomicBool::new(false));
+    let fired = Arc::new(AtomicBool::new(false));
+    let alice = Node::with_state_storage("alice", |state| {
+        Arc::new(FailOneDeltaWrite {
+            inner: TestProtocolStateStorage { storage: state },
+            armed: armed.clone(),
+            fired: fired.clone(),
+        })
+    });
+    let (mut alice, mut bob) = pair_of(alice, Node::new("bob"));
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut alice, &alice_space, "notes", "seed", "0");
+    settle(&mut alice, &mut bob);
+    assert_eq!(
+        read(&mut bob, &bob_space, "notes", "seed"),
+        Some(DataValue::text("0")),
+        "precondition: both replicas have to hold the document"
+    );
+
+    // Pending, as an application leaves work between flushes.
+    alice
+        .protocol
+        .data_map_set(
+            &alice_space,
+            "notes",
+            "m",
+            "from_alice",
+            DataValue::text("A"),
+        )
+        .expect("set");
+
+    // The pre-flush that drains it cannot write its delta record, so the
+    // commit is rewound and the edit goes back into the pending set. The
+    // import that follows flushes with the origin set, which folds the edit
+    // into the imported change and suppresses the pair toward the only peer
+    // it was owed to: the exact loss the pre-flush exists to prevent,
+    // reopened by a store that failed once.
+    armed.store(true, Ordering::SeqCst);
+    write(&mut bob, &bob_space, "notes", "from_bob", "B");
+    settle(&mut alice, &mut bob);
+
+    assert!(
+        fired.load(Ordering::SeqCst),
+        "precondition: the pre-flush has to have failed, or this proves nothing \
+         about what happens when it does"
+    );
+    assert_eq!(
+        read(&mut alice, &alice_space, "notes", "from_bob"),
+        Some(DataValue::text("B")),
+        "a failed pre-flush cost the import it was making room for"
+    );
+    assert_eq!(
+        read(&mut bob, &bob_space, "notes", "from_alice"),
+        Some(DataValue::text("A")),
+        "the edit stranded by the failed pre-flush was never announced, and \
+         nothing is left to notice it"
+    );
+}
+
+/// Push a document past `MAX_DOC_BYTES` and leave it there.
+///
+/// Two values that are together over the cap, rather than many small ones
+/// that add up to it. The cap is measured over the compacted export, which
+/// includes the delta history a flush has not folded away yet, so a document
+/// nudged over the line by its history drops back under as soon as compaction
+/// runs and the next flush answers `Ok`. Content this size cannot be
+/// compacted back under the cap, which is what makes `DocTooLarge` the answer
+/// every later flush gives.
+///
+/// The bytes are incompressible on purpose: the compacted encoding
+/// compresses, so a megabyte of one repeated byte measures as almost nothing.
+fn grow_past_cap(node: &mut Node, space: &str, doc: &str) {
+    let filler = |seed: u32| -> Vec<u8> {
+        let mut state = 0x9e37_79b9u32.wrapping_mul(seed.wrapping_add(1));
+        (0..600 * 1024)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect()
+    };
+    node.protocol
+        .data_map_set(space, doc, "m", "half", DataValue::bytes(filler(1)))
+        .expect("set");
+    node.protocol.data_flush(space, doc).expect("flush");
+    node.protocol
+        .data_map_set(space, doc, "m", "other_half", DataValue::bytes(filler(2)))
+        .expect("set");
+    let breach = node.protocol.data_flush(space, doc);
+    assert!(
+        matches!(breach, Err(crate::error::Error::DocTooLarge { .. })),
+        "the document answered {breach:?} rather than reaching its cap"
+    );
+}
+
+#[test]
+fn a_document_over_its_cap_still_accepts_a_remote_change() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut alice, &alice_space, "notes", "shared", "0");
+    settle(&mut alice, &mut bob);
+    assert_eq!(
+        read(&mut bob, &bob_space, "notes", "shared"),
+        Some(DataValue::text("0")),
+        "precondition: both replicas have to hold the document"
+    );
+
+    // Grown past the cap while the peer was not replicating, so the growth
+    // costs no frames and Bob's copy stays small. What is under test is what
+    // Alice does with an arriving change, not how a megabyte crosses a link.
+    alice.protocol.peer_data_sync.remove(&bob.address);
+    grow_past_cap(&mut alice, &alice_space, "notes");
+    alice.protocol.peer_data_sync.insert(bob.address.clone());
+    alice.transport.clear_sent_messages();
+
+    // Deletion is the only edit a document past its cap still accepts, and
+    // it is the route back under. Left pending, so the pre-flush has
+    // something to do when Bob's change arrives.
+    //
+    // The seed rather than one of the fillers: dropping 8 KiB from a
+    // document that has just crossed the cap brings it back under, and then
+    // the pre-flush answers `Ok` and this test proves nothing about the
+    // error it is named for.
+    alice
+        .protocol
+        .data_map_delete(&alice_space, "notes", "m", "shared")
+        .expect("deletions must keep working past the cap");
+    assert!(
+        alice
+            .protocol
+            .data_doc_size(&alice_space, "notes")
+            .expect("size")
+            > crate::MAX_DOC_BYTES as u64,
+        "precondition: the document has to still be over its cap with the \
+         deletion pending, or the pre-flush answers `Ok` and the arm under \
+         test is never reached"
+    );
+
+    // `DocTooLarge` is what the pre-flush answers here, and it is the one
+    // error that must not stop the import: the remote change may be the
+    // deletion that brings the document back under, so refusing it would
+    // close the only door out.
+    write(&mut bob, &bob_space, "notes", "from_bob", "B");
+    pump(&mut bob, &mut alice);
+
+    assert_eq!(
+        read(&mut alice, &alice_space, "notes", "from_bob"),
+        Some(DataValue::text("B")),
+        "a document over its cap refused a remote change instead of stepping over the flush error"
+    );
+    assert_eq!(
+        alice
+            .protocol
+            .data_map_get(&alice_space, "notes", "m", "shared")
+            .expect("get"),
+        None,
+        "the pre-flush did not commit the pending deletion"
+    );
+    // The claim the log makes on this path is that the flush and the push
+    // both happened and only the size verdict that follows them failed. The
+    // push is the half no local read can see.
+    let pushed: Vec<_> = alice
+        .transport
+        .sent_messages()
+        .into_iter()
+        .filter(|message| !message.metadata.contains_key(ACK_FOR_KEY))
+        .collect();
+    assert!(
+        !pushed.is_empty(),
+        "the pending deletion was committed but never sent, so `DocTooLarge` \
+         does mean the flush was lost"
+    );
+}
+
+#[test]
+fn a_local_edit_stranded_over_the_cap_is_announced_to_the_peer() {
+    let armed = Arc::new(AtomicBool::new(false));
+    let fired = Arc::new(AtomicBool::new(false));
+    let alice = Node::with_state_storage("alice", |state| {
+        Arc::new(FailOneDeltaWrite {
+            inner: TestProtocolStateStorage { storage: state },
+            armed: armed.clone(),
+            fired: fired.clone(),
+        })
+    });
+    let (mut alice, mut bob) = pair_of(alice, Node::new("bob"));
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut alice, &alice_space, "notes", "shared", "0");
+    settle(&mut alice, &mut bob);
+    assert_eq!(
+        read(&mut bob, &bob_space, "notes", "shared"),
+        Some(DataValue::text("0")),
+        "precondition: both replicas have to hold the document"
+    );
+
+    alice.protocol.peer_data_sync.remove(&bob.address);
+    grow_past_cap(&mut alice, &alice_space, "notes");
+    alice.protocol.peer_data_sync.insert(bob.address.clone());
+
+    // The seed rather than one of the fillers, for the reason the sibling
+    // test gives: dropping a filler brings the document back under the cap,
+    // the flush inside the import then answers `Ok`, and the arm under test
+    // is never reached.
+    alice
+        .protocol
+        .data_map_delete(&alice_space, "notes", "m", "shared")
+        .expect("deletions must keep working past the cap");
+    assert!(
+        alice
+            .protocol
+            .data_doc_size(&alice_space, "notes")
+            .expect("size")
+            > crate::MAX_DOC_BYTES as u64,
+        "precondition: the document has to still be over its cap with the \
+         deletion pending"
+    );
+    alice.transport.clear_sent_messages();
+
+    // Both halves of the loss at once, which is the case neither sibling
+    // test covers. The pre-flush cannot write its delta record, so the
+    // deletion is rewound into the pending set. The import then folds it
+    // into the imported change and suppresses the pair toward the only peer
+    // it was owed to, and the flush that did so answers `DocTooLarge`,
+    // because the document is over its cap either way. That error is raised
+    // after the fold is durable, so reading it as a failed import would
+    // withhold the announcement on exactly the documents whose one pending
+    // edit is the deletion that brings them back under.
+    write(&mut bob, &bob_space, "notes", "from_bob", "B");
+    armed.store(true, Ordering::SeqCst);
+    pump(&mut bob, &mut alice);
+
+    assert!(
+        fired.load(Ordering::SeqCst),
+        "precondition: the pre-flush has to have failed, or this proves nothing \
+         about what happens when it does"
+    );
+    assert_eq!(
+        read(&mut alice, &alice_space, "notes", "from_bob"),
+        Some(DataValue::text("B")),
+        "a document over its cap refused a remote change instead of stepping \
+         over the flush error"
+    );
+    assert_eq!(
+        alice
+            .protocol
+            .data_map_get(&alice_space, "notes", "m", "shared")
+            .expect("get"),
+        None,
+        "precondition: the fold has to have happened, or there is nothing \
+         stranded to announce"
+    );
+
+    // The announcement itself. Nothing else on this path sends: the fold's
+    // own push is suppressed as an echo, which is what strands it, so a
+    // non-acknowledgement frame here is the offer or nothing.
+    let announced: Vec<_> = alice
+        .transport
+        .sent_messages()
+        .into_iter()
+        .filter(|message| !message.metadata.contains_key(ACK_FOR_KEY))
+        .collect();
+    assert!(
+        !announced.is_empty(),
+        "the deletion folded into the import was stranded with no offer, so \
+         nothing is left to tell the peer to ask"
+    );
+
+    // The offer draws catch-up and the catch-up ladder runs out: every rung
+    // is over the frame budget for a document this size, and "nothing" is a
+    // rung. So the exchange still ends. What the peer does with the answer
+    // is the media path's job, not this one's; what is under test is that it
+    // gets to ask at all.
+    let rounds = settle(&mut alice, &mut bob);
+    assert_eq!(
+        rounds.last(),
+        Some(&0),
+        "the compensating offer started an exchange that does not end: {rounds:?}"
     );
 }
 
