@@ -1,14 +1,14 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.22.x` line.
+current `v0.23.x` line.
 
 The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 `initialize_mls` changes shape, three config updaters become fallible, and
 several previously-accepted inputs are now rejected at the boundary. Sections
 1–12 below cover that release and are the ones that can stop your build.
 
-Since `v0.17.0` two releases can break a build. `v0.20.0` enables iOS
+Since `v0.17.0` three releases can break a build. `v0.20.0` enables iOS
 autolinking, so a manual `pod 'MeshSdk'` line left in your `Podfile` now fails
 `pod install` — React Native on iOS only; it is a one-line deletion, and
 [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) has the
@@ -18,7 +18,12 @@ full list of Podfile leftovers to remove, and the same release is what makes iOS
 the wire becomes a self-certifying `off1…` address derived from an identity key
 it mints for itself. [§14](#14-your-identity-is-derived-not-chosen-v0210) is the
 migration guide — read it before bumping, because there is deliberately no
-in-place migration of existing sessions.
+in-place migration of existing sessions. `v0.23.0` breaks every binding once
+more, in the one place nothing was reading: the learned-route API is deleted,
+eight methods and four types that wrote into a table the delivery path never
+consulted, along with `ProtocolConfig.path`.
+[§15](#15-the-learned-route-api-is-gone-v0230) lists them; delete the calls,
+because there is nothing to replace them with.
 
 Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
@@ -68,6 +73,20 @@ every call, so a payload naming one field silently reset everything the caller
 did not mention. Both bridges now merge onto the live config read back from the
 engine, so if you were restating every field to survive that, you can stop.
 
+`v0.23.0` adds two that compile fine, and the first is a whole layer.
+Replicated documents arrive **on by default**
+([§16](#16-replicated-documents-are-available-11-and-in-groups-v0230)): this
+build advertises document sync to its peers even if your app never opens a
+`DataStore`. Nothing is stored until you write a document and nothing is sent
+until you share one, and `data.enabled: false` refuses the layer outright, but
+one obligation follows a custom storage backend, which is that
+`DataStore.wipeAll()` joins `wipePersistedState()` on your logout path. The
+second is quieter: transport choice now asks where the recipient is, so a
+device holding a live mesh link to the recipient sends over that link even when
+an internet carrier is up and scoring would have put the relay first. What is
+delivered does not change; which radio carries it does, and so does how fast it
+settles when the recipient is standing next to you.
+
 Work through it in order. [§0](#0-before-you-ship-downgrade-is-not-a-rollback)
 is a release-engineering decision, not a code change, and it is the one that
 cannot be undone later.
@@ -94,6 +113,8 @@ cannot be undone later.
 | 12.1 | [iOS: delete your manual `pod 'MeshSdk'` line](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) | n/a | n/a | **breaking** (`pod install` fails) | n/a |
 | 13 | [Upgrade test checklist](#13-upgrade-test-checklist) | — | — | — | — |
 | 14 | [Your identity is derived, not chosen](#14-your-identity-is-derived-not-chosen-v0210) | **breaking** | **breaking** | **breaking** | **breaking** |
+| 15 | [The learned-route API is gone](#15-the-learned-route-api-is-gone-v0230) | **breaking** | **breaking** | **breaking** | **breaking** |
+| 16 | [Replicated documents](#16-replicated-documents-are-available-11-and-in-groups-v0230) | new API, on by default | new API, on by default | new API, on by default | new API, on by default |
 
 ---
 
@@ -1511,7 +1532,7 @@ config section if present.
 
 ---
 
-## 16. Replicated documents are available, 1:1 and in groups
+## 16. Replicated documents are available, 1:1 and in groups *(v0.23.0)*
 
 A new `DataStore` object ships on every binding: offline-first documents any
 member of a space can edit while disconnected, merging deterministically when
