@@ -4098,6 +4098,42 @@ impl OfflineProtocol {
             .map_err(ProtocolError::from)
     }
 
+    pub(crate) fn data_fetch_attachment(
+        &self,
+        space_id: String,
+        hash: String,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_fetch_attachment(&space_id, &hash)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_provide_attachment(
+        &self,
+        space_id: String,
+        peer_id: String,
+        hash: String,
+        bytes: Vec<u8>,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_provide_attachment(&space_id, &peer_id, &hash, bytes)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_decline_attachment(
+        &self,
+        space_id: String,
+        peer_id: String,
+        hash: String,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_decline_attachment(&space_id, &peer_id, &hash)
+            .map_err(ProtocolError::from)
+    }
+
     pub(crate) fn data_wipe_all(&self) -> Result<(), ProtocolError> {
         let mut guard = self.lock_inner()?;
         guard.data_wipe_all().map_err(ProtocolError::from)
@@ -7192,6 +7228,44 @@ impl DataStore {
     /// does not delete content.
     pub fn wipe_all(&self) -> Result<(), ProtocolError> {
         self.protocol.data_wipe_all()
+    }
+
+    /// The address of some bytes, in the spelling a reference uses.
+    ///
+    /// Takes no lock and touches no state: it is a hash function, exposed
+    /// here so an application writing a reference gets the same spelling
+    /// this SDK checks arriving bytes against.
+    pub fn attachment_hash(&self, bytes: Vec<u8>) -> String {
+        CoreProtocol::data_attachment_hash(&bytes)
+    }
+
+    /// Asks the peer a 1:1 space is named after for the bytes behind a
+    /// reference.
+    pub fn fetch_attachment(&self, space_id: String, hash: String) -> Result<(), ProtocolError> {
+        self.protocol.data_fetch_attachment(space_id, hash)
+    }
+
+    /// Answers a peer's request with the bytes.
+    pub fn provide_attachment(
+        &self,
+        space_id: String,
+        peer_id: String,
+        hash: String,
+        bytes: Vec<u8>,
+    ) -> Result<(), ProtocolError> {
+        self.protocol
+            .data_provide_attachment(space_id, peer_id, hash, bytes)
+    }
+
+    /// Tells a peer their request will not be answered.
+    pub fn decline_attachment(
+        &self,
+        space_id: String,
+        peer_id: String,
+        hash: String,
+    ) -> Result<(), ProtocolError> {
+        self.protocol
+            .data_decline_attachment(space_id, peer_id, hash)
     }
 }
 

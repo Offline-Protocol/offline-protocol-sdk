@@ -2006,6 +2006,57 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    // ---- attachments ---------------------------------------------------
+    //
+    // Blob bytes never enter a document and never enter protocol state, so
+    // the app owns them. `dataAttachmentHash` gives the address to write into
+    // a document; the other three are the fetch conversation.
+
+    @ReactMethod
+    fun dataAttachmentHash(bytesBase64: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            val bytes = android.util.Base64.decode(bytesBase64, android.util.Base64.DEFAULT)
+            promise.resolve(store.attachmentHash(bytes))
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATAATTACHMENTHASH", "attachmentHash failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataFetchAttachment(spaceId: String, hash: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.fetchAttachment(spaceId, hash)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATAFETCHATTACHMENT", "fetchAttachment failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataProvideAttachment(spaceId: String, peerId: String, hash: String, bytesBase64: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            val bytes = android.util.Base64.decode(bytesBase64, android.util.Base64.DEFAULT)
+            store.provideAttachment(spaceId, peerId, hash, bytes)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATAPROVIDEATTACHMENT", "provideAttachment failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataDeclineAttachment(spaceId: String, peerId: String, hash: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.declineAttachment(spaceId, peerId, hash)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATADECLINEATTACHMENT", "declineAttachment failed")
+        }
+    }
+
     @ReactMethod
     fun dataWipeAll(promise: Promise) {
         try {

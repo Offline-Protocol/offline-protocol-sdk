@@ -1924,6 +1924,94 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    // ---- attachments ---------------------------------------------------
+    //
+    // Blob bytes never enter a document and never enter protocol state, so
+    // the app owns them. `dataAttachmentHash` gives the address to write into
+    // a document; the other three are the fetch conversation.
+
+    @objc func dataAttachmentHash(_ bytesBase64: String,
+                                  resolver: @escaping RCTPromiseResolveBlock,
+                                  rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            guard let bytes = Data(base64Encoded: bytesBase64) else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "bytes must be base64"])
+            }
+            resolver(store.attachmentHash(bytes: [UInt8](bytes)))
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATAATTACHMENTHASH",
+                                    fallbackMessage: "attachmentHash failed")
+        }
+    }
+
+    @objc func dataFetchAttachment(_ spaceId: String,
+                                   hash: String,
+                                   resolver: @escaping RCTPromiseResolveBlock,
+                                   rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.fetchAttachment(spaceId: spaceId, hash: hash)
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATAFETCHATTACHMENT",
+                                    fallbackMessage: "fetchAttachment failed")
+        }
+    }
+
+    @objc func dataProvideAttachment(_ spaceId: String,
+                                     peerId: String,
+                                     hash: String,
+                                     bytesBase64: String,
+                                     resolver: @escaping RCTPromiseResolveBlock,
+                                     rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            guard let bytes = Data(base64Encoded: bytesBase64) else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "bytes must be base64"])
+            }
+            try store.provideAttachment(spaceId: spaceId, peerId: peerId,
+                                        hash: hash, bytes: [UInt8](bytes))
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATAPROVIDEATTACHMENT",
+                                    fallbackMessage: "provideAttachment failed")
+        }
+    }
+
+    @objc func dataDeclineAttachment(_ spaceId: String,
+                                     peerId: String,
+                                     hash: String,
+                                     resolver: @escaping RCTPromiseResolveBlock,
+                                     rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.declineAttachment(spaceId: spaceId, peerId: peerId, hash: hash)
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATADECLINEATTACHMENT",
+                                    fallbackMessage: "declineAttachment failed")
+        }
+    }
+
     @objc func dataWipeAll(resolver: @escaping RCTPromiseResolveBlock,
                            rejecter: @escaping RCTPromiseRejectBlock) {
         do {

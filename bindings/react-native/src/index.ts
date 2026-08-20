@@ -4095,6 +4095,83 @@ export class DataStore {
   async wipeAll(): Promise<void> {
     await OfflineProtocolNativeModule.dataWipeAll();
   }
+
+  // ---- attachments ------------------------------------------------------
+  //
+  // Blob bytes never enter a document and never enter protocol state: a
+  // document holds a reference and the bytes ride the media path. The
+  // consequence for your app is that YOU own the bytes. The SDK cannot
+  // answer a peer's request on its own because it never kept a copy, so it
+  // asks you, through the `data_attachment_requested` event.
+
+  /**
+   * The address of some bytes, in the spelling a reference uses.
+   *
+   * Write the result into a document with `mapSet`:
+   *
+   * ```ts
+   * const hash = await store.attachmentHash(bytesBase64);
+   * await store.mapSet(space, 'notes', 'files', 'plan', JSON.stringify({
+   *   kind: 'attachment', hash, size: byteLength, name: 'plan.pdf',
+   * }));
+   * ```
+   *
+   * Compute it here rather than anywhere else. Two spellings of one address
+   * are two addresses: they fetch twice, store twice, and compare unequal
+   * while naming identical bytes.
+   *
+   * @param bytesBase64 The blob, base64.
+   */
+  async attachmentHash(bytesBase64: string): Promise<string> {
+    return await OfflineProtocolNativeModule.dataAttachmentHash(bytesBase64);
+  }
+
+  /**
+   * Asks the peer a 1:1 space is named after for the bytes behind a
+   * reference.
+   *
+   * Pull rather than push, because a space may reference more bytes than a
+   * phone wants over Bluetooth: the decision to spend that is yours, per
+   * blob, when somebody opens one. The answer arrives later as
+   * `data_attachment_received` or `data_attachment_unavailable`, never from
+   * this call.
+   *
+   * Group spaces are refused in this version: a blob rides a transfer to a
+   * confirmed 1:1 session, and two group members need not have one.
+   */
+  async fetchAttachment(spaceId: string, hash: string): Promise<void> {
+    await OfflineProtocolNativeModule.dataFetchAttachment(spaceId, hash);
+  }
+
+  /**
+   * Answers a peer's `data_attachment_requested` with the bytes.
+   *
+   * Rejects bytes that do not hash to `hash`, so a mistake reaches you while
+   * you still have the file in hand rather than travelling the whole media
+   * path to be refused on the other side.
+   *
+   * @param bytesBase64 The blob, base64.
+   */
+  async provideAttachment(
+    spaceId: string,
+    peerId: string,
+    hash: string,
+    bytesBase64: string
+  ): Promise<void> {
+    await OfflineProtocolNativeModule.dataProvideAttachment(spaceId, peerId, hash, bytesBase64);
+  }
+
+  /**
+   * Tells a peer their request will not be answered.
+   *
+   * Answer this way when you no longer hold the bytes. It is a real answer
+   * rather than silence: a reference outlives the bytes it names, and without
+   * this the asking side cannot tell a peer that lost the file from one that
+   * is merely slow, so it shows somebody a spinner that never resolves.
+   */
+  async declineAttachment(spaceId: string, peerId: string, hash: string): Promise<void> {
+    await OfflineProtocolNativeModule.dataDeclineAttachment(spaceId, peerId, hash);
+  }
 }
 
 /**

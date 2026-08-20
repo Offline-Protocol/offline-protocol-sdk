@@ -1968,6 +1968,55 @@ interface DataStore {
     // when replication resumes. This clears the device, not the content.
     [Throws=ProtocolError]
     void wipe_all();
+
+    // ---- attachments ---------------------------------------------------
+    //
+    // Blob bytes never enter a document and never enter protocol state. A
+    // document holds a reference (a SHA-256, a size, a name) and the bytes
+    // travel the media path, which already does windowing, per-transport
+    // chunk sizing, ACK and retry.
+    //
+    // The consequence for an application is that IT owns the bytes. The SDK
+    // cannot answer a peer's request on its own, because it never kept a
+    // copy; it asks, through DataAttachmentRequested.
+
+    // The address of some bytes, in the spelling a reference uses.
+    //
+    // Write the result into a document as
+    // {"kind":"attachment","hash":"...","size":N} via map_set. Computing it
+    // anywhere else risks a second spelling of the same hash, and two
+    // spellings of one address are two addresses.
+    string attachment_hash(sequence<u8> bytes);
+
+    // Ask the peer a 1:1 space is named after for the bytes behind a
+    // reference.
+    //
+    // Pull rather than push, because a space may reference more bytes than a
+    // phone wants over Bluetooth: the decision to spend that belongs to the
+    // application, per blob, when somebody opens one. The answer arrives as
+    // DataAttachmentReceived or DataAttachmentUnavailable, never inline.
+    //
+    // Group spaces are refused in this version: a blob rides a transfer to a
+    // confirmed 1:1 session, and two group members need not have one.
+    [Throws=ProtocolError]
+    void fetch_attachment(string space_id, string hash);
+
+    // Answer a peer's request with the bytes.
+    //
+    // Refuses bytes that do not hash to `hash`, so a mistake is reported to
+    // the application that made it while it still has the file in hand,
+    // rather than travelling the whole media path to be refused elsewhere.
+    [Throws=ProtocolError]
+    void provide_attachment(string space_id, string peer_id, string hash, sequence<u8> bytes);
+
+    // Tell a peer their request will not be answered.
+    //
+    // A real answer rather than silence. A reference outlives the bytes it
+    // names, so a peer holding a reference and no blob is ordinary; without
+    // this the asking side cannot tell that from a slow peer and shows
+    // somebody a spinner that never resolves.
+    [Throws=ProtocolError]
+    void decline_attachment(string space_id, string peer_id, string hash);
 };
 
 // BLE fragment for outgoing data

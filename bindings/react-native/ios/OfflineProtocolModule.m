@@ -531,6 +531,28 @@ RCT_EXTERN_METHOD(dataDocSize:(NSString *)spaceId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(dataAttachmentHash:(NSString *)bytesBase64
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataFetchAttachment:(NSString *)spaceId
+                  hash:(NSString *)hash
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataProvideAttachment:(NSString *)spaceId
+                  peerId:(NSString *)peerId
+                  hash:(NSString *)hash
+                  bytesBase64:(NSString *)bytesBase64
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dataDeclineAttachment:(NSString *)spaceId
+                  peerId:(NSString *)peerId
+                  hash:(NSString *)hash
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(dataWipeAll:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 

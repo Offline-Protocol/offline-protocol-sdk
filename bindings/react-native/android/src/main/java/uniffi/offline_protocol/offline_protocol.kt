@@ -888,11 +888,15 @@ external fun uniffi_offline_protocol_uniffi_checksum_func_parse_invite(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_decline_attachment(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc(
 ): Short
@@ -901,6 +905,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json(
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_flush(
 ): Short
@@ -921,6 +927,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete(
 ): Short
@@ -1344,11 +1352,15 @@ external fun uniffi_offline_protocol_uniffi_fn_constructor_datastore_new(`protoc
 ): Long
 external fun uniffi_offline_protocol_uniffi_fn_constructor_datastore_with_storage(`protocol`: Long,`storage`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
+external fun uniffi_offline_protocol_uniffi_fn_method_datastore_attachment_hash(`ptr`: Long,`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_counter_increment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`amount`: Double,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_counter_value(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Double
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_create_doc(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_datastore_decline_attachment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`peerId`: RustBuffer.ByValue,`hash`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_delete_doc(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1358,6 +1370,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_datastore_doc_size(`ptr`: 
 ): Long
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_export_raw(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`hash`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_flush(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_flush_all(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1377,6 +1391,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_datastore_map_delete(`ptr`
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_map_get_json(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_map_set(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`valueJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_datastore_provide_attachment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`peerId`: RustBuffer.ByValue,`hash`: RustBuffer.ByValue,`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_text_delete(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`position`: Int,`count`: Int,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1880,6 +1896,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() != 20699.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() != 53129.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment() != 55977.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1887,6 +1906,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc() != 55339.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_decline_attachment() != 36653.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc() != 39527.toShort()) {
@@ -1899,6 +1921,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw() != 29802.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment() != 64859.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush() != 53125.toShort()) {
@@ -1929,6 +1954,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set() != 53094.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment() != 35833.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete() != 35552.toShort()) {
@@ -3060,11 +3088,15 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 //
 public interface DataStoreInterface {
     
+    fun `attachmentHash`(`bytes`: List<kotlin.UByte>): kotlin.String
+    
     fun `counterIncrement`(`spaceId`: kotlin.String, `docId`: kotlin.String, `collection`: kotlin.String, `amount`: kotlin.Double)
     
     fun `counterValue`(`spaceId`: kotlin.String, `docId`: kotlin.String, `collection`: kotlin.String): kotlin.Double
     
     fun `createDoc`(`spaceId`: kotlin.String, `docId`: kotlin.String)
+    
+    fun `declineAttachment`(`spaceId`: kotlin.String, `peerId`: kotlin.String, `hash`: kotlin.String)
     
     fun `deleteDoc`(`spaceId`: kotlin.String, `docId`: kotlin.String)
     
@@ -3073,6 +3105,8 @@ public interface DataStoreInterface {
     fun `docSize`(`spaceId`: kotlin.String, `docId`: kotlin.String): kotlin.ULong
     
     fun `exportRaw`(`spaceId`: kotlin.String, `docId`: kotlin.String): kotlin.ByteArray
+    
+    fun `fetchAttachment`(`spaceId`: kotlin.String, `hash`: kotlin.String)
     
     fun `flush`(`spaceId`: kotlin.String, `docId`: kotlin.String)
     
@@ -3093,6 +3127,8 @@ public interface DataStoreInterface {
     fun `mapGetJson`(`spaceId`: kotlin.String, `docId`: kotlin.String, `collection`: kotlin.String, `key`: kotlin.String): kotlin.String?
     
     fun `mapSet`(`spaceId`: kotlin.String, `docId`: kotlin.String, `collection`: kotlin.String, `key`: kotlin.String, `valueJson`: kotlin.String)
+    
+    fun `provideAttachment`(`spaceId`: kotlin.String, `peerId`: kotlin.String, `hash`: kotlin.String, `bytes`: List<kotlin.UByte>)
     
     fun `textDelete`(`spaceId`: kotlin.String, `docId`: kotlin.String, `collection`: kotlin.String, `position`: kotlin.UInt, `count`: kotlin.UInt)
     
@@ -3209,6 +3245,19 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
         }
     }
 
+    override fun `attachmentHash`(`bytes`: List<kotlin.UByte>): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_attachment_hash(
+        it,
+        FfiConverterSequenceUByte.lower(`bytes`),_status)
+}
+    }
+    )
+    }
+    
+
     
     @Throws(ProtocolException::class)override fun `counterIncrement`(`spaceId`: kotlin.String, `docId`: kotlin.String, `collection`: kotlin.String, `amount`: kotlin.Double)
         = 
@@ -3244,6 +3293,19 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_create_doc(
         it,
         FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `declineAttachment`(`spaceId`: kotlin.String, `peerId`: kotlin.String, `hash`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_decline_attachment(
+        it,
+        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`peerId`),FfiConverterString.lower(`hash`),_status)
 }
     }
     
@@ -3302,6 +3364,19 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     }
     )
     }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `fetchAttachment`(`spaceId`: kotlin.String, `hash`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment(
+        it,
+        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`hash`),_status)
+}
+    }
+    
     
 
     
@@ -3433,6 +3508,19 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_map_set(
         it,
         FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),FfiConverterString.lower(`collection`),FfiConverterString.lower(`key`),FfiConverterString.lower(`valueJson`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `provideAttachment`(`spaceId`: kotlin.String, `peerId`: kotlin.String, `hash`: kotlin.String, `bytes`: List<kotlin.UByte>)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_provide_attachment(
+        it,
+        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`peerId`),FfiConverterString.lower(`hash`),FfiConverterSequenceUByte.lower(`bytes`),_status)
 }
     }
     
