@@ -7186,7 +7186,10 @@ impl DataStore {
     /// tombstones, so a peer cannot tell a wiped space from one this device
     /// has never seen, and on a running engine with live sessions its next
     /// version offer recreates and refills every document. The logout path
-    /// tears the engine down anyway; anywhere else, stop it first.
+    /// tears the engine down anyway; anywhere else, stop it first, and only
+    /// for as long as it stays stopped: the peer still holds the documents,
+    /// so they return when replication resumes. This clears the device, it
+    /// does not delete content.
     pub fn wipe_all(&self) -> Result<(), ProtocolError> {
         self.protocol.data_wipe_all()
     }

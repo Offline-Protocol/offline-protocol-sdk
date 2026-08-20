@@ -1313,7 +1313,10 @@ impl OfflineProtocol {
     /// version offer names them and they are recreated and refilled from the
     /// peer's copy, and an offer of our own naming nothing reads as a replica
     /// that has never seen the space. On the logout path the engine is being
-    /// torn down anyway. Anywhere else, stop it first.
+    /// torn down anyway. Anywhere else, stop it first, and only for as long
+    /// as it stays stopped: the peer still holds the documents, so they return
+    /// when replication resumes with it. The call clears this device, it does
+    /// not delete content.
     pub fn data_wipe_all(&mut self) -> Result<()> {
         let Some(storage) = self.data_storage() else {
             return Ok(());

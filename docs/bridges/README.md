@@ -267,7 +267,10 @@ The call is only durable once replication has stopped. There are no deletion
 tombstones, so a peer cannot tell a wiped space from one this device has never
 seen, and on a running engine with live sessions its next version offer
 recreates and refills every document. Logout tears the engine down anyway;
-a wipe used for anything else has to stop it first.
+a wipe used for anything else has to stop it first, and only for as long as it
+stays stopped: the peer still holds the documents, so they return when
+replication resumes. The call clears this device, it does not delete
+content.
 
 Reference adapters live in `examples/storage-adapters/`, one per binding,
 each with the conformance suite wired into its own test harness.

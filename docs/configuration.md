@@ -704,7 +704,9 @@ Two obligations come with a custom backend:
   `DataStore.wipeAll()` as well or documents outlive the account. Stop the
   engine first: there are no deletion tombstones, so a wipe on a running
   engine with live sessions is undone by the peer's next version offer, which
-  recreates and refills every document with no error and no event.
+  recreates and refills every document with no error and no event. Stopping
+  covers it only while it stays stopped, because the peer still holds the
+  documents: the call clears this device, it does not delete content.
 
 **Limits.** A document is capped at 1 MiB compacted, with a
 `data_doc_size_warning` event at 768 KiB. Passing the cap raises `DocTooLarge`;

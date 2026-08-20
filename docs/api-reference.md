@@ -1095,7 +1095,9 @@ deletion tombstones, so a peer cannot tell a wiped space from one this device
 has never seen, and on a running engine with live sessions its next version
 offer recreates and refills every document, with no error and no event. On the
 logout path the engine is being torn down anyway; anywhere else, stop it
-first.
+first, and only for as long as it stays stopped: the peer still holds the
+documents, so they return when replication resumes. Read `wipeAll()` as
+clearing this device rather than as deleting content.
 
 ## UniFFI Bindings
 
