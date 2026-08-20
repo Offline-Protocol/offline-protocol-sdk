@@ -1,6 +1,6 @@
 # State machines
 
-Five state machines govern the protocol's runtime behaviour. Each is documented
+Six state machines govern the protocol's runtime behaviour. Each is documented
 with its states, its transitions, the invariants that hold across them, and the
 failure modes that the current shape exists to prevent.
 
@@ -11,6 +11,7 @@ failure modes that the current shape exists to prevent.
 | [Session lifecycle](session-lifecycle.md) | 1:1 MLS session establishment, confirmation, desync, and heal |
 | [Group message lifecycle](group-message-lifecycle.md) | A group message from send through fan-out, buffering, and drain |
 | [Transport lifecycle](transport-lifecycle.md) | Transport availability, scoring, switching, and escalation |
+| [Document replication](data-replication.md) | A document from edit to durable record, a space from offer to convergence, an attachment fetch to one of six ends |
 
 ## How to read these
 
@@ -22,7 +23,7 @@ Several of these shapes look over-engineered until you know which bug they close
 and the surrounding prose is there so a future change does not undo one by
 accident.
 
-## The one invariant that spans all five
+## The one invariant that spans all six
 
 **Custody of an undelivered message stays with the sender until a receiver
 positively confirms it.**
@@ -35,3 +36,7 @@ sender keep custody, not to acknowledge and hope.
 The corollary matters to application teams: because acknowledgements are
 withheld on recoverable failures and re-sent on recovery, **a missing
 acknowledgement is not proof of non-delivery.**
+
+Document replication inherits it rather than restating it: a sync frame is an
+ordinary message on the same ladder, which is why that layer needed no delivery
+machinery of its own.

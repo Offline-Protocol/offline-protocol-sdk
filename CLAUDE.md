@@ -21,6 +21,7 @@ that are versioned, reviewable, and readable by people who are not an agent.
 | Anything security-relevant | [docs/security/threat-model.md](docs/security/threat-model.md) |
 | Acknowledgement, retry, session, group or transport behaviour | [docs/state-machines/](docs/state-machines/README.md) |
 | A decision that looks odd or over-engineered | [docs/adr/](docs/adr/README.md) |
+| Replicated documents: the store, sync frames, attachments | [docs/spec/data-sync.md](docs/spec/data-sync.md), [the replication state machine](docs/state-machines/data-replication.md), ADR [0018](docs/adr/0018-data-layer-engine-and-storage-seams.md) and [0019](docs/adr/0019-remote-document-imports-are-contained-not-trusted.md) |
 | Any binding: Swift, Kotlin, Python, TypeScript | [docs/bridges/](docs/bridges/README.md) |
 
 The ADR index is the fastest route to "why is this like this". If you are about

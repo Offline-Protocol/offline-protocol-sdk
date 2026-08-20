@@ -121,6 +121,34 @@ that collision was resolved by renaming the victim to
 fixing the pattern. Anchor it as `/lib/` before adding any nested `lib/`
 directory, or expect the same silent disappearance.
 
+## T9. The `DataValue` union is hand-written, and a Rust guard is what keeps it honest
+
+Document values cross the boundary as JSON rather than as a UDL type, which is
+what stops a new value kind from reshaping every binding. The cost lands here:
+no generator writes the reader, so `export type DataValue` in `src/index.ts` is
+maintained by hand, and so are the two strings that tell a caller what a kind
+may be.
+
+This has already happened once. `attachment` was added to the Rust enum, the
+UDL and all three generated bindings, and missed the TypeScript union. Both
+`cargo test` and `tsc --noEmit` stayed green, because a missing member of a
+union is legal TypeScript. The damage is on the read side and it is quiet:
+`mapGet` returns `{ kind: 'attachment', ... }` at runtime while the declared
+type says that cannot happen, so every exhaustive `switch` an application wrote
+is wrong and the compiler certified it.
+
+The pin is `react_native_types_cover_every_data_value_kind` in
+`crates/offline-protocol-uniffi/src/lib.rs`. It parses the Rust `DataValue`
+enum and asserts every kind appears in this union, in the UDL comment beside
+`map_set`, and in the runtime hint a caller gets for a malformed value. A kind
+added in Rust therefore fails a Rust test, which is the only place that can see
+all four at once ([C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language)).
+
+Two consequences for anyone editing this file: keep the union one contiguous
+block ending in a blank line, because that is how the guard finds it, and do
+not "simplify" it to `Record<string, unknown>`. The union is the only thing
+telling an application that `attachment` is a shape it has to handle.
+
 ## Testing
 
 ```bash

@@ -387,6 +387,47 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Documentation
 
+- **Replicated documents have a guide, a state machine and examples that run.**
+  The reference half was complete and the guide half was not: an application
+  author could read every frame on the wire and still have nowhere to learn
+  when a document is the right shape for their state.
+  [docs/data.md](./docs/data.md) is that document, and it answers the questions
+  the API reference cannot: message or document, what happens when two people
+  edit one key, what each size limit does when it is reached, and what this
+  version deliberately does not do.
+  [The replication state machine](./docs/state-machines/data-replication.md)
+  joins the other five with the local document states, the anti-entropy
+  exchange and its triggers, the catch-up ladder, and the six ways an
+  attachment fetch can end. Two programs make the behaviour executable rather
+  than described: `cargo run -p offline-protocol --example replicated_notes`
+  opens a store, edits all four collection types and reopens the same records
+  after the engine is rebuilt, and
+  `cargo run -p offline-protocol-data --example offline_merge` shows what two
+  people editing one document offline actually get back.
+
+- **The React Native guide no longer asks for a flag that is already on, and
+  now lists the whole surface.** It still told applications to set
+  `data: { enabled: true }`, the fifth restatement of a default that changed
+  before it ever shipped. Its `DataStore` table was also missing every
+  attachment method, the `DataValue` union it referred readers to, and its
+  event-type list named none of the six `data_*` events, so an app author
+  reading the platform guide could not tell they existed.
+
+- **The native platform guides cover the data layer.** Both document group
+  messaging with worked code and mentioned replicated documents nowhere, which
+  left Swift and Kotlin readers with no path into the API their binding
+  already exposes. Each now has a Replicated Documents section: the store,
+  values as JSON, the durability rule, the bring-your-own-backend constructor
+  with the logout obligation it carries, and the two events an application
+  must handle.
+
+- **The hand-written pieces and the routing table say so.** The TypeScript
+  bridge contract records that the `DataValue` union is maintained by hand and
+  names the Rust guard that pins it, because the one time it drifted both
+  `cargo test` and `tsc` stayed green. CLAUDE.md's "read this first" table now
+  routes a change in this area to the spec chapter, the state machine and the
+  two ADRs, and the docs index calls the ADR set nineteen rather than fifteen.
+
 - **`DataStore.wipeAll()` says that it is only durable once replication has
   stopped.** There are no deletion tombstones, so nothing distinguishes a
   space this device wiped from one it has never seen: called on a running

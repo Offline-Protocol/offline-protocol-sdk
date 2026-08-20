@@ -371,7 +371,7 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 | **once** | `once(eventType, listener): this` | Registers a one-time listener. |
 | **removeAllListeners** | `removeAllListeners(eventType?: EventType \| 'all'): this` | Removes listeners for a type or all. |
 
-**Event types**: `message_sent`, `message_received`, `message_delivered`, `message_failed`, `transport_switched`, `relay_promoted`, `relay_demoted`, `neighbor_discovered`, `neighbor_lost`, `network_metrics`, `file_progress`, `file_received`, `diagnostic`, `secure_session_established`, `secure_session_failed`, `connection_request_received`, `connection_request_undeliverable`, `connection_accepted`, `connection_rejected`, `connection_request_cancelled`, `group_created`, `group_message_received`, `group_member_added`, `group_member_removed`, `group_unauthorized_membership_change`, `group_message_sent`, `group_message_partial_failure`, `group_message_delivery_report`, `group_epoch_fork_detected`, `group_epoch_fork_resolved`, `group_role_changed`, `service_discovered`, `service_request_received`, `service_response_received`, `presence_updated`, `typing_indicator_received`, `read_receipt_received`, `message_relayed`, `message_deferred`.
+**Event types**: `message_sent`, `message_received`, `message_delivered`, `message_failed`, `transport_switched`, `relay_promoted`, `relay_demoted`, `neighbor_discovered`, `neighbor_lost`, `network_metrics`, `file_progress`, `file_received`, `diagnostic`, `secure_session_established`, `secure_session_failed`, `connection_request_received`, `connection_request_undeliverable`, `connection_accepted`, `connection_rejected`, `connection_request_cancelled`, `group_created`, `group_message_received`, `group_member_added`, `group_member_removed`, `group_unauthorized_membership_change`, `group_message_sent`, `group_message_partial_failure`, `group_message_delivery_report`, `group_epoch_fork_detected`, `group_epoch_fork_resolved`, `group_role_changed`, `service_discovered`, `service_request_received`, `service_response_received`, `presence_updated`, `typing_indicator_received`, `read_receipt_received`, `message_relayed`, `message_deferred`, `data_changed`, `data_doc_size_warning`, `data_attachment_requested`, `data_attachment_received`, `data_attachment_unavailable`, `data_doc_unsyncable`.
 
 **Identity**: `neighbor_discovered.peer_id` is the peer's canonical address — the `off1…` value that peer derived from its own identity key, on every transport — and is what you pass as `recipient` to `sendMessage` / `sendConnectionRequest`. Your own is `localAddress()`; no app chooses its address, so a peer claiming one can be checked by re-deriving it from the key it presents.
 
@@ -541,7 +541,14 @@ Parse the raw event and check the server frame's `type` before consuming extensi
 
 Offline-first state any member of a space can edit while disconnected, merging
 deterministically when replicas meet again. Requires
-`initializeMlsWithSecureStorage()` and `data: { enabled: true }` in the config.
+`initializeMlsWithSecureStorage()` to have run, because documents are sealed at
+rest with the key it mints. `data.enabled` defaults to `true`, so there is no
+flag to set; setting it to `false` makes every method below throw
+`DataDisabled`.
+
+`spaceId` is an MLS scope: a peer's address for a 1:1 space, or a group id for
+a group. See the [Replicated Documents guide](data.md) for the model, how
+concurrent edits resolve, and what this version deliberately does not do.
 
 ```typescript
 import { DataStore } from '@offline-protocol/mesh-sdk';
@@ -577,12 +584,41 @@ await store.flush('space-1', 'profile');
 | **flushAll** | `flushAll(): Promise<void>` | Persists every open document. |
 | **docSize** | `docSize(spaceId, docId): Promise<number>` | Compacted size in bytes. |
 | **wipeAll** | `wipeAll(): Promise<void>` | Deletes every data-layer record. Needed on logout only when documents were pointed at an app-supplied backend, which `wipePersistedState` cannot reach. Only durable once replication has stopped: with the engine running and sessions live, the peer's next version offer recreates and refills every document. |
+| **attachmentHash** | `attachmentHash(bytesBase64: string): Promise<string>` | The address of some bytes, in the spelling a reference uses. Compute it here rather than anywhere else: two spellings of one hash are two addresses. |
+| **fetchAttachment** | `fetchAttachment(spaceId, hash): Promise<void>` | Asks the peer for a blob. The answer arrives as an event, never inline. Rejects for a group space, and for a peer that cannot carry blobs. |
+| **provideAttachment** | `provideAttachment(spaceId, peerId, hash, bytesBase64): Promise<void>` | Answers a peer's request. Rejects if the bytes do not hash to `hash`. |
+| **declineAttachment** | `declineAttachment(spaceId, peerId, hash): Promise<void>` | Tells a peer the bytes are gone. Rejects for a peer that cannot carry blobs. |
+
+A `DataValue` is one of:
+
+```typescript
+type DataValue =
+  | { kind: 'null' }
+  | { kind: 'bool'; value: boolean }
+  | { kind: 'int'; value: number }
+  | { kind: 'float'; value: number }
+  | { kind: 'text'; value: string }
+  | { kind: 'bytes'; value: number[] }
+  | { kind: 'attachment'; hash: string; size: number; name?: string; mime?: string };
+```
 
 Edits batch before they reach storage: call `flush()` when the app must know a
 change is durable. The `data_changed` event fires **after** the change is
 durable. A document is capped at 1 MiB compacted, with `data_doc_size_warning`
 at 768 KiB; passing the cap raises `DocTooLarge`, and deletions keep working so
 the document can be brought back under it.
+
+**Attachments.** A document can name a blob it does not hold: write an
+`attachment` value with `attachmentHash`, and the bytes travel the media path
+rather than entering the document. Your app owns those bytes, so a peer's
+request arrives as `data_attachment_requested` and only you can answer it.
+Answer every one, with `provideAttachment` or `declineAttachment`: without a
+refusal the asking side cannot tell a peer that lost the file from one on a
+slow radio, and shows somebody a spinner forever. Fetched bytes arrive whole,
+base64, in `data_attachment_received`, and a fetch that ends without them
+arrives as `data_attachment_unavailable`. Blob carriage is 1:1 in this release;
+references replicate in a group but the bytes do not. Worked code is in the
+[API reference](api-reference.md#attachments).
 
 ### 11.12 MLS (End-to-End Encryption)
 
