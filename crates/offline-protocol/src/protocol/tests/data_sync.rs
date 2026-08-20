@@ -2674,3 +2674,205 @@ fn a_transfer_that_failed_before_its_purpose_arrived_reports_no_file_failure() {
     );
     assert_eq!(failed[0]["file_name"].as_str(), Some("identified.bin"));
 }
+
+#[test]
+fn a_fetch_does_not_expire_while_its_own_answer_is_arriving() {
+    // The timeout is generous because the media path may be Bluetooth, which
+    // is exactly the case where a blob takes longer to arrive than the clock
+    // allows. The fetch record is not bookkeeping: it is what admits the
+    // bytes at the end, so a record that expired mid-carriage would discard a
+    // blob that fully crossed, and the retry it invites carries the same
+    // bytes over the same radio to die at the same point.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+    // Large enough that one window cannot finish it, so the sweep below lands
+    // in the middle of a live transfer rather than after one.
+    let blob = vec![3u8; 2 * 1024 * 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&blob);
+
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+    alice
+        .protocol
+        .data_provide_attachment(&alice_space, &bob.address, &hash, blob.clone())
+        .expect("provide");
+
+    // Age the question past the timeout, exactly as the wall clock would on a
+    // radio slow enough to matter, and then let some of the answer land.
+    let stale = std::time::Instant::now()
+        - crate::protocol::data_sync::ATTACHMENT_FETCH_TIMEOUT
+        - std::time::Duration::from_secs(1);
+    for seen_at in bob.protocol.pending_attachment_fetches.values_mut() {
+        *seen_at = stale;
+    }
+    alice.protocol.pump_media_transfers();
+    pump(&mut alice, &mut bob);
+    assert!(
+        bob.protocol.file_transfer_manager.active_transfer_count() > 0,
+        "the fixture must reach the sweep with a transfer actually in flight"
+    );
+
+    // The sweep the tick runs, in the middle of the carriage.
+    bob.protocol.expire_attachment_fetches();
+    assert!(
+        events_named(&bob, "data_attachment_unavailable").is_empty(),
+        "a fetch whose bytes are arriving must not be reported as unanswered"
+    );
+
+    settle_media(&mut alice, &mut bob);
+
+    let received = events_named(&bob, "data_attachment_received");
+    assert_eq!(
+        received.len(),
+        1,
+        "the blob crossed in full and must be handed over"
+    );
+    assert_eq!(
+        BASE64
+            .decode(received[0]["data"].as_str().expect("base64"))
+            .expect("decode"),
+        blob
+    );
+}
+
+#[test]
+fn a_document_already_crossing_is_not_sent_a_second_time() {
+    // The trigger for carriage recurs on its own: the peer stays stale for
+    // the whole multi-minute crossing of a document this size, and says so on
+    // every exchange. Each of those would otherwise start another copy of the
+    // same transfer, and a peer may hold only two at once.
+    let (mut alice, mut bob) = pair();
+    let space = Node::space_for(&bob);
+
+    fill_past_the_frame_budget(&mut alice, &space, 0x1234_5678_9ABC_DEF0);
+    // One exchange, no settle: the carriage is deliberately left in flight.
+    pump(&mut alice, &mut bob);
+    pump(&mut bob, &mut alice);
+    let crossing = |node: &Node| {
+        node.protocol
+            .outbound_media_transfers
+            .values()
+            .filter(|transfer| transfer.data_purpose.is_some())
+            .count()
+    };
+    assert_eq!(crossing(&alice), 1, "the document must be on its way");
+
+    // The same rung reached again while the first crossing is unfinished.
+    for _ in 0..3 {
+        alice
+            .protocol
+            .nudge_data_sync(&space, None, "test_repeat_exchange");
+        pump(&mut alice, &mut bob);
+        pump(&mut bob, &mut alice);
+    }
+    assert_eq!(
+        crossing(&alice),
+        1,
+        "a repeated exchange must not start a second copy of one document"
+    );
+
+    // What the duplicates cost, and the reason this is worth a test rather
+    // than a comment: the slots they fill are the application's too, and the
+    // transfers holding them are invisible to it by design, so the error it
+    // gets names a limit it cannot account for.
+    alice
+        .protocol
+        .send_media_with(
+            bob.address.clone(),
+            vec![1u8; 4096],
+            "holiday.jpg",
+            offline_protocol_core::ContentType::Image,
+            crate::protocol::types::MediaSendOptions::default(),
+        )
+        .expect("the app's own media send must still have a slot");
+
+    // The suppression must be transient rather than a latch. It is keyed on a
+    // transfer being in flight, so a check that outlived its transfer would
+    // strand every later version of the document instead of every duplicate
+    // of one.
+    settle_media(&mut alice, &mut bob);
+    assert_eq!(
+        crossing(&alice),
+        0,
+        "a finished crossing must release what it held"
+    );
+    let bob_space = Node::space_for(&alice);
+    assert!(
+        bob.protocol
+            .data_map_get(&bob_space, "notes", "m", "k0")
+            .expect("get")
+            .is_some(),
+        "and the document must have arrived"
+    );
+
+    fill_past_the_frame_budget(&mut alice, &space, 0x0FED_CBA9_8765_4321);
+    pump(&mut alice, &mut bob);
+    pump(&mut bob, &mut alice);
+    assert_eq!(
+        crossing(&alice),
+        1,
+        "a document that grew again must be able to cross again"
+    );
+}
+
+#[test]
+fn a_snapshot_larger_than_a_record_is_refused_before_it_is_buffered() {
+    // The ceiling is certain before the first chunk: a document past it
+    // cannot be persisted by this device even if every byte arrives. Refusing
+    // at the end still refuses, but only after a whole reassembly has been
+    // spent to reach a verdict that was decided at the door.
+    //
+    // The peer is nonconforming by construction, which is the only way to get
+    // here: this implementation refuses to carry such a document at all.
+    let (mut alice, mut bob) = pair();
+    let over = crate::protocol::data_sync::MAX_MEDIA_SNAPSHOT_BYTES + 64 * 1024;
+    alice
+        .protocol
+        .send_media_inner(
+            bob.address.clone(),
+            vec![5u8; over],
+            "notes".to_string(),
+            offline_protocol_core::ContentType::File,
+            crate::protocol::types::MediaSendOptions::default(),
+            Some(crate::media_envelope::DataPurpose::Snapshot {
+                doc: "notes".to_string(),
+            }),
+        )
+        .expect("a peer that advertised carriage accepts the send");
+    pump(&mut alice, &mut bob);
+
+    assert_eq!(
+        bob.protocol.file_transfer_manager.active_transfer_count(),
+        0,
+        "a snapshot past the record ceiling must buffer nothing"
+    );
+    assert!(events_named(&bob, "file_received").is_empty());
+    assert!(events_named(&bob, "file_progress").is_empty());
+
+    // The control, on the same road: a snapshot under the ceiling IS
+    // admitted. Without it the assertion above passes for a fixture whose
+    // chunk 0 never arrived.
+    let (mut alice, mut bob) = pair();
+    alice
+        .protocol
+        .send_media_inner(
+            bob.address.clone(),
+            vec![5u8; 2 * 1024 * 1024],
+            "notes".to_string(),
+            offline_protocol_core::ContentType::File,
+            crate::protocol::types::MediaSendOptions::default(),
+            Some(crate::media_envelope::DataPurpose::Snapshot {
+                doc: "notes".to_string(),
+            }),
+        )
+        .expect("send");
+    pump(&mut alice, &mut bob);
+    assert_eq!(
+        bob.protocol.file_transfer_manager.active_transfer_count(),
+        1,
+        "the same road must admit a snapshot the ceiling allows"
+    );
+}

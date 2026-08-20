@@ -146,12 +146,20 @@ pub(crate) const MAX_MEDIA_SNAPSHOT_BYTES: usize = super::types::MAX_PROTOCOL_ST
 /// one still worth remembering.
 pub(crate) const MAX_PENDING_ATTACHMENT_FETCHES: usize = 64;
 
-/// How long a fetch stays outstanding before it is given up on.
+/// How long a fetch stays outstanding with no sign of an answer.
 ///
-/// Generous, because the answer travels the media path and the media path
-/// may be Bluetooth. The cost of being slow here is a reference that reports
-/// unavailable while its bytes are still arriving, and the app can ask
-/// again; the cost of no timeout at all is a map that only grows.
+/// Measured from the last sign of life rather than from the question, and
+/// the difference is the whole of it: chunks of the answer refresh the
+/// entry, so a blob slower to arrive than this does not have its own record
+/// expire underneath it. That record is what admits the bytes at the end, so
+/// an expiry mid-carriage discards a blob that fully arrived, and the retry
+/// it invites takes just as long and dies exactly the same way.
+///
+/// Generous even so, because a holder may take a while to answer at all and
+/// the media path may be Bluetooth. The cost of being slow here is a
+/// reference that reports unavailable while somebody is still deciding, and
+/// the app can ask again; the cost of no timeout at all is a map that only
+/// grows.
 pub(crate) const ATTACHMENT_FETCH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// Blob requests one peer may have acted on inside a window.
@@ -1146,6 +1154,21 @@ impl OfflineProtocol {
             return;
         }
 
+        // Not a dead end and not reported as one: the document is already on
+        // its way. This rung is re-entered on its own while a carriage runs,
+        // because the peer stays stale for the whole of it and says so on
+        // every exchange.
+        let purpose = DataPurpose::Snapshot {
+            doc: doc.to_string(),
+        };
+        if self.data_media_transfer_in_flight(space, &purpose) {
+            debug!(
+                space,
+                doc, "This document is already crossing to the peer; not starting a second copy"
+            );
+            return;
+        }
+
         debug!(
             space,
             doc,
@@ -1158,9 +1181,7 @@ impl OfflineProtocol {
             doc.to_string(),
             ContentType::File,
             MediaSendOptions::default(),
-            Some(DataPurpose::Snapshot {
-                doc: doc.to_string(),
-            }),
+            Some(purpose),
         ) {
             // Transient by nature: no confirmed session yet, the per-peer
             // transfer slots are full, or the protocol is not running.
@@ -1550,10 +1571,14 @@ impl OfflineProtocol {
         if self.pending_attachment_fetches.len() >= MAX_PENDING_ATTACHMENT_FETCHES
             && !self.pending_attachment_fetches.contains_key(&key)
         {
+            // Oldest by last sign of life rather than by age, which is what
+            // keeps a fetch whose bytes are actively arriving out of this:
+            // every chunk of an answer refreshes its entry, so a live
+            // carriage sits among the newest and is never the one displaced.
             if let Some(oldest) = self
                 .pending_attachment_fetches
                 .iter()
-                .min_by_key(|(_, asked_at)| **asked_at)
+                .min_by_key(|(_, seen_at)| **seen_at)
                 .map(|(key, _)| key.clone())
             {
                 self.pending_attachment_fetches.remove(&oldest);
@@ -1617,6 +1642,22 @@ impl OfflineProtocol {
             )));
         }
 
+        // Answering twice is not an error to report back: the app did as it
+        // was asked, and the bytes are on their way. Idempotent rather than
+        // refused, because a request repeated after its window reopens is
+        // ordinary and an app has no way to see that its first answer is
+        // still in flight.
+        let purpose = DataPurpose::Attachment {
+            hash: hash.to_string(),
+        };
+        if self.data_media_transfer_in_flight(peer, &purpose) {
+            debug!(
+                peer,
+                "These bytes are already crossing to this peer; not starting a second copy"
+            );
+            return Ok(());
+        }
+
         self.send_media_inner(
             peer.to_string(),
             bytes,
@@ -1626,9 +1667,7 @@ impl OfflineProtocol {
             hash.to_string(),
             ContentType::File,
             MediaSendOptions::default(),
-            Some(DataPurpose::Attachment {
-                hash: hash.to_string(),
-            }),
+            Some(purpose),
         )?;
         Ok(())
     }
@@ -1783,6 +1822,51 @@ impl OfflineProtocol {
                 reason: reason.to_string(),
             });
         }
+    }
+
+    /// Note that the answer to a fetch is on its way.
+    ///
+    /// A transfer that is visibly progressing is the answer this device is
+    /// waiting for, so the question must not expire while it arrives. Without
+    /// this the record times out mid-carriage and
+    /// [`Self::accept_data_media_payload`] then drops a blob that fully
+    /// arrived as one nobody asked for, which no retry can fix: the retry
+    /// carries the same bytes over the same radio and expires at the same
+    /// point.
+    ///
+    /// Only an attachment has a record to refresh. A snapshot is unsolicited
+    /// by design and keeps none.
+    pub(crate) fn refresh_attachment_fetch(&mut self, peer: &str, purpose: &DataPurpose) {
+        let DataPurpose::Attachment { hash } = purpose else {
+            return;
+        };
+        let key = Self::attachment_fetch_key(peer, hash);
+        if let Some(seen_at) = self.pending_attachment_fetches.get_mut(&key) {
+            *seen_at = Instant::now();
+        }
+    }
+
+    /// Whether a transfer for exactly this purpose is already on its way to
+    /// this peer.
+    ///
+    /// Both roads onto the media path are re-entered by things that recur on
+    /// their own: a peer stays stale for the whole multi-minute carriage of a
+    /// document, so every anti-entropy exchange in that window reaches the
+    /// top rung again, and an application answering a repeated request has no
+    /// way to know its first answer is still in flight.
+    ///
+    /// Without this check those repeats become second copies of one transfer.
+    /// A peer may hold only [`MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER`] at
+    /// once, so the duplicates halve the throughput of the transfer that
+    /// matters and then fill the slots, and the next thing to fail is the
+    /// application's own media send, with a limit error whose cause it cannot
+    /// see: the transfers holding those slots are invisible to it by design.
+    ///
+    /// [`MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER`]: crate::constants::MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER
+    fn data_media_transfer_in_flight(&self, recipient: &str, purpose: &DataPurpose) -> bool {
+        self.outbound_media_transfers.values().any(|transfer| {
+            transfer.recipient == recipient && transfer.data_purpose.as_ref() == Some(purpose)
+        })
     }
 
     /// Give up on fetches nobody answered, and say so.

@@ -446,7 +446,14 @@ pub struct OfflineProtocol {
     pub(crate) last_data_sync_offer: HashMap<String, Instant>,
 
     /// Attachment fetches asked for and not yet answered, keyed by space and
-    /// blob hash, valued by when the question went out.
+    /// blob hash, valued by the last sign that an answer is coming: the
+    /// moment the question went out, or the arrival of a chunk of its
+    /// answer.
+    ///
+    /// The refresh is what keeps this record's two jobs consistent. It bounds
+    /// how long a question is remembered, and it is also what admits the
+    /// bytes when they finally land, so a record that expired while its own
+    /// answer was arriving would discard a blob that fully crossed.
     ///
     /// Load-bearing for more than bookkeeping: arriving blob bytes are
     /// admitted only against an entry here, checked when the transfer's

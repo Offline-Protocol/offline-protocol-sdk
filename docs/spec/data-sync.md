@@ -371,6 +371,13 @@ A requester MUST bound how often it repeats `need_blob` for one hash, and a
 holder MUST bound how often it acts on one. Neither frame is idempotent in
 cost: each one it acts on spends a whole transfer.
 
+An implementation SHOULD NOT start a second transfer for bytes already
+crossing to the same peer. Both frames can arrive again while the first answer
+is still in flight, and a duplicate costs more than a wasted radio: a transfer
+occupies one of a small number of per-peer slots that the application's own
+sends draw from, so duplicates of an invisible transfer surface as a limit the
+application cannot account for.
+
 A receiver MUST verify that arriving bytes hash to what it asked for, and MUST
 discard them otherwise. Authentication answers who sent bytes, never what they
 are, so this check is what makes fetching from an authenticated peer safe
@@ -380,6 +387,16 @@ A receiver MUST discard blob bytes it has no outstanding request for, and
 SHOULD refuse the transfer as soon as it can identify it rather than at the
 end. Discarding only on completion still discards, but the storage and the
 battery have already been spent, and the sender paid one frame to spend them.
+
+A requester that expires outstanding requests MUST NOT let one expire while
+its own answer is arriving. The rule above and any expiry compose into a trap
+otherwise: the record of the request is what admits the bytes, so a request
+timed out mid-carriage discards a blob that fully crossed, and the retry it
+invites carries the same bytes over the same radio to expire at the same
+point. Time the expiry from the last sign that an answer is coming rather than
+from the question. This matters most on exactly the transports this layer
+exists for, where a large blob can take longer to arrive than any reasonable
+patience for an unanswered question.
 
 Where the identifying information rides a particular part of the transfer, a
 receiver cannot judge what arrives before it. Such a receiver SHOULD release
@@ -434,6 +451,13 @@ MUST refuse one that arrives anyway rather than buffering it to completion.
 The receiver could not persist it even if every byte arrived, so the transfer
 would otherwise spend a long time to fail at the end, and an unsolicited
 transfer that no request bounds is exactly the one whose size has to.
+
+A transfer declares its total size alongside the mark that identifies it, so
+the refusal belongs at the moment the transfer is identified. A receiver that
+waits for reassembly to compare sizes has already spent everything the bound
+was protecting. Note that a peer's ceiling need not match this one, and a
+sender's compliance is not something a receiver can assume: this is a check on
+what arrives, not a restatement of the sender's rule.
 
 An implementation MUST report a document it cannot replicate rather than
 discarding it silently. The two replicas will not converge, both sides keep

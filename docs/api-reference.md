@@ -1111,8 +1111,10 @@ proto.on('data_attachment_unavailable', ({ hash, reason }) => showMissing(hash, 
 so a peer holding a reference and no blob is ordinary rather than broken.
 Without a refusal the asking side cannot tell that from a slow radio, and shows
 somebody a spinner that never resolves. A fetch that nobody answers ends by
-itself after fifteen minutes with `reason: 'timeout'`, and one displaced by
-newer fetches ends with `reason: 'evicted'`.
+itself after fifteen minutes of silence with `reason: 'timeout'`, and one
+displaced by newer fetches ends with `reason: 'evicted'`. Silence, not age: a
+transfer that is arriving keeps its own fetch alive, so a blob that takes an
+hour over Bluetooth is delivered rather than timed out at the last byte.
 
 **Keep blobs to a size you are willing to hold in memory.** A fetched blob
 arrives whole, in one event, base64 encoded. The protocol's own ceiling is the

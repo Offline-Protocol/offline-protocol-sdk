@@ -879,7 +879,9 @@ impl OfflineProtocol {
         // first be asked. Answered with an ACK rather than silence: the
         // sender is wrong rather than unlucky, and a retry would be refused
         // exactly the same way.
-        if is_first_chunk && !self.admits_data_media_transfer(&sender, data_purpose.as_ref()) {
+        if is_first_chunk
+            && !self.admits_data_media_transfer(&sender, data_purpose.as_ref(), file_size)
+        {
             // Refused, not merely skipped. Chunks need not arrive in order,
             // so any that landed before this one already opened an assembly,
             // and any behind it would open another. The refusal has to
@@ -910,6 +912,22 @@ impl OfflineProtocol {
                 } else if let Some(entry) = self.pending_media_metadata.get_mut(&file_id) {
                     entry.last_updated_at = Instant::now();
                 }
+                // What this transfer is, as far as this device can tell
+                // right now. Read once and used twice below.
+                let arriving = self
+                    .pending_media_metadata
+                    .get(&file_id)
+                    .and_then(|entry| entry.data_purpose.clone());
+                // A chunk landing is the sign that an answer is coming, so
+                // the question it answers is kept alive. The fetch record is
+                // what admits the bytes at the end, and it expires on a
+                // clock that a large blob over a slow radio outlives: without
+                // this the record dies mid-carriage and the completed
+                // transfer is then dropped as unsolicited, forever, because
+                // every retry takes just as long.
+                if let Some(purpose) = &arriving {
+                    self.note_data_media_progress(&sender, purpose);
+                }
                 // A data-purposed transfer is invisible to the application
                 // for its whole life, not merely at the end. Reporting
                 // progress on it would put a download nobody started in
@@ -927,10 +945,8 @@ impl OfflineProtocol {
                 // delayed loses the progress events until it lands. That is
                 // cheap: progress is advisory and each event supersedes the
                 // last, so the app sees the count resume rather than a gap.
-                let reports_progress = self
-                    .pending_media_metadata
-                    .get(&file_id)
-                    .is_some_and(|entry| entry.data_purpose.is_none());
+                let reports_progress =
+                    arriving.is_none() && self.pending_media_metadata.contains_key(&file_id);
                 if reports_progress {
                     if let Ok(state) = lock_shared_state(&self.shared_state) {
                         state.emit_event(Event::file_progress(
@@ -1093,6 +1109,7 @@ impl OfflineProtocol {
         &self,
         sender: &str,
         purpose: Option<&crate::media_envelope::DataPurpose>,
+        declared_size: u64,
     ) -> bool {
         let Some(purpose) = purpose else {
             return true;
@@ -1106,20 +1123,40 @@ impl OfflineProtocol {
                 );
                 return false;
             }
-            if let crate::media_envelope::DataPurpose::Attachment { hash } = purpose {
-                if !self.awaiting_attachment(sender, hash) {
-                    warn!(
-                        peer = %sender,
-                        "Refusing attachment bytes for a fetch this device never made"
-                    );
-                    return false;
+            match purpose {
+                crate::media_envelope::DataPurpose::Attachment { hash } => {
+                    if !self.awaiting_attachment(sender, hash) {
+                        warn!(
+                            peer = %sender,
+                            "Refusing attachment bytes for a fetch this device never made"
+                        );
+                        return false;
+                    }
+                }
+                // A snapshot has no fetch record to judge it by, so the size
+                // it declares is the only thing that can be judged here. It
+                // is judged here rather than at the end because the ceiling
+                // is certain: a document past it cannot be persisted by this
+                // device even if every byte arrives, so admitting one spends
+                // a whole reassembly to reach a refusal that was decided
+                // before the first chunk. The completion check stays as the
+                // backstop against a header that lied.
+                crate::media_envelope::DataPurpose::Snapshot { .. } => {
+                    if declared_size > crate::protocol::data_sync::MAX_MEDIA_SNAPSHOT_BYTES as u64 {
+                        warn!(
+                            peer = %sender,
+                            declared = declared_size,
+                            "Refusing a carried snapshot larger than a record can hold"
+                        );
+                        return false;
+                    }
                 }
             }
             true
         }
         #[cfg(not(feature = "data"))]
         {
-            let _ = (sender, purpose);
+            let _ = (sender, purpose, declared_size);
             // Nothing here can use these bytes, so nothing here should buffer
             // them either.
             false
@@ -1153,6 +1190,26 @@ impl OfflineProtocol {
                 ?purpose,
                 "Dropping a document-layer transfer: this build has no data layer"
             );
+        }
+    }
+
+    /// Note that a data-purposed transfer is still arriving, so whatever
+    /// this device is waiting on does not expire underneath it. See
+    /// [`Self::route_data_media_payload`] for the gate.
+    pub(super) fn note_data_media_progress(
+        &mut self,
+        sender: &str,
+        purpose: &crate::media_envelope::DataPurpose,
+    ) {
+        #[cfg(feature = "data")]
+        {
+            self.refresh_attachment_fetch(sender, purpose);
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            // A build with no data layer never admitted this transfer, so
+            // there is nothing here that could be waiting on it.
+            let _ = (sender, purpose);
         }
     }
 
