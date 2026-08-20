@@ -1094,6 +1094,38 @@ fn an_over_long_name_or_type_is_refused() {
 }
 
 #[test]
+fn a_size_the_engine_cannot_hold_is_refused_rather_than_clamped() {
+    // The engine's integer is signed and this crate's is not, so a size past
+    // `MAX_ATTACHMENT_SIZE` cannot survive the conversion. Refused at the
+    // operation rather than clamped inside it: a clamped size replicates to
+    // the whole space as a number its writer never wrote, and every member
+    // then decides whether to fetch against it.
+    let mut doc = DataDoc::new();
+    let err = doc
+        .map_set(
+            "files",
+            "blob",
+            DataValue::attachment(HASH_A, crate::MAX_ATTACHMENT_SIZE + 1),
+        )
+        .expect_err("a size past the engine's integer must be refused");
+    assert!(matches!(err, DataError::InvalidAttachment { .. }), "{err}");
+
+    // The control: the largest size that DOES fit is accepted and reads back
+    // unchanged. Without it the assertion above passes for a bound that
+    // refuses everything.
+    doc.map_set(
+        "files",
+        "blob",
+        DataValue::attachment(HASH_A, crate::MAX_ATTACHMENT_SIZE),
+    )
+    .expect("the largest representable size must be accepted");
+    assert_eq!(
+        doc.map_get("files", "blob").expect("get"),
+        Some(DataValue::attachment(HASH_A, crate::MAX_ATTACHMENT_SIZE))
+    );
+}
+
+#[test]
 fn an_attachment_reference_serializes_in_the_shape_the_ffi_carries() {
     // The canonical FFI and wire spelling. Absent name and type are absent,
     // not null: a golden vector pins this same shape, and a reader that has

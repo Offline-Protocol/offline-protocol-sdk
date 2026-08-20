@@ -64,6 +64,16 @@ pub const MAX_ATTACHMENT_NAME_LEN: usize = 256;
 /// accepts every registered name and leaves nothing to argue about.
 pub const MAX_ATTACHMENT_MIME_LEN: usize = 255;
 
+/// Largest size an attachment reference may declare.
+///
+/// Not a statement about how large a blob may be: what a transport will
+/// carry is the transfer layer's business and is far smaller than this. It
+/// is the largest value the engine can hold without changing meaning, since
+/// the engine has one integer type and it is signed. A reference declaring
+/// more is refused at the operation that writes it rather than clamped on
+/// the way in, because a clamped size is a size its writer never wrote.
+pub const MAX_ATTACHMENT_SIZE: u64 = i64::MAX as u64;
+
 /// Longest accepted single value, equal to the whole-document cap.
 ///
 /// A value at or past this size can never fit inside a document that also
@@ -237,6 +247,17 @@ pub fn validate_attachment(
     if size == 0 {
         return Err(DataError::InvalidAttachment {
             reason: "size must not be zero",
+        });
+    }
+    // The upper bound is structural rather than a policy about how large a
+    // blob may be: the engine has one integer type and it is signed, so a
+    // size past this cannot be stored without changing it. Refused here so
+    // that the conversion further down is lossless by construction. Left to
+    // the conversion, the same value would be silently clamped and a replica
+    // would read back a size its writer never wrote.
+    if size > MAX_ATTACHMENT_SIZE {
+        return Err(DataError::InvalidAttachment {
+            reason: "size is larger than MAX_ATTACHMENT_SIZE",
         });
     }
     if name.is_some_and(|name| name.len() > MAX_ATTACHMENT_NAME_LEN) {

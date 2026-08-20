@@ -42,9 +42,14 @@
 //! - **Content and display fields are left raw**: `content`, `file_data`,
 //!   `name`, `new_name`/`old_name`, `group_name`, `file_name`,
 //!   `initial_message`, `reason`/`reason_detail`, `method`, `body`,
-//!   `version`. Scrubbing payload is out of scope for `scrub_ids`; if that
-//!   ever needs to change it belongs behind a separate `emit_content` knob
-//!   so the two concerns don't get conflated.
+//!   `version`, and [`Event::DataAttachmentReceived::data`]. Scrubbing
+//!   payload is out of scope for `scrub_ids`; if that ever needs to change
+//!   it belongs behind a separate `emit_content` knob so the two concerns
+//!   don't get conflated.
+//!
+//!   `data` deserves naming rather than filing quietly under "content": it
+//!   is a whole blob, base64, and it is the largest single value a sink can
+//!   be handed. A sink that persists raw events persists the file itself.
 //!
 //!   Group and file names stay here on purpose even though petnames moved
 //!   out. A group name is a label several parties share and agree on, and a

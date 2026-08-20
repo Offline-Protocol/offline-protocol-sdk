@@ -287,6 +287,27 @@ lowercase hex characters, and MUST NOT case-fold an uppercase one. Two
 spellings of one address are two addresses: they would fetch twice, store
 twice, and compare unequal while naming identical bytes.
 
+`size` MUST be greater than zero and MUST NOT exceed 9223372036854775807
+(2^63 - 1). Zero names no bytes, so a reference carrying it can only ever
+produce a fetch that cannot succeed. The upper bound is structural rather than
+a policy about how large a blob may be: it is the largest integer this layer
+carries without changing its meaning, and a value past it would have to be
+clamped, which replicates to the whole space as a number its writer never
+wrote.
+
+`name` MUST NOT exceed 256 bytes and `mime` MUST NOT exceed 255 bytes, both
+measured on the encoded UTF-8 rather than on characters. They are display
+fields that replicate to every member of the space whether or not anybody
+fetches the blob, so they are bounded where they are written rather than where
+they are shown.
+
+Every bound above is checked in both directions, and the inbound direction is
+the one that decides interoperability: a reference arriving inside a peer's
+delta is checked before it is read out, and one that fails any check reads as
+absent, exactly as an unknown value kind does. A writer that violates a bound
+does not hear about it from the other side; its references simply are not
+there. Check them where the reference is written.
+
 A reference is one whole value, replaced and never edited in place. That is
 what makes concurrent attachment writes safe without any rule anybody has to
 remember: two members attaching different blobs to one key resolve the way
@@ -316,9 +337,10 @@ either field.
 ### How large a blob may be
 
 A blob rides the media path and is bounded by it, not by the document layer:
-the transfer layer's own file-size limit is the ceiling, and it is generous
-(hundreds of megabytes) because it was sized for the files people send each
-other.
+the transfer layer's own file-size limit is the ceiling. That limit is a local
+policy rather than a protocol constant, so an implementation MUST NOT assume
+any particular value for a peer's. This one defaults to 100 MB and is
+configurable in both directions.
 
 That ceiling is not a recommendation. A fetched blob is delivered to the
 application whole, in one event, so its bytes are held in memory on the
@@ -394,15 +416,24 @@ path as a whole document. This is the rung above `snap`, and the last one.
 It is terminal in the same way `snap` is: it provokes no answer, so the
 refusals below it can ask freely.
 
-It is subject to the same rules as an attachment transfer. It is gated on
-`data_versions` entry 3, it is 1:1 only, and the arriving bytes go through the
-same import containment every remote blob goes through. The road the bytes
-travelled says nothing about what they are: this is still an import from a
-peer who is authenticated and may still be wrong.
+It is gated on `data_versions` entry 3, it is 1:1 only, and the arriving bytes
+go through the same import containment every remote blob goes through. The
+road the bytes travelled says nothing about what they are: this is still an
+import from a peer who is authenticated and may still be wrong.
 
-A sender MUST NOT carry a document larger than one sealed protocol-state
-record can hold. The receiver could not persist it even if every byte arrived,
-so the transfer would spend a long time to fail at the end.
+It differs from an attachment transfer in one rule, and it is the rule a
+reader is most likely to carry over by mistake. A snapshot is **unsolicited by
+design**: it answers a version exchange rather than a fetch, so there is no
+outstanding request to check it against, and the requirement that a receiver
+discard bytes it did not ask for does not apply to it. Applying it would
+disable this rung entirely, because nothing ever asks for a snapshot by name.
+
+What stands in for that check is the size bound. A sender MUST NOT carry a
+document larger than one sealed protocol-state record can hold, and a receiver
+MUST refuse one that arrives anyway rather than buffering it to completion.
+The receiver could not persist it even if every byte arrived, so the transfer
+would otherwise spend a long time to fail at the end, and an unsolicited
+transfer that no request bounds is exactly the one whose size has to.
 
 An implementation MUST report a document it cannot replicate rather than
 discarding it silently. The two replicas will not converge, both sides keep

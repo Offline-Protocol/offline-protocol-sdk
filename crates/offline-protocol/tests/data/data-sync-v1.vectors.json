@@ -95,7 +95,7 @@
     {
       "name": "every field",
       "json": "{\"kind\":\"attachment\",\"hash\":\"d73deca5a2a317edda0925823c6c775c9acefea1d69889f22b27566b403d8a1c\",\"size\":34,\"name\":\"plan.pdf\",\"mime\":\"application/pdf\"}",
-      "note": "Field order is fixed: kind, hash, size, name, mime."
+      "note": "Field order is fixed: kind, hash, size, name, mime. Bounds a reader must also enforce: `size` in 1..=9223372036854775807, `name` at most 256 bytes, `mime` at most 255. A reference breaching any of them reads as absent, exactly as an unknown value kind does."
     },
     {
       "name": "no display name and no media type",

@@ -746,11 +746,13 @@ fn to_engine_value(value: DataValue) -> LoroValue {
                 (ATTACHMENT_HASH_KEY.to_string(), LoroValue::from(hash)),
                 (
                     ATTACHMENT_SIZE_KEY.to_string(),
-                    // The engine has one integer type and it is signed. Sizes
-                    // are bounded far below this by the transfer layer, so the
-                    // saturating cast is unreachable rather than lossy, and it
-                    // is a cast rather than a refusal because a value this
-                    // deep has no way to report one.
+                    // The engine has one integer type and it is signed.
+                    // `validate_attachment` refuses anything past
+                    // `MAX_ATTACHMENT_SIZE` at the operation that writes it,
+                    // and every write path runs it, so the saturation here is
+                    // a backstop rather than the bound: it exists because a
+                    // value this deep has no way to report a refusal, not
+                    // because the case is expected.
                     LoroValue::from(i64::try_from(size).unwrap_or(i64::MAX)),
                 ),
             ];

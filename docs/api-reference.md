@@ -856,6 +856,10 @@ Emitted when a group is renamed.
 |---|---|---|
 | `data_changed` | `space_id`, `doc_id`, `delta_bytes` | A document change reached storage |
 | `data_doc_size_warning` | `space_id`, `doc_id`, `compacted_bytes`, `cap_bytes` | A document passed 768 KiB, approaching the 1 MiB cap |
+| `data_attachment_requested` | `space_id`, `peer_id`, `hash` | A peer wants the bytes behind a reference. Answer with `provideAttachment` or `declineAttachment` |
+| `data_attachment_received` | `space_id`, `peer_id`, `hash`, `data` | Fetched bytes arrived and matched the hash that asked for them. `data` is the whole blob, base64 |
+| `data_attachment_unavailable` | `space_id`, `peer_id`, `hash`, `reason` | A fetch ended without bytes: `declined`, `timeout`, `evicted`, `hash_mismatch`, or a transfer failure |
+| `data_doc_unsyncable` | `space_id`, `doc_id`, `bytes`, `reason` | A document cannot be replicated in any form: too large to frame, and no media path to the peer |
 
 ## Group Role Management
 
@@ -1042,9 +1046,9 @@ await store.flush('space-1', 'profile');
 | `docSize(space, doc)` | `number` | Compacted size in bytes |
 | `wipeAll()` | `void` | Delete every data-layer record. Only durable once replication has stopped |
 | `attachmentHash(bytesBase64)` | `string` | The address of some bytes, for writing a reference |
-| `fetchAttachment(space, hash)` | `void` | Ask the peer for a blob. Answers arrive as events |
-| `provideAttachment(space, peer, hash, bytesBase64)` | `void` | Answer a peer's request |
-| `declineAttachment(space, peer, hash)` | `void` | Tell a peer the bytes are gone |
+| `fetchAttachment(space, hash)` | `void` | Ask the peer for a blob. Answers arrive as events; throws for a group space or a peer that cannot carry blobs |
+| `provideAttachment(space, peer, hash, bytesBase64)` | `void` | Answer a peer's request. Throws if the bytes do not hash to `hash` |
+| `declineAttachment(space, peer, hash)` | `void` | Tell a peer the bytes are gone. Throws for a peer that cannot carry blobs |
 
 A space id is the MLS scope the space rides on: a peer address (replicates
 1:1 with that peer), a group id from `createGroup` (replicates with every
@@ -1120,8 +1124,15 @@ and they replicate to everyone in the space whether or not anybody fetches the
 blob. Render `name` as inert text and never treat it as a path: the bytes are
 addressed by `hash` alone.
 
-Four things worth knowing before you build on this:
+Five things worth knowing before you build on this:
 
+- **Both answers depend on the peer's capability, and say so immediately.**
+  `fetchAttachment` and `declineAttachment` reject synchronously toward a peer
+  that never advertised blob carriage (an older build, or one with the data
+  layer switched off), because neither frame would be readable to them. That
+  rejection is the whole signal: no `data_attachment_unavailable` follows a
+  fetch that never left the device, so handle the rejected promise rather than
+  waiting on an event that is not coming.
 - **Declining is a real answer.** A reference outlives the bytes it names, so
   a peer holding a reference and no blob is normal. Stay silent and the asking
   side cannot tell you from a slow radio, and shows a person a spinner that
