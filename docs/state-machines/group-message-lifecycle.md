@@ -290,6 +290,36 @@ documents. It does not rescue a member absent long enough for the outbox to
 expire every rung, which predates group replication and is bounded by the
 epoch instead.
 
+The count is scoped to one epoch and one process, because those are the only
+spans it can speak for:
+
+- **A commit rebases it.** Every member restarts the ratchet at zero when the
+  epoch rotates, so a count carried across a rotation describes a gap that no
+  longer exists, and promoting on it would spend a roster-wide frame to close
+  nothing. The count is therefore stored against the epoch it was taken in
+  rather than cleared at each rotation site, so a rotation site added later
+  cannot forget to clear it.
+- **A relaunch does not reset the gap it is counting.** The sender ratchet is
+  persisted with the group state; this count is not. Reading a missing count
+  as zero would let a device that restarts often accumulate the true gap
+  across sessions and strand a member without the bound ever tripping. A
+  missing count therefore reads as *spent*: the first directed frame per
+  group per process goes to the whole roster, which re-bases every member's
+  reachable window at the cost of one frame per group per launch.
+
+**A promotion is still a roster-wide delivery, so it answers to the
+all-members gate.** A directed frame needs no capability check, because the
+member it answers asked for it; handing that same frame to the whole roster
+is exactly the send the gate refuses.
+
+When the bound is reached and the gate is closed, the frame is withheld
+rather than sent addressed. Every directed encryption spends a generation
+only its target observes, so continuing past the bound trades a document
+convergence that is already stalled group-wide (the closed gate stops local
+commits too) for the permanent loss of this device's group *chat* to every
+other member. Either an ordinary group message or the gate opening releases
+it, and the member holding the gate shut is being probed meanwhile.
+
 ## Bounds
 
 | Bound | Value |
@@ -300,7 +330,8 @@ epoch instead.
 | Unauthorized-change report suppression | 300 s per (group, committer, enforced) |
 | Unproven-leaf report suppression | 300 s per (group, sender, site) |
 | Replication offer suppression | 30 s per (member, group) |
-| Roster-invisible group generations | 256 per group, then the next frame goes to the whole roster |
+| Roster-invisible group generations | 256 per group per epoch, then the next frame goes to the whole roster (gate permitting) |
+| First directed frame per group per process | Always roster-wide: the inherited generation is unreadable |
 
 The `enforced` component of the first key is load-bearing. Dropping it lets an
 earlier report-only event suppress the refusal alarm for the same committer,

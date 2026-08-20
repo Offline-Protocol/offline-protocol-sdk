@@ -220,6 +220,22 @@ offers, deltas answering them, and snapshots to the member that asked, so the
 1.5-round-trip termination rule below holds unchanged. Only a local commit is
 sent to the whole roster.
 
+With one exception, which a sender MUST implement: a group has a single
+sender ratchet per epoch, so an addressed frame advances the generation every
+*other* member has to reach, and a member that never observes one falls out
+of MLS's forward-distance window and stops decrypting that sender entirely.
+A sender MUST therefore bound how many frames it encrypts for a group without
+delivering one to the whole roster, and deliver the next one roster-wide when
+that bound is reached. A promoted frame is an ordinary roster-wide delivery
+and is subject to the all-members gate above like any other. Where the bound
+is reached and the gate is closed, a sender MUST withhold the frame rather
+than send it addressed: a roster-wide frame some member renders as text is
+the worse outcome, and spending further generations that only one member can
+observe strands the rest for messaging as well as replication. Receivers need no special
+handling, since every body is either idempotent or answerable with nothing.
+See [the group message lifecycle](../state-machines/group-message-lifecycle.md#addressed-frames-still-advance-everyones-ratchet)
+for the bound this implementation uses.
+
 Directed frames are still encrypted under the group key rather than a
 pairwise session: two members of a group need not have a 1:1 session with
 each other, and requiring one would make replication depend on a handshake

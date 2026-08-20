@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use offline_protocol_data::DataValue;
 use offline_protocol_transport::{MockTransport, Transport, TransportType};
 
-use crate::group_mesh::MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS;
+use crate::group_mesh::{RosterRatchetGap, MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS};
 use crate::mls::InMemoryStorage;
 use crate::protocol::prefixes::internal_prefixes;
 use crate::protocol::tests::{create_test_config_for_user, id};
@@ -855,13 +855,42 @@ fn directed_frames_do_not_strand_the_member_they_skip() {
     );
 }
 
+/// The gap this device believes it has opened in `group`.
+fn ratchet_gap(member: &Member, group: &str) -> Option<RosterRatchetGap> {
+    member
+        .protocol
+        .group_mesh
+        .roster_invisible_generations
+        .get(group)
+        .copied()
+}
+
+/// Declare the budget spent at the epoch the group is actually on, which is
+/// what 256 directed frames would have done, without sending them.
+fn spend_the_budget(member: &mut Member, group: &str) {
+    let epoch = ratchet_gap(member, group)
+        .expect("the group has to have been sent something before its budget can be spent")
+        .epoch;
+    member
+        .protocol
+        .group_mesh
+        .roster_invisible_generations
+        .insert(
+            group.to_string(),
+            RosterRatchetGap {
+                epoch,
+                invisible: MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS,
+            },
+        );
+}
+
 #[test]
 fn a_roster_wide_frame_clears_the_ratchet_gap_budget() {
     // The budget is spent by frames the roster does not see and cleared by
     // one it does. Group chat is the common clearer, so a talkative group
     // never promotes anything; a group that only replicates documents is
     // the one that relies on the promotion.
-    let (mut alice, mut bob, _carol, group) = trio();
+    let (mut alice, bob, _carol, group) = trio();
 
     for _ in 0..10 {
         alice.protocol.last_data_sync_offer.clear();
@@ -870,14 +899,12 @@ fn a_roster_wide_frame_clears_the_ratchet_gap_budget() {
             .kick_group_data_sync(&group, &bob.address, "rediscovered");
     }
     assert_eq!(
-        alice
-            .protocol
-            .group_mesh
-            .roster_invisible_generations
-            .get(&group)
-            .copied(),
-        Some(10),
-        "each directed frame has to be counted, or the budget never trips"
+        ratchet_gap(&alice, &group).map(|gap| gap.invisible),
+        Some(9),
+        "each directed frame has to be counted, or the budget never trips. \
+         Nine and not ten because the first frame of the process is promoted \
+         on its own account: this device cannot see the generation it \
+         inherited from earlier sessions"
     );
 
     alice
@@ -886,16 +913,183 @@ fn a_roster_wide_frame_clears_the_ratchet_gap_budget() {
         .expect("send a group message");
 
     assert_eq!(
-        alice
-            .protocol
-            .group_mesh
-            .roster_invisible_generations
-            .get(&group)
-            .copied(),
-        None,
+        ratchet_gap(&alice, &group).map(|gap| gap.invisible),
+        Some(0),
         "a message every member is handed puts the whole roster back within \
          reach, so the gap it closed must not keep counting against the next \
          promotion"
+    );
+    assert!(
+        ratchet_gap(&alice, &group).is_some(),
+        "and the entry has to stay: an absent one means \"this process has \
+         never given the roster a frame\", which would promote every frame \
+         from here on"
+    );
+}
+
+#[test]
+fn the_first_directed_frame_of_a_process_is_promoted() {
+    // The MLS sender ratchet is persisted with the group state and this
+    // counter is not, so a relaunch inherits a generation it cannot read.
+    // Counting from zero there would let a device that restarts often
+    // accumulate the gap across sessions and strand a member without the
+    // budget ever tripping: four quiet launches of 250 directed frames each
+    // cross 1000 with the counter never leaving 250.
+    let (mut alice, mut bob, mut carol, group) = trio();
+
+    // Give the group a history so the offer below has something to carry,
+    // then take the process back to what a relaunch leaves: the MLS state
+    // (and its generation) intact, this map empty.
+    write(&mut alice, &group, "notes", "title", "hello");
+    settle(&mut alice, &mut bob, &mut carol);
+    alice
+        .protocol
+        .group_mesh
+        .roster_invisible_generations
+        .clear();
+    alice.transport.clear_sent_messages();
+
+    alice.protocol.last_data_sync_offer.clear();
+    alice
+        .protocol
+        .kick_group_data_sync(&group, &bob.address, "rediscovered");
+
+    assert!(
+        data_frames_sent(&alice, &mut carol, &group) > 0,
+        "the first directed frame after a relaunch has to reach the whole \
+         roster: it is the only rung this process can be sure every member \
+         can still decrypt"
+    );
+    assert_eq!(
+        ratchet_gap(&alice, &group).map(|gap| gap.invisible),
+        Some(0),
+        "and having promoted it, the count starts from a gap of nothing"
+    );
+}
+
+#[test]
+fn an_epoch_rotation_rebases_the_ratchet_gap() {
+    // The gap is a property of one epoch: a commit rotates the group and
+    // every member restarts the ratchet at zero, so a count carried across
+    // the rotation describes a gap that no longer exists. Keyed by epoch
+    // rather than cleared at each rotation site, because a rotation site
+    // added later cannot forget to call something it never knew about.
+    let (mut alice, mut bob, mut carol, group) = trio();
+
+    write(&mut alice, &group, "notes", "title", "hello");
+    settle(&mut alice, &mut bob, &mut carol);
+    let epoch = ratchet_gap(&alice, &group)
+        .expect("the write recorded an epoch")
+        .epoch;
+
+    // A spent budget belonging to an epoch the group has since left.
+    alice
+        .protocol
+        .group_mesh
+        .roster_invisible_generations
+        .insert(
+            group.clone(),
+            RosterRatchetGap {
+                epoch: epoch.saturating_sub(1),
+                invisible: MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS,
+            },
+        );
+    alice.transport.clear_sent_messages();
+
+    alice.protocol.last_data_sync_offer.clear();
+    alice
+        .protocol
+        .kick_group_data_sync(&group, &bob.address, "rediscovered");
+
+    assert_eq!(
+        data_frames_sent(&alice, &mut carol, &group),
+        0,
+        "a gap recorded in an epoch the group has left must not spend a \
+         roster-wide frame to close a ratchet every member already restarted"
+    );
+    let gap = ratchet_gap(&alice, &group).expect("the directed frame was counted");
+    assert_eq!(
+        gap.epoch, epoch,
+        "the count has to move to the epoch it now describes"
+    );
+    assert_eq!(
+        gap.invisible, 1,
+        "and start from that epoch's first invisible frame"
+    );
+}
+
+#[test]
+fn a_promotion_never_crosses_a_closed_replication_gate() {
+    // A directed frame needs no capability check: the member it answers
+    // asked for it. A promotion is a roster-wide delivery, and handing that
+    // same frame to a member who does not intercept `__DATA_V1__` shows it
+    // to their user as literal text, which is the send the all-members gate
+    // exists to refuse. Reachable through knowledge asymmetry: Alice can be
+    // answering Bob perfectly legitimately at the moment she learns Carol is
+    // on a build that cannot read these.
+    //
+    // With the promotion unavailable the frame is withheld rather than sent
+    // addressed, because every directed encryption spends a generation only
+    // its target observes. Past the forward-distance limit that costs the
+    // others this device's group *chat*, so continuing would trade a
+    // permanent messaging failure for a document convergence that is
+    // already stalled group-wide.
+    let (mut alice, mut bob, mut carol, group) = trio();
+
+    write(&mut alice, &group, "notes", "title", "hello");
+    settle(&mut alice, &mut bob, &mut carol);
+    spend_the_budget(&mut alice, &group);
+    let spent = ratchet_gap(&alice, &group).expect("the budget was just spent");
+    alice.protocol.peer_data_group.remove(&carol.address);
+    alice.transport.clear_sent_messages();
+
+    // Bob asks. Alice would answer him directly, and the spent budget is
+    // what would otherwise promote that answer to the whole roster.
+    bob.protocol.last_data_sync_offer.clear();
+    bob.protocol
+        .kick_group_data_sync(&group, &alice.address, "rediscovered");
+    {
+        let (a, c) = (&mut alice, &mut carol);
+        pump(&mut bob, &mut [a, c]);
+    }
+
+    assert_eq!(
+        data_frames_sent(&alice, &mut carol, &group),
+        0,
+        "the ratchet budget promoted a replication frame into a roster whose \
+         gate is closed; Carol renders it to her user as literal __DATA_V1__ \
+         text, which is the whole reason the gate exists"
+    );
+    assert_eq!(
+        data_frames_sent(&alice, &mut bob, &group),
+        0,
+        "with the promotion unavailable the answer has to be withheld, not \
+         sent addressed: another generation only Bob observes is one more \
+         step toward Carol losing this device's chat as well"
+    );
+    assert_eq!(
+        ratchet_gap(&alice, &group).map(|gap| gap.invisible),
+        Some(spent.invisible),
+        "a withheld frame must not be counted, or the refusal spends the \
+         very budget it exists to stop spending"
+    );
+
+    // The positive control, and the reason this test is about the gate
+    // rather than about nothing ever happening: the same question, with
+    // Carol known capable again, is answered by the promotion.
+    alice.protocol.peer_data_group.insert(carol.address.clone());
+    alice.transport.clear_sent_messages();
+    bob.protocol.last_data_sync_offer.clear();
+    bob.protocol
+        .kick_group_data_sync(&group, &alice.address, "rediscovered");
+    {
+        let (a, c) = (&mut alice, &mut carol);
+        pump(&mut bob, &mut [a, c]);
+    }
+    assert!(
+        data_frames_sent(&alice, &mut carol, &group) > 0,
+        "once every member can read one, the spent budget has to promote the \
+         answer to the whole roster: that is the rung Carol climbs"
     );
 }
 
@@ -906,7 +1100,7 @@ fn forgetting_a_peer_drops_its_group_offer_windows_too() {
     // key leaves one behind per shared group, and each of those suppresses
     // the first offer to that peer after the capability is relearned —
     // which is a document that silently does not sync, one space at a time.
-    let (mut alice, mut bob, _carol, group) = trio();
+    let (mut alice, bob, _carol, group) = trio();
 
     alice
         .protocol
