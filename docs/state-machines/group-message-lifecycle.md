@@ -266,6 +266,30 @@ A change arriving from the group is never pushed back into it: the group
 ciphertext already reached every member, so re-broadcasting would make one
 edit cost N² frames.
 
+### Addressed frames still advance everyone's ratchet
+
+A group has one sender ratchet per epoch, so a frame addressed to a single
+member advances the generation *every* member must reach to decrypt anything
+later from that sender. MLS refuses a generation more than 1000 ahead of the
+highest a receiver has seen, and a receiver that cannot decrypt does not
+advance, so once the gap opens it never closes on its own: the skipped member
+stops receiving that sender's frames entirely, chat included, until a commit
+rotates the epoch. A stable group produces no commits.
+
+Directed replication answers are the first traffic here that advances the
+ratchet without every member observing it, and rediscovery produces them
+without the user doing anything. A sender therefore counts the frames it has
+encrypted for a group without giving the whole roster one, and at the bound
+below sends the next frame to the roster instead. That costs the other
+members one redundant import, which the CRDT absorbs and the no-echo rule
+stops there, and it leaves each of them a rung they can still decrypt.
+
+Ordinary group chat clears this count, so a talking group never promotes
+anything; the promotion is what covers a group that only replicates
+documents. It does not rescue a member absent long enough for the outbox to
+expire every rung, which predates group replication and is bounded by the
+epoch instead.
+
 ## Bounds
 
 | Bound | Value |
@@ -276,6 +300,7 @@ edit cost N² frames.
 | Unauthorized-change report suppression | 300 s per (group, committer, enforced) |
 | Unproven-leaf report suppression | 300 s per (group, sender, site) |
 | Replication offer suppression | 30 s per (member, group) |
+| Roster-invisible group generations | 256 per group, then the next frame goes to the whole roster |
 
 The `enforced` component of the first key is load-bearing. Dropping it lets an
 earlier report-only event suppress the refusal alarm for the same committer,

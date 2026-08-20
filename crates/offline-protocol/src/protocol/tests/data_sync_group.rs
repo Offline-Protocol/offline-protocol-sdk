@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use offline_protocol_data::DataValue;
 use offline_protocol_transport::{MockTransport, Transport, TransportType};
 
+use crate::group_mesh::MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS;
 use crate::mls::InMemoryStorage;
 use crate::protocol::prefixes::internal_prefixes;
 use crate::protocol::tests::{create_test_config_for_user, id};
@@ -800,5 +801,100 @@ fn a_space_named_after_a_one_to_one_session_slot_is_not_a_group_space() {
     assert!(
         !alice.protocol.group_mesh.members.contains_key(&slot),
         "and classifying it must not have filed it in the roster cache"
+    );
+}
+
+#[test]
+fn directed_frames_do_not_strand_the_member_they_skip() {
+    // A group has ONE sender ratchet per epoch. A frame addressed to one
+    // member still advances the generation every *other* member must reach,
+    // and OpenMLS refuses a generation more than 1000 ahead of the highest a
+    // receiver has seen. Directed replication answers are the first traffic
+    // in this SDK that advances the ratchet without every member observing
+    // it, and rediscovery produces them without the user doing anything, so
+    // left unbounded they cross 1000 on their own.
+    //
+    // What that costs is not the replication: it is every later frame from
+    // this sender, chat included, permanently undecryptable for the skipped
+    // member until a commit rotates the epoch — and a stable group produces
+    // no commits. The frame lands as `Retriable`, is buffered, and expires.
+    let (mut alice, mut bob, mut carol, group) = trio();
+
+    // Alice and Bob reconcile over and over while Carol is simply not
+    // around, which is the steady state of a rediscovery loop between two
+    // co-located members of a three-member group.
+    let hidden = MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS as usize * 5;
+    for _ in 0..hidden {
+        // The production trigger, with only its rate limit stepped over.
+        alice.protocol.last_data_sync_offer.clear();
+        alice
+            .protocol
+            .kick_group_data_sync(&group, &bob.address, "rediscovered");
+    }
+    assert!(
+        hidden > 1000,
+        "the run has to exceed the forward-distance limit or this test \
+         passes for the wrong reason (hidden: {hidden})"
+    );
+
+    // Deliver everything, including the frames the budget promoted to the
+    // whole roster. Those are the rungs Carol climbs.
+    settle(&mut alice, &mut bob, &mut carol);
+
+    // Now something every member needs.
+    write(&mut alice, &group, "notes", "title", "hello");
+    settle(&mut alice, &mut bob, &mut carol);
+
+    assert_eq!(
+        read(&mut carol, &group, "notes", "title"),
+        Some(DataValue::text("hello")),
+        "Carol could not decrypt a frame addressed to the whole roster: the \
+         directed traffic she never saw ran the group's sender ratchet out of \
+         her reach, which costs her every later message from Alice and not \
+         just this one"
+    );
+}
+
+#[test]
+fn a_roster_wide_frame_clears_the_ratchet_gap_budget() {
+    // The budget is spent by frames the roster does not see and cleared by
+    // one it does. Group chat is the common clearer, so a talkative group
+    // never promotes anything; a group that only replicates documents is
+    // the one that relies on the promotion.
+    let (mut alice, mut bob, _carol, group) = trio();
+
+    for _ in 0..10 {
+        alice.protocol.last_data_sync_offer.clear();
+        alice
+            .protocol
+            .kick_group_data_sync(&group, &bob.address, "rediscovered");
+    }
+    assert_eq!(
+        alice
+            .protocol
+            .group_mesh
+            .roster_invisible_generations
+            .get(&group)
+            .copied(),
+        Some(10),
+        "each directed frame has to be counted, or the budget never trips"
+    );
+
+    alice
+        .protocol
+        .send_group_message(&group, "an ordinary message", None, None)
+        .expect("send a group message");
+
+    assert_eq!(
+        alice
+            .protocol
+            .group_mesh
+            .roster_invisible_generations
+            .get(&group)
+            .copied(),
+        None,
+        "a message every member is handed puts the whole roster back within \
+         reach, so the gap it closed must not keep counting against the next \
+         promotion"
     );
 }

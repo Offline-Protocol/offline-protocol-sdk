@@ -32,6 +32,45 @@ pub(super) const GROUP_MESSAGE_DEDUP_TTL_SECS: u64 = 300;
 pub(super) const MAX_GROUP_MESSAGE_DEDUP_ENTRIES: usize = 10_000;
 /// Maximum allowed base64-encoded payload size for incoming group messages (1 MB).
 pub(crate) const MAX_BASE64_PAYLOAD_SIZE: usize = 1_048_576;
+/// How many application messages this device may encrypt under a group key
+/// without delivering one to the whole roster, before the next frame is
+/// promoted to roster-wide.
+///
+/// A group has one sender ratchet per epoch, so *every* encryption advances
+/// the generation every member must reach to decrypt anything later from
+/// this device. A frame delivered to one member advances it for all of them
+/// and is observed by one, and OpenMLS refuses a generation more than
+/// [`SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE`] (1000) ahead of the highest
+/// a receiver has seen. Past that gap the absent member cannot decrypt this
+/// device's next frame, and cannot decrypt the one after that either,
+/// because nothing advanced their ratchet: the group silently stops
+/// receiving this device's messages, chat included, until a commit rotates
+/// the epoch. A stable group produces no commits.
+///
+/// Directed replication answers are the first traffic in this SDK that
+/// advances the ratchet without every member seeing it, and they are
+/// produced by rediscovery rather than by anything the user does, so
+/// unbounded they cross 1000 on their own. Promoting one frame per budget
+/// to the whole roster puts a decryptable rung in every member's outbox and
+/// bounds the gap at the budget, restoring the property group messaging
+/// always had: generations advance roughly with roster-wide traffic.
+///
+/// 256 leaves room for three consecutive promoted frames to be lost outright
+/// and the fourth still to decrypt. It does not rescue a member absent long
+/// enough for the outbox to expire every rung (7 days); that case predates
+/// group replication and is bounded by the epoch, not by this.
+///
+/// [`SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE`]: offline_protocol_mls::group::SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE
+pub(crate) const MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS: u32 = 256;
+
+/// The budget is only meaningful below the distance it is protecting, and
+/// the two live in different crates. Stated to the compiler so raising the
+/// budget past the limit fails the build rather than shipping a bound that
+/// no longer bounds anything.
+const _: () = assert!(
+    MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS
+        < offline_protocol_mls::group::SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE
+);
 /// How long an outstanding relay group registration waits for its
 /// `__GROUP_CREATED__` answer before the correlation entry is expired. The
 /// relay answers within a round trip, so this is generous slack; what it
@@ -287,6 +326,21 @@ pub(crate) struct GroupMeshState {
     /// Deduplication cache for group messages received via multiple paths.
     /// Key: message ID, Value: when first seen.
     pub(crate) message_dedup: HashMap<String, Instant>,
+
+    /// Per group, how many application messages this device has encrypted
+    /// under the group key since it last sent one to the whole roster.
+    ///
+    /// The sender ratchet is per epoch and shared by every recipient, so a
+    /// frame addressed to one member still advances the generation the
+    /// others must reach. This counts how far that has run ahead of what
+    /// the roster has been given a chance to observe;
+    /// [`MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS`] documents what happens
+    /// when it is allowed to run to 1000.
+    ///
+    /// Bounded exactly like [`Self::members`], keyed the same way and
+    /// pruned on the same teardown paths. A stale entry would be harmless
+    /// anyway: it can only buy one early roster-wide frame after a re-join.
+    pub(crate) roster_invisible_generations: HashMap<String, u32>,
 
     /// Buffer for out-of-order MLS commits that failed to decrypt.
     /// Maps group_id -> deque of pending commits awaiting retry.
@@ -1777,6 +1831,9 @@ impl OfflineProtocol {
                         let _ = mls_guard.leave_group(&gid);
                     }
                     self.group_mesh.members.remove(&payload.group_id);
+                    self.group_mesh
+                        .roster_invisible_generations
+                        .remove(&payload.group_id);
                     let was_synced = self.group_mesh.relay_synced.remove(&payload.group_id);
                     let was_pending = self
                         .group_mesh
@@ -3642,6 +3699,9 @@ impl OfflineProtocol {
         // after we leave, and a stale one retried after a rapid re-invite
         // would expire with retry_count > 0 and falsely flag an epoch fork.
         self.group_mesh.members.remove(group_id);
+        self.group_mesh
+            .roster_invisible_generations
+            .remove(group_id);
         let was_synced = self.group_mesh.relay_synced.remove(group_id);
         let was_pending = self
             .group_mesh
@@ -3995,6 +4055,13 @@ impl OfflineProtocol {
             let gid = offline_protocol_mls::GroupId::new(group_id)?;
             mls_guard.encrypt_for_group(&gid, plaintext.as_bytes())?
         };
+        // Every member is given this one, by relay broadcast or per-member
+        // fan-out, so it is the rung that closes whatever gap the directed
+        // replication frames opened. Ordinary group chat is therefore what
+        // normally keeps the budget clear, and the promotion in
+        // `send_group_internal_frame` is what covers a group that is only
+        // replicating documents.
+        self.note_group_generation(group_id, true);
 
         let ciphertext_b64 = base64_encode(&encrypted.ciphertext);
         let epoch = encrypted.epoch;
@@ -5012,9 +5079,24 @@ impl OfflineProtocol {
         target: Option<&str>,
         plaintext: &str,
     ) -> Result<()> {
+        // A directed frame advances the group's sender ratchet for every
+        // member while only one of them observes it, so the addressing that
+        // keeps this traffic cheap is also what opens a decryption gap in
+        // the members it skips. Once the budget is spent the next frame goes
+        // to the whole roster instead, buying every member a rung they can
+        // still decrypt. See [`MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS`].
+        //
+        // Whatever the frame happens to be is safe to hand the roster: a
+        // delta or snapshot is an idempotent import the no-echo rule stops
+        // there, and a reply-offer names documents a current replica answers
+        // with nothing. The one that is merely wasteful is a snapshot
+        // request, which every member then answers instead of one; it is
+        // bounded by the blob cap and happens at most once per budget, which
+        // is cheaper than threading the body kind down here to avoid it.
+        let roster_wide = target.is_none() || self.group_generation_budget_spent(group_id);
         let members = match target {
-            Some(member) => vec![member.to_string()],
-            None => self.group_roster(group_id)?,
+            Some(member) if !roster_wide => vec![member.to_string()],
+            _ => self.group_roster(group_id)?,
         };
         if members.iter().all(|m| m == &self.local_id) {
             return Ok(());
@@ -5025,6 +5107,16 @@ impl OfflineProtocol {
             let gid = offline_protocol_mls::GroupId::new(group_id)?;
             mls_guard.encrypt_for_group(&gid, plaintext.as_bytes())?
         };
+        // Past the encryption, which is where the generation is actually
+        // spent: an error above consumed nothing.
+        self.note_group_generation(group_id, roster_wide);
+        if roster_wide && target.is_some() {
+            debug!(
+                group_id = %group_id,
+                "Promoting a directed replication frame to the whole roster to keep \
+                 every member's sender ratchet within reach"
+            );
+        }
         let ciphertext_b64 = base64_encode(&encrypted.ciphertext);
 
         let (_ids, _ok, failed) = self.fanout_group_frames_per_member(
@@ -5050,6 +5142,38 @@ impl OfflineProtocol {
             );
         }
         Ok(())
+    }
+
+    /// Whether this device has encrypted
+    /// [`MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS`] frames for `group_id`
+    /// without handing the whole roster one to observe.
+    fn group_generation_budget_spent(&self, group_id: &str) -> bool {
+        self.group_mesh
+            .roster_invisible_generations
+            .get(group_id)
+            .is_some_and(|spent| *spent >= MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS)
+    }
+
+    /// Records one group encryption against the ratchet-gap budget.
+    ///
+    /// Reset on a roster-wide send rather than on confirmed delivery,
+    /// deliberately: an unreachable member's copy is parked in the outbox
+    /// and arrives in order behind the others, so it is a rung they will
+    /// climb rather than one they missed. Waiting for delivery would mean a
+    /// single member who is merely offline pins every later frame to the
+    /// whole roster, which spends uplink on all of them to fix nothing.
+    fn note_group_generation(&mut self, group_id: &str, roster_wide: bool) {
+        if roster_wide {
+            self.group_mesh
+                .roster_invisible_generations
+                .remove(group_id);
+        } else {
+            *self
+                .group_mesh
+                .roster_invisible_generations
+                .entry(group_id.to_string())
+                .or_insert(0) += 1;
+        }
     }
 
     /// The roster of a group this device is a member of, cache first.

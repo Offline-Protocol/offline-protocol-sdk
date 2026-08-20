@@ -69,6 +69,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   to produce a per-recipient delivery report about an application-facing
   message; a replication frame has no such identity to report on.
 
+  Because a group has one sender ratchet per epoch, an addressed frame still
+  advances the generation every *other* member has to reach, and MLS refuses a
+  generation too far ahead of the last one a receiver saw. A sender therefore
+  sends one frame to the whole roster after enough addressed ones, which keeps
+  every member's ratchet within reach; ordinary group chat does the same job,
+  so this only ever fires in a group that is purely replicating documents.
+  Without it a group could quietly stop delivering a talkative member's
+  messages, chat included, until a commit rotated the epoch.
+
 - **Documents replicate between peers, over the delivery ladder that was
   already there.** Two devices with a secure session converge on the documents
   they share: changes made offline on both sides merge on reconnect, and a
