@@ -69,3 +69,10 @@ openmls_basic_credential = { workspace = true }
 openmls_traits = { workspace = true }
 
 [lib]
+
+# The example drives the document API, which the `data` feature gates. Declared
+# so that a `--no-default-features` build skips it instead of failing to
+# compile a target that cannot exist in that configuration.
+[[example]]
+name = "replicated_notes"
+required-features = ["data"]

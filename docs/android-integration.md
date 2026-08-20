@@ -302,6 +302,67 @@ override fun onEvent(eventJson: String) {
 - The last admin cannot be demoted, removed, or leave (prevents orphaned groups)
 - If the last admin disconnects unexpectedly, a deterministic election promotes the next admin
 
+## Replicated Documents
+
+Shared state any member of a space can edit while disconnected, merging
+deterministically when the replicas meet again. The model, how concurrent edits
+resolve, and the limits are in the [Replicated Documents guide](data.md); this
+section is the Kotlin shape of it.
+
+`DataStore` wraps a live protocol instance. It needs `initializeMls` to have
+run, because documents are sealed at rest with the record key that call mints.
+`data.enabled` defaults to `true`, so nothing switches the layer on.
+
+```kotlin
+val store = DataStore(protocol)
+
+// A space is an MLS scope: a peer's address for a 1:1 space, a group id for a
+// group. Values cross as JSON: {"kind":"text","value":"..."}.
+val space = peerAddress
+
+store.createDoc(space, "trip")
+store.mapSet(space, "trip", "meta", "title", """{"kind":"text","value":"Coast road"}""")
+store.textInsert(space, "trip", "notes", 0u, "Meet at the bridge")
+store.counterIncrement(space, "trip", "opened", 1.0)
+
+// Edits batch. This is what makes them durable.
+store.flush(space, "trip")
+
+val json = store.docJson(space, "trip")
+```
+
+Every call above blocks while it reaches storage, so keep them off the main
+looper like every other protocol call
+([K2](bridges/kotlin.md#k2-nothing-blocking-on-the-main-looper)).
+
+To put documents in a store of your own rather than the one protocol state
+already uses, construct it with a provider instead. Sealing sits above that
+seam, so the adapter is handed sealed bytes and never sees document content,
+and an app that does this owes `wipeAll()` on logout because
+`wipePersistedState` cannot reach a backend it does not know about:
+
+```kotlin
+val store = DataStore.withStorage(protocol, myBackend)
+```
+
+A reference implementation and the conformance suite that gates one are in
+[`examples/storage-adapters/kotlin/`](../examples/storage-adapters/README.md).
+
+Six events arrive through the same `EventCallback` as everything else. Handle
+`data_changed` to re-render (it fires after the change is durable), and
+`data_attachment_requested` if your app writes attachment references: the SDK
+never kept the blob bytes, so only your app can answer, and a request nobody
+answers leaves the asking side showing a spinner forever.
+
+```kotlin
+"data_changed" ->
+    reload(obj.optString("space_id"), obj.optString("doc_id"))
+"data_attachment_requested" ->
+    // Answer with provideAttachment(...), or declineAttachment(...) if the
+    // bytes are gone. Both are real answers; silence is not.
+    respondToAttachment(obj)
+```
+
 ## Peer Identity
 
 There is no trust pin to manage. A peer's address **is** the hash of their

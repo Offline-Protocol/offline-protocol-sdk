@@ -1000,7 +1000,9 @@ pub struct FileProgress {
 
 Offline-first state any member of a space can edit while disconnected, merging
 deterministically when replicas meet again. Messaging is synced events; this is
-synced state.
+synced state. For the model behind these calls, how concurrent edits resolve,
+and what this version deliberately does not do, see the
+[Replicated Documents guide](data.md).
 
 Requires `initializeMls` to have run — documents are sealed at rest with the
 same per-install record key as every other protocol category, and that key is

@@ -34,6 +34,7 @@ before changing behaviour, not before using the SDK.
 | [DORS Configuration](dors-configuration.md) | Tuning DORS for different use cases with parameter reference |
 | [Message Delivery](message-delivery.md) | Delivery lifecycle, retry/ACK system, flush triggers, and client-side persistence |
 | [Mesh Networking](mesh.md) | Peer discovery, connection management, message delivery, and routing |
+| [Replicated Documents](data.md) | Offline-first shared state: spaces, collections, how edits merge, attachments, storage |
 | [MLS Encryption](mls-integration.md) | End-to-end encryption with auto-encryption and manual MLS APIs |
 | [Service Discovery](service-discovery.md) | Decentralized service registration, discovery, and request/response |
 | [Telemetry](telemetry.md) | Wire up a telemetry sink for metrics, routing decisions, and MLS lifecycle |
@@ -68,18 +69,19 @@ implementation written against these documents should interoperate.
 
 | Document | Governs |
 |----------|---------|
-| [Overview](state-machines/README.md) | The invariant that spans all five |
+| [Overview](state-machines/README.md) | The invariant that spans all six |
 | [Delivery and acknowledgements](state-machines/delivery-and-acks.md) | What happens to an inbound frame, and when a receiver acknowledges |
 | [Outbox and retries](state-machines/outbox-and-retries.md) | An outbound message from send to terminal state |
 | [Session lifecycle](state-machines/session-lifecycle.md) | 1:1 MLS establishment, confirmation, desync, and heal |
 | [Group message lifecycle](state-machines/group-message-lifecycle.md) | A group message through fan-out, buffering, and drain |
 | [Transport lifecycle](state-machines/transport-lifecycle.md) | Transport availability, scoring, switching, escalation |
+| [Document replication](state-machines/data-replication.md) | A document from edit to durable record, a space from offer to convergence, an attachment fetch |
 
 ## Decisions
 
 | Document | Scope |
 |----------|-------|
-| [ADR index](adr/README.md) | Fifteen decisions that are expensive to reverse or easy to undo by accident |
+| [ADR index](adr/README.md) | Nineteen decisions that are expensive to reverse or easy to undo by accident |
 
 If something in the codebase looks redundant or over-engineered, check here
 before simplifying it.
@@ -111,6 +113,10 @@ in here fails **silently** when violated.
 | [React Native Example App](../examples/react-native-app/README.md) | Complete messaging app demonstrating all SDK features |
 | [Example App Setup](../examples/react-native-app/SETUP.md) | First-time setup for the example app |
 | [Example App Integration Guide](../examples/react-native-app/INTEGRATION_GUIDE.md) | Step-by-step project integration walkthrough |
+| [Mesh Wiki](../examples/mesh-wiki/README.md) | Mesh services: a device answering queries over BLE with no internet |
+| [Storage adapters](../examples/storage-adapters/README.md) | SQLite `ProtocolStateStorage` implementations for Swift, Kotlin and Python |
+| `cargo run -p offline-protocol --example replicated_notes` | Replicated documents: open a store, edit, persist, reopen |
+| `cargo run -p offline-protocol-data --example offline_merge` | What two people editing the same document offline actually get back |
 
 ## Contributing
 
