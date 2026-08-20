@@ -3344,7 +3344,15 @@ impl OfflineProtocol {
             .filter(|m| m.as_str() != invitee_user_id)
             .filter_map(|m| {
                 if *m == self_id {
-                    (!self.advertised_data_versions().is_empty())
+                    // Attest the entry itself, not merely that some data
+                    // version is advertised. The two coincide today because
+                    // one switch produces both, but claiming DATA_GROUP_V1
+                    // for a build that does not intercept group frames is
+                    // the single error that puts `__DATA_V1__` in front of a
+                    // user as text, and a self-attestation is the one place
+                    // the claim cannot be corrected by a direct exchange.
+                    self.advertised_data_versions()
+                        .contains(&DATA_GROUP_V1)
                         .then(|| (m.clone(), vec![DATA_GROUP_V1]))
                 } else {
                     self.attestable_data_versions(m).map(|v| (m.clone(), v))

@@ -12464,6 +12464,43 @@ fn welcome_group_replication_attestation_is_bounded_to_the_roster() {
 }
 
 #[test]
+fn the_inviter_self_attests_exactly_what_it_advertises() {
+    // The inviter's own entry is the one attestation nothing can correct
+    // later: every other member's is overridden the moment their key package
+    // arrives, but nobody ever sends us ours. So it has to state the group
+    // entry itself rather than "some data version is on" — the two coincide
+    // today because one switch produces both, and this pins them together so
+    // a later split cannot quietly promise group interception this build
+    // does not do. Promising it wrongly is the one error that puts literal
+    // `__DATA_V1__` text in front of a user.
+    let (alice, _bob, _carol, _group_id) = setup_three_party_invite(true, true);
+    let advertises_group = alice.advertised_data_versions().contains(&DATA_GROUP_V1);
+
+    let welcome = alice
+        .outbox_messages()
+        .find(|m| {
+            m.recipient.as_str() == &id("carol")
+                && m.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
+        })
+        .expect("welcome to carol must be queued");
+    let welcome_payload: GroupMlsWelcomePayload = serde_json::from_str(
+        welcome
+            .content
+            .strip_prefix(internal_prefixes::GROUP_MLS_WELCOME)
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        welcome_payload.member_data.contains_key(&id("alice")),
+        advertises_group,
+        "the inviter's self-attestation and its own advertisement have to be \
+         the same claim; a build that attests what it does not advertise is \
+         telling the group to send it frames it will render as chat text"
+    );
+}
+
+#[test]
 fn non_admin_commit_group_replication_attestation_is_ignored() {
     // Same trust bound as the role and the rich attestation: honored only
     // from an admin sender, because adds are admin-only and a non-admin
