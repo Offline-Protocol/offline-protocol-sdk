@@ -178,6 +178,7 @@ The SDK consists of modular Rust crates:
 - **offline-protocol-mls** - End-to-end encryption using MLS (RFC 9420)
 - **offline-protocol-services** - Service discovery and request/response over mesh
 - **offline-protocol-data** - Replicated documents (CRDT) that merge after offline edits
+- **offline-protocol-leaf** - A constrained device (lock, sensor) as a never-committing MLS member, for bare metal
 - **offline-protocol** - Main protocol engine with auto-encryption
 - **offline-protocol-uniffi** - UniFFI bindings for Swift/Kotlin
 

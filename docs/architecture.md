@@ -117,6 +117,32 @@ implementations and are not allowed to disagree about anything outside them.
 
 **Dependencies**: `offline-protocol-core`, `offline-protocol-sealed`, OpenMLS
 
+### offline-protocol-leaf
+
+**Purpose**: A constrained device (a door lock, a sensor, a mains-powered
+relay) speaking the protocol as a real peer rather than a reduced one. It runs
+RFC 9420 MLS through mls-rs as a **never-committing member**: the phone creates
+the group, adds the device and issues every commit, while the device joins,
+opens what arrives, answers and persists. See
+[ADR 0021](adr/0021-a-leaf-node-speaks-mls.md).
+
+**Key Components**:
+- `LeafDevice` - a frame-level state machine: an inbound message in, the frames to send and what happened out
+- `LeafStore` - one blob-storage seam a device implements over its secure key storage
+- Key package minting with the backdated `not_before` and supplied timestamp a device needs in order to pair at all
+
+**Three obligations it cannot discharge for the integrator**: a time source at
+pairing, real hardware entropy behind `getrandom`, and durable atomic storage.
+Persist-before-emit is enforced structurally rather than documented: every
+operation that advances the ratchet writes before it returns a frame, because a
+state rolled back by a power cut reuses an AEAD nonce.
+
+**Safety**: `#![deny(unsafe_code)]`
+
+**Dependencies**: `offline-protocol-core`, `offline-protocol-sealed`, mls-rs.
+Deliberately **not** the engine or the MLS crate: nothing above `sealed` builds
+without `std`.
+
 ### 7. offline-protocol-services
 
 **Purpose**: Standalone service discovery and request/response over the mesh.

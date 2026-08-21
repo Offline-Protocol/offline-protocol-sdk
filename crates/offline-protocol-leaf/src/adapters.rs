@@ -1,0 +1,251 @@
+//! Adapters that carry mls-rs's storage traits onto [`LeafStore`].
+//!
+//! mls-rs asks for two storage providers, and neither shape belongs in a
+//! device integrator's lap: they carry mls-rs's own types, they are versioned
+//! with a dependency [ADR 0021](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/adr/0021-a-leaf-node-speaks-mls.md)
+//! calls monitored rather than settled, and getting the write ordering wrong
+//! is a confidentiality bug rather than a lost message. So firmware implements
+//! one blob store and these adapters do the rest.
+
+use alloc::{format, string::String, sync::Arc, vec::Vec};
+use mls_rs_core::{
+    error::IntoAnyError,
+    group::{EpochRecord, GroupState, GroupStateStorage},
+    key_package::{KeyPackageData, KeyPackageStorage},
+};
+use mls_rs_core::{
+    identity::BasicCredential,
+    mls_rs_codec::{MlsDecode, MlsEncode},
+};
+use zeroize::Zeroizing;
+
+use crate::store::{LeafStore, StoreError, KEY_TYPE_GROUP_EPOCH, KEY_TYPE_GROUP_STATE};
+use crate::store::{KEY_TYPE_KEY_PACKAGE, KEY_TYPE_PEER};
+
+impl IntoAnyError for StoreError {}
+
+/// Renders bytes as lowercase hex, so an arbitrary group id can be a key id.
+///
+/// Group ids are chosen by whoever created the group and are not required to
+/// be printable. Hex is the shortest thing that cannot collide with the `:`
+/// this module uses as a separator.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        // `write!` would need `core::fmt::Write` in scope and can fail; a
+        // table lookup cannot.
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        out.push(DIGITS[(b >> 4) as usize] as char);
+        out.push(DIGITS[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// Where a group's current state is kept.
+fn state_key(group_id: &[u8]) -> String {
+    hex(group_id)
+}
+
+/// Where one prior epoch is kept.
+fn epoch_key(group_id: &[u8], epoch_id: u64) -> String {
+    format!("{}:{}", hex(group_id), epoch_id)
+}
+
+/// Where the highest stored epoch id is kept.
+fn max_epoch_key(group_id: &[u8]) -> String {
+    format!("{}:max", hex(group_id))
+}
+
+/// Carries [`GroupStateStorage`] onto the device's blob store.
+#[derive(Clone)]
+pub(crate) struct GroupStateAdapter {
+    store: Arc<dyn LeafStore>,
+}
+
+impl GroupStateAdapter {
+    pub(crate) fn new(store: Arc<dyn LeafStore>) -> Self {
+        Self { store }
+    }
+}
+
+impl GroupStateStorage for GroupStateAdapter {
+    type Error = StoreError;
+
+    fn state(&self, group_id: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>, Self::Error> {
+        Ok(self
+            .store
+            .load(KEY_TYPE_GROUP_STATE, &state_key(group_id))?
+            .map(Zeroizing::new))
+    }
+
+    fn epoch(
+        &self,
+        group_id: &[u8],
+        epoch_id: u64,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, Self::Error> {
+        Ok(self
+            .store
+            .load(KEY_TYPE_GROUP_EPOCH, &epoch_key(group_id, epoch_id))?
+            .map(Zeroizing::new))
+    }
+
+    /// Writes the epoch records first and the group state last.
+    ///
+    /// mls-rs asks for one atomic transaction, and this seam offers atomicity
+    /// per entry rather than across a set, so the ordering has to carry what
+    /// the transaction would have. Prior-epoch records are additive: they let
+    /// a message that arrives late still decrypt. Writing them before the
+    /// state means a power cut mid-write leaves the **old** state alongside
+    /// records it does not yet reference, which costs nothing. The reverse
+    /// order would leave a new state whose prior epochs were never written, so
+    /// the device would come back having lost exactly the out-of-order
+    /// tolerance a lossy radio needs.
+    ///
+    /// The caller does not emit anything until this returns `Ok`, so a failure
+    /// here is a frame that was never sent rather than state that fell behind
+    /// one that was.
+    fn write(
+        &mut self,
+        state: GroupState,
+        epoch_inserts: Vec<EpochRecord>,
+        epoch_updates: Vec<EpochRecord>,
+    ) -> Result<(), Self::Error> {
+        let mut highest: Option<u64> = None;
+
+        for record in epoch_inserts.iter().chain(epoch_updates.iter()) {
+            self.store.store(
+                KEY_TYPE_GROUP_EPOCH,
+                &epoch_key(&state.id, record.id),
+                &record.data,
+            )?;
+            highest = Some(highest.map_or(record.id, |h: u64| h.max(record.id)));
+        }
+
+        if let Some(highest) = highest {
+            let previous = self.max_epoch_id(&state.id)?.unwrap_or(0);
+            if highest >= previous {
+                self.store.store(
+                    KEY_TYPE_GROUP_EPOCH,
+                    &max_epoch_key(&state.id),
+                    &highest.to_be_bytes(),
+                )?;
+            }
+        }
+
+        self.store
+            .store(KEY_TYPE_GROUP_STATE, &state_key(&state.id), &state.data)
+    }
+
+    fn max_epoch_id(&self, group_id: &[u8]) -> Result<Option<u64>, Self::Error> {
+        let raw = self
+            .store
+            .load(KEY_TYPE_GROUP_EPOCH, &max_epoch_key(group_id))?;
+        match raw {
+            None => Ok(None),
+            Some(bytes) => {
+                let array: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+                    StoreError::Corrupt(format!(
+                        "max epoch record is {} bytes, expected 8",
+                        bytes.len()
+                    ))
+                })?;
+                Ok(Some(u64::from_be_bytes(array)))
+            }
+        }
+    }
+}
+
+/// Carries [`KeyPackageStorage`] onto the device's blob store.
+///
+/// The values here hold the init and leaf-node private keys of a key package
+/// the device minted and has not yet spent. mls-rs deletes an entry when the
+/// package is consumed by a join, which is why an init key is single use and
+/// why a static pairing artifact must never carry one.
+#[derive(Clone)]
+pub(crate) struct KeyPackageAdapter {
+    store: Arc<dyn LeafStore>,
+}
+
+impl KeyPackageAdapter {
+    pub(crate) fn new(store: Arc<dyn LeafStore>) -> Self {
+        Self { store }
+    }
+}
+
+impl KeyPackageStorage for KeyPackageAdapter {
+    type Error = StoreError;
+
+    fn delete(&mut self, id: &[u8]) -> Result<(), Self::Error> {
+        self.store.delete(KEY_TYPE_KEY_PACKAGE, &hex(id))
+    }
+
+    fn insert(&mut self, id: Vec<u8>, pkg: KeyPackageData) -> Result<(), Self::Error> {
+        let encoded = pkg
+            .mls_encode_to_vec()
+            .map_err(|e| StoreError::Store(format!("cannot encode key package data: {e:?}")))?;
+        self.store.store(KEY_TYPE_KEY_PACKAGE, &hex(&id), &encoded)
+    }
+
+    fn get(&self, id: &[u8]) -> Result<Option<KeyPackageData>, Self::Error> {
+        let Some(raw) = self.store.load(KEY_TYPE_KEY_PACKAGE, &hex(id))? else {
+            return Ok(None);
+        };
+        let decoded = KeyPackageData::mls_decode(&mut &raw[..])
+            .map_err(|e| StoreError::Corrupt(format!("key package data does not decode: {e:?}")))?;
+        Ok(Some(decoded))
+    }
+}
+
+/// What a peer told us it can parse, and what we therefore may emit to it.
+///
+/// Persisted because these are end-to-end capabilities: they describe what the
+/// recipient parses after any number of relay hops, so a device that forgot
+/// them across a power cycle would silently downgrade every established peer
+/// until the next key package exchange.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PeerRecord {
+    /// Envelope forms the peer parses. `[1]` means the compact envelope.
+    #[serde(default)]
+    pub(crate) env_versions: Vec<u8>,
+    /// Frame encodings the peer decodes on the next hop.
+    #[serde(default)]
+    pub(crate) wire_versions: Vec<u8>,
+    /// Whether this device has already given this peer a key package.
+    ///
+    /// Persisted rather than held in RAM because an init key is single use:
+    /// a device that forgot across a power cycle would mint a second package
+    /// on the next exchange and leave the peer holding two, of which only one
+    /// is ever spent. Cleared when a peer resets the session, which is the
+    /// one moment a fresh package is required rather than wasteful.
+    #[serde(default)]
+    pub(crate) key_package_sent: bool,
+}
+
+impl PeerRecord {
+    pub(crate) fn load(store: &Arc<dyn LeafStore>, peer: &str) -> Result<Option<Self>, StoreError> {
+        let Some(raw) = store.load(KEY_TYPE_PEER, peer)? else {
+            return Ok(None);
+        };
+        serde_json::from_slice(&raw)
+            .map(Some)
+            .map_err(|e| StoreError::Corrupt(format!("peer record does not decode: {e}")))
+    }
+
+    pub(crate) fn save(&self, store: &Arc<dyn LeafStore>, peer: &str) -> Result<(), StoreError> {
+        let encoded = serde_json::to_vec(self)
+            .map_err(|e| StoreError::Store(format!("cannot encode peer record: {e}")))?;
+        store.store(KEY_TYPE_PEER, peer, &encoded)
+    }
+}
+
+/// Reads the address out of a basic credential.
+///
+/// The credential's whole content is the peer's address in its canonical text
+/// form. Anything else is a credential this protocol did not mint.
+pub(crate) fn credential_address(credential: &BasicCredential) -> Result<&str, crate::LeafError> {
+    core::str::from_utf8(&credential.identifier).map_err(|_| {
+        crate::LeafError::IdentityBinding(String::from(
+            "credential identifier is not valid UTF-8, so it names no address",
+        ))
+    })
+}

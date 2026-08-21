@@ -1,0 +1,89 @@
+//! Errors a leaf node can produce.
+
+use alloc::string::String;
+use thiserror::Error;
+
+/// Result type for this crate.
+pub type Result<T> = core::result::Result<T, LeafError>;
+
+/// What can go wrong on a leaf node.
+///
+/// Deliberately not `#[non_exhaustive]`, for the reason
+/// [ADR 0022](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md)
+/// gives for `SealedError`: firmware that maps these onto its own error space
+/// should get a compile error when a variant is added, rather than a wildcard
+/// arm that silently renders a new failure as an old one.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LeafError {
+    /// The backing store failed.
+    #[error("Storage failed: {0}")]
+    Storage(String),
+
+    /// The device has no identity yet, and an operation needed one.
+    #[error("Device is not provisioned")]
+    NotProvisioned,
+
+    /// The device already has an identity, and provisioning would replace it.
+    ///
+    /// Overwriting an identity is not a recoverable state: the device's
+    /// address changes, every peer's paired record names a device that no
+    /// longer exists, and nothing on the wire says why.
+    #[error("Device is already provisioned")]
+    AlreadyProvisioned,
+
+    /// A cryptographic operation failed.
+    #[error("Crypto failed: {0}")]
+    Crypto(String),
+
+    /// MLS refused an operation.
+    #[error("MLS failed: {0}")]
+    Mls(String),
+
+    /// A frame did not parse.
+    #[error("Malformed frame: {0}")]
+    MalformedFrame(String),
+
+    /// A control frame arrived unsigned, or its signature did not verify.
+    ///
+    /// Unsigned is a refusal rather than a downgrade: every control frame in
+    /// this protocol carries a signature, and one that does not is either an
+    /// implementation that skipped the step or an injection.
+    #[error("Control frame refused: {0}")]
+    ControlFrameRefused(String),
+
+    /// A presented key did not derive to the address that claimed it, or the
+    /// claimed identifier is not an address at all.
+    ///
+    /// Both are the same refusal on purpose. An identifier that does not parse
+    /// as an address has no derivation to check, and answering "acceptable"
+    /// for it is the bypass rather than a lenience.
+    #[error("Identity binding failed: {0}")]
+    IdentityBinding(String),
+
+    /// No session exists with this peer.
+    #[error("No session with {0}")]
+    NoSession(String),
+
+    /// The sealed layer refused a value.
+    #[error("{0}")]
+    Sealed(String),
+}
+
+impl From<offline_protocol_sealed::SealedError> for LeafError {
+    fn from(e: offline_protocol_sealed::SealedError) -> Self {
+        // The inner text passes through rather than the rendered `Display` of
+        // a wrapper, so a failure reads the same here as it does on the phone.
+        use offline_protocol_sealed::SealedError as S;
+        match e {
+            S::Serialization(m) => LeafError::Sealed(alloc::format!("Serialization failed: {m}")),
+            S::Deserialization(m) => {
+                LeafError::Sealed(alloc::format!("Deserialization failed: {m}"))
+            }
+            S::InvalidGroupId(m) => LeafError::Sealed(alloc::format!("Invalid group id: {m}")),
+            S::InvalidPublicKey(m) => LeafError::Sealed(alloc::format!("Invalid public key: {m}")),
+            S::FieldTooLarge(n) => LeafError::Sealed(alloc::format!(
+                "Field too large for canonical payload length prefix: {n} bytes"
+            )),
+        }
+    }
+}

@@ -1,0 +1,99 @@
+[package]
+name = "offline-protocol-leaf"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "A constrained leaf node that speaks the Offline Protocol as a never-committing MLS member"
+
+[lints]
+workspace = true
+
+[features]
+default = ["std"]
+# `std` forwards to dependencies and gates the unit tests. Nothing in this
+# crate reads a clock or draws entropy on its own account in either
+# configuration: the time comes in as a parameter and the randomness comes
+# from a `getrandom` backend the firmware supplies, which is what makes the
+# bare-metal build the same code rather than a reduced one.
+std = [
+    "offline-protocol-core/std",
+    "offline-protocol-sealed/std",
+    "mls-rs/std",
+    "mls-rs-core/std",
+    "mls-rs-crypto-rustcrypto/std",
+    "serde/std",
+    "serde_json/std",
+    "base64/std",
+    "thiserror/std",
+]
+
+# Selects `getrandom`'s custom backend, which a bare-metal target needs
+# because `getrandom` has no backend for one and refuses to compile without
+# this. Enabling it does **not** supply randomness: the firmware must register
+# an implementation (`getrandom::register_custom_getrandom!`) wired to the
+# part's hardware entropy source, and MLS key generation is exactly as strong
+# as what that returns.
+#
+# Deliberately not implied by anything. Turning it on under `std` would replace
+# the operating system's entropy with a symbol that is probably not defined,
+# and the failure would be a link error at best and a predictable key at worst.
+bare-metal-rng = ["dep:getrandom", "getrandom/custom"]
+
+# Every dependency below is declared locally rather than inherited with
+# `workspace = true`, for the reason ADR 0020 records: cargo silently ignores
+# `default-features = false` when it sits next to `workspace = true`, so an
+# inherited dependency keeps dragging its `std` feature into the bare-metal
+# build and the failure appears as a linker error in someone's firmware rather
+# than as a failed check here. `local_dep_versions_match_the_workspace_table`
+# in this crate is the counterweight: dropping inheritance means a
+# workspace-wide version bump would otherwise stop applying here silently.
+[dependencies]
+offline-protocol-core = { path = "../offline-protocol-core", version = "0.23.0", default-features = false }
+offline-protocol-sealed = { path = "../offline-protocol-sealed", version = "0.23.0", default-features = false }
+
+# Pinned with `=` deliberately. An interop result is a claim about two exact
+# versions (ADR 0021), `tools/mls-interop` pins the same two, and this
+# dependency is monitored rather than settled: mls-rs has had no third-party
+# security audit and its only bare-metal crypto provider is the one its own
+# authors label experimental.
+#
+# The four features are the leaf profile measured in `tools/embedded-footprint`:
+# `private_message` because application messages are `PrivateMessage` and
+# nothing works without it, `out_of_order` and `prior_epoch` because a radio
+# reorders and drops, and `by_ref_proposal` for the proposals a phone's commit
+# can carry. `rfc_compliant` is deliberately absent: it pulls X.509 in for
+# about 12 KiB of flash this protocol never uses, since credentials here are
+# basic ones carrying an address.
+mls-rs = { version = "=0.56.0", default-features = false, features = [
+    "private_message",
+    "out_of_order",
+    "prior_epoch",
+    "by_ref_proposal",
+] }
+mls-rs-crypto-rustcrypto = { version = "=0.22.1", default-features = false }
+# Named directly because this crate implements two of its traits
+# (`GroupStateStorage`, `KeyPackageStorage`) and `mls-rs` does not re-export
+# the types they carry. Pinned with the same `=` and for the same reason.
+mls-rs-core = { version = "=0.27.0", default-features = false }
+
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+thiserror = { version = "2.0", default-features = false }
+# `Zeroizing` is in the signature of `GroupStateStorage`, so it is ours to name.
+zeroize = { version = "1", default-features = false }
+# Optional and off by default: see the `bare-metal-rng` feature above.
+getrandom = { version = "0.2", default-features = false, optional = true }
+
+# The phone side, so the tests are a real OpenMLS peer talking to this
+# crate's mls-rs one rather than this crate talking to itself. `cargo test`
+# here is the only place in the workspace where the two implementations meet
+# inside one process; `tools/mls-interop` is the other, out of process.
+[dev-dependencies]
+offline-protocol-mls = { path = "../offline-protocol-mls", version = "0.23.0" }
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+
+[lib]

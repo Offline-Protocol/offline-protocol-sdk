@@ -619,15 +619,62 @@ impl Message {
         app_id: AppId,
         content: impl Into<String>,
     ) -> Self {
+        Self::from_parts(
+            MessageId::new(),
+            sender,
+            recipient,
+            app_id,
+            content,
+            Timestamp::now(),
+        )
+    }
+
+    /// Creates a message from parts the caller supplies, reading no clock and
+    /// drawing no entropy.
+    ///
+    /// This is [`Message::new`] with its two ambient inputs made explicit, and
+    /// it is the constructor a bare-metal target uses, because that target has
+    /// neither. Every other field takes the same default `new` gives it.
+    ///
+    /// [`Message::new`] delegates here, so there is one struct literal for an
+    /// outbound message rather than two that drift.
+    ///
+    /// # Why this exists
+    ///
+    /// [ADR 0020](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/adr/0020-core-compiles-without-std.md)
+    /// made this crate build without `std` on the reading that a constrained
+    /// node "receives frames rather than minting them". That is true of a node
+    /// which only forwards, and false the moment one answers: a leaf node
+    /// running MLS mints a key package, a confirmation and every sealed reply.
+    /// Without this, such a node cannot produce a `Message` at all, because
+    /// the struct has a private field and no other public constructor is
+    /// available without `std`.
+    ///
+    /// # Supplying the two inputs
+    ///
+    /// A device with no entropy still needs a unique [`MessageId`]. Deriving
+    /// one from a persisted counter and the device's own identity is enough:
+    /// ids are compared for equality by the deduplicator, never assumed
+    /// unpredictable. The timestamp is display metadata and is not a security
+    /// input, so a device whose clock is only as good as its last pairing is
+    /// no less safe, only less legible in a log.
+    pub fn from_parts(
+        id: MessageId,
+        sender: UserId,
+        recipient: UserId,
+        app_id: AppId,
+        content: impl Into<String>,
+        timestamp: Timestamp,
+    ) -> Self {
         Self {
-            id: MessageId::new(),
+            id,
             sender,
             recipient,
             app_id,
             priority: MessagePriority::default(),
             ttl: TTL::default(),
             hop_count: HopCount::new(),
-            timestamp: Timestamp::now(),
+            timestamp,
             lamport_clock: LamportClock::default(),
             content_type: ContentType::default(),
             content: content.into(),

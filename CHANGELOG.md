@@ -134,8 +134,56 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   One device, one key: a fleet sharing an identity key turns one extraction in
   a laboratory into every unit's identity.
 
-### Changed
+- **`offline-protocol-leaf`: a constrained device that speaks this protocol as
+  a real peer.** A door lock or a sensor with a few hundred kilobytes of flash
+  and no operating system now runs RFC 9420 MLS through mls-rs and holds an
+  end-to-end encrypted conversation with a phone under the same guarantees a
+  phone gets. Same frames, same envelope, same trust gates, no second sealing
+  path and no reduced properties, which is the decision
+  [ADR 0021](./docs/adr/0021-a-leaf-node-speaks-mls.md) took and this crate
+  implements.
 
+  `LeafDevice` is a frame-level state machine rather than a bag of primitives:
+  an inbound message goes in, the frames to send and what happened come out. It
+  runs the **never-committing member** profile, so the phone creates the group
+  and issues every commit while the device joins, opens, answers and persists.
+  Per-commit cost on the device is two elliptic-curve operations and
+  per-message cost is symmetric only.
+
+  What it refuses is the point. Every control frame must carry a signature
+  whose key **derives to the address the frame claims**, and an identifier that
+  is not an address is the same refusal rather than a skip, because a claim
+  with no derivation to check is the bypass. A Welcome must name the peer that
+  signed it and the group this pair would build. A sealed frame's MLS sender
+  must be the peer the frame came from. Sixteen tests cover this against a real
+  OpenMLS phone in the same process, which is the only kind of test that
+  catches a default in one library the other refuses.
+
+  **Persist-before-emit is structural, not documented.** Every operation that
+  advances ratchet state writes through `LeafStore` and only then returns the
+  frame, so a store that fails produces an error and no frame at all. A device
+  that emitted first would come back from a power cut and reuse an AEAD nonce,
+  which is a confidentiality failure rather than a lost message. A test arms a
+  failing store and asserts both that nothing is emitted and that the write was
+  actually attempted, so it cannot pass by short-circuiting earlier.
+
+  Three obligations stay with the integrator, and the API is shaped so none can
+  be forgotten silently: every entry point needing a clock takes
+  `now_unix_secs` (a device that lets an MLS library read a clock it does not
+  have stamps 1970 and is refused as expired, so it never pairs at all), the
+  crate registers no `getrandom` backend (firmware wires the part's hardware
+  entropy source, and key generation is exactly as strong as what it returns),
+  and `LeafStore` must be atomic per entry.
+
+- **`Message::from_parts` in `offline-protocol-core`**, which is
+  `Message::new` with its two ambient inputs, the clock and the entropy, made
+  explicit. ADR 0020 made core build without `std` on the reading that a
+  constrained node "receives frames rather than minting them". That is true of
+  a node which only forwards and false the moment one answers, so without this
+  a bare-metal node could not produce a `Message` at all. `Message::new`
+  delegates to it, so there is one struct literal rather than two that drift.
+
+### Changed
 - **The envelope codec and `GroupId::new` now return `SealedError`** rather
   than `MlsError`, having moved into `offline-protocol-sealed`. Nothing else
   changes: `From<SealedError>` exists for both `MlsError` and the engine's

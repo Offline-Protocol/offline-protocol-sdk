@@ -23,6 +23,7 @@ that are versioned, reviewable, and readable by people who are not an agent.
 | A decision that looks odd or over-engineered | [docs/adr/](docs/adr/README.md) |
 | `offline-protocol-core`: adding an import, a dependency, or a constructor | ADR [0020](docs/adr/0020-core-compiles-without-std.md) (it is dual std/no_std) |
 | `offline-protocol-sealed`: the envelope codec, `derive_address`, canonical signing payloads, ratchet constants, the 1:1 control-frame prefixes, `KeyPackagePayload` | ADR [0022](docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md) (also dual std/no_std, and the one home for each) |
+| `offline-protocol-leaf`: anything a device does at pairing, on a frame, or with its store | ADR [0021](docs/adr/0021-a-leaf-node-speaks-mls.md) and [docs/spec/leaf-provisioning.md](docs/spec/leaf-provisioning.md) (a time source, real entropy and durable-before-emit are obligations, not suggestions) |
 | Replicated documents: the store, sync frames, attachments | [docs/spec/data-sync.md](docs/spec/data-sync.md), [the replication state machine](docs/state-machines/data-replication.md), ADR [0018](docs/adr/0018-data-layer-engine-and-storage-seams.md) and [0019](docs/adr/0019-remote-document-imports-are-contained-not-trusted.md) |
 | Any binding: Swift, Kotlin, Python, TypeScript | [docs/bridges/](docs/bridges/README.md) |
 
@@ -60,15 +61,19 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 # Benchmarks (Criterion)
 cargo bench --package offline-protocol-bench
 
-# Bare metal. `offline-protocol-core` and `offline-protocol-sealed` are dual
-# std/no_std and CI gates both no_std halves; nothing else in the workspace
-# compiles either without `std`, so a stray `use std::` in one of them only
-# fails here.
+# Bare metal. `offline-protocol-core`, `offline-protocol-sealed` and
+# `offline-protocol-leaf` are dual std/no_std and CI gates all three no_std
+# halves; nothing else in the workspace compiles without `std`, so a stray
+# `use std::` in one of them only fails here. So does an mls-rs error
+# formatted with `{}`: mls-rs implements Display only under std.
 rustup target add thumbv8m.main-none-eabihf
 for crate in offline-protocol-core offline-protocol-sealed; do
     cargo clippy -p "$crate" --no-default-features \
         --target thumbv8m.main-none-eabihf -- -D warnings
 done
+# The leaf crate needs a getrandom backend selected; the firmware registers one.
+cargo clippy -p offline-protocol-leaf --no-default-features \
+    --features bare-metal-rng --target thumbv8m.main-none-eabihf -- -D warnings
 ./tools/embedded-footprint/measure.sh    # flash/RAM cost of the protocol layer
 ```
 
@@ -117,6 +122,10 @@ offline-protocol               Engine: OfflineProtocol, ProtocolConfig, Transpor
     |
 offline-protocol-uniffi        UniFFI bindings (cdylib + staticlib)
 offline-protocol-bench         Criterion benchmarks
+
+offline-protocol-leaf          A constrained device as a never-committing MLS member.
+                               Sits on core + sealed only, never on the engine
+                               (dual std/no_std)
 ```
 
 ### Key extension points
@@ -205,8 +214,8 @@ Conventional Commits: `<type>(<scope>): <subject>`
 
 Types: `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `chore`
 
-Scopes: `core`, `sealed`, `transport`, `router`, `reliability`, `services`,
-`protocol`, `uniffi`, `bindings`
+Scopes: `core`, `sealed`, `leaf`, `transport`, `router`, `reliability`,
+`services`, `protocol`, `uniffi`, `bindings`
 
 ## Code style (Rust)
 
