@@ -20,13 +20,23 @@
 //! # What this image is not
 //!
 //! It is linked and measured, never executed, exactly like the other two. The
-//! MLS calls below are fed `black_box`ed bytes that are not a real Welcome and
-//! not a real ciphertext, so at runtime each would return `Err`. That is sound
-//! for a code-size measurement, because the optimiser cannot prove the failure
-//! and links every path, and it is worthless as a functional test. Proving that
-//! this stack interoperates with the phone's OpenMLS is a separate exercise
-//! with a separate harness. The guard against the measurement silently hollowing
-//! out is the symbol count in `measure.sh`, not this file.
+//! frame handed to the device below is an ordinary text message rather than a
+//! Welcome or a sealed envelope, so at runtime the interesting arms would
+//! return early. That is sound for a code-size measurement, because the
+//! optimiser cannot prove which arm runs and links every path, and it is
+//! worthless as a functional test. Proving that this stack interoperates with
+//! the phone's OpenMLS is a separate exercise with a separate harness
+//! (`tools/mls-interop`, plus the in-process tests in the leaf crate itself).
+//! The guard against the measurement silently hollowing out is the symbol
+//! count in `measure.sh`, not this file.
+//!
+//! # What it measures now
+//!
+//! The whole of `offline-protocol-leaf`, which is the code a device runs. An
+//! earlier version of this file drove mls-rs directly and therefore linked
+//! neither the envelope codec, nor the control-frame signing, nor the address
+//! derivation: it priced an image nobody could ship. The figure is larger for
+//! that reason and is the honest one.
 
 #![no_std]
 #![no_main]
@@ -40,23 +50,12 @@ extern crate alloc;
 use embedded_footprint as _;
 
 use alloc::string::ToString;
-use alloc::vec;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::hint::black_box;
 use cortex_m_rt::entry;
 use offline_protocol_core::{validate_id_chars, Address, Message, UserId};
-
-use mls_rs::identity::basic::{BasicCredential, BasicIdentityProvider};
-use mls_rs::identity::SigningIdentity;
-use mls_rs::time::MlsTime;
-use mls_rs::{CipherSuite, CipherSuiteProvider, Client, CryptoProvider, MlsMessage};
-use mls_rs_crypto_rustcrypto::RustCryptoProvider;
-
-/// The suite the SDK pins in exactly one place
-/// (`offline-protocol-mls/src/group.rs`). A leaf that negotiated anything else
-/// could not talk to a phone, so the provider below is built with this one
-/// enabled and the other three left out of the image.
-const CIPHERSUITE: CipherSuite = CipherSuite::CURVE25519_AES128;
+use offline_protocol_leaf::{LeafDevice, LeafStore, StoreError};
 
 /// A real message, produced by the SDK on the host and pasted here. Both
 /// codecs round-trip it, which was checked before it was embedded.
@@ -67,10 +66,6 @@ const SAMPLE_JSON: &str = r#"{"id":"ea22cfba-7e3f-4820-9ba5-fe33dd9ef33e","sende
 
 /// The sender from `SAMPLE_JSON`, canonically spelled.
 const SAMPLE_ADDRESS: &str = "off1qyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyr4s29s";
-
-/// Stands in for a frame arriving off the radio. Not a valid MLS message; see
-/// the module note on why that does not affect what gets linked.
-const INBOUND: &[u8] = &[0u8; 128];
 
 /// When the device was paired, in seconds since the epoch.
 ///
@@ -108,74 +103,78 @@ fn protocol_workload() {
     black_box(UserId::new(black_box(SAMPLE_ADDRESS)).is_ok());
 }
 
-/// Everything the device does with MLS, in the order it does it.
+/// A store that holds nothing.
+///
+/// Enough to link every path through the crate's storage seam, and nothing a
+/// device would ship: `load` always answers "not there", so the workload
+/// provisions a fresh identity on every call rather than resuming one. Real
+/// firmware implements this over the part's secure key storage, and owes the
+/// durability and per-entry atomicity the trait documents, because that is
+/// what keeps a power cut from rolling a ratchet back onto a used nonce.
+struct NullStore;
+
+impl LeafStore for NullStore {
+    fn store(&self, _key_type: &str, _key_id: &str, _data: &[u8]) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    fn load(&self, _key_type: &str, _key_id: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        Ok(None)
+    }
+
+    fn delete(&self, _key_type: &str, _key_id: &str) -> Result<(), StoreError> {
+        Ok(())
+    }
+}
+
+/// Everything the device does, in the order it does it.
+///
+/// This goes through `offline-protocol-leaf` rather than reaching for mls-rs
+/// directly, which is what makes the figure below a measurement of the code a
+/// device would actually run. An earlier version of this file called mls-rs
+/// itself and linked neither the envelope codec nor the control-frame signing
+/// nor the address derivation, so it priced an image nobody could ship.
 fn mls_workload() -> Option<()> {
-    // Only the pinned suite is enabled, so the other three curves never reach
-    // the image.
-    let crypto = RustCryptoProvider::with_enabled_cipher_suites(vec![CIPHERSUITE]);
-    let suite = crypto.cipher_suite_provider(CIPHERSUITE)?;
+    let store: Arc<dyn LeafStore> = Arc::new(NullStore);
 
-    // The device's long-term signature key. On real hardware this is generated
-    // once at provisioning and lives in whatever key storage the part offers,
-    // not regenerated per boot as it is here.
-    let (secret, public) = suite.signature_key_generate().ok()?;
+    // Provisioning draws from the getrandom backend this harness registers,
+    // which is a counter. On hardware that symbol is the part's TRNG, and the
+    // device's identity is exactly as strong as what it returns.
+    let device = LeafDevice::open(store, black_box("com.example.lock")).ok()?;
+    black_box(device.address());
 
-    // The credential content is the device's own `off1` address, which is the
-    // shape the SDK already requires of every leaf credential.
-    let credential = BasicCredential::new(SAMPLE_ADDRESS.as_bytes().to_vec());
-    let signing_identity = SigningIdentity::new(credential.into_credential(), public);
-
-    let client: Client<_> = Client::builder()
-        .identity_provider(BasicIdentityProvider)
-        .crypto_provider(crypto)
-        .signing_identity(signing_identity, secret, CIPHERSUITE)
-        .build();
-
-    // Pairing: the device mints one key package for the phone to consume. This
-    // is the artifact a QR code must never carry, because an MLS init key is
-    // single-use and a sticker is not.
-    //
-    // The timestamp is supplied, not read. See `PAIRED_AT`: the `None` this
-    // call would otherwise take is the 1970 trap, and a workload that models
-    // the device's order of operations should not model the refused version of
-    // its first step.
-    if let Ok(key_package) = client.generate_key_package_message(
-        Default::default(),
-        Default::default(),
-        Some(MlsTime::from(PAIRED_AT)),
-    ) {
-        if let Ok(bytes) = key_package.to_bytes() {
-            black_box(&bytes);
+    // Pairing: the device mints one key package and signs the frame carrying
+    // it. The timestamp is supplied rather than read, because a bare-metal
+    // device has no clock and the library stamps 1970 when it tries to find
+    // one. See `PAIRED_AT`.
+    if let Ok(advertisement) = device.key_package_frame(black_box(SAMPLE_ADDRESS), PAIRED_AT) {
+        if let Ok(json) = advertisement.to_json() {
+            black_box(&json);
         }
     }
 
-    // Joining: the phone commits the Add and hands back a Welcome.
-    let welcome = MlsMessage::from_bytes(black_box(INBOUND)).ok()?;
-    let (mut group, info) = client.join_group(None, &welcome, None).ok()?;
-    black_box(&info);
-
-    // Steady state: open what arrives (application messages, and the commits
-    // the phone issues), answer, and persist before the answer is emitted.
-    if let Ok(inbound) = MlsMessage::from_bytes(black_box(INBOUND)) {
-        if let Ok(received) = group.process_incoming_message(inbound) {
-            black_box(&received);
+    // Steady state: a frame arrives off the radio, is parsed by the protocol
+    // layer, and is handed to the device, which verifies it, opens it if it is
+    // sealed, persists, and hands back whatever it owes in reply.
+    if let Ok(inbound) = Message::from_json(black_box(SAMPLE_JSON)) {
+        if let Ok(handled) = device.handle(&inbound, PAIRED_AT) {
+            black_box(&handled.events);
+            for frame in &handled.outbound {
+                if let Ok(json) = frame.to_json() {
+                    black_box(&json);
+                }
+            }
         }
     }
 
-    let answer = group
-        .encrypt_application_message(black_box(b"unlocked"), Vec::new())
-        .ok()?;
-
-    // A leaf that emits before its ratchet state is durable will reuse an AEAD
-    // nonce after a power cut, which is a confidentiality failure and not a
-    // delivery hiccup. So the persist goes here, between sealing the answer and
-    // handing it to the radio, and the `black_box` below is the emit it has to
-    // come before. Writing the two in the other order would link the same code
-    // and teach the wrong thing to whoever uses this file as a skeleton.
-    group.write_to_storage().ok()?;
-
-    if let Ok(bytes) = answer.to_bytes() {
-        black_box(&bytes);
+    // Answering. The persist is inside `seal`, before it returns anything, so
+    // there is no ordering here for a reader of this file to get wrong: the
+    // crate does not offer the sealed bytes until the state behind them is
+    // durable.
+    if let Ok(answer) = device.seal(black_box(SAMPLE_ADDRESS), black_box("unlocked"), PAIRED_AT) {
+        if let Ok(json) = answer.to_json() {
+            black_box(&json);
+        }
     }
 
     Some(())
