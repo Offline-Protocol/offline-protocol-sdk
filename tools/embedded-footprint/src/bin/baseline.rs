@@ -12,6 +12,9 @@
 
 #![no_std]
 #![no_main]
+// `#[entry] fn main() -> !` has to diverge and there is nothing to park on in a
+// program that is linked and never run.
+#![allow(clippy::empty_loop)]
 
 extern crate alloc;
 
@@ -23,6 +26,10 @@ use core::hint::black_box;
 use cortex_m_rt::entry;
 
 #[entry]
+// Not `vec![]`. The point of these two lines is a heap allocation the optimiser
+// cannot fold away, and this binary is the subtrahend for every number in the
+// report, so its shape is not free to change for tidiness.
+#[allow(clippy::vec_init_then_push)]
 fn main() -> ! {
     let mut v: Vec<u8> = Vec::new();
     v.push(black_box(1));

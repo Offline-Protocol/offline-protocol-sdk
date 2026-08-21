@@ -53,3 +53,28 @@ static ALLOCATOR: Bump = Bump;
 fn panic(_info: &PanicInfo) -> ! {
     loop {}
 }
+
+/// Entropy, for linking only.
+///
+/// `rand_core::OsRng` reaches `getrandom`, which has no backend on a bare-metal
+/// target, so the link fails without one registered. This counter is **not**
+/// entropy and must never be copied into firmware: a real leaf node wires this
+/// symbol to its vendor TRNG, and MLS key generation is only as strong as what
+/// it returns. It is acceptable here for exactly one reason, which is the same
+/// reason the allocator above never frees: this image is linked and measured,
+/// never executed.
+#[cfg(feature = "leaf-base")]
+mod rng {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn fill(dest: &mut [u8]) -> Result<(), getrandom::Error> {
+        for byte in dest.iter_mut() {
+            *byte = COUNTER.fetch_add(1, Ordering::Relaxed) as u8;
+        }
+        Ok(())
+    }
+
+    getrandom::register_custom_getrandom!(fill);
+}

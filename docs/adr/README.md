@@ -31,6 +31,7 @@ silently undo it. Decisions that follow from the obvious default do not need one
 | [0018](0018-data-layer-engine-and-storage-seams.md) | The data layer has two seams: the engine and the backend | Accepted |
 | [0019](0019-remote-document-imports-are-contained-not-trusted.md) | Remote document imports are contained, not trusted | Accepted |
 | [0020](0020-core-compiles-without-std.md) | Core compiles without `std`, and `std` is a default-on feature | Accepted |
+| [0021](0021-a-leaf-node-speaks-mls.md) | A leaf node speaks MLS, through a second implementation | Accepted |
 
 ## Format
 
