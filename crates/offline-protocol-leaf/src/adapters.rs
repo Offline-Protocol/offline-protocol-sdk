@@ -24,6 +24,24 @@ use crate::store::{KEY_TYPE_KEY_PACKAGE, KEY_TYPE_PEER};
 
 impl IntoAnyError for StoreError {}
 
+/// How many prior-epoch records a group keeps.
+///
+/// mls-rs delegates this to the storage provider rather than applying it
+/// itself: its own in-memory provider trims to three on every write, and a
+/// provider that never trims keeps every epoch a group has ever left. That is
+/// two failures rather than one. The records accumulate on a part whose flash
+/// is measured in hundreds of kilobytes, and each one holds that epoch's
+/// secrets, so retaining them all turns "how far out of order a message may
+/// arrive" into "how far back a stolen device decrypts". Three is the window
+/// a phone-driven commit cadence needs on a lossy radio, and it is the bound
+/// on both.
+///
+/// This is leaf-side storage policy, not a number the two ends must match:
+/// the phone's provider keeps its own history and neither reads the other's.
+/// It is therefore declared here rather than in `offline-protocol-sealed`,
+/// which is for values a peer would disagree with us about.
+pub(crate) const PRIOR_EPOCH_RETENTION: u64 = 3;
+
 /// Renders bytes as lowercase hex, so an arbitrary group id can be a key id.
 ///
 /// Group ids are chosen by whoever created the group and are not required to
@@ -104,6 +122,16 @@ impl GroupStateStorage for GroupStateAdapter {
     /// The caller does not emit anything until this returns `Ok`, so a failure
     /// here is a frame that was never sent rather than state that fell behind
     /// one that was.
+    ///
+    /// Expired records are dropped **after** the state write, and their
+    /// failures are not propagated. Both follow from the same rule. Deleting
+    /// first would let a cut leave a state beside fewer prior epochs than it
+    /// references, which is the direction this ordering exists to avoid; and
+    /// once the state write has returned, the write the caller is waiting on
+    /// is durable, so reporting a failed housekeeping delete as an error would
+    /// suppress a frame whose state is already on flash. A record that
+    /// survives a failed delete is swept by
+    /// [`LeafDevice::unpair`](crate::LeafDevice::unpair).
     fn write(
         &mut self,
         state: GroupState,
@@ -133,7 +161,25 @@ impl GroupStateStorage for GroupStateAdapter {
         }
 
         self.store
-            .store(KEY_TYPE_GROUP_STATE, &state_key(&state.id), &state.data)
+            .store(KEY_TYPE_GROUP_STATE, &state_key(&state.id), &state.data)?;
+
+        // One delete per record that entered, which is all the window can
+        // lose: mls-rs requires each inserted epoch id to be exactly one above
+        // the highest stored, so the window advances by the number of inserts
+        // and never skips. Updates rewrite records already inside it.
+        //
+        // The marker is deliberately left alone. `max_epoch_id` is what
+        // mls-rs checks that next id against, so it has to stay the highest
+        // epoch ever written rather than the highest still held.
+        for record in epoch_inserts.iter() {
+            if let Some(expired) = record.id.checked_sub(PRIOR_EPOCH_RETENTION) {
+                let _ = self
+                    .store
+                    .delete(KEY_TYPE_GROUP_EPOCH, &epoch_key(&state.id, expired));
+            }
+        }
+
+        Ok(())
     }
 
     fn max_epoch_id(&self, group_id: &[u8]) -> Result<Option<u64>, Self::Error> {
@@ -155,12 +201,36 @@ impl GroupStateStorage for GroupStateAdapter {
     }
 }
 
+/// How many minted-but-unspent key packages a device keeps.
+///
+/// mls-rs deletes an entry when a join consumes it, so the only entries that
+/// accumulate are packages nobody ever spent: a pairing that was abandoned, or
+/// one a stranger provoked. Without a bound each of those is private key
+/// material written to flash and never reclaimed, and provoking a mint costs
+/// an attacker one signed frame.
+///
+/// Evicting the oldest is the trade this makes, and it is not free: a peer
+/// holding an evicted package can no longer complete a join with it, so a
+/// flood turns into a pairing failure rather than a full flash. Four is enough
+/// for a household pairing its phones in sequence, and small enough that the
+/// residue is bounded.
+const MAX_UNSPENT_KEY_PACKAGES: usize = 4;
+
+/// Where the list of unspent key package ids is kept.
+///
+/// Held under the same key type as the packages themselves. It cannot collide
+/// with one: every other id there is [`hex`] output, and `_` is not a hex
+/// digit.
+const KEY_PACKAGE_INDEX: &str = "__index__";
+
 /// Carries [`KeyPackageStorage`] onto the device's blob store.
 ///
 /// The values here hold the init and leaf-node private keys of a key package
 /// the device minted and has not yet spent. mls-rs deletes an entry when the
 /// package is consumed by a join, which is why an init key is single use and
-/// why a static pairing artifact must never carry one.
+/// why a static pairing artifact must never carry one. What it does not do is
+/// bound the ones never consumed, so this adapter does: see
+/// [`MAX_UNSPENT_KEY_PACKAGES`].
 #[derive(Clone)]
 pub(crate) struct KeyPackageAdapter {
     store: Arc<dyn LeafStore>,
@@ -170,20 +240,80 @@ impl KeyPackageAdapter {
     pub(crate) fn new(store: Arc<dyn LeafStore>) -> Self {
         Self { store }
     }
+
+    /// The ids of unspent packages, oldest first.
+    ///
+    /// A corrupt index is treated as an empty one rather than an error. It is
+    /// housekeeping state, and refusing to mint a key package because a list
+    /// of previous ones does not parse would turn a recoverable annoyance into
+    /// a device that cannot pair.
+    fn index(&self) -> Result<Vec<String>, StoreError> {
+        let Some(raw) = self.store.load(KEY_TYPE_KEY_PACKAGE, KEY_PACKAGE_INDEX)? else {
+            return Ok(Vec::new());
+        };
+        Ok(serde_json::from_slice(&raw).unwrap_or_default())
+    }
+
+    fn save_index(&self, index: &[String]) -> Result<(), StoreError> {
+        let encoded = serde_json::to_vec(index)
+            .map_err(|e| StoreError::Store(format!("cannot encode key package index: {e}")))?;
+        self.store
+            .store(KEY_TYPE_KEY_PACKAGE, KEY_PACKAGE_INDEX, &encoded)
+    }
 }
 
 impl KeyPackageStorage for KeyPackageAdapter {
     type Error = StoreError;
 
     fn delete(&mut self, id: &[u8]) -> Result<(), Self::Error> {
-        self.store.delete(KEY_TYPE_KEY_PACKAGE, &hex(id))
+        let key = hex(id);
+        self.store.delete(KEY_TYPE_KEY_PACKAGE, &key)?;
+
+        // Dropped from the index too, so a package a join consumed does not
+        // hold a slot against the ones still outstanding.
+        //
+        // Best effort, because the package itself is already gone, which is
+        // what was asked for. mls-rs calls this after it has persisted the
+        // group state that consumed the package, so an error here would report
+        // a deletion that did happen as one that did not, and the caller would
+        // withhold a frame whose state is on flash. A stale entry costs one
+        // slot and is evicted in its turn.
+        if let Ok(mut index) = self.index() {
+            if let Some(at) = index.iter().position(|held| held == &key) {
+                index.remove(at);
+                let _ = self.save_index(&index);
+            }
+        }
+        Ok(())
     }
 
     fn insert(&mut self, id: Vec<u8>, pkg: KeyPackageData) -> Result<(), Self::Error> {
         let encoded = pkg
             .mls_encode_to_vec()
             .map_err(|e| StoreError::Store(format!("cannot encode key package data: {e:?}")))?;
-        self.store.store(KEY_TYPE_KEY_PACKAGE, &hex(&id), &encoded)
+        let key = hex(&id);
+
+        // The index is written before the package it names. A cut between the
+        // two leaves an index entry for a package that is not there, which
+        // costs one wasted slot; the reverse would leave private key material
+        // no index knows about, which is the thing that never gets reclaimed.
+        let mut index = self.index()?;
+        if !index.iter().any(|held| held == &key) {
+            index.push(key.clone());
+        }
+        let evicted: Vec<String> = if index.len() > MAX_UNSPENT_KEY_PACKAGES {
+            index
+                .drain(..index.len() - MAX_UNSPENT_KEY_PACKAGES)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.save_index(&index)?;
+        for stale in evicted {
+            self.store.delete(KEY_TYPE_KEY_PACKAGE, &stale)?;
+        }
+
+        self.store.store(KEY_TYPE_KEY_PACKAGE, &key, &encoded)
     }
 
     fn get(&self, id: &[u8]) -> Result<Option<KeyPackageData>, Self::Error> {
@@ -219,9 +349,43 @@ pub(crate) struct PeerRecord {
     /// one moment a fresh package is required rather than wasteful.
     #[serde(default)]
     pub(crate) key_package_sent: bool,
+
+    /// Ids of the reset-flagged key package frames already acted on.
+    ///
+    /// A reset tears down a live session, so a frame carrying one is worth
+    /// capturing and sending again. Remembering the last few ids means the
+    /// same captured frame cannot tear down a session twice.
+    ///
+    /// This bounds a repeat, and does not close replay. Nothing in the signed
+    /// payload states freshness, so an attacker holding a reset frame older
+    /// than this ring can still spend it once. Closing that is a wire change
+    /// rather than a device one, and is recorded on
+    /// [`LeafDevice`](crate::LeafDevice).
+    #[serde(default)]
+    pub(crate) recent_reset_ids: Vec<String>,
 }
 
+/// How many reset frame ids a peer record remembers.
+pub(crate) const RECENT_RESET_IDS: usize = 4;
+
 impl PeerRecord {
+    /// Records `id` as acted on, dropping the oldest beyond the ring.
+    pub(crate) fn remember_reset(&mut self, id: &str) {
+        if self.recent_reset_ids.iter().any(|seen| seen == id) {
+            return;
+        }
+        self.recent_reset_ids.push(String::from(id));
+        if self.recent_reset_ids.len() > RECENT_RESET_IDS {
+            let excess = self.recent_reset_ids.len() - RECENT_RESET_IDS;
+            self.recent_reset_ids.drain(..excess);
+        }
+    }
+
+    /// Whether this reset frame has already been acted on.
+    pub(crate) fn has_seen_reset(&self, id: &str) -> bool {
+        self.recent_reset_ids.iter().any(|seen| seen == id)
+    }
+
     pub(crate) fn load(store: &Arc<dyn LeafStore>, peer: &str) -> Result<Option<Self>, StoreError> {
         let Some(raw) = store.load(KEY_TYPE_PEER, peer)? else {
             return Ok(None);

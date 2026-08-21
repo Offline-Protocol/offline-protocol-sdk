@@ -105,6 +105,19 @@ pub(crate) fn build(
     );
     message.priority = priority;
     message.lamport_clock = LamportClock::from_value(counter);
+
+    // A leaf asks for no delivery acknowledgement, because it has nothing to
+    // do with one. The default is `true`, which is right for a sender that
+    // holds a retry queue and settles a message against the answer; this
+    // device has neither, so every acknowledgement it provoked would be a
+    // frame it parses as carrying no prefix it answers and drops. On a link
+    // with very little airtime that is one wasted transmission per frame sent.
+    //
+    // The other direction is not this crate's to decide. A phone marks its own
+    // frames as needing one and a leaf emits none, so it retries until it
+    // gives up. Whether a leaf peer is exempt from that machinery or owes an
+    // acknowledgement is a question for the spec, which today lists neither.
+    message.requires_ack = false;
     Ok(message)
 }
 

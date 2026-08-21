@@ -62,6 +62,20 @@ impl Identity {
     /// crate does: a device that hands out an address it did not persist comes
     /// back after a power cut as a different device, and the peer that paired
     /// with the first one has no way to learn that.
+    ///
+    /// # Why the secret is written last
+    ///
+    /// An identity is two entries and the store is atomic per entry, not
+    /// across a pair, so a cut lands between them. The secret is therefore
+    /// both the last write and the marker this function refuses on, which
+    /// makes a half-written identity a state the next boot **overwrites**
+    /// rather than one it is stuck in.
+    ///
+    /// Written the other way round the two checks disagree: `resume` refuses
+    /// for the missing public key, `provision` refuses for the present secret,
+    /// and `open` has no third door. A device that lost power once during its
+    /// very first boot would then answer every call with an error, in the
+    /// field, with nothing short of an out-of-band wipe to recover it.
     pub(crate) fn provision(store: &Arc<dyn LeafStore>) -> Result<Self> {
         if store
             .load(KEY_TYPE_IDENTITY, KEY_ID_SECRET)
@@ -77,10 +91,10 @@ impl Identity {
             .map_err(|e| LeafError::Crypto(format!("cannot generate a signature key: {e:?}")))?;
 
         store
-            .store(KEY_TYPE_IDENTITY, KEY_ID_SECRET, secret.as_bytes())
+            .store(KEY_TYPE_IDENTITY, KEY_ID_PUBLIC, public.as_bytes())
             .map_err(|e| LeafError::Storage(e.to_string()))?;
         store
-            .store(KEY_TYPE_IDENTITY, KEY_ID_PUBLIC, public.as_bytes())
+            .store(KEY_TYPE_IDENTITY, KEY_ID_SECRET, secret.as_bytes())
             .map_err(|e| LeafError::Storage(e.to_string()))?;
 
         let address = derive_address(public.as_bytes())?;
@@ -92,6 +106,12 @@ impl Identity {
     }
 
     /// Loads a previously provisioned identity.
+    ///
+    /// Both entries are required, which is safe only because
+    /// [`Identity::provision`] writes the public key first: the pair is either
+    /// complete or missing the secret, and the second of those is what `open`
+    /// recovers from. Swapping those two writes makes this function the half
+    /// of a deadlock.
     pub(crate) fn resume(store: &Arc<dyn LeafStore>) -> Result<Self> {
         let secret = store
             .load(KEY_TYPE_IDENTITY, KEY_ID_SECRET)

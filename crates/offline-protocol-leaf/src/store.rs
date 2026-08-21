@@ -46,6 +46,12 @@ pub const KEY_TYPE_GROUP_EPOCH: &str = "group_epoch";
 pub const KEY_TYPE_KEY_PACKAGE: &str = "key_package";
 /// Key type for what a peer told us it can parse.
 pub const KEY_TYPE_PEER: &str = "peer";
+/// Key type for the list of peers this device holds records for.
+///
+/// One entry, rewritten as peers are admitted and forgotten. It exists because
+/// this seam offers no way to enumerate what is in it, and a bound nobody can
+/// count is not a bound.
+pub const KEY_TYPE_PEER_INDEX: &str = "peer_index";
 
 /// What a store can fail with.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

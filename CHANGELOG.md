@@ -154,10 +154,24 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   whose key **derives to the address the frame claims**, and an identifier that
   is not an address is the same refusal rather than a skip, because a claim
   with no derivation to check is the bypass. A Welcome must name the peer that
-  signed it and the group this pair would build. A sealed frame's MLS sender
-  must be the peer the frame came from. Sixteen tests cover this against a real
+  signed it, name the group this pair would build, and then actually join that
+  group rather than the one its body claimed. A sealed frame's MLS sender must
+  be the peer the frame came from. A confirmation probe is answered only by a
+  device that still holds a session, because a peer confirms on that answer and
+  flushes into it. A reset frame is acted on once, so a captured one is not a
+  repeatable session teardown. Twenty-three tests cover this against a real
   OpenMLS phone in the same process, which is the only kind of test that
   catches a default in one library the other refuses.
+
+  **What it keeps is bounded.** Prior-epoch records are trimmed to a window
+  rather than kept forever, which bounds both the flash they occupy and how far
+  back a stolen device reads; unpairing erases them along with the session, so
+  epoch secrets do not outlive the erasure an owner asked for. Peer records and
+  unspent key packages are bounded too, and a full peer table refuses a
+  stranger rather than evicting somebody the owner paired with, because
+  producing a frame that derives to its own address costs an attacker nothing.
+  Every operation that advances state takes `&mut self`, so two seals racing
+  into one AEAD nonce is a compile error rather than a rare one.
 
   **Persist-before-emit is structural, not documented.** Every operation that
   advances ratchet state writes through `LeafStore` and only then returns the

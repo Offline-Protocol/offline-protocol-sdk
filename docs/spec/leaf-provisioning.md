@@ -151,6 +151,15 @@ A conforming leaf:
 - **never emits** a Welcome, a commit, a proposal, or any group, rich, document
   or relay frame.
 
+A leaf MUST answer a probe only while it holds a session with that peer, which
+is the rule a phone already applies to the same frame. The acknowledgement is
+not a liveness signal: a peer confirms its session on receiving one and then
+flushes everything it had queued into that session. A device that answered
+after losing its store would confirm a session it cannot decrypt one frame of,
+and the silence afterwards is indistinguishable from a quiet link, so the peer
+never learns. Staying quiet leaves it unconfirmed, which is a state it has a
+path out of.
+
 Per-commit cost on the device is two elliptic-curve operations. Per-message
 cost is symmetric only.
 
@@ -166,6 +175,15 @@ it, discard the existing session and mint a fresh key package, so that the
 exchange begins again from step 2 above. A leaf that treats `session_reset` as
 an ordinary key package refresh keeps a session the phone has already discarded,
 and every later frame from it decrypts to nothing.
+
+A leaf MUST NOT act on the same reset frame twice. Nothing in the signed payload
+states freshness, so a captured reset verifies as well on its tenth delivery as
+on its first, and each teardown it earns is a session the pair has to rebuild.
+Remembering the frames already acted on costs one bounded list per peer and
+denies the repeat. It does not close replay: a frame older than that list can
+still be spent once. **Closing it needs a freshness field inside the signed
+payload**, which is a change to the wire and to both ends rather than to a
+device, and is an open gap rather than a decision this chapter has taken.
 
 Letting a device originate Update proposals would make it self-healing on its
 own schedule. That is deliberately outside this version.

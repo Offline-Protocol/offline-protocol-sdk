@@ -64,6 +64,16 @@ pub enum LeafError {
     #[error("No session with {0}")]
     NoSession(String),
 
+    /// The device already holds as many peers as it keeps room for, and none
+    /// of them is an incomplete pairing that could be recycled.
+    ///
+    /// Refusing rather than evicting an established peer is deliberate. A
+    /// device with a full table is one a stranger cannot displace the owner
+    /// from; the owner clears a slot with
+    /// [`LeafDevice::unpair`](crate::LeafDevice::unpair).
+    #[error("Peer table is full")]
+    TooManyPeers,
+
     /// The sealed layer refused a value.
     #[error("{0}")]
     Sealed(String),

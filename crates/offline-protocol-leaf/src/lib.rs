@@ -33,7 +33,7 @@
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // A real device implements `LeafStore` over its secure key storage.
 //! let store: Arc<dyn LeafStore> = Arc::new(MemoryStore::new());
-//! let device = LeafDevice::open(store, "com.example.lock")?;
+//! let mut device = LeafDevice::open(store, "com.example.lock")?;
 //!
 //! // `now` comes from the radio stack, the commissioner, or the pairing
 //! // exchange. It is a parameter because a device has no clock, and an MLS
@@ -63,6 +63,14 @@
 //! This crate orders every persist before the emit it belongs to, so a store
 //! that lies is the one remaining way to reuse an AEAD nonce after a power
 //! cut.
+//!
+//! # One writer
+//!
+//! Every operation that advances state takes `&mut self`, so a device is one
+//! value exclusively held rather than a handle to share between tasks. Two
+//! seals at once would reuse an AEAD nonce without any power cut being
+//! involved; see [`LeafDevice`] for that argument and for what a replayed
+//! control frame can still do.
 //!
 //! # Bare metal
 //!
