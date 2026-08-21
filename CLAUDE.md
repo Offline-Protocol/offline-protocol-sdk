@@ -21,6 +21,7 @@ that are versioned, reviewable, and readable by people who are not an agent.
 | Anything security-relevant | [docs/security/threat-model.md](docs/security/threat-model.md) |
 | Acknowledgement, retry, session, group or transport behaviour | [docs/state-machines/](docs/state-machines/README.md) |
 | A decision that looks odd or over-engineered | [docs/adr/](docs/adr/README.md) |
+| `offline-protocol-core`: adding an import, a dependency, or a constructor | ADR [0020](docs/adr/0020-core-compiles-without-std.md) (it is dual std/no_std) |
 | Replicated documents: the store, sync frames, attachments | [docs/spec/data-sync.md](docs/spec/data-sync.md), [the replication state machine](docs/state-machines/data-replication.md), ADR [0018](docs/adr/0018-data-layer-engine-and-storage-seams.md) and [0019](docs/adr/0019-remote-document-imports-are-contained-not-trusted.md) |
 | Any binding: Swift, Kotlin, Python, TypeScript | [docs/bridges/](docs/bridges/README.md) |
 
@@ -57,6 +58,14 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
 # Benchmarks (Criterion)
 cargo bench --package offline-protocol-bench
+
+# Bare metal. `offline-protocol-core` is dual std/no_std and CI gates the
+# no_std half; nothing else in the workspace compiles it without `std`, so a
+# stray `use std::` in core only fails here.
+rustup target add thumbv8m.main-none-eabihf
+cargo clippy -p offline-protocol-core --no-default-features \
+    --target thumbv8m.main-none-eabihf -- -D warnings
+./tools/embedded-footprint/measure.sh    # flash/RAM cost of the protocol layer
 ```
 
 ### UniFFI and mobile builds
@@ -147,6 +156,12 @@ These fail silently if broken. Each is documented in full where it is linked.
   record.** Malformed imports can panic upstream, and `minisize` is
   `panic = "abort"`, so the AEAD tag is the real containment
   ([ADR 0018](docs/adr/0018-data-layer-engine-and-storage-seams.md)).
+- **`offline-protocol-core` must keep compiling without `std`.** Its seven
+  locally-declared dependencies cannot go back to `{ workspace = true }`
+  (cargo silently ignores `default-features = false` on an inherited
+  dependency), and a new `use std::` needs a `#[cfg(feature = "std")]`. The
+  `embedded-core` CI job is the only thing that catches either
+  ([ADR 0020](docs/adr/0020-core-compiles-without-std.md)).
 - **Never add a catch-all arm to a telemetry reason classifier that matches on
   an enum** (a classifier over an open wire string may, if the fallback returns
   a fixed token and never the input)
