@@ -13,6 +13,12 @@ members = [
     "crates/offline-protocol-bench",
 ]
 
+# Has its own `[workspace]` table, so cargo already keeps it out. Named here so
+# the exclusion is visible from the root rather than only on opening the crate:
+# it builds for bare metal only, and as a member it would make every
+# `cargo build --workspace` demand a Cortex-M toolchain.
+exclude = ["tools/embedded-footprint"]
+
 [workspace.package]
 # The release version, shared with the `vX.Y.Z` git tag and the npm package —
 # `offline-protocol 0.20.1` on crates.io is the same release as `v0.20.1` and

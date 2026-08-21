@@ -1,0 +1,27 @@
+[package]
+name = "embedded-footprint"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Measures what offline-protocol-core costs in flash and RAM on a Cortex-M33"
+
+# Deliberately its own workspace, not a member of the SDK's. This crate only
+# ever builds for bare metal, and a workspace member would drag a Cortex-M
+# toolchain requirement into every `cargo build --workspace` in the repo.
+[workspace]
+
+[dependencies]
+# The configuration a leaf node links: no std, no clock, no entropy.
+offline-protocol-core = { path = "../../crates/offline-protocol-core", default-features = false }
+cortex-m-rt = "0.7.5"
+
+[profile.release]
+# `minisize`'s settings, because that is the profile a mobile or embedded
+# artifact ships under and the number is meant to be quotable.
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false
+# Symbols are kept: the per-symbol breakdown is half the value of the report.
+strip = false
