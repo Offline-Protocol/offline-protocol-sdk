@@ -1,0 +1,359 @@
+//! Does the leaf's MLS stack talk to the phone's?
+//!
+//! ADR 0020 left a leaf node's payload cryptography open, on the grounds that
+//! MLS does not fit on the part. That is true of OpenMLS and of large groups,
+//! and a phone paired with one device is neither: two members, a three-node
+//! ratchet tree. `tools/embedded-footprint` answers whether the leaf's stack
+//! fits. This answers the other half, which no amount of flash measurement can:
+//! whether it is talking to the phone or only to itself.
+//!
+//! The phone side is OpenMLS 0.7.4 configured the way the SDK configures it
+//! (`crates/offline-protocol-mls/src/group.rs`): ciphersuite 3, the ratchet
+//! tree carried as an extension, the SDK's sender-ratchet tolerance. The leaf
+//! side is mls-rs 0.56 on the RustCrypto provider, the configuration the
+//! footprint harness measures. Both versions are pinned with `=`, because an
+//! interop result is a statement about two specific versions and means nothing
+//! if either floats.
+//!
+//! The flow is a never-committing member's whole life: pair, join, hear,
+//! answer, survive a commit, hear again. Everything asserts, so a disagreement
+//! between the two stacks exits non-zero rather than printing a warning.
+//!
+//! # The part worth reading
+//!
+//! Getting this to pass took three corrections, all of them on the leaf's key
+//! package and none of them obvious. [`leaf_key_package`] documents each, and
+//! [`default_configuration_is_rejected`] runs the uncorrected version and
+//! requires it to *fail*. That negative control is the point: every correction
+//! is a default that someone will eventually "simplify" back, and without a
+//! test that fails when they do, the next person to hit these spends their time
+//! on a hardware bring-up bench instead of here.
+
+use openmls::prelude::tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
+use openmls::prelude::*;
+use openmls_basic_credential::SignatureKeyPair;
+use openmls_rust_crypto::OpenMlsRustCrypto;
+use openmls_traits::OpenMlsProvider;
+
+use mls_rs::client_builder::MlsConfig;
+use mls_rs::identity::basic::{BasicCredential, BasicIdentityProvider};
+use mls_rs::identity::SigningIdentity;
+use mls_rs::mls_rs_codec::MlsEncode;
+use mls_rs::time::MlsTime;
+use mls_rs::{CipherSuite, CipherSuiteProvider, Client, CryptoProvider, MlsMessage};
+use mls_rs_crypto_rustcrypto::RustCryptoProvider;
+
+use offline_protocol_core::Address;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// The SDK pins this in exactly one place and never negotiates it.
+const PHONE_SUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+/// The same suite, spelled the way mls-rs spells it.
+const LEAF_SUITE: CipherSuite = CipherSuite::CURVE25519_AES128;
+
+/// Both from `crates/offline-protocol-mls/src/group.rs`.
+const OUT_OF_ORDER_TOLERANCE: u32 = 32;
+const MAXIMUM_FORWARD_DISTANCE: u32 = 1000;
+
+/// How long a leaf's key package claims to be valid.
+///
+/// mls-rs defaults to a year. OpenMLS refuses any leaf node whose total
+/// lifetime range exceeds one hour plus three months
+/// (`MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS`), so the default is refused on
+/// arrival. 28 days sits well inside the cap.
+const KEY_PACKAGE_LIFETIME: Duration = Duration::from_secs(28 * 24 * 3600);
+
+/// How far into the past a key package's validity window has to start.
+///
+/// OpenMLS tests `not_before < now`, strictly. mls-rs's client builder writes
+/// `not_before` as exactly the timestamp it is handed, without the backdating
+/// its own `Lifetime::seconds` helper applies, so a package stamped with the
+/// current second is refused for being not yet valid. This is also the margin
+/// that absorbs clock skew between the two devices.
+const NOT_BEFORE_BACKDATE: u64 = 3600;
+
+/// The SDK's one derivation: an address is the truncated hash of the identity
+/// key, so a credential containing it carries its own proof.
+fn derive_address(public_key: &[u8]) -> Address {
+    use sha2::{Digest, Sha256};
+    assert_eq!(public_key.len(), 32, "Ed25519 public keys are 32 bytes");
+    let hash = Sha256::digest(public_key);
+    let mut truncated = [0u8; 20];
+    truncated.copy_from_slice(&hash[..20]);
+    Address::from_hash_bytes(truncated)
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after 1970")
+        .as_secs()
+}
+
+/// A leaf client and the address its identity key derives to.
+fn leaf_client(lifetime: Duration) -> (Client<impl MlsConfig>, String) {
+    // Only the pinned suite is enabled. On the device this also keeps three
+    // other curves out of the image.
+    let crypto = RustCryptoProvider::with_enabled_cipher_suites(vec![LEAF_SUITE]);
+    let suite = crypto
+        .cipher_suite_provider(LEAF_SUITE)
+        .expect("the RustCrypto provider supports ciphersuite 3");
+    let (secret, public) = suite
+        .signature_key_generate()
+        .expect("signature key generation");
+
+    let address = derive_address(public.as_bytes()).to_string();
+
+    // The credential content *is* the address, which is what the SDK's leaf
+    // identity binding requires of every member of every group.
+    let credential = BasicCredential::new(address.as_bytes().to_vec());
+    let identity = SigningIdentity::new(credential.into_credential(), public);
+
+    let client = Client::builder()
+        .identity_provider(BasicIdentityProvider)
+        .crypto_provider(crypto)
+        .signing_identity(identity, secret, LEAF_SUITE)
+        .key_package_lifetime(lifetime)
+        .build();
+
+    (client, address)
+}
+
+/// The leaf's pairing artifact, with all three corrections applied.
+///
+/// 1. **The lifetime is shortened.** See [`KEY_PACKAGE_LIFETIME`].
+/// 2. **`not_before` is backdated.** See [`NOT_BEFORE_BACKDATE`].
+/// 3. **The timestamp is passed in, not read.** A bare-metal leaf has no
+///    clock, and mls-rs stamps `not_before = 0` when it cannot read one, which
+///    puts the validity window in 1970 and gets the package refused as expired.
+///    Passing it explicitly here is not a test convenience: it is the shape the
+///    device firmware has to have, and it means **a leaf needs a time source at
+///    pairing**, from its radio stack, its commissioner, or the pairing frame
+///    itself. That obligation is real and belongs in the ADR.
+///
+/// The framing correction is separate and smaller: the SDK puts a bare
+/// `KeyPackage` on the wire, while mls-rs's convenience API returns one wrapped
+/// in an `MLSMessage`. Both are legal; they just have to agree.
+fn leaf_key_package(client: &Client<impl MlsConfig>, backdate: u64) -> Vec<u8> {
+    let paired_at = MlsTime::from(unix_now() - backdate);
+
+    client
+        .generate_key_package_message(Default::default(), Default::default(), Some(paired_at))
+        .expect("leaf generates a key package")
+        .into_key_package()
+        .expect("the message is a key package")
+        .mls_encode_to_vec()
+        .expect("re-encode the key package as bare KeyPackage bytes")
+}
+
+/// A phone, configured as `MlsGroupCreateConfig` is configured in the SDK.
+fn phone() -> (OpenMlsRustCrypto, SignatureKeyPair, CredentialWithKey) {
+    let provider = OpenMlsRustCrypto::default();
+    let keys =
+        SignatureKeyPair::new(PHONE_SUITE.signature_algorithm()).expect("phone signature keys");
+    keys.store(provider.storage()).expect("store phone keys");
+
+    let address = derive_address(keys.public()).to_string();
+    let credential = CredentialWithKey {
+        credential: Credential::new(CredentialType::Basic, address.as_bytes().to_vec()),
+        signature_key: keys.public().into(),
+    };
+
+    (provider, keys, credential)
+}
+
+/// Runs the phone's side of key package admission: parse, then validate.
+fn phone_admits(provider: &OpenMlsRustCrypto, bytes: &[u8]) -> Result<KeyPackage, String> {
+    KeyPackageIn::tls_deserialize_exact(bytes)
+        .map_err(|e| format!("parse: {e}"))?
+        .validate(provider.crypto(), ProtocolVersion::Mls10)
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// The negative control.
+///
+/// mls-rs's defaults produce a key package the phone refuses. If this ever
+/// stops failing, one of the two libraries changed its mind and the
+/// corrections above may no longer be load-bearing, which is worth knowing
+/// deliberately rather than discovering by deleting them.
+fn default_configuration_is_rejected() {
+    let (client, _) = leaf_client(Duration::from_secs(365 * 24 * 3600));
+    let bytes = leaf_key_package(&client, 0);
+    let (provider, _, _) = phone();
+
+    match phone_admits(&provider, &bytes) {
+        Err(e) => println!("  0. uncorrected defaults are refused by the phone ({e})"),
+        Ok(_) => panic!(
+            "the uncorrected leaf key package was ACCEPTED.\n\
+             One of the two stacks changed its lifetime rules. Re-derive whether \
+             KEY_PACKAGE_LIFETIME and NOT_BEFORE_BACKDATE are still needed before \
+             touching them."
+        ),
+    }
+}
+
+fn step(n: u32, what: &str) {
+    println!("  {n}. {what}");
+}
+
+fn main() {
+    println!("OpenMLS 0.7.4 (phone) <-> mls-rs 0.56.0 (leaf), ciphersuite 3\n");
+
+    default_configuration_is_rejected();
+
+    // ---- The leaf builds an identity and a pairing artifact ---------------
+    let (leaf, leaf_address) = leaf_client(KEY_PACKAGE_LIFETIME);
+    step(1, &format!("leaf identity derives to {leaf_address}"));
+
+    let key_package_bytes = leaf_key_package(&leaf, NOT_BEFORE_BACKDATE);
+    step(
+        2,
+        &format!("leaf key package, {} bytes", key_package_bytes.len()),
+    );
+
+    // ---- The phone admits it, exactly as `import_key_package` does --------
+    let (provider, phone_keys, phone_credential) = phone();
+    let leaf_key_package = phone_admits(&provider, &key_package_bytes)
+        .expect("phone parses and validates the leaf's key package");
+    step(3, "phone parsed and validated it");
+
+    let credential_content = leaf_key_package
+        .leaf_node()
+        .credential()
+        .serialized_content();
+    assert_eq!(
+        std::str::from_utf8(credential_content).expect("utf8 credential"),
+        leaf_address,
+        "a leaf credential must be the address its own signature key derives to"
+    );
+    step(4, "leaf credential satisfies the SDK's identity binding");
+
+    // ---- The phone creates the group and adds the leaf -------------------
+    let group_config = MlsGroupCreateConfig::builder()
+        .ciphersuite(PHONE_SUITE)
+        .use_ratchet_tree_extension(true)
+        .sender_ratchet_configuration(SenderRatchetConfiguration::new(
+            OUT_OF_ORDER_TOLERANCE,
+            MAXIMUM_FORWARD_DISTANCE,
+        ))
+        .build();
+
+    let mut phone_group = MlsGroup::new(&provider, &phone_keys, &group_config, phone_credential)
+        .expect("phone creates the group");
+
+    let (_commit, welcome, _group_info) = phone_group
+        .add_members(&provider, &phone_keys, &[leaf_key_package])
+        .expect("phone commits the Add");
+    phone_group
+        .merge_pending_commit(&provider)
+        .expect("phone merges its own commit");
+    step(5, "phone created the group and committed the Add");
+
+    // ---- The leaf joins from the Welcome ---------------------------------
+    let welcome_bytes = welcome.tls_serialize_detached().expect("serialize welcome");
+    let welcome_message =
+        MlsMessage::from_bytes(&welcome_bytes).expect("leaf parses the phone's Welcome");
+
+    // `tree_data` is None on purpose: the SDK sets `use_ratchet_tree_extension`,
+    // so the tree rides inside the Welcome. A device that had to fetch the tree
+    // out of band would need a side channel it does not have.
+    let (mut leaf_group, _info) = leaf
+        .join_group(None, &welcome_message, None)
+        .expect("leaf joins from the Welcome");
+    step(6, "leaf joined from the Welcome with no out-of-band tree");
+
+    assert_eq!(
+        leaf_group.current_epoch(),
+        phone_group.epoch().as_u64(),
+        "both sides must agree on the epoch after the join"
+    );
+
+    // ---- Phone speaks, leaf hears ----------------------------------------
+    let phone_msg = phone_group
+        .create_message(&provider, &phone_keys, b"unlock the door")
+        .expect("phone encrypts")
+        .tls_serialize_detached()
+        .expect("serialize");
+
+    match leaf_group
+        .process_incoming_message(MlsMessage::from_bytes(&phone_msg).expect("leaf parses"))
+        .expect("leaf decrypts the phone's message")
+    {
+        mls_rs::group::ReceivedMessage::ApplicationMessage(app) => {
+            assert_eq!(app.data(), b"unlock the door");
+            step(7, "leaf decrypted the phone's application message");
+        }
+        other => panic!("expected an application message, got {other:?}"),
+    }
+
+    // ---- Leaf answers, phone hears ---------------------------------------
+    let leaf_answer = leaf_group
+        .encrypt_application_message(b"unlocked", Vec::new())
+        .expect("leaf encrypts its answer")
+        .to_bytes()
+        .expect("serialize the answer");
+
+    let inbound = MlsMessageIn::tls_deserialize_exact(&leaf_answer)
+        .expect("phone parses the leaf's answer")
+        .try_into_protocol_message()
+        .expect("the answer is a protocol message");
+
+    match phone_group
+        .process_message(&provider, inbound)
+        .expect("phone decrypts the leaf's answer")
+        .into_content()
+    {
+        ProcessedMessageContent::ApplicationMessage(app) => {
+            assert_eq!(app.into_bytes(), b"unlocked");
+            step(8, "phone decrypted the leaf's answer");
+        }
+        _ => panic!("expected an application message from the leaf"),
+    }
+
+    // ---- The phone commits; the leaf has to survive it -------------------
+    let (commit, _welcome, _gi) = phone_group
+        .self_update(&provider, &phone_keys, LeafNodeParameters::default())
+        .expect("phone self-updates")
+        .into_contents();
+    phone_group
+        .merge_pending_commit(&provider)
+        .expect("phone merges the update");
+
+    let commit_bytes = commit
+        .tls_serialize_detached()
+        .expect("serialize the commit");
+    match leaf_group
+        .process_incoming_message(MlsMessage::from_bytes(&commit_bytes).expect("leaf parses"))
+        .expect("leaf processes the phone's commit")
+    {
+        mls_rs::group::ReceivedMessage::Commit(_) => step(9, "leaf processed the phone's commit"),
+        other => panic!("expected a commit, got {other:?}"),
+    }
+
+    assert_eq!(
+        leaf_group.current_epoch(),
+        phone_group.epoch().as_u64(),
+        "both sides must agree on the epoch after the commit"
+    );
+
+    // ---- And still hears in the new epoch --------------------------------
+    let after = phone_group
+        .create_message(&provider, &phone_keys, b"post-commit")
+        .expect("phone encrypts in the new epoch")
+        .tls_serialize_detached()
+        .expect("serialize");
+
+    match leaf_group
+        .process_incoming_message(MlsMessage::from_bytes(&after).expect("leaf parses"))
+        .expect("leaf decrypts in the new epoch")
+    {
+        mls_rs::group::ReceivedMessage::ApplicationMessage(app) => {
+            assert_eq!(app.data(), b"post-commit");
+            step(10, "leaf decrypted in the new epoch");
+        }
+        other => panic!("expected an application message, got {other:?}"),
+    }
+
+    println!("\nPASS: the leaf stack interoperates with the phone's, both directions,");
+    println!("across a commit, with the SDK's ciphersuite and credential shape.");
+}

@@ -1,0 +1,38 @@
+[package]
+name = "mls-interop"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Proves the leaf's MLS stack interoperates with the phone's"
+
+# Its own workspace, for the same reason `embedded-footprint` has one: it links
+# two independent MLS implementations at once, and neither belongs in the SDK's
+# dependency graph.
+[workspace]
+
+[dependencies]
+# The phone's stack, pinned to exactly what the SDK resolves today. An interop
+# claim is about two specific versions, so neither of these floats.
+openmls = "=0.7.4"
+openmls_rust_crypto = "=0.4.4"
+openmls_basic_credential = "0.4"
+openmls_traits = "0.4"
+
+# The leaf's stack, in the configuration `embedded-footprint` measures, plus
+# `std` because this harness runs on the host.
+mls-rs = { version = "=0.56.0", default-features = false, features = [
+    "private_message",
+    "out_of_order",
+    "prior_epoch",
+    "by_ref_proposal",
+    "std",
+] }
+mls-rs-crypto-rustcrypto = "=0.22.1"
+
+# Address derivation, so the leaf's credential is checked against the real type
+# rather than a copy of the rule.
+offline-protocol-core = { path = "../../crates/offline-protocol-core" }
+sha2 = "0.10"
+
+[profile.release]
+debug = false

@@ -76,8 +76,14 @@ with a number rather than an argument.
 This ADR covers the protocol layer only. It does not make MLS run on a leaf
 node, and it should not be read as promising that: OpenMLS is not a no_std
 crate, and MLS key-schedule and ratchet-tree state does not fit alongside a
-vendor radio stack in 256 KB. A leaf node's payload cryptography is a separate
-decision, still open.
+vendor radio stack in 256 KB.
+
+A leaf node's payload cryptography was settled separately, in
+[ADR 0021](0021-a-leaf-node-speaks-mls.md). The paragraph above holds for
+OpenMLS and for large groups, and turned out not to hold for the shape the
+problem has: a phone paired with one device is a two-member group whose ratchet
+tree is three nodes, and a second RFC 9420 implementation that does build
+without `std` fits the part. A leaf runs real MLS.
 
 ## What would undo this
 

@@ -222,6 +222,32 @@ jobs:
       - name: Measure embedded footprint
         run: ./tools/embedded-footprint/measure.sh >> "$GITHUB_STEP_SUMMARY"
 
+  mls-interop:
+    name: MLS interop (phone <-> leaf)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-mls-interop
+          workspaces: tools/mls-interop
+
+      # The other half of ADR 0021. `embedded-footprint` proves a leaf's MLS
+      # stack fits; this proves it is talking to the phone rather than only to
+      # itself. Both library versions are pinned, so this fails when a bump
+      # changes behaviour, which is the point: an interop claim is about two
+      # specific versions.
+      #
+      # Step 0 inside the harness is a negative control that requires the
+      # uncorrected mls-rs defaults to be REJECTED. If that starts passing,
+      # read the harness README before touching anything.
+      - name: Phone and leaf MLS stacks interoperate
+        working-directory: tools/mls-interop
+        run: cargo run --release --locked
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

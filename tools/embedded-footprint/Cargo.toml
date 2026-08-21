@@ -15,6 +15,48 @@ description = "Measures what offline-protocol-core costs in flash and RAM on a C
 offline-protocol-core = { path = "../../crates/offline-protocol-core", default-features = false }
 cortex-m-rt = "0.7.5"
 
+# The MLS half, optional because the two original binaries measure the protocol
+# layer alone and must keep doing so without a heavier dependency tree in the
+# graph. Only the `leaf*` binaries pull these in.
+mls-rs = { version = "0.56", default-features = false, optional = true }
+mls-rs-crypto-rustcrypto = { version = "0.22", default-features = false, optional = true }
+# `rand_core::OsRng` reaches getrandom, which has no backend on bare metal. The
+# `custom` feature is what lets the binary register one; see `src/rng.rs`.
+getrandom = { version = "0.2", default-features = false, features = [
+    "custom",
+], optional = true }
+
+[features]
+# Shared by every leaf configuration below. Never selected on its own: each
+# variant adds the mls-rs feature set that names it.
+leaf-base = ["dep:mls-rs", "dep:mls-rs-crypto-rustcrypto", "dep:getrandom"]
+
+# What a never-committing leaf actually needs. Application messages are
+# `PrivateMessage`, so `private_message` is not optional; `out_of_order` and
+# `prior_epoch` are what let a node on a lossy radio still decrypt when frames
+# arrive late or straddle a commit, which is the normal case on this hardware,
+# not an edge one.
+leaf = [
+    "leaf-base",
+    "mls-rs/private_message",
+    "mls-rs/out_of_order",
+    "mls-rs/prior_epoch",
+    "mls-rs/by_ref_proposal",
+]
+
+# The floor: application messages and nothing else. Not a shippable
+# configuration, measured to show what the resilience features above cost.
+leaf-min = ["leaf-base", "mls-rs/private_message"]
+
+# The ceiling: everything RFC 9420 asks of a full implementation, X.509
+# credential support included. A leaf uses basic credentials, so this is an
+# upper bound for the report rather than a candidate.
+leaf-full = ["leaf-base", "mls-rs/rfc_compliant"]
+
+[[bin]]
+name = "leaf"
+required-features = ["leaf-base"]
+
 [profile.release]
 # `minisize`'s settings, because that is the profile a mobile or embedded
 # artifact ships under and the number is meant to be quotable.
