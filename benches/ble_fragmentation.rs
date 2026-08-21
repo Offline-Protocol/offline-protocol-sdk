@@ -1,6 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use offline_protocol_core::{AppId, Message, UserId};
 use offline_protocol_transport::BleTransport;
+use std::hint::black_box;
 
 fn create_large_message(size: usize) -> Message {
     let content = "x".repeat(size);

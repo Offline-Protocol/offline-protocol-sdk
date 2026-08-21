@@ -49,3 +49,8 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+# The engine and transport benches drive real sends through `MockTransport`,
+# which lives behind the transport crate's `test-utils` feature. Without this
+# the benches compile to empty stubs and silently measure nothing; mirrors
+# offline-protocol's own dev-dependency.
+offline-protocol-transport = { workspace = true, features = ["test-utils"] }

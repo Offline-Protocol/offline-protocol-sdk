@@ -1,9 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use offline_protocol::{OfflineProtocol, ProtocolConfig};
-use offline_protocol_transport::{Transport, TransportType};
-
-#[cfg(test)]
-use offline_protocol_transport::mock::MockTransport;
+use offline_protocol_transport::{mock::MockTransport, Transport, TransportType};
+use std::hint::black_box;
 
 fn bench_protocol_creation(c: &mut Criterion) {
     c.bench_function("protocol_creation", |b| {
@@ -14,7 +12,6 @@ fn bench_protocol_creation(c: &mut Criterion) {
     });
 }
 
-#[cfg(test)]
 fn bench_protocol_start_stop(c: &mut Criterion) {
     c.bench_function("protocol_start_stop", |b| {
         b.iter(|| {
@@ -35,12 +32,6 @@ fn bench_protocol_start_stop(c: &mut Criterion) {
     });
 }
 
-#[cfg(not(test))]
-fn bench_protocol_start_stop(_c: &mut Criterion) {
-    // Disabled - requires MockTransport which is test-only
-}
-
-#[cfg(test)]
 fn bench_send_message(c: &mut Criterion) {
     c.bench_function("send_message", |b| {
         b.iter_batched(
@@ -70,12 +61,6 @@ fn bench_send_message(c: &mut Criterion) {
     });
 }
 
-#[cfg(not(test))]
-fn bench_send_message(_c: &mut Criterion) {
-    // Disabled - requires MockTransport which is test-only
-}
-
-#[cfg(test)]
 fn bench_process_loop(c: &mut Criterion) {
     c.bench_function("process_loop", |b| {
         b.iter_batched(
@@ -99,11 +84,6 @@ fn bench_process_loop(c: &mut Criterion) {
             criterion::BatchSize::LargeInput,
         );
     });
-}
-
-#[cfg(not(test))]
-fn bench_process_loop(_c: &mut Criterion) {
-    // Disabled - requires MockTransport which is test-only
 }
 
 criterion_group!(
