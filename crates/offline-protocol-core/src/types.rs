@@ -1,7 +1,42 @@
 //! Core protocol types.
 
+use alloc::string::{String, ToString};
+use core::fmt;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+
+/// Map type backing [`Message::metadata`](crate::Message::metadata) and
+/// [`ServiceDescriptor::capabilities`](crate::ServiceDescriptor::capabilities).
+///
+/// `HashMap` under `std`, which is what it has always been and what every
+/// existing consumer still sees. Without `std` it is a `BTreeMap`, because
+/// `HashMap`'s default hasher seeds itself from an entropy source a bare-metal
+/// target does not have.
+///
+/// The substitution is invisible on the wire in both directions: the JSON form
+/// is an object, whose members are unordered by definition, and the binary v1
+/// codec never sees this type at all because it carries metadata as an ordered
+/// `Vec<(String, String)>`.
+#[cfg(feature = "std")]
+pub type MetadataMap = std::collections::HashMap<String, String>;
+
+/// Map type backing metadata and capability maps. See the `std` variant.
+#[cfg(not(feature = "std"))]
+pub type MetadataMap = alloc::collections::BTreeMap<String, String>;
+
+/// Milliseconds since the Unix epoch, negative if the platform clock is set
+/// earlier than it.
+///
+/// This is exactly what `chrono::Utc::now().timestamp_millis()` returned
+/// before this crate dropped chrono for two call sites. `SystemTime` yields
+/// the same `i64` provided the pre-epoch case is spelled out rather than left
+/// to wrap through the unsigned duration.
+#[cfg(feature = "std")]
+fn unix_millis_now() -> i64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(since_epoch) => since_epoch.as_millis() as i64,
+        Err(before_epoch) => -(before_epoch.duration().as_millis() as i64),
+    }
+}
 
 /// Why an identifier was rejected by [`validate_id_chars`].
 ///
@@ -319,8 +354,11 @@ pub struct WallClockTimestamp(i64);
 
 impl WallClockTimestamp {
     /// Captures the current wall-clock time.
+    ///
+    /// Requires the `std` feature: a bare-metal target has no wall clock.
+    #[cfg(feature = "std")]
     pub fn now() -> Self {
-        Self(chrono::Utc::now().timestamp_millis())
+        Self(unix_millis_now())
     }
 
     /// Creates a wall-clock timestamp from milliseconds since Unix epoch.
@@ -334,6 +372,7 @@ impl WallClockTimestamp {
     }
 }
 
+#[cfg(feature = "std")]
 impl Default for WallClockTimestamp {
     fn default() -> Self {
         Self::now()
@@ -348,8 +387,13 @@ pub struct Timestamp(i64);
 
 impl Timestamp {
     /// Creates a new timestamp with the current time.
+    ///
+    /// Requires the `std` feature: a bare-metal target has no wall clock.
+    /// Without it, build timestamps from wire-supplied millis via
+    /// [`Timestamp::from_millis`].
+    #[cfg(feature = "std")]
     pub fn now() -> Self {
-        Self(chrono::Utc::now().timestamp_millis())
+        Self(unix_millis_now())
     }
 
     /// Creates a timestamp from milliseconds since Unix epoch.
@@ -371,11 +415,13 @@ impl Timestamp {
     /// incorrect results due to clock skew. Prefer `LocalInstant` for
     /// single-device elapsed time measurements.
     #[deprecated(note = "Use LocalInstant for elapsed time measurements")]
+    #[cfg(feature = "std")]
     pub fn elapsed_millis(&self) -> i64 {
         Self::now().0 - self.0
     }
 }
 
+#[cfg(feature = "std")]
 impl Default for Timestamp {
     fn default() -> Self {
         Self::now()
@@ -392,7 +438,7 @@ impl Default for Timestamp {
 pub struct LamportClock(u64);
 
 impl<'de> serde::Deserialize<'de> for LamportClock {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
@@ -453,9 +499,14 @@ impl fmt::Display for LamportClock {
 ///
 /// Cannot be serialized — physically cannot cross a device boundary.
 /// Use this instead of `Timestamp::elapsed_millis()` for single-device timing.
+///
+/// Requires the `std` feature: this is a `std::time::Instant` wrapper through
+/// and through, and a bare-metal target supplies the monotonic clock itself.
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy)]
 pub struct LocalInstant(std::time::Instant);
 
+#[cfg(feature = "std")]
 impl LocalInstant {
     /// Captures the current monotonic instant.
     pub fn now() -> Self {
@@ -473,7 +524,7 @@ impl LocalInstant {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
 

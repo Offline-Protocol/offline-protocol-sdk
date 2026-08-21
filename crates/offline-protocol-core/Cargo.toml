@@ -18,17 +18,61 @@ description = "Core types and data structures for the Offline Protocol SDK"
 [lints]
 workspace = true
 
+[features]
+# `std` is on by default, so every existing consumer compiles unchanged and the
+# published API is byte-identical to what it was before this crate gained a
+# bare-metal build. Turning it off is what a Cortex-M leaf node does:
+# `--no-default-features` leaves the decode, validate and encode paths, and
+# removes the constructors that mint state from the platform (`MessageId::new`,
+# `Timestamp::now`, `LocalInstant`) plus the poison-recovering lock helpers.
+#
+# There is deliberately no separate `alloc` feature. Every type here is built
+# out of `String` and `Vec`, so `alloc` is mandatory in both configurations and
+# a feature that can never be turned off is dead configuration.
+#
+# `uuid/v4` lives here rather than in the base dependency because v4 pulls
+# `getrandom`, which has no backend on a bare-metal target and fails the build.
+# The no_std path constructs ids from bytes that arrived on the wire instead.
+default = ["std"]
+std = [
+    "serde/std",
+    "serde_json/std",
+    "base64/std",
+    "unicode-normalization/std",
+    "thiserror/std",
+    "uuid/std",
+    "uuid/v4",
+    "dep:tracing",
+]
+
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
+# The seven entries below are declared locally rather than inherited from the
+# workspace table, and that is load-bearing rather than untidy: a member crate
+# CANNOT drop default features from a `{ workspace = true }` dependency. Cargo
+# accepts `default-features = false` next to `workspace = true` and silently
+# ignores it, so an inherited `serde` would keep dragging `serde/std` in and the
+# bare-metal build would fail with errors pointing at the dependency instead of
+# at the cause. Declaring them here is the only way the opt-out takes effect.
+#
+# Version requirements must stay in lockstep with `[workspace.dependencies]` in
+# the root manifest. `workspace_dependency_versions_match` in `src/lib.rs`
+# fails the build if they drift.
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+unicode-normalization = { version = "0.1", default-features = false }
+thiserror = { version = "2.0", default-features = false }
+uuid = { version = "1.6", default-features = false, features = ["serde"] }
+# Optional because `sync.rs` is its only consumer and that module is std-only.
+tracing = { version = "0.1", optional = true }
+
+# These two stay inherited: the workspace already declares them
+# `default-features = false, features = ["alloc"]` for unrelated reasons
+# (postcard to avoid the unmaintained `atomic-polyfill`, bech32 because its
+# `std` feature only adds error impls that never cross this API), which happens
+# to be exactly the shape a bare-metal build needs.
 postcard = { workspace = true }
-base64 = { workspace = true }
 bech32 = { workspace = true }
-unicode-normalization = { workspace = true }
-thiserror = { workspace = true }
-uuid = { workspace = true }
-chrono = { workspace = true }
-tracing = { workspace = true }
 
 [dev-dependencies]
 

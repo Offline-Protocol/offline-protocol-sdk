@@ -20,8 +20,9 @@
 //! It is the same move [`Address`](crate::Address) makes for routing tags, and
 //! for the same reason.
 
-use std::fmt;
-use std::str::FromStr;
+use alloc::string::String;
+use core::fmt;
+use core::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
@@ -296,7 +297,7 @@ impl<'de> Deserialize<'de> for Username {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
 
