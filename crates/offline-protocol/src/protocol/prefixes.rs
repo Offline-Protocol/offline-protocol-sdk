@@ -1,4 +1,10 @@
 //! Internal message prefix definitions and base64 utilities.
+//!
+//! Six of the prefixes below are defined in `offline-protocol-sealed` and
+//! named here rather than spelled out: the ones a leaf node also emits and
+//! parses, with a different MLS implementation. Reservation still happens
+//! here, because `INTERNAL_PREFIXES` is what refuses application content that
+//! begins with one, and that array is generated from this macro invocation.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
@@ -53,22 +59,25 @@ macro_rules! define_internal_prefixes {
 }
 
 define_internal_prefixes! {
-    /// Prefix for key package messages.
-    KEY_PACKAGE = "__MLS_KEY_PKG__",
-    /// Prefix for welcome messages.
-    WELCOME = "__MLS_WELCOME__",
-    /// Prefix for encrypted messages.
-    ENCRYPTED = "__MLS_ENC__",
-    /// Prefix for session confirmation probe messages.
-    SESSION_CONFIRM_PROBE = "__MLS_CONFIRM_PROBE__",
-    /// Prefix for session confirmation acknowledgement messages.
-    SESSION_CONFIRM_ACK = "__MLS_CONFIRM_ACK__",
+    /// Prefix for key package messages. Defined in `offline-protocol-sealed`.
+    KEY_PACKAGE = offline_protocol_sealed::prefixes::KEY_PACKAGE,
+    /// Prefix for welcome messages. Defined in `offline-protocol-sealed`.
+    WELCOME = offline_protocol_sealed::prefixes::WELCOME,
+    /// Prefix for encrypted messages. Defined in `offline-protocol-sealed`.
+    ENCRYPTED = offline_protocol_sealed::prefixes::ENCRYPTED,
+    /// Prefix for session confirmation probe messages. Defined in
+    /// `offline-protocol-sealed`.
+    SESSION_CONFIRM_PROBE = offline_protocol_sealed::prefixes::SESSION_CONFIRM_PROBE,
+    /// Prefix for session confirmation acknowledgement messages. Defined in
+    /// `offline-protocol-sealed`.
+    SESSION_CONFIRM_ACK = offline_protocol_sealed::prefixes::SESSION_CONFIRM_ACK,
     /// Prefix for the MLS-encrypted session-confirm an adopter sends on adopting
     /// the peer's Welcome. Only ever travels INSIDE an `ENCRYPTED` envelope, never
     /// as a raw control message on the wire; its sole purpose is to be a
     /// group-aware decrypt so the both-create "owner" (which confirms only on
-    /// `decrypt_success`) converges. Consumed on receipt — never surfaced to the app.
-    SESSION_CONFIRM_ENCRYPTED = "__MLS_ENC_CONFIRM__",
+    /// `decrypt_success`) converges. Consumed on receipt, never surfaced to the
+    /// app. Defined in `offline-protocol-sealed`.
+    SESSION_CONFIRM_ENCRYPTED = offline_protocol_sealed::prefixes::SESSION_CONFIRM_ENCRYPTED,
     /// Prefix for the sealed rich payload (`RichPayloadV1` JSON) inside a
     /// decrypted MLS plaintext. Only ever travels INSIDE an `ENCRYPTED`
     /// envelope, negotiated via `rich_versions` in the key package; listed

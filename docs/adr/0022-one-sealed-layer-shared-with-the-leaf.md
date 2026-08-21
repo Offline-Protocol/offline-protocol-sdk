@@ -97,6 +97,22 @@ error's text (the failure [ADR 0013](0013-exhaustive-privacy-classifier.md)
 names for classifiers). Adding a variant here is a compile error in the MLS
 crate until someone decides what it means.
 
+### What joined the layer afterwards
+
+The four pieces above are what the decision was taken over. The rule it set
+(anything both ends must agree on lives here, once) admits more, and two more
+arrived when the leaf crate needed them:
+
+| Piece | Came from | Why both ends need it |
+|---|---|---|
+| The six 1:1 control-frame prefixes | `offline-protocol`, a private module | A frame's type is the prefix its content begins with, so two ends that disagree about one do not have a conversation |
+| `KeyPackagePayload` and the compact envelope version | `offline-protocol`, a private module | It is the only channel by which capabilities are advertised, and a leaf builds it with the other MLS implementation |
+
+Neither changes what this ADR decided, and both were pure relocations: the
+prefix registry that reserves a prefix and refuses application content
+beginning with one stays in the engine, because reservation is engine
+machinery rather than something the two ends agree on.
+
 ## What would undo this
 
 Reintroducing a second implementation of any of the four. The likely route is

@@ -1,6 +1,6 @@
 # offline-protocol-sealed
 
-The pieces both halves of a sealed conversation must agree on, in a form a bare-metal leaf node can link: the encrypted-envelope wire codec, address derivation, and the canonical signing-payload construction.
+The pieces both halves of a sealed conversation must agree on, in a form a bare-metal leaf node can link: the encrypted-envelope wire codec, address derivation, the canonical signing-payload construction, and the control frames a pair exchanges.
 
 Provides:
 
@@ -8,6 +8,7 @@ Provides:
 - `derive_address`, the SDK's one derivation of an address from an identity key
 - `canonical_payload`, the domain-separated, length-prefixed construction every signature in the protocol is taken over
 - The sender-ratchet and leaf key-package constants that a phone and a leaf must configure identically
+- The six control-frame prefixes a 1:1 sealed conversation is carried on, and `KeyPackagePayload`, the body that advertises what a peer can parse
 
 Like [`offline-protocol-core`](https://crates.io/crates/offline-protocol-core), this crate compiles for bare-metal targets with `--no-default-features`.
 

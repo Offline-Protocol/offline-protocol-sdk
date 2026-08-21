@@ -50,6 +50,8 @@ pub mod constants;
 pub mod derive;
 pub mod envelope;
 pub mod error;
+pub mod keypackage;
+pub mod prefixes;
 
 pub use canonical::{
     canonical_payload, control_signing_payload, CTRL_PK_META_KEY, CTRL_SIGN_DOMAIN,
@@ -62,6 +64,7 @@ pub use constants::{
 pub use derive::{derive_address, ED25519_PUBLIC_KEY_LEN};
 pub use envelope::{EncryptedMessage, GroupId, MlsMessageType, WelcomeMessage};
 pub use error::{Result, SealedError};
+pub use keypackage::{KeyPackagePayload, MLS_ENVELOPE_COMPACT_V1};
 
 #[cfg(all(test, feature = "std"))]
 mod manifest_guard_tests {

@@ -67,6 +67,33 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   copies come back. See
   [ADR 0022](./docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md).
 
+- **Two more pieces join that layer: the 1:1 control-frame prefixes and
+  `KeyPackagePayload`.** Both were private to the engine, and both are things
+  the two ends of a sealed conversation have to agree on while building them
+  with different MLS implementations. A frame's type is the prefix its content
+  begins with, so two ends that disagree about one do not have a conversation;
+  and the key package payload is the only channel in this protocol by which
+  capabilities are advertised, which is why a device that cannot mint one is
+  served the floor forever.
+
+  `offline-protocol-sealed` gains `prefixes` (the six a pair speaks: key
+  package, Welcome, encrypted, the two confirmation frames, and the encrypted
+  confirmation that only ever travels inside an envelope), plus
+  `KeyPackagePayload` and `MLS_ENVELOPE_COMPACT_V1`. **Reservation stays in the
+  engine**: `INTERNAL_PREFIXES` is what refuses application content beginning
+  with a reserved prefix, and it is still generated from the one macro
+  invocation that names them, so adding a prefix is still a single-line change
+  in a single place. Group, connection, relay, presence and sealed-body
+  prefixes stay in the engine too, because none of them reach a device and the
+  alternative puts relay vocabulary in an image budgeted in kilobytes.
+
+  Pure relocation: no wire byte, no JSON field, no error string and no FFI
+  signature changes, and every engine use site is untouched because the
+  constants and the type are re-exported under their existing names. Two new
+  guard tests pin the prefix literals byte for byte and prove none of them is a
+  prefix of another, which is a live near miss between `__MLS_ENC__` and
+  `__MLS_ENC_CONFIRM__`.
+
 - **What a leaf node owes at pairing is specified** in
   [docs/spec/leaf-provisioning.md](./docs/spec/leaf-provisioning.md). A leaf is
   a peer rather than a class of peer: same frames, same envelope, same trust
