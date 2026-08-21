@@ -91,7 +91,7 @@ dependencies {
     // JVM tests have to bring it themselves. Test-only: consumers keep getting
     // it from the host app. Hold at 1.13.x, the last line that builds against
     // compileSdk 34.
-    testImplementation 'androidx.core:core:1.13.1'
+    testImplementation 'androidx.core:core:1.19.0'
     // Real org.json for JVM unit tests (the android.jar org.json is a stub
     // that throws) — needed by RelayControlOpTranslatorTest.
     testImplementation 'org.json:json:20260719'
