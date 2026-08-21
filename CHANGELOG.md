@@ -67,6 +67,46 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   copies come back. See
   [ADR 0022](./docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md).
 
+- **What a leaf node owes at pairing is specified** in
+  [docs/spec/leaf-provisioning.md](./docs/spec/leaf-provisioning.md). A leaf is
+  a peer rather than a class of peer: same frames, same envelope, same trust
+  gates, no second sealing path. What is genuinely different is four
+  obligations that a passing build does not reveal, and each is stated with the
+  failure it prevents. A static artifact carries `{address, pubkey}` and never
+  a key package, because an init key is single use and a sticker is not. A key
+  package is minted from a **supplied** time, because an implementation that
+  cannot read a clock stamps a validity window at the Unix epoch and the peer
+  refuses it as expired, so a device that ships that way never pairs at all.
+  State is persisted **before** a frame that advanced it is emitted, because a
+  device that answers and then loses power comes back and reuses an AEAD nonce.
+  Entropy comes from real hardware, because MLS key generation is exactly as
+  strong as what that source returns.
+
+  The chapter also specifies the never-committing profile (what a leaf emits,
+  what it accepts, and what it must never emit), and states that a phone-driven
+  rekey reaches a device as a key package with `session_reset` set rather than
+  as an unsolicited Welcome, which is the sequence a device has to survive for
+  post-compromise security to arrive at all.
+
+- **The leaf profile in [capability
+  negotiation](./docs/spec/capability-negotiation.md)**: what a minimal device
+  advertises, and the two rules that are easy to get backwards on a part where
+  every kilobyte is argued over. A device that advertises nothing still
+  interoperates, because empty lists select the floor and the floor is a
+  complete conversation. And parsing stays unconditional on a device too: a
+  leaf that decodes only the envelope form it advertised drops frames from a
+  peer that legitimately believed it capable.
+
+- **Two threat-model entries for the device class**:
+  [A8, the provisioning-time adversary](./docs/security/threat-model.md), who
+  handles a device or its label before its owner does, and has no
+  cryptographic answer because every cryptographic check passes (the key on the
+  swapped label does derive to the address on that label); and R12, which says
+  plainly that boundary 3's "platform secure storage holds" assumption means an
+  OS keystore on a phone and whatever the part provides on a microcontroller.
+  One device, one key: a fleet sharing an identity key turns one extraction in
+  a laboratory into every unit's identity.
+
 ### Changed
 
 - **The envelope codec and `GroupId::new` now return `SealedError`** rather

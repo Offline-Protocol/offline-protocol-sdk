@@ -57,6 +57,7 @@ implementation written against these documents should interoperate.
 | [Encryption envelopes](spec/encryption-envelopes.md) | MLS envelope forms, media chunk envelope, sealed rich payload |
 | [Group protocol](spec/group-protocol.md) | Group frames, membership commits, leaf identity binding, relay broadcast |
 | [Capability negotiation](spec/capability-negotiation.md) | What peers advertise, what it gates, what absence means |
+| [Leaf node provisioning](spec/leaf-provisioning.md) | What a constrained device owes at pairing, the never-committing profile |
 
 ## Security
 

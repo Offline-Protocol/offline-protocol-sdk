@@ -153,6 +153,43 @@ and MUST NOT feed envelope selection. It is a second-hand claim, adequate for
 deciding whether to include optional context in a group message, not adequate
 for anything else.
 
+## The leaf profile
+
+A constrained device negotiates through the same key package as any other peer.
+This is the reason a leaf node runs MLS at all: capability advertisement rides
+in a key package and nowhere else, so a device with no key package to mint has
+no channel to advertise anything, and every frame sent to it falls to the floor
+forever. See [ADR 0021](../adr/0021-a-leaf-node-speaks-mls.md) for the decision
+and [Leaf node provisioning](leaf-provisioning.md) for what a device owes at
+pairing.
+
+A minimal leaf advertises little and works fully:
+
+| Field | A minimal leaf | Effect |
+|-------|----------------|--------|
+| `wire_versions` | `[1]` if it decodes the binary hop encoding, else empty | Empty means peers send it JSON, which every conforming receiver parses anyway |
+| `env_versions` | `[1]` if it decodes the compact envelope, else empty | Empty means peers send the JSON envelope, which is the permanent floor |
+| `rich_versions` | Empty | Peers send plain text and drop extras rather than sending them in a weaker form |
+| `data_versions` | Empty | No document replication with this peer |
+| `nostr_pubkey` | Absent unless the device is reachable over that carrier | Peers seal to the publicly computable key |
+
+Two consequences follow from the universal rules above, and both are easy to
+get backwards on a device where every kilobyte is argued over.
+
+**A device that advertises nothing still interoperates.** Empty lists select
+the floor, and the floor is a complete conversation: a JSON-encoded `Message`
+carrying a JSON `__MLS_ENC__` envelope. Advertising a capability buys smaller
+frames, never a feature the peer would otherwise withhold.
+
+**Parsing is unconditional on a device too.** A leaf MUST accept every
+historical form of everything it receives regardless of what it advertised,
+which for the envelope means all three inbound forms described in
+[Encryption envelopes](encryption-envelopes.md). A device that decodes only the
+form it advertises drops frames from a peer that legitimately believed it
+capable, and the shipping order in [Adding a capability](#adding-a-capability)
+exists precisely to keep that from happening in a fleet where firmware updates
+slowly.
+
 ## Adding a capability
 
 1. Decide the layer. Hop-local capabilities are in-memory and re-exchanged;

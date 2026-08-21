@@ -34,11 +34,20 @@ reduces but does not eliminate what that reveals.
 | **A5. Malicious application** | Runs above the SDK on the same device | Full access to the SDK's public API |
 | **A6. Device compromise** | Root or equivalent on the device | Everything |
 | **A7. Hostile gateway** | Operates or has compromised a gateway a device attached to | Everything A3 has, at a zone's bridge to the wider network: originates verdicts and presence answers, and observes attach sessions |
+| **A8. Provisioning-time adversary** | Handles a leaf node, or its labelling, before its owner does | Chooses which key the device's pairing artifact names, and what the device pairs with first |
 
 A6 is out of scope. The protocol assumes platform secure storage holds. A5 is
 partly in scope: the SDK refuses control-frame injection through public send
 surfaces and refuses to hand back attacker-chosen identifiers, but it does not
 defend an application against itself.
+
+A8 arrives with leaf nodes and has no cryptographic answer, because every
+cryptographic check passes: the key on the swapped label does derive to the
+address on that label. Its anchor is the one an invite already relies on, the
+out-of-band human context in which the artifact was obtained, and what the
+protocol adds is that the substitution is detectable afterwards, because an
+address is stable and self-certifying. See
+[Leaf node provisioning](../spec/leaf-provisioning.md#the-provisioning-time-adversary).
 
 ## Trust boundaries
 
@@ -446,6 +455,24 @@ accepted, which is why it is recorded here rather than raised as a residual of
 its own.
 
 This shrinks when the engine's import hardening reaches its Rust release.
+
+### R12. A leaf node's identity key is only as protected as the part
+
+Boundary 3 assumes platform secure storage. A phone has an OS-backed keystore
+behind that assumption; a microcontroller has whatever the part provides, and
+an attacker holding the device has physical access rather than the remote
+access A6 describes.
+
+**Why it stands:** it is an integration property, not a protocol one. A leaf
+SHOULD hold its identity key in the part's secure key storage, reachable
+through the same storage seam the SDK already uses for key material, and a
+device that keeps the key in general flash yields it to anyone who holds the
+device.
+
+**What bounds it:** one device, one key. A fleet provisioned with a shared
+identity key turns one extraction into every unit's identity, and the address
+that names one device names all of them. See
+[Leaf node provisioning](../spec/leaf-provisioning.md#identity-and-key-storage).
 
 ## The telemetry producer rule
 
