@@ -57,7 +57,15 @@ fn bench_transport_send_receive(c: &mut Criterion) {
 
                 let message = create_test_message(size);
                 transport.send(&message).unwrap();
-                let received = transport.receive().unwrap();
+                // `send` records outbound frames rather than looping them back,
+                // so without this the queue is empty and `receive` measures a
+                // miss. Feeding it is what makes the round trip in the
+                // benchmark's name real.
+                transport.queue_message(message);
+                let received = transport
+                    .receive()
+                    .unwrap()
+                    .expect("queued message must come back");
 
                 black_box(received);
             });
