@@ -24,7 +24,15 @@ if [[ -z "${LLVM_SIZE}" ]]; then
     echo "llvm-size not found. Run: rustup component add llvm-tools-preview" >&2
     exit 1
 fi
+# Fatal for the same reason `llvm-size` is. This one is the only guard the leaf
+# images have against silently hollowing out, and a run that skipped it would
+# still print a table, which is the failure mode the guard exists to prevent.
+# Both binaries ship in `llvm-tools-preview`, so needing one is needing both.
 LLVM_NM=$(find "$(rustc --print sysroot)" -name llvm-nm -type f | head -1)
+if [[ -z "${LLVM_NM}" ]]; then
+    echo "llvm-nm not found. Run: rustup component add llvm-tools-preview" >&2
+    exit 1
+fi
 
 # `--locked` because the point of this harness is a number that does not move
 # for reasons unrelated to the code being measured.
@@ -86,13 +94,11 @@ for row in "${LEAF_ROWS[@]}"; do
     # linked (a workload that optimises away, a dependency that silently drops
     # out), the flash number falls toward `protocol` and reads as an
     # improvement. A symbol count cannot be fooled that way.
-    if [[ -n "${LLVM_NM}" ]]; then
-        symbols=$("${LLVM_NM}" "${OUT}/leaf" 2>/dev/null | grep -c "mls_rs" || true)
-        if (( symbols < 50 )); then
-            echo "FAIL: only ${symbols} mls-rs symbols in the ${feature} image." >&2
-            echo "The workload stopped linking MLS; the number below is not a footprint." >&2
-            exit 1
-        fi
+    symbols=$("${LLVM_NM}" "${OUT}/leaf" 2>/dev/null | grep -c "mls_rs" || true)
+    if (( symbols < 50 )); then
+        echo "FAIL: only ${symbols} mls-rs symbols in the ${feature} image." >&2
+        echo "The workload stopped linking MLS; the number below is not a footprint." >&2
+        exit 1
     fi
 
     awk -v f="${f}" -v bf="${base_flash}" -v pf="${prot_flash}" -v l="${label}" 'BEGIN {

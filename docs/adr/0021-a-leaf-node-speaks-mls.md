@@ -58,7 +58,7 @@ included:
 
 | Configuration | Flash | vs baseline |
 |---|--:|--:|
-| Application messages only, not shippable | 361.9 KiB | 360.8 KiB |
+| Application messages only, not shippable | 361.7 KiB | 360.6 KiB |
 | **Never-committing leaf, the candidate** | **391.3 KiB** | **390.2 KiB** |
 | `rfc_compliant`, X.509 included, upper bound | 403.8 KiB | 402.7 KiB |
 
@@ -107,14 +107,11 @@ rides in a key package and nothing else, so every frame sent to such a device
 would fall to the JSON floor forever. A device that does MLS mints a signed key
 package like any other peer, and the whole negotiation layer applies unchanged.
 
-### Three things a leaf's key package must do differently
+### Two things a leaf's key package must do differently
 
 These were found by running the two stacks against each other, not by reading
 either one's documentation, and each is a default that produces a key package
 the phone refuses.
-
-**The lifetime must be shortened.** mls-rs defaults to a year. OpenMLS refuses
-any leaf node whose total lifetime range exceeds one hour plus three months.
 
 **`not_before` must be backdated.** OpenMLS tests `not_before < now`, strictly,
 while mls-rs's client builder writes `not_before` as exactly the timestamp it is
@@ -132,10 +129,41 @@ what this is and is not: key package validity is a freshness bound, not an
 authentication mechanism, so a wrong clock costs availability rather than
 security. It still has to be designed rather than discovered on a bench.
 
-`tools/mls-interop` builds the uncorrected configuration and requires the phone
-to reject it. That negative control is the guard: each correction is a default
-someone will eventually tidy back, and a harness that only proves the corrected
-path works cannot tell them they broke it.
+`tools/mls-interop` restores each default in turn and requires the phone to
+reject the result. Those negative controls are the guard: each correction is a
+default someone will eventually tidy back, and a harness that only proves the
+corrected path works cannot tell them they broke it.
+
+### A third default that is policy, not a correction
+
+An earlier draft of this ADR listed a third correction, that a leaf must shorten
+mls-rs's one-year key package lifetime because OpenMLS refuses any leaf node
+whose total lifetime range exceeds one hour plus three months. **OpenMLS 0.7.4
+does not do that.** It declares the bound
+(`MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS`) and the predicate that tests it
+(`Lifetime::has_acceptable_range`), and nothing in the crate calls the
+predicate. `KeyPackageIn::validate` checks only the `not_before < now <
+not_after` window, and names its failure `InvalidLifetime`, which is what made a
+year-long lifetime look like it was refused for its range when it was really
+refused for its `not_before`.
+
+The correction is kept as leaf-side policy, at 28 days: RFC 9420 asks an
+application to define a maximum total lifetime, and a shorter window bounds how
+long an unused init key stays usable. It is simply not something the phone makes
+a leaf do, and this ADR should not have said it was.
+
+Two things follow. The first is a harness rule: negative controls restore one
+default at a time, because a control that broke all three at once was refused
+for whichever reason OpenMLS checked first and could not tell a real requirement
+from an imagined one. That is how this was found, on the first run after the
+split. The second is a gap on the phone, recorded here and deliberately not
+fixed in this ADR's change: because no cap is applied,
+`MlsManager::import_key_package` admits a key package from any peer with an
+arbitrarily long lifetime, where RFC 9420 asks an implementation to reject it.
+It is a freshness bound rather than an authentication one, so it is not urgent,
+but it is ours to enforce and no library is doing it for us.
+`tools/mls-interop` step 0.3 pins the current behaviour and fails if OpenMLS
+starts applying its own cap.
 
 ### What must be true of the device that is not true of a phone
 
@@ -195,5 +223,6 @@ disappears. If a future device genuinely cannot run MLS, that is a new ADR that
 has to re-derive the cost on the phone side, not an extension of this one.
 
 Re-inheriting the leaf's crypto configuration from a default is the smaller
-version of the same thing. The three key package corrections above are load
-bearing, and `tools/mls-interop` step 0 is what says so out loud.
+version of the same thing. The key package corrections above are load bearing,
+and the `tools/mls-interop` step 0 lines are what say so out loud, one per
+default so that each can be believed on its own.

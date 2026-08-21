@@ -11,6 +11,9 @@
 
 #![no_std]
 #![no_main]
+// `#[entry] fn main() -> !` has to diverge and there is nothing to park on in a
+// program that is linked and never run.
+#![allow(clippy::empty_loop)]
 
 extern crate alloc;
 

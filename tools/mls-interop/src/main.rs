@@ -21,13 +21,21 @@
 //!
 //! # The part worth reading
 //!
-//! Getting this to pass took three corrections, all of them on the leaf's key
-//! package and none of them obvious. [`leaf_key_package`] documents each, and
-//! [`default_configuration_is_rejected`] runs the uncorrected version and
-//! requires it to *fail*. That negative control is the point: every correction
-//! is a default that someone will eventually "simplify" back, and without a
-//! test that fails when they do, the next person to hit these spends their time
-//! on a hardware bring-up bench instead of here.
+//! Getting this to pass took corrections to the leaf's key package that neither
+//! library signposts. [`leaf_key_package`] documents them, and
+//! [`corrections_are_load_bearing`] restores each default in turn and requires
+//! the phone to refuse the result. Those negative controls are the point: a
+//! correction is a default that someone will eventually "simplify" back, and
+//! without a test that fails when they do, the next person to hit these spends
+//! their time on a hardware bring-up bench instead of here.
+//!
+//! Restoring one default at a time rather than all at once is what makes them
+//! worth having, and it is also what corrected this file's own account of
+//! itself. Two of the three defaults originally listed here are genuinely
+//! refused by the phone. The third, a year-long key package lifetime, is not
+//! refused at all: see [`the_lifetime_cap_is_policy_not_enforcement`]. A control
+//! that broke all three at once could not tell the difference, because OpenMLS
+//! reports every one of these as `InvalidLifetime`.
 
 use openmls::prelude::tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
 use openmls::prelude::*;
@@ -57,10 +65,12 @@ const MAXIMUM_FORWARD_DISTANCE: u32 = 1000;
 
 /// How long a leaf's key package claims to be valid.
 ///
-/// mls-rs defaults to a year. OpenMLS refuses any leaf node whose total
-/// lifetime range exceeds one hour plus three months
-/// (`MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS`), so the default is refused on
-/// arrival. 28 days sits well inside the cap.
+/// mls-rs defaults to a year. 28 days is leaf-side policy rather than something
+/// the phone makes us do: it is what RFC 9420 asks an application to define, it
+/// sits inside the cap OpenMLS declares in
+/// `MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS`, and it bounds how long an unused init
+/// key stays usable. The phone does not enforce that cap today, which
+/// [`the_lifetime_cap_is_policy_not_enforcement`] pins and explains.
 const KEY_PACKAGE_LIFETIME: Duration = Duration::from_secs(28 * 24 * 3600);
 
 /// How far into the past a key package's validity window has to start.
@@ -71,6 +81,10 @@ const KEY_PACKAGE_LIFETIME: Duration = Duration::from_secs(28 * 24 * 3600);
 /// current second is refused for being not yet valid. This is also the margin
 /// that absorbs clock skew between the two devices.
 const NOT_BEFORE_BACKDATE: u64 = 3600;
+
+/// mls-rs's own default, kept as a named constant because
+/// [`corrections_are_load_bearing`] has to be able to restore it.
+const MLS_RS_DEFAULT_LIFETIME: Duration = Duration::from_secs(365 * 24 * 3600);
 
 /// The SDK's one derivation: an address is the truncated hash of the identity
 /// key, so a credential containing it carries its own proof.
@@ -119,11 +133,10 @@ fn leaf_client(lifetime: Duration) -> (Client<impl MlsConfig>, String) {
     (client, address)
 }
 
-/// The leaf's pairing artifact, with all three corrections applied.
+/// The leaf's pairing artifact, with the corrections applied.
 ///
-/// 1. **The lifetime is shortened.** See [`KEY_PACKAGE_LIFETIME`].
-/// 2. **`not_before` is backdated.** See [`NOT_BEFORE_BACKDATE`].
-/// 3. **The timestamp is passed in, not read.** A bare-metal leaf has no
+/// 1. **`not_before` is backdated.** See [`NOT_BEFORE_BACKDATE`].
+/// 2. **The timestamp is passed in, not read.** A bare-metal leaf has no
 ///    clock, and mls-rs stamps `not_before = 0` when it cannot read one, which
 ///    puts the validity window in 1970 and gets the package refused as expired.
 ///    Passing it explicitly here is not a test convenience: it is the shape the
@@ -131,14 +144,27 @@ fn leaf_client(lifetime: Duration) -> (Client<impl MlsConfig>, String) {
 ///    pairing**, from its radio stack, its commissioner, or the pairing frame
 ///    itself. That obligation is real and belongs in the ADR.
 ///
+/// The shortened lifetime is a third difference from mls-rs's defaults but not
+/// a correction, because the phone accepts the default: see
+/// [`KEY_PACKAGE_LIFETIME`].
+///
 /// The framing correction is separate and smaller: the SDK puts a bare
 /// `KeyPackage` on the wire, while mls-rs's convenience API returns one wrapped
 /// in an `MLSMessage`. Both are legal; they just have to agree.
-fn leaf_key_package(client: &Client<impl MlsConfig>, backdate: u64) -> Vec<u8> {
-    let paired_at = MlsTime::from(unix_now() - backdate);
-
+///
+/// `not_before` is a parameter rather than something computed here so that
+/// [`corrections_are_load_bearing`] can restore one default at a time. Note in
+/// particular that a clockless leaf is reproduced by passing 0, never by
+/// passing `None`: this harness runs on a host, so `None` would have mls-rs
+/// read a real clock and the 1970 window the device actually emits would never
+/// appear.
+fn leaf_key_package(client: &Client<impl MlsConfig>, not_before: u64) -> Vec<u8> {
     client
-        .generate_key_package_message(Default::default(), Default::default(), Some(paired_at))
+        .generate_key_package_message(
+            Default::default(),
+            Default::default(),
+            Some(MlsTime::from(not_before)),
+        )
         .expect("leaf generates a key package")
         .into_key_package()
         .expect("the message is a key package")
@@ -170,24 +196,98 @@ fn phone_admits(provider: &OpenMlsRustCrypto, bytes: &[u8]) -> Result<KeyPackage
         .map_err(|e| format!("{e:?}"))
 }
 
-/// The negative control.
+/// The negative controls: one per correction, each restoring a single default.
 ///
-/// mls-rs's defaults produce a key package the phone refuses. If this ever
-/// stops failing, one of the two libraries changed its mind and the
-/// corrections above may no longer be load-bearing, which is worth knowing
-/// deliberately rather than discovering by deleting them.
-fn default_configuration_is_rejected() {
-    let (client, _) = leaf_client(Duration::from_secs(365 * 24 * 3600));
-    let bytes = leaf_key_package(&client, 0);
+/// One at a time is the whole design. With several defaults wrong at once a
+/// package is refused for whichever reason OpenMLS happens to check first, and
+/// a control like that cannot say which correction is doing the work. Splitting
+/// them is what turned up that one of the three originally claimed here is not
+/// enforced by the phone at all: see
+/// [`the_lifetime_cap_is_policy_not_enforcement`].
+///
+/// If either case below is ACCEPTED, one of the two stacks changed its validity
+/// rules and whether that correction is still load-bearing has to be re-derived
+/// rather than discovered by someone deleting it.
+fn corrections_are_load_bearing() {
     let (provider, _, _) = phone();
+    let now = unix_now();
+
+    // Both cases are the same OpenMLS rule: `not_before < now`, tested strictly
+    // in `Lifetime::is_valid`. The first stamps `not_before` an hour into the
+    // future rather than at exactly `now`, which is what dropping the backdate
+    // literally produces. That is deliberate: `not_before == now` is refused
+    // only when the phone validates inside the same second the package was
+    // minted, so a control built on it would be a coin flip. An hour of skew
+    // exercises the same rule deterministically, and skew between two devices
+    // is the form this failure takes in the field anyway.
+    let cases: [(&str, &str, u64); 2] = [
+        (
+            "a leaf whose clock leads the phone's",
+            "NOT_BEFORE_BACKDATE",
+            now + NOT_BEFORE_BACKDATE,
+        ),
+        (
+            "a leaf with no clock at all, stamping 1970",
+            "the supplied pairing timestamp",
+            0,
+        ),
+    ];
+
+    for (index, (what, correction, not_before)) in cases.iter().enumerate() {
+        let (client, _) = leaf_client(KEY_PACKAGE_LIFETIME);
+        let bytes = leaf_key_package(&client, *not_before);
+
+        match phone_admits(&provider, &bytes) {
+            Err(e) => println!("  0.{} {what} is refused ({e})", index + 1),
+            Ok(_) => panic!(
+                "the phone ACCEPTED a key package from {what}.\n\
+                 OpenMLS or mls-rs changed its key package validity rules, so \
+                 {correction} may no longer be load-bearing. Re-derive that \
+                 before touching it."
+            ),
+        }
+    }
+}
+
+/// The third default, and the one that turned out not to be a correction.
+///
+/// RFC 9420 tells an application to define a maximum total lifetime for a leaf
+/// node and reject anything longer, and OpenMLS 0.7.4 ships both halves of
+/// that: the constant `MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS` (an hour plus
+/// three months) and the predicate `Lifetime::has_acceptable_range`. Nothing
+/// calls the predicate. `KeyPackageIn::validate` checks only
+/// `Lifetime::is_valid`, which is the `not_before < now < not_after` window,
+/// and returns `InvalidLifetime` when it fails, which is the error name that
+/// made a year-long lifetime look like it was being refused for its range when
+/// it was really being refused for its `not_before`.
+///
+/// So [`KEY_PACKAGE_LIFETIME`] is leaf-side policy, not something the phone
+/// enforces. Worth keeping, because it is what RFC 9420 asks and it bounds how
+/// long an unused init key stays usable, but it is not an interop correction
+/// and this harness must not imply that it is. Two consequences, both pinned
+/// here rather than left as prose:
+///
+/// 1. If this case ever starts being *refused*, OpenMLS wired up its own cap
+///    and the shortened lifetime became load-bearing for interop after all.
+/// 2. Because the phone applies no cap, the SDK admits a key package from any
+///    peer with an arbitrarily long lifetime. That is a gap in
+///    `MlsManager::import_key_package`, not in this harness, and it is recorded
+///    in ADR 0021 rather than quietly fixed from here.
+fn the_lifetime_cap_is_policy_not_enforcement() {
+    let (provider, _, _) = phone();
+    let (client, _) = leaf_client(MLS_RS_DEFAULT_LIFETIME);
+    let bytes = leaf_key_package(&client, unix_now() - NOT_BEFORE_BACKDATE);
 
     match phone_admits(&provider, &bytes) {
-        Err(e) => println!("  0. uncorrected defaults are refused by the phone ({e})"),
-        Ok(_) => panic!(
-            "the uncorrected leaf key package was ACCEPTED.\n\
-             One of the two stacks changed its lifetime rules. Re-derive whether \
-             KEY_PACKAGE_LIFETIME and NOT_BEFORE_BACKDATE are still needed before \
-             touching them."
+        Ok(_) => println!(
+            "  0.3 mls-rs's one-year lifetime is ACCEPTED: OpenMLS defines a cap \
+             and never applies it"
+        ),
+        Err(e) => panic!(
+            "the phone REFUSED a year-long key package lifetime ({e}).\n\
+             OpenMLS now enforces MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS. That makes \
+             KEY_PACKAGE_LIFETIME load-bearing for interop, and ADR 0021's account \
+             of it as leaf-side policy needs updating."
         ),
     }
 }
@@ -199,13 +299,14 @@ fn step(n: u32, what: &str) {
 fn main() {
     println!("OpenMLS 0.7.4 (phone) <-> mls-rs 0.56.0 (leaf), ciphersuite 3\n");
 
-    default_configuration_is_rejected();
+    corrections_are_load_bearing();
+    the_lifetime_cap_is_policy_not_enforcement();
 
     // ---- The leaf builds an identity and a pairing artifact ---------------
     let (leaf, leaf_address) = leaf_client(KEY_PACKAGE_LIFETIME);
     step(1, &format!("leaf identity derives to {leaf_address}"));
 
-    let key_package_bytes = leaf_key_package(&leaf, NOT_BEFORE_BACKDATE);
+    let key_package_bytes = leaf_key_package(&leaf, unix_now() - NOT_BEFORE_BACKDATE);
     step(
         2,
         &format!("leaf key package, {} bytes", key_package_bytes.len()),
@@ -217,16 +318,35 @@ fn main() {
         .expect("phone parses and validates the leaf's key package");
     step(3, "phone parsed and validated it");
 
-    let credential_content = leaf_key_package
-        .leaf_node()
-        .credential()
-        .serialized_content();
+    // `MlsManager::verify_address_binding` derives from the signature key in the
+    // package that *arrived*, not from one the process already holds, and this
+    // check is written the same way for the same reason. Comparing a credential
+    // against the locally-generated address would hold by construction: it
+    // would pass even if mls-rs and OpenMLS disagreed about where the signature
+    // key sits in the encoding, which is exactly the disagreement an interop
+    // harness exists to catch.
+    let presented_key = leaf_key_package.leaf_node().signature_key().as_slice();
+    let claimed = std::str::from_utf8(
+        leaf_key_package
+            .leaf_node()
+            .credential()
+            .serialized_content(),
+    )
+    .expect("utf8 credential");
+
     assert_eq!(
-        std::str::from_utf8(credential_content).expect("utf8 credential"),
-        leaf_address,
-        "a leaf credential must be the address its own signature key derives to"
+        derive_address(presented_key).to_string(),
+        claimed,
+        "derive(presented_key) must equal the address the credential claims"
     );
-    step(4, "leaf credential satisfies the SDK's identity binding");
+    assert_eq!(
+        claimed, leaf_address,
+        "and the address the phone recovered must be the leaf's own"
+    );
+    step(
+        4,
+        "derive(presented_key) == claimed address, on the phone's copy",
+    );
 
     // ---- The phone creates the group and adds the leaf -------------------
     let group_config = MlsGroupCreateConfig::builder()

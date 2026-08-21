@@ -8,9 +8,10 @@
 //!
 //! The workload is the **never-committing member** profile. The phone creates
 //! the group, adds the device, and issues every commit; the device mints a key
-//! package at pairing, joins from a Welcome, processes what arrives, answers,
-//! and persists. No `commit_builder` appears here, deliberately: leaving the
-//! commit path unlinked is part of why the number is what it is.
+//! package at pairing, joins from a Welcome, processes what arrives, seals an
+//! answer, persists, and only then emits. No `commit_builder` appears here,
+//! deliberately: leaving the commit path unlinked is part of why the number is
+//! what it is.
 //!
 //! Two deltas come out of this. Against `baseline` it is the whole leaf image,
 //! which answers "does it fit". Against `protocol` it is what MLS costs on top
@@ -29,6 +30,9 @@
 
 #![no_std]
 #![no_main]
+// `#[entry] fn main() -> !` has to diverge and there is nothing to park on in a
+// program that is linked and never run.
+#![allow(clippy::empty_loop)]
 
 extern crate alloc;
 
@@ -44,6 +48,7 @@ use offline_protocol_core::{validate_id_chars, Address, Message, UserId};
 
 use mls_rs::identity::basic::{BasicCredential, BasicIdentityProvider};
 use mls_rs::identity::SigningIdentity;
+use mls_rs::time::MlsTime;
 use mls_rs::{CipherSuite, CipherSuiteProvider, Client, CryptoProvider, MlsMessage};
 use mls_rs_crypto_rustcrypto::RustCryptoProvider;
 
@@ -66,6 +71,19 @@ const SAMPLE_ADDRESS: &str = "off1qyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyr4s29s";
 /// Stands in for a frame arriving off the radio. Not a valid MLS message; see
 /// the module note on why that does not affect what gets linked.
 const INBOUND: &[u8] = &[0u8; 128];
+
+/// When the device was paired, in seconds since the epoch.
+///
+/// This is a parameter of the workload rather than something read from a clock
+/// because a bare-metal leaf has no clock to read. Handed `None`, mls-rs stamps
+/// `not_before = 0`, which puts the key package's validity window in 1970 and
+/// gets it refused as expired by the phone (`tools/mls-interop` proves that
+/// refusal). Supplying the timestamp is therefore the shape the firmware has to
+/// have, and it is why ADR 0021 makes a time source at pairing an obligation on
+/// the device: on hardware this value comes from the radio stack, the
+/// commissioner, or the pairing exchange. The literal is `SAMPLE_JSON`'s
+/// timestamp in seconds, so this file quotes one clock and not two.
+const PAIRED_AT: u64 = 1_787_314_332;
 
 /// The protocol layer's own workload, identical to `protocol.rs`.
 fn protocol_workload() {
@@ -116,9 +134,16 @@ fn mls_workload() -> Option<()> {
     // Pairing: the device mints one key package for the phone to consume. This
     // is the artifact a QR code must never carry, because an MLS init key is
     // single-use and a sticker is not.
-    if let Ok(key_package) =
-        client.generate_key_package_message(Default::default(), Default::default(), None)
-    {
+    //
+    // The timestamp is supplied, not read. See `PAIRED_AT`: the `None` this
+    // call would otherwise take is the 1970 trap, and a workload that models
+    // the device's order of operations should not model the refused version of
+    // its first step.
+    if let Ok(key_package) = client.generate_key_package_message(
+        Default::default(),
+        Default::default(),
+        Some(MlsTime::from(PAIRED_AT)),
+    ) {
         if let Ok(bytes) = key_package.to_bytes() {
             black_box(&bytes);
         }
@@ -137,16 +162,21 @@ fn mls_workload() -> Option<()> {
         }
     }
 
-    if let Ok(answer) = group.encrypt_application_message(black_box(b"unlocked"), Vec::new()) {
-        if let Ok(bytes) = answer.to_bytes() {
-            black_box(&bytes);
-        }
-    }
+    let answer = group
+        .encrypt_application_message(black_box(b"unlocked"), Vec::new())
+        .ok()?;
 
     // A leaf that emits before its ratchet state is durable will reuse an AEAD
-    // nonce after a power cut. Ordering this call before the emit above is the
-    // whole point of writing it down.
+    // nonce after a power cut, which is a confidentiality failure and not a
+    // delivery hiccup. So the persist goes here, between sealing the answer and
+    // handing it to the radio, and the `black_box` below is the emit it has to
+    // come before. Writing the two in the other order would link the same code
+    // and teach the wrong thing to whoever uses this file as a skeleton.
     group.write_to_storage().ok()?;
+
+    if let Ok(bytes) = answer.to_bytes() {
+        black_box(&bytes);
+    }
 
     Some(())
 }
