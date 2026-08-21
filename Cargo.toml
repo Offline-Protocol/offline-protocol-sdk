@@ -87,7 +87,7 @@ criterion = "0.8"
 
 # MLS (Message Layer Security)
 openmls = "0.7"
-openmls_rust_crypto = "0.4"
+openmls_rust_crypto = "0.5"
 openmls_basic_credential = "0.4"
 openmls_traits = "0.4"
 
