@@ -1,8 +1,9 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use offline_protocol_core::{AppId, Message, MessagePriority, UserId};
 use offline_protocol_router::{DorsConfig, TransportSelector};
 use offline_protocol_transport::{TransportMetrics, TransportType};
 use std::collections::HashMap;
+use std::hint::black_box;
 
 fn create_test_message(priority: MessagePriority) -> Message {
     let mut message = Message::new(

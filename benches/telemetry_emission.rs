@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use offline_protocol::telemetry::device::{DeviceCapabilitySnapshot, CHANGED_BATTERY};
 use offline_protocol::telemetry::metrics_snapshot::MetricsFrame;
 use offline_protocol::telemetry::routing::{RoutingDecision, RoutingPhase, RoutingReasonCode};
@@ -20,6 +20,7 @@ use offline_protocol::{NoopTelemetrySink, TelemetryRecord, TelemetrySink};
 use offline_protocol_reliability::{DeduplicatorMode, DeduplicatorStats, RetryQueueStats};
 use offline_protocol_router::RelayRole;
 use offline_protocol_transport::{TransportStatus, TransportType};
+use std::hint::black_box;
 
 fn empty_retry_stats() -> RetryQueueStats {
     RetryQueueStats {
