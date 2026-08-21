@@ -85,7 +85,7 @@ dependencies {
     }
 
     testImplementation 'junit:junit:4.13.2'
-    testImplementation 'org.robolectric:robolectric:4.16'
+    testImplementation 'org.robolectric:robolectric:4.16.1'
     // NotificationCompat reaches the production classpath transitively through
     // react-android, which is compileOnly in the standalone/CI harness — so the
     // JVM tests have to bring it themselves. Test-only: consumers keep getting
