@@ -19,7 +19,9 @@ if [[ -z "${LLVM_SIZE}" ]]; then
     exit 1
 fi
 
-cargo build --release --quiet
+# `--locked` because the point of this harness is a number that does not move
+# for reasons unrelated to the code being measured.
+cargo build --release --locked --quiet
 
 # `llvm-size -A` prints one "section size addr" row per section.
 section() {  # section <binary> <section-name>
@@ -34,17 +36,18 @@ prot_bss=$(section "${OUT}/protocol" .bss)
 flash_delta=$(( prot_flash - base_flash ))
 bss_delta=$(( prot_bss - base_bss ))
 
-printf '| Measurement | Bytes | KiB |\n'
-printf '|---|--:|--:|\n'
-printf '| Baseline firmware (runtime, allocator, panic handler) | %d | %.1f |\n' \
-    "${base_flash}" "$(echo "${base_flash}/1024" | bc -l)"
-printf '| With offline-protocol-core linked | %d | %.1f |\n' \
-    "${prot_flash}" "$(echo "${prot_flash}/1024" | bc -l)"
-printf '| **Protocol layer, flash** | **%d** | **%.1f** |\n' \
-    "${flash_delta}" "$(echo "${flash_delta}/1024" | bc -l)"
-printf '| Protocol layer, static RAM (`.bss`) | %d | %.1f |\n' \
-    "${bss_delta}" "$(echo "${bss_delta}/1024" | bc -l)"
-printf '\nMeasured on %s, release profile (opt-level "z", LTO, panic=abort),\n' "${TARGET}"
-printf 'core built `--no-default-features`. Static RAM excludes the heap: the\n'
-printf 'harness provisions 16 KiB in both binaries so it cancels here, and a\n'
-printf 'real node sizes its own from its workload.\n'
+# `bc` is not guaranteed on a CI runner; awk is.
+awk -v bf="${base_flash}" -v pf="${prot_flash}" -v fd="${flash_delta}" \
+    -v bd="${bss_delta}" -v tgt="${TARGET}" 'BEGIN {
+  k = 1024
+  printf "| Measurement | Bytes | KiB |\n"
+  printf "|---|--:|--:|\n"
+  printf "| Baseline firmware (runtime, allocator, panic handler) | %'"'"'d | %.1f |\n", bf, bf/k
+  printf "| With offline-protocol-core linked | %'"'"'d | %.1f |\n", pf, pf/k
+  printf "| **Protocol layer, flash** | **%'"'"'d** | **%.1f** |\n", fd, fd/k
+  printf "| Protocol layer, static RAM (`.bss`) | %'"'"'d | %.1f |\n", bd, bd/k
+  printf "\nMeasured on %s, release profile (opt-level \"z\", LTO, panic=abort),\n", tgt
+  printf "core built `--no-default-features`. Static RAM excludes the heap: the\n"
+  printf "harness provisions 16 KiB in both binaries so it cancels here, and a\n"
+  printf "real node sizes its own from its workload.\n"
+}'

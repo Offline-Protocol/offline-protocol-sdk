@@ -176,6 +176,52 @@ jobs:
       - name: Check workspace on MSRV
         run: cargo check --workspace --all-targets --locked
 
+  embedded-core:
+    name: Embedded core (thumbv8m)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv8m.main-none-eabihf
+          components: clippy, llvm-tools
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-embedded
+
+      # The gate. `offline-protocol-core` is the one crate a constrained leaf
+      # node links, and nothing else in this file compiles it without `std`.
+      # Without this step the no_std configuration rots back to std-only the
+      # first time someone adds a `use std::` to a file that has no reason to
+      # look bare-metal-specific, and the failure surfaces on someone's
+      # hardware rather than here.
+      - name: Build core for bare metal
+        run: >
+          cargo build --package offline-protocol-core
+          --no-default-features --locked --target thumbv8m.main-none-eabihf
+
+      - name: Clippy core for bare metal
+        run: >
+          cargo clippy --package offline-protocol-core
+          --no-default-features --locked --target thumbv8m.main-none-eabihf
+          -- -D warnings
+
+      # Publish isolation. Core declares seven dependencies locally rather than
+      # inheriting them, which is what makes `default-features = false` take
+      # effect; the cost is that a missing `std` re-add is invisible inside the
+      # workspace, where another member's features paper over it, and only
+      # fails when cargo builds the crate on its own at release time. Selecting
+      # the single package reproduces that isolation here instead.
+      - name: Build core standalone with default features
+        run: cargo build --package offline-protocol-core --locked
+
+      # Report-only: the size is information, not a threshold. A number that
+      # fails a build invites tuning the number.
+      - name: Measure embedded footprint
+        run: ./tools/embedded-footprint/measure.sh >> "$GITHUB_STEP_SUMMARY"
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
