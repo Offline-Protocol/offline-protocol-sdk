@@ -18,6 +18,16 @@ from websockets.asyncio.client import ClientConnection
 
 from .transport_manager import TransportError, TransportManager, TransportState
 
+# Relay address-routing (parity with the Swift AddressDeclarationPolicy). When a
+# relay advertises this capability and mints an ``address_challenge`` in its
+# ``Authenticated`` frame, the client proves control of its ``off1…`` address by
+# signing a domain-separated payload and replying with ``DeclareAddress``. Only
+# then does the relay route messages addressed to this node. Absent the
+# capability/challenge, nothing here runs and behaviour is unchanged.
+_ADDRESS_ROUTING_CAPABILITY = "address_routing_v1"
+_ADDRESS_PROOF_DOMAIN = b"offline-relay-addr-v1"
+_ADDRESS_CHALLENGE_LENGTH = 32
+
 logger = logging.getLogger(__name__)
 
 # -- Constants (matching iOS InternetManager.swift) ---------------------------
@@ -277,10 +287,18 @@ class InternetManager(TransportManager):
         except Exception as exc:
             self._emit_diagnostic("error", f"Failed to send auth: {exc}")
 
-    async def _safe_handle_authenticated(self, user_id: str, username: str) -> None:
+    async def _safe_handle_authenticated(
+        self,
+        user_id: str,
+        username: str,
+        capabilities: list[str] | None = None,
+        address_challenge: str | None = None,
+    ) -> None:
         """Wrapper that catches exceptions to prevent stuck STARTING state."""
         try:
-            await self._handle_authenticated(user_id, username)
+            await self._handle_authenticated(
+                user_id, username, capabilities, address_challenge
+            )
         except Exception as exc:
             self._emit_diagnostic("error", f"Authentication handler failed: {exc}")
             await self._handle_connection_closed(exc)
@@ -292,7 +310,13 @@ class InternetManager(TransportManager):
         except Exception as exc:
             self._emit_diagnostic("error", f"Connection-closed handler failed: {exc}")
 
-    async def _handle_authenticated(self, user_id: str, username: str) -> None:
+    async def _handle_authenticated(
+        self,
+        user_id: str,
+        username: str,
+        capabilities: list[str] | None = None,
+        address_challenge: str | None = None,
+    ) -> None:
         self._authenticated = True
         self._update_state(TransportState.RUNNING)
 
@@ -319,6 +343,74 @@ class InternetManager(TransportManager):
             "user_id": user_id,
             "username": username,
         })
+
+        # Prove control of our off1 address so the relay will route to us
+        # (parity with the Swift transport). Fully guarded and best-effort:
+        # any failure here leaves the authenticated session intact.
+        await self._maybe_declare_address(username, capabilities or [], address_challenge)
+
+    async def _maybe_declare_address(
+        self,
+        username: str | None,
+        capabilities: list[str],
+        address_challenge: str | None,
+    ) -> None:
+        """Answer the relay's address challenge with a signed ``DeclareAddress``.
+
+        No-op unless the relay advertised ``address_routing_v1`` and sent a
+        valid challenge, so relays without the capability are unaffected. Never
+        raises into the auth path: a refused or failed declaration leaves the
+        connection authenticated (just unrouted), matching prior behaviour.
+        """
+        if _ADDRESS_ROUTING_CAPABILITY not in capabilities:
+            return
+        if not address_challenge:
+            return
+        if not username:
+            self._emit_diagnostic(
+                "warning", "Address routing offered but no username to bind"
+            )
+            return
+        ws = self._ws
+        if ws is None:
+            return
+        try:
+            challenge = base64.b64decode(address_challenge, validate=True)
+            if len(challenge) != _ADDRESS_CHALLENGE_LENGTH:
+                self._emit_diagnostic(
+                    "warning", "Address challenge has unexpected length; skipping"
+                )
+                return
+            # "offline-relay-addr-v1" || u32be(len(account.utf8)) || account.utf8 || challenge
+            account_bytes = username.encode("utf-8")
+            payload = (
+                _ADDRESS_PROOF_DOMAIN
+                + len(account_bytes).to_bytes(4, "big")
+                + account_bytes
+                + challenge
+            )
+            public_key = bytes(self._protocol.get_identity_public_key())
+            signature = bytes(self._protocol.sign_data(list(payload)))
+            # Lazy import avoids any import-cycle at module load.
+            from .offline_protocol import derive_address
+
+            address = derive_address(list(public_key))
+            frame = json.dumps(
+                {
+                    "type": "DeclareAddress",
+                    "address": address,
+                    "public_key": base64.b64encode(public_key).decode("ascii"),
+                    "signature": base64.b64encode(signature).decode("ascii"),
+                }
+            )
+            await ws.send(frame)
+            self._emit_diagnostic(
+                "info", "Sent DeclareAddress to relay", {"address": address}
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort, must not break auth
+            self._emit_diagnostic(
+                "warning", f"DeclareAddress failed (continuing unrouted): {exc}"
+            )
 
     async def _handle_connection_closed(self, error: Exception | None) -> None:
         # Re-entrancy guard. On AuthError + WS-close, two paths race here:
@@ -470,8 +562,22 @@ class InternetManager(TransportManager):
         if msg_type == "Authenticated":
             user_id = msg.get("user_id", self._device_id)
             username = msg.get("username", self._device_id)
+            capabilities = msg.get("capabilities", [])
+            address_challenge = msg.get("address_challenge")
             self._spawn_process_task(
-                self._safe_handle_authenticated(user_id, username)
+                self._safe_handle_authenticated(
+                    user_id, username, capabilities, address_challenge
+                )
+            )
+
+        elif msg_type == "AddressDeclared":
+            self._emit_diagnostic(
+                "info", "Relay confirmed address binding", {"address": msg.get("address")}
+            )
+
+        elif msg_type == "AddressDeclarationRefused":
+            self._emit_diagnostic(
+                "warning", f"Relay refused address binding: {msg.get('reason')}"
             )
 
         elif msg_type == "AuthError":
