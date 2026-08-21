@@ -78,8 +78,7 @@ printf "| Configuration | Flash | vs baseline | vs protocol only |\n"
 printf "|---|--:|--:|--:|\n"
 
 declare -a LEAF_ROWS=(
-    "leaf-min:application messages only (not shippable)"
-    "leaf:never-committing leaf (candidate)"
+    "leaf:never-committing leaf, the shipping profile"
     "leaf-full:rfc_compliant, X.509 included (upper bound)"
 )
 
@@ -111,15 +110,16 @@ done
 if (( leaf_measured )); then
     cat <<'NOTE'
 
-The candidate row is the number that answers "does it fit": on a 1536 KiB xG24
+The first row is the number that answers "does it fit": on a 1536 KiB xG24
 that is the whole leaf image, protocol layer included, against a part that also
 has to hold a radio stack and an application.
 
 Two things this does not measure. Heap is the first: MLS group state is
 allocated, not static, so `.bss` stays flat here and the working-set figure has
 to come from running the thing, not linking it. Interoperability is the second:
-these images are linked and never executed, and the MLS calls are fed bytes
-that are not a real Welcome, so this says nothing about whether the stack talks
-to the phone's OpenMLS. That question has its own harness.
+these images are linked and never executed, and the frame handed to the device
+is an ordinary text message rather than a Welcome, so this says nothing about
+whether the stack talks to the phone's OpenMLS. That question has its own
+harness, and so do the leaf crate's own tests.
 NOTE
 fi

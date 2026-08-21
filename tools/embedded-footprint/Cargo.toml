@@ -13,6 +13,10 @@ description = "Measures what offline-protocol-core costs in flash and RAM on a C
 [dependencies]
 # The configuration a leaf node links: no std, no clock, no entropy.
 offline-protocol-core = { path = "../../crates/offline-protocol-core", default-features = false }
+# The leaf image measures the shipping crate rather than a hand-written
+# workload against mls-rs, so the number covers the envelope codec, the
+# control-frame signing and the address derivation a device really links.
+offline-protocol-leaf = { path = "../../crates/offline-protocol-leaf", default-features = false, optional = true }
 cortex-m-rt = "0.7.5"
 
 # The MLS half, optional because the two original binaries measure the protocol
@@ -29,13 +33,22 @@ getrandom = { version = "0.2", default-features = false, features = [
 [features]
 # Shared by every leaf configuration below. Never selected on its own: each
 # variant adds the mls-rs feature set that names it.
-leaf-base = ["dep:mls-rs", "dep:mls-rs-crypto-rustcrypto", "dep:getrandom"]
+leaf-base = ["dep:offline-protocol-leaf", "dep:mls-rs", "dep:mls-rs-crypto-rustcrypto", "dep:getrandom"]
 
 # What a never-committing leaf actually needs. Application messages are
 # `PrivateMessage`, so `private_message` is not optional; `out_of_order` and
 # `prior_epoch` are what let a node on a lossy radio still decrypt when frames
 # arrive late or straddle a commit, which is the normal case on this hardware,
 # not an edge one.
+#
+# These are restated here rather than left to `offline-protocol-leaf`, which
+# already requires all four, so that this manifest still says what the leaf
+# profile is. There used to be a `leaf-min` variant below them, pricing
+# application messages with the resilience features off. It was removed when
+# the workload moved onto the crate: the crate requires the four, cargo unifies
+# features, and the variant silently started measuring the same image as this
+# one. A row that reports a number for a configuration nobody can build is
+# worse than no row.
 leaf = [
     "leaf-base",
     "mls-rs/private_message",
@@ -43,10 +56,6 @@ leaf = [
     "mls-rs/prior_epoch",
     "mls-rs/by_ref_proposal",
 ]
-
-# The floor: application messages and nothing else. Not a shippable
-# configuration, measured to show what the resilience features above cost.
-leaf-min = ["leaf-base", "mls-rs/private_message"]
 
 # The ceiling: everything RFC 9420 asks of a full implementation, X.509
 # credential support included. A leaf uses basic credentials, so this is an

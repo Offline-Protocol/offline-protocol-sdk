@@ -22,11 +22,24 @@ shape a shipping artifact has:
   JSON frame, re-encode it as binary wire v1, decode that, re-encode as JSON,
   parse an address and verify it is canonically spelled, and run the
   identifier policy.
-- `leaf` is the same plus MLS: mint a key package, join from a Welcome, open
-  what arrives, seal an answer, and persist. It is built three times, against
-  the smallest mls-rs feature set that works, the set a real leaf needs, and
-  the full `rfc_compliant` set, because the spread between them is the part
-  that is actually a choice.
+- `leaf` is the same plus a whole device: it drives `offline-protocol-leaf`,
+  which provisions an identity, mints a key package, handles an inbound frame,
+  and seals an answer. It is built twice, against the feature set a real leaf
+  needs and against the full `rfc_compliant` set, because the spread between
+  them is the part that is actually a choice.
+
+  It measures the shipping crate rather than a hand-written workload against
+  mls-rs, and that changed the number. The earlier version called mls-rs
+  directly and so linked neither the envelope codec, nor the control-frame
+  signing, nor the address derivation: it priced an image nobody could ship.
+  The figure below is about 45 KiB larger for that reason and is the honest
+  one.
+
+  There used to be a third image, `leaf-min`, pricing application messages with
+  the resilience features off. It is gone: `offline-protocol-leaf` requires all
+  four mls-rs features, cargo unifies features, and the variant silently began
+  measuring the same bytes as `leaf`. A row reporting a number for a
+  configuration nobody can build is worse than no row.
 
 The reported figure is the **delta**, so it excludes the runtime cost that any
 firmware pays whether or not it speaks this protocol. The leaf images report two
@@ -57,10 +70,24 @@ For the `leaf` images specifically, two more things are missing and neither is
 small. **Heap is the first.** MLS group state is allocated, not static, so
 `.bss` barely moves and the working-set figure is simply not in this
 measurement; it has to come from running the thing. **Interoperability is the
-second.** These images are linked and never executed, and the MLS calls are fed
-bytes that are not a real Welcome, so nothing here says the stack can talk to
-the phone. `tools/mls-interop` is what answers that, and it is the gate that
-matters more.
+second.** These images are linked and never executed, and the frame handed to
+the device is an ordinary text message rather than a Welcome or a sealed
+envelope, so nothing here says the stack can talk to the phone.
+`tools/mls-interop` is what answers that, along with the in-process tests in
+the leaf crate, and those are the gates that matter more.
+
+## Where the leaf image stands against the 400 KiB gate
+
+ADR 0021 set a 400 KiB gate to decide whether MLS on a leaf node was viable at
+all, and the Stage 0 spike cleared it at 390.2 KiB. The shipping image measured
+here is larger, because it links the code a device actually runs rather than
+the MLS calls alone. The gate did its job, which was to answer a yes-or-no
+question before anything was built; it is not a budget the shipping image is
+being held to, and the number that matters now is the one this harness prints.
+
+On a 1536 KiB xG24 the shipping image is a little over a quarter of flash, and
+the recovery lever below is worth more than the growth if a product ever needs
+it back.
 
 About a third of the `leaf` image is dead weight that a better crypto provider
 would remove: `mls-rs-crypto-rustcrypto` holds all four curves in one
