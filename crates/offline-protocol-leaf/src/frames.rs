@@ -115,8 +115,12 @@ pub(crate) fn build(
     //
     // The other direction is not this crate's to decide. A phone marks its own
     // frames as needing one and a leaf emits none, so it retries until it
-    // gives up. Whether a leaf peer is exempt from that machinery or owes an
-    // acknowledgement is a question for the spec, which today lists neither.
+    // gives up, and every retry of a sealed frame lands here as a replay the
+    // device refuses: airtime spent, and an error stream firmware cannot tell
+    // from an attack. Whether a leaf peer is exempt from that machinery or owes
+    // an acknowledgement is a question for the spec, which today lists neither.
+    // Tracked as issue 402:
+    // https://github.com/Offline-Protocol/offline-protocol-sdk/issues/402
     message.requires_ack = false;
     Ok(message)
 }

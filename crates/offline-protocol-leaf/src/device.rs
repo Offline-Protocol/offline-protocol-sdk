@@ -10,7 +10,7 @@ use alloc::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use mls_rs::client_builder::MlsConfig;
 use mls_rs::group::ReceivedMessage;
-use mls_rs::{Client, MlsMessage};
+use mls_rs::{Client, Group, MlsMessage};
 use offline_protocol_core::{Address, AppId, Message, MessagePriority};
 use offline_protocol_sealed::{
     prefixes, EncryptedMessage, GroupId, KeyPackagePayload, MlsMessageType, WelcomeMessage,
@@ -71,8 +71,15 @@ pub enum LeafEvent {
         peer: String,
     },
     /// An application message arrived and decrypted.
+    ///
+    /// `peer` is proven: it is the address the sealing group member's own
+    /// signature key derives to. What it is not is permission. Any address in
+    /// radio range can complete a pairing, so firmware decides what a message
+    /// from this particular peer is allowed to actuate. A lock that opens for
+    /// whatever arrives on an established session opens for anyone patient
+    /// enough to pair with it.
     MessageReceived {
-        /// The peer's address.
+        /// The peer's address, proven rather than claimed.
         peer: String,
         /// The plaintext.
         text: String,
@@ -144,13 +151,23 @@ pub struct Handled {
 ///
 /// # What it does not defend against
 ///
+/// **Anyone pairing.** Every gate here answers "is this peer the address it
+/// claims to be", and none of them answers "did the owner mean this peer".
+/// Producing a key that derives to its own address costs nothing, so an
+/// unattended device admits whoever asks, up to the bound above. That is the
+/// same position two phones are in, where the out-of-band artifact carries
+/// first-contact trust; on a device it is firmware that decides when the radio
+/// accepts a pairing at all, and firmware that decides what an opened message
+/// may actuate. [`LeafDevice::peers`] is how it audits what accumulated.
+///
 /// A replayed control frame. The signed payload states who, to whom, and what,
 /// with nothing that says *when*, so a captured frame verifies forever. The
 /// destructive case is a reset-flagged key package, which tears down a live
 /// session, and the peer record remembers the last few of those so the same
 /// frame cannot spend twice. An attacker holding an older one can still spend
 /// it once. Closing that needs freshness inside the signed payload, which is a
-/// change to the wire and to both ends rather than to this crate.
+/// change to the wire and to both ends rather than to this crate, and is
+/// tracked as [issue 403](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/403).
 ///
 /// `Debug` renders the device's address and nothing else. Everything else it
 /// holds is either secret or a handle to secrets, and a device that printed
@@ -263,9 +280,7 @@ impl LeafDevice {
     ) -> Result<Message> {
         let client = self.client()?;
         let group_id = self.group_id(peer)?;
-        let mut group = client
-            .load_group(group_id.as_str().as_bytes())
-            .map_err(|_| LeafError::NoSession(peer.to_string()))?;
+        let mut group = self.load_group(&client, peer, &group_id)?;
 
         let sealed = group
             .encrypt_application_message(plaintext, Vec::new())
@@ -335,11 +350,23 @@ impl LeafDevice {
         } else if frames::strip_prefix(content, prefixes::SESSION_CONFIRM_PROBE).is_some() {
             self.on_probe(message, now_unix_secs)
         } else if frames::strip_prefix(content, prefixes::SESSION_CONFIRM_ACK).is_some() {
-            frames::verify_control_frame(message)?;
+            // Never acted on, and not a frame this device accepts at all. A
+            // leaf emits an acknowledgement and never a probe, so it has none
+            // outstanding and every inbound one is unsolicited.
+            //
+            // Reading one as proof of a session is the bypass: producing a
+            // frame that derives to its own address costs an attacker nothing,
+            // so acting on it would let anyone holding a keypair tell firmware
+            // a session exists that this device would refuse to seal into. The
+            // phone gates the same frame on holding a session of its own; the
+            // profile in the spec lists this prefix under what a leaf emits and
+            // not under what it accepts.
             Ok(Handled {
                 outbound: Vec::new(),
-                events: vec![LeafEvent::SessionEstablished {
-                    peer: message.sender.as_str().to_string(),
+                events: vec![LeafEvent::Ignored {
+                    reason: String::from(
+                        "an acknowledgement arrived for a probe this device never sends",
+                    ),
                 }],
             })
         } else {
@@ -530,9 +557,7 @@ impl LeafDevice {
             )));
         }
 
-        let mut group = client
-            .load_group(group_id.as_str().as_bytes())
-            .map_err(|_| LeafError::NoSession(sender.to_string()))?;
+        let mut group = self.load_group(&client, sender, &group_id)?;
 
         let inbound = MlsMessage::from_bytes(&envelope.ciphertext)
             .map_err(|e| LeafError::Mls(format!("sealed payload does not decode: {e:?}")))?;
@@ -655,7 +680,17 @@ impl LeafDevice {
         // that is not there is not an error, which is what makes a fixed
         // window the right shape rather than an enumeration this seam cannot
         // offer.
-        let highest = self.max_epoch(&key)?.unwrap_or(0);
+        //
+        // A marker that is missing or unreadable cannot bound anything, and
+        // anchoring at zero would delete one record, return `Ok`, and leave
+        // every other epoch's secrets on flash: an erasure the owner asked for
+        // that reports success and did not happen. The group state names the
+        // same neighbourhood of epochs and is about to be deleted anyway, so it
+        // is the fallback anchor.
+        let highest = match self.max_epoch(&key)? {
+            Some(highest) => highest,
+            None => self.current_epoch(&group_id).unwrap_or(0),
+        };
         let floor = highest.saturating_sub(PRIOR_EPOCH_RETENTION + FORGET_EPOCH_SLACK);
         for epoch in floor..=highest {
             self.store
@@ -673,6 +708,11 @@ impl LeafDevice {
     }
 
     /// The highest epoch id ever written for a group, by storage key.
+    ///
+    /// `None` covers both a marker that was never written and one that does
+    /// not decode. The two are the same answer here, which is safe only
+    /// because the caller treats `None` as "no bound available" and finds
+    /// another anchor, rather than as "no epochs".
     fn max_epoch(&self, group_key: &str) -> Result<Option<u64>> {
         let raw = self
             .store
@@ -761,7 +801,7 @@ impl LeafDevice {
     /// the same.
     fn bind_sender_credential(
         &self,
-        group: &mls_rs::Group<impl MlsConfig>,
+        group: &Group<impl MlsConfig>,
         index: u32,
         claimed: &str,
     ) -> Result<()> {
@@ -799,6 +839,44 @@ impl LeafDevice {
         build_client(&self.identity, &self.store)
     }
 
+    /// Loads the group for a session with `peer`, and says which failure it is.
+    ///
+    /// A group that will not load is two different things wearing one error.
+    /// State that is **absent** is a device that never paired with this peer,
+    /// or one that unpaired, and re-pairing is the repair. State that is
+    /// **present and unloadable** is a store handing back bytes this device did
+    /// not write, which no amount of re-pairing fixes and which a bench needs
+    /// to be told about rather than sent chasing a pairing problem.
+    fn load_group<C: MlsConfig>(
+        &self,
+        client: &Client<C>,
+        peer: &str,
+        group_id: &GroupId,
+    ) -> Result<Group<C>> {
+        match client.load_group(group_id.as_str().as_bytes()) {
+            Ok(group) => Ok(group),
+            Err(e) if self.state_present(group_id)? => Err(LeafError::Storage(format!(
+                "group state for {peer} is on flash but does not load: {e:?}"
+            ))),
+            Err(_) => Err(LeafError::NoSession(peer.to_string())),
+        }
+    }
+
+    /// The epoch a group is in, read from its stored state.
+    ///
+    /// Best effort by construction: the one caller is the sweep in
+    /// [`LeafDevice::forget_session`], which needs an anchor when the marker
+    /// cannot give it one, and a state that will not load leaves nothing to
+    /// read. A device with neither has nothing above the window to have
+    /// written.
+    fn current_epoch(&self, group_id: &GroupId) -> Option<u64> {
+        let client = self.client().ok()?;
+        client
+            .load_group(group_id.as_str().as_bytes())
+            .ok()
+            .map(|group| group.current_epoch())
+    }
+
     fn group_id(&self, peer: &str) -> Result<GroupId> {
         Ok(GroupId::for_session(
             &self.identity.address.to_string(),
@@ -815,6 +893,11 @@ impl LeafDevice {
     /// Whether a session with `peer` exists on flash.
     pub fn has_session(&self, peer: &str) -> Result<bool> {
         let group_id = self.group_id(peer)?;
+        self.state_present(&group_id)
+    }
+
+    /// Whether group state for this id is on flash, whatever its condition.
+    fn state_present(&self, group_id: &GroupId) -> Result<bool> {
         Ok(self
             .store
             .load(
@@ -825,9 +908,40 @@ impl LeafDevice {
             .is_some())
     }
 
+    /// The peers this device holds records for.
+    ///
+    /// Firmware's way to audit what a device accumulated. A session proves who
+    /// a peer is and never that the owner meant to have them, so a device that
+    /// has been in a hallway for a year may hold peers nobody chose; this is
+    /// how they are found, and [`LeafDevice::unpair`] is how they are removed.
+    /// Not every entry holds a session: a pairing that stopped after the first
+    /// frame leaves a record too, and those are the slots a new peer recycles.
+    pub fn peers(&self) -> Result<Vec<String>> {
+        self.peer_index()
+    }
+
     /// What this device recorded about a peer's capabilities.
     pub fn peer_env_versions(&self, peer: &str) -> Result<Vec<u8>> {
         Ok(self.peer_record(peer)?.env_versions)
+    }
+
+    /// Forgets a peer: its session, its prior epochs, and what it advertised.
+    ///
+    /// Exposed because a device that is factory reset or unpaired must be able
+    /// to forget, and because leaving MLS state behind for a peer the owner
+    /// removed is the kind of residue that outlives the reason it existed.
+    ///
+    /// Also releases the slot it held, so unpairing is how an owner makes room
+    /// on a device whose peer table is full.
+    pub fn unpair(&mut self, peer: &str) -> Result<()> {
+        self.forget_peer(peer)?;
+
+        let mut index = self.peer_index()?;
+        if index.iter().any(|held| held == peer) {
+            index.retain(|held| held != peer);
+            self.save_peer_index(&index)?;
+        }
+        Ok(())
     }
 }
 
@@ -867,26 +981,4 @@ fn parse_envelope(body: &str) -> Result<EncryptedMessage> {
     }
     serde_json::from_slice(&bytes)
         .map_err(|e| LeafError::MalformedFrame(format!("base64 envelope: {e}")))
-}
-
-/// Erases every trace of a peer.
-///
-/// Exposed because a device that is factory reset or unpaired must be able to
-/// forget, and because leaving MLS state behind for a peer the owner removed
-/// is the kind of residue that outlives the reason it existed.
-impl LeafDevice {
-    /// Forgets a peer: its session, its prior epochs, and what it advertised.
-    ///
-    /// Also the slot it held, so unpairing is how an owner makes room on a
-    /// device whose peer table is full.
-    pub fn unpair(&mut self, peer: &str) -> Result<()> {
-        self.forget_peer(peer)?;
-
-        let mut index = self.peer_index()?;
-        if index.iter().any(|held| held == peer) {
-            index.retain(|held| held != peer);
-            self.save_peer_index(&index)?;
-        }
-        Ok(())
-    }
 }

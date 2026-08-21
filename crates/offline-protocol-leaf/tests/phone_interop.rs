@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 
 use offline_protocol_core::{Message, MessagePriority, UserId};
 use offline_protocol_leaf::{
-    store::{KEY_TYPE_GROUP_EPOCH, KEY_TYPE_IDENTITY, KEY_TYPE_PEER},
+    store::{KEY_TYPE_GROUP_EPOCH, KEY_TYPE_GROUP_STATE, KEY_TYPE_IDENTITY, KEY_TYPE_PEER},
     LeafDevice, LeafError, LeafEvent, LeafStore, MemoryStore, StoreError,
 };
 use offline_protocol_mls::{storage::InMemoryStorage, MlsManager, MlsStorage};
@@ -599,6 +599,54 @@ fn a_probe_without_a_session_is_not_answered() {
 }
 
 #[test]
+fn an_unsolicited_acknowledgement_does_not_establish_a_session() {
+    let stranger = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+
+    // A leaf emits acknowledgements and never probes, so it never has one
+    // outstanding and every inbound acknowledgement is unsolicited. Acting on
+    // one would hand a session to anyone holding a keypair: the frame is
+    // signed, and a signature that derives to its own address costs nothing to
+    // produce. The phone gates the same frame on holding a session of its own,
+    // and the leaf profile lists this prefix under what a device emits rather
+    // than under what it accepts.
+    let frame = phone_control_frame(
+        &stranger,
+        &device.address().to_string(),
+        prefixes::SESSION_CONFIRM_ACK.to_string(),
+    );
+
+    let handled = device
+        .handle(&frame, NOW)
+        .expect("the acknowledgement is handled");
+    assert!(
+        !handled
+            .events
+            .iter()
+            .any(|event| matches!(event, LeafEvent::SessionEstablished { .. })),
+        "an unsolicited acknowledgement established a session: {:?}",
+        handled.events
+    );
+    assert!(
+        handled.outbound.is_empty(),
+        "an unsolicited acknowledgement produced a frame"
+    );
+    assert!(
+        !device
+            .has_session(&stranger.address)
+            .expect("session check"),
+        "an unsolicited acknowledgement left a session on flash"
+    );
+
+    // And what firmware would have acted on is refused where it counts: there
+    // is no session to seal into, whatever the event said.
+    let err = device
+        .seal(&stranger.address, "unlock", NOW)
+        .expect_err("sealed to a peer that only sent an acknowledgement");
+    assert!(matches!(err, LeafError::NoSession(_)), "produced {err:?}");
+}
+
+#[test]
 fn a_peer_that_already_has_a_key_package_is_not_sent_another() {
     let phone = new_phone();
     let mut device = device(Arc::new(MemoryStore::new()));
@@ -945,6 +993,81 @@ fn unpairing_erases_the_prior_epoch_records_too() {
     assert!(
         !device.has_session(&phone.address).expect("session check"),
         "unpairing left a session"
+    );
+}
+
+#[test]
+fn a_corrupt_group_state_is_not_reported_as_a_missing_session() {
+    let phone = new_phone();
+    let store = Arc::new(CountingStore::default());
+    let mut device = device(Arc::clone(&store) as Arc<dyn LeafStore>);
+    pair(&phone, &mut device);
+
+    // A store handing back bytes this device did not write. Reported as a
+    // missing session it sends a bench chasing a re-pair, which is the one
+    // repair that cannot work: the pairing is fine and the flash is not.
+    let key = store
+        .keys_of(KEY_TYPE_GROUP_STATE)
+        .into_iter()
+        .next()
+        .expect("pairing wrote group state");
+    store
+        .store(KEY_TYPE_GROUP_STATE, &key, b"not a group")
+        .expect("store");
+
+    let err = device
+        .seal(&phone.address, "unlock", NOW)
+        .expect_err("a corrupt group state still produced a frame");
+    assert!(
+        matches!(err, LeafError::Storage(_)),
+        "a corrupt group state produced {err:?}"
+    );
+
+    // The control: an absent session is still the other error, so this test is
+    // not simply asserting that everything is a storage failure.
+    let stranger = new_phone();
+    let err = device
+        .seal(&stranger.address, "unlock", NOW)
+        .expect_err("sealed to a peer with no session");
+    assert!(
+        matches!(err, LeafError::NoSession(_)),
+        "an absent session produced {err:?}"
+    );
+}
+
+#[test]
+fn unpairing_sweeps_epochs_a_corrupt_marker_cannot_bound() {
+    let phone = new_phone();
+    let store = Arc::new(CountingStore::default());
+    let mut device = device(Arc::clone(&store) as Arc<dyn LeafStore>);
+    let device_address = pair(&phone, &mut device);
+
+    commit_to(&phone, &mut device, &device_address);
+    commit_to(&phone, &mut device, &device_address);
+    assert!(
+        !store.epoch_records().is_empty(),
+        "the setup wrote no epoch records, so this test would pass vacuously"
+    );
+
+    // The marker is what bounds the sweep, and it is one more record on a part
+    // whose flash can hand back something else. Anchoring at zero when it does
+    // deletes one record, returns `Ok`, and leaves the rest of the epochs'
+    // secrets on flash under a name the next session with this peer answers to.
+    let marker = store
+        .keys_of(KEY_TYPE_GROUP_EPOCH)
+        .into_iter()
+        .find(|id| id.ends_with(":max"))
+        .expect("a marker was written");
+    store
+        .store(KEY_TYPE_GROUP_EPOCH, &marker, b"not eight bytes")
+        .expect("store");
+
+    device.unpair(&phone.address).expect("device unpairs");
+
+    assert!(
+        store.epoch_records().is_empty(),
+        "a corrupt marker left epoch records behind: {:?}",
+        store.epoch_records()
     );
 }
 

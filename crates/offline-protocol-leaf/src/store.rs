@@ -24,6 +24,16 @@
 //! in the same words, for the same reason. A flash driver that buffers a write
 //! and reports success satisfies the type and breaks the rule.
 //!
+//! # What it bounds, and what it does not
+//!
+//! This crate bounds how much a store *holds*: peers, unspent key packages and
+//! prior-epoch records each have a ceiling. It does not bound how often a store
+//! is *written*, and an inbound key package costs a handful of writes to a part
+//! whose flash has a finite number of them. A device exposed to strangers wants
+//! its pairing window controlled by firmware rather than left open, which is
+//! the same conclusion the authorization obligation reaches from the other
+//! direction.
+//!
 //! # Where the key material should live
 //!
 //! Everything written through this trait is secret: the identity private key,

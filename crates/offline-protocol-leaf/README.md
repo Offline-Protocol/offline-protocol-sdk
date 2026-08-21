@@ -9,7 +9,7 @@ Provides:
 - `LeafStore`, one blob-storage seam a device implements over its secure key storage, with persist-before-emit enforced rather than documented
 - Key package minting with the backdated `not_before` and supplied timestamp a device needs to pair at all
 
-Three obligations this crate cannot discharge for you: a **time source** at pairing (every entry point takes `now_unix_secs`, because a device that lets an MLS library read a clock it does not have stamps 1970 and is refused as expired), **real entropy** (this crate registers no `getrandom` backend on purpose; wire the symbol to the part's hardware source), and **durable storage** (`LeafStore` must be atomic per entry, because a ratchet state rolled back by a power cut reuses an AEAD nonce).
+Four obligations this crate cannot discharge for you: a **time source** at pairing (every entry point takes `now_unix_secs`, because a device that lets an MLS library read a clock it does not have stamps 1970 and is refused as expired), **real entropy** (this crate registers no `getrandom` backend on purpose; wire the symbol to the part's hardware source), **durable storage** (`LeafStore` must be atomic per entry, because a ratchet state rolled back by a power cut reuses an AEAD nonce), and **authorization** (a session proves who a peer is and never that the owner meant them, since any address in radio range can complete a pairing, so firmware decides when the radio accepts one and what a given peer may actuate).
 
 Like [`offline-protocol-core`](https://crates.io/crates/offline-protocol-core) and [`offline-protocol-sealed`](https://crates.io/crates/offline-protocol-sealed), this crate compiles for bare-metal targets with `--no-default-features` (add `--features bare-metal-rng`).
 

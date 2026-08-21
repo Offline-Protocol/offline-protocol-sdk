@@ -158,8 +158,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   group rather than the one its body claimed. A sealed frame's MLS sender must
   be the peer the frame came from. A confirmation probe is answered only by a
   device that still holds a session, because a peer confirms on that answer and
-  flushes into it. A reset frame is acted on once, so a captured one is not a
-  repeatable session teardown. Twenty-three tests cover this against a real
+  flushes into it, and an inbound acknowledgement is never acted on at all,
+  because a leaf emits those and never probes, so every one that arrives is
+  unsolicited and treating it as proof of a session would let any keypair
+  holder assert one. A reset frame is acted on once, so a captured one is not a
+  repeatable session teardown. Twenty-six tests cover this against a real
   OpenMLS phone in the same process, which is the only kind of test that
   catches a default in one library the other refuses.
 
@@ -181,13 +184,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   failing store and asserts both that nothing is emitted and that the write was
   actually attempted, so it cannot pass by short-circuiting earlier.
 
-  Three obligations stay with the integrator, and the API is shaped so none can
+  Four obligations stay with the integrator, and the API is shaped so none can
   be forgotten silently: every entry point needing a clock takes
   `now_unix_secs` (a device that lets an MLS library read a clock it does not
   have stamps 1970 and is refused as expired, so it never pairs at all), the
   crate registers no `getrandom` backend (firmware wires the part's hardware
   entropy source, and key generation is exactly as strong as what it returns),
-  and `LeafStore` must be atomic per entry.
+  and `LeafStore` must be atomic per entry. The fourth is **authorization**: a
+  session proves who a peer is and never that the owner meant them, since any
+  address in radio range can complete a pairing, so firmware decides when the
+  radio accepts one and what a given peer's messages may actuate. A lock that
+  opens for whatever arrives on an established session opens for anyone patient
+  enough to pair with it. `LeafDevice::peers` is how firmware audits what a
+  device accumulated and `unpair` is how it removes one.
 
 - **`Message::from_parts` in `offline-protocol-core`**, which is
   `Message::new` with its two ambient inputs, the clock and the entropy, made

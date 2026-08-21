@@ -21,10 +21,12 @@ The decision behind this, and the measurements that justified it, are in
 rather than implement twice are in
 [ADR 0022](../adr/0022-one-sealed-layer-shared-with-the-leaf.md).
 
-## Four obligations
+## Five obligations
 
 These hold before any mechanism below makes sense. Three of them are invisible
-in a passing build and expensive to discover on a bench.
+in a passing build and expensive to discover on a bench. The fifth is invisible
+in a working deployment as well, because a device that grants too much works
+perfectly until somebody asks it to.
 
 ### 1. A static artifact carries an address and a key, never a key package
 
@@ -80,6 +82,25 @@ that has it: an MLS implementation built for bare metal reaches a symbol the
 firmware supplies. Measurement harnesses in this repository register a counter
 in that slot so an image that never executes can be linked and sized. That stub
 must never reach firmware, and it is documented as such where it appears.
+
+### 5. A session is authentication, not authorization
+
+A leaf MUST NOT treat an established session as permission to act. It MUST
+decide what a peer may do from that peer's address, and the integrator MUST
+control when the device accepts a new pairing at all.
+
+Every gate in this protocol answers "is this peer the address it claims to be".
+None of them answers "did the owner mean this peer". Producing a key that
+derives to its own address costs nothing, so a device left open to pairing ends
+up holding sessions with whoever was in range, every one of them
+cryptographically impeccable. A lock that opens for any message on an
+established session opens for anyone patient enough to pair with it, and every
+frame in that exchange verifies.
+
+This is the obligation a test cannot fail for you: the device works, the peer
+is authenticated, the ciphertext is sound. The bound is an implementation
+choice, whether that is a pairing button, a commissioning window, or an owner
+list written at first pairing, and this chapter requires only that one exists.
 
 ## The pairing exchange
 
@@ -160,6 +181,14 @@ and the silence afterwards is indistinguishable from a quiet link, so the peer
 never learns. Staying quiet leaves it unconfirmed, which is a state it has a
 path out of.
 
+A leaf MUST NOT treat an inbound `__MLS_CONFIRM_ACK__` as evidence of a
+session, which is why the frame appears above under what a leaf emits and not
+under what it accepts. A leaf emits acknowledgements and never probes, so it
+never has one outstanding and every inbound one is unsolicited. Acting on one
+would let any holder of a keypair assert that a session exists: the frame is
+signed, and a signature that derives to its own address costs nothing to
+produce. The frame is answered by a peer that probed, and a leaf is not one.
+
 Per-commit cost on the device is two elliptic-curve operations. Per-message
 cost is symmetric only.
 
@@ -183,7 +212,9 @@ Remembering the frames already acted on costs one bounded list per peer and
 denies the repeat. It does not close replay: a frame older than that list can
 still be spent once. **Closing it needs a freshness field inside the signed
 payload**, which is a change to the wire and to both ends rather than to a
-device, and is an open gap rather than a decision this chapter has taken.
+device, and is an open gap rather than a decision this chapter has taken. It is
+tracked as
+[issue 403](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/403).
 
 Letting a device originate Update proposals would make it self-healing on its
 own schedule. That is deliberately outside this version.

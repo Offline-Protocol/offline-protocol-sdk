@@ -46,7 +46,7 @@
 //! # }
 //! ```
 //!
-//! # Three obligations this crate cannot discharge for you
+//! # Four obligations this crate cannot discharge for you
 //!
 //! **A time source at pairing.** Every entry point that needs a clock takes
 //! `now_unix_secs`. A device that supplies something wrong emits a key package
@@ -63,6 +63,16 @@
 //! This crate orders every persist before the emit it belongs to, so a store
 //! that lies is the one remaining way to reuse an AEAD nonce after a power
 //! cut.
+//!
+//! **Authorization.** A session proves *who* a peer is and never that they may
+//! do anything. Every gate in this crate answers the first question, and any
+//! address in radio range can complete a pairing, because producing a key that
+//! derives to its own address costs nothing. So firmware decides when the radio
+//! accepts a new pairing, and firmware decides what a message from a given peer
+//! may actuate, by the address on the event. A lock that opens for whatever
+//! arrives on an established session opens for anyone patient enough to pair
+//! with it. [`LeafDevice::peers`] is how firmware audits what a device
+//! accumulated and [`LeafDevice::unpair`] is how it removes one.
 //!
 //! # One writer
 //!

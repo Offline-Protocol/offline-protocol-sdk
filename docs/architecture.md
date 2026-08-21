@@ -131,8 +131,10 @@ opens what arrives, answers and persists. See
 - `LeafStore` - one blob-storage seam a device implements over its secure key storage
 - Key package minting with the backdated `not_before` and supplied timestamp a device needs in order to pair at all
 
-**Three obligations it cannot discharge for the integrator**: a time source at
-pairing, real hardware entropy behind `getrandom`, and durable atomic storage.
+**Four obligations it cannot discharge for the integrator**: a time source at
+pairing, real hardware entropy behind `getrandom`, durable atomic storage, and
+authorization, because a session proves who a peer is and never that the owner
+meant them.
 Persist-before-emit is enforced structurally rather than documented: every
 operation that advances the ratchet writes before it returns a frame, because a
 state rolled back by a power cut reuses an AEAD nonce.
