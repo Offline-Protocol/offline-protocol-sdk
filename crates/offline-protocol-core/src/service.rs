@@ -1,9 +1,11 @@
 //! Service discovery types for the Offline Protocol SDK.
 
+use alloc::format;
+use alloc::string::String;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use crate::error::Error;
+use crate::types::MetadataMap;
 
 /// Maximum length for a service ID.
 pub const MAX_SERVICE_ID_LEN: usize = 256;
@@ -15,13 +17,13 @@ pub struct ServiceId(String);
 impl TryFrom<String> for ServiceId {
     type Error = Error;
 
-    fn try_from(s: String) -> std::result::Result<Self, Self::Error> {
+    fn try_from(s: String) -> core::result::Result<Self, Self::Error> {
         ServiceId::new(s)
     }
 }
 
 impl<'de> Deserialize<'de> for ServiceId {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
@@ -65,8 +67,8 @@ impl ServiceId {
     }
 }
 
-impl std::fmt::Display for ServiceId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ServiceId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
@@ -79,10 +81,10 @@ pub struct ServiceDescriptor {
     /// Version of the service (e.g. "1.0").
     pub version: String,
     /// Arbitrary key-value capabilities advertised by this service.
-    pub capabilities: HashMap<String, String>,
+    pub capabilities: MetadataMap,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
 
@@ -145,13 +147,13 @@ mod tests {
 
     #[test]
     fn test_service_id_empty_deserialization_rejected() {
-        let result: std::result::Result<ServiceId, _> = serde_json::from_str("\"\"");
+        let result: core::result::Result<ServiceId, _> = serde_json::from_str("\"\"");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_service_descriptor_serde_roundtrip() {
-        let mut caps = HashMap::new();
+        let mut caps = MetadataMap::new();
         caps.insert("format".to_string(), "json".to_string());
         let desc = ServiceDescriptor {
             service_id: ServiceId::new("echo").unwrap(),

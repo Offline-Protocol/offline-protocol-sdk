@@ -24,8 +24,10 @@
 //! input. Briar's "spare bit" address bug is the reference failure for what
 //! happens when this is skipped.
 
-use std::fmt;
-use std::str::FromStr;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt;
+use core::str::FromStr;
 
 use bech32::primitives::decode::CheckedHrpstring;
 use bech32::{Bech32m, Hrp};
@@ -270,7 +272,7 @@ impl<'de> Deserialize<'de> for Address {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
 

@@ -37,6 +37,10 @@
 //! spans rather than as intra-doc links, which rustdoc rejects for private
 //! items in public documentation.)
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use crate::message::{ContentType, MessagePriority};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -269,7 +273,7 @@ pub(crate) fn decode(data: &[u8]) -> crate::Result<WireMessageV1> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
     use crate::types::LAMPORT_CLOCK_MAX;

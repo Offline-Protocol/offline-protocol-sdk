@@ -1,9 +1,10 @@
 //! Error types for the Offline Protocol SDK.
 
+use alloc::string::{String, ToString};
 use thiserror::Error;
 
 /// Result type alias using the core Error type.
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, Error>;
 
 /// Core errors that can occur in the Offline Protocol SDK.
 // Adding a variant to a public error enum is a breaking change without

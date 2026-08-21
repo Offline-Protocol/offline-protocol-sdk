@@ -11,6 +11,45 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+### Added
+
+- **`offline-protocol-core` compiles without `std`.** The crate now builds for
+  bare-metal targets with `--no-default-features`, which is what a constrained
+  leaf node links: a Cortex-M door lock, sensor or mains-powered relay that
+  speaks the protocol but cannot host the engine. `std` is a feature and it is
+  on by default, so the published API and every existing consumer are
+  unchanged.
+
+  What `std` gates is exactly what the platform has to supply and a bare-metal
+  target does not: a wall clock (`Timestamp::now`, `WallClockTimestamp::now`),
+  a monotonic clock (`LocalInstant`), entropy (`MessageId::new`, and
+  `Message::new` and `MessageBuilder` with it), and threads (the `sync`
+  module). Everything that parses, validates, re-encodes or compares is present
+  in both configurations, which is the half a leaf node uses, because it
+  receives frames rather than minting them. Build messages from wire-supplied
+  parts via `MessageId::from_bytes` and `Timestamp::from_millis` on that path.
+
+  Two field types changed spelling to `MetadataMap`, which under `std` **is**
+  `HashMap<String, String>` exactly as before, and is a `BTreeMap` without it.
+  Nothing moves on the wire: JSON objects are unordered by definition and the
+  binary v1 codec carries metadata as an ordered `Vec<(String, String)>`.
+  `chrono` is no longer a dependency of this crate. See
+  [ADR 0020](./docs/adr/0020-core-compiles-without-std.md).
+
+- **The protocol layer's cost on a Cortex-M33 is measured, not estimated.**
+  `tools/embedded-footprint` links two firmware images for
+  `thumbv8m.main-none-eabihf` and reports the difference: **about 95 KiB of
+  flash (97,152 bytes) and no static RAM** beyond the heap a node provisions
+  for itself. That is roughly 6% of an xG24's 1536 KB. CI prints the table on
+  every run.
+
+  The figure is the protocol layer alone. It excludes signature verification
+  and payload unsealing, the radio driver, an RTOS and key storage, and it is
+  not the engine, which is `std` and `tokio` bound and does not build for this
+  target at all.
+
 ## [0.23.0] — 2026-08-20
 
 > **The protocol carries state now, not only messages.** A new data layer adds

@@ -1,9 +1,12 @@
 //! Message types and structures.
 
-use crate::types::{AppId, HopCount, LamportClock, Timestamp, UserId, TTL};
+use crate::types::{AppId, HopCount, LamportClock, MetadataMap, Timestamp, UserId, TTL};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fmt;
 use uuid::Uuid;
 
 /// Unique message identifier.
@@ -12,6 +15,12 @@ pub struct MessageId(Uuid);
 
 impl MessageId {
     /// Generates a new random message ID.
+    ///
+    /// Requires the `std` feature, which is what enables `uuid`'s `v4`: the
+    /// generator draws from `getrandom`, which has no backend on a bare-metal
+    /// target. Reconstruct ids from the wire with [`MessageId::from_bytes`]
+    /// instead.
+    #[cfg(feature = "std")]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
@@ -48,6 +57,7 @@ impl MessageId {
     }
 }
 
+#[cfg(feature = "std")]
 impl Default for MessageId {
     fn default() -> Self {
         Self::new()
@@ -541,7 +551,7 @@ pub struct Message {
 
     /// Optional metadata for application-specific use.
     #[serde(default)]
-    pub metadata: HashMap<String, String>,
+    pub metadata: MetadataMap,
 
     /// Whether this message requires an ACK.
     #[serde(default = "default_requires_ack")]
@@ -598,6 +608,11 @@ impl Message {
     /// * `recipient` - Recipient's user ID
     /// * `app_id` - Application ID
     /// * `content` - Message content
+    ///
+    /// Requires the `std` feature: this stamps a fresh [`MessageId`] and
+    /// [`Timestamp`], neither of which a bare-metal target can mint. Build the
+    /// struct literally from wire-supplied parts instead.
+    #[cfg(feature = "std")]
     pub fn new(
         sender: UserId,
         recipient: UserId,
@@ -618,7 +633,7 @@ impl Message {
             content: content.into(),
             binary_content: None,
             media_metadata: None,
-            metadata: HashMap::new(),
+            metadata: MetadataMap::new(),
             requires_ack: true,
             reply_to_msg: None,
             forwarded_from: None,
@@ -629,6 +644,9 @@ impl Message {
     }
 
     /// Creates a message builder for more control over message creation.
+    ///
+    /// Requires the `std` feature, because the message it builds is stamped.
+    #[cfg(feature = "std")]
     pub fn builder(sender: UserId, recipient: UserId, app_id: AppId) -> MessageBuilder {
         MessageBuilder::new(sender, recipient, app_id)
     }
@@ -759,7 +777,8 @@ impl Message {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        // Deterministic order (a HashMap iterates nondeterministically).
+        // Deterministic order: sorted explicitly because the `std` spelling
+        // of `MetadataMap` is a `HashMap`, which iterates nondeterministically.
         metadata.sort_by(|a, b| a.0.cmp(&b.0));
 
         // A long canonical-base64 content tail (an MLS envelope, typically)
@@ -880,6 +899,9 @@ impl Message {
 }
 
 /// Builder for creating messages with custom settings.
+///
+/// Requires the `std` feature: `build` stamps a fresh id and timestamp.
+#[cfg(feature = "std")]
 pub struct MessageBuilder {
     sender: UserId,
     recipient: UserId,
@@ -890,13 +912,14 @@ pub struct MessageBuilder {
     priority: MessagePriority,
     ttl: TTL,
     lamport_clock: LamportClock,
-    metadata: HashMap<String, String>,
+    metadata: MetadataMap,
     requires_ack: bool,
     reply_to_msg: Option<MessageId>,
     forwarded_from: Option<ForwardInfo>,
     reply_context: Option<ReplyContext>,
 }
 
+#[cfg(feature = "std")]
 impl MessageBuilder {
     /// Creates a new message builder.
     pub fn new(sender: UserId, recipient: UserId, app_id: AppId) -> Self {
@@ -910,7 +933,7 @@ impl MessageBuilder {
             priority: MessagePriority::default(),
             ttl: TTL::default(),
             lamport_clock: LamportClock::default(),
-            metadata: HashMap::new(),
+            metadata: MetadataMap::new(),
             requires_ack: true,
             reply_to_msg: None,
             forwarded_from: None,
@@ -1011,7 +1034,7 @@ impl MessageBuilder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
 

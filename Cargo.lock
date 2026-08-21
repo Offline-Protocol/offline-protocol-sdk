@@ -1992,7 +1992,6 @@ version = "0.23.0"
 dependencies = [
  "base64",
  "bech32",
- "chrono",
  "postcard",
  "serde",
  "serde_json",
