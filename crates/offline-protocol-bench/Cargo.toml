@@ -39,6 +39,11 @@ name = "telemetry_emission"
 harness = false
 path = "../../benches/telemetry_emission.rs"
 
+[[bench]]
+name = "mls_encryption"
+harness = false
+path = "../../benches/mls_encryption.rs"
+
 [dependencies]
 offline-protocol-core = { workspace = true }
 offline-protocol-transport = { workspace = true }
