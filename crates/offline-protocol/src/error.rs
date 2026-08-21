@@ -293,6 +293,21 @@ pub enum Error {
     Other(String),
 }
 
+/// Carries a sealed-layer failure in as the MLS error it has always been.
+///
+/// The envelope codec and the group-id constructor used to raise
+/// `MlsError` directly; they now raise
+/// [`SealedError`](offline_protocol_sealed::SealedError), which the MLS crate
+/// maps back variant for variant. Routing through that mapping rather than
+/// inventing a new variant here is what keeps `Error::Mls` matching, the
+/// `SessionStateError` classification above, and the rendered text identical
+/// to what callers saw before the move.
+impl From<offline_protocol_sealed::SealedError> for Error {
+    fn from(err: offline_protocol_sealed::SealedError) -> Self {
+        Self::Mls(offline_protocol_mls::MlsError::from(err))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Error, SessionStateError};

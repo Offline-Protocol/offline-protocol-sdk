@@ -51,7 +51,13 @@ use mls_rs::time::MlsTime;
 use mls_rs::{CipherSuite, CipherSuiteProvider, Client, CryptoProvider, MlsMessage};
 use mls_rs_crypto_rustcrypto::RustCryptoProvider;
 
-use offline_protocol_core::Address;
+// The SDK's own declarations, not copies of them. The derivation rule and
+// these four numbers are what this harness exists to test the phone against;
+// a local copy would leave it green while it stopped testing them.
+use offline_protocol_sealed::{
+    derive_address, LEAF_KEY_PACKAGE_LIFETIME, LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS,
+    SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE, SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The SDK pins this in exactly one place and never negotiates it.
@@ -59,43 +65,9 @@ const PHONE_SUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA2
 /// The same suite, spelled the way mls-rs spells it.
 const LEAF_SUITE: CipherSuite = CipherSuite::CURVE25519_AES128;
 
-/// Both from `crates/offline-protocol-mls/src/group.rs`.
-const OUT_OF_ORDER_TOLERANCE: u32 = 32;
-const MAXIMUM_FORWARD_DISTANCE: u32 = 1000;
-
-/// How long a leaf's key package claims to be valid.
-///
-/// mls-rs defaults to a year. 28 days is leaf-side policy rather than something
-/// the phone makes us do: it is what RFC 9420 asks an application to define, it
-/// sits inside the cap OpenMLS declares in
-/// `MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS`, and it bounds how long an unused init
-/// key stays usable. The phone does not enforce that cap today, which
-/// [`the_lifetime_cap_is_policy_not_enforcement`] pins and explains.
-const KEY_PACKAGE_LIFETIME: Duration = Duration::from_secs(28 * 24 * 3600);
-
-/// How far into the past a key package's validity window has to start.
-///
-/// OpenMLS tests `not_before < now`, strictly. mls-rs's client builder writes
-/// `not_before` as exactly the timestamp it is handed, without the backdating
-/// its own `Lifetime::seconds` helper applies, so a package stamped with the
-/// current second is refused for being not yet valid. This is also the margin
-/// that absorbs clock skew between the two devices.
-const NOT_BEFORE_BACKDATE: u64 = 3600;
-
 /// mls-rs's own default, kept as a named constant because
 /// [`corrections_are_load_bearing`] has to be able to restore it.
 const MLS_RS_DEFAULT_LIFETIME: Duration = Duration::from_secs(365 * 24 * 3600);
-
-/// The SDK's one derivation: an address is the truncated hash of the identity
-/// key, so a credential containing it carries its own proof.
-fn derive_address(public_key: &[u8]) -> Address {
-    use sha2::{Digest, Sha256};
-    assert_eq!(public_key.len(), 32, "Ed25519 public keys are 32 bytes");
-    let hash = Sha256::digest(public_key);
-    let mut truncated = [0u8; 20];
-    truncated.copy_from_slice(&hash[..20]);
-    Address::from_hash_bytes(truncated)
-}
 
 fn unix_now() -> u64 {
     SystemTime::now()
@@ -116,7 +88,9 @@ fn leaf_client(lifetime: Duration) -> (Client<impl MlsConfig>, String) {
         .signature_key_generate()
         .expect("signature key generation");
 
-    let address = derive_address(public.as_bytes()).to_string();
+    let address = derive_address(public.as_bytes())
+        .expect("Ed25519 public keys are 32 bytes")
+        .to_string();
 
     // The credential content *is* the address, which is what the SDK's leaf
     // identity binding requires of every member of every group.
@@ -135,7 +109,7 @@ fn leaf_client(lifetime: Duration) -> (Client<impl MlsConfig>, String) {
 
 /// The leaf's pairing artifact, with the corrections applied.
 ///
-/// 1. **`not_before` is backdated.** See [`NOT_BEFORE_BACKDATE`].
+/// 1. **`not_before` is backdated.** See [`LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS`].
 /// 2. **The timestamp is passed in, not read.** A bare-metal leaf has no
 ///    clock, and mls-rs stamps `not_before = 0` when it cannot read one, which
 ///    puts the validity window in 1970 and gets the package refused as expired.
@@ -146,7 +120,7 @@ fn leaf_client(lifetime: Duration) -> (Client<impl MlsConfig>, String) {
 ///
 /// The shortened lifetime is a third difference from mls-rs's defaults but not
 /// a correction, because the phone accepts the default: see
-/// [`KEY_PACKAGE_LIFETIME`].
+/// [`LEAF_KEY_PACKAGE_LIFETIME`].
 ///
 /// The framing correction is separate and smaller: the SDK puts a bare
 /// `KeyPackage` on the wire, while mls-rs's convenience API returns one wrapped
@@ -179,7 +153,9 @@ fn phone() -> (OpenMlsRustCrypto, SignatureKeyPair, CredentialWithKey) {
         SignatureKeyPair::new(PHONE_SUITE.signature_algorithm()).expect("phone signature keys");
     keys.store(provider.storage()).expect("store phone keys");
 
-    let address = derive_address(keys.public()).to_string();
+    let address = derive_address(keys.public())
+        .expect("Ed25519 public keys are 32 bytes")
+        .to_string();
     let credential = CredentialWithKey {
         credential: Credential::new(CredentialType::Basic, address.as_bytes().to_vec()),
         signature_key: keys.public().into(),
@@ -223,8 +199,8 @@ fn corrections_are_load_bearing() {
     let cases: [(&str, &str, u64); 2] = [
         (
             "a leaf whose clock leads the phone's",
-            "NOT_BEFORE_BACKDATE",
-            now + NOT_BEFORE_BACKDATE,
+            "LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS",
+            now + LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS,
         ),
         (
             "a leaf with no clock at all, stamping 1970",
@@ -234,7 +210,7 @@ fn corrections_are_load_bearing() {
     ];
 
     for (index, (what, correction, not_before)) in cases.iter().enumerate() {
-        let (client, _) = leaf_client(KEY_PACKAGE_LIFETIME);
+        let (client, _) = leaf_client(LEAF_KEY_PACKAGE_LIFETIME);
         let bytes = leaf_key_package(&client, *not_before);
 
         match phone_admits(&provider, &bytes) {
@@ -261,7 +237,7 @@ fn corrections_are_load_bearing() {
 /// made a year-long lifetime look like it was being refused for its range when
 /// it was really being refused for its `not_before`.
 ///
-/// So [`KEY_PACKAGE_LIFETIME`] is leaf-side policy, not something the phone
+/// So [`LEAF_KEY_PACKAGE_LIFETIME`] is leaf-side policy, not something the phone
 /// enforces. Worth keeping, because it is what RFC 9420 asks and it bounds how
 /// long an unused init key stays usable, but it is not an interop correction
 /// and this harness must not imply that it is. Two consequences, both pinned
@@ -276,7 +252,7 @@ fn corrections_are_load_bearing() {
 fn the_lifetime_cap_is_policy_not_enforcement() {
     let (provider, _, _) = phone();
     let (client, _) = leaf_client(MLS_RS_DEFAULT_LIFETIME);
-    let bytes = leaf_key_package(&client, unix_now() - NOT_BEFORE_BACKDATE);
+    let bytes = leaf_key_package(&client, unix_now() - LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS);
 
     match phone_admits(&provider, &bytes) {
         Ok(_) => println!(
@@ -286,7 +262,7 @@ fn the_lifetime_cap_is_policy_not_enforcement() {
         Err(e) => panic!(
             "the phone REFUSED a year-long key package lifetime ({e}).\n\
              OpenMLS now enforces MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS. That makes \
-             KEY_PACKAGE_LIFETIME load-bearing for interop, and ADR 0021's account \
+             LEAF_KEY_PACKAGE_LIFETIME load-bearing for interop, and ADR 0021's account \
              of it as leaf-side policy needs updating."
         ),
     }
@@ -303,10 +279,10 @@ fn main() {
     the_lifetime_cap_is_policy_not_enforcement();
 
     // ---- The leaf builds an identity and a pairing artifact ---------------
-    let (leaf, leaf_address) = leaf_client(KEY_PACKAGE_LIFETIME);
+    let (leaf, leaf_address) = leaf_client(LEAF_KEY_PACKAGE_LIFETIME);
     step(1, &format!("leaf identity derives to {leaf_address}"));
 
-    let key_package_bytes = leaf_key_package(&leaf, unix_now() - NOT_BEFORE_BACKDATE);
+    let key_package_bytes = leaf_key_package(&leaf, unix_now() - LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS);
     step(
         2,
         &format!("leaf key package, {} bytes", key_package_bytes.len()),
@@ -335,7 +311,9 @@ fn main() {
     .expect("utf8 credential");
 
     assert_eq!(
-        derive_address(presented_key).to_string(),
+        derive_address(presented_key)
+            .expect("a leaf node credential carries a 32-byte Ed25519 key")
+            .to_string(),
         claimed,
         "derive(presented_key) must equal the address the credential claims"
     );
@@ -353,8 +331,8 @@ fn main() {
         .ciphersuite(PHONE_SUITE)
         .use_ratchet_tree_extension(true)
         .sender_ratchet_configuration(SenderRatchetConfiguration::new(
-            OUT_OF_ORDER_TOLERANCE,
-            MAXIMUM_FORWARD_DISTANCE,
+            SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
+            SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE,
         ))
         .build();
 

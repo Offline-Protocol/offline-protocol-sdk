@@ -31,7 +31,26 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Dependencies**: `serde`, `uuid`, `chrono`
 
-### 2. offline-protocol-transport
+### 2. offline-protocol-sealed
+
+**Purpose**: The pieces both ends of a sealed conversation must agree on, in a
+form a bare-metal leaf node can link. A phone and a leaf run different MLS
+implementations and are not allowed to disagree about anything outside them.
+
+**Key Components**:
+- `EncryptedMessage`, `GroupId`, `MlsMessageType`, `WelcomeMessage` - the sealed envelope, with the compact binary codec and the JSON floor
+- `derive_address` - the SDK's only derivation of an address from an identity key
+- `canonical_payload` - the domain-separated, length-prefixed construction every signature in the protocol is taken over, plus the control-frame payload
+- The sender-ratchet bounds and the leaf key-package policy constants
+
+**Bare metal**: compiles with `--no-default-features`, like
+`offline-protocol-core`. See [ADR 0022](adr/0022-one-sealed-layer-shared-with-the-leaf.md).
+
+**Safety**: `#![deny(unsafe_code)]` - 100% safe Rust
+
+**Dependencies**: `offline-protocol-core`, sha2
+
+### 3. offline-protocol-transport
 
 **Purpose**: Transport abstraction layer.
 
@@ -46,7 +65,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Dependencies**: `offline-protocol-core`
 
-### 3. offline-protocol-router
+### 4. offline-protocol-router
 
 **Purpose**: DORS engine and routing logic.
 
@@ -67,7 +86,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Dependencies**: `offline-protocol-core`, `offline-protocol-transport`
 
-### 4. offline-protocol-reliability
+### 5. offline-protocol-reliability
 
 **Purpose**: Reliable delivery guarantees.
 
@@ -85,20 +104,20 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Dependencies**: `offline-protocol-core`
 
-### 5. offline-protocol-mls
+### 6. offline-protocol-mls
 
 **Purpose**: End-to-end encryption for one-to-one and group messaging using MLS (RFC 9420).
 
 **Key Components**:
 - `MlsManager` - Session, group, key-package, encryption, and decryption lifecycle
 - `MlsStorage` - Storage-agnostic interface for platform **secure** storage (credential store)
-- `GroupId`, `GroupInfo`, `EncryptedMessage`, and `WelcomeMessage`
+- `GroupInfo` and `KeyPackageBundle` (the envelope types themselves live in `offline-protocol-sealed` and are re-exported here)
 
 **Safety**: `#![deny(unsafe_code)]` - 100% safe Rust
 
-**Dependencies**: `offline-protocol-core`, OpenMLS
+**Dependencies**: `offline-protocol-core`, `offline-protocol-sealed`, OpenMLS
 
-### 6. offline-protocol-services
+### 7. offline-protocol-services
 
 **Purpose**: Standalone service discovery and request/response over the mesh.
 
@@ -119,7 +138,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Dependencies**: `offline-protocol-core`
 
-### 7. offline-protocol-data
+### 8. offline-protocol-data
 
 **Purpose**: Replicated documents — offline-first state that any member of a space can edit while disconnected, merging deterministically when replicas meet again. Messaging is synced events; this crate is synced state.
 
@@ -139,7 +158,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Dependencies**: `loro` (pinned exactly; it publishes no MSRV metadata, so every bump re-runs the MSRV check and the mobile size measurement)
 
-### 8. offline-protocol
+### 9. offline-protocol
 
 **Purpose**: Main SDK API integrating all components.
 
@@ -166,7 +185,7 @@ AEAD key held in secure storage before they reach the state provider. See
 
 **Dependencies**: All other crates. `offline-protocol-data` is behind a default-on `data` feature, so a native consumer that only wants messaging can drop the CRDT engine with `default-features = false`.
 
-### 9. offline-protocol-uniffi
+### 10. offline-protocol-uniffi
 
 **Purpose:** UniFFI bindings for cross-platform interoperability.
 

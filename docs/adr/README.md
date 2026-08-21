@@ -32,6 +32,7 @@ silently undo it. Decisions that follow from the obvious default do not need one
 | [0019](0019-remote-document-imports-are-contained-not-trusted.md) | Remote document imports are contained, not trusted | Accepted |
 | [0020](0020-core-compiles-without-std.md) | Core compiles without `std`, and `std` is a default-on feature | Accepted |
 | [0021](0021-a-leaf-node-speaks-mls.md) | A leaf node speaks MLS, through a second implementation | Accepted |
+| [0022](0022-one-sealed-layer-shared-with-the-leaf.md) | One sealed layer, shared with the leaf | Accepted |
 
 ## Format
 

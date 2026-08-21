@@ -29,14 +29,16 @@ mls-rs = { version = "=0.56.0", default-features = false, features = [
 ] }
 mls-rs-crypto-rustcrypto = "=0.22.1"
 
-# Address derivation, so the credential check runs against the real `Address`
-# type. The derivation rule itself, and the sender-ratchet constants in
-# `main.rs`, are copies of what `offline-protocol-mls` declares: nothing pins
-# the two together, so a change there leaves this harness green while it stops
-# testing the SDK's configuration. Closing that seam belongs with the stage that
-# gives the leaf a home in the workspace.
-offline-protocol-core = { path = "../../crates/offline-protocol-core" }
-sha2 = "0.10"
+# The address derivation, the sender-ratchet bounds and the leaf key-package
+# policy, taken from the SDK rather than restated here. This harness exists to
+# run the phone against the SDK's configuration; a local copy of any of it
+# would leave the harness green while it quietly stopped testing that. The
+# derivation returns the real `Address` type, so the credential check runs
+# against it rather than against a string. The harness is its own cargo
+# workspace, so no type check connects the two:
+# `the_interop_harness_uses_this_crate_rather_than_its_own_copies` in
+# offline-protocol-sealed is what fails if the copies come back.
+offline-protocol-sealed = { path = "../../crates/offline-protocol-sealed" }
 
 [profile.release]
 debug = false

@@ -22,6 +22,7 @@ that are versioned, reviewable, and readable by people who are not an agent.
 | Acknowledgement, retry, session, group or transport behaviour | [docs/state-machines/](docs/state-machines/README.md) |
 | A decision that looks odd or over-engineered | [docs/adr/](docs/adr/README.md) |
 | `offline-protocol-core`: adding an import, a dependency, or a constructor | ADR [0020](docs/adr/0020-core-compiles-without-std.md) (it is dual std/no_std) |
+| `offline-protocol-sealed`: the envelope codec, `derive_address`, canonical signing payloads, ratchet constants | ADR [0022](docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md) (also dual std/no_std, and the one home for each) |
 | Replicated documents: the store, sync frames, attachments | [docs/spec/data-sync.md](docs/spec/data-sync.md), [the replication state machine](docs/state-machines/data-replication.md), ADR [0018](docs/adr/0018-data-layer-engine-and-storage-seams.md) and [0019](docs/adr/0019-remote-document-imports-are-contained-not-trusted.md) |
 | Any binding: Swift, Kotlin, Python, TypeScript | [docs/bridges/](docs/bridges/README.md) |
 
@@ -59,12 +60,15 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 # Benchmarks (Criterion)
 cargo bench --package offline-protocol-bench
 
-# Bare metal. `offline-protocol-core` is dual std/no_std and CI gates the
-# no_std half; nothing else in the workspace compiles it without `std`, so a
-# stray `use std::` in core only fails here.
+# Bare metal. `offline-protocol-core` and `offline-protocol-sealed` are dual
+# std/no_std and CI gates both no_std halves; nothing else in the workspace
+# compiles either without `std`, so a stray `use std::` in one of them only
+# fails here.
 rustup target add thumbv8m.main-none-eabihf
-cargo clippy -p offline-protocol-core --no-default-features \
-    --target thumbv8m.main-none-eabihf -- -D warnings
+for crate in offline-protocol-core offline-protocol-sealed; do
+    cargo clippy -p "$crate" --no-default-features \
+        --target thumbv8m.main-none-eabihf -- -D warnings
+done
 ./tools/embedded-footprint/measure.sh    # flash/RAM cost of the protocol layer
 ```
 
@@ -96,6 +100,9 @@ tests; see [docs/bridges/](docs/bridges/README.md#c9-bridge-behaviour-is-not-cov
 
 ```
 offline-protocol-core          Message, UserId, Address, AppId, TTL, HopCount, wire codec
+    |
+offline-protocol-sealed        EncryptedMessage + compact codec, derive_address, canonical
+                               signing payloads, ratchet constants (dual std/no_std)
     |
 offline-protocol-transport     Transport trait + BLE/WiFi Direct/Internet impls, metrics
 offline-protocol-reliability   AckManager, RetryQueue, Deduplicator, AckOptimizer
@@ -162,6 +169,17 @@ These fail silently if broken. Each is documented in full where it is linked.
   dependency), and a new `use std::` needs a `#[cfg(feature = "std")]`. The
   `embedded-core` CI job is the only thing that catches either
   ([ADR 0020](docs/adr/0020-core-compiles-without-std.md)).
+- **`offline-protocol-sealed` must keep compiling without `std` too**, under
+  the same two traps as core (local dependency declarations, no bare
+  `use std::`), gated by the same `embedded-core` CI job
+  ([ADR 0022](docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md)).
+- **Never write a second envelope codec, address derivation, canonical signing
+  payload or ratchet constant.** Each exists once, in `offline-protocol-sealed`;
+  everything else re-exports or delegates. The tempting route is a harness or
+  fixture writing three lines rather than taking the dependency, which is
+  exactly what `tools/mls-interop` did before this crate existed, and what
+  `the_interop_harness_uses_this_crate_rather_than_its_own_copies` now refuses
+  ([ADR 0022](docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md)).
 - **Never add a catch-all arm to a telemetry reason classifier that matches on
   an enum** (a classifier over an open wire string may, if the fallback returns
   a fixed token and never the input)
@@ -185,8 +203,8 @@ Conventional Commits: `<type>(<scope>): <subject>`
 
 Types: `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `chore`
 
-Scopes: `core`, `transport`, `router`, `reliability`, `services`, `protocol`,
-`uniffi`, `bindings`
+Scopes: `core`, `sealed`, `transport`, `router`, `reliability`, `services`,
+`protocol`, `uniffi`, `bindings`
 
 ## Code style (Rust)
 

@@ -1959,6 +1959,7 @@ dependencies = [
  "offline-protocol-mls",
  "offline-protocol-reliability",
  "offline-protocol-router",
+ "offline-protocol-sealed",
  "offline-protocol-services",
  "offline-protocol-transport",
  "openmls_basic_credential",
@@ -2021,6 +2022,7 @@ dependencies = [
  "ed25519-dalek 3.0.0",
  "hex",
  "offline-protocol-core",
+ "offline-protocol-sealed",
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
@@ -2054,6 +2056,18 @@ dependencies = [
  "serde",
  "thiserror 2.0.17",
  "tracing",
+]
+
+[[package]]
+name = "offline-protocol-sealed"
+version = "0.23.0"
+dependencies = [
+ "base64",
+ "offline-protocol-core",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.17",
 ]
 
 [[package]]

@@ -3,7 +3,7 @@
 use super::storage::MAX_RESTORE_KEYS_PER_CATEGORY;
 use super::{
     base64_decode, base64_encode, storage_keys, ControlGateOutcome, EncryptionCapableEntry,
-    InternalMessageResult, OfflineProtocol, CTRL_PK_META_KEY, CTRL_SIGN_DOMAIN, CTRL_SIG_META_KEY,
+    InternalMessageResult, OfflineProtocol, CTRL_PK_META_KEY, CTRL_SIG_META_KEY,
     DATA_PLANE_PREFIXES, INTERNAL_PREFIXES, MAX_CONTROL_GATE_WARNED_PEERS,
     MAX_PLAINTEXT_RECEIVE_WARNED_PEERS, RELAY_ANSWER_PREFIXES,
 };
@@ -22,33 +22,21 @@ use tracing::{debug, error, info, warn};
 const PUSH_KEY_PACKAGE_WARNING_SUPPRESS_INTERVAL: Duration = Duration::from_secs(300);
 
 impl OfflineProtocol {
-    /// Builds a canonical signing payload using length-prefixed encoding.
-    ///
-    /// Each field is encoded as `<4-byte big-endian length><utf-8 bytes>`,
-    /// making the encoding unambiguous regardless of field content (no
+    /// Builds the canonical signing payload a control frame is authenticated
+    /// over: `CTRL_SIGN_DOMAIN` followed by sender, message id, recipient and
+    /// content, each as `<4-byte big-endian length><utf-8 bytes>`, which makes
+    /// the encoding unambiguous regardless of field content (no
     /// delimiter-collision risk).
+    ///
+    /// The construction itself lives in
+    /// [`offline_protocol_sealed::control_signing_payload`], with every other
+    /// signing domain in the protocol, so a leaf node signs and verifies the
+    /// same bytes. Both the signer and the verifier here call this one
+    /// function: a verifier that rebuilds the payload from its own copy of the
+    /// field order starts accepting forgeries the moment the two drift.
     pub(crate) fn build_canonical_payload(message: &Message) -> Result<Vec<u8>> {
-        let fields: [&str; 4] = [
-            message.sender.as_str(),
-            &message.id.as_str(),
-            message.recipient.as_str(),
-            &message.content,
-        ];
-        let mut buf = Vec::with_capacity(
-            CTRL_SIGN_DOMAIN.len() + fields.iter().map(|f| 4 + f.len()).sum::<usize>(),
-        );
-        buf.extend_from_slice(CTRL_SIGN_DOMAIN);
-        for field in &fields {
-            let len: u32 = field.len().try_into().map_err(|_| {
-                Error::Other(format!(
-                    "Field too large for canonical payload length prefix: {} bytes",
-                    field.len()
-                ))
-            })?;
-            buf.extend_from_slice(&len.to_be_bytes());
-            buf.extend_from_slice(field.as_bytes());
-        }
-        Ok(buf)
+        offline_protocol_sealed::control_signing_payload(message)
+            .map_err(|e| Error::Other(e.to_string()))
     }
 
     /// Signs a control message by adding an Ed25519 signature and the sender's

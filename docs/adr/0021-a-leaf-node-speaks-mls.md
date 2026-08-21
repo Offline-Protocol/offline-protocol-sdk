@@ -200,6 +200,12 @@ The engine keeps one sealing path. Nothing in `send.rs`, the prefix registry,
 the data layer, group spaces, or the media envelope learns a new case, and the
 threat model does not fork into "peers like this" and "peers like that".
 
+The pieces the two ends share rather than implement twice (the envelope codec,
+the address derivation, the canonical signing payload, the ratchet bounds) were
+moved into one bare-metal-capable crate by
+[ADR 0022](0022-one-sealed-layer-shared-with-the-leaf.md), which is the
+plumbing this decision needs and changes nothing it decided.
+
 The device class picks up obligations the SDK has not had to state before: a
 time source at pairing, durable state before emission, and an entropy source
 that is real. They are written down here because they are invisible in a passing

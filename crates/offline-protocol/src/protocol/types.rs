@@ -308,17 +308,17 @@ pub(crate) const KNOWN_PEER_TTL_SECS: u64 = 1800;
 /// notice.
 pub(crate) use offline_protocol_router::CRITICAL_RELAY_BATTERY_LEVEL;
 
-/// Metadata key for the Ed25519 signature over the control message content (base64).
-pub(crate) const CTRL_SIG_META_KEY: &str = "__ctrl_sig";
-/// Metadata key for the sender's Ed25519 public key (base64, 32 bytes raw).
-pub(crate) const CTRL_PK_META_KEY: &str = "__ctrl_pk";
-
-/// Domain separator prepended to the canonical signing payload.
+/// The metadata keys a signed control frame carries: the Ed25519 signature
+/// over the canonical payload, and the public key it verifies against, both
+/// base64.
 ///
-/// Prevents cross-context signature reuse: a signature produced for control
-/// messages cannot be replayed in a future protocol extension that reuses the
-/// same MLS identity key but with a different domain separator.
-pub(crate) const CTRL_SIGN_DOMAIN: &[u8] = b"offline-ctrl-v1";
+/// Re-exported rather than restated because the payload they accompany is
+/// built by `offline_protocol_sealed::control_signing_payload`, which a leaf
+/// node calls too. `CTRL_SIGN_DOMAIN` lives there as well and is no longer
+/// named in this crate outside its tests: nothing here builds the payload any
+/// more. A key or a domain declared in two places is one that can differ in
+/// one of them, and the only symptom is a signature that stops verifying.
+pub(crate) use offline_protocol_sealed::{CTRL_PK_META_KEY, CTRL_SIG_META_KEY};
 
 /// Maximum number of peers retained in the encryption-capability set that gates
 /// inbound plaintext.
@@ -2111,7 +2111,7 @@ mod signing_domain_tests {
     use offline_protocol_mls::discovery::DISCOVERY_SIGN_DOMAIN;
     use offline_protocol_mls::invite::INVITE_SIGN_DOMAIN;
 
-    use super::CTRL_SIGN_DOMAIN;
+    use offline_protocol_sealed::CTRL_SIGN_DOMAIN;
 
     /// The relay's address-proof domain.
     ///

@@ -76,6 +76,7 @@ We use [Conventional Commits](https://www.conventionalcommits.org/):
 
 **Scopes**:
 - `core`: offline-protocol-core
+- `sealed`: offline-protocol-sealed (envelope codec, address derivation, signing payloads)
 - `transport`: offline-protocol-transport
 - `router`: offline-protocol-router (DORS)
 - `reliability`: offline-protocol-reliability
@@ -115,11 +116,13 @@ test(dors): add tests for transport switching
 offline-protocol-sdk/
 ├── crates/          # Rust crates (core logic)
 │   ├── offline-protocol-core/
+│   ├── offline-protocol-sealed/
 │   ├── offline-protocol-transport/
 │   ├── offline-protocol-router/
 │   ├── offline-protocol-reliability/
 │   ├── offline-protocol-mls/
 │   ├── offline-protocol-services/
+│   ├── offline-protocol-data/
 │   ├── offline-protocol/
 │   ├── offline-protocol-uniffi/
 │   └── offline-protocol-bench/

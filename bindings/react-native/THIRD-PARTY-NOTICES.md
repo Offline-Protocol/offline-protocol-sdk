@@ -27,8 +27,8 @@ upstream source on each crate's page) — the exact versions are listed below.
 |---------|--------|
 | MIT License | 243 |
 | Mozilla Public License 2.0 | 12 |
+| GNU Affero General Public License v3.0 only | 10 |
 | Apache License 2.0 | 10 |
-| GNU Affero General Public License v3.0 only | 9 |
 | BSD 3-Clause "New" or "Revised" License | 6 |
 | Boost Software License 1.0 | 1 |
 | Unicode License v3 | 1 |
@@ -45,6 +45,7 @@ Used by:
 - [offline-protocol-mls 0.23.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
 - [offline-protocol-reliability 0.23.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
 - [offline-protocol-router 0.23.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-sealed 0.23.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
 - [offline-protocol-services 0.23.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
 - [offline-protocol-transport 0.23.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
 - [offline-protocol-uniffi 0.23.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
