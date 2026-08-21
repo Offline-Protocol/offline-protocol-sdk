@@ -1,0 +1,65 @@
+[package]
+name = "offline-protocol-sealed"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+# Each publishable crate carries its own byte-identical LICENSE copy; cargo
+# packages every git-tracked file under the crate root, so it lands in the
+# .crate archive. scripts/check-license-consistency.sh asserts the copies never
+# drift.
+repository.workspace = true
+rust-version.workspace = true
+description = "Sealed-envelope codec, address derivation and canonical signing payloads for the Offline Protocol SDK"
+
+[lints]
+workspace = true
+
+[features]
+# `std` is on by default for the same reason it is in `offline-protocol-core`:
+# every existing consumer compiles unchanged. Turning it off is what a
+# Cortex-M leaf node does. Nothing in this crate needs a clock, entropy or
+# threads, so the no_std configuration loses no function at all: `std` here
+# only forwards the feature to dependencies that would otherwise pull their
+# own std shims in.
+#
+# There is deliberately no separate `alloc` feature, matching core: every type
+# here is built out of `String` and `Vec`, so `alloc` is mandatory in both
+# configurations.
+default = ["std"]
+std = [
+    "offline-protocol-core/std",
+    "serde/std",
+    "serde_json/std",
+    "base64/std",
+    "thiserror/std",
+    "sha2/std",
+]
+
+[dependencies]
+# Declared locally rather than inherited, for the reason ADR 0020 gives for
+# core's seven: a member crate CANNOT drop default features from a
+# `{ workspace = true }` dependency. Cargo accepts `default-features = false`
+# next to `workspace = true` and silently ignores it, so an inherited `serde`
+# would keep dragging `serde/std` in and the bare-metal build would fail with
+# errors pointing at the dependency instead of at the cause.
+#
+# Version requirements must stay in lockstep with `[workspace.dependencies]` in
+# the root manifest. `local_dep_versions_match_the_workspace_table` in
+# `src/lib.rs` fails the build if they drift.
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+thiserror = { version = "2.0", default-features = false }
+# The only cryptographic dependency here, and the reason this crate exists
+# rather than these types living in core: core links no crypto at all, and
+# address derivation is one SHA-256 over an identity key. See ADR 0022.
+sha2 = { version = "0.10", default-features = false }
+
+# Local for the same reason: the workspace entry carries default features, and
+# a leaf links this crate without `std`.
+offline-protocol-core = { path = "../offline-protocol-core", version = "0.23.0", default-features = false }
+
+[dev-dependencies]
+
+[lib]

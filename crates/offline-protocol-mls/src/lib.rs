@@ -32,7 +32,6 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-mod canonical;
 pub mod discovery;
 pub mod error;
 pub mod group;

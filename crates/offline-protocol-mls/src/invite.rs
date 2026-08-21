@@ -54,14 +54,14 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use offline_protocol_core::{contains_control_or_format, Address};
 
-use crate::canonical::canonical_payload;
 use crate::error::{MlsError, Result};
 use crate::manager::MlsManager;
+use offline_protocol_sealed::canonical_payload;
 
 /// Signature domain for invite payloads.
 ///
 /// Must not be a prefix of, or prefixed by, any other live signing domain. See
-/// the `canonical` module.
+/// `offline_protocol_sealed::canonical`.
 pub const INVITE_SIGN_DOMAIN: &[u8] = b"offline-invite-v1";
 
 /// The only invite format version this build produces or accepts.
@@ -243,6 +243,7 @@ pub fn invite_signing_payload(
             petname_bytes,
         ],
     )
+    .map_err(MlsError::from)
 }
 
 /// Decodes and verifies an invite blob.

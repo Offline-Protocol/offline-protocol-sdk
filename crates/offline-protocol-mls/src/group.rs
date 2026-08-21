@@ -17,25 +17,17 @@ use tracing::{debug, warn};
 pub const DEFAULT_CIPHERSUITE: Ciphersuite =
     Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
-/// How many generations behind the latest decrypted message a sender ratchet
-/// key is kept, so late/reordered messages remain decryptable.
+/// The sender-ratchet bounds every created and joined group is configured
+/// with, re-exported from the sealed layer.
 ///
-/// The OpenMLS default (5) is smaller than the windowed media transfer's
-/// in-flight budget (up to 8 chunks on internet transports, interleaved with
-/// text on the same 1:1 session ratchet), which would make a sufficiently
-/// delayed chunk *permanently* undecryptable and stall the transfer. 32 gives
-/// 4x headroom over the largest window at the cost of retaining up to 32
-/// unused message keys per sender ratchet.
-///
-/// The protocol layer keeps the combined in-flight budget within this bound
-/// by capping concurrent media transfers per peer
-/// (`MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER` in `offline-protocol`); revisit
-/// both together if either changes.
-pub const SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE: u32 = 32;
-
-/// How far ahead of the highest seen generation a sender ratchet may be
-/// fast-forwarded when messages are lost (OpenMLS default).
-pub const SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE: u32 = 1000;
+/// They live there rather than here because the peer at the other end of a
+/// session may be a leaf node running a different MLS implementation, and it
+/// has to be configured with the same two numbers. A drifted copy does not
+/// fail a build or a test: it produces a session that stops decrypting under
+/// load, on a device, later.
+pub use offline_protocol_sealed::{
+    SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE, SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
+};
 
 /// Sender ratchet configuration applied to every created and joined group.
 fn sender_ratchet_configuration() -> SenderRatchetConfiguration {

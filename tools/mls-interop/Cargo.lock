@@ -1011,12 +1011,11 @@ version = "0.0.0"
 dependencies = [
  "mls-rs",
  "mls-rs-crypto-rustcrypto",
- "offline-protocol-core",
+ "offline-protocol-sealed",
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
  "openmls_traits",
- "sha2",
 ]
 
 [[package]]
@@ -1197,6 +1196,18 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "uuid",
+]
+
+[[package]]
+name = "offline-protocol-sealed"
+version = "0.23.0"
+dependencies = [
+ "base64",
+ "offline-protocol-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]

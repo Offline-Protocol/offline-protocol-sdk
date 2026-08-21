@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/offline-protocol-core",
+    "crates/offline-protocol-sealed",
     "crates/offline-protocol-transport",
     "crates/offline-protocol-router",
     "crates/offline-protocol-reliability",
@@ -127,8 +128,9 @@ chacha20poly1305 = "0.10"
 #   "all dependencies must have a version requirement specified when packaging"
 # Keep these in lockstep with `workspace.package.version` above — a crate can
 # only be published once its dependencies exist on the registry at the named
-# version, so all eight move together.
+# version, so all nine move together.
 offline-protocol-core = { path = "crates/offline-protocol-core", version = "0.23.0" }
+offline-protocol-sealed = { path = "crates/offline-protocol-sealed", version = "0.23.0" }
 offline-protocol-transport = { path = "crates/offline-protocol-transport", version = "0.23.0" }
 offline-protocol-router = { path = "crates/offline-protocol-router", version = "0.23.0" }
 offline-protocol-reliability = { path = "crates/offline-protocol-reliability", version = "0.23.0" }

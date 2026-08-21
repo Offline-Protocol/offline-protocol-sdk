@@ -5638,6 +5638,7 @@ impl OfflineProtocol {
             let update_result = {
                 if let Ok(guard) = self.read_mls_guard() {
                     let r = offline_protocol_mls::GroupId::new(&fork.group_id)
+                        .map_err(offline_protocol_mls::MlsError::from)
                         .and_then(|gid| guard.update_keys(&gid));
                     drop(guard);
                     Some(r)

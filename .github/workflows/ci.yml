@@ -191,12 +191,12 @@ jobs:
         with:
           shared-key: ci-embedded
 
-      # The gate. `offline-protocol-core` is the one crate a constrained leaf
-      # node links, and nothing else in this file compiles it without `std`.
-      # Without this step the no_std configuration rots back to std-only the
-      # first time someone adds a `use std::` to a file that has no reason to
-      # look bare-metal-specific, and the failure surfaces on someone's
-      # hardware rather than here.
+      # The gate. `offline-protocol-core` and `offline-protocol-sealed` are the
+      # two crates a constrained leaf node links, and nothing else in this file
+      # compiles either without `std`. Without these steps the no_std
+      # configuration rots back to std-only the first time someone adds a
+      # `use std::` to a file that has no reason to look bare-metal-specific,
+      # and the failure surfaces on someone's hardware rather than here.
       - name: Build core for bare metal
         run: >
           cargo build --package offline-protocol-core
@@ -216,6 +216,26 @@ jobs:
       # the single package reproduces that isolation here instead.
       - name: Build core standalone with default features
         run: cargo build --package offline-protocol-core --locked
+
+      # The sealed layer: the envelope codec, address derivation and canonical
+      # signing payloads a leaf shares with the engine (ADR 0022). It carries
+      # the only crypto dependency in the bare-metal build, and the same two
+      # traps as core: local dependency declarations that must keep
+      # `default-features = false`, and a `std` feature that is invisible to
+      # lose inside the workspace.
+      - name: Build the sealed layer for bare metal
+        run: >
+          cargo build --package offline-protocol-sealed
+          --no-default-features --locked --target thumbv8m.main-none-eabihf
+
+      - name: Clippy the sealed layer for bare metal
+        run: >
+          cargo clippy --package offline-protocol-sealed
+          --no-default-features --locked --target thumbv8m.main-none-eabihf
+          -- -D warnings
+
+      - name: Build the sealed layer standalone with default features
+        run: cargo build --package offline-protocol-sealed --locked
 
       # `embedded-footprint` has its own workspace, so the repo's Clippy job
       # does not reach it. The leaf configurations are linted individually

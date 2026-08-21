@@ -171,6 +171,7 @@ script above).
 The SDK consists of modular Rust crates:
 
 - **offline-protocol-core** - Core types and data structures
+- **offline-protocol-sealed** - Sealed-envelope codec, address derivation and canonical signing payloads, shared with bare-metal leaf nodes
 - **offline-protocol-transport** - Multi-transport abstraction (BLE, WiFi, Internet, Reticulum, Nostr)
 - **offline-protocol-router** - DORS routing and relay management
 - **offline-protocol-reliability** - ACKs, retries, deduplication

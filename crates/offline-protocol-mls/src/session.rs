@@ -45,7 +45,7 @@ impl SessionManager {
     /// contains storage-hostile characters (the session id is a raw storage
     /// key).
     pub fn get_session_id(&self, other_user_id: &str) -> Result<GroupId> {
-        GroupId::for_session(&self.user_id, other_user_id)
+        GroupId::for_session(&self.user_id, other_user_id).map_err(MlsError::from)
     }
 
     /// Checks if a session exists with another user.

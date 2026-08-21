@@ -20,9 +20,6 @@ use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-/// Length of an Ed25519 public key, in bytes.
-const ED25519_PUBLIC_KEY_LEN: usize = 32;
-
 /// Default lifetime for key packages (30 days in seconds).
 const DEFAULT_KEY_PACKAGE_LIFETIME_SECS: u64 = 30 * 24 * 60 * 60;
 
@@ -1750,9 +1747,12 @@ impl MlsManager {
     /// key: `off1…`, the bech32m encoding of
     /// `0x01 ‖ SHA-256(public_key)[..20]`.
     ///
-    /// This is the only address derivation in the SDK. Bridges and apps reach
-    /// it through the `derive_address` FFI function rather than reimplementing
-    /// it, so that every platform agrees byte for byte.
+    /// This is the only address derivation in the SDK. It is implemented once,
+    /// in [`offline_protocol_sealed::derive_address`], where a bare-metal leaf
+    /// node can reach it as well; this method, the `derive_address` FFI
+    /// function the bridges and apps call, and the interop harness are all
+    /// delegations to that one function, so every platform agrees byte for
+    /// byte.
     ///
     /// # Arguments
     ///
@@ -1763,26 +1763,13 @@ impl MlsManager {
     /// Returns [`MlsError::InvalidPublicKey`] if `public_key` is not 32 bytes.
     /// The length is part of the format contract: hashing a differently-sized
     /// input would yield a different address for the same identity. The bytes
-    /// are deliberately *not* checked against the curve — an address is
-    /// defined over key bytes, and what proves ownership is the signature
-    /// verification that accompanies it (see [`Self::verify_signature`]), so
-    /// binding the address format to a signature library's parsing strictness
-    /// would only risk the derivation drifting between versions.
+    /// are deliberately *not* checked against the curve. An address is defined
+    /// over key bytes, and what proves ownership is the signature verification
+    /// that accompanies it (see [`Self::verify_signature`]), so binding the
+    /// address format to a signature library's parsing strictness would only
+    /// risk the derivation drifting between versions.
     pub fn derive_address(public_key: &[u8]) -> Result<Address> {
-        use sha2::{Digest, Sha256};
-
-        if public_key.len() != ED25519_PUBLIC_KEY_LEN {
-            return Err(MlsError::InvalidPublicKey(format!(
-                "Ed25519 public key must be {} bytes, got {}",
-                ED25519_PUBLIC_KEY_LEN,
-                public_key.len()
-            )));
-        }
-
-        let hash = Sha256::digest(public_key);
-        let mut truncated = [0u8; Address::HASH_LEN];
-        truncated.copy_from_slice(&hash[..Address::HASH_LEN]);
-        Ok(Address::from_hash_bytes(truncated))
+        offline_protocol_sealed::derive_address(public_key).map_err(MlsError::from)
     }
 
     /// Derives a deterministic user ID from a public key.
@@ -1795,6 +1782,12 @@ impl MlsManager {
     ///
     /// Returns the derived address in its canonical `off1…` string form.
     /// Unlike [`Self::derive_address`] this accepts any input length, which
+    /// It is also the one place that still spells the derivation out
+    /// instead of delegating to [`offline_protocol_sealed::derive_address`],
+    /// because it deliberately does not do the length check that function
+    /// starts with. `deprecated_derive_agrees_with_derive_address` pins the
+    /// two together for the inputs where both are defined; the copy goes
+    /// away with the method at the next breaking release.
     /// is precisely why it is deprecated: a caller passing a truncated or
     /// padded key gets a plausible-looking address for an identity that
     /// cannot exist.
@@ -3425,6 +3418,13 @@ mod tests {
     /// if it ever needs to change — never edit it to match new code output.
     const RFC8032_TV1_ADDRESS: &str = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn";
 
+    /// The same vector `offline-protocol-sealed` pins, asserted through this
+    /// crate's public path.
+    ///
+    /// Keeping it after the derivation moved is the point: the sealed crate's
+    /// copy proves the function is right, and this one proves the delegation
+    /// still reaches it. A delegating wrapper that started returning something
+    /// else would pass every test over there.
     #[test]
     fn derive_address_matches_the_pinned_vector() {
         let address = MlsManager::derive_address(&RFC8032_TV1_PK).expect("32-byte key derives");

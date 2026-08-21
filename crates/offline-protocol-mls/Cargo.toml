@@ -28,6 +28,10 @@ test-utils = []
 [dependencies]
 # Shared id-validation policy (storage-key safety)
 offline-protocol-core = { workspace = true }
+# The sealed layer: the envelope codec, address derivation and the canonical
+# signing-payload construction, in a crate a bare-metal leaf node can also
+# link. This crate re-exports what moved there, so callers see no change.
+offline-protocol-sealed = { workspace = true }
 
 # MLS implementation
 openmls = { workspace = true }

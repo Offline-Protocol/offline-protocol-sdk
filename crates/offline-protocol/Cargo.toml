@@ -31,6 +31,11 @@ offline-protocol-core = { workspace = true }
 offline-protocol-transport = { workspace = true }
 offline-protocol-router = { workspace = true }
 offline-protocol-reliability = { workspace = true }
+# The sealed layer: the envelope codec this crate's send and receive paths
+# encode with, and the canonical signing-payload construction the control
+# plane signs and verifies over. Shared with a leaf node rather than
+# restated here; see ADR 0022.
+offline-protocol-sealed = { workspace = true }
 offline-protocol-mls = { workspace = true }
 offline-protocol-services = { workspace = true }
 # Optional: the replicated-document layer. Default on, because the mobile

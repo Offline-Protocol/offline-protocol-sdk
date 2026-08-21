@@ -16,6 +16,9 @@ use crate::telemetry::{
 use crate::test_identity::{id, session_slot};
 use chrono::Duration as ChronoDuration;
 use offline_protocol_core::{AppId, ContentType, MessagePriority, ServiceDescriptor, UserId};
+// The engine no longer names this domain outside its tests: the payload it
+// prefixes is built in the sealed crate, which is where the tests read it from.
+use offline_protocol_sealed::CTRL_SIGN_DOMAIN;
 use offline_protocol_transport::{
     mock::MockTransport, nostr::NostrTransport, nostr_crypto::routing_tag_for_address, Transport,
     TransportMetrics, TransportStatus, TransportType,

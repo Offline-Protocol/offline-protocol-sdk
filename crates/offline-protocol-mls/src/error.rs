@@ -424,6 +424,34 @@ pub enum MlsError {
     },
 }
 
+/// Carries a sealed-layer failure into this crate's error type.
+///
+/// Each arm maps to the variant the moved code used to raise, and passes the
+/// inner string through rather than the rendered `Display`, so the text a
+/// caller sees is byte-identical to what it was before the move. Two test
+/// suites assert on substrings of it.
+///
+/// [`SealedError`](offline_protocol_sealed::SealedError) is deliberately not
+/// `#[non_exhaustive]`, so this match is
+/// exhaustive and a new variant over there is a compile error here until
+/// someone decides what it means. A wildcard arm would render it as some
+/// other error's text instead.
+impl From<offline_protocol_sealed::SealedError> for MlsError {
+    fn from(err: offline_protocol_sealed::SealedError) -> Self {
+        use offline_protocol_sealed::SealedError;
+        match err {
+            SealedError::Serialization(msg) => Self::Serialization(msg),
+            SealedError::Deserialization(msg) => Self::Deserialization(msg),
+            SealedError::InvalidGroupId(msg) => Self::InvalidGroupId(msg),
+            SealedError::InvalidPublicKey(msg) => Self::InvalidPublicKey(msg),
+            // No `Serialization` sibling to pass through: this one renders its
+            // own message, and `Serialization`'s prefix is what the MLS-crate
+            // caller printed before the construction moved.
+            SealedError::FieldTooLarge(_) => Self::Serialization(err.to_string()),
+        }
+    }
+}
+
 impl MlsError {
     /// A fixed, identifier-free classification of this error, safe to place in
     /// a field that reaches a [`TelemetrySink`][sink].

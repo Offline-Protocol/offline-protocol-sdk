@@ -52,14 +52,14 @@
 use offline_protocol_core::{Address, Username};
 use serde::{Deserialize, Serialize};
 
-use crate::canonical::canonical_payload;
 use crate::error::{MlsError, Result};
 use crate::manager::MlsManager;
+use offline_protocol_sealed::canonical_payload;
 
 /// Signature domain for discovery records.
 ///
 /// Must not be a prefix of, or prefixed by, any other live signing domain. See
-/// the `canonical` module.
+/// `offline_protocol_sealed::canonical`.
 pub const DISCOVERY_SIGN_DOMAIN: &[u8] = b"offline-disc-v1";
 
 /// The only discovery record version this build produces or accepts.
@@ -193,6 +193,7 @@ impl DiscoveryRecordV1 {
                 &issued_at_ms.to_be_bytes(),
             ],
         )
+        .map_err(MlsError::from)
     }
 
     /// Builds an unsigned record, ready for [`Self::sign_with`].

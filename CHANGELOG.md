@@ -50,6 +50,33 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   not the engine, which is `std` and `tokio` bound and does not build for this
   target at all.
 
+- **`offline-protocol-sealed`, a new crate holding what both ends of a sealed
+  conversation must agree on.** A phone and a leaf node run different MLS
+  implementations ([ADR 0021](./docs/adr/0021-a-leaf-node-speaks-mls.md)) and
+  are not allowed to disagree about anything outside them: the
+  `EncryptedMessage` envelope and its compact codec, `derive_address`, the
+  domain-separated canonical signing payload every signature is taken over, and
+  the sender-ratchet bounds a session is configured with. All four were in
+  crates that need `std`. They now live in one crate that builds for bare metal,
+  and everything else re-exports or delegates to it, so there is exactly one
+  implementation of each in the workspace.
+
+  `tools/mls-interop` previously carried its own copies of the derivation rule
+  and the ratchet constants, with nothing pinning them to the SDK's. It now
+  imports them, and a guard test reads the harness source and fails if the
+  copies come back. See
+  [ADR 0022](./docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md).
+
+### Changed
+
+- **The envelope codec and `GroupId::new` now return `SealedError`** rather
+  than `MlsError`, having moved into `offline-protocol-sealed`. Nothing else
+  changes: `From<SealedError>` exists for both `MlsError` and the engine's
+  `Error` and passes the inner message through, so every rendered error string,
+  every FFI error code and every wire byte is what it was. This is visible only
+  to Rust code that matches on the error type of `EncryptedMessage::from_bytes`,
+  `EncryptedMessage::from_base64` or `GroupId::new` directly.
+
 ## [0.23.0] — 2026-08-20
 
 > **The protocol carries state now, not only messages.** A new data layer adds
