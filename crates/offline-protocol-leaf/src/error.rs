@@ -64,6 +64,23 @@ pub enum LeafError {
     #[error("No session with {0}")]
     NoSession(String),
 
+    /// A Welcome asked this device to join on a key package it did not mint
+    /// for the peer that sent it.
+    ///
+    /// A key package is a **bearer token**. It rides in a frame that is signed
+    /// but not encrypted, so anyone in radio range copies one off the air, and
+    /// every other gate on a Welcome then passes for them honestly: they do
+    /// hold the key their own address derives from, and they did build the
+    /// group this pair's id names. Only this refusal separates the peer the
+    /// package was minted for from whoever else heard it.
+    ///
+    /// Its own variant rather than an identity binding, because the two send
+    /// firmware to different places. An identity binding failure says a peer
+    /// is not who it claims; this says the peer is exactly who it claims and
+    /// is spending something that was never given to it.
+    #[error("Unsolicited welcome: {0}")]
+    UnsolicitedWelcome(String),
+
     /// The device already holds as many peers as it keeps room for, and none
     /// of them is an incomplete pairing that could be recycled.
     ///

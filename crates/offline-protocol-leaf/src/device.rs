@@ -234,8 +234,12 @@ impl LeafDevice {
         session_reset: bool,
     ) -> Result<Message> {
         let client = self.client()?;
-        let data = keypkg::mint(&client, now_unix_secs)?;
-        let payload = keypkg::payload(&self.identity.address.to_string(), data, session_reset);
+        let minted = keypkg::mint(&client, now_unix_secs)?;
+        let payload = keypkg::payload(
+            &self.identity.address.to_string(),
+            minted.data,
+            session_reset,
+        );
         let body = serde_json::to_string(&payload)
             .map_err(|e| LeafError::MalformedFrame(format!("cannot encode key package: {e}")))?;
 
@@ -253,8 +257,16 @@ impl LeafDevice {
         // Recorded before the frame is handed back, so a device that emits one
         // and loses power does not emit a second on the next boot and leave
         // the peer holding two init keys of which only one is ever spent.
+        //
+        // The reference is recorded here for a second reason: it is the only
+        // thing that later distinguishes this peer's Welcome from one built by
+        // whoever else heard this frame. Minting has already written the
+        // package itself, so a cut between the two leaves a package no Welcome
+        // can name, which the adapter evicts in its turn. The opposite order
+        // would leave a name pointing at nothing.
         let mut record = self.peer_record(peer)?;
         record.key_package_sent = true;
+        record.key_package_ref = Some(minted.reference);
         record
             .save(&self.store, peer)
             .map_err(|e| LeafError::Storage(e.to_string()))?;
@@ -515,6 +527,21 @@ impl LeafDevice {
         let welcome_message = MlsMessage::from_bytes(&welcome.welcome_data)
             .map_err(|e| LeafError::Mls(format!("welcome does not decode: {e:?}")))?;
 
+        // And the Welcome must spend the key package this device minted **for
+        // this peer**. The two checks above are about the peer and the group;
+        // this one is about the material, and nothing else in the exchange
+        // covers it, because a key package rides in a frame that is signed but
+        // not encrypted and is therefore spendable by whoever copied it off the
+        // air.
+        //
+        // Checked before the join, which is the whole point: joining spends the
+        // init key, and the failure being prevented is not a stranger reading
+        // anything (the group and credential gates hold either way) but this
+        // device's package being **burned by somebody it was not meant for**,
+        // which leaves the intended peer holding a Welcome that can no longer
+        // be joined and a pairing that only a driven reset recovers.
+        self.require_own_key_package(sender, &welcome_message)?;
+
         // `tree_data: None` because the peer puts the ratchet tree in the
         // Welcome. A device that needed it out of band would need a side
         // channel it does not have.
@@ -543,12 +570,17 @@ impl LeafDevice {
             .map_err(|e| LeafError::Storage(format!("cannot persist group state: {e:?}")))?;
 
         // A session exists from here, so the peer has to be in the index
-        // whatever route it took to get one. Ordinarily it is already there,
-        // put there by the exchange that handed out the key package this
-        // Welcome spent; what this covers is that entry having been recycled
-        // in between, which is a slot a peer with no session is eligible to
-        // lose. A session firmware cannot see in [`LeafDevice::peers`] is one
-        // it cannot audit and cannot [`LeafDevice::unpair`].
+        // whatever route it took to get one: a session firmware cannot see in
+        // [`LeafDevice::peers`] is one it can neither audit nor
+        // [`LeafDevice::unpair`].
+        //
+        // Ordinarily it is already there, put there by the same mint that
+        // recorded the reference this Welcome just spent, and an eviction
+        // since then would have taken that reference with it and been refused
+        // above. What is left is the one order that separates them: the mint
+        // saves the peer record and indexes second, so an index write that
+        // failed leaves a peer holding a live reference and no slot. That peer
+        // arrives here.
         self.index_peer(sender)?;
 
         // The confirmation is a group-aware decrypt, sealed inside an ordinary
@@ -814,8 +846,16 @@ impl LeafDevice {
     ///
     /// The bound exists to stop a stranger spending a device's flash, and
     /// neither caller here is a stranger: one is firmware choosing to pair,
-    /// the other is a Welcome, which only lands on a key package this device
-    /// minted for that peer in the first place.
+    /// the other is a Welcome, and a Welcome is only reached by a peer whose
+    /// recorded key package reference it spends. That reference is written
+    /// only by a mint, and a mint is reached only through firmware or through
+    /// [`LeafDevice::admit_peer`], which is where the bound is applied. So
+    /// every peer arriving here has already been counted or chosen.
+    ///
+    /// That is a claim about [`LeafDevice::require_own_key_package`] and would
+    /// be false without it: a key package travels unencrypted, so before that
+    /// gate any listener could copy one, build this pair's group around it and
+    /// arrive here having been counted by nothing.
     ///
     /// It is the index rather than the bound that has to be complete. A peer
     /// missing from it holds a session nothing can audit and
@@ -862,6 +902,42 @@ impl LeafDevice {
 
         index.push(peer.to_string());
         self.save_peer_index(&index)
+    }
+
+    /// Requires a Welcome to spend the key package minted for its sender.
+    ///
+    /// A key package is a bearer token: this device hands one to a peer in a
+    /// frame addressed to that peer, and a shared radio carries it to everyone
+    /// else as well. A listener that copies it can build a group whose id is
+    /// the one this pair would build, sign the Welcome with its own key, and
+    /// name itself as inviter, so the inviter check and the group check both
+    /// pass honestly. What it cannot do is present the reference of a package
+    /// this device minted for **it**.
+    ///
+    /// A peer with no recorded reference is refused for the same reason an
+    /// unparseable identifier is elsewhere in this crate: there is nothing to
+    /// compare, and "nothing to compare" is the bypass rather than a lenience.
+    /// It also restores the bound: every peer reaching a session has been
+    /// through [`LeafDevice::admit_peer`] or was chosen by firmware, which is
+    /// what lets [`LeafDevice::index_peer`] skip [`MAX_PEERS`].
+    fn require_own_key_package(&self, peer: &str, welcome: &MlsMessage) -> Result<()> {
+        let Some(minted) = self.peer_record(peer)?.key_package_ref else {
+            return Err(LeafError::UnsolicitedWelcome(format!(
+                "no key package was ever minted for '{peer}', so nothing it sends can spend one"
+            )));
+        };
+
+        let spends_ours = welcome
+            .welcome_key_package_references()
+            .into_iter()
+            .any(|reference| crate::adapters::hex(reference) == minted);
+
+        if !spends_ours {
+            return Err(LeafError::UnsolicitedWelcome(format!(
+                "welcome from '{peer}' spends a key package this device did not mint for it"
+            )));
+        }
+        Ok(())
     }
 
     /// Requires the MLS member at `index` to derive to `claimed`.

@@ -194,6 +194,30 @@ what a shared radio does, and firmware that carries frames for its neighbours
 needs "not mine" to be a fact it can act on rather than a failure it has to
 interpret.
 
+A leaf MUST join only on a Welcome that spends **the key package it minted for
+the peer that sent it**, and MUST establish that before joining, because
+joining spends the init key.
+
+A key package is a bearer token. It travels in a frame that is signed and
+addressed but not encrypted, so a shared radio hands a copy to everyone in
+range, and a copy is exactly as spendable as the original. Every other gate on
+the Welcome that a listener builds around a copied package passes honestly:
+the listener does hold the key its own address derives from, it does name
+itself as inviter, and the group it built really is the one this pair's id
+names. A leaf that cannot tell the two apart therefore has no gate at all here,
+only checks that a copier satisfies for free.
+
+What the check saves is not confidentiality, since the joined group is one this
+device holds keys for either way. It is the **init key**, which is single use:
+spent by a listener, it leaves the peer it was minted for holding a Welcome
+that can no longer be joined, and a pairing that only a driven reset recovers.
+Refusing before the join leaves that package unspent. Refusing after would not.
+
+Recording which package went to which peer is what makes the difference
+checkable, and it is why a leaf MUST NOT treat "this peer was once given a
+package" as the test: a listener that has also paired holds a package of its
+own, and a Welcome spending somebody else's is the case that costs the most.
+
 A leaf MUST answer a probe only while it holds a session with that peer **that
 it can still load**, which is the rule a phone already applies to the same
 frame. The acknowledgement is not a liveness signal: a peer confirms its

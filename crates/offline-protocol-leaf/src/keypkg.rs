@@ -23,7 +23,11 @@
 //! Key package validity is a **freshness bound, not an authentication
 //! mechanism**. A wrong clock costs availability rather than confidentiality.
 
-use alloc::{format, string::ToString, vec::Vec};
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 use mls_rs::client_builder::MlsConfig;
 use mls_rs::time::MlsTime;
 use mls_rs::Client;
@@ -36,30 +40,56 @@ use offline_protocol_sealed::{
 
 use crate::error::{LeafError, Result};
 
-/// Mints a key package and returns its **bare** encoding.
+/// A freshly minted key package, and the name storage keys it by.
+pub(crate) struct Minted {
+    /// The bare key package, as it goes on the wire.
+    pub(crate) data: Vec<u8>,
+    /// The package's reference, hex, which is both the key
+    /// [`KeyPackageStorage`](mls_rs_core::key_package::KeyPackageStorage)
+    /// files it under and the name a Welcome spends it by.
+    pub(crate) reference: String,
+}
+
+/// Mints a key package and returns its **bare** encoding and its reference.
 ///
 /// mls-rs's convenience API returns a key package wrapped in an MLS message,
 /// and this protocol puts the bare key package on the wire. Both forms are
 /// legal MLS and only one of them is what the peer's parser accepts, so the
 /// wrapper is removed here rather than left for a caller to notice.
-pub(crate) fn mint(client: &Client<impl MlsConfig>, now_unix_secs: u64) -> Result<Vec<u8>> {
+///
+/// The reference comes back with it because a package is a **bearer token**,
+/// and the only defence against one being spent by whoever copied it off the
+/// air is knowing which peer this one went to. See
+/// [`PeerRecord::key_package_ref`](crate::adapters::PeerRecord::key_package_ref).
+/// It is read from the wrapper before that wrapper is consumed, so it is the
+/// reference of exactly the bytes returned beside it rather than a second
+/// derivation that could disagree.
+pub(crate) fn mint(client: &Client<impl MlsConfig>, now_unix_secs: u64) -> Result<Minted> {
     let not_before = now_unix_secs.saturating_sub(LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS);
 
-    client
+    let message = client
         .generate_key_package_message(
             Default::default(),
             Default::default(),
             Some(MlsTime::from(not_before)),
         )
-        .map_err(|e| LeafError::Mls(format!("cannot generate a key package: {e:?}")))?
+        .map_err(|e| LeafError::Mls(format!("cannot generate a key package: {e:?}")))?;
+
+    let reference = message
+        .key_package_reference(&crate::identity::suite_provider()?)
+        .map_err(|e| LeafError::Mls(format!("cannot reference the key package: {e:?}")))?
+        .ok_or_else(|| LeafError::Mls(String::from("generated message is not a key package")))?;
+
+    let data = message
         .into_key_package()
-        .ok_or_else(|| {
-            LeafError::Mls(alloc::string::String::from(
-                "generated message is not a key package",
-            ))
-        })?
+        .ok_or_else(|| LeafError::Mls(String::from("generated message is not a key package")))?
         .mls_encode_to_vec()
-        .map_err(|e| LeafError::Mls(format!("cannot encode the key package: {e:?}")))
+        .map_err(|e| LeafError::Mls(format!("cannot encode the key package: {e:?}")))?;
+
+    Ok(Minted {
+        data,
+        reference: crate::adapters::hex(&reference),
+    })
 }
 
 /// Builds the advertisement body that carries the key package.

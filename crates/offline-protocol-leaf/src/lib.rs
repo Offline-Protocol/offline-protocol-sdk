@@ -22,9 +22,11 @@
 //! takes an inbound [`Message`](offline_protocol_core::Message) and hands back
 //! the frames to send and what happened. The choreography it implements is
 //! security-critical and easy to get subtly wrong: the derive-and-compare gate
-//! at every site that accepts an identity claim, the confirmation that has to
-//! be a group-aware decrypt, and the reset sequence that a driven rekey
-//! arrives as.
+//! at every site that accepts an identity claim, the binding of a Welcome to
+//! the key package this device minted for the peer that sent it (a package
+//! travels unencrypted, so whoever copies one off the air satisfies every
+//! other gate honestly), the confirmation that has to be a group-aware
+//! decrypt, and the reset sequence that a driven rekey arrives as.
 //!
 //! ```
 //! use offline_protocol_leaf::{LeafDevice, LeafStore, MemoryStore};

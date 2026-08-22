@@ -155,9 +155,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   whose key **derives to the address the frame claims**, and an identifier that
   is not an address is the same refusal rather than a skip, because a claim
   with no derivation to check is the bypass. A Welcome must name the peer that
-  signed it, name the group this pair would build, and then actually join that
-  group rather than the one its body claimed. A sealed frame's MLS sender must
-  be the peer the frame came from. A confirmation probe is answered only by a
+  signed it, name the group this pair would build, spend **the key package this
+  device minted for that peer**, and then actually join the group its body
+  claimed. That third one is what separates a peer from anyone who overheard
+  it: a key package rides in a frame that is signed but not encrypted, so a
+  copy taken off the air is as spendable as the original and satisfies every
+  other gate honestly. Checked before the join, because joining spends the init
+  key, and a package burned by a listener leaves the peer it was minted for
+  holding a Welcome that no longer opens. A sealed frame's MLS sender must be
+  the peer the frame came from. A confirmation probe is answered only by a
   device that still holds a session, because a peer confirms on that answer and
   flushes into it, and an inbound acknowledgement is never acted on at all,
   because a leaf emits those and never probes, so every one that arrives is

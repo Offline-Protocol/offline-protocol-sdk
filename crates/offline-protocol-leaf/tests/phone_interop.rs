@@ -114,6 +114,16 @@ fn import_device_key_package(phone: &Phone, frame: &Message) {
         .expect("the phone accepts the device's key package");
 }
 
+/// The bare key package out of a device's advertisement frame.
+fn raw_key_package(frame: &Message) -> Vec<u8> {
+    let body = frame
+        .content
+        .strip_prefix(prefixes::KEY_PACKAGE)
+        .expect("frame carries a key package");
+    let payload: KeyPackagePayload = serde_json::from_str(body).expect("key package body parses");
+    payload.key_package_data
+}
+
 /// Pairs a phone and a device, returning the device's address.
 ///
 /// This is the whole choreography in one place: the device advertises, the
@@ -1337,25 +1347,33 @@ fn a_flood_of_strangers_cannot_displace_an_established_peer() {
 #[test]
 fn a_welcome_whose_body_lies_about_its_group_is_refused() {
     let phone = new_phone();
-    let stranger = new_phone();
     let mut device = device(Arc::new(MemoryStore::new()));
     let device_address = device.address().to_string();
 
-    // The stranger builds a real group with this device, using a package the
-    // device minted for it.
+    // The phone builds a group that is not this pair's, and does it with the
+    // package the device minted for the phone, so the reference check passes
+    // on material that really was handed to this peer. That is what keeps this
+    // test pointed at the gate it names rather than at an earlier one.
     let advertisement = device
-        .key_package_frame(&stranger.address, NOW)
+        .key_package_frame(&phone.address, NOW)
         .expect("device advertises");
-    import_device_key_package(&stranger, &advertisement);
-    let foreign = stranger
+    let decoy = phone
         .manager
-        .create_session(&device_address)
-        .expect("stranger creates a session");
+        .create_group("decoy")
+        .expect("phone creates a group that is not this pair's");
+    let (foreign, _commit) = phone
+        .manager
+        .add_group_member(
+            &decoy.group_id,
+            &device_address,
+            &raw_key_package(&advertisement),
+        )
+        .expect("phone adds the device to the decoy group");
 
-    // The phone relays that Welcome under an honest-looking body: it names
-    // itself as the inviter and this pair's own group id, so both of the
-    // checks that read the body pass. Only the Welcome inside disagrees, and
-    // it is the one that decides which group is actually joined.
+    // The body then lies: it names the phone as inviter and this pair's own
+    // group id, so both of the checks that read the body pass. Only the
+    // Welcome inside disagrees, and it is the one that decides which group is
+    // actually joined.
     let forged = WelcomeMessage {
         group_id: GroupId::for_session(&phone.address, &device_address).expect("pair group id"),
         welcome_data: foreign.welcome_data.clone(),
@@ -1957,5 +1975,171 @@ fn a_failed_eviction_leaves_no_key_package_the_index_has_forgotten() {
         orphaned.is_empty(),
         "a failed eviction left key package private material no index names: \
          {orphaned:?} (error was {err:?})"
+    );
+}
+
+/// A key package is a bearer token, and a shared radio delivers it to everyone.
+///
+/// The frame carrying it is signed and addressed, and neither of those keeps a
+/// copy out of a listener's hands. Every other gate on the Welcome that
+/// listener builds passes honestly: it holds the key its own address derives
+/// from, and the group it built really is the one its pair with this device
+/// would build. Only the reference of the package it spends gives it away.
+#[test]
+fn an_overheard_key_package_cannot_be_spent_by_the_node_that_overheard_it() {
+    let phone = new_phone();
+    let eavesdropper = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = device.address().to_string();
+
+    let advertisement = device
+        .key_package_frame(&phone.address, NOW)
+        .expect("device advertises to the phone");
+
+    // Copied off the air and spent under the eavesdropper's own name.
+    import_device_key_package(&eavesdropper, &advertisement);
+    let hijack = eavesdropper
+        .manager
+        .create_session(&device_address)
+        .expect("the eavesdropper builds a group on the copied package");
+    let frame = phone_control_frame(
+        &eavesdropper,
+        &device_address,
+        format!(
+            "{}{}",
+            prefixes::WELCOME,
+            serde_json::to_string(&hijack).expect("welcome")
+        ),
+    );
+
+    let err = device
+        .handle(&frame, NOW)
+        .expect_err("an overheard key package was spent by whoever copied it");
+    assert!(
+        matches!(err, LeafError::UnsolicitedWelcome(_)),
+        "spending an overheard key package produced {err:?}"
+    );
+    assert!(
+        !device
+            .has_session(&eavesdropper.address)
+            .expect("session check"),
+        "the refused welcome still left a session on flash"
+    );
+    // The bound is applied on the way in, and a Welcome skips it. That is only
+    // safe while a Welcome cannot be reached without a package of one's own.
+    assert!(
+        !device
+            .peers()
+            .expect("peer list")
+            .contains(&eavesdropper.address),
+        "a refused welcome still spent a slot in the peer table"
+    );
+
+    // The whole point of refusing before the join: the init key was never
+    // spent, so the peer it was minted for can still use that very package. A
+    // device that noticed after joining would have burned it, and the pairing
+    // it was for would need a driven reset to recover.
+    import_device_key_package(&phone, &advertisement);
+    let welcome = phone
+        .manager
+        .create_session(&device_address)
+        .expect("phone creates the session on the package it was given");
+    let welcome_frame = phone_control_frame(
+        &phone,
+        &device_address,
+        format!(
+            "{}{}",
+            prefixes::WELCOME,
+            serde_json::to_string(&welcome).expect("welcome serializes")
+        ),
+    );
+    let handled = device
+        .handle(&welcome_frame, NOW)
+        .expect("the intended peer can still join");
+    assert!(
+        handled.events.contains(&LeafEvent::SessionEstablished {
+            peer: phone.address.clone(),
+        }),
+        "the overheard attempt burned the package it was refused for: {:?}",
+        handled.events
+    );
+}
+
+/// Having a package of one's own is not permission to spend somebody else's.
+///
+/// This is the case a "has this peer ever been given a package" flag would
+/// wave through, and it is the one that costs the most: the neighbour is a
+/// peer this device really did mint for, and the package it spends is the one
+/// the phone is waiting to use.
+#[test]
+fn a_welcome_cannot_spend_a_key_package_minted_for_a_different_peer() {
+    let phone = new_phone();
+    let neighbour = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = device.address().to_string();
+
+    let for_phone = device
+        .key_package_frame(&phone.address, NOW)
+        .expect("device advertises to the phone");
+    // The neighbour is paired with too, so it holds a record and a package of
+    // its own on this device.
+    device
+        .key_package_frame(&neighbour.address, NOW)
+        .expect("device advertises to the neighbour");
+
+    // But it builds its Welcome on the phone's package rather than its own.
+    import_device_key_package(&neighbour, &for_phone);
+    let hijack = neighbour
+        .manager
+        .create_session(&device_address)
+        .expect("the neighbour builds a group on the phone's package");
+    let frame = phone_control_frame(
+        &neighbour,
+        &device_address,
+        format!(
+            "{}{}",
+            prefixes::WELCOME,
+            serde_json::to_string(&hijack).expect("welcome")
+        ),
+    );
+
+    let err = device
+        .handle(&frame, NOW)
+        .expect_err("a peer spent a package minted for somebody else");
+    assert!(
+        matches!(err, LeafError::UnsolicitedWelcome(_)),
+        "spending another peer's key package produced {err:?}"
+    );
+    assert!(
+        !device
+            .has_session(&neighbour.address)
+            .expect("session check"),
+        "the refused welcome still left a session on flash"
+    );
+
+    // And the phone's package survived it.
+    import_device_key_package(&phone, &for_phone);
+    let welcome = phone
+        .manager
+        .create_session(&device_address)
+        .expect("phone creates the session");
+    let welcome_frame = phone_control_frame(
+        &phone,
+        &device_address,
+        format!(
+            "{}{}",
+            prefixes::WELCOME,
+            serde_json::to_string(&welcome).expect("welcome serializes")
+        ),
+    );
+    let handled = device
+        .handle(&welcome_frame, NOW)
+        .expect("the intended peer can still join");
+    assert!(
+        handled.events.contains(&LeafEvent::SessionEstablished {
+            peer: phone.address.clone(),
+        }),
+        "the neighbour's attempt burned the phone's package: {:?}",
+        handled.events
     );
 }

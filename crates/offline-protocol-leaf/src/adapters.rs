@@ -458,6 +458,25 @@ pub(crate) struct PeerRecord {
     #[serde(default)]
     pub(crate) key_package_sent: bool,
 
+    /// The reference of the key package this device last minted for this peer.
+    ///
+    /// A key package is a **bearer token**: it travels in a frame that is
+    /// signed but not encrypted, so a copy taken off the air is as spendable
+    /// as the original, and a Welcome built around one passes every other gate
+    /// honestly. Recording which package went to which peer is what makes the
+    /// difference checkable, and
+    /// [`LeafDevice::handle`](crate::LeafDevice::handle) checks it before the
+    /// join rather than after, so a refused Welcome leaves the package
+    /// **unspent** and the peer it was minted for can still use it.
+    ///
+    /// One reference rather than a history: this device mints one package per
+    /// peer and re-mints only on a reset, so the newest is the one a peer was
+    /// told to use. A peer holding an older package that a re-mint replaced is
+    /// refused and re-pairs, which is the same path every other stale-pairing
+    /// failure takes.
+    #[serde(default)]
+    pub(crate) key_package_ref: Option<String>,
+
     /// Ids of the reset-flagged key package frames already acted on.
     ///
     /// A reset tears down a live session, so a frame carrying one is worth
