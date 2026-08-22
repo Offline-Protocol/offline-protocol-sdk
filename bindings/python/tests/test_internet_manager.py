@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from offline_protocol_sdk import address_declaration as policy
 from offline_protocol_sdk.internet_manager import InternetManager
 from offline_protocol_sdk.transport_manager import TransportError, TransportState
 
@@ -600,3 +602,277 @@ class TestInternetManagerSendMessageTOCTOU:
         call_args = mock_protocol.internet_send_failed_with_reason.call_args
         assert call_args.kwargs["message_id"] == "msg-1"
         assert "Disconnected" in call_args.kwargs["reason"]
+
+
+class TestAddressDeclaration:
+    """The relay address handshake, as wired into the manager.
+
+    The signed bytes themselves are pinned in ``test_address_declaration.py``
+    against the relay's own hex vector. What is pinned here is the wiring the
+    pure policy cannot see: the order the call sites run in, which name gets
+    signed, which address is declared, and where the relay's answers land.
+    """
+
+    CHALLENGE = bytes(range(32))
+    CHALLENGE_B64 = base64.b64encode(CHALLENGE).decode("ascii")
+    ADDRESS = "off1q9eqy0ww55qxm8ve0jv8gxpxknay7fkj9veg0swe"
+
+    @pytest.fixture
+    def declaring_protocol(self, mock_protocol: MagicMock) -> MagicMock:
+        mock_protocol.local_address = MagicMock(return_value=self.ADDRESS)
+        mock_protocol.get_identity_public_key = MagicMock(
+            return_value=list(bytes(range(32)))
+        )
+        mock_protocol.sign_data = MagicMock(return_value=list(bytes(range(64))))
+        mock_protocol.internet_relay_capabilities = MagicMock()
+        mock_protocol.internet_address_declared = MagicMock()
+        mock_protocol.internet_address_declaration_refused = MagicMock()
+        return mock_protocol
+
+    @staticmethod
+    def _manager(proto: MagicMock) -> tuple[InternetManager, AsyncMock]:
+        mgr = InternetManager(proto, "dev-1", server_url="ws://x.com")
+        ws = AsyncMock()
+        mgr._ws = ws
+        return mgr, ws
+
+    @staticmethod
+    async def _settle(mgr: InternetManager) -> None:
+        """Drain dispatch tasks and stop the loops authentication starts."""
+        pending = list(mgr._process_tasks)
+        if pending:
+            await asyncio.gather(*pending)
+        loops = [t for t in (mgr._poll_task, mgr._ping_task) if t is not None]
+        for task in loops:
+            task.cancel()
+        if loops:
+            await asyncio.gather(*loops, return_exceptions=True)
+
+    def _authenticated(self, **overrides: object) -> bytes:
+        frame: dict[str, object] = {
+            "type": "Authenticated",
+            "user_id": "u-1",
+            "username": "alice",
+            "capabilities": ["group_delivery_v3", "address_routing_v1"],
+            "address_challenge": self.CHALLENGE_B64,
+        }
+        frame.update(overrides)
+        return json.dumps(frame).encode()
+
+    @pytest.mark.asyncio
+    async def test_declares_address_before_flipping_status(
+        self, declaring_protocol: MagicMock
+    ) -> None:
+        """The relay attributes each inbound frame by whatever this connection
+        has proved when it reads that frame, and never re-stamps retroactively.
+        `internet_status_changed(True)` triggers the outbox flush, so anything
+        it sends before the declaration lands is attributed by account name for
+        good, and its address-stamped `Message.sender` then fails the
+        receiver's `validate_transport_sender` at hop 0. Capabilities must
+        likewise precede the flip, which reads the group broadcast gate.
+        """
+        mgr, ws = self._manager(declaring_protocol)
+        order: list[str] = []
+        ws.send.side_effect = lambda frame: order.append("declare")
+        declaring_protocol.internet_relay_capabilities.side_effect = (
+            lambda **_: order.append("capabilities")
+        )
+        declaring_protocol.internet_status_changed.side_effect = (
+            lambda **_: order.append("status")
+        )
+
+        await mgr._handle_authenticated(
+            "u-1", "alice", ["address_routing_v1"], self.CHALLENGE_B64, ws
+        )
+        await self._settle(mgr)
+
+        assert order == ["declare", "capabilities", "status"]
+
+    @pytest.mark.asyncio
+    async def test_declaration_frame_matches_the_relay_contract(
+        self, declaring_protocol: MagicMock
+    ) -> None:
+        mgr, ws = self._manager(declaring_protocol)
+
+        mgr._process_received(self._authenticated())
+        await self._settle(mgr)
+
+        frame = json.loads(ws.send.call_args.args[0])
+        assert frame["type"] == "DeclareAddress"
+        assert frame["address"] == self.ADDRESS
+        # The bytes signed are the policy's, over the relay's account name.
+        signed = bytes(declaring_protocol.sign_data.call_args.args[0])
+        assert signed == policy.proof_payload("alice", self.CHALLENGE)
+
+    @pytest.mark.asyncio
+    async def test_declares_local_address_not_a_re_derived_one(
+        self, declaring_protocol: MagicMock
+    ) -> None:
+        """The core's lockstep check compares the relay's `AddressDeclared`
+        echo against `local_address()`. Declaring anything else would make this
+        node report RELAY_ADDRESS_BINDING_MISMATCH against its own proof."""
+        declaring_protocol.local_address.return_value = "off1sentinel"
+        mgr, ws = self._manager(declaring_protocol)
+
+        mgr._process_received(self._authenticated())
+        await self._settle(mgr)
+
+        assert json.loads(ws.send.call_args.args[0])["address"] == "off1sentinel"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("omit_key", [True, False])
+    async def test_never_signs_the_device_id_when_the_relay_sends_no_username(
+        self, declaring_protocol: MagicMock, omit_key: bool
+    ) -> None:
+        """`username` is optional on the relay's `Authenticated`. The relay
+        verifies the proof against the name *it* resolved, so signing the local
+        device id produces a signature that cannot verify and is
+        indistinguishable, in the relay's logs, from an attack.
+
+        Both wire shapes are covered because only one of them can catch the
+        defect. The relay declares `username: Option<String>` without
+        `skip_serializing_if`, so a nameless account arrives today as an
+        explicit null, and `dict.get(key, fallback)` returns None for that
+        without ever consulting the fallback. It is the *absent* key that makes
+        a `.get("username", self._device_id)` answer with the local profile, so
+        a test that only sends null passes against the bug.
+        """
+        mgr, ws = self._manager(declaring_protocol)
+        frame = json.loads(self._authenticated())
+        if omit_key:
+            del frame["username"]
+        else:
+            frame["username"] = None
+
+        mgr._process_received(json.dumps(frame).encode())
+        await self._settle(mgr)
+
+        declaring_protocol.sign_data.assert_not_called()
+        ws.send.assert_not_called()
+        # Authentication itself is unaffected.
+        declaring_protocol.internet_status_changed.assert_called_once_with(
+            is_connected=True
+        )
+
+    @pytest.mark.asyncio
+    async def test_skips_quietly_when_the_relay_lacks_the_capability(
+        self, declaring_protocol: MagicMock
+    ) -> None:
+        mgr, ws = self._manager(declaring_protocol)
+
+        mgr._process_received(
+            self._authenticated(capabilities=[], address_challenge=None)
+        )
+        await self._settle(mgr)
+
+        ws.send.assert_not_called()
+        declaring_protocol.sign_data.assert_not_called()
+        assert mgr._authenticated is True
+        # The empty list is still injected, so a stale set from a previous
+        # relay cannot leak across connections.
+        declaring_protocol.internet_relay_capabilities.assert_called_once_with(
+            capabilities=[]
+        )
+
+    @pytest.mark.asyncio
+    async def test_skips_when_mls_is_not_initialized(
+        self, declaring_protocol: MagicMock
+    ) -> None:
+        """An app running with encryption disabled has no identity to prove and
+        stays in account-name space by construction. That is a clean skip, not
+        a signing failure."""
+        declaring_protocol.local_address.return_value = None
+        mgr, ws = self._manager(declaring_protocol)
+
+        mgr._process_received(self._authenticated())
+        await self._settle(mgr)
+
+        declaring_protocol.sign_data.assert_not_called()
+        ws.send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_malformed_challenge_is_not_signed(
+        self, declaring_protocol: MagicMock
+    ) -> None:
+        mgr, ws = self._manager(declaring_protocol)
+
+        mgr._process_received(
+            self._authenticated(
+                address_challenge=base64.b64encode(b"\x00" * 16).decode("ascii")
+            )
+        )
+        await self._settle(mgr)
+
+        declaring_protocol.sign_data.assert_not_called()
+        ws.send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_replaced_socket_does_not_inherit_the_challenge(
+        self, declaring_protocol: MagicMock
+    ) -> None:
+        """The challenge is minted per connection. A socket swapped in after
+        the frame arrived has its own `Authenticated` coming, so declaring the
+        predecessor's challenge on it can only earn a refusal."""
+        mgr, ws = self._manager(declaring_protocol)
+        successor = AsyncMock()
+
+        mgr._process_received(self._authenticated())
+        mgr._ws = successor  # reconnect lands before the spawned task runs
+        await self._settle(mgr)
+
+        ws.send.assert_not_called()
+        successor.send.assert_not_called()
+        declaring_protocol.sign_data.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_declaration_leaves_the_connection_authenticated(
+        self, declaring_protocol: MagicMock
+    ) -> None:
+        """An undeclared connection is a working connection: the relay simply
+        attributes it the legacy way. Failing it over a refused declaration
+        would turn a degraded path into no path."""
+        declaring_protocol.sign_data.side_effect = RuntimeError("no identity")
+        mgr, ws = self._manager(declaring_protocol)
+
+        mgr._process_received(self._authenticated())
+        await self._settle(mgr)
+
+        ws.send.assert_not_called()
+        assert mgr._authenticated is True
+        assert mgr.state == TransportState.RUNNING
+        declaring_protocol.internet_status_changed.assert_called_once_with(
+            is_connected=True
+        )
+
+    def test_address_declared_reaches_the_lockstep_check(
+        self, declaring_protocol: MagicMock
+    ) -> None:
+        """The echo goes to a dedicated FFI entry point, where the core
+        compares the bound address against `local_address()`. Logging it
+        instead would silently disable RELAY_ADDRESS_BINDING_MISMATCH."""
+        mgr, _ = self._manager(declaring_protocol)
+
+        mgr._process_received(
+            json.dumps({"type": "AddressDeclared", "address": self.ADDRESS}).encode()
+        )
+
+        declaring_protocol.internet_address_declared.assert_called_once_with(
+            address=self.ADDRESS
+        )
+
+    def test_the_refusal_frame_is_address_error(
+        self, declaring_protocol: MagicMock
+    ) -> None:
+        """The relay's refusal variant is `AddressError`, not the name of the
+        FFI entry point it feeds. Matching the wrong tag leaves every refusal
+        in the unhandled-message branch, so RELAY_ADDRESS_DECLARATION_REFUSED
+        never fires."""
+        mgr, _ = self._manager(declaring_protocol)
+
+        mgr._process_received(
+            json.dumps({"type": "AddressError", "reason": "address_taken"}).encode()
+        )
+
+        declaring_protocol.internet_address_declaration_refused.assert_called_once_with(
+            reason="address_taken"
+        )
