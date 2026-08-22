@@ -387,6 +387,7 @@ dependencies = [
  "mls-rs",
  "mls-rs-crypto-rustcrypto",
  "offline-protocol-core",
+ "offline-protocol-leaf",
 ]
 
 [[package]]
@@ -755,6 +756,34 @@ dependencies = [
  "thiserror",
  "unicode-normalization",
  "uuid",
+]
+
+[[package]]
+name = "offline-protocol-leaf"
+version = "0.23.0"
+dependencies = [
+ "base64",
+ "mls-rs",
+ "mls-rs-core",
+ "mls-rs-crypto-rustcrypto",
+ "offline-protocol-core",
+ "offline-protocol-sealed",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "offline-protocol-sealed"
+version = "0.23.0"
+dependencies = [
+ "base64",
+ "offline-protocol-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]
