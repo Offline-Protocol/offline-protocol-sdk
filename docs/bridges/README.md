@@ -129,12 +129,24 @@ binding edited alone fails the Rust suite rather than its own. See
 The one-shot event tag list and the mesh wake task key are pinned the same way,
 by Rust guards that read the binding sources.
 
-**The relay address-proof signing domain** is the fifth: the Swift and Kotlin
+**The relay address-proof signing domain** is the fifth, and it is the one set
+pinned by both mechanisms at once. The Swift and Kotlin
 `AddressDeclarationPolicy` each hold a copy of `offline-relay-addr-v1`, and a
 Rust guard reads both sources. It belongs to the four-domain mutual non-prefix
 rule the core pins separately, so an edit here that agrees with itself in one
 language still fails that guard rather than producing a signature nothing
 verifies.
+
+Python holds a third copy, in `address_declaration.py`, pinned the other way:
+`test_address_declaration.py` asserts the whole proof payload against the
+relay's own hex vector, which contains the domain. Python earns the
+per-language route because its tests actually execute in CI, where the Swift
+and Kotlin `InternetManager` sources are typechecked at most and never run, so
+for those two a source-reading guard is the only reachable pin. The same test
+is what pins the call ordering that the Rust guard
+`react_native_relay_declares_its_address_before_it_flushes` has to assert
+textually for the other two: the declaration is written before the outbox
+flush, and a Python test can simply observe the calls happen in that order.
 
 **The resolution-query completion deadline** is the sixth, and the newest: the
 Swift and Kotlin `NostrQueryTracker` each hold a copy of

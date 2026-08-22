@@ -16,6 +16,7 @@ from typing import Any, Coroutine
 import websockets
 from websockets.asyncio.client import ClientConnection
 
+from . import address_declaration
 from .transport_manager import TransportError, TransportManager, TransportState
 
 logger = logging.getLogger(__name__)
@@ -277,10 +278,19 @@ class InternetManager(TransportManager):
         except Exception as exc:
             self._emit_diagnostic("error", f"Failed to send auth: {exc}")
 
-    async def _safe_handle_authenticated(self, user_id: str, username: str) -> None:
+    async def _safe_handle_authenticated(
+        self,
+        user_id: str,
+        username: str | None,
+        capabilities: Any,
+        address_challenge: str | None,
+        ws: ClientConnection | None,
+    ) -> None:
         """Wrapper that catches exceptions to prevent stuck STARTING state."""
         try:
-            await self._handle_authenticated(user_id, username)
+            await self._handle_authenticated(
+                user_id, username, capabilities, address_challenge, ws
+            )
         except Exception as exc:
             self._emit_diagnostic("error", f"Authentication handler failed: {exc}")
             await self._handle_connection_closed(exc)
@@ -292,11 +302,51 @@ class InternetManager(TransportManager):
         except Exception as exc:
             self._emit_diagnostic("error", f"Connection-closed handler failed: {exc}")
 
-    async def _handle_authenticated(self, user_id: str, username: str) -> None:
+    async def _handle_authenticated(
+        self,
+        user_id: str,
+        username: str | None,
+        capabilities: Any,
+        address_challenge: str | None,
+        ws: ClientConnection | None,
+    ) -> None:
         self._authenticated = True
         self._update_state(TransportState.RUNNING)
 
-        # Notify protocol — triggers outbox flush
+        self._emit_diagnostic("info", "Authenticated with relay server", {
+            "user_id": user_id,
+            "username": username or self._device_id,
+        })
+
+        # The order of the three steps below is load-bearing, and mirrors the
+        # same block in the Swift and Kotlin managers.
+        #
+        # The address declaration MUST precede the status flip. The relay
+        # attributes each inbound frame by whatever this connection has proved
+        # at the moment it reads that frame, and never re-stamps retroactively,
+        # so a send that leaves before the declaration is attributed by account
+        # name for good. Its `Message.sender` (an address) then fails the
+        # receiver's `validate_transport_sender` at hop 0, which drops exactly
+        # the `__MLS_KEY_PKG__` / `__MLS_WELCOME__` frames a new session needs.
+        # The flush the status flip performs is what produces those sends, so
+        # the declaration goes out first and WebSocket frame order does the
+        # rest.
+        await self._maybe_declare_address(
+            username, capabilities, address_challenge, ws
+        )
+
+        # Capabilities MUST also reach the SDK before the status flip: the
+        # flush reads the group broadcast gate's capability set. The list is
+        # injected even when empty, so a stale set from a previous relay can
+        # never leak across connections.
+        try:
+            self._protocol.internet_relay_capabilities(
+                capabilities=capabilities if isinstance(capabilities, list) else []
+            )
+        except Exception as exc:
+            self._emit_diagnostic("error", f"Relay capability injection failed: {exc}")
+
+        # Notify protocol: this is what triggers the outbox flush.
         try:
             self._protocol.internet_status_changed(is_connected=True)
         except Exception as exc:
@@ -312,13 +362,99 @@ class InternetManager(TransportManager):
         self._poll_task = asyncio.ensure_future(self._poll_outgoing_loop())
         self._ping_task = asyncio.ensure_future(self._ping_loop())
 
-        # Immediate flush
+        # Immediate flush. The poll drains the internet send queue the status
+        # flip just filled, so messages queued while disconnected go out now
+        # rather than on the next timer tick.
         self._poll_and_send_messages()
 
-        self._emit_diagnostic("info", "Authenticated with relay server", {
-            "user_id": user_id,
-            "username": username,
-        })
+    async def _maybe_declare_address(
+        self,
+        username: str | None,
+        capabilities: Any,
+        address_challenge: str | None,
+        ws: ClientConnection | None,
+    ) -> None:
+        """Answer the relay's address challenge with a signed ``DeclareAddress``.
+
+        No-op unless the relay advertised ``address_routing_v1`` and sent a
+        well-formed challenge, so relays without the capability are unaffected.
+
+        Never raises into the auth path. An undeclared connection is a working
+        connection: the relay simply attributes it the legacy way, which is how
+        it behaved before addresses existed. Failing the connection over a
+        refused declaration would turn a degraded path into no path.
+
+        Nothing waits on the relay's answer. The relay binds the address before
+        it reads the next frame off the socket, so ordering is established by
+        the write alone; ``AddressDeclared`` and ``AddressError`` are reported
+        when they arrive but gate nothing.
+        """
+        outcome = address_declaration.decide(capabilities, address_challenge, username)
+        if isinstance(outcome, address_declaration.Skip):
+            self._emit_diagnostic(
+                "debug",
+                "Not declaring an address to the relay",
+                {"reason": outcome.reason},
+            )
+            return
+
+        # The declaration belongs to the connection that was handed the
+        # challenge. A socket replaced between that frame's arrival and this
+        # coroutine has its own `Authenticated`, carrying its own challenge,
+        # already on the way.
+        if ws is None or ws is not self._ws:
+            self._emit_diagnostic(
+                "debug",
+                "Not declaring an address to the relay",
+                {"reason": address_declaration.Reason.CONNECTION_REPLACED},
+            )
+            return
+
+        # The address the core compares the relay's answer against, so the
+        # declaration must carry this value and not a locally re-derived one.
+        # Absent before `initialize_mls`: an app running with encryption
+        # disabled stays in account-name space by construction, which is a
+        # clean skip rather than a failure.
+        try:
+            address = self._protocol.local_address()
+        except Exception:
+            address = None
+        if not address:
+            self._emit_diagnostic(
+                "debug",
+                "Not declaring an address to the relay",
+                {"reason": address_declaration.Reason.ADDRESS_UNAVAILABLE},
+            )
+            return
+
+        try:
+            payload = address_declaration.proof_payload(
+                outcome.account, outcome.challenge
+            )
+            public_key = bytes(self._protocol.get_identity_public_key())
+            signature = bytes(self._protocol.sign_data(list(payload)))
+            frame = address_declaration.declaration_json(
+                address, public_key, signature
+            )
+        except Exception as exc:
+            self._emit_diagnostic(
+                "error",
+                f"Could not sign the address declaration: {exc}",
+                {"reason": address_declaration.Reason.SIGNING_FAILED},
+            )
+            return
+
+        try:
+            await ws.send(frame)
+        except Exception as exc:
+            self._emit_diagnostic(
+                "warning", f"Address declaration write failed: {exc}"
+            )
+            return
+
+        self._emit_diagnostic(
+            "info", "Sent DeclareAddress to relay", {"address": address}
+        )
 
     async def _handle_connection_closed(self, error: Exception | None) -> None:
         # Re-entrancy guard. On AuthError + WS-close, two paths race here:
@@ -469,9 +605,66 @@ class InternetManager(TransportManager):
 
         if msg_type == "Authenticated":
             user_id = msg.get("user_id", self._device_id)
-            username = msg.get("username", self._device_id)
+            # RAW, with no `device_id` fallback: this name goes into the signed
+            # address proof, and the relay verifies it against the account name
+            # *it* resolved. Signing a locally-chosen substitute produces a
+            # signature that cannot verify and, in the relay's logs, is
+            # indistinguishable from an attack. The fallback lives at the
+            # display sites instead.
+            username = msg.get("username")
+            capabilities = msg.get("capabilities", [])
+            address_challenge = msg.get("address_challenge")
+            # The socket this frame arrived on. `_process_received` runs inline
+            # in the receive loop, so `_ws` here is that socket; by the time the
+            # spawned task runs it may not be.
             self._spawn_process_task(
-                self._safe_handle_authenticated(user_id, username)
+                self._safe_handle_authenticated(
+                    user_id, username, capabilities, address_challenge, self._ws
+                )
+            )
+
+        elif msg_type == "AddressDeclared":
+            # The relay bound this connection to the address we proved. From its
+            # next inbound frame on, it attributes us by address instead of
+            # account name. Informational: the binding took effect before the
+            # relay answered (its frame loop is sequential), so nothing waits on
+            # this.
+            #
+            # The echo goes to the SDK, which is where the lockstep check lives:
+            # it compares the bound address against `local_address()` and
+            # reports a disagreement as RELAY_ADDRESS_BINDING_MISMATCH. A
+            # dedicated entry point, not message-plane injection, so an
+            # acknowledgement cannot be synthesized through the notification
+            # ciphertext injector.
+            declared_address = msg.get("address", "")
+            try:
+                self._protocol.internet_address_declared(address=declared_address)
+            except Exception as exc:
+                logger.debug("internet_address_declared failed: %s", exc)
+            self._emit_diagnostic(
+                "info",
+                "Relay accepted the address declaration",
+                {"address": declared_address},
+            )
+
+        elif msg_type == "AddressError":
+            # The refusal frame is `AddressError` (relay `ServerMessage`), not
+            # the name of the FFI entry point it feeds. Non-fatal by contract:
+            # the connection stays authenticated and keeps working in
+            # account-name space. No retry here, because a refusal is either
+            # permanent for this connection (bad material, or a different
+            # address already declared) or means this socket was displaced by a
+            # newer login, in which case the successor declares for itself. The
+            # next reconnect re-declares from scratch.
+            reason = msg.get("reason", "Unknown error")
+            try:
+                self._protocol.internet_address_declaration_refused(reason=reason)
+            except Exception as exc:
+                logger.debug("internet_address_declaration_refused failed: %s", exc)
+            self._emit_diagnostic(
+                "error",
+                "Relay refused the address declaration; staying in account-name space",
+                {"reason": reason},
             )
 
         elif msg_type == "AuthError":

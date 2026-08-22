@@ -272,6 +272,35 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   measure the same bytes as `leaf`. A row reporting a number for a
   configuration nobody can build is worse than no row.
 
+### Fixed
+
+- **A Python node was never routable by its `off1…` address over the Internet
+  transport.** The transport authenticated to the relay but never answered the
+  address-routing challenge, so the relay kept attributing the connection by
+  account name and could not resolve messages addressed to the node. Addressed
+  sends and service discovery therefore never reached it. The transport now
+  signs the same domain-separated proof the Swift and Kotlin bridges sign and
+  replies with `DeclareAddress`, pinned against the relay's own hex vector so
+  the three implementations cannot drift apart. Relays that do not advertise
+  `address_routing_v1` see byte-identical behaviour to before, and a
+  declaration that cannot be made leaves the connection authenticated and
+  working in account-name space, exactly as it worked before addresses
+  existed.
+
+  The declaration is written before the outbox flush, because the relay
+  attributes each frame by whatever the connection has proved at the moment it
+  reads that frame and never re-stamps retroactively. Anything sent ahead of
+  the proof stays attributed by account name for good, and its address-stamped
+  `Message.sender` then fails the receiver's strict sender check, which is
+  what drops the key-package and welcome frames a new MLS session needs.
+
+  The relay's two answers reach the core through `internet_address_declared`
+  and `internet_address_declaration_refused` rather than the log, so a Python
+  node performs the same binding-mismatch lockstep check as the other
+  bridges. The relay's advertised capabilities are also injected before the
+  status flip, so the group broadcast gate sees them on the connection they
+  belong to.
+
 ## [0.23.0] — 2026-08-20
 
 > **The protocol carries state now, not only messages.** A new data layer adds
