@@ -20,7 +20,10 @@ use std::collections::BTreeMap;
 
 use offline_protocol_core::{Message, MessagePriority, UserId};
 use offline_protocol_leaf::{
-    store::{KEY_TYPE_GROUP_EPOCH, KEY_TYPE_GROUP_STATE, KEY_TYPE_IDENTITY, KEY_TYPE_PEER},
+    store::{
+        KEY_TYPE_GROUP_EPOCH, KEY_TYPE_GROUP_STATE, KEY_TYPE_IDENTITY, KEY_TYPE_KEY_PACKAGE,
+        KEY_TYPE_PEER,
+    },
     LeafDevice, LeafError, LeafEvent, LeafStore, MemoryStore, StoreError,
 };
 use offline_protocol_mls::{storage::InMemoryStorage, MlsManager, MlsStorage};
@@ -1665,5 +1668,193 @@ fn unpairing_sweeps_epochs_when_the_state_entry_cannot_be_read() {
         store.epoch_records().is_empty(),
         "an unreadable state entry left epoch records behind: {:?}",
         store.epoch_records()
+    );
+}
+
+/// Builds a key package advertisement body, with the package data left as
+/// junk because a device records what a peer advertises and never parses the
+/// package itself: the phone builds the group, not the device.
+fn advertisement_body(user_id: &str) -> String {
+    let payload = KeyPackagePayload {
+        user_id: user_id.to_string(),
+        key_package_data: vec![7],
+        remaining_lifetime_ms: 0,
+        timestamp_ms: 0,
+        session_reset: false,
+        wire_versions: vec![],
+        env_versions: vec![MLS_ENVELOPE_COMPACT_V1],
+        rich_versions: vec![],
+        data_versions: vec![],
+        nostr_pubkey: None,
+    };
+    format!(
+        "{}{}",
+        prefixes::KEY_PACKAGE,
+        serde_json::to_string(&payload).expect("payload")
+    )
+}
+
+#[test]
+fn a_frame_addressed_to_another_node_is_ignored() {
+    let phone = new_phone();
+    let bystander = new_phone();
+    let store = Arc::new(CountingStore::default());
+    let mut device = device(Arc::clone(&store) as Arc<dyn LeafStore>);
+    let device_address = device.address().to_string();
+
+    // One body, sent twice, to two different recipients. That is the whole
+    // test: the frames are otherwise identical, so whatever the device does
+    // differently it did because of the addressing and nothing else.
+    let body = advertisement_body(&phone.address);
+
+    // A radio hears what it is not the recipient of. This frame is honestly
+    // signed and its signature covers the recipient, so every gate below the
+    // dispatch verifies it happily; only the addressing says it is not ours.
+    let overheard = phone_control_frame(&phone, &bystander.address, body.clone());
+    let handled = device
+        .handle(&overheard, NOW)
+        .expect("overhearing a neighbour is not a failure");
+
+    assert!(
+        handled.outbound.is_empty(),
+        "the device answered a frame addressed to somebody else: {:?}",
+        handled.outbound.len()
+    );
+    assert!(
+        matches!(handled.events.as_slice(), [LeafEvent::Ignored { .. }]),
+        "an overheard frame produced {:?}",
+        handled.events
+    );
+
+    // And it spent nothing. Each of these is a write to a part with a finite
+    // number of them, and the key package is a private init key minted for a
+    // pairing nobody asked this device for.
+    assert!(
+        store.keys_of(KEY_TYPE_PEER).is_empty(),
+        "an overheard frame wrote a peer record: {:?}",
+        store.keys_of(KEY_TYPE_PEER)
+    );
+    assert!(
+        store.keys_of(KEY_TYPE_KEY_PACKAGE).is_empty(),
+        "an overheard frame minted a key package: {:?}",
+        store.keys_of(KEY_TYPE_KEY_PACKAGE)
+    );
+    assert!(
+        device.peers().expect("peers").is_empty(),
+        "an overheard frame put a peer in the audit list"
+    );
+
+    // The control: the same body addressed to this device is acted on. Without
+    // this the test above would pass on a device that answers nothing at all.
+    let addressed = phone_control_frame(&phone, &device_address, body);
+    let handled = device
+        .handle(&addressed, NOW)
+        .expect("device handles a frame addressed to it");
+    assert_eq!(
+        handled.outbound.len(),
+        1,
+        "a frame addressed to this device was not answered: {:?}",
+        handled.events
+    );
+    assert!(
+        device.peers().expect("peers").contains(&phone.address),
+        "a frame addressed to this device did not record its sender"
+    );
+}
+
+#[test]
+fn a_sealed_frame_addressed_elsewhere_is_not_opened() {
+    let phone = new_phone();
+    let bystander = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = pair(&phone, &mut device);
+
+    // A frame this device really can open, addressed to somebody else. The
+    // data plane carries no signature, by design: MLS authenticates its own
+    // sender, so the AEAD covers the ciphertext and nothing covers the
+    // addressing beside it. Anyone who captured this frame can therefore
+    // rewrite its recipient and hand it back.
+    //
+    // Openable is not the same question as addressed here, and without the
+    // dispatch gate the device never asks the second one: it opens the
+    // ciphertext and reports an ordinary message. Firmware that also carries
+    // frames for its neighbours would then act on the same frame it forwards.
+    let sealed = phone
+        .manager
+        .encrypt_for_user(&device_address, b"unlock")
+        .expect("phone seals");
+    let elsewhere = phone_sealed_frame(&phone, &bystander.address, &sealed);
+
+    let handled = device
+        .handle(&elsewhere, NOW)
+        .expect("a frame addressed elsewhere is not a failure");
+    assert!(
+        matches!(handled.events.as_slice(), [LeafEvent::Ignored { .. }]),
+        "a sealed frame addressed elsewhere produced {:?}",
+        handled.events
+    );
+
+    // The control: the same ciphertext addressed here opens. What the device
+    // refused was the addressing rather than the frame.
+    let addressed = phone_sealed_frame(&phone, &device_address, &sealed);
+    let handled = device.handle(&addressed, NOW).expect("device opens");
+    assert_eq!(
+        handled.events,
+        vec![LeafEvent::MessageReceived {
+            peer: phone.address.clone(),
+            text: "unlock".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn traffic_between_two_neighbours_is_ignored_rather_than_reported_as_a_failure() {
+    let phone = new_phone();
+    let bystander = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    pair(&phone, &mut device);
+
+    // Two other nodes talking, overheard. This device is in neither end of it
+    // and cannot open a byte, so nothing here is a confidentiality question.
+    // What it is is a reporting one: every gate downstream refuses this as an
+    // identity binding failure, and on a device whose only account of itself
+    // is its error stream that makes ordinary neighbour traffic arrive wearing
+    // the shape of an attack on it.
+    let stranger = new_phone();
+    let envelope = EncryptedMessage {
+        group_id: GroupId::for_session(&stranger.address, &bystander.address)
+            .expect("their pair's group id"),
+        message_type: offline_protocol_sealed::MlsMessageType::Application,
+        epoch: 1,
+        ciphertext: vec![9, 9, 9],
+        sender_id: stranger.address.clone(),
+        timestamp_ms: 0,
+    };
+    let overheard = phone_sealed_frame(&stranger, &bystander.address, &envelope);
+
+    let handled = device
+        .handle(&overheard, NOW)
+        .expect("two neighbours talking is not this device's failure");
+    assert!(
+        matches!(handled.events.as_slice(), [LeafEvent::Ignored { .. }]),
+        "overheard neighbour traffic produced {:?}",
+        handled.events
+    );
+
+    // The control: the device still has its own working session, so this is a
+    // device that ignores what is not its business rather than one that has
+    // stopped listening.
+    let sealed = phone
+        .manager
+        .encrypt_for_user(&device.address().to_string(), b"unlock")
+        .expect("phone seals");
+    let frame = phone_sealed_frame(&phone, &device.address().to_string(), &sealed);
+    let handled = device.handle(&frame, NOW).expect("device opens");
+    assert_eq!(
+        handled.events,
+        vec![LeafEvent::MessageReceived {
+            peer: phone.address.clone(),
+            text: "unlock".to_string(),
+        }]
     );
 }

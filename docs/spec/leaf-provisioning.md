@@ -172,6 +172,28 @@ A conforming leaf:
 - **never emits** a Welcome, a commit, a proposal, or any group, rich, document
   or relay frame.
 
+Every frame it accepts is one **addressed to it**. A leaf MUST establish that
+before it acts on anything, whatever prefix the frame carries and however well
+the frame verifies, and nothing further down asks the question again: a control
+frame's signature covers the recipient, so one honestly signed for somebody
+else verifies perfectly, and a sealed frame carries no signature at all, so its
+recipient is whatever the last hand to touch it wrote there. Being able to open
+a frame is a different claim from having been sent it.
+
+What the check saves is not a message opened by the wrong node, since the group
+and credential gates hold either way. It is an overheard key package admitting
+a peer, spending flash, minting a private init key nobody asked this device
+for, and answering a node that never addressed it; a sealed frame the device
+can open being acted on after anyone who captured it rewrote the recipient; and
+every other prefix arriving as an identity-binding failure, so ordinary traffic
+between two neighbours reaches firmware wearing the shape of an attack on a
+device whose only account of itself is that error stream.
+
+A frame addressed elsewhere is **ignored rather than refused**. Overhearing is
+what a shared radio does, and firmware that carries frames for its neighbours
+needs "not mine" to be a fact it can act on rather than a failure it has to
+interpret.
+
 A leaf MUST answer a probe only while it holds a session with that peer **that
 it can still load**, which is the rule a phone already applies to the same
 frame. The acknowledgement is not a liveness signal: a peer confirms its

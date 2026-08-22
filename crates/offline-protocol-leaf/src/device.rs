@@ -341,7 +341,41 @@ impl LeafDevice {
     ///
     /// Returns the frames to send and what happened. Everything in
     /// [`Handled::outbound`] is already durable by the time it is returned.
+    ///
+    /// # A frame addressed elsewhere is answered by nothing
+    ///
+    /// A radio hears what it is not the recipient of, so this is the first
+    /// question asked, before a signature is verified or a prefix is read.
+    /// Nothing further down asks it again, and neither kind of frame answers
+    /// it on its own: a control frame's signature **covers** the recipient
+    /// rather than checking it, so one honestly signed for somebody else
+    /// verifies perfectly here, and a sealed frame carries no signature at
+    /// all, so its recipient is whatever the last hand to touch it wrote
+    /// there. Being able to open a frame is a different claim from having been
+    /// sent it.
+    ///
+    /// Three things follow from not asking. An overheard key package admits a
+    /// peer, spends flash on a record, mints a private init key nobody asked
+    /// this device for, and answers a phone that never addressed it. A sealed
+    /// frame this device really can open is acted on after anyone who captured
+    /// it rewrote the recipient, because that field is not inside the AEAD.
+    /// And every other prefix arrives as an identity-binding failure, so
+    /// ordinary traffic between two neighbours reaches firmware wearing the
+    /// shape of an attack, on a device whose only account of itself is that
+    /// error stream.
+    ///
+    /// What the check does not do is keep anyone else's ciphertext readable
+    /// here: the group and credential gates below hold either way.
+    ///
+    /// It is [`LeafEvent::Ignored`] rather than an error because overhearing is
+    /// what a shared radio does, and because firmware that carries frames for
+    /// its neighbours needs "not mine" to be a fact it can act on rather than a
+    /// failure it has to interpret.
     pub fn handle(&mut self, message: &Message, now_unix_secs: u64) -> Result<Handled> {
+        if !self.is_addressed_to_me(message) {
+            return Ok(ignored("frame is addressed to another node"));
+        }
+
         let content = &message.content;
 
         // Order matters: the encrypted-confirm prefix is not checked here at
@@ -873,6 +907,21 @@ impl LeafDevice {
             credential_address,
             member.signing_identity.signature_key.as_bytes(),
         )
+    }
+
+    /// Whether this frame names this device as its recipient.
+    ///
+    /// The comparison is between parsed addresses rather than between strings,
+    /// which costs nothing and is the same test every other identity claim in
+    /// this protocol gets. A recipient that is not an address at all is not
+    /// this device: this device is named by one, and by exactly one spelling
+    /// of it, since [`Address`] refuses anything but the canonical rendering.
+    fn is_addressed_to_me(&self, message: &Message) -> bool {
+        message
+            .recipient
+            .as_str()
+            .parse::<Address>()
+            .is_ok_and(|recipient| recipient == self.identity.address)
     }
 
     fn client(&self) -> Result<Client<impl MlsConfig>> {

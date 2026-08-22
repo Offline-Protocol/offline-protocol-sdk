@@ -117,7 +117,7 @@ implementations and are not allowed to disagree about anything outside them.
 
 **Dependencies**: `offline-protocol-core`, `offline-protocol-sealed`, OpenMLS
 
-### offline-protocol-leaf
+### 7. offline-protocol-leaf
 
 **Purpose**: A constrained device (a door lock, a sensor, a mains-powered
 relay) speaking the protocol as a real peer rather than a reduced one. It runs
@@ -145,7 +145,7 @@ state rolled back by a power cut reuses an AEAD nonce.
 Deliberately **not** the engine or the MLS crate: nothing above `sealed` builds
 without `std`.
 
-### 7. offline-protocol-services
+### 8. offline-protocol-services
 
 **Purpose**: Standalone service discovery and request/response over the mesh.
 
@@ -166,7 +166,7 @@ without `std`.
 
 **Dependencies**: `offline-protocol-core`
 
-### 8. offline-protocol-data
+### 9. offline-protocol-data
 
 **Purpose**: Replicated documents — offline-first state that any member of a space can edit while disconnected, merging deterministically when replicas meet again. Messaging is synced events; this crate is synced state.
 
@@ -186,7 +186,7 @@ without `std`.
 
 **Dependencies**: `loro` (pinned exactly; it publishes no MSRV metadata, so every bump re-runs the MSRV check and the mobile size measurement)
 
-### 9. offline-protocol
+### 10. offline-protocol
 
 **Purpose**: Main SDK API integrating all components.
 
@@ -213,7 +213,7 @@ AEAD key held in secure storage before they reach the state provider. See
 
 **Dependencies**: All other crates. `offline-protocol-data` is behind a default-on `data` feature, so a native consumer that only wants messaging can drop the CRDT engine with `default-features = false`.
 
-### 10. offline-protocol-uniffi
+### 11. offline-protocol-uniffi
 
 **Purpose:** UniFFI bindings for cross-platform interoperability.
 

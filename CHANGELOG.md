@@ -162,9 +162,14 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   because a leaf emits those and never probes, so every one that arrives is
   unsolicited and treating it as proof of a session would let any keypair
   holder assert one. A reset frame is acted on once, so a captured one is not a
-  repeatable session teardown. Twenty-six tests cover this against a real
-  OpenMLS phone in the same process, which is the only kind of test that
-  catches a default in one library the other refuses.
+  repeatable session teardown. Underneath all of them, a frame addressed to
+  another node is ignored before a prefix is read: a signature covers the
+  recipient rather than checking it, and a sealed frame carries none at all, so
+  without that gate an overheard key package mints a private init key nobody
+  asked for and a captured frame with its recipient rewritten is still acted
+  on. Every one of these is covered against a real OpenMLS phone in the same
+  process, which is the only kind of test that catches a default in one library
+  the other refuses.
 
   **What it keeps is bounded.** Prior-epoch records are trimmed to a window
   rather than kept forever, which bounds both the flash they occupy and how far
