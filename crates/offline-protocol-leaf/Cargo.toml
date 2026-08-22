@@ -95,5 +95,3 @@ getrandom = { version = "0.2", default-features = false, optional = true }
 [dev-dependencies]
 offline-protocol-mls = { path = "../offline-protocol-mls", version = "0.23.0" }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
-
-[lib]

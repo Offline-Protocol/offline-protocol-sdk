@@ -74,6 +74,85 @@ fn max_epoch_key(group_id: &[u8]) -> String {
     format!("{}:max", hex(group_id))
 }
 
+/// How many bytes of a state entry carry the sequencing marker: a presence
+/// flag and a big-endian epoch id.
+const STATE_MARKER_LEN: usize = 9;
+
+/// Puts the sequencing marker in front of the state mls-rs handed us.
+///
+/// # Why the marker rides inside the state entry
+///
+/// mls-rs sequences every epoch insert against
+/// [`GroupStateStorage::max_epoch_id`]: an inserted record's id must be
+/// exactly one above what that returns, or the operation is refused. Nothing
+/// in this crate caches either value, so both are read from flash on every
+/// operation, and the two therefore have to move together or not at all.
+///
+/// Held as separate entries they cannot. This seam is atomic per entry rather
+/// than across a set, so a cut or a failed write between a marker record and
+/// the state leaves the marker one ahead of the state it describes, and from
+/// there **every later commit is refused, permanently**: the retry inserts the
+/// epoch id the marker has already counted. Reversing the order does not fix
+/// it, it moves the same wedge into the other window. What that costs is not a
+/// lost frame: the device stops opening anything its peer sends until the
+/// peer's own recovery drives a full reset, which on a door lock is an owner
+/// standing outside it.
+///
+/// One entry closes the window. The marker a validation reads is a slice of
+/// the same bytes as the state it validates against, so there is no moment in
+/// which the two disagree.
+fn encode_state_entry(marker: Option<u64>, state: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(STATE_MARKER_LEN + state.len());
+    match marker {
+        Some(epoch) => {
+            out.push(1);
+            out.extend_from_slice(&epoch.to_be_bytes());
+        }
+        // A group that has left no epoch behind yet. mls-rs skips the
+        // sequencing check entirely for `None`, which is what a group that was
+        // just joined needs.
+        None => out.extend_from_slice(&[0u8; STATE_MARKER_LEN]),
+    }
+    out.extend_from_slice(state);
+    out
+}
+
+/// Splits a state entry into its marker and the state mls-rs stored.
+fn decode_state_entry(raw: &[u8]) -> Result<(Option<u64>, &[u8]), StoreError> {
+    if raw.len() < STATE_MARKER_LEN {
+        return Err(StoreError::Corrupt(format!(
+            "group state entry is {} bytes, too short to carry its epoch marker",
+            raw.len()
+        )));
+    }
+    let (header, state) = raw.split_at(STATE_MARKER_LEN);
+    let marker = match header[0] {
+        0 => None,
+        1 => {
+            let mut epoch = [0u8; 8];
+            epoch.copy_from_slice(&header[1..STATE_MARKER_LEN]);
+            Some(u64::from_be_bytes(epoch))
+        }
+        other => {
+            return Err(StoreError::Corrupt(format!(
+                "group state entry carries epoch marker flag {other}, expected 0 or 1"
+            )))
+        }
+    };
+    Ok((marker, state))
+}
+
+/// The sequencing marker in a group's state entry, if it can be read.
+///
+/// For the erasure sweep in [`LeafDevice::unpair`](crate::LeafDevice::unpair),
+/// which needs an anchor rather than a guarantee: every failure here is the
+/// same answer, "this record cannot bound anything", and the caller looks
+/// elsewhere.
+pub(crate) fn state_marker(store: &Arc<dyn LeafStore>, group_key: &str) -> Option<u64> {
+    let raw = store.load(KEY_TYPE_GROUP_STATE, group_key).ok()??;
+    decode_state_entry(&raw).ok().and_then(|(marker, _)| marker)
+}
+
 /// Carries [`GroupStateStorage`] onto the device's blob store.
 #[derive(Clone)]
 pub(crate) struct GroupStateAdapter {
@@ -90,10 +169,15 @@ impl GroupStateStorage for GroupStateAdapter {
     type Error = StoreError;
 
     fn state(&self, group_id: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>, Self::Error> {
-        Ok(self
+        let Some(raw) = self
             .store
             .load(KEY_TYPE_GROUP_STATE, &state_key(group_id))?
-            .map(Zeroizing::new))
+        else {
+            return Ok(None);
+        };
+        let raw = Zeroizing::new(raw);
+        let (_, state) = decode_state_entry(&raw)?;
+        Ok(Some(Zeroizing::new(state.to_vec())))
     }
 
     fn epoch(
@@ -119,18 +203,20 @@ impl GroupStateStorage for GroupStateAdapter {
     /// the device would come back having lost exactly the out-of-order
     /// tolerance a lossy radio needs.
     ///
+    /// The state and the marker that sequences it go down as **one entry**,
+    /// because ordering cannot make those two safe in either direction. See
+    /// [`encode_state_entry`] for what a torn write between them costs.
+    ///
     /// The caller does not emit anything until this returns `Ok`, so a failure
     /// here is a frame that was never sent rather than state that fell behind
     /// one that was.
     ///
-    /// Expired records are dropped **after** the state write, and their
-    /// failures are not propagated. Both follow from the same rule. Deleting
-    /// first would let a cut leave a state beside fewer prior epochs than it
-    /// references, which is the direction this ordering exists to avoid; and
-    /// once the state write has returned, the write the caller is waiting on
-    /// is durable, so reporting a failed housekeeping delete as an error would
-    /// suppress a frame whose state is already on flash. A record that
-    /// survives a failed delete is swept by
+    /// The high-water record and the expired-record deletes both happen
+    /// **after** the state write, and neither propagates a failure. Both
+    /// follow from the same rule: once the state write has returned, the write
+    /// the caller is waiting on is durable, so reporting a failure in
+    /// housekeeping would suppress a frame whose state is already on flash.
+    /// A record that survives a failed delete is swept by
     /// [`LeafDevice::unpair`](crate::LeafDevice::unpair).
     fn write(
         &mut self,
@@ -138,7 +224,8 @@ impl GroupStateStorage for GroupStateAdapter {
         epoch_inserts: Vec<EpochRecord>,
         epoch_updates: Vec<EpochRecord>,
     ) -> Result<(), Self::Error> {
-        let mut highest: Option<u64> = None;
+        let previous = self.max_epoch_id(&state.id)?;
+        let mut marker = previous;
 
         for record in epoch_inserts.iter().chain(epoch_updates.iter()) {
             self.store.store(
@@ -146,31 +233,40 @@ impl GroupStateStorage for GroupStateAdapter {
                 &epoch_key(&state.id, record.id),
                 &record.data,
             )?;
-            highest = Some(highest.map_or(record.id, |h: u64| h.max(record.id)));
+            marker = Some(marker.map_or(record.id, |held: u64| held.max(record.id)));
         }
 
-        if let Some(highest) = highest {
-            let previous = self.max_epoch_id(&state.id)?.unwrap_or(0);
-            if highest >= previous {
-                self.store.store(
-                    KEY_TYPE_GROUP_EPOCH,
-                    &max_epoch_key(&state.id),
-                    &highest.to_be_bytes(),
-                )?;
-            }
-        }
+        self.store.store(
+            KEY_TYPE_GROUP_STATE,
+            &state_key(&state.id),
+            &encode_state_entry(marker, &state.data),
+        )?;
 
-        self.store
-            .store(KEY_TYPE_GROUP_STATE, &state_key(&state.id), &state.data)?;
+        // The erasure high-water mark, which is a different job from the
+        // marker above and is why it is a different record rather than the
+        // same one read twice.
+        //
+        // The marker inside the state entry answers "what may be inserted
+        // next", and it goes away with the state it lives in. This record
+        // answers "how far up did this group ever write", which
+        // [`LeafDevice::unpair`](crate::LeafDevice::unpair) needs in order to
+        // bound a sweep over records it cannot enumerate, and it has to be
+        // readable in the one case the other is not: a state entry the part
+        // hands back as something else. It is deliberately never lowered by
+        // trimming, so it stays above every record that could still be there.
+        let advanced_to = if marker == previous { None } else { marker };
+        if let Some(high) = advanced_to {
+            let _ = self.store.store(
+                KEY_TYPE_GROUP_EPOCH,
+                &max_epoch_key(&state.id),
+                &high.to_be_bytes(),
+            );
+        }
 
         // One delete per record that entered, which is all the window can
         // lose: mls-rs requires each inserted epoch id to be exactly one above
         // the highest stored, so the window advances by the number of inserts
         // and never skips. Updates rewrite records already inside it.
-        //
-        // The marker is deliberately left alone. `max_epoch_id` is what
-        // mls-rs checks that next id against, so it has to stay the highest
-        // epoch ever written rather than the highest still held.
         for record in epoch_inserts.iter() {
             if let Some(expired) = record.id.checked_sub(PRIOR_EPOCH_RETENTION) {
                 let _ = self
@@ -182,22 +278,25 @@ impl GroupStateStorage for GroupStateAdapter {
         Ok(())
     }
 
+    /// The highest epoch id this group has left behind.
+    ///
+    /// Read from the same entry as the state it belongs to, because mls-rs
+    /// sequences every epoch insert against this value and a marker that got
+    /// ahead of its state wedges the group permanently. See
+    /// [`encode_state_entry`].
+    ///
+    /// A group with no state has no marker, and that `None` is what makes
+    /// mls-rs skip the sequencing check for a group that was just joined.
     fn max_epoch_id(&self, group_id: &[u8]) -> Result<Option<u64>, Self::Error> {
-        let raw = self
+        let Some(raw) = self
             .store
-            .load(KEY_TYPE_GROUP_EPOCH, &max_epoch_key(group_id))?;
-        match raw {
-            None => Ok(None),
-            Some(bytes) => {
-                let array: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
-                    StoreError::Corrupt(format!(
-                        "max epoch record is {} bytes, expected 8",
-                        bytes.len()
-                    ))
-                })?;
-                Ok(Some(u64::from_be_bytes(array)))
-            }
-        }
+            .load(KEY_TYPE_GROUP_STATE, &state_key(group_id))?
+        else {
+            return Ok(None);
+        };
+        let raw = Zeroizing::new(raw);
+        let (marker, _) = decode_state_entry(&raw)?;
+        Ok(marker)
     }
 }
 

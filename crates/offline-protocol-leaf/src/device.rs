@@ -259,6 +259,12 @@ impl LeafDevice {
             .save(&self.store, peer)
             .map_err(|e| LeafError::Storage(e.to_string()))?;
 
+        // Handing out a package is the moment a pairing with this peer becomes
+        // possible, so it is the moment the peer becomes something firmware
+        // should be able to see in [`LeafDevice::peers`]. Inbound exchanges
+        // reach here having already been admitted, where this is a no-op.
+        self.index_peer(peer)?;
+
         Ok(message)
     }
 
@@ -361,21 +367,11 @@ impl LeafDevice {
             // phone gates the same frame on holding a session of its own; the
             // profile in the spec lists this prefix under what a leaf emits and
             // not under what it accepts.
-            Ok(Handled {
-                outbound: Vec::new(),
-                events: vec![LeafEvent::Ignored {
-                    reason: String::from(
-                        "an acknowledgement arrived for a probe this device never sends",
-                    ),
-                }],
-            })
+            Ok(ignored(
+                "an acknowledgement arrived for a probe this device never sends",
+            ))
         } else {
-            Ok(Handled {
-                outbound: Vec::new(),
-                events: vec![LeafEvent::Ignored {
-                    reason: String::from("frame carries no prefix this device answers"),
-                }],
-            })
+            Ok(ignored("frame carries no prefix this device answers"))
         }
     }
 
@@ -512,6 +508,15 @@ impl LeafDevice {
             .write_to_storage()
             .map_err(|e| LeafError::Storage(format!("cannot persist group state: {e:?}")))?;
 
+        // A session exists from here, so the peer has to be in the index
+        // whatever route it took to get one. Ordinarily it is already there,
+        // put there by the exchange that handed out the key package this
+        // Welcome spent; what this covers is that entry having been recycled
+        // in between, which is a slot a peer with no session is eligible to
+        // lose. A session firmware cannot see in [`LeafDevice::peers`] is one
+        // it cannot audit and cannot [`LeafDevice::unpair`].
+        self.index_peer(sender)?;
+
         // The confirmation is a group-aware decrypt, sealed inside an ordinary
         // envelope. A peer that created a session of its own confirms only on
         // a successful decrypt, so a plaintext acknowledgement would leave it
@@ -627,15 +632,24 @@ impl LeafDevice {
         frames::verify_control_frame(message)?;
         let sender = message.sender.as_str();
 
-        if !self.has_session(sender)? {
-            return Ok(Handled {
-                outbound: Vec::new(),
-                events: vec![LeafEvent::Ignored {
-                    reason: String::from(
-                        "a confirmation probe arrived for a peer this device has no session with",
-                    ),
-                }],
-            });
+        // Loaded rather than counted. "State is on flash" and "this device can
+        // decrypt" are different claims, and an acknowledgement asserts the
+        // second: a device that answered on the strength of bytes it cannot
+        // load would confirm a session it cannot open one frame of, which is
+        // the failure staying quiet exists to avoid. A state that is present
+        // and unloadable is also not silence, it is a store handing back what
+        // this device did not write, and it propagates for the reason
+        // [`LeafDevice::load_group`] separates the two.
+        let client = self.client()?;
+        let group_id = self.group_id(sender)?;
+        match self.load_group(&client, sender, &group_id) {
+            Ok(_) => {}
+            Err(LeafError::NoSession(_)) => {
+                return Ok(ignored(
+                    "a confirmation probe arrived for a peer this device has no session with",
+                ))
+            }
+            Err(e) => return Err(e),
         }
 
         let mut ack = frames::build(
@@ -674,23 +688,28 @@ impl LeafDevice {
         let group_id = self.group_id(peer)?;
         let key = crate::adapters::hex(group_id.as_str().as_bytes());
 
-        // The marker is the highest epoch ever written, so it is the top of
-        // the sweep. Trimming keeps only the newest few below it; the slack
-        // covers a delete that failed while it was doing so. A delete of a key
-        // that is not there is not an error, which is what makes a fixed
-        // window the right shape rather than an enumeration this seam cannot
-        // offer.
+        // The anchor is the top of the sweep. Trimming keeps only the newest
+        // few below it; the slack covers a delete that failed while it was
+        // doing so. A delete of a key that is not there is not an error, which
+        // is what makes a fixed window the right shape rather than an
+        // enumeration this seam cannot offer.
         //
-        // A marker that is missing or unreadable cannot bound anything, and
-        // anchoring at zero would delete one record, return `Ok`, and leave
-        // every other epoch's secrets on flash: an erasure the owner asked for
-        // that reports success and did not happen. The group state names the
-        // same neighbourhood of epochs and is about to be deleted anyway, so it
-        // is the fallback anchor.
-        let highest = match self.max_epoch(&key)? {
-            Some(highest) => highest,
-            None => self.current_epoch(&group_id).unwrap_or(0),
+        // Three sources, tried in order, because an anchor that is missing or
+        // unreadable cannot bound anything and anchoring at zero would delete
+        // one record, return `Ok`, and leave every other epoch's secrets on
+        // flash: an erasure the owner asked for that reports success and did
+        // not happen. The marker inside the state entry is first because it is
+        // the one written atomically with the state. The separate high-water
+        // record is second and covers the case that one cannot: a state entry
+        // the part hands back as something else. The group's own epoch is
+        // last, and names the same neighbourhood.
+        let anchor = match crate::adapters::state_marker(&self.store, &key) {
+            Some(highest) => Some(highest),
+            None => self.max_epoch(&key)?,
         };
+        let highest = anchor
+            .or_else(|| self.current_epoch(&group_id))
+            .unwrap_or(0);
         let floor = highest.saturating_sub(PRIOR_EPOCH_RETENTION + FORGET_EPOCH_SLACK);
         for epoch in floor..=highest {
             self.store
@@ -755,6 +774,27 @@ impl LeafDevice {
         self.store
             .store(KEY_TYPE_PEER_INDEX, "peers", &encoded)
             .map_err(|e| LeafError::Storage(e.to_string()))
+    }
+
+    /// Records `peer` in the index without holding it to [`MAX_PEERS`].
+    ///
+    /// The bound exists to stop a stranger spending a device's flash, and
+    /// neither caller here is a stranger: one is firmware choosing to pair,
+    /// the other is a Welcome, which only lands on a key package this device
+    /// minted for that peer in the first place.
+    ///
+    /// It is the index rather than the bound that has to be complete. A peer
+    /// missing from it holds a session nothing can audit and
+    /// [`LeafDevice::unpair`] cannot be pointed at, and a session is exactly
+    /// what the authorization obligation asks firmware to review, since none
+    /// of the gates in this crate answers whether the owner meant this peer.
+    fn index_peer(&mut self, peer: &str) -> Result<()> {
+        let mut index = self.peer_index()?;
+        if index.iter().any(|held| held == peer) {
+            return Ok(());
+        }
+        index.push(peer.to_string());
+        self.save_peer_index(&index)
     }
 
     /// Makes room for `peer` in the bounded set, or refuses.
@@ -950,6 +990,20 @@ impl core::fmt::Debug for LeafDevice {
         f.debug_struct("LeafDevice")
             .field("address", &self.identity.address.to_string())
             .finish_non_exhaustive()
+    }
+}
+
+/// A frame that produced nothing, and why.
+///
+/// Surfaced rather than swallowed so a bench can tell "refused" from "silently
+/// dropped", which are the two states a pairing failure looks like from
+/// outside a device with no console.
+fn ignored(reason: &str) -> Handled {
+    Handled {
+        outbound: Vec::new(),
+        events: vec![LeafEvent::Ignored {
+            reason: String::from(reason),
+        }],
     }
 }
 

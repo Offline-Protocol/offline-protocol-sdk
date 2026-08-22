@@ -1382,3 +1382,288 @@ fn a_welcome_whose_body_lies_about_its_group_is_refused() {
         "the refused welcome still left a session on flash"
     );
 }
+
+/// A store that refuses writes of one key type while armed.
+///
+/// A power cut lands between two entries rather than inside one, and this is
+/// how that looks to a caller: everything before the cut is durable, the entry
+/// at the cut is not, and the device is asked to carry on afterwards.
+struct TornStore {
+    inner: MemoryStore,
+    refuse_type: Mutex<Option<String>>,
+    refusals: Mutex<usize>,
+}
+
+impl TornStore {
+    fn new() -> Self {
+        Self {
+            inner: MemoryStore::new(),
+            refuse_type: Mutex::new(None),
+            refusals: Mutex::new(0),
+        }
+    }
+
+    fn cut(&self, key_type: &str) {
+        *self.refuse_type.lock().expect("lock") = Some(key_type.to_string());
+    }
+
+    fn restore_power(&self) {
+        *self.refuse_type.lock().expect("lock") = None;
+    }
+
+    fn refusals(&self) -> usize {
+        *self.refusals.lock().expect("lock")
+    }
+}
+
+impl LeafStore for TornStore {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> Result<(), StoreError> {
+        if self.refuse_type.lock().expect("lock").as_deref() == Some(key_type) {
+            *self.refusals.lock().expect("lock") += 1;
+            return Err(StoreError::Store("power cut".to_string()));
+        }
+        self.inner.store(key_type, key_id, data)
+    }
+
+    fn load(&self, key_type: &str, key_id: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        self.inner.load(key_type, key_id)
+    }
+
+    fn delete(&self, key_type: &str, key_id: &str) -> Result<(), StoreError> {
+        self.inner.delete(key_type, key_id)
+    }
+}
+
+#[test]
+fn a_cut_between_the_epoch_records_and_the_state_does_not_wedge_the_session() {
+    let phone = new_phone();
+    let store = Arc::new(TornStore::new());
+    let mut device = device(Arc::clone(&store) as Arc<dyn LeafStore>);
+    let device_address = pair(&phone, &mut device);
+
+    // A healthy commit first, so the group has a marker to get ahead of. The
+    // wedge this guards needs a marker that already exists.
+    commit_to(&phone, &mut device, &device_address);
+
+    // The cut: the commit's epoch records reach flash, the state does not.
+    // mls-rs sequences every later insert against the marker, so a marker that
+    // landed here without its state refuses every commit that follows, for
+    // good: the retry offers the epoch id the marker has already counted.
+    store.cut(KEY_TYPE_GROUP_STATE);
+    let group_id = GroupId::for_session(&phone.address, &device_address).expect("pair group id");
+    let commit = phone.manager.update_keys(&group_id).expect("phone commits");
+    let frame = phone_sealed_frame(&phone, &device_address, &commit);
+    let err = device
+        .handle(&frame, NOW)
+        .expect_err("a state write that failed still reported success");
+    assert!(
+        matches!(err, LeafError::Storage(_)),
+        "a cut state write produced {err:?}"
+    );
+
+    // The control: the write really was refused, so this test is exercising
+    // the torn window rather than passing because nothing was attempted.
+    assert!(
+        store.refusals() > 0,
+        "no state write was attempted, so this proves nothing about the window"
+    );
+
+    // Power comes back and the phone retries the frame it never saw answered,
+    // which is what a radio does with anything unacknowledged.
+    store.restore_power();
+    let retried = device
+        .handle(&frame, NOW)
+        .expect("the retried commit was refused, so the session is wedged");
+    assert!(
+        retried
+            .events
+            .iter()
+            .any(|event| matches!(event, LeafEvent::CommitApplied { .. })),
+        "the retried commit did not apply: {:?}",
+        retried.events
+    );
+
+    // And the session is a working one rather than one that merely stopped
+    // reporting errors.
+    let sealed = phone
+        .manager
+        .encrypt_for_user(&device_address, b"unlock")
+        .expect("phone seals");
+    let app_frame = phone_sealed_frame(&phone, &device_address, &sealed);
+    let handled = device.handle(&app_frame, NOW).expect("device opens");
+    assert_eq!(
+        handled.events,
+        vec![LeafEvent::MessageReceived {
+            peer: phone.address.clone(),
+            text: "unlock".to_string(),
+        }]
+    );
+
+    // The device answers too, so its own ratchet advanced rather than merely
+    // its reader.
+    let answer = device
+        .seal(&phone.address, "unlocked", NOW)
+        .expect("device seals");
+    let opened = phone
+        .manager
+        .decrypt_from_user(&envelope_of(&answer), &device_address)
+        .expect("phone opens the answer");
+    assert_eq!(opened.as_deref(), Some(&b"unlocked"[..]));
+}
+
+#[test]
+fn a_peer_that_paired_through_a_welcome_is_in_the_audit_list() {
+    let phone = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    pair(&phone, &mut device);
+
+    // Authorization is the obligation this crate cannot discharge, and
+    // `peers` is what it offers firmware instead: the list of who a device
+    // ended up holding. A session missing from it is one nobody can audit and
+    // nobody can point `unpair` at, and advertise-then-Welcome is the ordinary
+    // way a session comes to exist, not an unusual one.
+    assert!(
+        device.has_session(&phone.address).expect("session check"),
+        "the pairing left no session, so this test would pass vacuously"
+    );
+    let peers = device.peers().expect("peers");
+    assert!(
+        peers.contains(&phone.address),
+        "a peer this device holds a session with is missing from the audit list: {peers:?}"
+    );
+
+    // And the list is actionable: what it names can be removed.
+    device.unpair(&phone.address).expect("device unpairs");
+    assert!(
+        !device.has_session(&phone.address).expect("session check"),
+        "unpairing a peer from the audit list left its session"
+    );
+    assert!(
+        device.peers().expect("peers").is_empty(),
+        "unpairing left the peer in the audit list"
+    );
+}
+
+#[test]
+fn a_probe_against_a_group_state_that_will_not_load_is_not_answered() {
+    let phone = new_phone();
+    let store = Arc::new(CountingStore::default());
+    let mut device = device(Arc::clone(&store) as Arc<dyn LeafStore>);
+    pair(&phone, &mut device);
+
+    // Bytes on flash are not a session. A peer confirms its session on the
+    // acknowledgement and then flushes everything it queued into it, so a
+    // device that answered on the strength of a state it cannot load would
+    // confirm a session it cannot open one frame of, and its silence
+    // afterwards is indistinguishable from a quiet link.
+    let key = store
+        .keys_of(KEY_TYPE_GROUP_STATE)
+        .into_iter()
+        .next()
+        .expect("pairing wrote group state");
+    store
+        .store(KEY_TYPE_GROUP_STATE, &key, b"not a group")
+        .expect("store");
+
+    let probe = phone_control_frame(
+        &phone,
+        &device.address().to_string(),
+        prefixes::SESSION_CONFIRM_PROBE.to_string(),
+    );
+    let err = device
+        .handle(&probe, NOW)
+        .expect_err("a device with an unloadable session confirmed one anyway");
+
+    // And it is reported as what it is. A store handing back bytes this device
+    // did not write is not a missing session, and sending a bench to re-pair
+    // is sending it after the one repair that cannot work.
+    assert!(
+        matches!(err, LeafError::Storage(_)),
+        "an unloadable state produced {err:?}"
+    );
+}
+
+#[test]
+fn a_resumed_device_refuses_a_public_key_its_secret_did_not_make() {
+    let store: Arc<dyn LeafStore> = Arc::new(MemoryStore::new());
+    let original = LeafDevice::provision(Arc::clone(&store), APP_ID).expect("provisioning");
+    let address = original.address().to_string();
+    let own = store
+        .load(KEY_TYPE_IDENTITY, "signature_public")
+        .expect("load")
+        .expect("provisioning wrote a public key");
+
+    // The identity is two entries, and the reason this crate has a durability
+    // contract at all is that a part can hand back something other than what
+    // was written. Somebody else's public key is the shape that does the most
+    // damage quietly: the device comes back at an address no peer knows it by
+    // and signs frames that verify nowhere, and every gate in the protocol
+    // refuses it while naming a different failure than the one that happened.
+    let other_store: Arc<dyn LeafStore> = Arc::new(MemoryStore::new());
+    LeafDevice::provision(Arc::clone(&other_store), APP_ID).expect("second device");
+    let foreign = other_store
+        .load(KEY_TYPE_IDENTITY, "signature_public")
+        .expect("load")
+        .expect("the second device wrote a public key");
+    assert_ne!(
+        foreign, own,
+        "the two devices minted the same key, so this test would prove nothing"
+    );
+
+    store
+        .store(KEY_TYPE_IDENTITY, "signature_public", &foreign)
+        .expect("store");
+    let err = LeafDevice::resume(Arc::clone(&store), APP_ID)
+        .expect_err("a device resumed on a key its secret does not derive to");
+    assert!(
+        matches!(err, LeafError::Storage(_)),
+        "a mismatched identity pair produced {err:?}"
+    );
+
+    // The control: with its own key back, the same device resumes as itself.
+    // This refuses a mismatch rather than refusing everything.
+    store
+        .store(KEY_TYPE_IDENTITY, "signature_public", &own)
+        .expect("store");
+    let resumed = LeafDevice::resume(store, APP_ID).expect("the intact pair still resumes");
+    assert_eq!(resumed.address().to_string(), address);
+}
+
+#[test]
+fn unpairing_sweeps_epochs_when_the_state_entry_cannot_be_read() {
+    let phone = new_phone();
+    let store = Arc::new(CountingStore::default());
+    let mut device = device(Arc::clone(&store) as Arc<dyn LeafStore>);
+    let device_address = pair(&phone, &mut device);
+
+    commit_to(&phone, &mut device, &device_address);
+    commit_to(&phone, &mut device, &device_address);
+    assert!(
+        !store.epoch_records().is_empty(),
+        "the setup wrote no epoch records, so this test would pass vacuously"
+    );
+
+    // The sweep's first anchor is the marker inside the state entry, and this
+    // is the case that anchor cannot cover: the entry itself is unreadable, so
+    // neither the marker nor the group's own epoch can bound anything. The
+    // separate high-water record exists for exactly this, and without it the
+    // sweep would anchor at zero, delete one record, return `Ok`, and leave
+    // the rest of the epochs' secrets on flash under a name the next session
+    // with this peer answers to.
+    let key = store
+        .keys_of(KEY_TYPE_GROUP_STATE)
+        .into_iter()
+        .next()
+        .expect("pairing wrote group state");
+    store
+        .store(KEY_TYPE_GROUP_STATE, &key, b"nope")
+        .expect("store");
+
+    device.unpair(&phone.address).expect("device unpairs");
+
+    assert!(
+        store.epoch_records().is_empty(),
+        "an unreadable state entry left epoch records behind: {:?}",
+        store.epoch_records()
+    );
+}

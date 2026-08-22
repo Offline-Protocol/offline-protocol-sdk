@@ -112,6 +112,17 @@ impl Identity {
     /// complete or missing the secret, and the second of those is what `open`
     /// recovers from. Swapping those two writes makes this function the half
     /// of a deadlock.
+    ///
+    /// # Why the pair is checked rather than trusted
+    ///
+    /// The two entries are stored separately, and the whole reason this crate
+    /// has a durability contract is that a part can hand back something other
+    /// than what was written. A device that resumed on a public key its secret
+    /// does not derive to would take an address no peer knows it by and sign
+    /// frames that verify nowhere: every gate in this protocol refuses it, and
+    /// every one of them names a different failure than the one that happened,
+    /// which is a bench chasing a pairing problem that is really a flash
+    /// problem. One scalar multiplication per boot buys the right error.
     pub(crate) fn resume(store: &Arc<dyn LeafStore>) -> Result<Self> {
         let secret = store
             .load(KEY_TYPE_IDENTITY, KEY_ID_SECRET)
@@ -122,10 +133,23 @@ impl Identity {
             .map_err(|e| LeafError::Storage(e.to_string()))?
             .ok_or(LeafError::NotProvisioned)?;
 
+        let secret = SignatureSecretKey::from(secret);
         let public = SignaturePublicKey::from(public);
+
+        let derived = suite_provider()?
+            .signature_key_derive_public(&secret)
+            .map_err(|e| {
+                LeafError::Crypto(format!("cannot derive a public key from the secret: {e:?}"))
+            })?;
+        if derived.as_bytes() != public.as_bytes() {
+            return Err(LeafError::Storage(alloc::string::String::from(
+                "the stored public key is not the one this device's secret derives to",
+            )));
+        }
+
         let address = derive_address(public.as_bytes())?;
         Ok(Self {
-            secret: SignatureSecretKey::from(secret),
+            secret,
             public,
             address,
         })

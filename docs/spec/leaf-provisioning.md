@@ -172,14 +172,17 @@ A conforming leaf:
 - **never emits** a Welcome, a commit, a proposal, or any group, rich, document
   or relay frame.
 
-A leaf MUST answer a probe only while it holds a session with that peer, which
-is the rule a phone already applies to the same frame. The acknowledgement is
-not a liveness signal: a peer confirms its session on receiving one and then
-flushes everything it had queued into that session. A device that answered
-after losing its store would confirm a session it cannot decrypt one frame of,
-and the silence afterwards is indistinguishable from a quiet link, so the peer
-never learns. Staying quiet leaves it unconfirmed, which is a state it has a
-path out of.
+A leaf MUST answer a probe only while it holds a session with that peer **that
+it can still load**, which is the rule a phone already applies to the same
+frame. The acknowledgement is not a liveness signal: a peer confirms its
+session on receiving one and then flushes everything it had queued into that
+session. A device that answered after losing its store would confirm a session
+it cannot decrypt one frame of, and the silence afterwards is
+indistinguishable from a quiet link, so the peer never learns. Staying quiet
+leaves it unconfirmed, which is a state it has a path out of. Stored bytes are
+not the test: state that is present and unloadable decrypts exactly as much as
+state that is absent, so a leaf MUST NOT answer on the strength of a record it
+has not opened.
 
 A leaf MUST NOT treat an inbound `__MLS_CONFIRM_ACK__` as evidence of a
 session, which is why the frame appears above under what a leaf emits and not

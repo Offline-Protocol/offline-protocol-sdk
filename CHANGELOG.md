@@ -184,6 +184,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   failing store and asserts both that nothing is emitted and that the write was
   actually attempted, so it cannot pass by short-circuiting earlier.
 
+  The seam is atomic per entry rather than across a set, so what a cut lands
+  between is chosen rather than left to chance. Prior-epoch records go down
+  before the state, because a state with records it does not yet reference
+  costs nothing while the reverse loses the out-of-order tolerance a lossy
+  radio needs. The **epoch marker mls-rs sequences against travels inside the
+  state entry**, because ordering cannot make those two safe in either
+  direction: a marker that reached flash without its state refuses every commit
+  that follows, permanently, and the device goes deaf to its peer until that
+  peer drives a full reset. A separate high-water record survives the state and
+  bounds the erasure sweep on unpair, which is the one job the in-state marker
+  cannot do.
+
   Four obligations stay with the integrator, and the API is shaped so none can
   be forgotten silently: every entry point needing a clock takes
   `now_unix_secs` (a device that lets an MLS library read a clock it does not
@@ -196,7 +208,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   radio accepts one and what a given peer's messages may actuate. A lock that
   opens for whatever arrives on an established session opens for anyone patient
   enough to pair with it. `LeafDevice::peers` is how firmware audits what a
-  device accumulated and `unpair` is how it removes one.
+  device accumulated and `unpair` is how it removes one, and every route to a
+  session puts the peer on that list, because a session firmware cannot see is
+  one it can neither review nor revoke.
 
 - **`Message::from_parts` in `offline-protocol-core`**, which is
   `Message::new` with its two ambient inputs, the clock and the entropy, made
