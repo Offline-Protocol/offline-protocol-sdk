@@ -89,16 +89,27 @@ for row in "${LEAF_ROWS[@]}"; do
     cargo build --release --locked --quiet --features "${feature}"
     f=$(flash "${OUT}/leaf")
 
-    # The guard the sample-honesty problem needs. If MLS ever stops being
-    # linked (a workload that optimises away, a dependency that silently drops
-    # out), the flash number falls toward `protocol` and reads as an
+    # The guard the sample-honesty problem needs. If either half ever stops
+    # being linked (a workload that optimises away, a dependency that silently
+    # drops out), the flash number falls toward `protocol` and reads as an
     # improvement. A symbol count cannot be fooled that way.
-    symbols=$("${LLVM_NM}" "${OUT}/leaf" 2>/dev/null | grep -c "mls_rs" || true)
-    if (( symbols < 50 )); then
-        echo "FAIL: only ${symbols} mls-rs symbols in the ${feature} image." >&2
-        echo "The workload stopped linking MLS; the number below is not a footprint." >&2
-        exit 1
-    fi
+    #
+    # Both halves are counted, because they fall out independently. The leaf
+    # crate is the one this harness exists to price: a workload that drifted
+    # back onto mls-rs directly would link the envelope codec, the
+    # control-frame signing and the address derivation no more than the
+    # version this replaced did, drop tens of kilobytes, and pass an mls-rs
+    # count the whole way.
+    for probe in "mls_rs:MLS" "offline_protocol_leaf:the leaf crate"; do
+        symbol="${probe%%:*}"
+        what="${probe#*:}"
+        symbols=$("${LLVM_NM}" "${OUT}/leaf" 2>/dev/null | grep -c "${symbol}" || true)
+        if (( symbols < 50 )); then
+            echo "FAIL: only ${symbols} ${symbol} symbols in the ${feature} image." >&2
+            echo "The workload stopped linking ${what}; the number below is not a footprint." >&2
+            exit 1
+        fi
+    done
 
     awk -v f="${f}" -v bf="${base_flash}" -v pf="${prot_flash}" -v l="${label}" 'BEGIN {
       k = 1024

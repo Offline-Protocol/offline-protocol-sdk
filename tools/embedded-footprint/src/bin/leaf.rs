@@ -140,7 +140,7 @@ fn mls_workload() -> Option<()> {
     // Provisioning draws from the getrandom backend this harness registers,
     // which is a counter. On hardware that symbol is the part's TRNG, and the
     // device's identity is exactly as strong as what it returns.
-    let device = LeafDevice::open(store, black_box("com.example.lock")).ok()?;
+    let mut device = LeafDevice::open(store, black_box("com.example.lock")).ok()?;
     black_box(device.address());
 
     // Pairing: the device mints one key package and signs the frame carrying
