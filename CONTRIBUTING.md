@@ -77,6 +77,7 @@ We use [Conventional Commits](https://www.conventionalcommits.org/):
 **Scopes**:
 - `core`: offline-protocol-core
 - `sealed`: offline-protocol-sealed (envelope codec, address derivation, signing payloads)
+- `leaf`: offline-protocol-leaf (a constrained device as a never-committing MLS member)
 - `transport`: offline-protocol-transport
 - `router`: offline-protocol-router (DORS)
 - `reliability`: offline-protocol-reliability
@@ -117,6 +118,7 @@ offline-protocol-sdk/
 ├── crates/          # Rust crates (core logic)
 │   ├── offline-protocol-core/
 │   ├── offline-protocol-sealed/
+│   ├── offline-protocol-leaf/
 │   ├── offline-protocol-transport/
 │   ├── offline-protocol-router/
 │   ├── offline-protocol-reliability/

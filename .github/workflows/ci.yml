@@ -237,6 +237,30 @@ jobs:
       - name: Build the sealed layer standalone with default features
         run: cargo build --package offline-protocol-sealed --locked
 
+      # The leaf node itself. `bare-metal-rng` selects getrandom's custom
+      # backend, which the target needs because getrandom has none for it and
+      # refuses to compile otherwise; the crate still registers no
+      # implementation, because that is the firmware's TRNG to wire up.
+      #
+      # This step is the only thing that catches an mls-rs error formatted with
+      # `{}`: mls-rs implements `Display` on its error only under `std`, so the
+      # host build accepts what the device build rejects.
+      - name: Build the leaf node for bare metal
+        run: >
+          cargo build --package offline-protocol-leaf
+          --no-default-features --features bare-metal-rng
+          --locked --target thumbv8m.main-none-eabihf
+
+      - name: Clippy the leaf node for bare metal
+        run: >
+          cargo clippy --package offline-protocol-leaf
+          --no-default-features --features bare-metal-rng
+          --locked --target thumbv8m.main-none-eabihf
+          -- -D warnings
+
+      - name: Build the leaf node standalone with default features
+        run: cargo build --package offline-protocol-leaf --locked
+
       # `embedded-footprint` has its own workspace, so the repo's Clippy job
       # does not reach it. The leaf configurations are linted individually
       # because each is a separate link with a different feature set.

@@ -117,7 +117,35 @@ implementations and are not allowed to disagree about anything outside them.
 
 **Dependencies**: `offline-protocol-core`, `offline-protocol-sealed`, OpenMLS
 
-### 7. offline-protocol-services
+### 7. offline-protocol-leaf
+
+**Purpose**: A constrained device (a door lock, a sensor, a mains-powered
+relay) speaking the protocol as a real peer rather than a reduced one. It runs
+RFC 9420 MLS through mls-rs as a **never-committing member**: the phone creates
+the group, adds the device and issues every commit, while the device joins,
+opens what arrives, answers and persists. See
+[ADR 0021](adr/0021-a-leaf-node-speaks-mls.md).
+
+**Key Components**:
+- `LeafDevice` - a frame-level state machine: an inbound message in, the frames to send and what happened out
+- `LeafStore` - one blob-storage seam a device implements over its secure key storage
+- Key package minting with the backdated `not_before` and supplied timestamp a device needs in order to pair at all
+
+**Four obligations it cannot discharge for the integrator**: a time source at
+pairing, real hardware entropy behind `getrandom`, durable atomic storage, and
+authorization, because a session proves who a peer is and never that the owner
+meant them.
+Persist-before-emit is enforced structurally rather than documented: every
+operation that advances the ratchet writes before it returns a frame, because a
+state rolled back by a power cut reuses an AEAD nonce.
+
+**Safety**: `#![deny(unsafe_code)]`
+
+**Dependencies**: `offline-protocol-core`, `offline-protocol-sealed`, mls-rs.
+Deliberately **not** the engine or the MLS crate: nothing above `sealed` builds
+without `std`.
+
+### 8. offline-protocol-services
 
 **Purpose**: Standalone service discovery and request/response over the mesh.
 
@@ -138,7 +166,7 @@ implementations and are not allowed to disagree about anything outside them.
 
 **Dependencies**: `offline-protocol-core`
 
-### 8. offline-protocol-data
+### 9. offline-protocol-data
 
 **Purpose**: Replicated documents — offline-first state that any member of a space can edit while disconnected, merging deterministically when replicas meet again. Messaging is synced events; this crate is synced state.
 
@@ -158,7 +186,7 @@ implementations and are not allowed to disagree about anything outside them.
 
 **Dependencies**: `loro` (pinned exactly; it publishes no MSRV metadata, so every bump re-runs the MSRV check and the mobile size measurement)
 
-### 9. offline-protocol
+### 10. offline-protocol
 
 **Purpose**: Main SDK API integrating all components.
 
@@ -185,7 +213,7 @@ AEAD key held in secure storage before they reach the state provider. See
 
 **Dependencies**: All other crates. `offline-protocol-data` is behind a default-on `data` feature, so a native consumer that only wants messaging can drop the CRDT engine with `default-features = false`.
 
-### 10. offline-protocol-uniffi
+### 11. offline-protocol-uniffi
 
 **Purpose:** UniFFI bindings for cross-platform interoperability.
 
