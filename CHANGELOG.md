@@ -188,8 +188,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
   **What it keeps is bounded.** Prior-epoch records are trimmed to a window
   rather than kept forever, which bounds both the flash they occupy and how far
-  back a stolen device reads; unpairing erases them along with the session, so
-  epoch secrets do not outlive the erasure an owner asked for. Peer records and
+  back a stolen device reads; unpairing erases them along with the session and
+  with the key package minted for that peer, so neither epoch secrets nor an
+  unspent init key outlive the erasure an owner asked for. Peer records and
   unspent key packages are bounded too, and a full peer table refuses a
   stranger rather than evicting somebody the owner paired with, because
   producing a frame that derives to its own address costs an attacker nothing.

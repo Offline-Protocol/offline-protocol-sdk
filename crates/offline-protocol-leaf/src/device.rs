@@ -17,7 +17,7 @@ use offline_protocol_sealed::{
     MLS_ENVELOPE_COMPACT_V1,
 };
 
-use crate::adapters::{PeerRecord, PRIOR_EPOCH_RETENTION};
+use crate::adapters::{KeyPackageAdapter, PeerRecord, PRIOR_EPOCH_RETENTION};
 use crate::error::{LeafError, Result};
 use crate::frames;
 use crate::identity::{build_client, Identity};
@@ -44,12 +44,16 @@ use crate::store::{
 /// stated on [`LeafError::TooManyPeers`].
 const MAX_PEERS: usize = 16;
 
-/// How far below the retained window [`LeafDevice::unpair`] sweeps.
+/// How far past the retained window [`LeafDevice::unpair`] sweeps, in **both**
+/// directions.
 ///
 /// [`PRIOR_EPOCH_RETENTION`] says what a healthy device holds. This is the
-/// margin for one that is not: a delete that failed during trimming leaves a
-/// record holding an epoch's secrets, and forgetting a peer is the moment to
-/// clear those rather than the moment to assume they are not there.
+/// margin for one that is not, and each side of the window needs it for a
+/// different reason. Below: a delete that failed during trimming leaves a
+/// record holding an epoch's secrets. Above: the adapter writes epoch records
+/// before the state entry that sequences them, so a cut between the two leaves
+/// a record that every anchor agrees is not there. Forgetting a peer is the
+/// moment to clear both rather than the moment to assume they are absent.
 const FORGET_EPOCH_SLACK: u64 = 16;
 
 /// Something that happened, for the firmware to act on.
@@ -798,10 +802,17 @@ impl LeafDevice {
         let group_id = self.group_id(peer)?;
         let key = crate::adapters::hex(group_id.as_str().as_bytes());
 
-        // The anchor is the top of the sweep. Trimming keeps only the newest
-        // few below it; the slack covers a delete that failed while it was
-        // doing so. A delete of a key that is not there is not an error, which
-        // is what makes a fixed window the right shape rather than an
+        // The anchor is the middle of the sweep rather than its top. Trimming
+        // keeps only the newest few below it and the slack covers a delete
+        // that failed while it was doing so, but a record can also sit
+        // **above** every anchor: the adapter writes epoch records before the
+        // state entry that names them, so a cut between the two leaves an
+        // epoch on flash that the marker, the high-water record and the
+        // group's own epoch all agree is not there. Sweeping only downward
+        // would delete every record but that one and report success, which is
+        // the same erasure-that-did-not-happen the three anchors below exist
+        // to prevent. A delete of a key that is not there is not an error,
+        // which is what makes a fixed window the right shape rather than an
         // enumeration this seam cannot offer.
         //
         // Three sources, tried in order, because an anchor that is missing or
@@ -821,7 +832,8 @@ impl LeafDevice {
             .or_else(|| self.current_epoch(&group_id))
             .unwrap_or(0);
         let floor = highest.saturating_sub(PRIOR_EPOCH_RETENTION + FORGET_EPOCH_SLACK);
-        for epoch in floor..=highest {
+        let ceiling = highest.saturating_add(FORGET_EPOCH_SLACK);
+        for epoch in floor..=ceiling {
             self.store
                 .delete(KEY_TYPE_GROUP_EPOCH, &format!("{key}:{epoch}"))
                 .map_err(|e| LeafError::Storage(e.to_string()))?;
@@ -852,9 +864,41 @@ impl LeafDevice {
             .map(u64::from_be_bytes))
     }
 
-    /// Forgets a peer's session and what it advertised, leaving the index.
+    /// Forgets a peer's session, its key package and what it advertised,
+    /// leaving the index.
     fn forget_peer(&mut self, peer: &str) -> Result<()> {
+        // Read before the record holding it is deleted, because that reference
+        // is the only pointer this device has to the key package minted for
+        // this peer, and the package is private key material. An init key is
+        // single use, so one nobody spends is never consumed, and the only
+        // other thing that reclaims it is four later mints pushing it out of
+        // the ring. On a device that pairs twice a year that is years of
+        // holding an init key for a peer the owner asked it to forget.
+        //
+        // Best effort, though. A record that will not decode has no reference
+        // to give, and refusing the whole call for that would leave the owner
+        // unable to forget a peer at all: the one escape hatch a device has,
+        // closed by exactly the corruption it exists to recover from. An
+        // unreclaimed package is the smaller residue, and it is the same
+        // reading [`LeafDevice::peer_index`] gives an index that does not
+        // parse.
+        let minted = self
+            .peer_record(peer)
+            .ok()
+            .and_then(|record| record.key_package_ref);
+
         self.forget_session(peer)?;
+
+        // Erased before the record stops naming it, which is the ordering the
+        // adapter's own eviction uses and for the same reason: a failed erase
+        // leaves a pointer a retry can still follow, where the other order
+        // leaves key material that nothing names and nothing reclaims.
+        if let Some(reference) = minted {
+            KeyPackageAdapter::new(Arc::clone(&self.store))
+                .erase(&reference)
+                .map_err(|e| LeafError::Storage(e.to_string()))?;
+        }
+
         self.store
             .delete(KEY_TYPE_PEER, peer)
             .map_err(|e| LeafError::Storage(e.to_string()))?;
@@ -1201,11 +1245,17 @@ impl LeafDevice {
         Ok(self.peer_record(peer)?.env_versions)
     }
 
-    /// Forgets a peer: its session, its prior epochs, and what it advertised.
+    /// Forgets a peer: its session, its prior epochs, the key package minted
+    /// for it, and what it advertised.
     ///
     /// Exposed because a device that is factory reset or unpaired must be able
     /// to forget, and because leaving MLS state behind for a peer the owner
     /// removed is the kind of residue that outlives the reason it existed.
+    ///
+    /// The key package is part of that and is easy to miss, because the only
+    /// pointer to it is the reference inside the record this call deletes. It
+    /// holds an init key, which is single use and therefore never consumed if
+    /// the pairing it was minted for never completed.
     ///
     /// Also releases the slot it held, so unpairing is how an owner makes room
     /// on a device whose peer table is full.

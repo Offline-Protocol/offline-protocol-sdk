@@ -1413,6 +1413,7 @@ struct TornStore {
     inner: MemoryStore,
     refuse_type: Mutex<Option<String>>,
     refusals: Mutex<usize>,
+    keys: Mutex<Vec<(String, String)>>,
 }
 
 impl TornStore {
@@ -1421,7 +1422,19 @@ impl TornStore {
             inner: MemoryStore::new(),
             refuse_type: Mutex::new(None),
             refusals: Mutex::new(0),
+            keys: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Prior-epoch records held, which `LeafStore` itself cannot enumerate.
+    fn epoch_records(&self) -> Vec<String> {
+        self.keys
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|(held, id)| held == KEY_TYPE_GROUP_EPOCH && !id.ends_with(":max"))
+            .map(|(_, id)| id.clone())
+            .collect()
     }
 
     fn cut(&self, key_type: &str) {
@@ -1443,7 +1456,12 @@ impl LeafStore for TornStore {
             *self.refusals.lock().expect("lock") += 1;
             return Err(StoreError::Store("power cut".to_string()));
         }
-        self.inner.store(key_type, key_id, data)
+        self.inner.store(key_type, key_id, data)?;
+        let mut keys = self.keys.lock().expect("lock");
+        if !keys.iter().any(|(t, i)| t == key_type && i == key_id) {
+            keys.push((key_type.to_string(), key_id.to_string()));
+        }
+        Ok(())
     }
 
     fn load(&self, key_type: &str, key_id: &str) -> Result<Option<Vec<u8>>, StoreError> {
@@ -1451,7 +1469,12 @@ impl LeafStore for TornStore {
     }
 
     fn delete(&self, key_type: &str, key_id: &str) -> Result<(), StoreError> {
-        self.inner.delete(key_type, key_id)
+        self.inner.delete(key_type, key_id)?;
+        self.keys
+            .lock()
+            .expect("lock")
+            .retain(|(t, i)| !(t == key_type && i == key_id));
+        Ok(())
     }
 }
 
@@ -2300,5 +2323,141 @@ fn a_probe_against_a_group_that_stopped_being_a_pair_is_not_answered() {
     assert!(
         matches!(err, LeafError::IdentityBinding(_)),
         "a probe against a widened group produced {err:?}"
+    );
+}
+
+/// A record can sit *above* every anchor the sweep has to work from.
+///
+/// The adapter writes epoch records before the state entry that sequences
+/// them, so a cut between the two leaves an epoch on flash that the marker,
+/// the high-water record and the group's own epoch all agree is not there. A
+/// sweep that only ran downward would delete every record but that one and
+/// report success, which is an erasure the owner asked for that did not
+/// happen, holding the secrets of the one epoch nothing else will ever name.
+#[test]
+fn unpairing_sweeps_an_epoch_record_a_torn_write_left_above_every_anchor() {
+    let phone = new_phone();
+    let store = Arc::new(TornStore::new());
+    let mut device = device(Arc::clone(&store) as Arc<dyn LeafStore>);
+    let device_address = pair(&phone, &mut device);
+
+    // Two ordinary commits, so the group has left epochs behind and the
+    // records below the anchor are the ones a healthy sweep already covers.
+    commit_to(&phone, &mut device, &device_address);
+    commit_to(&phone, &mut device, &device_address);
+
+    // The cut: the record for the epoch being left goes down, and the state
+    // entry that would have named it does not.
+    store.cut(KEY_TYPE_GROUP_STATE);
+    let group_id = GroupId::for_session(&phone.address, &device_address).expect("pair group id");
+    let commit = phone.manager.update_keys(&group_id).expect("phone commits");
+    let frame = phone_sealed_frame(&phone, &device_address, &commit);
+    let err = device
+        .handle(&frame, NOW)
+        .expect_err("the state write was cut and the frame was handled anyway");
+    assert!(
+        matches!(err, LeafError::Storage(_)),
+        "a cut state write produced {err:?}"
+    );
+    store.restore_power();
+
+    let before = store.epoch_records();
+    assert!(
+        !before.is_empty(),
+        "nothing was left on flash to sweep, so this test proves nothing"
+    );
+
+    device.unpair(&phone.address).expect("the owner unpairs");
+
+    let after = store.epoch_records();
+    assert!(
+        after.is_empty(),
+        "an epoch record survived the erasure its owner asked for: {after:?} \
+         (before unpairing: {before:?})"
+    );
+}
+
+/// An init key outliving the peer it was minted for.
+///
+/// The reference in the peer record is the only pointer to it, so deleting
+/// that record without erasing the package first leaves private key material
+/// nothing names and nothing reclaims: a package nobody spends is never
+/// consumed by a join, no sweep covers this key type, and the ring only
+/// evicts it once four later mints have happened. On a device that pairs
+/// twice a year that is years, for a peer the owner asked it to forget.
+#[test]
+fn unpairing_erases_the_key_package_minted_for_the_peer() {
+    // Mirrored from the adapter, which keeps it private; it cannot collide
+    // with a package id because every one of those is hex and `_` is not a
+    // hex digit.
+    const KEY_PACKAGE_INDEX: &str = "__index__";
+
+    let phone = new_phone();
+    let store = Arc::new(CountingStore::default());
+    let mut device = device(Arc::clone(&store) as Arc<dyn LeafStore>);
+
+    // Minted and never spent, which is the state that accumulates: an
+    // abandoned pairing, or one a stranger provoked.
+    device
+        .key_package_frame(&phone.address, NOW)
+        .expect("device mints a key package");
+
+    let held: Vec<String> = store
+        .keys_of(KEY_TYPE_KEY_PACKAGE)
+        .into_iter()
+        .filter(|id| id != KEY_PACKAGE_INDEX)
+        .collect();
+    assert_eq!(
+        held.len(),
+        1,
+        "no package was minted, so this test proves nothing: {held:?}"
+    );
+
+    device.unpair(&phone.address).expect("the owner unpairs");
+
+    let after: Vec<String> = store
+        .keys_of(KEY_TYPE_KEY_PACKAGE)
+        .into_iter()
+        .filter(|id| id != KEY_PACKAGE_INDEX)
+        .collect();
+    assert!(
+        after.is_empty(),
+        "an init key survived the peer it was minted for: {after:?}"
+    );
+}
+
+/// The owner's escape hatch cannot be closed by the corruption it recovers
+/// from.
+///
+/// Erasing the key package means reading the record that names it, and a
+/// record that will not decode has no reference to give. Refusing the whole
+/// call for that would leave a device unable to forget a peer at all, which
+/// is a worse residue than an unreclaimed package by every measure.
+#[test]
+fn unpairing_survives_a_peer_record_that_will_not_decode() {
+    let phone = new_phone();
+    let store = Arc::new(CountingStore::default());
+    let mut device = device(Arc::clone(&store) as Arc<dyn LeafStore>);
+
+    device
+        .key_package_frame(&phone.address, NOW)
+        .expect("device mints a key package");
+
+    // The record holding the reference is now unreadable.
+    store
+        .store(KEY_TYPE_PEER, &phone.address, b"not json at all")
+        .expect("the store accepts the corrupt record");
+
+    device
+        .unpair(&phone.address)
+        .expect("a corrupt record left the owner unable to forget a peer");
+
+    assert!(
+        !store.keys_of(KEY_TYPE_PEER).contains(&phone.address),
+        "the peer record survived unpairing"
+    );
+    assert!(
+        !device.peers().expect("peer list").contains(&phone.address),
+        "the peer survived unpairing in the index"
     );
 }

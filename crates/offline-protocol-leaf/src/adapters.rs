@@ -304,9 +304,12 @@ impl GroupStateStorage for GroupStateAdapter {
 ///
 /// mls-rs deletes an entry when a join consumes it, so the only entries that
 /// accumulate are packages nobody ever spent: a pairing that was abandoned, or
-/// one a stranger provoked. Without a bound each of those is private key
-/// material written to flash and never reclaimed, and provoking a mint costs
-/// an attacker one signed frame.
+/// one a stranger provoked. [`LeafDevice::unpair`](crate::LeafDevice::unpair)
+/// reclaims the one a peer record still names, which needs an owner who knows
+/// the peer is there; a stranger provoking mints leaves records nobody is
+/// watching. Without a bound each of those is private key material written to
+/// flash and never reclaimed, and provoking a mint costs an attacker one
+/// signed frame.
 ///
 /// Evicting the oldest is the trade this makes, and it is not free: a peer
 /// holding an evicted package can no longer complete a join with it, so a
@@ -359,31 +362,45 @@ impl KeyPackageAdapter {
         self.store
             .store(KEY_TYPE_KEY_PACKAGE, KEY_PACKAGE_INDEX, &encoded)
     }
-}
 
-impl KeyPackageStorage for KeyPackageAdapter {
-    type Error = StoreError;
+    /// Erases the package filed under `reference` and stops the index naming
+    /// it.
+    ///
+    /// Two callers, and the second is why this is reachable by reference
+    /// rather than only by the id mls-rs holds. mls-rs erases a package a join
+    /// consumed. [`LeafDevice::unpair`](crate::LeafDevice::unpair) erases one
+    /// minted for a peer the owner has removed, and nothing else ever will:
+    /// an init key is single use, so a package nobody spends is never
+    /// consumed, and the ring only evicts it once four later mints have
+    /// happened.
+    ///
+    /// The erase is what propagates and dropping the name is best effort. By
+    /// then the material is gone, which is what was asked for, and a stale
+    /// index entry costs one slot and is evicted in its turn. Reporting it
+    /// would turn a deletion that did happen into one the caller believes did
+    /// not: mls-rs calls this after persisting the group state that consumed
+    /// the package, so the caller would withhold a frame whose state is
+    /// already on flash.
+    pub(crate) fn erase(&self, reference: &str) -> Result<(), StoreError> {
+        self.store.delete(KEY_TYPE_KEY_PACKAGE, reference)?;
 
-    fn delete(&mut self, id: &[u8]) -> Result<(), Self::Error> {
-        let key = hex(id);
-        self.store.delete(KEY_TYPE_KEY_PACKAGE, &key)?;
-
-        // Dropped from the index too, so a package a join consumed does not
-        // hold a slot against the ones still outstanding.
-        //
-        // Best effort, because the package itself is already gone, which is
-        // what was asked for. mls-rs calls this after it has persisted the
-        // group state that consumed the package, so an error here would report
-        // a deletion that did happen as one that did not, and the caller would
-        // withhold a frame whose state is on flash. A stale entry costs one
-        // slot and is evicted in its turn.
         if let Ok(mut index) = self.index() {
-            if let Some(at) = index.iter().position(|held| held == &key) {
+            if let Some(at) = index.iter().position(|held| held == reference) {
                 index.remove(at);
                 let _ = self.save_index(&index);
             }
         }
         Ok(())
+    }
+}
+
+impl KeyPackageStorage for KeyPackageAdapter {
+    type Error = StoreError;
+
+    /// Erases the package a join consumed, so it does not hold a slot against
+    /// the ones still outstanding. See [`KeyPackageAdapter::erase`].
+    fn delete(&mut self, id: &[u8]) -> Result<(), Self::Error> {
+        self.erase(&hex(id))
     }
 
     fn insert(&mut self, id: Vec<u8>, pkg: KeyPackageData) -> Result<(), Self::Error> {
@@ -408,9 +425,10 @@ impl KeyPackageStorage for KeyPackageAdapter {
         // index entry naming a package that is not there. That costs one slot
         // and is evicted in its turn. The opposite residue is private key
         // material the index has stopped naming, and **nothing reclaims that**:
-        // the sweep in [`LeafDevice::unpair`](crate::LeafDevice::unpair) is
-        // over epoch records, this key type has no sweep of its own, and an
-        // eviction the index has already forgotten is never attempted again.
+        // [`LeafDevice::unpair`](crate::LeafDevice::unpair) erases the package
+        // a peer record still names and sweeps epoch records, neither of which
+        // reaches one already evicted, this key type has no sweep of its own,
+        // and an eviction the index has forgotten is never attempted again.
         //
         // So the evicted packages are erased before the index stops naming
         // them, and the index is written before the package it names. A delete
