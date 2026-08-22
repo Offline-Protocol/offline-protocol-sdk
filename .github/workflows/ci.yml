@@ -267,7 +267,7 @@ jobs:
       - name: Clippy the footprint harness
         working-directory: tools/embedded-footprint
         run: |
-          for features in "" "leaf-min" "leaf" "leaf-full"; do
+          for features in "" "leaf" "leaf-full"; do
             cargo clippy --release --locked --target thumbv8m.main-none-eabihf \
               ${features:+--features "$features"} -- -D warnings
           done

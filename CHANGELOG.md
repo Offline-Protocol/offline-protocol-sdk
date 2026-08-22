@@ -242,6 +242,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   delegates to it, so there is one struct literal rather than two that drift.
 
 ### Changed
+
 - **The envelope codec and `GroupId::new` now return `SealedError`** rather
   than `MlsError`, having moved into `offline-protocol-sealed`. Nothing else
   changes: `From<SealedError>` exists for both `MlsError` and the engine's
@@ -249,6 +250,27 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   every FFI error code and every wire byte is what it was. This is visible only
   to Rust code that matches on the error type of `EncryptedMessage::from_bytes`,
   `EncryptedMessage::from_base64` or `GroupId::new` directly.
+
+- **The embedded footprint harness measures the shipping crate.** Its leaf
+  image drove mls-rs directly, so it linked neither the envelope codec, nor the
+  control-frame signing, nor the address derivation: it priced an image nobody
+  could ship. It now runs `offline-protocol-leaf`, and the whole-image figure
+  moved from **391.3 KiB to 445.6 KiB** of flash, a little over a quarter of a
+  1536 KiB xG24.
+
+  The 400 KiB figure in [ADR 0021](./docs/adr/0021-a-leaf-node-speaks-mls.md)
+  was a decision gate, set to answer whether MLS on a leaf node was viable
+  before anything was built, and it did that job. It is not a budget the
+  shipping image is held to, and the recovery lever recorded beside it is still
+  worth more than the growth: about 111 KiB of the image is P-384 and P-256
+  arithmetic that nothing uses, linked because the crypto provider keeps all
+  four curves in one enum with no feature gating.
+
+  The `leaf-min` image is gone. It priced application messages with the
+  resilience features off, and once the workload moved onto the crate, which
+  requires all four mls-rs features, cargo's feature unification made it
+  measure the same bytes as `leaf`. A row reporting a number for a
+  configuration nobody can build is worse than no row.
 
 ## [0.23.0] — 2026-08-20
 
