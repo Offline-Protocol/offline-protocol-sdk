@@ -392,10 +392,6 @@ impl KeyPackageStorage for KeyPackageAdapter {
             .map_err(|e| StoreError::Store(format!("cannot encode key package data: {e:?}")))?;
         let key = hex(&id);
 
-        // The index is written before the package it names. A cut between the
-        // two leaves an index entry for a package that is not there, which
-        // costs one wasted slot; the reverse would leave private key material
-        // no index knows about, which is the thing that never gets reclaimed.
         let mut index = self.index()?;
         if !index.iter().any(|held| held == &key) {
             index.push(key.clone());
@@ -407,10 +403,23 @@ impl KeyPackageStorage for KeyPackageAdapter {
         } else {
             Vec::new()
         };
-        self.save_index(&index)?;
+
+        // Two writes, ordered so the same thing survives either failure: an
+        // index entry naming a package that is not there. That costs one slot
+        // and is evicted in its turn. The opposite residue is private key
+        // material the index has stopped naming, and **nothing reclaims that**:
+        // the sweep in [`LeafDevice::unpair`](crate::LeafDevice::unpair) is
+        // over epoch records, this key type has no sweep of its own, and an
+        // eviction the index has already forgotten is never attempted again.
+        //
+        // So the evicted packages are erased before the index stops naming
+        // them, and the index is written before the package it names. A delete
+        // that fails takes the whole mint down with it, which is a key package
+        // this device does not hand out rather than one it cannot account for.
         for stale in evicted {
             self.store.delete(KEY_TYPE_KEY_PACKAGE, &stale)?;
         }
+        self.save_index(&index)?;
 
         self.store.store(KEY_TYPE_KEY_PACKAGE, &key, &encoded)
     }

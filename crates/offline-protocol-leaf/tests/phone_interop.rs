@@ -1858,3 +1858,104 @@ fn traffic_between_two_neighbours_is_ignored_rather_than_reported_as_a_failure()
         }]
     );
 }
+
+/// A store that writes and reads normally and refuses every delete.
+///
+/// The shape a flash part takes when erasing a sector fails: the write path is
+/// fine and the reclaim path is not.
+#[derive(Default)]
+struct UndeletableStore {
+    inner: MemoryStore,
+    keys: Mutex<Vec<(String, String)>>,
+}
+
+impl UndeletableStore {
+    /// The key ids held under one key type, in insertion order.
+    fn keys_of(&self, key_type: &str) -> Vec<String> {
+        self.keys
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|(held, _)| held == key_type)
+            .map(|(_, id)| id.clone())
+            .collect()
+    }
+}
+
+impl LeafStore for UndeletableStore {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> Result<(), StoreError> {
+        self.inner.store(key_type, key_id, data)?;
+        let mut keys = self.keys.lock().expect("lock");
+        if !keys.iter().any(|(t, i)| t == key_type && i == key_id) {
+            keys.push((key_type.to_string(), key_id.to_string()));
+        }
+        Ok(())
+    }
+
+    fn load(&self, key_type: &str, key_id: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        self.inner.load(key_type, key_id)
+    }
+
+    fn delete(&self, _key_type: &str, _key_id: &str) -> Result<(), StoreError> {
+        Err(StoreError::Delete("the sector will not erase".to_string()))
+    }
+}
+
+#[test]
+fn a_failed_eviction_leaves_no_key_package_the_index_has_forgotten() {
+    // Where the list of unspent packages lives. Mirrored from the adapter,
+    // which keeps it private; it cannot collide with a package id because
+    // every one of those is hex and `_` is not a hex digit.
+    const KEY_PACKAGE_INDEX: &str = "__index__";
+    /// What the adapter keeps, past which a mint evicts the oldest.
+    const MAX_UNSPENT: usize = 4;
+
+    let store = Arc::new(UndeletableStore::default());
+    let mut device = device(Arc::clone(&store) as Arc<dyn LeafStore>);
+
+    // Fill the window. Nothing is evicted yet, so no delete is attempted and
+    // the failing erase is not in play.
+    let peers: Vec<String> = (0..MAX_UNSPENT).map(|_| new_phone().address).collect();
+    for peer in &peers {
+        device
+            .key_package_frame(peer, NOW)
+            .expect("device mints a key package");
+    }
+    let held: Vec<String> = store
+        .keys_of(KEY_TYPE_KEY_PACKAGE)
+        .into_iter()
+        .filter(|id| id != KEY_PACKAGE_INDEX)
+        .collect();
+    assert_eq!(
+        held.len(),
+        MAX_UNSPENT,
+        "the window did not fill, so the eviction below would never run: {held:?}"
+    );
+
+    // One more. This one evicts, the erase fails, and the mint fails with it.
+    let err = device
+        .key_package_frame(&new_phone().address, NOW)
+        .expect_err("a package was minted although its eviction could not be erased");
+
+    // The invariant: nothing is on flash that the index has stopped naming.
+    // A package the index still names but which is gone costs one slot and is
+    // evicted in its turn; the reverse is private key material nothing
+    // reclaims, because no sweep covers this key type and an eviction the
+    // index has forgotten is never attempted again.
+    let raw = store
+        .load(KEY_TYPE_KEY_PACKAGE, KEY_PACKAGE_INDEX)
+        .expect("load")
+        .expect("minting wrote an index");
+    let index: Vec<String> = serde_json::from_slice(&raw).expect("the index parses");
+    let orphaned: Vec<String> = store
+        .keys_of(KEY_TYPE_KEY_PACKAGE)
+        .into_iter()
+        .filter(|id| id != KEY_PACKAGE_INDEX)
+        .filter(|id| !index.contains(id))
+        .collect();
+    assert!(
+        orphaned.is_empty(),
+        "a failed eviction left key package private material no index names: \
+         {orphaned:?} (error was {err:?})"
+    );
+}
