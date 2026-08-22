@@ -23,7 +23,8 @@ use crate::frames;
 use crate::identity::{build_client, Identity};
 use crate::keypkg;
 use crate::store::{
-    LeafStore, KEY_TYPE_GROUP_EPOCH, KEY_TYPE_GROUP_STATE, KEY_TYPE_PEER, KEY_TYPE_PEER_INDEX,
+    LeafStore, KEY_TYPE_GROUP_EPOCH, KEY_TYPE_GROUP_STATE, KEY_TYPE_KEY_PACKAGE, KEY_TYPE_PEER,
+    KEY_TYPE_PEER_INDEX,
 };
 
 /// How many peers an **inbound** frame may add records for.
@@ -1090,6 +1091,25 @@ impl LeafDevice {
         if !spends_ours {
             return Err(LeafError::UnsolicitedWelcome(format!(
                 "welcome from '{peer}' spends a key package this device did not mint for it"
+            )));
+        }
+
+        // The reference matches, so this is the peer's own package. Whether it
+        // is still on flash is a separate question, and it is asked here
+        // because the answer decides which failure firmware is handed. An init
+        // key is single use, so a package an earlier join consumed is gone,
+        // and the ring bounding unspent packages evicts on the fourth later
+        // mint. Left to the join, either arrives from inside MLS as a Welcome
+        // that will not decode, which reads as a broken peer and sends a bench
+        // to the wire when the repair is a fresh package.
+        if self
+            .store
+            .load(KEY_TYPE_KEY_PACKAGE, &minted)
+            .map_err(|e| LeafError::Storage(e.to_string()))?
+            .is_none()
+        {
+            return Err(LeafError::StaleKeyPackage(format!(
+                "the key package '{peer}' spends was minted for it and is no longer held"
             )));
         }
         Ok(())

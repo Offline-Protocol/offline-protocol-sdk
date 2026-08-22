@@ -2461,3 +2461,55 @@ fn unpairing_survives_a_peer_record_that_will_not_decode() {
         "the peer survived unpairing in the index"
     );
 }
+
+/// The peer is exactly who it claims and is spending exactly what it was
+/// given, and the package is gone anyway.
+///
+/// Not an attack: the ring that bounds unspent packages evicted it when later
+/// mints filled the window. Left to the join, this arrives from inside MLS as
+/// a Welcome that will not decode, which reads as a broken peer and sends a
+/// bench to the wire when the repair is a fresh package.
+#[test]
+fn a_welcome_that_spends_a_package_the_device_no_longer_holds_names_the_real_failure() {
+    /// What the adapter keeps, past which a mint evicts the oldest.
+    const MAX_UNSPENT: usize = 4;
+
+    let phone = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = device.address().to_string();
+
+    let advertisement = device
+        .key_package_frame(&phone.address, NOW)
+        .expect("device advertises to the phone");
+    import_device_key_package(&phone, &advertisement);
+
+    // Four later mints, which is exactly what it takes to push the phone's
+    // package out of the ring. The phone's record still names it.
+    for peer in (0..MAX_UNSPENT).map(|_| new_phone().address) {
+        device
+            .key_package_frame(&peer, NOW)
+            .expect("device mints for another peer");
+    }
+
+    let welcome = phone
+        .manager
+        .create_session(&device_address)
+        .expect("phone creates the session on the package it was given");
+    let frame = phone_control_frame(
+        &phone,
+        &device_address,
+        format!(
+            "{}{}",
+            prefixes::WELCOME,
+            serde_json::to_string(&welcome).expect("welcome serializes")
+        ),
+    );
+
+    let err = device
+        .handle(&frame, NOW)
+        .expect_err("the package this welcome spends is no longer held");
+    assert!(
+        matches!(err, LeafError::StaleKeyPackage(_)),
+        "a welcome spending an evicted package produced {err:?}"
+    );
+}

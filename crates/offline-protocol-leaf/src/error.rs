@@ -81,6 +81,22 @@ pub enum LeafError {
     #[error("Unsolicited welcome: {0}")]
     UnsolicitedWelcome(String),
 
+    /// A Welcome spends the key package this device minted for its sender, and
+    /// that package is no longer held.
+    ///
+    /// Neither an attack nor an identity failure: the peer is exactly who it
+    /// claims and is spending exactly what it was given. The package is simply
+    /// gone, because an earlier join consumed it (an init key is single use,
+    /// so a Welcome is not replayable) or because later mints pushed it out of
+    /// the bounded ring.
+    ///
+    /// Its own variant because the repair is a fresh package rather than a
+    /// retry, and because the alternative is the same condition arriving from
+    /// inside MLS as a Welcome that will not decode, which reads as a broken
+    /// peer and sends a bench to the wire.
+    #[error("Stale key package: {0}")]
+    StaleKeyPackage(String),
+
     /// The device already holds as many peers as it keeps room for, and none
     /// of them is an incomplete pairing that could be recycled.
     ///
