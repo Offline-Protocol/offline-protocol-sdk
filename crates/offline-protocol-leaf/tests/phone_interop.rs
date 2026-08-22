@@ -2178,3 +2178,127 @@ fn a_commit_that_adds_a_third_member_is_refused() {
         "a commit that grew the pair produced {err:?}"
     );
 }
+
+/// Drives the peer into adding a third member to the pair's own group.
+///
+/// The device refuses the commit and has applied it regardless, which is the
+/// state the tests below are about: a member cannot skip one commit and keep
+/// decrypting the next, so the refusal is a returned value and the roster it
+/// objected to is what is on flash.
+fn widen_the_pair(phone: &Phone, device: &mut LeafDevice, device_address: &str) {
+    let outsider = new_phone();
+    let group_id = GroupId::for_session(&phone.address, device_address).expect("pair group id");
+    let bundle = outsider
+        .manager
+        .get_or_create_key_package()
+        .expect("the outsider has a key package");
+    let (_welcome, commit) = phone
+        .manager
+        .add_group_member(&group_id, &outsider.address, &bundle.key_package_data)
+        .expect("the peer adds a third member to the pair's own group");
+
+    let frame = phone_sealed_frame(phone, device_address, &commit);
+    let err = device
+        .handle(&frame, NOW)
+        .expect_err("the device followed its peer into a room it never chose");
+    assert!(
+        matches!(err, LeafError::IdentityBinding(_)),
+        "a commit that grew the pair produced {err:?}"
+    );
+}
+
+/// A refusal is a value, and a device that is power cycled has only flash.
+///
+/// Refusing the widening commit and then sealing into the group anyway hands
+/// the added member every message that follows. The commit is the only moment
+/// the roster can change and the worst possible moment to be the only one that
+/// checks it, because by then the answer cannot be kept anywhere.
+#[test]
+fn a_group_that_stopped_being_a_pair_is_not_sealed_into() {
+    let phone = new_phone();
+    let store: Arc<dyn LeafStore> = Arc::new(MemoryStore::new());
+    let mut device = device(Arc::clone(&store));
+    let device_address = pair(&phone, &mut device);
+
+    device
+        .seal(&phone.address, "while it was a pair", NOW)
+        .expect("a pair seals");
+
+    widen_the_pair(&phone, &mut device, &device_address);
+
+    let err = device
+        .seal(&phone.address, "after", NOW)
+        .expect_err("the device sealed into a group holding a third member");
+    assert!(
+        matches!(err, LeafError::IdentityBinding(_)),
+        "sealing into a widened group produced {err:?}"
+    );
+
+    // The one that matters: the returned refusal is gone, and the roster on
+    // flash is the device's whole account of what happened.
+    drop(device);
+    let mut revived = LeafDevice::resume(Arc::clone(&store), APP_ID).expect("device resumes");
+    let err = revived
+        .seal(&phone.address, "after a reboot", NOW)
+        .expect_err("a rebooted device sealed into a group holding a third member");
+    assert!(
+        matches!(err, LeafError::IdentityBinding(_)),
+        "sealing into a widened group after a reboot produced {err:?}"
+    );
+}
+
+/// The same group, in the other direction.
+///
+/// The message really is the peer's, so it binds honestly and arrives as
+/// ordinary traffic. A device that opened it would go on actuating for its
+/// owner while a member the owner never chose reads the room, which is the
+/// state firmware most needs told rather than hidden.
+#[test]
+fn a_message_into_a_group_that_stopped_being_a_pair_is_not_opened() {
+    let phone = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = pair(&phone, &mut device);
+
+    widen_the_pair(&phone, &mut device, &device_address);
+
+    let sealed = phone
+        .manager
+        .encrypt_for_user(&device_address, b"unlock")
+        .expect("phone seals");
+    let frame = phone_sealed_frame(&phone, &device_address, &sealed);
+    let err = device
+        .handle(&frame, NOW)
+        .expect_err("the device opened a message from a group holding a third member");
+    assert!(
+        matches!(err, LeafError::IdentityBinding(_)),
+        "opening a message from a widened group produced {err:?}"
+    );
+}
+
+/// An acknowledgement is a promise to use the session.
+///
+/// The peer confirms on it and flushes everything it had queued. A device that
+/// answered for a group it will refuse to seal into makes a promise it has
+/// already decided to break, and the peer's own silence afterwards is
+/// indistinguishable from a quiet link.
+#[test]
+fn a_probe_against_a_group_that_stopped_being_a_pair_is_not_answered() {
+    let phone = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = pair(&phone, &mut device);
+
+    widen_the_pair(&phone, &mut device, &device_address);
+
+    let probe = phone_control_frame(
+        &phone,
+        &device_address,
+        prefixes::SESSION_CONFIRM_PROBE.to_string(),
+    );
+    let err = device
+        .handle(&probe, NOW)
+        .expect_err("the device promised a session it will not seal into");
+    assert!(
+        matches!(err, LeafError::IdentityBinding(_)),
+        "a probe against a widened group produced {err:?}"
+    );
+}

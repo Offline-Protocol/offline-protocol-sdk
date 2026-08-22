@@ -300,6 +300,15 @@ impl LeafDevice {
         let group_id = self.group_id(peer)?;
         let mut group = self.load_group(&client, peer, &group_id)?;
 
+        // Nothing is sealed into a group that stopped being this pair. The
+        // roster is the only thing that says it did, and the commit that
+        // changed it is applied and durable by the time anything can read it,
+        // so the question has to be asked at the use and not only at the
+        // change: a refusal returned once is a value firmware may drop and a
+        // reboot certainly does, and the device would then seal every later
+        // message into a room with a member the owner never chose.
+        self.require_still_a_pair(&group, peer)?;
+
         let sealed = group
             .encrypt_application_message(plaintext, Vec::new())
             .map_err(|e| LeafError::Mls(format!("cannot seal: {e:?}")))?
@@ -630,6 +639,14 @@ impl LeafDevice {
 
         let mut group = self.load_group(&client, sender, &group_id)?;
 
+        // Asked before the frame is opened, for the reason a seal asks it
+        // before sealing: a group that stopped being this pair is one this
+        // device holds no conversation with in either direction. The commit
+        // that widens a roster is caught below instead, after it applies,
+        // because that is the only moment it can be seen at all; this is what
+        // keeps every frame after that one from arriving as ordinary traffic.
+        self.require_still_a_pair(&group, sender)?;
+
         let inbound = MlsMessage::from_bytes(&envelope.ciphertext)
             .map_err(|e| LeafError::Mls(format!("sealed payload does not decode: {e:?}")))?;
 
@@ -727,15 +744,23 @@ impl LeafDevice {
         // [`LeafDevice::load_group`] separates the two.
         let client = self.client()?;
         let group_id = self.group_id(sender)?;
-        match self.load_group(&client, sender, &group_id) {
-            Ok(_) => {}
+        let group = match self.load_group(&client, sender, &group_id) {
+            Ok(group) => group,
             Err(LeafError::NoSession(_)) => {
                 return Ok(ignored(
                     "a confirmation probe arrived for a peer this device has no session with",
                 ))
             }
             Err(e) => return Err(e),
-        }
+        };
+
+        // And it must still be this pair. An acknowledgement is a promise to
+        // use the session rather than a report that bytes exist, and a device
+        // that will refuse to seal into this group has no such promise to
+        // make: the peer would confirm, flush everything it had queued, and
+        // hear nothing further. Refused rather than ignored, because unlike an
+        // absent session this is a state firmware needs to hear about.
+        self.require_still_a_pair(&group, sender)?;
 
         let mut ack = frames::build(
             &self.store,
@@ -933,17 +958,28 @@ impl LeafDevice {
     /// that entirely the peer's decision, which is exactly why it is worth
     /// checking rather than trusting.
     ///
-    /// So the roster is re-read on every commit, which is the only moment it
-    /// can change: two members, and both of them **derived** rather than read
-    /// off a credential, since a basic credential is a bare assertion. That is
-    /// two scalar multiplications on a cadence the peer sets, spent at the one
-    /// instant the shape of the group is in question.
+    /// So the roster is re-read on **every use of the group**, and not only on
+    /// the commit that can change it: two members, and both of them
+    /// **derived** rather than read off a credential, since a basic credential
+    /// is a bare assertion.
     ///
-    /// Reported rather than rolled back, for the reason the caller gives: by
-    /// the time there is a roster to read, the commit is applied and durable.
-    /// A member cannot skip one commit and keep decrypting the next, so the
-    /// choice here is not whether to follow the peer but whether firmware gets
-    /// to hear that it happened.
+    /// Checking only at the commit would be checking at the one moment whose
+    /// answer cannot be kept. A commit is applied and durable by the time
+    /// there is a roster to read, so the refusal is a returned error and
+    /// nothing else: it survives no reboot, and a device that came back up
+    /// would seal its next message into the widened room and call it an
+    /// ordinary session. Reading the roster where the group is used puts the
+    /// answer somewhere it cannot be lost, which is the same reason nothing
+    /// else in this crate caches MLS state.
+    ///
+    /// It costs a roster read and two SHA-256 derivations per frame. Both are
+    /// symmetric work, so the profile's promise that per-message cost is
+    /// symmetric only still holds.
+    ///
+    /// Reported rather than rolled back. A member cannot skip one commit and
+    /// keep decrypting the next, so the choice is not whether to follow the
+    /// peer but whether firmware is told, and what it does about it is
+    /// [`LeafDevice::unpair`] or the peer's own reset.
     fn require_still_a_pair(&self, group: &Group<impl MlsConfig>, peer: &str) -> Result<()> {
         let roster = group.roster();
         let members = roster.members();

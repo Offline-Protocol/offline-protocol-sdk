@@ -218,14 +218,24 @@ checkable, and it is why a leaf MUST NOT treat "this peer was once given a
 package" as the test: a listener that has also paired holds a package of its
 own, and a Welcome spending somebody else's is the case that costs the most.
 
-A leaf MUST re-check that its group is still a pair on every commit, and MUST
-refuse one that is not. The Welcome gate keeps a device out of a room it never
-chose, and it runs exactly once. A commit changes the roster without changing
-the group id, and in this profile every commit is the peer's to make, so a leaf
-that checked only at the join follows its peer into a room one member at a time
-and never sees it happen. The roster is the only thing that says otherwise, and
-the member addresses in it MUST be derived rather than read, a basic credential
-being a bare assertion.
+A leaf MUST establish that its group is still a pair **every time it uses
+that group**: before it seals, before it opens, before it answers a probe, and
+again on each commit once that commit has applied. The Welcome gate keeps a
+device out of a room it never chose, and it runs exactly once. A commit changes
+the roster without changing the group id, and in this profile every commit is
+the peer's to make, so a leaf that checked only at the join follows its peer
+into a room one member at a time and never sees it happen. The roster is the
+only thing that says otherwise, and the member addresses in it MUST be derived
+rather than read, a basic credential being a bare assertion.
+
+Checking only where the roster changes is not enough, and the reason is that
+the commit is the one moment whose answer cannot be kept. It is applied and
+durable by the time there is a roster to read, so the refusal is a returned
+value and nothing more: it survives no reboot, and a device that came back up
+would seal its next message into the widened room and call it an ordinary
+session. Reading the roster where the group is used puts the answer somewhere
+that cannot be lost. It costs a roster read and two derivations per frame, both
+of them symmetric work, so the profile's per-message cost is unchanged.
 
 Such a commit is **reported rather than rolled back**. A member cannot skip one
 commit and keep decrypting the next, so by the time there is a roster to read
@@ -234,8 +244,8 @@ the pair stopped being a pair, on a device where the alternative is not
 noticing.
 
 A leaf MUST answer a probe only while it holds a session with that peer **that
-it can still load**, which is the rule a phone already applies to the same
-frame. The acknowledgement is not a liveness signal: a peer confirms its
+it can still load and that is still this pair**, which is the rule a phone
+already applies to the same frame. The acknowledgement is not a liveness signal: a peer confirms its
 session on receiving one and then flushes everything it had queued into that
 session. A device that answered after losing its store would confirm a session
 it cannot decrypt one frame of, and the silence afterwards is
