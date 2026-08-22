@@ -27,9 +27,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   a monotonic clock (`LocalInstant`), entropy (`MessageId::new`, and
   `Message::new` and `MessageBuilder` with it), and threads (the `sync`
   module). Everything that parses, validates, re-encodes or compares is present
-  in both configurations, which is the half a leaf node uses, because it
-  receives frames rather than minting them. Build messages from wire-supplied
-  parts via `MessageId::from_bytes` and `Timestamp::from_millis` on that path.
+  in both configurations, which is the half a leaf node that only forwards
+  uses. A node that answers also mints, and `Message::from_parts` in this same
+  release is what lets it: build messages from wire-supplied parts, via
+  `MessageId::from_bytes` and `Timestamp::from_millis` on that path.
 
   Two field types changed spelling to `MetadataMap`, which under `std` **is**
   `HashMap<String, String>` exactly as before, and is a `BTreeMap` without it.
