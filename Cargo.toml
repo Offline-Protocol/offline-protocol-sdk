@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/offline-protocol-core",
     "crates/offline-protocol-sealed",
+    "crates/offline-protocol-leaf",
     "crates/offline-protocol-transport",
     "crates/offline-protocol-router",
     "crates/offline-protocol-reliability",
@@ -116,6 +117,10 @@ hmac = "0.12"
 subtle = "2"
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = "1"
+mls-rs = { version = "=0.56.0", default-features = false }
+mls-rs-crypto-rustcrypto = { version = "=0.22.1", default-features = false }
+mls-rs-core = { version = "=0.27.0", default-features = false }
+getrandom = { version = "0.2", default-features = false }
 # At-rest sealing for install-scoped protocol-state records.
 chacha20poly1305 = "0.10"
 
@@ -131,6 +136,7 @@ chacha20poly1305 = "0.10"
 # version, so all nine move together.
 offline-protocol-core = { path = "crates/offline-protocol-core", version = "0.23.0" }
 offline-protocol-sealed = { path = "crates/offline-protocol-sealed", version = "0.23.0" }
+offline-protocol-leaf = { path = "crates/offline-protocol-leaf", version = "0.23.0" }
 offline-protocol-transport = { path = "crates/offline-protocol-transport", version = "0.23.0" }
 offline-protocol-router = { path = "crates/offline-protocol-router", version = "0.23.0" }
 offline-protocol-reliability = { path = "crates/offline-protocol-reliability", version = "0.23.0" }

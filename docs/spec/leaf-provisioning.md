@@ -21,10 +21,12 @@ The decision behind this, and the measurements that justified it, are in
 rather than implement twice are in
 [ADR 0022](../adr/0022-one-sealed-layer-shared-with-the-leaf.md).
 
-## Four obligations
+## Five obligations
 
 These hold before any mechanism below makes sense. Three of them are invisible
-in a passing build and expensive to discover on a bench.
+in a passing build and expensive to discover on a bench. The fifth is invisible
+in a working deployment as well, because a device that grants too much works
+perfectly until somebody asks it to.
 
 ### 1. A static artifact carries an address and a key, never a key package
 
@@ -80,6 +82,25 @@ that has it: an MLS implementation built for bare metal reaches a symbol the
 firmware supplies. Measurement harnesses in this repository register a counter
 in that slot so an image that never executes can be linked and sized. That stub
 must never reach firmware, and it is documented as such where it appears.
+
+### 5. A session is authentication, not authorization
+
+A leaf MUST NOT treat an established session as permission to act. It MUST
+decide what a peer may do from that peer's address, and the integrator MUST
+control when the device accepts a new pairing at all.
+
+Every gate in this protocol answers "is this peer the address it claims to be".
+None of them answers "did the owner mean this peer". Producing a key that
+derives to its own address costs nothing, so a device left open to pairing ends
+up holding sessions with whoever was in range, every one of them
+cryptographically impeccable. A lock that opens for any message on an
+established session opens for anyone patient enough to pair with it, and every
+frame in that exchange verifies.
+
+This is the obligation a test cannot fail for you: the device works, the peer
+is authenticated, the ciphertext is sound. The bound is an implementation
+choice, whether that is a pairing button, a commissioning window, or an owner
+list written at first pairing, and this chapter requires only that one exists.
 
 ## The pairing exchange
 
@@ -151,6 +172,97 @@ A conforming leaf:
 - **never emits** a Welcome, a commit, a proposal, or any group, rich, document
   or relay frame.
 
+Every frame it accepts is one **addressed to it**. A leaf MUST establish that
+before it acts on anything, whatever prefix the frame carries and however well
+the frame verifies, and nothing further down asks the question again: a control
+frame's signature covers the recipient, so one honestly signed for somebody
+else verifies perfectly, and a sealed frame carries no signature at all, so its
+recipient is whatever the last hand to touch it wrote there. Being able to open
+a frame is a different claim from having been sent it.
+
+What the check saves is not a message opened by the wrong node, since the group
+and credential gates hold either way. It is an overheard key package admitting
+a peer, spending flash, minting a private init key nobody asked this device
+for, and answering a node that never addressed it; a sealed frame the device
+can open being acted on after anyone who captured it rewrote the recipient; and
+every other prefix arriving as an identity-binding failure, so ordinary traffic
+between two neighbours reaches firmware wearing the shape of an attack on a
+device whose only account of itself is that error stream.
+
+A frame addressed elsewhere is **ignored rather than refused**. Overhearing is
+what a shared radio does, and firmware that carries frames for its neighbours
+needs "not mine" to be a fact it can act on rather than a failure it has to
+interpret.
+
+A leaf MUST join only on a Welcome that spends **the key package it minted for
+the peer that sent it**, and MUST establish that before joining, because
+joining spends the init key.
+
+A key package is a bearer token. It travels in a frame that is signed and
+addressed but not encrypted, so a shared radio hands a copy to everyone in
+range, and a copy is exactly as spendable as the original. Every other gate on
+the Welcome that a listener builds around a copied package passes honestly:
+the listener does hold the key its own address derives from, it does name
+itself as inviter, and the group it built really is the one this pair's id
+names. A leaf that cannot tell the two apart therefore has no gate at all here,
+only checks that a copier satisfies for free.
+
+What the check saves is not confidentiality, since the joined group is one this
+device holds keys for either way. It is the **init key**, which is single use:
+spent by a listener, it leaves the peer it was minted for holding a Welcome
+that can no longer be joined, and a pairing that only a driven reset recovers.
+Refusing before the join leaves that package unspent. Refusing after would not.
+
+Recording which package went to which peer is what makes the difference
+checkable, and it is why a leaf MUST NOT treat "this peer was once given a
+package" as the test: a listener that has also paired holds a package of its
+own, and a Welcome spending somebody else's is the case that costs the most.
+
+A leaf MUST establish that its group is still a pair **every time it uses
+that group**: before it seals, before it opens, before it answers a probe, and
+again on each commit once that commit has applied. The Welcome gate keeps a
+device out of a room it never chose, and it runs exactly once. A commit changes
+the roster without changing the group id, and in this profile every commit is
+the peer's to make, so a leaf that checked only at the join follows its peer
+into a room one member at a time and never sees it happen. The roster is the
+only thing that says otherwise, and the member addresses in it MUST be derived
+rather than read, a basic credential being a bare assertion.
+
+Checking only where the roster changes is not enough, and the reason is that
+the commit is the one moment whose answer cannot be kept. It is applied and
+durable by the time there is a roster to read, so the refusal is a returned
+value and nothing more: it survives no reboot, and a device that came back up
+would seal its next message into the widened room and call it an ordinary
+session. Reading the roster where the group is used puts the answer somewhere
+that cannot be lost. It costs a roster read and two derivations per frame, both
+of them symmetric work, so the profile's per-message cost is unchanged.
+
+Such a commit is **reported rather than rolled back**. A member cannot skip one
+commit and keep decrypting the next, so by the time there is a roster to read
+the commit is applied and durable. What the refusal buys is that firmware hears
+the pair stopped being a pair, on a device where the alternative is not
+noticing.
+
+A leaf MUST answer a probe only while it holds a session with that peer **that
+it can still load and that is still this pair**, which is the rule a phone
+already applies to the same frame. The acknowledgement is not a liveness signal: a peer confirms its
+session on receiving one and then flushes everything it had queued into that
+session. A device that answered after losing its store would confirm a session
+it cannot decrypt one frame of, and the silence afterwards is
+indistinguishable from a quiet link, so the peer never learns. Staying quiet
+leaves it unconfirmed, which is a state it has a path out of. Stored bytes are
+not the test: state that is present and unloadable decrypts exactly as much as
+state that is absent, so a leaf MUST NOT answer on the strength of a record it
+has not opened.
+
+A leaf MUST NOT treat an inbound `__MLS_CONFIRM_ACK__` as evidence of a
+session, which is why the frame appears above under what a leaf emits and not
+under what it accepts. A leaf emits acknowledgements and never probes, so it
+never has one outstanding and every inbound one is unsolicited. Acting on one
+would let any holder of a keypair assert that a session exists: the frame is
+signed, and a signature that derives to its own address costs nothing to
+produce. The frame is answered by a peer that probed, and a leaf is not one.
+
 Per-commit cost on the device is two elliptic-curve operations. Per-message
 cost is symmetric only.
 
@@ -166,6 +278,17 @@ it, discard the existing session and mint a fresh key package, so that the
 exchange begins again from step 2 above. A leaf that treats `session_reset` as
 an ordinary key package refresh keeps a session the phone has already discarded,
 and every later frame from it decrypts to nothing.
+
+A leaf MUST NOT act on the same reset frame twice. Nothing in the signed payload
+states freshness, so a captured reset verifies as well on its tenth delivery as
+on its first, and each teardown it earns is a session the pair has to rebuild.
+Remembering the frames already acted on costs one bounded list per peer and
+denies the repeat. It does not close replay: a frame older than that list can
+still be spent once. **Closing it needs a freshness field inside the signed
+payload**, which is a change to the wire and to both ends rather than to a
+device, and is an open gap rather than a decision this chapter has taken. It is
+tracked as
+[issue 403](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/403).
 
 Letting a device originate Update proposals would make it self-healing on its
 own schedule. That is deliberately outside this version.

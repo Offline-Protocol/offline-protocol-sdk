@@ -27,9 +27,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   a monotonic clock (`LocalInstant`), entropy (`MessageId::new`, and
   `Message::new` and `MessageBuilder` with it), and threads (the `sync`
   module). Everything that parses, validates, re-encodes or compares is present
-  in both configurations, which is the half a leaf node uses, because it
-  receives frames rather than minting them. Build messages from wire-supplied
-  parts via `MessageId::from_bytes` and `Timestamp::from_millis` on that path.
+  in both configurations, which is the half a leaf node that only forwards
+  uses. A node that answers also mints, and `Message::from_parts` in this same
+  release is what lets it: build messages from wire-supplied parts, via
+  `MessageId::from_bytes` and `Timestamp::from_millis` on that path.
 
   Two field types changed spelling to `MetadataMap`, which under `std` **is**
   `HashMap<String, String>` exactly as before, and is a `BTreeMap` without it.
@@ -134,8 +135,113 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   One device, one key: a fleet sharing an identity key turns one extraction in
   a laboratory into every unit's identity.
 
-### Changed
+- **`offline-protocol-leaf`: a constrained device that speaks this protocol as
+  a real peer.** A door lock or a sensor with a few hundred kilobytes of flash
+  and no operating system now runs RFC 9420 MLS through mls-rs and holds an
+  end-to-end encrypted conversation with a phone under the same guarantees a
+  phone gets. Same frames, same envelope, same trust gates, no second sealing
+  path and no reduced properties, which is the decision
+  [ADR 0021](./docs/adr/0021-a-leaf-node-speaks-mls.md) took and this crate
+  implements.
 
+  `LeafDevice` is a frame-level state machine rather than a bag of primitives:
+  an inbound message goes in, the frames to send and what happened come out. It
+  runs the **never-committing member** profile, so the phone creates the group
+  and issues every commit while the device joins, opens, answers and persists.
+  Per-commit cost on the device is two elliptic-curve operations and
+  per-message cost is symmetric only.
+
+  What it refuses is the point. Every control frame must carry a signature
+  whose key **derives to the address the frame claims**, and an identifier that
+  is not an address is the same refusal rather than a skip, because a claim
+  with no derivation to check is the bypass. A Welcome must name the peer that
+  signed it, name the group this pair would build, spend **the key package this
+  device minted for that peer**, and then actually join the group its body
+  claimed. That third one is what separates a peer from anyone who overheard
+  it: a key package rides in a frame that is signed but not encrypted, so a
+  copy taken off the air is as spendable as the original and satisfies every
+  other gate honestly. Checked before the join, because joining spends the init
+  key, and a package burned by a listener leaves the peer it was minted for
+  holding a Welcome that no longer opens. The group must still be a pair every
+  time the device uses it, re-read from the roster and derived rather than
+  read, because a commit changes the membership without changing the group id
+  and every commit here is the peer's to make. Checking only on the commit
+  would check at the one moment whose answer cannot be kept: it is applied and
+  durable by the time there is a roster to read, so the refusal is a returned
+  value that no reboot survives, and the device would seal its next message
+  into the widened room and call it an ordinary session. A sealed frame's MLS
+  sender must be the peer the frame came from, commits included. A confirmation
+  probe is answered only by a device that still holds a session it can load and
+  that is still this pair, because a peer confirms on that answer and
+  flushes into it, and an inbound acknowledgement is never acted on at all,
+  because a leaf emits those and never probes, so every one that arrives is
+  unsolicited and treating it as proof of a session would let any keypair
+  holder assert one. A reset frame is acted on once, so a captured one is not a
+  repeatable session teardown. Underneath all of them, a frame addressed to
+  another node is ignored before a prefix is read: a signature covers the
+  recipient rather than checking it, and a sealed frame carries none at all, so
+  without that gate an overheard key package mints a private init key nobody
+  asked for and a captured frame with its recipient rewritten is still acted
+  on. Every one of these is covered against a real OpenMLS phone in the same
+  process, which is the only kind of test that catches a default in one library
+  the other refuses.
+
+  **What it keeps is bounded.** Prior-epoch records are trimmed to a window
+  rather than kept forever, which bounds both the flash they occupy and how far
+  back a stolen device reads; unpairing erases them along with the session and
+  with the key package minted for that peer, so neither epoch secrets nor an
+  unspent init key outlive the erasure an owner asked for. Peer records and
+  unspent key packages are bounded too, and a full peer table refuses a
+  stranger rather than evicting somebody the owner paired with, because
+  producing a frame that derives to its own address costs an attacker nothing.
+  Every operation that advances state takes `&mut self`, so two seals racing
+  into one AEAD nonce is a compile error rather than a rare one.
+
+  **Persist-before-emit is structural, not documented.** Every operation that
+  advances ratchet state writes through `LeafStore` and only then returns the
+  frame, so a store that fails produces an error and no frame at all. A device
+  that emitted first would come back from a power cut and reuse an AEAD nonce,
+  which is a confidentiality failure rather than a lost message. A test arms a
+  failing store and asserts both that nothing is emitted and that the write was
+  actually attempted, so it cannot pass by short-circuiting earlier.
+
+  The seam is atomic per entry rather than across a set, so what a cut lands
+  between is chosen rather than left to chance. Prior-epoch records go down
+  before the state, because a state with records it does not yet reference
+  costs nothing while the reverse loses the out-of-order tolerance a lossy
+  radio needs. The **epoch marker mls-rs sequences against travels inside the
+  state entry**, because ordering cannot make those two safe in either
+  direction: a marker that reached flash without its state refuses every commit
+  that follows, permanently, and the device goes deaf to its peer until that
+  peer drives a full reset. A separate high-water record survives the state and
+  bounds the erasure sweep on unpair, which is the one job the in-state marker
+  cannot do.
+
+  Four obligations stay with the integrator, and the API is shaped so none can
+  be forgotten silently: every entry point needing a clock takes
+  `now_unix_secs` (a device that lets an MLS library read a clock it does not
+  have stamps 1970 and is refused as expired, so it never pairs at all), the
+  crate registers no `getrandom` backend (firmware wires the part's hardware
+  entropy source, and key generation is exactly as strong as what it returns),
+  and `LeafStore` must be atomic per entry. The fourth is **authorization**: a
+  session proves who a peer is and never that the owner meant them, since any
+  address in radio range can complete a pairing, so firmware decides when the
+  radio accepts one and what a given peer's messages may actuate. A lock that
+  opens for whatever arrives on an established session opens for anyone patient
+  enough to pair with it. `LeafDevice::peers` is how firmware audits what a
+  device accumulated and `unpair` is how it removes one, and every route to a
+  session puts the peer on that list, because a session firmware cannot see is
+  one it can neither review nor revoke.
+
+- **`Message::from_parts` in `offline-protocol-core`**, which is
+  `Message::new` with its two ambient inputs, the clock and the entropy, made
+  explicit. ADR 0020 made core build without `std` on the reading that a
+  constrained node "receives frames rather than minting them". That is true of
+  a node which only forwards and false the moment one answers, so without this
+  a bare-metal node could not produce a `Message` at all. `Message::new`
+  delegates to it, so there is one struct literal rather than two that drift.
+
+### Changed
 - **The envelope codec and `GroupId::new` now return `SealedError`** rather
   than `MlsError`, having moved into `offline-protocol-sealed`. Nothing else
   changes: `From<SealedError>` exists for both `MlsError` and the engine's
