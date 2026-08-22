@@ -25,7 +25,8 @@
 //! at every site that accepts an identity claim, the binding of a Welcome to
 //! the key package this device minted for the peer that sent it (a package
 //! travels unencrypted, so whoever copies one off the air satisfies every
-//! other gate honestly), the confirmation that has to be a group-aware
+//! other gate honestly), the roster re-read that keeps a pair a pair once
+//! commits start arriving, the confirmation that has to be a group-aware
 //! decrypt, and the reset sequence that a driven rekey arrives as.
 //!
 //! ```

@@ -218,6 +218,21 @@ checkable, and it is why a leaf MUST NOT treat "this peer was once given a
 package" as the test: a listener that has also paired holds a package of its
 own, and a Welcome spending somebody else's is the case that costs the most.
 
+A leaf MUST re-check that its group is still a pair on every commit, and MUST
+refuse one that is not. The Welcome gate keeps a device out of a room it never
+chose, and it runs exactly once. A commit changes the roster without changing
+the group id, and in this profile every commit is the peer's to make, so a leaf
+that checked only at the join follows its peer into a room one member at a time
+and never sees it happen. The roster is the only thing that says otherwise, and
+the member addresses in it MUST be derived rather than read, a basic credential
+being a bare assertion.
+
+Such a commit is **reported rather than rolled back**. A member cannot skip one
+commit and keep decrypting the next, so by the time there is a roster to read
+the commit is applied and durable. What the refusal buys is that firmware hears
+the pair stopped being a pair, on a device where the alternative is not
+noticing.
+
 A leaf MUST answer a probe only while it holds a session with that peer **that
 it can still load**, which is the rule a phone already applies to the same
 frame. The acknowledgement is not a liveness signal: a peer confirms its

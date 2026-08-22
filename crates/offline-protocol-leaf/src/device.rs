@@ -666,10 +666,29 @@ impl LeafDevice {
                     }]
                 }
             }
-            ReceivedMessage::Commit(_) => vec![LeafEvent::CommitApplied {
-                peer: sender.to_string(),
-                epoch,
-            }],
+            ReceivedMessage::Commit(commit) => {
+                // Two questions a commit has to answer, ordered so the
+                // first failure is the informative one: is this still the
+                // pair this device joined, and did the peer whose frame
+                // carried this actually author it. The roster answers the
+                // first. Only the committer's own credential answers the
+                // second, because the frame states who sent it and a peer is
+                // free to relay a third member's work under its own name,
+                // which without this reaches firmware wearing the peer's
+                // address.
+                //
+                // Reported rather than rolled back. A member cannot skip one
+                // commit and keep decrypting the next, so by the time there
+                // is anything to read the commit is applied and durable. What
+                // these two buy is that firmware hears a group stopped being
+                // the pair it agreed to, rather than nothing at all.
+                self.require_still_a_pair(&group, sender)?;
+                self.bind_sender_credential(&group, commit.committer, sender)?;
+                vec![LeafEvent::CommitApplied {
+                    peer: sender.to_string(),
+                    epoch,
+                }]
+            }
             _ => vec![LeafEvent::Ignored {
                 reason: String::from("sealed frame carried nothing this device acts on"),
             }],
@@ -904,6 +923,62 @@ impl LeafDevice {
         self.save_peer_index(&index)
     }
 
+    /// Requires the group to still be the pair this device agreed to.
+    ///
+    /// The Welcome gate is what keeps this device out of a room it never
+    /// chose, and it runs once. Nothing repeats it afterwards, and a commit is
+    /// free to add a member without the group id changing, so a device that
+    /// checked only at the join would follow its peer into a room one member
+    /// at a time and never see it happen. The never-committing profile makes
+    /// that entirely the peer's decision, which is exactly why it is worth
+    /// checking rather than trusting.
+    ///
+    /// So the roster is re-read on every commit, which is the only moment it
+    /// can change: two members, and both of them **derived** rather than read
+    /// off a credential, since a basic credential is a bare assertion. That is
+    /// two scalar multiplications on a cadence the peer sets, spent at the one
+    /// instant the shape of the group is in question.
+    ///
+    /// Reported rather than rolled back, for the reason the caller gives: by
+    /// the time there is a roster to read, the commit is applied and durable.
+    /// A member cannot skip one commit and keep decrypting the next, so the
+    /// choice here is not whether to follow the peer but whether firmware gets
+    /// to hear that it happened.
+    fn require_still_a_pair(&self, group: &Group<impl MlsConfig>, peer: &str) -> Result<()> {
+        let roster = group.roster();
+        let members = roster.members();
+        if members.len() != 2 {
+            return Err(LeafError::IdentityBinding(format!(
+                "a commit left this group holding {} members, and a leaf node's group is a pair",
+                members.len()
+            )));
+        }
+
+        let mine = self.identity.address.to_string();
+        for member in &members {
+            let credential = member
+                .signing_identity
+                .credential
+                .as_basic()
+                .ok_or_else(|| {
+                    LeafError::IdentityBinding(String::from(
+                        "a group member presents no basic credential, so it names no address",
+                    ))
+                })?;
+            let address = crate::adapters::credential_address(credential)?;
+            if address != mine && address != peer {
+                return Err(LeafError::IdentityBinding(format!(
+                    "a commit left '{address}' in this group, which is neither this device nor '{peer}'"
+                )));
+            }
+            frames::verify_sender_derivation(
+                address,
+                member.signing_identity.signature_key.as_bytes(),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Requires a Welcome to spend the key package minted for its sender.
     ///
     /// A key package is a bearer token: this device hands one to a peer in a
@@ -972,7 +1047,7 @@ impl LeafDevice {
         let credential_address = crate::adapters::credential_address(credential)?;
         if credential_address != claimed {
             return Err(LeafError::IdentityBinding(format!(
-                "sealed by group member '{credential_address}', but the frame claims '{claimed}'"
+                "authored by group member '{credential_address}', but the frame claims '{claimed}'"
             )));
         }
 

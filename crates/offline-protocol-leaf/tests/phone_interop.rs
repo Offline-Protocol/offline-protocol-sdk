@@ -2143,3 +2143,38 @@ fn a_welcome_cannot_spend_a_key_package_minted_for_a_different_peer() {
         handled.events
     );
 }
+
+/// A pair that stops being a pair is a room this device never chose.
+///
+/// The Welcome gate refuses a group that is not this pair's, and it runs once.
+/// A commit changes the roster without changing the group id, and in the
+/// never-committing profile every commit is the peer's to make, so the only
+/// thing standing between a device and a room full of strangers is re-reading
+/// the roster on the way through.
+#[test]
+fn a_commit_that_adds_a_third_member_is_refused() {
+    let phone = new_phone();
+    let outsider = new_phone();
+    let store = Arc::new(MemoryStore::new());
+    let mut device = device(store);
+    let device_address = pair(&phone, &mut device);
+    let group_id = GroupId::for_session(&phone.address, &device_address).expect("pair group id");
+
+    let bundle = outsider
+        .manager
+        .get_or_create_key_package()
+        .expect("the outsider has a key package");
+    let (_welcome, commit) = phone
+        .manager
+        .add_group_member(&group_id, &outsider.address, &bundle.key_package_data)
+        .expect("the peer adds a third member to the pair's own group");
+
+    let frame = phone_sealed_frame(&phone, &device_address, &commit);
+    let err = device
+        .handle(&frame, NOW)
+        .expect_err("the device followed its peer into a room it never chose");
+    assert!(
+        matches!(err, LeafError::IdentityBinding(_)),
+        "a commit that grew the pair produced {err:?}"
+    );
+}

@@ -162,8 +162,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   copy taken off the air is as spendable as the original and satisfies every
   other gate honestly. Checked before the join, because joining spends the init
   key, and a package burned by a listener leaves the peer it was minted for
-  holding a Welcome that no longer opens. A sealed frame's MLS sender must be
-  the peer the frame came from. A confirmation probe is answered only by a
+  holding a Welcome that no longer opens. A commit must leave the group a pair,
+  re-read from the roster and derived rather than read, because a commit
+  changes the membership without changing the group id and every commit here is
+  the peer's to make. A sealed frame's MLS sender must be the peer the frame
+  came from, commits included. A confirmation probe is answered only by a
   device that still holds a session, because a peer confirms on that answer and
   flushes into it, and an inbound acknowledgement is never acted on at all,
   because a leaf emits those and never probes, so every one that arrives is
