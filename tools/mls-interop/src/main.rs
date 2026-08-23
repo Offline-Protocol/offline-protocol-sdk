@@ -33,7 +33,7 @@
 //! worth having, and it is also what corrected this file's own account of
 //! itself. Two of the three defaults originally listed here are genuinely
 //! refused by the phone. The third, a year-long key package lifetime, is not
-//! refused at all: see [`the_lifetime_cap_is_policy_not_enforcement`]. A control
+//! refused by OpenMLS at all: see [`the_lifetime_cap_is_ours_to_apply`]. A control
 //! that broke all three at once could not tell the difference, because OpenMLS
 //! reports every one of these as `InvalidLifetime`.
 
@@ -56,7 +56,8 @@ use mls_rs_crypto_rustcrypto::RustCryptoProvider;
 // a local copy would leave it green while it stopped testing them.
 use offline_protocol_sealed::{
     derive_address, LEAF_KEY_PACKAGE_LIFETIME, LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS,
-    SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE, SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
+    MAX_ACCEPTED_KEY_PACKAGE_LIFETIME, SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE,
+    SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -165,11 +166,35 @@ fn phone() -> (OpenMlsRustCrypto, SignatureKeyPair, CredentialWithKey) {
 }
 
 /// Runs the phone's side of key package admission: parse, then validate.
-fn phone_admits(provider: &OpenMlsRustCrypto, bytes: &[u8]) -> Result<KeyPackage, String> {
+/// What OpenMLS alone will admit: parse and `KeyPackageIn::validate`, nothing
+/// else. Kept separate from [`phone_admits`] so a refusal can be attributed to
+/// the library rather than to the SDK's policy on top of it.
+fn openmls_admits(provider: &OpenMlsRustCrypto, bytes: &[u8]) -> Result<KeyPackage, String> {
     KeyPackageIn::tls_deserialize_exact(bytes)
         .map_err(|e| format!("parse: {e}"))?
         .validate(provider.crypto(), ProtocolVersion::Mls10)
         .map_err(|e| format!("{e:?}"))
+}
+
+/// What `MlsManager::import_key_package` will admit: everything OpenMLS checks,
+/// plus the validity-window cap RFC 9420 puts on the application and the SDK
+/// applies in `verify_lifetime_bound`.
+///
+/// The cap is here rather than in [`openmls_admits`] because it is the SDK's,
+/// and a harness that modelled the phone as bare OpenMLS would go on reporting
+/// that a year-long package is accepted long after it stopped being.
+fn phone_admits(provider: &OpenMlsRustCrypto, bytes: &[u8]) -> Result<KeyPackage, String> {
+    let key_package = openmls_admits(provider, bytes)?;
+
+    let window = key_package.life_time();
+    let width = window.not_after().saturating_sub(window.not_before());
+    if width > MAX_ACCEPTED_KEY_PACKAGE_LIFETIME.as_secs() {
+        return Err(format!(
+            "validity window is {width} seconds, wider than the {} the SDK admits",
+            MAX_ACCEPTED_KEY_PACKAGE_LIFETIME.as_secs()
+        ));
+    }
+    Ok(key_package)
 }
 
 /// The negative controls: one per correction, each restoring a single default.
@@ -179,7 +204,7 @@ fn phone_admits(provider: &OpenMlsRustCrypto, bytes: &[u8]) -> Result<KeyPackage
 /// a control like that cannot say which correction is doing the work. Splitting
 /// them is what turned up that one of the three originally claimed here is not
 /// enforced by the phone at all: see
-/// [`the_lifetime_cap_is_policy_not_enforcement`].
+/// [`the_lifetime_cap_is_ours_to_apply`].
 ///
 /// If either case below is ACCEPTED, one of the two stacks changed its validity
 /// rules and whether that correction is still load-bearing has to be re-derived
@@ -213,7 +238,7 @@ fn corrections_are_load_bearing() {
         let (client, _) = leaf_client(LEAF_KEY_PACKAGE_LIFETIME);
         let bytes = leaf_key_package(&client, *not_before);
 
-        match phone_admits(&provider, &bytes) {
+        match openmls_admits(&provider, &bytes) {
             Err(e) => println!("  0.{} {what} is refused ({e})", index + 1),
             Ok(_) => panic!(
                 "the phone ACCEPTED a key package from {what}.\n\
@@ -225,7 +250,7 @@ fn corrections_are_load_bearing() {
     }
 }
 
-/// The third default, and the one that turned out not to be a correction.
+/// The third default: refused, but by the SDK rather than by the library.
 ///
 /// RFC 9420 tells an application to define a maximum total lifetime for a leaf
 /// node and reject anything longer, and OpenMLS 0.7.4 ships both halves of
@@ -237,33 +262,42 @@ fn corrections_are_load_bearing() {
 /// made a year-long lifetime look like it was being refused for its range when
 /// it was really being refused for its `not_before`.
 ///
-/// So [`LEAF_KEY_PACKAGE_LIFETIME`] is leaf-side policy, not something the phone
-/// enforces. Worth keeping, because it is what RFC 9420 asks and it bounds how
-/// long an unused init key stays usable, but it is not an interop correction
-/// and this harness must not imply that it is. Two consequences, both pinned
-/// here rather than left as prose:
+/// That left the SDK admitting a key package with an arbitrarily long window
+/// from any peer, which was issue 396. The cap is now
+/// [`MAX_ACCEPTED_KEY_PACKAGE_LIFETIME`], applied in
+/// `MlsManager::verify_lifetime_bound` and modelled here by [`phone_admits`].
 ///
-/// 1. If this case ever starts being *refused*, OpenMLS wired up its own cap
-///    and the shortened lifetime became load-bearing for interop after all.
-/// 2. Because the phone applies no cap, the SDK admits a key package from any
-///    peer with an arbitrarily long lifetime. That is a gap in
-///    `MlsManager::import_key_package`, not in this harness, and it is recorded
-///    in ADR 0021 rather than quietly fixed from here.
-fn the_lifetime_cap_is_policy_not_enforcement() {
+/// Both halves are asserted, because they fail for different reasons and only
+/// one of them is ours:
+///
+/// 1. **OpenMLS still accepts it.** If that changes, the library wired up its
+///    own cap, and where the SDK's refusal comes from is no longer what this
+///    says it is.
+/// 2. **The SDK refuses it.** If that changes, the cap has been removed or
+///    widened past a year and issue 396 is open again.
+fn the_lifetime_cap_is_ours_to_apply() {
     let (provider, _, _) = phone();
     let (client, _) = leaf_client(MLS_RS_DEFAULT_LIFETIME);
     let bytes = leaf_key_package(&client, unix_now() - LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS);
 
+    if let Err(e) = openmls_admits(&provider, &bytes) {
+        panic!(
+            "OpenMLS REFUSED a year-long key package lifetime ({e}).\n\
+             It now enforces MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS itself, so the \
+             SDK's cap is no longer what refuses this and ADR 0021's account of \
+             where the bound comes from needs updating."
+        );
+    }
+
     match phone_admits(&provider, &bytes) {
-        Ok(_) => println!(
-            "  0.3 mls-rs's one-year lifetime is ACCEPTED: OpenMLS defines a cap \
-             and never applies it"
+        Err(e) => println!(
+            "  0.3 mls-rs's one-year lifetime is refused by the SDK's cap ({e}); \
+             OpenMLS alone accepts it"
         ),
-        Err(e) => panic!(
-            "the phone REFUSED a year-long key package lifetime ({e}).\n\
-             OpenMLS now enforces MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS. That makes \
-             LEAF_KEY_PACKAGE_LIFETIME load-bearing for interop, and ADR 0021's account \
-             of it as leaf-side policy needs updating."
+        Ok(_) => panic!(
+            "the phone ACCEPTED a year-long key package lifetime.\n\
+             MAX_ACCEPTED_KEY_PACKAGE_LIFETIME is not being applied at import, \
+             which is issue 396 reopened."
         ),
     }
 }
@@ -276,7 +310,7 @@ fn main() {
     println!("OpenMLS 0.7.4 (phone) <-> mls-rs 0.56.0 (leaf), ciphersuite 3\n");
 
     corrections_are_load_bearing();
-    the_lifetime_cap_is_policy_not_enforcement();
+    the_lifetime_cap_is_ours_to_apply();
 
     // ---- The leaf builds an identity and a pairing artifact ---------------
     let (leaf, leaf_address) = leaf_client(LEAF_KEY_PACKAGE_LIFETIME);

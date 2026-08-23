@@ -117,6 +117,30 @@ pub struct Handled {
     pub events: Vec<LeafEvent>,
 }
 
+/// What a frame proved about the peer it names.
+///
+/// A frame's sender is a plaintext field, and proving it is the whole business
+/// of the handlers [`LeafDevice::dispatch`] routes to. Two of that function's
+/// arms prove nothing, because a frame carrying nothing this device acts on
+/// gives them nothing to work with, and those two are not failures: they
+/// return normally, with a reason.
+///
+/// So "did not fail" and "proved who sent it" are different questions, and an
+/// acknowledgement is owed only for the second. Answering on the first would
+/// hand anyone within radio range exactly what
+/// [`LeafDevice::acknowledge`]'s known-peer gate exists to withhold, because
+/// naming a paired peer costs an attacker nothing beyond having overheard one
+/// frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sender {
+    /// A control signature verified against the address the frame names, or
+    /// the frame opened under a key only that peer holds.
+    Proven,
+    /// Nothing was checked. The sender is whatever the last hand to touch the
+    /// frame wrote there.
+    Claimed,
+}
+
 /// A leaf node.
 ///
 /// # The never-committing profile
@@ -408,19 +432,73 @@ impl LeafDevice {
             return Ok(ignored("frame is addressed to another node"));
         }
 
+        // Before the frame is opened, because opening it a second time is what
+        // fails: the ratchet has spent that generation and refuses it, and the
+        // peer is only asking again because the first answer went missing.
+        if let Some(repeat) = self.repeat_acknowledgement(message, now_unix_secs)? {
+            return Ok(repeat);
+        }
+
+        let (mut handled, sender) = self.dispatch(message, now_unix_secs)?;
+
+        // Only a frame that proved who sent it is answered, which is narrower
+        // than "was not refused". An `Err` above never reaches here, and that
+        // much is the phone's own rule and the reason for it: an
+        // acknowledgement is a receipt, and handing one to whoever just failed
+        // the signature gate tells them their frames are being processed. But
+        // a frame carrying no prefix fails nothing, so it needs the other half
+        // of the question: see [`Sender`].
+        if sender == Sender::Proven {
+            match self.acknowledge(message, now_unix_secs) {
+                Ok(Some(ack)) => handled.outbound.push(ack),
+                Ok(None) => {}
+                // Never propagated, because by here the frame is open and what
+                // it produced is already owed to firmware: the ratchet has
+                // spent that generation, so returning the error would discard
+                // an unlock this device really did receive, and the
+                // retransmission that followed would be refused as a replay
+                // with nothing remembered to answer it from. The answer is
+                // dropped instead, which costs the retry ladder that ran
+                // before any of this existed and is recovered by it.
+                Err(e) => handled.events.push(LeafEvent::Ignored {
+                    reason: format!("the answer this frame is owed could not be stored: {e}"),
+                }),
+            }
+        }
+
+        Ok(handled)
+    }
+
+    /// Routes a frame to the handler for its prefix, and says whether anything
+    /// on that route proved the sender the frame names.
+    ///
+    /// Every handler below either verifies a control signature as its first
+    /// act or opens the frame under the pair's group key, on every path that
+    /// returns normally. That is what makes their success [`Sender::Proven`],
+    /// and a handler that stopped doing it would have to say so here.
+    fn dispatch(&mut self, message: &Message, now_unix_secs: u64) -> Result<(Handled, Sender)> {
         let content = &message.content;
 
         // Order matters: the encrypted-confirm prefix is not checked here at
         // all, because it never travels as a frame. It is only ever found
         // inside a decrypted plaintext, which is where this looks for it.
         if let Some(body) = frames::strip_prefix(content, prefixes::KEY_PACKAGE) {
-            self.on_key_package(message, body, now_unix_secs)
+            Ok((
+                self.on_key_package(message, body, now_unix_secs)?,
+                Sender::Proven,
+            ))
         } else if let Some(body) = frames::strip_prefix(content, prefixes::WELCOME) {
-            self.on_welcome(message, body, now_unix_secs)
+            Ok((
+                self.on_welcome(message, body, now_unix_secs)?,
+                Sender::Proven,
+            ))
         } else if let Some(body) = frames::strip_prefix(content, prefixes::ENCRYPTED) {
-            self.on_encrypted(message, body, now_unix_secs)
+            Ok((
+                self.on_encrypted(message, body, now_unix_secs)?,
+                Sender::Proven,
+            ))
         } else if frames::strip_prefix(content, prefixes::SESSION_CONFIRM_PROBE).is_some() {
-            self.on_probe(message, now_unix_secs)
+            Ok((self.on_probe(message, now_unix_secs)?, Sender::Proven))
         } else if frames::strip_prefix(content, prefixes::SESSION_CONFIRM_ACK).is_some() {
             // Never acted on, and not a frame this device accepts at all. A
             // leaf emits an acknowledgement and never a probe, so it has none
@@ -433,11 +511,15 @@ impl LeafDevice {
             // phone gates the same frame on holding a session of its own; the
             // profile in the spec lists this prefix under what a leaf emits and
             // not under what it accepts.
-            Ok(ignored(
-                "an acknowledgement arrived for a probe this device never sends",
+            Ok((
+                ignored("an acknowledgement arrived for a probe this device never sends"),
+                Sender::Claimed,
             ))
         } else {
-            Ok(ignored("frame carries no prefix this device answers"))
+            Ok((
+                ignored("frame carries no prefix this device answers"),
+                Sender::Claimed,
+            ))
         }
     }
 
@@ -1246,6 +1328,111 @@ impl LeafDevice {
             &self.identity.address.to_string(),
             peer,
         )?)
+    }
+
+    /// Repeats an acknowledgement for a frame this device already answered.
+    ///
+    /// The peer only retransmits because it heard nothing, and the frame it
+    /// sends again is the one it sent before: the same bytes and the same id,
+    /// frozen in its outbox. Opening it a second time cannot work, because the
+    /// ratchet spent that generation on the first copy, so before this the
+    /// device refused it and stayed quiet and the peer went right on asking.
+    ///
+    /// Answering from memory is honest. The claim an acknowledgement makes is
+    /// that the frame with this id reached its recipient, and it did.
+    fn repeat_acknowledgement(
+        &mut self,
+        message: &Message,
+        now_unix_secs: u64,
+    ) -> Result<Option<Handled>> {
+        if !message.requires_ack {
+            return Ok(None);
+        }
+
+        let Some(record) = self.known_peer(message.sender.as_str())? else {
+            return Ok(None);
+        };
+        if !record.was_acknowledged(message.id.to_string().as_str()) {
+            return Ok(None);
+        }
+
+        Ok(Some(Handled {
+            outbound: alloc::vec![frames::acknowledge(
+                &self.store,
+                &self.identity,
+                &self.app_id,
+                message,
+                now_unix_secs,
+            )?],
+            events: alloc::vec![LeafEvent::Ignored {
+                reason: String::from("a frame this device already answered arrived again"),
+            }],
+        }))
+    }
+
+    /// Mints the acknowledgement owed for a frame that was accepted, and
+    /// remembers it before the caller can send it.
+    ///
+    /// # Why only a peer this device already knows
+    ///
+    /// A record exists for a peer that got through the key package gate, which
+    /// means a verified signature and an address that derives to the key that
+    /// made it. Answering anyone else would hand a stranger within radio range
+    /// two things they do not have today: a way to make the device transmit on
+    /// demand, and an answer to "is there a node at this address", which on a
+    /// lock is the question worth asking first. It would also let a flood of
+    /// forged senders each write a record on a part with a few hundred
+    /// kilobytes of flash.
+    ///
+    /// Nothing is lost by the restriction. The peer that sends frames worth
+    /// acknowledging is the one this device is paired with, and an unknown
+    /// sender gets exactly the silence it got before.
+    ///
+    /// # Why the record is not the whole gate
+    ///
+    /// It answers "has this address ever paired", and the frame in hand names
+    /// its sender in plaintext, so on its own the record clears anyone who
+    /// overheard the pair once. The caller asks [`Sender`] first, and only a
+    /// frame that verified a signature or opened under the pair's key reaches
+    /// here. The two are one gate: this one says the peer is known, that one
+    /// says the frame is from it.
+    fn acknowledge(&mut self, message: &Message, now_unix_secs: u64) -> Result<Option<Message>> {
+        if !message.requires_ack {
+            return Ok(None);
+        }
+
+        let peer = message.sender.as_str();
+        let Some(mut record) = self.known_peer(peer)? else {
+            return Ok(None);
+        };
+
+        let ack = frames::acknowledge(
+            &self.store,
+            &self.identity,
+            &self.app_id,
+            message,
+            now_unix_secs,
+        )?;
+
+        // Durable before it is emitted, which is this profile's third
+        // obligation. A device that answered and then lost the record would
+        // meet the retransmission with silence, which is the state this
+        // whole mechanism exists to leave.
+        record.remember_acknowledged(message.id.to_string().as_str());
+        record
+            .save(&self.store, peer)
+            .map_err(|e| LeafError::Storage(e.to_string()))?;
+
+        Ok(Some(ack))
+    }
+
+    /// The record for a peer this device has paired with, or `None`.
+    ///
+    /// Distinct from [`Self::peer_record`], which returns a default for an
+    /// unknown peer. Here the difference between "known" and "not" is the
+    /// decision being made, so it must not be flattened away.
+    fn known_peer(&self, peer: &str) -> Result<Option<PeerRecord>> {
+        PeerRecord::load(&self.store, peer).map_err(|e| LeafError::Storage(e.to_string()))
     }
 
     fn peer_record(&self, peer: &str) -> Result<PeerRecord> {

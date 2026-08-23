@@ -4,7 +4,12 @@
 pub const DEFAULT_INITIAL_TTL: u8 = 8;
 
 /// Metadata key for ACK messages indicating which message ID the ACK is for.
-pub const ACK_FOR_KEY: &str = "ack_for";
+///
+/// Re-exported rather than declared, because a leaf node writes the same key on
+/// the acknowledgements it owes and cannot reach this crate. The one home is
+/// `offline-protocol-sealed`; a second spelling here would be a pair that stops
+/// answering each other with nothing failing to build.
+pub use offline_protocol_sealed::ACK_FOR_KEY;
 
 /// Metadata key for ACK messages indicating the hop count.
 pub const ACK_HOP_COUNT_KEY: &str = "ack_hop_count";

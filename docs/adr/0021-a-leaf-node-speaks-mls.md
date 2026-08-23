@@ -54,7 +54,8 @@ because a decision resting on numbers should ship the thing that reproduces
 them.
 
 **It fits.** `tools/embedded-footprint` links a whole leaf image, protocol layer
-included:
+included. These are the Stage 0 spike's numbers, which is what the 400 KiB gate
+above was set against:
 
 | Configuration | Flash | vs baseline |
 |---|--:|--:|
@@ -62,12 +63,21 @@ included:
 | **Never-committing leaf, the candidate** | **391.3 KiB** | **390.2 KiB** |
 | `rfc_compliant`, X.509 included, upper bound | 403.8 KiB | 402.7 KiB |
 
-On a 1536 KB part that is about a quarter of flash for the candidate, against a
-budget that also has to hold a radio stack and an application. Roughly 111 KiB
-of it is P-384 and P-256 arithmetic that nothing here uses, linked because the
-provider keeps all four curves in one enum with no feature gating and filters
-suites at runtime. A curve-gated provider is worth about 28% of the image and is
-not needed to clear the bar.
+The shipping image is larger, and deliberately so: the spike drove mls-rs
+directly, so it linked neither the envelope codec, nor the control-frame
+signing, nor the address derivation, and priced an image nobody could ship. The
+harness now links `offline-protocol-leaf` itself. **Read the current figure out
+of `measure.sh` rather than from this table**, which is kept as the record of
+the decision rather than as a running total; the gate answered a yes-or-no
+question before anything was built and is not a budget the shipping image is
+held to.
+
+On a 1536 KB part the spike was about a quarter of flash, against a budget that
+also has to hold a radio stack and an application. Roughly 111 KiB of it is
+P-384 and P-256 arithmetic that nothing here uses, linked because the provider
+keeps all four curves in one enum with no feature gating and filters suites at
+runtime. A curve-gated provider is worth about 28% of the image and is not
+needed to clear the bar.
 
 **And it interoperates.** `tools/mls-interop` runs OpenMLS 0.7.4 against
 mls-rs 0.56.0, both pinned, with this SDK's ciphersuite, this SDK's group
@@ -134,7 +144,7 @@ reject the result. Those negative controls are the guard: each correction is a
 default someone will eventually tidy back, and a harness that only proves the
 corrected path works cannot tell them they broke it.
 
-### A third default that is policy, not a correction
+### A third default that is policy, and the cap that was missing
 
 An earlier draft of this ADR listed a third correction, that a leaf must shorten
 mls-rs's one-year key package lifetime because OpenMLS refuses any leaf node
@@ -156,14 +166,34 @@ Two things follow. The first is a harness rule: negative controls restore one
 default at a time, because a control that broke all three at once was refused
 for whichever reason OpenMLS checked first and could not tell a real requirement
 from an imagined one. That is how this was found, on the first run after the
-split. The second is a gap on the phone, recorded here and deliberately not
-fixed in this ADR's change: because no cap is applied,
-`MlsManager::import_key_package` admits a key package from any peer with an
-arbitrarily long lifetime, where RFC 9420 asks an implementation to reject it.
-It is a freshness bound rather than an authentication one, so it is not urgent,
-but it is ours to enforce and no library is doing it for us.
-`tools/mls-interop` step 0.3 pins the current behaviour and fails if OpenMLS
-starts applying its own cap.
+split.
+
+The second was a gap on the phone, recorded here and deliberately left open by
+this ADR's change: because no cap was applied, `MlsManager::import_key_package`
+admitted a key package from any peer with an arbitrarily long lifetime, where
+RFC 9420 asks an implementation to reject it. That is
+[issue 396](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/396),
+and it is closed. The cap is `MAX_ACCEPTED_KEY_PACKAGE_LIFETIME` in
+`offline-protocol-sealed`, applied by `MlsManager::verify_lifetime_bound` at
+import and on every read of the contact cache.
+
+Closing it turned up the reason a leaf's 28 days had looked like a tightening
+of something. **The phone was minting 84-day windows of its own.**
+`KeyPackage::builder()` was never told a lifetime, so OpenMLS applied its
+default of three months plus an hour, and the constant this SDK documented as a
+30-day key package lifetime governed only when the local record stopped being
+offered. The window on the wire, which is the one every other install judges,
+said something else. Both now come from `DEFAULT_KEY_PACKAGE_LIFETIME_SECS`.
+
+That is also why the cap is 90 days rather than the bound OpenMLS declares.
+Three months plus an hour is *exactly* what an unconfigured OpenMLS build emits,
+so a cap set there admits every package this SDK has ever minted by a margin of
+zero seconds, and refuses any peer whose skew allowance is a second wider. The
+margin is the point of the number.
+
+`tools/mls-interop` step 0.3 pins both halves: that OpenMLS still accepts a
+year-long window, so the refusal is known to be ours, and that the SDK refuses
+it, so the cap cannot be removed without a red harness.
 
 ### What must be true of the device that is not true of a phone
 

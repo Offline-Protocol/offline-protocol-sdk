@@ -518,9 +518,65 @@ pub(crate) struct PeerRecord {
     /// [`frames`](crate::frames) for why it has no legacy peer to accommodate.
     #[serde(default)]
     pub(crate) last_reset_ms: i64,
+
+    /// The ids of the last few frames from this peer that were acknowledged.
+    ///
+    /// An acknowledgement is the frame most likely to be the one that goes
+    /// missing: it is the last in the exchange and nothing answers it, so
+    /// nothing retries it. When one is lost the peer retransmits what it
+    /// already delivered, the ratchet refuses the replay, and without this the
+    /// device stays silent and the full retry ladder runs anyway, which is the
+    /// case issue 402 exists to end rather than to narrow.
+    ///
+    /// Answering from memory closes it: a frame whose id is here was received
+    /// once, so saying so again is true, costs one small frame, and stops the
+    /// remaining nine.
+    ///
+    /// # Why a list here, where a reset needed only an integer
+    ///
+    /// [`Self::last_reset_ms`] replaced exactly this shape, and the difference
+    /// is where the number being compared comes from. A reset's timestamp is
+    /// inside the signature, so a high-water mark over it is a statement an
+    /// attacker cannot move. A sealed frame carries no signature at all, and
+    /// its id and timestamp sit outside the AEAD, so a watermark over either
+    /// could be parked in the future by anyone within radio range and would
+    /// deny the peer every future acknowledgement.
+    ///
+    /// A list has no such failure. Nothing reaches it that this device did not
+    /// itself acknowledge, and its worst case is re-answering a frame it
+    /// already answered, which is one frame rather than a durably broken pair.
+    #[serde(default)]
+    pub(crate) acknowledged: Vec<String>,
 }
 
+/// How many acknowledged frame ids a device remembers per peer.
+///
+/// Four, because the peer's own ladder is what sets the number: it waits ten
+/// seconds for an answer before retransmitting, so the ids at risk are the ones
+/// still in flight in that window, and a phone does not have dozens of frames
+/// outstanding to a lock. It is a bound on flash, not a bound on correctness:
+/// forgetting an id costs the retry ladder that was running before this
+/// existed.
+pub(crate) const REMEMBERED_ACKS: usize = 4;
+
 impl PeerRecord {
+    /// Whether a frame from this peer has already been acknowledged, so the
+    /// answer can be repeated without opening it a second time.
+    pub(crate) fn was_acknowledged(&self, id: &str) -> bool {
+        self.acknowledged.iter().any(|seen| seen == id)
+    }
+
+    /// Records a frame as acknowledged, evicting the oldest when full.
+    pub(crate) fn remember_acknowledged(&mut self, id: &str) {
+        if self.was_acknowledged(id) {
+            return;
+        }
+        if self.acknowledged.len() >= REMEMBERED_ACKS {
+            self.acknowledged.remove(0);
+        }
+        self.acknowledged.push(String::from(id));
+    }
+
     /// Records a reset stamped `signed_ms` as acted on.
     pub(crate) fn remember_reset(&mut self, signed_ms: i64) {
         self.last_reset_ms = signed_ms;

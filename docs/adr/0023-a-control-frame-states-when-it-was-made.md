@@ -41,7 +41,9 @@ refreshes its last-send stamp, so terminal failure moves out to an absolute cap
 of four lifetimes, about 28 days. A connection request riding that ladder is
 signed once, at the start, and re-sent unchanged for a month. A published key
 package is not delivered at all: it is left on a relay to be *found*, for as
-long as the package is valid, which the engine caps at 30 days.
+long as the package is valid, which is 30 days for one this install minted and
+up to the 90 days `MAX_ACCEPTED_KEY_PACKAGE_LIFETIME` admits for one that
+arrived from elsewhere.
 
 So a receiver that demands monotonicity refuses frames that are late by design,
 and it refuses them at the worst moment: the recovery frame for a broken pair
@@ -80,10 +82,17 @@ different ages:
 | Phone | 30 days | 48 hours |
 | Leaf | 48 hours | 48 hours |
 
-Thirty days is not a comfort margin. It is the smallest number that clears both
-paths on which this protocol delivers a legitimately old frame: the outbox's
-28-day absolute cap, and a published key package's 30-day validity. A shorter
-window refuses frames that are late by design.
+Thirty days is not a comfort margin. It is the smallest number that clears the
+path on which this protocol delivers a legitimately old frame under this
+payload: the outbox's 28-day absolute cap. A shorter window refuses frames that
+are late by design.
+
+A published key package is the other genuinely old frame, and it is not what
+sets this number, because such a record is signed under the older payload and
+never judged for its age (see below). Were that to change, the window it would
+have to clear is not 30 days but the 90 that
+`MAX_ACCEPTED_KEY_PACKAGE_LIFETIME` admits from a peer, which is worth knowing
+before anyone reads the two numbers as one.
 
 A leaf allows two days because none of that reaches a device. A leaf is paired
 with one phone over a direct radio link, is not addressed through a relay, and
@@ -183,9 +192,12 @@ someone never met is its entire purpose.
 
 It is not the hole it looks like. The record carries `session_reset: false`, so
 it holds no directive worth replaying, and re-delivering it can do nothing but
-re-offer a key package still inside its own validity. Bounding *that* is
+re-offer a key package still inside its own validity. Bounding *that* was
 [issue 396](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/396)'s
-subject, not this one's.
+subject rather than this one's, and it is now bounded: `verify_lifetime_bound`
+refuses a window wider than `MAX_ACCEPTED_KEY_PACKAGE_LIFETIME` at import and on
+every read of the cache, so the replay of a published record expires with the
+package instead of never.
 
 ### The failure mode is a clock, and it needs a lever
 

@@ -30,8 +30,11 @@
 ///   four lifetimes, about 28 days. A connection request riding that ladder is
 ///   signed once, at the start.
 /// - **A published key package is not delivered, it is left to be found.** It
-///   sits on a relay for as long as the package is valid, which the engine
-///   caps at 30 days.
+///   sits on a relay for as long as the package is valid: 30 days for one this
+///   install minted, and up to [`crate::MAX_ACCEPTED_KEY_PACKAGE_LIFETIME`] for one
+///   minted elsewhere. Such a record is signed under the older payload on
+///   purpose, so this window is not what admits it; the numbers are here
+///   because they are what a window would have to clear if that ever changed.
 ///
 /// A window shorter than either of those refuses frames that are late by
 /// design. This is therefore a bound on the replay of every other control

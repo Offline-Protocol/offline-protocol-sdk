@@ -24,13 +24,13 @@ use offline_protocol_leaf::{
         KEY_TYPE_GROUP_EPOCH, KEY_TYPE_GROUP_STATE, KEY_TYPE_IDENTITY, KEY_TYPE_KEY_PACKAGE,
         KEY_TYPE_PEER,
     },
-    LeafDevice, LeafError, LeafEvent, LeafStore, MemoryStore, StoreError,
+    Handled, LeafDevice, LeafError, LeafEvent, LeafStore, MemoryStore, StoreError,
 };
 use offline_protocol_mls::{storage::InMemoryStorage, MlsManager, MlsStorage};
 use offline_protocol_sealed::{
     control_signing_payload_v2, derive_address, prefixes, EncryptedMessage, GroupId,
-    KeyPackagePayload, WelcomeMessage, CTRL_FRESHNESS_FUTURE_MS, LEAF_CTRL_FRESHNESS_PAST_MS,
-    MLS_ENVELOPE_COMPACT_V1,
+    KeyPackagePayload, WelcomeMessage, ACK_FOR_KEY, CTRL_FRESHNESS_FUTURE_MS,
+    LEAF_CTRL_FRESHNESS_PAST_MS, MLS_ENVELOPE_COMPACT_V1,
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -184,8 +184,9 @@ fn pair(phone: &Phone, device: &mut LeafDevice) -> String {
     // The confirmation is a group-aware decrypt, so the phone must be able to
     // open it. That is the whole reason it is sealed rather than sent as a
     // plaintext acknowledgement.
-    assert_eq!(handled.outbound.len(), 1, "expected one confirmation frame");
-    let confirm = envelope_of(&handled.outbound[0]);
+    let said = spoken(&handled);
+    assert_eq!(said.len(), 1, "expected one confirmation frame");
+    let confirm = envelope_of(said[0]);
     let opened = phone
         .manager
         .decrypt_from_user(&confirm, &device_address)
@@ -197,6 +198,28 @@ fn pair(phone: &Phone, device: &mut LeafDevice) -> String {
     );
 
     device_address
+}
+
+/// What a device said, with delivery acknowledgements taken out.
+///
+/// A leaf answers every frame it accepts from a peer it knows (issue 402), so
+/// a test about what the device *said* has to separate the two or it is really
+/// asserting on an acknowledgement it never meant to look at.
+fn spoken(handled: &Handled) -> Vec<&Message> {
+    handled
+        .outbound
+        .iter()
+        .filter(|frame| !frame.metadata.contains_key(ACK_FOR_KEY))
+        .collect()
+}
+
+/// The delivery acknowledgements a device emitted.
+fn acknowledgements(handled: &Handled) -> Vec<&Message> {
+    handled
+        .outbound
+        .iter()
+        .filter(|frame| frame.metadata.contains_key(ACK_FOR_KEY))
+        .collect()
 }
 
 /// Pulls the envelope out of a device's `__MLS_ENC__` frame.
@@ -318,12 +341,9 @@ fn a_driven_rekey_reaches_the_device_as_a_session_reset() {
     );
 
     // And it answers with a fresh package, so the exchange can begin again.
-    assert_eq!(
-        handled.outbound.len(),
-        1,
-        "a reset did not produce a fresh key package"
-    );
-    let fresh = &handled.outbound[0];
+    let said = spoken(&handled);
+    assert_eq!(said.len(), 1, "a reset did not produce a fresh key package");
+    let fresh = said[0];
     assert!(fresh.content.starts_with(prefixes::KEY_PACKAGE));
 
     // The phone can complete a second pairing from it, which is what makes the
@@ -557,8 +577,307 @@ fn state_survives_a_power_cycle() {
     );
 }
 
+/// The shape of the answer, field by field.
+///
+/// A delivery acknowledgement is not a control frame: no prefix, no signature,
+/// empty content. Its whole meaning is one metadata entry, and the engine that
+/// reads it takes the key from the same declaration this asserts against, so a
+/// rename moves both ends at once rather than leaving a device talking to
+/// itself.
 #[test]
-fn a_replayed_sealed_frame_is_refused() {
+fn an_accepted_frame_is_answered_with_a_delivery_acknowledgement() {
+    let phone = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = pair(&phone, &mut device);
+
+    let sealed = phone
+        .manager
+        .encrypt_for_user(&device_address, b"unlock")
+        .expect("phone seals");
+    let frame = phone_sealed_frame(&phone, &device_address, &sealed);
+    assert!(
+        frame.requires_ack,
+        "the frame under test did not ask for an answer, so it proves nothing"
+    );
+
+    let handled = device.handle(&frame, NOW).expect("device opens the frame");
+    let answers = acknowledgements(&handled);
+    assert_eq!(answers.len(), 1, "an accepted frame was not answered");
+    let ack = answers[0];
+
+    assert_eq!(
+        ack.metadata.get(ACK_FOR_KEY),
+        Some(&frame.id.to_string()),
+        "the answer did not name the frame it answers"
+    );
+    assert_eq!(
+        ack.sender.as_str(),
+        device_address,
+        "an answer from anyone but the recipient is discarded by the peer"
+    );
+    assert_eq!(
+        ack.recipient.as_str(),
+        phone.address,
+        "the answer went somewhere other than the sender"
+    );
+    assert!(ack.content.is_empty(), "an answer carries no content");
+    assert!(
+        !ack.requires_ack,
+        "an answer that asks to be answered does not terminate"
+    );
+    assert!(
+        !ack.metadata
+            .contains_key(offline_protocol_sealed::CTRL_SIG_META_KEY),
+        "an answer is not a control frame and must not be signed as one"
+    );
+}
+
+/// A stranger gets the silence it got before.
+///
+/// A record exists only for a peer that cleared the key package gate, so this
+/// is the line between a paired phone and anyone else within radio range.
+/// Answering the second would hand out two things a device should not give
+/// away: a way to make it transmit on demand, and a reply to "is there a node
+/// at this address", which against a lock is the first question worth asking.
+#[test]
+fn a_frame_from_a_peer_this_device_does_not_know_is_not_answered() {
+    let phone = new_phone();
+    let stranger = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = pair(&phone, &mut device);
+
+    let mut frame = phone_control_frame(
+        &stranger,
+        &device_address,
+        String::from("nothing this device parses"),
+    );
+    sign_as(&stranger, &mut frame);
+    assert!(frame.requires_ack, "the frame did not ask for an answer");
+
+    let handled = device.handle(&frame, NOW).expect("a stranger is ignored");
+    assert!(
+        handled.outbound.is_empty(),
+        "a device answered a peer it has never paired with: {:?}",
+        handled.outbound
+    );
+}
+
+/// A frame that names a paired peer and proves nothing is not answered.
+///
+/// The known-peer gate asks whether an address has ever paired, and a frame's
+/// sender is a plaintext field, so anyone who overheard the pair once can
+/// write that address on a frame of their own. What closes it is that a frame
+/// carrying no prefix this device acts on verifies nothing, so it never earns
+/// an answer: without that, a stranger in radio range has a way to make a lock
+/// transmit on demand and a reply to "is there a node at this address", which
+/// is the whole thing the gate was put there to withhold.
+#[test]
+fn a_frame_that_names_a_known_peer_but_proves_nothing_is_not_answered() {
+    let phone = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = pair(&phone, &mut device);
+
+    // No signature at all: whoever built this holds none of the phone's keys
+    // and has only copied its address off a frame it overheard.
+    let forged = Message::new(
+        UserId::new(&phone.address).expect("phone address is a user id"),
+        UserId::new(&device_address).expect("device address is a user id"),
+        offline_protocol_core::AppId::new(APP_ID).expect("app id"),
+        String::from("nothing this device parses"),
+    );
+    assert!(
+        forged.requires_ack,
+        "the frame under test did not ask for an answer, so it proves nothing"
+    );
+
+    let handled = device
+        .handle(&forged, NOW)
+        .expect("an unsigned frame is ignored");
+    assert!(
+        handled.outbound.is_empty(),
+        "a device answered a frame that proved nothing about its sender: {:?}",
+        handled.outbound
+    );
+}
+
+/// And such a frame cannot push out what the device really did answer.
+///
+/// The memory is four deep and evicts oldest-first, so a frame that got into
+/// it for free would be a way to empty it: five of them and the device has
+/// nothing left to answer a genuine retransmission from, which puts back the
+/// full retry ladder this mechanism exists to end. Nothing may be written
+/// there on the strength of a plaintext sender field.
+#[test]
+fn frames_that_prove_nothing_cannot_evict_what_a_device_answered() {
+    let phone = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = pair(&phone, &mut device);
+
+    let sealed = phone
+        .manager
+        .encrypt_for_user(&device_address, b"unlock")
+        .expect("phone seals");
+    let genuine = phone_sealed_frame(&phone, &device_address, &sealed);
+    device.handle(&genuine, NOW).expect("first delivery opens");
+
+    // Exactly the depth, which is the fewest that would push the genuine id
+    // off the end if junk were remembered. The same four that
+    // `a_replay_the_device_no_longer_remembers_is_refused` uses to do it with
+    // real frames, so the two move together if the depth ever changes.
+    for n in 0..4 {
+        let forged = Message::new(
+            UserId::new(&phone.address).expect("phone address is a user id"),
+            UserId::new(&device_address).expect("device address is a user id"),
+            offline_protocol_core::AppId::new(APP_ID).expect("app id"),
+            format!("junk {n}"),
+        );
+        let handled = device.handle(&forged, NOW).expect("junk is ignored");
+        assert!(
+            handled.outbound.is_empty(),
+            "a device answered junk: {:?}",
+            handled.outbound
+        );
+    }
+
+    let repeat = device
+        .handle(&genuine, NOW)
+        .expect("a retransmission is answered");
+    assert_eq!(
+        acknowledgements(&repeat).len(),
+        1,
+        "junk pushed a real answer out of the memory, restoring the retry ladder"
+    );
+}
+
+/// An unsolicited probe acknowledgement is not answered either.
+///
+/// It is the other arm that verifies nothing, and it is the more tempting of
+/// the two, because it carries a prefix this device recognises. Recognising a
+/// prefix is not checking a signature.
+#[test]
+fn an_unsolicited_probe_acknowledgement_is_not_answered() {
+    let phone = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = pair(&phone, &mut device);
+
+    let forged = Message::new(
+        UserId::new(&phone.address).expect("phone address is a user id"),
+        UserId::new(&device_address).expect("device address is a user id"),
+        offline_protocol_core::AppId::new(APP_ID).expect("app id"),
+        String::from(prefixes::SESSION_CONFIRM_ACK),
+    );
+
+    let handled = device
+        .handle(&forged, NOW)
+        .expect("an unsolicited ack is ignored");
+    assert!(
+        handled.outbound.is_empty(),
+        "a device answered an unsolicited probe acknowledgement: {:?}",
+        handled.outbound
+    );
+}
+
+/// A refusal is not a receipt.
+///
+/// Handing an acknowledgement to whoever just failed the signature gate tells
+/// them their frames are being processed, which is the phone's reason for
+/// withholding one on a security rejection and is this device's too.
+#[test]
+fn a_frame_that_is_refused_is_not_answered() {
+    let phone = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = pair(&phone, &mut device);
+
+    // Signed by the peer, then altered, so it fails on the signature rather
+    // than on anything about its shape.
+    let mut frame = phone_control_frame(
+        &phone,
+        &device_address,
+        format!("{}not a key package", prefixes::KEY_PACKAGE),
+    );
+    sign_as(&phone, &mut frame);
+    frame.content.push_str(" tampered");
+
+    let err = device
+        .handle(&frame, NOW)
+        .expect_err("a tampered frame was accepted");
+    assert!(
+        matches!(
+            err,
+            LeafError::ControlFrameRefused(_) | LeafError::MalformedFrame(_)
+        ),
+        "the frame was refused for an unexpected reason: {err:?}"
+    );
+}
+
+/// The memory of an answer survives losing power.
+///
+/// A device that answered and then forgot would meet the retransmission with
+/// silence, which is the state this whole mechanism exists to leave, so the
+/// record is written before the answer is handed to the caller.
+#[test]
+fn what_a_device_answered_survives_a_power_cycle() {
+    let phone = new_phone();
+    let store: Arc<dyn LeafStore> = Arc::new(MemoryStore::new());
+    let mut device = device(Arc::clone(&store));
+    let device_address = pair(&phone, &mut device);
+
+    let sealed = phone
+        .manager
+        .encrypt_for_user(&device_address, b"unlock")
+        .expect("phone seals");
+    let frame = phone_sealed_frame(&phone, &device_address, &sealed);
+    device.handle(&frame, NOW).expect("first delivery opens");
+
+    // The same flash, a fresh device.
+    let mut rebooted = LeafDevice::resume(Arc::clone(&store), APP_ID).expect("device resumes");
+    let handled = rebooted
+        .handle(&frame, NOW)
+        .expect("a replay after a reboot is answered");
+    assert_eq!(
+        acknowledgements(&handled).len(),
+        1,
+        "a device that rebooted met a retransmission with silence"
+    );
+}
+
+/// A frame that asks for no answer gets none.
+#[test]
+fn a_frame_that_does_not_ask_for_an_answer_is_not_answered() {
+    let phone = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = pair(&phone, &mut device);
+
+    let sealed = phone
+        .manager
+        .encrypt_for_user(&device_address, b"unlock")
+        .expect("phone seals");
+    let mut frame = phone_sealed_frame(&phone, &device_address, &sealed);
+    frame.requires_ack = false;
+
+    let handled = device.handle(&frame, NOW).expect("device opens the frame");
+    assert!(
+        acknowledgements(&handled).is_empty(),
+        "a device answered a frame that asked for no answer"
+    );
+}
+
+/// A frame that arrives twice is answered twice and opened once.
+///
+/// The second copy is overwhelmingly a retransmission: the peer waits ten
+/// seconds for an answer and sends the same frozen bytes again when none comes,
+/// and the answer is the frame most likely to have been the one that went
+/// missing. Opening it again is impossible, because the ratchet spent that
+/// generation on the first copy, so what a device can do is say again what it
+/// said before. It is the phone's own rule for a duplicate, for the reason the
+/// phone gives: a second copy and a lost answer are not distinguishable here,
+/// and staying quiet for the second turns a delivered frame into a failed one.
+///
+/// The property the older version of this test pinned still holds and is
+/// asserted below: the frame is not opened a second time, and nothing reaches
+/// firmware suggesting it was.
+#[test]
+fn a_replayed_sealed_frame_is_answered_again_and_never_opened_twice() {
     let phone = new_phone();
     let mut device = device(Arc::new(MemoryStore::new()));
     let device_address = pair(&phone, &mut device);
@@ -569,13 +888,85 @@ fn a_replayed_sealed_frame_is_refused() {
         .expect("phone seals");
     let frame = phone_sealed_frame(&phone, &device_address, &sealed);
 
-    device.handle(&frame, NOW).expect("first delivery opens");
+    let first = device.handle(&frame, NOW).expect("first delivery opens");
+    assert!(
+        first.events.contains(&LeafEvent::MessageReceived {
+            peer: phone.address.clone(),
+            text: String::from("unlock"),
+        }),
+        "the first delivery did not reach firmware: {:?}",
+        first.events
+    );
+    assert_eq!(
+        acknowledgements(&first).len(),
+        1,
+        "an accepted frame was not answered"
+    );
+
+    let second = device.handle(&frame, NOW).expect("a replay is answered");
+    assert_eq!(
+        acknowledgements(&second).len(),
+        1,
+        "a retransmission went unanswered, which is what makes the peer keep asking"
+    );
+    assert_eq!(
+        acknowledgements(&second)[0].metadata.get(ACK_FOR_KEY),
+        Some(&frame.id.to_string()),
+        "the repeated answer named a different frame"
+    );
+    assert!(
+        spoken(&second).is_empty(),
+        "a replay produced a frame beyond the answer: {:?}",
+        spoken(&second)
+    );
+    assert!(
+        !second
+            .events
+            .iter()
+            .any(|event| matches!(event, LeafEvent::MessageReceived { .. })),
+        "a replayed frame was delivered to firmware a second time: {:?}",
+        second.events
+    );
+}
+
+/// A replay the device no longer remembers answering is still refused.
+///
+/// The memory is four frames deep, which bounds flash rather than correctness,
+/// and this is the edge it puts there: past it a device has nothing to answer
+/// from and the ratchet does what it always did. It matters because the whole
+/// point of quietening the retransmissions was to leave a real replay
+/// visible, and a device that absorbed every one of them would have traded one
+/// invisible attack for another.
+#[test]
+fn a_replay_the_device_no_longer_remembers_is_refused() {
+    let phone = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = pair(&phone, &mut device);
+
+    let sealed = phone
+        .manager
+        .encrypt_for_user(&device_address, b"unlock")
+        .expect("phone seals");
+    let capture = phone_sealed_frame(&phone, &device_address, &sealed);
+    device.handle(&capture, NOW).expect("first delivery opens");
+
+    // Four more, which is exactly the depth, so the captured frame's id falls
+    // off the end.
+    for n in 0..4 {
+        let sealed = phone
+            .manager
+            .encrypt_for_user(&device_address, format!("later {n}").as_bytes())
+            .expect("phone seals");
+        let frame = phone_sealed_frame(&phone, &device_address, &sealed);
+        device.handle(&frame, NOW).expect("later delivery opens");
+    }
+
     let err = device
-        .handle(&frame, NOW)
-        .expect_err("a replayed frame was opened a second time");
+        .handle(&capture, NOW)
+        .expect_err("a forgotten replay was answered anyway");
     assert!(
         matches!(err, LeafError::Mls(_)),
-        "a replay produced {err:?}"
+        "a forgotten replay produced {err:?}"
     );
 }
 
@@ -592,14 +983,15 @@ fn the_device_answers_a_probe_with_an_ack() {
     );
     let handled = device.handle(&probe, NOW).expect("device answers");
 
-    assert_eq!(handled.outbound.len(), 1);
+    let said = spoken(&handled);
+    assert_eq!(said.len(), 1);
     assert_eq!(
-        handled.outbound[0].content,
+        said[0].content,
         prefixes::SESSION_CONFIRM_ACK,
         "a probe was not answered with an acknowledgement"
     );
     assert!(
-        handled.outbound[0]
+        said[0]
             .metadata
             .contains_key(offline_protocol_sealed::CTRL_SIG_META_KEY),
         "the acknowledgement went out unsigned"
@@ -725,7 +1117,7 @@ fn a_peer_that_already_has_a_key_package_is_not_sent_another() {
 
     let handled = device.handle(&frame, NOW).expect("device records the peer");
     assert!(
-        handled.outbound.is_empty(),
+        spoken(&handled).is_empty(),
         "the device answered a key package with another one, which loops"
     );
     assert!(handled.events.contains(&LeafEvent::PeerAdvertised {
@@ -830,6 +1222,95 @@ fn a_failing_store_produces_no_frame() {
     );
 }
 
+/// A store that fails to write peer records once armed, and nothing else.
+///
+/// Narrow on purpose. A store that failed everything would fail the frame's
+/// own persist and never reach the question this is asked to answer, which is
+/// what a device does when the frame is already open and only the bookkeeping
+/// behind the answer fails.
+#[derive(Default)]
+struct PeerWriteFailingStore {
+    inner: MemoryStore,
+    failing: AtomicBool,
+}
+
+impl PeerWriteFailingStore {
+    fn arm(&self) {
+        self.failing.store(true, Ordering::SeqCst);
+    }
+}
+
+impl LeafStore for PeerWriteFailingStore {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> Result<(), StoreError> {
+        if key_type == KEY_TYPE_PEER && self.failing.load(Ordering::SeqCst) {
+            return Err(StoreError::Store("flash is on fire".to_string()));
+        }
+        self.inner.store(key_type, key_id, data)
+    }
+
+    fn load(&self, key_type: &str, key_id: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        self.inner.load(key_type, key_id)
+    }
+
+    fn delete(&self, key_type: &str, key_id: &str) -> Result<(), StoreError> {
+        self.inner.delete(key_type, key_id)
+    }
+}
+
+/// A store that fails while recording the answer does not eat the message.
+///
+/// By the time the answer is minted the frame is open and the ratchet has
+/// spent that generation, so what it produced is already owed to firmware: an
+/// unlock this device really did receive cannot be thrown away because the
+/// receipt for it would not write. The retransmission that follows will be
+/// refused as a replay with nothing remembered to answer it from, which is the
+/// ordinary retry ladder and is recoverable. A lost command is not.
+#[test]
+fn a_store_that_fails_while_recording_the_answer_still_reports_the_message() {
+    let phone = new_phone();
+    let store = Arc::new(PeerWriteFailingStore::default());
+    let mut device = device(Arc::clone(&store) as Arc<dyn LeafStore>);
+    let device_address = pair(&phone, &mut device);
+
+    let sealed = phone
+        .manager
+        .encrypt_for_user(&device_address, b"unlock")
+        .expect("phone seals");
+    let frame = phone_sealed_frame(&phone, &device_address, &sealed);
+
+    store.arm();
+
+    let handled = device
+        .handle(&frame, NOW)
+        .expect("a frame this device opened was reported as a failure");
+    assert!(
+        handled.events.contains(&LeafEvent::MessageReceived {
+            peer: phone.address.clone(),
+            text: String::from("unlock"),
+        }),
+        "the command was discarded because its receipt would not store: {:?}",
+        handled.events
+    );
+
+    // No answer, because the record behind it is not durable and this crate
+    // emits nothing it has not persisted first.
+    assert!(
+        acknowledgements(&handled).is_empty(),
+        "an answer went out with nothing on flash behind it"
+    );
+
+    // And firmware is told, rather than left to infer it from a silence that
+    // looks exactly like a healthy device on a quiet link.
+    assert!(
+        handled
+            .events
+            .iter()
+            .any(|event| matches!(event, LeafEvent::Ignored { reason } if reason.contains("could not be stored"))),
+        "a store failure was swallowed: {:?}",
+        handled.events
+    );
+}
+
 #[test]
 fn a_device_refuses_to_replace_its_own_identity() {
     let store: Arc<dyn LeafStore> = Arc::new(MemoryStore::new());
@@ -865,7 +1346,7 @@ fn a_device_address_derives_from_its_own_key() {
     sign_as(&phone, &mut frame);
 
     let handled = device.handle(&frame, NOW).expect("probe answered");
-    let ack = &handled.outbound[0];
+    let ack = spoken(&handled)[0];
     let key = BASE64
         .decode(
             ack.metadata
@@ -1221,7 +1702,7 @@ fn a_replayed_session_reset_does_not_tear_down_the_new_session() {
     }));
 
     // The pair rebuilds, as a driven rekey is meant to.
-    import_device_key_package(&phone, &handled.outbound[0]);
+    import_device_key_package(&phone, spoken(&handled)[0]);
     let welcome = phone
         .manager
         .create_session(&device_address)
@@ -1821,7 +2302,7 @@ fn a_frame_addressed_to_another_node_is_ignored() {
         .handle(&addressed, NOW)
         .expect("device handles a frame addressed to it");
     assert_eq!(
-        handled.outbound.len(),
+        spoken(&handled).len(),
         1,
         "a frame addressed to this device was not answered: {:?}",
         handled.events

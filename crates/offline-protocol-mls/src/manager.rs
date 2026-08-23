@@ -12,6 +12,7 @@ use crate::types::{
 };
 
 use offline_protocol_core::Address;
+use offline_protocol_sealed::MAX_ACCEPTED_KEY_PACKAGE_LIFETIME;
 use openmls::prelude::tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
@@ -21,7 +22,38 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// Default lifetime for key packages (30 days in seconds).
+///
+/// Two things read this, and until issue 396 only one of them did: the stored
+/// bundle's `expires_at_ms`, which is when this install stops offering the
+/// package, and the MLS validity window on the wire, which is when everyone
+/// else stops accepting it. The second was never set. `KeyPackage::builder()`
+/// left OpenMLS to apply its own default of three months plus an hour, so a
+/// package this SDK described as living 30 days was cryptographically valid
+/// for 84, and the number below documented an intention nothing carried out.
+///
+/// They are one number because they are one fact. A package that expires
+/// locally before its window closes leaves peers holding something we will not
+/// answer for; one whose window closes first is offered after it is already
+/// refused.
 const DEFAULT_KEY_PACKAGE_LIFETIME_SECS: u64 = 30 * 24 * 60 * 60;
+
+// What we mint has to survive what we admit, and both this and the cap are
+// edited by hand. See `MAX_ACCEPTED_KEY_PACKAGE_LIFETIME` for why the margin is
+// not decoration.
+const _: () = assert!(
+    DEFAULT_KEY_PACKAGE_LIFETIME_SECS + LIFETIME_SKEW_MARGIN_SECS
+        <= MAX_ACCEPTED_KEY_PACKAGE_LIFETIME.as_secs(),
+    "this install mints a key package it would refuse from a peer"
+);
+
+/// How far into the past a key package's validity window starts.
+///
+/// `Lifetime::new` backdates by exactly this much, so a package handed to a
+/// peer whose clock runs slightly behind ours is not refused for not yet being
+/// valid. It is part of the window's total width, which is why the assertion
+/// above adds it before comparing against the cap: an off-by-this-margin cap
+/// is the failure OpenMLS's own constant walks into.
+const LIFETIME_SKEW_MARGIN_SECS: u64 = 60 * 60;
 
 /// How long an expired key package's private init key is kept before it is
 /// destroyed (7 days in seconds).
@@ -340,7 +372,12 @@ impl MlsManager {
         let credential = self.get_credential()?;
         let signature_keys = self.get_signer()?;
 
+        // Stated rather than defaulted. Left to OpenMLS this is three months
+        // plus an hour, which is both wider than this SDK documents anywhere
+        // and exactly the library's own declared maximum, so a package minted
+        // that way clears every cap by nothing at all (issue 396).
         let key_package_bundle = KeyPackage::builder()
+            .key_package_lifetime(Lifetime::new(DEFAULT_KEY_PACKAGE_LIFETIME_SECS))
             .build(
                 DEFAULT_CIPHERSUITE,
                 &self.provider,
@@ -641,6 +678,7 @@ impl MlsManager {
 
         Self::verify_credential_identity(&key_package, user_id)?;
         Self::verify_address_binding(&key_package, user_id)?;
+        Self::verify_lifetime_bound(&key_package)?;
 
         let key_type = StorageKeyType::ContactKeyPackage.as_str();
         self.storage.store(key_type, user_id, key_package_data)?;
@@ -672,8 +710,54 @@ impl MlsManager {
         // window a container write aims at.
         Self::verify_credential_identity(&key_package, user_id)?;
         Self::verify_address_binding(&key_package, user_id)?;
+        Self::verify_lifetime_bound(&key_package)?;
 
         Ok(key_package)
+    }
+
+    /// Requires a key package's validity window to be no wider than this
+    /// install admits.
+    ///
+    /// RFC 9420 puts this on the application: define a maximum total lifetime
+    /// and reject any leaf node claiming more. Nothing here did until issue
+    /// 396. OpenMLS looks like it does the job and does not: it declares
+    /// `MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS` and ships
+    /// `Lifetime::has_acceptable_range`, and `KeyPackageIn::validate` calls
+    /// neither. What `validate` checks is `Lifetime::is_valid`, which asks only
+    /// whether *now* falls between the two ends. A package claiming a century
+    /// satisfies that on every day of the century.
+    ///
+    /// # Why the window is the thing that expires a key package
+    ///
+    /// An imported package is cached in the install-scoped protocol-state store
+    /// and re-read for as long as it validates, so nothing but the window ever
+    /// ages it out. Left unbounded, one leaked init key stays a working way to
+    /// open a session as its owner forever, and bounding the packages we mint
+    /// bounds nothing about the ones we accept.
+    ///
+    /// # Why this runs on the cache read too
+    ///
+    /// For the same reason [`Self::verify_address_binding`] does: an entry
+    /// written to the store out of band never passed the import gate. Checking
+    /// only at import would leave the widest window in the system reachable by
+    /// whoever can write that store.
+    ///
+    /// An inverted window (`not_after` below `not_before`) saturates to zero
+    /// here and passes, which is correct rather than an oversight: it cannot
+    /// contain *now*, so `validate` has already refused it before this runs.
+    fn verify_lifetime_bound(key_package: &KeyPackage) -> Result<()> {
+        let lifetime = key_package.life_time();
+        let width = lifetime.not_after().saturating_sub(lifetime.not_before());
+        let cap = MAX_ACCEPTED_KEY_PACKAGE_LIFETIME.as_secs();
+
+        if width > cap {
+            return Err(MlsError::InvalidKeyPackage(format!(
+                "key package validity window is {} seconds, wider than the {} \
+                 seconds this install admits",
+                width, cap
+            )));
+        }
+        Ok(())
     }
 
     /// Requires the key package's leaf signature key to derive to the address
@@ -946,7 +1030,15 @@ impl MlsManager {
     /// credential-identity one `import_key_package` has always had — so a
     /// package could be admitted to a group under a roster label that had
     /// nothing to do with it. The 1:1 path and the group path apply the same
-    /// two checks.
+    /// three checks.
+    ///
+    /// The third is the validity-window cap, and it belongs here for the
+    /// reason it belongs anywhere: this is a third route by which a key
+    /// package this install did not mint is admitted, it takes its bytes
+    /// straight off the wire out of `pending_key_packages`, and a bound
+    /// applied on two routes of three is not a bound. What differs from the
+    /// 1:1 path is only how long the damage lasts, since a package spent on a
+    /// commit is not also cached for re-use.
     pub fn add_group_member(
         &self,
         group_id: &GroupId,
@@ -960,6 +1052,7 @@ impl MlsManager {
 
         Self::verify_credential_identity(&key_package, invitee_user_id)?;
         Self::verify_address_binding(&key_package, invitee_user_id)?;
+        Self::verify_lifetime_bound(&key_package)?;
 
         let mut group = self
             .group_manager
@@ -4348,6 +4441,174 @@ mod tests {
             !after.members.contains(&addr("carol")),
             "roster surfaced the unproven member: {:?}",
             after.members
+        );
+    }
+
+    // ========================================================================
+    // KEY PACKAGE VALIDITY WINDOWS (issue 396)
+    // ========================================================================
+
+    /// Mints a key package for a real identity with a chosen validity window.
+    ///
+    /// Everything but the window is honest: the credential names the address
+    /// the signature key derives to, so the identity gates pass and a refusal
+    /// can only have come from [`MlsManager::verify_lifetime_bound`].
+    fn key_package_with_window(label: &str, lifetime: Lifetime) -> (String, Vec<u8>) {
+        let storage: Arc<dyn MlsStorage> = Arc::new(InMemoryStorage::new());
+        let provider = MlsProvider::new(MlsStorageAdapter::new(storage));
+        let (keys, address) = test_identity(label);
+        keys.store(provider.storage()).unwrap();
+
+        let credential = CredentialWithKey {
+            credential: Credential::new(
+                CredentialType::Basic,
+                address.to_string().as_bytes().to_vec(),
+            ),
+            signature_key: keys.public().into(),
+        };
+        let bytes = KeyPackage::builder()
+            .key_package_lifetime(lifetime)
+            .build(DEFAULT_CIPHERSUITE, &provider, &keys, credential)
+            .unwrap()
+            .key_package()
+            .tls_serialize_detached()
+            .unwrap();
+
+        (address.to_string(), bytes)
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// The case the issue was filed on: mls-rs hands out a year by default, and
+    /// OpenMLS validation admits it because it never applies its own cap.
+    #[test]
+    fn a_year_long_validity_window_is_refused_at_import() {
+        let (manager, _) = create_addressed_manager("alice");
+
+        let (peer, bytes) = key_package_with_window("bob", Lifetime::new(365 * 24 * 60 * 60));
+
+        let err = manager
+            .import_key_package(&peer, &bytes)
+            .expect_err("a year-long window must be refused");
+        assert!(
+            matches!(&err, MlsError::InvalidKeyPackage(m) if m.contains("wider than")),
+            "refused for the wrong reason: {err:?}"
+        );
+    }
+
+    /// The same package, and the same refusal, on the path that never sees the
+    /// import gate. A contact entry written straight into the store models the
+    /// container write [`MlsManager::verify_address_binding`] is also written
+    /// against; without the check here the widest window in the system is
+    /// reachable by whoever can write that store.
+    #[test]
+    fn a_wide_window_written_straight_into_the_store_is_refused_on_read() {
+        let storage: Arc<dyn MlsStorage> = Arc::new(InMemoryStorage::new());
+        let (keys, address) = test_identity("alice");
+        seed_identity(&storage, &keys);
+        let manager = MlsManager::new(address.to_string(), Arc::clone(&storage)).unwrap();
+
+        let (peer, bytes) = key_package_with_window("bob", Lifetime::new(365 * 24 * 60 * 60));
+        storage
+            .store(StorageKeyType::ContactKeyPackage.as_str(), &peer, &bytes)
+            .unwrap();
+
+        let err = manager
+            .get_contact_key_package(&peer)
+            .expect_err("a cached year-long window must be refused too");
+        assert!(
+            matches!(&err, MlsError::InvalidKeyPackage(m) if m.contains("wider than")),
+            "refused for the wrong reason: {err:?}"
+        );
+    }
+
+    /// What this install puts on the wire is what it documents.
+    ///
+    /// Before issue 396 nothing set the window and OpenMLS applied its own
+    /// default of three months plus an hour, so this asserted 84 days while
+    /// `DEFAULT_KEY_PACKAGE_LIFETIME_SECS` said 30. The two numbers are the
+    /// same fact and this is where they are held to it.
+    #[test]
+    fn our_own_key_package_states_the_lifetime_we_document() {
+        let (manager, _) = create_addressed_manager("alice");
+
+        let bundle = manager.generate_key_package().unwrap();
+        let key_package = KeyPackageIn::tls_deserialize_exact(bundle.key_package_data.as_slice())
+            .unwrap()
+            .validate(manager.provider.crypto(), ProtocolVersion::Mls10)
+            .unwrap();
+
+        let window = key_package.life_time();
+        assert_eq!(
+            window.not_after() - window.not_before(),
+            DEFAULT_KEY_PACKAGE_LIFETIME_SECS + LIFETIME_SKEW_MARGIN_SECS,
+            "the window on the wire is not the lifetime this crate declares"
+        );
+        assert!(
+            MlsManager::verify_lifetime_bound(&key_package).is_ok(),
+            "this install mints a package it would refuse from a peer"
+        );
+    }
+
+    /// The third route a package this install did not mint is admitted by.
+    ///
+    /// A group invite reads its bytes out of `pending_key_packages`, which
+    /// holds what arrived on the wire, and the cap it is judged against has to
+    /// be the same one the 1:1 paths apply. A bound on two routes of three is
+    /// not a bound, and this is the route with no cache read behind it to
+    /// catch what the import missed.
+    #[test]
+    fn a_year_long_validity_window_is_refused_by_a_group_invite() {
+        let alice = create_test_manager("alice");
+        let group_id = alice.create_group("Test Group").unwrap().group_id;
+
+        let (bob, wide) = key_package_with_window("bob", Lifetime::new(365 * 24 * 60 * 60));
+        let err = alice
+            .add_group_member(&group_id, &bob, &wide)
+            .expect_err("a year-long window must be refused by the group path too");
+        assert!(
+            matches!(&err, MlsError::InvalidKeyPackage(m) if m.contains("wider than")),
+            "refused for the wrong reason: {err:?}"
+        );
+
+        // And the genuine invitee still joins, so the cap is what refused the
+        // package above rather than anything about this group.
+        let bob_manager = create_test_manager("bob");
+        let bob_kp = bob_manager.generate_key_package().unwrap();
+        alice
+            .add_group_member(&group_id, &bob, &bob_kp.key_package_data)
+            .expect("a package inside the cap is admitted");
+    }
+
+    /// The boundary, from both sides. A cap tested only with a year-long
+    /// package would pass with the comparison written backwards.
+    #[test]
+    fn a_window_exactly_at_the_cap_is_admitted_and_one_second_over_is_not() {
+        let cap = MAX_ACCEPTED_KEY_PACKAGE_LIFETIME.as_secs();
+        let (manager, _) = create_addressed_manager("alice");
+
+        // Backdated by 10s so `now` sits inside both windows and OpenMLS's own
+        // `is_valid` is not what does the refusing.
+        let start = now_secs() - 10;
+
+        let (at_cap, bytes) = key_package_with_window("bob", Lifetime::init(start, start + cap));
+        manager
+            .import_key_package(&at_cap, &bytes)
+            .expect("a window exactly at the cap is admitted");
+
+        let (over_cap, bytes) =
+            key_package_with_window("carol", Lifetime::init(start, start + cap + 1));
+        let err = manager
+            .import_key_package(&over_cap, &bytes)
+            .expect_err("one second over the cap must be refused");
+        assert!(
+            matches!(&err, MlsError::InvalidKeyPackage(m) if m.contains("wider than")),
+            "refused for the wrong reason: {err:?}"
         );
     }
 }
