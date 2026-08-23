@@ -1030,7 +1030,15 @@ impl MlsManager {
     /// credential-identity one `import_key_package` has always had — so a
     /// package could be admitted to a group under a roster label that had
     /// nothing to do with it. The 1:1 path and the group path apply the same
-    /// two checks.
+    /// three checks.
+    ///
+    /// The third is the validity-window cap, and it belongs here for the
+    /// reason it belongs anywhere: this is a third route by which a key
+    /// package this install did not mint is admitted, it takes its bytes
+    /// straight off the wire out of `pending_key_packages`, and a bound
+    /// applied on two routes of three is not a bound. What differs from the
+    /// 1:1 path is only how long the damage lasts, since a package spent on a
+    /// commit is not also cached for re-use.
     pub fn add_group_member(
         &self,
         group_id: &GroupId,
@@ -1044,6 +1052,7 @@ impl MlsManager {
 
         Self::verify_credential_identity(&key_package, invitee_user_id)?;
         Self::verify_address_binding(&key_package, invitee_user_id)?;
+        Self::verify_lifetime_bound(&key_package)?;
 
         let mut group = self
             .group_manager
@@ -4544,6 +4553,36 @@ mod tests {
             MlsManager::verify_lifetime_bound(&key_package).is_ok(),
             "this install mints a package it would refuse from a peer"
         );
+    }
+
+    /// The third route a package this install did not mint is admitted by.
+    ///
+    /// A group invite reads its bytes out of `pending_key_packages`, which
+    /// holds what arrived on the wire, and the cap it is judged against has to
+    /// be the same one the 1:1 paths apply. A bound on two routes of three is
+    /// not a bound, and this is the route with no cache read behind it to
+    /// catch what the import missed.
+    #[test]
+    fn a_year_long_validity_window_is_refused_by_a_group_invite() {
+        let alice = create_test_manager("alice");
+        let group_id = alice.create_group("Test Group").unwrap().group_id;
+
+        let (bob, wide) = key_package_with_window("bob", Lifetime::new(365 * 24 * 60 * 60));
+        let err = alice
+            .add_group_member(&group_id, &bob, &wide)
+            .expect_err("a year-long window must be refused by the group path too");
+        assert!(
+            matches!(&err, MlsError::InvalidKeyPackage(m) if m.contains("wider than")),
+            "refused for the wrong reason: {err:?}"
+        );
+
+        // And the genuine invitee still joins, so the cap is what refused the
+        // package above rather than anything about this group.
+        let bob_manager = create_test_manager("bob");
+        let bob_kp = bob_manager.generate_key_package().unwrap();
+        alice
+            .add_group_member(&group_id, &bob, &bob_kp.key_package_data)
+            .expect("a package inside the cap is admitted");
     }
 
     /// The boundary, from both sides. A cap tested only with a year-long

@@ -24,10 +24,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   usable for establishing new sessions until the century ran out
   ([#396](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/396)).
 
-  Imports and every read of the contact cache now refuse a window wider than 90
-  days. The cache read matters as much as the import: an entry written to the
-  protocol-state store out of band never passed the import gate, which is the
-  same reason the address-binding check runs there too.
+  All three routes by which a key package this install did not mint is admitted
+  now refuse a window wider than 90 days: the 1:1 import, every read of the
+  contact cache, and a group invite. The cache read matters as much as the
+  import, because an entry written to the protocol-state store out of band never
+  passed the import gate, which is the same reason the address-binding check
+  runs there too; the group invite matters because it takes its bytes straight
+  off the wire, and a bound applied on two routes of three is not a bound.
 
   Closing it turned up the other half. **This SDK was minting 84-day windows
   while documenting 30.** The key package builder was never told a lifetime, so
@@ -333,9 +336,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   leaf peer instead of `MessageFailed` after retry exhaustion.
 
   Three rules go with it, and each closes something that answering naively would
-  open. A device answers **only a peer it holds a record for**, so a stranger in
-  radio range cannot make it transmit on demand or learn that a node exists at
-  an address. It answers **only what it accepted**, because handing a receipt to
+  open. A device answers **only a peer it holds a record for and only a frame
+  that proved it came from that peer**, so a stranger in radio range cannot make
+  it transmit on demand or learn that a node exists at an address: the record
+  says an address once paired, and a frame's sender is a plaintext field, so
+  either gate alone admits whoever overheard the pair once. It answers **only
+  what it accepted**, because handing a receipt to
   whoever just failed the signature gate tells them their frames are being
   processed. And it **repeats an answer for a frame it already answered**,
   without opening it again, because the answer is the frame most likely to have
@@ -350,7 +356,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   being the protocol talking to itself. See
   [the leaf provisioning spec](./docs/spec/leaf-provisioning.md#what-a-leaf-owes-for-a-frame-it-received).
 
-  The leaf image grows 2.5 KiB for it, from 445.9 KiB to 448.4 KiB, which
+  The leaf image grows 3.2 KiB for it, from 445.9 KiB to 449.1 KiB, which
   `tools/embedded-footprint/measure.sh` prints and this note does not pin.
 
 - **The envelope codec and `GroupId::new` now return `SealedError`** rather

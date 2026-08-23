@@ -309,6 +309,27 @@ signature gate tells them their frames are being processed. This is the rule a
 phone already applies when it withholds an answer from a frame its own security
 gate rejected.
 
+**And only a frame that proved who sent it**, which is a narrower rule than
+"not refused" and is the one that must be implemented. A leaf ignores rather
+than refuses a frame carrying no prefix it acts on, and an unsolicited
+`__MLS_CONFIRM_ACK__` likewise: neither is a failure, and neither verifies
+anything, because there is nothing in such a frame to verify. A leaf MUST NOT
+answer either. The record above proves an address has paired at some point, and
+a frame's sender is a plaintext field, so on its own the record admits anyone
+who overheard the pair once: the two gates are one rule, and only a frame whose
+control signature verified, or which opened under the pair's group key, has
+earned an answer. Answering the rest would hand back the transmit-on-demand and
+the presence oracle the known-peer rule was written to withhold, and would let
+frames costing nothing to forge evict the ids a device really does owe answers
+for.
+
+**The record MUST NOT decide the frame.** If the id cannot be stored, the
+answer MUST be withheld and the frame's own result MUST still be reported. By
+then the frame is open and the ratchet has spent that generation, so discarding
+its result to report the storage failure would lose a command the device
+carried out; what is lost instead is the answer, and the peer's retry ladder is
+what recovers it.
+
 **A frame that arrives twice is answered twice.** The second copy is
 overwhelmingly a retransmission, because the answer is the frame most likely to
 have been the one that went missing: it is last in the exchange and nothing

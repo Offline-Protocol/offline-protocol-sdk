@@ -401,7 +401,12 @@ impl OfflineProtocol {
             // would pin their entries as latest-to-expire and preferentially
             // evict legitimate peers. A legacy sender omitting the field (0)
             // falls back to the same default. This only bounds the *cached*
-            // expiry — OpenMLS enforces real key-package validity at use time.
+            // expiry. The package's own validity window is judged where the
+            // package is admitted, by `verify_lifetime_bound` against
+            // `MAX_ACCEPTED_KEY_PACKAGE_LIFETIME`, and it has to be: OpenMLS
+            // checks only that *now* falls inside that window and never how
+            // wide it is, so a package claiming a century passes validation on
+            // every day of the century (issue 396).
             let lifetime_ms = if payload.remaining_lifetime_ms > 0 {
                 payload
                     .remaining_lifetime_ms
