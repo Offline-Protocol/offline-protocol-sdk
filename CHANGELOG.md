@@ -15,6 +15,39 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Security
 
+- **A key package's validity window is now bounded, in both directions.** RFC
+  9420 puts this on the application: define a maximum total lifetime and reject
+  any key package claiming more. Nothing here did. OpenMLS looks like it does
+  the job and does not, declaring the constant and shipping the predicate while
+  `KeyPackageIn::validate` calls neither, so it checked only that *now* fell
+  inside the window. A package claiming a century was admitted, cached, and
+  usable for establishing new sessions until the century ran out
+  ([#396](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/396)).
+
+  Imports and every read of the contact cache now refuse a window wider than 90
+  days. The cache read matters as much as the import: an entry written to the
+  protocol-state store out of band never passed the import gate, which is the
+  same reason the address-binding check runs there too.
+
+  Closing it turned up the other half. **This SDK was minting 84-day windows
+  while documenting 30.** The key package builder was never told a lifetime, so
+  OpenMLS applied its own default of three months plus an hour, and the constant
+  named for a 30-day lifetime governed only when the local record stopped being
+  offered, not the window every other install actually judges. Both now come
+  from one number, and a package this install mints says 30 days because it is
+  30 days.
+
+  That is also why the cap is 90 days rather than the bound OpenMLS declares:
+  three months plus an hour is exactly what an unconfigured build emits, so a
+  cap set there would admit every package this SDK has ever minted with no
+  margin at all and refuse any peer whose skew allowance is a second wider.
+
+  **What to expect on upgrade.** Nothing for ordinary peers: 90 days admits
+  every package any released version of this SDK has put on the wire, and a leaf
+  node's 28 days clears it three times over. A peer running an MLS stack that
+  defaults to a year, which is what mls-rs hands out, is refused at import with
+  an `InvalidKeyPackage` naming both widths.
+
 - **A control frame now states when it was made, and a captured one stops
   verifying.** The canonical signing payload bound the sender, the message id,
   the recipient and the content, and nothing about time, so a frame recorded off

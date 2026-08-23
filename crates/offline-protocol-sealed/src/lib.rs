@@ -63,7 +63,8 @@ pub use canonical::{
 };
 pub use constants::{
     LEAF_KEY_PACKAGE_LIFETIME, LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS,
-    SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE, SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
+    MAX_ACCEPTED_KEY_PACKAGE_LIFETIME, SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE,
+    SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
 };
 pub use derive::{derive_address, ED25519_PUBLIC_KEY_LEN};
 pub use envelope::{EncryptedMessage, GroupId, MlsMessageType, WelcomeMessage};
@@ -176,6 +177,7 @@ mod interop_harness_guard_tests {
             "SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE",
             "LEAF_KEY_PACKAGE_LIFETIME",
             "LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS",
+            "MAX_ACCEPTED_KEY_PACKAGE_LIFETIME",
         ] {
             assert!(
                 main_rs.contains(symbol),
@@ -192,6 +194,7 @@ mod interop_harness_guard_tests {
             "const MAXIMUM_FORWARD_DISTANCE",
             "const KEY_PACKAGE_LIFETIME",
             "const NOT_BEFORE_BACKDATE",
+            "const MAX_ACCEPTED",
         ] {
             assert!(
                 !main_rs.contains(copy),

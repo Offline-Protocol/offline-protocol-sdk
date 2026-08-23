@@ -351,8 +351,12 @@ package** is signed under the older payload deliberately, because a record left
 on a relay for strangers has no known verifier and signing it the other way
 makes cold contact unverifiable to anyone who has not upgraded. That record
 carries no reset, and its replay is bounded instead by the key package's own
-lifetime, which is
-[issue 396](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/396).
+validity window, which the importer now caps at 90 days
+(`MAX_ACCEPTED_KEY_PACKAGE_LIFETIME`, applied on import and on every read of
+the contact cache). Before
+[issue 396](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/396)
+that window had no bound at all: OpenMLS validates only that *now* falls inside
+it, so a package claiming a century was admitted and stayed usable for one.
 
 ### R7b. Freshness is only as good as the verifier's clock
 
