@@ -5082,6 +5082,15 @@ impl OfflineProtocol {
                 Vec::new()
             },
             data_versions: self.advertised_data_versions(),
+            // Advertised unconditionally, including with freshness
+            // enforcement switched off. The two are different questions: this
+            // field says which signatures we can *read*, which is always both
+            // of them, while the kill switch decides whether a readable
+            // signature is also refused for being stale. Withholding it under
+            // the switch would make peers sign the older payload at us, and
+            // the peer-capability record that closes the downgrade could then
+            // never be written.
+            ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
             // Present only when the Nostr transport is installed. Advertised
             // regardless of the sealing kill switch, which gates what *we*
             // publish, not what a peer may seal to us: withholding it would
