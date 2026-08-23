@@ -37178,3 +37178,65 @@ fn an_unsigned_timestamp_cannot_move_the_replay_mark_with_the_switch_off() {
          parked while it was off"
     );
 }
+
+/// The *send* half has to survive a restart too, or a node comes back signing
+/// the older payload at peers that refuse it.
+///
+/// This is the quiet direction of the ratchet. The accept half is pinned by
+/// `the_ratchet_survives_a_restart`, and losing it would re-open a replay;
+/// losing this one instead breaks the pair from our side, because a peer that
+/// has proved the newer payload refuses everything we send under the older one
+/// bar a key package. Nothing else in the suite notices: delete the restore and
+/// every other test stays green while a restarted node talks to its established
+/// peers in a payload they will not accept until a live key-package exchange
+/// happens to run again.
+#[test]
+fn the_payload_we_sign_at_a_peer_survives_a_restart() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let peer = id("bob");
+
+    {
+        let mut alice = protocol_with_mls_storage(storage.clone());
+        alice.handle_key_package_message(
+            &peer,
+            key_package_frame_body(&peer, false, vec![offline_protocol_sealed::CTRL_SIGN_V2])
+                .strip_prefix(internal_prefixes::KEY_PACKAGE)
+                .unwrap(),
+            true,
+            Some(Utc::now().timestamp_millis()),
+        );
+        assert!(alice.signs_freshness_bound_control_to(&peer));
+    }
+
+    let mut restarted = protocol_with_mls_storage(storage);
+    assert!(
+        restarted.signs_freshness_bound_control_to(&peer),
+        "the advertised capability must be restored from the durable record"
+    );
+
+    // And the restored flag is not merely set but consulted: the frame this
+    // node now mints for that peer really carries the freshness-bound
+    // signature. Asserting the flag alone would pass on a node that restored
+    // it and then signed the older payload anyway.
+    let mut frame = unsigned_frame(&restarted.local_id.clone(), &peer, &conn_request_body());
+    restarted.sign_control_message(&mut frame).unwrap();
+    let signature = crate::protocol::base64_decode(
+        frame
+            .metadata
+            .get(crate::protocol::CTRL_SIG_META_KEY)
+            .unwrap(),
+    )
+    .unwrap();
+    let public_key = crate::protocol::base64_decode(
+        frame
+            .metadata
+            .get(crate::protocol::CTRL_PK_META_KEY)
+            .unwrap(),
+    )
+    .unwrap();
+    let v2 = OfflineProtocol::build_canonical_payload_v2(&frame).unwrap();
+    assert!(
+        offline_protocol_mls::MlsManager::verify_signature(&public_key, &v2, &signature).unwrap(),
+        "a restarted node must still sign the freshness-bound payload at this peer"
+    );
+}
