@@ -292,10 +292,16 @@ not a ratchet.
 
 One exception, and it is required rather than permitted: a verifier MUST still
 accept a `__MLS_KEY_PKG__` frame from a held peer under the v1 payload, and MUST
-ignore that frame's `session_reset`. Without it a peer that reinstalls signs v1,
-because it no longer knows what this verifier accepts, and is refused on the one
-frame that would have told it — and a key package is the only frame that
-re-teaches capabilities, so the state is permanent.
+ignore that frame's `session_reset`. Without it a peer whose record of this node
+was lost signs v1, because it no longer knows what this verifier accepts, and is
+refused on the one frame that would have told it — and a key package is the only
+frame that re-teaches capabilities, so the state is permanent.
+
+The case is capability-record loss, not a reinstall: an address is the hash of an
+identity key, so a peer that reinstalls arrives under a different address and is
+a different peer to every gate here. What produces a known address whose record
+is gone is eviction under a bounded cache, a restore that lost the capability
+category, or a storage failure on it.
 
 #### 3. Directives that destroy state
 

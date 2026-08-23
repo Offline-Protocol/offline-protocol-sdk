@@ -168,8 +168,8 @@ pub struct KeyPackagePayload {
     /// either way, but readable by anyone who guesses our user id, so the
     /// difference is real privacy rather than a mere optimization.
     ///
-    /// Trust boundary: **unlike the three capability lists above, this one is
-    /// only honoured from a signed key package.** All four ride in the same
+    /// Trust boundary: **unlike the capability lists above, this one is only
+    /// honoured from a signed key package.** All four ride in the same
     /// plaintext payload, but this field is consumed as a *destination key*,
     /// not as a feature hint, so the distinction matters: a wrong capability
     /// costs a fallback, whereas a wrong key here means envelope metadata is

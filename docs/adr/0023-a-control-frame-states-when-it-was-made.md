@@ -146,10 +146,17 @@ this rule was clean and wrong.
 
 ### A key package escapes the ratchet, with its reset ignored
 
-Without an escape the ratchet is a trap with no exit. A peer that reinstalls
-loses what it knew about us, signs v1 because it no longer knows we accept v2,
-and is refused on the very frame that would have told it — and since a key
-package is the only frame that re-teaches capabilities, the state is permanent.
+Without an escape the ratchet is a trap with no exit. A peer whose record of us
+was lost signs v1, because it no longer knows we accept v2, and is refused on the
+very frame that would have told it — and since a key package is the only frame
+that re-teaches capabilities, the state is permanent.
+
+The case is **capability-record loss, not a reinstall.** An address is the hash
+of an identity key, so a peer that reinstalls arrives under a different address
+and is simply a different peer. What produces a peer at a known address whose
+record we no longer hold is eviction under `MAX_PENDING_KEY_PACKAGES` pressure,
+a restore that lost the capability category, or a storage failure on it. Getting
+this backwards would have made the escape look unnecessary.
 
 So a v1 key package from a held peer is admitted and its `session_reset` is
 ignored. The escape also clears `key_package_sent_to`, because the reciprocal

@@ -497,6 +497,13 @@ impl LeafDevice {
                 // power cut is the one event this crate assumes will happen.
                 record.remember_reset(stamp);
                 record.key_package_sent = false;
+                // Written here *and* again at the end of this function, which
+                // is deliberate rather than redundant: the second write
+                // carries the peer's refreshed capabilities and cannot be
+                // moved earlier, and this one cannot be moved later without
+                // putting a power cut between the mark and the teardown it
+                // authorizes. Two writes on a reset frame, which arrives about
+                // as often as a rekey; the ordinary frame still writes once.
                 record
                     .save(&self.store, sender)
                     .map_err(|e| LeafError::Storage(e.to_string()))?;

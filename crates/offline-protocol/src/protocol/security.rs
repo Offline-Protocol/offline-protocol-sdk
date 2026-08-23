@@ -576,11 +576,12 @@ impl OfflineProtocol {
     /// `__MLS_KEY_PKG__`, which is admitted and then has its `session_reset`
     /// ignored (the `Unbound` verdict is what conveys that downstream). The
     /// escape exists because the ratchet would otherwise be a trap with no
-    /// way out: a peer that reinstalls loses what it knew about us, signs the
-    /// older payload because it no longer knows we accept the newer one, and
-    /// is refused on the very frame that would have told it. Since a key
-    /// package is also the only frame that re-teaches capabilities, refusing
-    /// it makes the state permanent.
+    /// way out: a peer whose record of *us* was lost signs the older payload,
+    /// because it no longer knows we accept the newer one, and is refused on
+    /// the very frame that would have told it. Since a key package is also the
+    /// only frame that re-teaches capabilities, refusing it makes the state
+    /// permanent. See the escape itself for what actually loses that record —
+    /// not a reinstall, which arrives as a different address entirely.
     ///
     /// Admitting it costs nothing an attacker wants: a key package with its
     /// reset ignored advertises capabilities, which is the thing this protocol
@@ -667,6 +668,21 @@ impl OfflineProtocol {
                     // skipped for a peer we have already sent to, so without
                     // it the peer never receives the advertisement that would
                     // teach it to sign the newer payload again.
+                    //
+                    // The case it heals is capability-record *loss*, not a
+                    // reinstall: an address is the hash of an identity key, so
+                    // a peer that reinstalls arrives as a different peer
+                    // entirely. What produces a peer at a known address whose
+                    // record we no longer hold is eviction under
+                    // `MAX_PENDING_KEY_PACKAGES` pressure, a restore that lost
+                    // the capability category, or a storage failure on it.
+                    //
+                    // Replaying a captured v1 key package therefore costs us
+                    // one key-package send. Bounded twice over: the receive
+                    // deduplicator refuses an exact repeat for an hour, and
+                    // `take_push_key_package` re-hands that peer's existing
+                    // package rather than minting a fresh one, so nothing
+                    // accumulates.
                     self.key_package_sent_to.remove(sender);
                     return FreshnessVerdict::Unbound;
                 }
