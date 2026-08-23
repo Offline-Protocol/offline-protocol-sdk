@@ -169,6 +169,9 @@ A conforming leaf:
 - **accepts** `__MLS_KEY_PKG__` (including one that sets `session_reset`),
   `__MLS_WELCOME__`, `__MLS_ENC__` carrying either an application message or a
   commit, and `__MLS_CONFIRM_PROBE__`;
+- **answers** a frame it accepted with a delivery acknowledgement, which is not
+  a control frame and carries no prefix (see
+  [What a leaf owes for a frame it received](#what-a-leaf-owes-for-a-frame-it-received));
 - **never emits** a Welcome, a commit, a proposal, or any group, rich, document
   or relay frame.
 
@@ -265,6 +268,73 @@ produce. The frame is answered by a peer that probed, and a leaf is not one.
 
 Per-commit cost on the device is two elliptic-curve operations. Per-message
 cost is symmetric only.
+
+### What a leaf owes for a frame it received
+
+A leaf MUST answer a frame it accepted from a peer it holds a record for with a
+**delivery acknowledgement**, when the frame asked for one.
+
+This is a different frame from `__MLS_CONFIRM_ACK__` above and means a different
+thing. That one is sealed, answers a probe, and says *this pair still shares a
+session*. This one is a plain message: no prefix, no signature, empty content,
+and a single metadata entry naming the id of the frame it answers. It says only
+*the frame with this id reached the node it was addressed to*, and it MUST NOT
+be read as evidence of anything else.
+
+**Why a device answers at all**, on a link chosen for how little it costs to
+keep quiet: because staying quiet costs more. A peer marks its frames as needing
+an acknowledgement and settles them against the answer. Against a device that
+never answered, every frame ran the full retry ladder, which is ten
+retransmissions of a sealed frame over about thirteen minutes. Each one arrived
+as a replay of a generation the ratchet had already spent, so the device refused
+it correctly and firmware saw a run of decrypt failures indistinguishable from
+somebody replaying frames at it deliberately. The one signal that would tell an
+integrator they are under attack was buried under traffic the protocol generated
+itself. The answer is empty content and one metadata entry; what it prevents is
+ten full sealed envelopes. It is also the only way the peer's application ever
+learns that the command it sent to a lock arrived.
+
+**Only a peer it already knows.** A record exists for a peer that got through
+the key package gate, which means a verified signature over a freshness-bound
+payload and an address that derives to the key that made it. A leaf MUST NOT
+answer anyone else. Answering would hand a stranger within radio range two
+things a device should not give away: a way to make it transmit on demand, and
+a reply to "is there a node at this address", which against a lock is the first
+question worth asking. Nothing is lost, because the peer whose frames are worth
+acknowledging is the one the device is paired with.
+
+**Only what it accepted.** A frame that is refused MUST NOT be answered. An
+acknowledgement is a receipt, and handing one to whoever just failed the
+signature gate tells them their frames are being processed. This is the rule a
+phone already applies when it withholds an answer from a frame its own security
+gate rejected.
+
+**A frame that arrives twice is answered twice.** The second copy is
+overwhelmingly a retransmission, because the answer is the frame most likely to
+have been the one that went missing: it is last in the exchange and nothing
+retries it. Opening the copy is impossible, since the ratchet spent that
+generation on the first, so a leaf MUST remember the ids of the last few frames
+it answered and repeat the answer without opening the frame again. A second copy
+and a lost answer are not distinguishable at the receiver, and staying quiet for
+the second turns a delivered frame into a failed one.
+
+The memory is bounded, and the bound is flash rather than correctness: past it a
+device has nothing to answer from and the ratchet refuses the frame as it always
+did. That edge is deliberate. Absorbing *every* replay would trade one invisible
+attack for another, and the point of quietening the protocol's own
+retransmissions is to leave a real one visible.
+
+The record MUST be durable before the answer is emitted, like every other state
+this profile writes. A device that answered and then forgot would meet the
+retransmission with silence, which is the state the whole mechanism exists to
+leave.
+
+**What the answer does not carry.** A phone puts two further entries on its own
+acknowledgements, naming the hop count and the carrier the answer came back
+over. A leaf writes neither, and the peer's defaults for their absence are
+already right for a device: no hops, because a leaf is a direct peer, and BLE,
+because that is the radio a leaf is paired over. A device does not own its
+transport, so naming one would be firmware's guess crossing the wire as fact.
 
 ### Post-compromise security arrives on the phone's cadence
 

@@ -9350,6 +9350,98 @@ fn test_a_parked_dm_is_settled_by_an_acknowledgement_carried_back() {
     );
 }
 
+/// The acknowledgement a leaf node sends back, which carries one entry.
+///
+/// `offline-protocol-leaf` writes only [`ACK_FOR_KEY`]. The hop count and the
+/// carrier are deliberately absent: a device is a direct peer, so its hop count
+/// is zero, and it does not own its radio, so naming one would be firmware's
+/// guess crossing the wire as fact. Both of this engine's defaults for the
+/// missing entries are therefore already right for a leaf, which is the fact
+/// this pins.
+fn leaf_delivery_ack_frame(from: &str, to: &str, acked: &MessageId) -> Message {
+    Message::builder(
+        UserId::new(from).unwrap(),
+        UserId::new(to).unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(String::new())
+    .requires_ack(false)
+    .metadata(ACK_FOR_KEY, acked.as_str())
+    .build()
+}
+
+/// A leaf's answer settles a message here, and the app is told what it means.
+///
+/// Until issue 402 a leaf owed no acknowledgement, so every frame sent to one
+/// ran the retry ladder to exhaustion and ended in `MessageFailed` for a
+/// command the device had carried out. This is the engine's half of the fix,
+/// and it is a separate test from the leaf's because neither crate can see the
+/// other: the leaf builds the frame, this reads it, and the only thing they
+/// share is `ACK_FOR_KEY`, which now has one declaration for exactly that
+/// reason.
+#[test]
+fn test_an_acknowledgement_carrying_only_ack_for_settles_the_message() {
+    let (mut protocol, _internet, ble) = online_device_with_a_neighbor();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert!(protocol.outbox.contains_key(&message_id));
+
+    ble.queue_message_from(
+        leaf_delivery_ack_frame("bob", "user123", &message_id),
+        "bob".to_string(),
+    );
+    assert!(
+        protocol.receive_message().is_none(),
+        "an acknowledgement is not app traffic"
+    );
+
+    assert!(
+        !protocol.outbox.contains_key(&message_id),
+        "a leaf answered and the message is still being retried"
+    );
+    assert!(
+        !protocol.retry_queue.contains(&message_id.as_str()),
+        "and its reachability probe must be gone with it"
+    );
+
+    let captured = events.lock().unwrap();
+    let delivered = captured
+        .iter()
+        .find_map(|event| match event {
+            Event::MessageDelivered {
+                message_id: id,
+                hop_count,
+                transport,
+                ..
+            } if *id == message_id.as_str() => Some((*hop_count, transport.clone())),
+            _ => None,
+        })
+        .expect("the app was never told the frame was delivered");
+
+    assert_eq!(
+        delivered.0, 0,
+        "a leaf is a direct peer, so the absent hop count must read as none"
+    );
+    assert_eq!(
+        delivered.1, "ble",
+        "the absent carrier must read as the radio a leaf is paired over"
+    );
+}
+
 #[test]
 fn test_a_parked_dm_is_not_settled_by_anyone_elses_acknowledgement() {
     // An acknowledgement carries no signature, so the settle path is gated on

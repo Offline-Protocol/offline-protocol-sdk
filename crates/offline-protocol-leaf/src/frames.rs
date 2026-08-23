@@ -47,7 +47,7 @@ use offline_protocol_core::{
     Address, AppId, LamportClock, Message, MessageId, MessagePriority, Timestamp, UserId,
 };
 use offline_protocol_sealed::{
-    control_frame_freshness, control_signing_payload_v2, derive_address, Freshness,
+    control_frame_freshness, control_signing_payload_v2, derive_address, Freshness, ACK_FOR_KEY,
     CTRL_FRESHNESS_FUTURE_MS, CTRL_PK_META_KEY, CTRL_SIG_META_KEY, LEAF_CTRL_FRESHNESS_PAST_MS,
 };
 
@@ -131,16 +131,67 @@ pub(crate) fn build(
     // frame it parses as carrying no prefix it answers and drops. On a link
     // with very little airtime that is one wasted transmission per frame sent.
     //
-    // The other direction is not this crate's to decide. A phone marks its own
-    // frames as needing one and a leaf emits none, so it retries until it
-    // gives up, and every retry of a sealed frame lands here as a replay the
-    // device refuses: airtime spent, and an error stream firmware cannot tell
-    // from an attack. Whether a leaf peer is exempt from that machinery or owes
-    // an acknowledgement is a question for the spec, which today lists neither.
-    // Tracked as issue 402:
-    // https://github.com/Offline-Protocol/offline-protocol-sdk/issues/402
+    // The other direction is [`acknowledge`], and it goes the other way: a
+    // leaf owes one, because a phone that never hears an answer retransmits.
     message.requires_ack = false;
     Ok(message)
+}
+
+/// Mints the delivery acknowledgement a leaf owes for a frame it received.
+///
+/// # Why a device answers at all
+///
+/// A phone marks its frames as needing an acknowledgement and settles them
+/// against the answer. Against a device that never answered, every one of them
+/// ran the full retry ladder: ten retransmissions of a sealed frame over about
+/// thirteen minutes, on the link this crate exists to be careful with. Each
+/// retransmission arrived here as a replay of a generation the ratchet had
+/// already spent, so it was correctly refused, and firmware saw a run of
+/// [`LeafError::Mls`](crate::LeafError::Mls) indistinguishable from somebody
+/// replaying frames at the device on purpose. The one signal that would tell
+/// an integrator they are under attack was buried under traffic the protocol
+/// generated itself (issue 402).
+///
+/// The arithmetic is what decides it. An acknowledgement is empty content and
+/// a single metadata entry; the frames it prevents are ten full sealed
+/// envelopes. Answering costs a fraction of staying quiet, and it is also the
+/// only way the phone's application ever learns that the command it sent to a
+/// lock arrived.
+///
+/// # What it is not
+///
+/// It carries no prefix and no signature, and it is not evidence of anything.
+/// A peer reads it as "the frame with this id reached its recipient" and
+/// nothing more: the engine that receives it checks only that the answer comes
+/// from the address the message was addressed to, which a forger who saw the
+/// frame saw too. Session confirmation is a different frame with a different
+/// meaning ([`prefixes::SESSION_CONFIRM_ACK`]), and this one must never be read
+/// as standing in for it.
+///
+/// [`prefixes::SESSION_CONFIRM_ACK`]: offline_protocol_sealed::prefixes::SESSION_CONFIRM_ACK
+pub(crate) fn acknowledge(
+    store: &Arc<dyn LeafStore>,
+    identity: &Identity,
+    app_id: &AppId,
+    answering: &Message,
+    now_unix_secs: u64,
+) -> Result<Message> {
+    let mut ack = build(
+        store,
+        identity,
+        app_id,
+        answering.sender.as_str(),
+        String::new(),
+        now_unix_secs,
+        MessagePriority::Low,
+    )?;
+
+    // The whole meaning of the frame. Without it a peer reads a blank message
+    // and settles nothing, which is the failure this exists to end rather than
+    // a degraded version of it.
+    ack.metadata
+        .insert(ACK_FOR_KEY.to_string(), answering.id.to_string());
+    Ok(ack)
 }
 
 /// Seconds to milliseconds, saturating rather than wrapping.

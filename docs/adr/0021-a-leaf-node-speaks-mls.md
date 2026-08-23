@@ -54,7 +54,8 @@ because a decision resting on numbers should ship the thing that reproduces
 them.
 
 **It fits.** `tools/embedded-footprint` links a whole leaf image, protocol layer
-included:
+included. These are the Stage 0 spike's numbers, which is what the 400 KiB gate
+above was set against:
 
 | Configuration | Flash | vs baseline |
 |---|--:|--:|
@@ -62,12 +63,21 @@ included:
 | **Never-committing leaf, the candidate** | **391.3 KiB** | **390.2 KiB** |
 | `rfc_compliant`, X.509 included, upper bound | 403.8 KiB | 402.7 KiB |
 
-On a 1536 KB part that is about a quarter of flash for the candidate, against a
-budget that also has to hold a radio stack and an application. Roughly 111 KiB
-of it is P-384 and P-256 arithmetic that nothing here uses, linked because the
-provider keeps all four curves in one enum with no feature gating and filters
-suites at runtime. A curve-gated provider is worth about 28% of the image and is
-not needed to clear the bar.
+The shipping image is larger, and deliberately so: the spike drove mls-rs
+directly, so it linked neither the envelope codec, nor the control-frame
+signing, nor the address derivation, and priced an image nobody could ship. The
+harness now links `offline-protocol-leaf` itself. **Read the current figure out
+of `measure.sh` rather than from this table**, which is kept as the record of
+the decision rather than as a running total; the gate answered a yes-or-no
+question before anything was built and is not a budget the shipping image is
+held to.
+
+On a 1536 KB part the spike was about a quarter of flash, against a budget that
+also has to hold a radio stack and an application. Roughly 111 KiB of it is
+P-384 and P-256 arithmetic that nothing here uses, linked because the provider
+keeps all four curves in one enum with no feature gating and filters suites at
+runtime. A curve-gated provider is worth about 28% of the image and is not
+needed to clear the bar.
 
 **And it interoperates.** `tools/mls-interop` runs OpenMLS 0.7.4 against
 mls-rs 0.56.0, both pinned, with this SDK's ciphersuite, this SDK's group

@@ -314,6 +314,45 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Changed
 
+- **A leaf node now answers the frames it receives, and a phone stops retrying
+  at it.** A leaf owed no delivery acknowledgement, so a phone that marks its
+  frames as needing one settled nothing and ran the full retry ladder against
+  every frame it sent: ten retransmissions of a sealed frame over about thirteen
+  minutes, on the link `offline-protocol-leaf` exists to be careful with. Each
+  retransmission arrived at the device as a replay of a generation the ratchet
+  had already spent, so it was refused correctly and firmware saw a run of
+  decrypt failures indistinguishable from somebody replaying frames at it on
+  purpose. The one signal that would tell an integrator they are under attack
+  was buried under traffic the protocol generated itself
+  ([#402](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/402)).
+
+  The answer is an ordinary message: no prefix, no signature, empty content, and
+  one metadata entry naming the frame it answers. It costs a fraction of what it
+  prevents, and it is also the only way an application ever learns that the
+  command it sent to a lock arrived, since `message_delivered` now fires for a
+  leaf peer instead of `MessageFailed` after retry exhaustion.
+
+  Three rules go with it, and each closes something that answering naively would
+  open. A device answers **only a peer it holds a record for**, so a stranger in
+  radio range cannot make it transmit on demand or learn that a node exists at
+  an address. It answers **only what it accepted**, because handing a receipt to
+  whoever just failed the signature gate tells them their frames are being
+  processed. And it **repeats an answer for a frame it already answered**,
+  without opening it again, because the answer is the frame most likely to have
+  been lost and a device that stayed quiet for the retransmission would leave
+  the ladder running anyway. That memory is a few frames deep; past it a replay
+  is refused exactly as before, which is deliberate, because absorbing every
+  replay would trade one invisible attack for another.
+
+  **For integrators**, two things change on the device. A leaf emits one small
+  frame per accepted frame that asked for an answer, where it previously emitted
+  none, and a run of `LeafError::Mls` is now worth investigating rather than
+  being the protocol talking to itself. See
+  [the leaf provisioning spec](./docs/spec/leaf-provisioning.md#what-a-leaf-owes-for-a-frame-it-received).
+
+  The leaf image grows 2.5 KiB for it, from 445.9 KiB to 448.4 KiB, which
+  `tools/embedded-footprint/measure.sh` prints and this note does not pin.
+
 - **The envelope codec and `GroupId::new` now return `SealedError`** rather
   than `MlsError`, having moved into `offline-protocol-sealed`. Nothing else
   changes: `From<SealedError>` exists for both `MlsError` and the engine's

@@ -8,6 +8,24 @@
 
 use core::time::Duration;
 
+/// The metadata key naming the message a delivery acknowledgement answers.
+///
+/// An acknowledgement is not a control frame. It carries no prefix and no
+/// signature: it is an ordinary message with empty content whose whole meaning
+/// is this one metadata entry, so a receiver that does not know this string
+/// reads a blank message and a sender that does not write it is never
+/// answered. That makes it exactly the kind of number this module holds, and
+/// the reason it is not left in the engine, where a leaf node cannot reach it
+/// and would have to spell it again.
+///
+/// It is deliberately the *only* entry a leaf writes. The other two the engine
+/// puts on its own acknowledgements say which hop count and which carrier the
+/// answer came back over, and both have defaults that are already right for a
+/// device: no hops, because a leaf is a direct peer, and BLE, because that is
+/// the radio a leaf is paired over. A device does not own its transport, so
+/// naming one would be firmware's guess crossing the wire as fact.
+pub const ACK_FOR_KEY: &str = "ack_for";
+
 /// How many generations behind the latest decrypted message a sender ratchet
 /// key is kept, so late/reordered messages remain decryptable.
 ///

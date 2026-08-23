@@ -408,6 +408,28 @@ impl LeafDevice {
             return Ok(ignored("frame is addressed to another node"));
         }
 
+        // Before the frame is opened, because opening it a second time is what
+        // fails: the ratchet has spent that generation and refuses it, and the
+        // peer is only asking again because the first answer went missing.
+        if let Some(repeat) = self.repeat_acknowledgement(message, now_unix_secs)? {
+            return Ok(repeat);
+        }
+
+        let mut handled = self.dispatch(message, now_unix_secs)?;
+
+        // Only what was accepted is answered. An `Err` above never reaches
+        // here, which is the phone's own rule and the reason for it: an
+        // acknowledgement is a receipt, and handing one to whoever just failed
+        // the signature gate tells them their frames are being processed.
+        if let Some(ack) = self.acknowledge(message, now_unix_secs)? {
+            handled.outbound.push(ack);
+        }
+
+        Ok(handled)
+    }
+
+    /// Routes a frame to the handler for its prefix.
+    fn dispatch(&mut self, message: &Message, now_unix_secs: u64) -> Result<Handled> {
         let content = &message.content;
 
         // Order matters: the encrypted-confirm prefix is not checked here at
@@ -1246,6 +1268,102 @@ impl LeafDevice {
             &self.identity.address.to_string(),
             peer,
         )?)
+    }
+
+    /// Repeats an acknowledgement for a frame this device already answered.
+    ///
+    /// The peer only retransmits because it heard nothing, and the frame it
+    /// sends again is the one it sent before: the same bytes and the same id,
+    /// frozen in its outbox. Opening it a second time cannot work, because the
+    /// ratchet spent that generation on the first copy, so before this the
+    /// device refused it and stayed quiet and the peer went right on asking.
+    ///
+    /// Answering from memory is honest. The claim an acknowledgement makes is
+    /// that the frame with this id reached its recipient, and it did.
+    fn repeat_acknowledgement(
+        &mut self,
+        message: &Message,
+        now_unix_secs: u64,
+    ) -> Result<Option<Handled>> {
+        if !message.requires_ack {
+            return Ok(None);
+        }
+
+        let Some(record) = self.known_peer(message.sender.as_str())? else {
+            return Ok(None);
+        };
+        if !record.was_acknowledged(message.id.to_string().as_str()) {
+            return Ok(None);
+        }
+
+        Ok(Some(Handled {
+            outbound: alloc::vec![frames::acknowledge(
+                &self.store,
+                &self.identity,
+                &self.app_id,
+                message,
+                now_unix_secs,
+            )?],
+            events: alloc::vec![LeafEvent::Ignored {
+                reason: String::from("a frame this device already answered arrived again"),
+            }],
+        }))
+    }
+
+    /// Mints the acknowledgement owed for a frame that was accepted, and
+    /// remembers it before the caller can send it.
+    ///
+    /// # Why only a peer this device already knows
+    ///
+    /// A record exists for a peer that got through the key package gate, which
+    /// means a verified signature and an address that derives to the key that
+    /// made it. Answering anyone else would hand a stranger within radio range
+    /// two things they do not have today: a way to make the device transmit on
+    /// demand, and an answer to "is there a node at this address", which on a
+    /// lock is the question worth asking first. It would also let a flood of
+    /// forged senders each write a record on a part with a few hundred
+    /// kilobytes of flash.
+    ///
+    /// Nothing is lost by the restriction. The peer that sends frames worth
+    /// acknowledging is the one this device is paired with, and an unknown
+    /// sender gets exactly the silence it got before.
+    fn acknowledge(&mut self, message: &Message, now_unix_secs: u64) -> Result<Option<Message>> {
+        if !message.requires_ack {
+            return Ok(None);
+        }
+
+        let peer = message.sender.as_str();
+        let Some(mut record) = self.known_peer(peer)? else {
+            return Ok(None);
+        };
+
+        let ack = frames::acknowledge(
+            &self.store,
+            &self.identity,
+            &self.app_id,
+            message,
+            now_unix_secs,
+        )?;
+
+        // Durable before it is emitted, which is this profile's third
+        // obligation. A device that answered and then lost the record would
+        // meet the retransmission with silence, which is the state this
+        // whole mechanism exists to leave.
+        record.remember_acknowledged(message.id.to_string().as_str());
+        record
+            .save(&self.store, peer)
+            .map_err(|e| LeafError::Storage(e.to_string()))?;
+
+        Ok(Some(ack))
+    }
+
+    /// The record for a peer this device has paired with, or `None`.
+    ///
+    /// Distinct from [`Self::peer_record`], which returns a default for an
+    /// unknown peer. Here the difference between "known" and "not" is the
+    /// decision being made, so it must not be flattened away.
+    fn known_peer(&self, peer: &str) -> Result<Option<PeerRecord>> {
+        PeerRecord::load(&self.store, peer).map_err(|e| LeafError::Storage(e.to_string()))
     }
 
     fn peer_record(&self, peer: &str) -> Result<PeerRecord> {
