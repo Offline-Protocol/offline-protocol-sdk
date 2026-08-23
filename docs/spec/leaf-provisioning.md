@@ -279,16 +279,29 @@ exchange begins again from step 2 above. A leaf that treats `session_reset` as
 an ordinary key package refresh keeps a session the phone has already discarded,
 and every later frame from it decrypts to nothing.
 
-A leaf MUST NOT act on the same reset frame twice. Nothing in the signed payload
-states freshness, so a captured reset verifies as well on its tenth delivery as
-on its first, and each teardown it earns is a session the pair has to rebuild.
-Remembering the frames already acted on costs one bounded list per peer and
-denies the repeat. It does not close replay: a frame older than that list can
-still be spent once. **Closing it needs a freshness field inside the signed
-payload**, which is a change to the wire and to both ends rather than to a
-device, and is an open gap rather than a decision this chapter has taken. It is
-tracked as
-[issue 403](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/403).
+A leaf MUST NOT act on a reset frame it has already spent, and MUST NOT act on
+one older than the last it acted on. A reset tears a live session down, and each
+teardown a captured frame earns is a session the pair has to rebuild, so a
+signature alone is not enough authority to carry one.
+
+The rule is a **high-water mark**: a leaf records the signed timestamp of the
+most recent reset it acted on for a peer, and admits a later reset only when its
+stamp is strictly newer. One integer per peer, persisted, and written **before**
+the teardown rather than after, because the teardown is followed by a fresh
+pairing and a power cut in between would otherwise leave the frame able to break
+the replacement too.
+
+This is sound only because the stamp is inside the signature (see
+[Control message freshness](control-messages.md#freshness)). On a payload that
+left it outside, an attacker would rewrite it, park the mark past every future
+reset and permanently deny the pair the ability to heal, which is a worse
+failure than the replay. A leaf verifies no such payload.
+
+It supersedes the bounded list of recently-seen frame ids that earlier releases
+of this profile described, which denied a repeat of a remembered frame and left
+an older capture spendable once. It closes
+[issue 403](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/403)
+on the device side.
 
 Letting a device originate Update proposals would make it self-healing on its
 own schedule. That is deliberately outside this version.

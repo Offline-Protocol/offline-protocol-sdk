@@ -783,6 +783,58 @@ export interface ProtocolConfig {
    * defaults live in the Rust core and nowhere else.
    */
   data?: DataConfig;
+  /**
+   * Control-plane hardening (optional).
+   *
+   * Every field is optional and an omitted one keeps the SDK default — the
+   * defaults live in the Rust core and nowhere else.
+   */
+  security?: SecurityConfig;
+  /**
+   * Top-level alias for {@link SecurityConfig.controlFreshnessEnforced}.
+   *
+   * `security.controlFreshnessEnforced` is the documented home. This spelling
+   * exists because that field is the lever an app reaches for mid-incident,
+   * when its fleet's clocks are wrong and its control plane has gone quiet,
+   * and a lever that silently does nothing because it was written one level
+   * too high is worse than no lever. The nested value wins if both are set.
+   */
+  controlFreshnessEnforced?: boolean;
+}
+
+/**
+ * Control-plane hardening.
+ */
+export interface SecurityConfig {
+  /**
+   * Whether a control frame is refused for being stale (default `true`).
+   *
+   * A control frame's signature covers the frame's own timestamp, and the SDK
+   * refuses one stamped more than 30 days ago or more than 48 hours ahead of
+   * this device's clock. Without that, a frame captured off the air verifies
+   * forever, and a recorded session reset is a repeatable way to tear down a
+   * live session.
+   *
+   * **The failure this switch exists for is a clock, not a peer.** The
+   * timestamp is judged against *this device's* clock, so a device that comes
+   * up with an unset one reads every honest peer as decades in the future and
+   * refuses all of them — taking down its own control plane, key exchange
+   * included, until the clock is right.
+   *
+   * The signal is a run of `STALE_CONTROL_FRAME` security warnings. Many
+   * different `peer_id`s in a short window is this device's clock; a single
+   * `peer_id` while others are fine is that peer.
+   *
+   * Setting this to `false` restores the pre-hardening behaviour exactly:
+   * signatures are still verified, nothing is refused for its age, and session
+   * resets are honoured on any verified frame. It is a recovery tool for a
+   * fleet whose clocks are wrong, not a setting to ship with.
+   *
+   * Also accepted as a top-level `controlFreshnessEnforced` on
+   * {@link ProtocolConfig}, so a lever reached for in an incident still works
+   * if it lands one level too high. This nested spelling wins if both are set.
+   */
+  controlFreshnessEnforced?: boolean;
 }
 
 /**
@@ -2290,7 +2342,8 @@ export type SecurityWarningCode =
   | 'PUSH_KEY_PACKAGE_POOL_EXHAUSTED'
   | 'RELAY_ADDRESS_BINDING_MISMATCH'
   | 'RELAY_ADDRESS_DECLARATION_REFUSED'
-  | 'GROUP_LEAF_IDENTITY_UNPROVEN';
+  | 'GROUP_LEAF_IDENTITY_UNPROVEN'
+  | 'STALE_CONTROL_FRAME';
 
 /**
  * A security-relevant anomaly was detected for a peer.
@@ -2357,6 +2410,18 @@ export type SecurityWarningCode =
  * delivering peer and it is this device's own id. `reason` is diagnostic text,
  * must not be parsed, and carries no identifier: the impersonated address stays
  * in the logs of the device that refused it.
+ *
+ * `STALE_CONTROL_FRAME` refuses a frame for what its signature says about
+ * *when*: stamped too far in the past, too far ahead of this device's clock, or
+ * carrying the older signing payload from a peer that has proved it can produce
+ * the newer one. **Check this device's clock first.** The signed timestamp is
+ * compared against it, so a device whose own clock is wrong refuses honest
+ * peers in bulk, and the event stream then looks like an attack rather than a
+ * local fault. Many different `peer_id`s in a short window is a clock; one
+ * `peer_id` while others are fine is that peer, either replaying captured
+ * frames or running a broken build. Nothing is torn down — the frame is
+ * dropped, unacknowledged, and a peer whose frame was genuinely just slow
+ * re-sends a fresh one.
  */
 export interface SecurityWarningEvent extends BaseEvent {
   type: 'security_warning';

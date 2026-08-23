@@ -1866,6 +1866,7 @@ fn feed_key_package(protocol: &mut OfflineProtocol, sender: &str, wire_versions:
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
+        ctrl_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -1945,6 +1946,7 @@ fn feed_key_package_with_env(protocol: &mut OfflineProtocol, sender: &str, env_v
         env_versions,
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
+        ctrl_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -2140,6 +2142,7 @@ pub(crate) fn feed_key_package_with_capabilities(
         env_versions: Vec::new(),
         rich_versions,
         data_versions,
+        ctrl_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -2258,6 +2261,7 @@ fn feed_key_package_with_caps(
         env_versions,
         rich_versions,
         data_versions: Vec::new(),
+        ctrl_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -2399,6 +2403,7 @@ fn key_package_message_with_nostr_pubkey(
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
+        ctrl_versions: Vec::new(),
         nostr_pubkey: nostr_pubkey.map(str::to_string),
     };
     let content = format!(
@@ -2733,6 +2738,7 @@ fn feed_key_package_with_data(
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
         data_versions,
+        ctrl_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -3101,6 +3107,7 @@ fn peer_capability_restore_prunes_overflow() {
         env_versions: Vec::new(),
         rich_versions: vec![RICH_PAYLOAD_V1],
         data_versions: Vec::new(),
+        ctrl_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let encoded = serde_json::to_vec(&caps).unwrap();
@@ -3241,6 +3248,7 @@ fn peer_capability_restore_prefers_session_peers() {
         env_versions: Vec::new(),
         rich_versions: vec![RICH_PAYLOAD_V1],
         data_versions: Vec::new(),
+        ctrl_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let encoded = serde_json::to_vec(&caps).unwrap();
@@ -3847,6 +3855,7 @@ fn test_process_internal_message_key_package() {
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
+        ctrl_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -14224,6 +14233,7 @@ fn feed_session_reset_key_package(
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
+        ctrl_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -17468,6 +17478,7 @@ fn test_lamport_clock_merge_on_internal_message() {
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
+        ctrl_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -17678,6 +17689,7 @@ fn test_key_package_remaining_lifetime_ms() {
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
+        ctrl_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -17762,6 +17774,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             env_versions: Vec::new(),
             rich_versions: Vec::new(),
             data_versions: Vec::new(),
+            ctrl_versions: Vec::new(),
             nostr_pubkey: None,
         };
         let content = format!(
@@ -17849,6 +17862,7 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
+        ctrl_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -17899,6 +17913,7 @@ fn test_received_key_package_lifetime_is_clamped() {
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
+        ctrl_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -19420,6 +19435,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             env_versions: Vec::new(),
             rich_versions: Vec::new(),
             data_versions: Vec::new(),
+            ctrl_versions: Vec::new(),
             nostr_pubkey: None,
         };
         let content = format!(
@@ -20149,7 +20165,7 @@ fn test_relay_attribution_must_be_the_address_not_the_profile() {
     assert!(
         matches!(
             protocol.security_gate_control_message(&as_address, Some(TransportType::Internet)),
-            ControlGateOutcome::Proceed { signed: true }
+            ControlGateOutcome::Proceed { signed: true, .. }
         ),
         "a relay that attributes by address must let alice's own signed control \
          frame through"
@@ -20404,7 +20420,7 @@ fn test_sign_and_verify_control_message_roundtrip() {
     // Verify it — should succeed and record alice as encryption-capable
     let result = protocol.verify_control_message(&msg);
     assert!(
-        matches!(result, Ok(true)),
+        matches!(result, Ok(ControlVerification::Verified(_))),
         "Round-trip sign+verify must succeed, got: {:?}",
         result
     );
@@ -20412,7 +20428,7 @@ fn test_sign_and_verify_control_message_roundtrip() {
     // Verify again — the same key still derives to the same address
     let result2 = protocol.verify_control_message(&msg);
     assert!(
-        matches!(result2, Ok(true)),
+        matches!(result2, Ok(ControlVerification::Verified(_))),
         "Second verify with same key must succeed"
     );
 }
@@ -21156,7 +21172,7 @@ fn test_security_gate_passes_with_matching_transport_id_when_required() {
 
     let result = protocol.security_gate_control_message(&msg, None);
     assert!(
-        matches!(result, ControlGateOutcome::Proceed { signed: true }),
+        matches!(result, ControlGateOutcome::Proceed { signed: true, .. }),
         "Signed control message with matching transport identity should pass"
     );
 }
@@ -21219,7 +21235,7 @@ fn test_relayed_signed_control_passes_when_identity_required() {
 
     let result = protocol.security_gate_control_message(&msg, None);
     assert!(
-        matches!(result, ControlGateOutcome::Proceed { signed: true }),
+        matches!(result, ControlGateOutcome::Proceed { signed: true, .. }),
         "signed mesh-relayed control frame must pass the strict gate"
     );
 }
@@ -21251,7 +21267,7 @@ fn test_signed_conn_request_from_known_sender_with_internet_identity() {
     alice.sign_control_message(&mut pin_msg).unwrap();
     assert!(matches!(
         protocol.verify_control_message(&pin_msg),
-        Ok(true)
+        Ok(ControlVerification::Verified(_))
     ));
     assert!(protocol.is_encryption_capable(&id("alice")));
 
@@ -34079,7 +34095,10 @@ fn honestly_signed_sender_passes_on_first_contact() {
     );
     crate::test_identity::sign_as("alice", &mut msg);
 
-    assert!(matches!(protocol.verify_control_message(&msg), Ok(true)));
+    assert!(matches!(
+        protocol.verify_control_message(&msg),
+        Ok(ControlVerification::Verified(_))
+    ));
     assert!(
         protocol.is_encryption_capable(&id("alice")),
         "verifying a peer's signature proves they run MLS"
@@ -34196,7 +34215,7 @@ fn relay_answer_exemption_does_not_extend_to_peer_delivered_frames() {
     assert!(
         matches!(
             protocol.security_gate_control_message(&msg, Some(TransportType::Internet)),
-            ControlGateOutcome::Proceed { signed: false }
+            ControlGateOutcome::Proceed { signed: false, .. }
         ),
         "a relay answer over relay ingest must be admitted — no peer signs one"
     );
@@ -34266,7 +34285,10 @@ fn capability_survives_restart_through_the_durable_record() {
             format!("{}{{\"data\":\"x\"}}", internal_prefixes::CONN_REQUEST),
         );
         crate::test_identity::sign_as("bob", &mut signed);
-        assert!(matches!(alice.verify_control_message(&signed), Ok(true)));
+        assert!(matches!(
+            alice.verify_control_message(&signed),
+            Ok(ControlVerification::Verified(_))
+        ));
         assert!(alice.is_encryption_capable(&id("bob")));
     }
 
@@ -34295,7 +34317,10 @@ fn capability_restore_skips_unreadable_records() {
             format!("{}{{\"data\":\"x\"}}", internal_prefixes::CONN_REQUEST),
         );
         crate::test_identity::sign_as("bob", &mut signed);
-        assert!(matches!(alice.verify_control_message(&signed), Ok(true)));
+        assert!(matches!(
+            alice.verify_control_message(&signed),
+            Ok(ControlVerification::Verified(_))
+        ));
     }
 
     // Garbage in the record, and a second entry under a storage-hostile key.
@@ -34432,7 +34457,12 @@ fn capability_restore_stops_at_the_category_bound_without_pruning() {
     });
 
     // One real record, so the walk has something legitimate to recover too.
-    let entry = serde_json::to_vec(&EncryptionCapableEntry { last_seen_ms: 1 }).unwrap();
+    let entry = serde_json::to_vec(&EncryptionCapableEntry {
+        last_seen_ms: 1,
+        ctrl_freshness_proved: false,
+        last_reset_ms: 0,
+    })
+    .unwrap();
     counting
         .inner
         .store(storage_keys::ENCRYPTION_CAPABLE_PEERS, &id("bob"), &entry)
@@ -36512,5 +36542,701 @@ fn test_username_discovery_requires_cold_contact() {
     assert!(
         protocol.nostr_discovery_claim.is_none(),
         "and nothing may be published under it"
+    );
+}
+
+// ============================================================================
+// CONTROL-FRAME FRESHNESS (issue 403)
+// ============================================================================
+
+/// Builds a control frame stamped `offset_ms` away from now and signed by its
+/// sender under the freshness-bound payload.
+///
+/// The stamp is applied *before* signing on purpose: the timestamp is inside
+/// the v2 payload, so a fixture that stamps afterwards produces a signature
+/// over a different frame than the one it hands over, and every such test
+/// passes for the wrong reason (a signature failure, not a freshness refusal).
+fn frame_stamped_v2(sender: &str, recipient: &str, content: &str, offset_ms: i64) -> Message {
+    let mut message = unsigned_frame(sender, recipient, content);
+    message.timestamp =
+        offline_protocol_core::Timestamp::from_millis(Utc::now().timestamp_millis() + offset_ms);
+    crate::test_identity::sign_as_sender_v2(&mut message);
+    message
+}
+
+/// The same frame under the older payload.
+fn frame_stamped_v1(sender: &str, recipient: &str, content: &str, offset_ms: i64) -> Message {
+    let mut message = unsigned_frame(sender, recipient, content);
+    message.timestamp =
+        offline_protocol_core::Timestamp::from_millis(Utc::now().timestamp_millis() + offset_ms);
+    crate::test_identity::sign_as_sender(&mut message);
+    message
+}
+
+fn conn_request_body() -> String {
+    format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST)
+}
+
+fn key_package_frame_body(sender: &str, session_reset: bool, ctrl_versions: Vec<u8>) -> String {
+    let payload = KeyPackagePayload {
+        user_id: sender.to_string(),
+        key_package_data: vec![1, 2, 3, 4],
+        remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
+        timestamp_ms: 0,
+        session_reset,
+        wire_versions: Vec::new(),
+        env_versions: Vec::new(),
+        rich_versions: Vec::new(),
+        data_versions: Vec::new(),
+        ctrl_versions,
+        nostr_pubkey: None,
+    };
+    format!(
+        "{}{}",
+        internal_prefixes::KEY_PACKAGE,
+        serde_json::to_string(&payload).unwrap()
+    )
+}
+
+fn protocol_with_mls(user: &str) -> OfflineProtocol {
+    let mut protocol = OfflineProtocol::new(create_test_config_for_user(user)).unwrap();
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    protocol.initialize_mls_for_test(storage).unwrap();
+    protocol
+}
+
+/// The question every other test here depends on: does the freshness-bound
+/// payload actually get *used* by two instances talking through the real
+/// paths, or is the signing side unreachable?
+///
+/// It is worth its own test because nothing else would notice. Every refusal
+/// test below can be satisfied by hand-built frames, and the engine would
+/// still be signing the older payload at every real peer forever — the
+/// capability would be advertised, recorded, and never consulted.
+#[test]
+fn a_key_package_exchange_moves_a_pair_onto_the_freshness_bound_payload() {
+    let mut alice = protocol_with_mls("alice");
+
+    // Before hearing from bob, alice cannot know what he verifies, so she
+    // signs the payload every install understands.
+    assert!(
+        !alice.signs_freshness_bound_control_to(&id("bob")),
+        "a peer we have never met cannot be assumed to verify anything"
+    );
+
+    // Bob's key package arrives, advertising that he does.
+    alice.handle_key_package_message(
+        &id("bob"),
+        key_package_frame_body(
+            &id("bob"),
+            false,
+            vec![offline_protocol_sealed::CTRL_SIGN_V2],
+        )
+        .strip_prefix(internal_prefixes::KEY_PACKAGE)
+        .unwrap(),
+        true,
+        Some(Utc::now().timestamp_millis()),
+    );
+
+    assert!(
+        alice.signs_freshness_bound_control_to(&id("bob")),
+        "a peer that advertised the freshness-bound payload must be signed to under it"
+    );
+
+    // And the frames alice now mints for bob really do carry it: verified by
+    // rebuilding both payloads and checking which signature stands.
+    let mut frame = unsigned_frame(&id("alice"), &id("bob"), &conn_request_body());
+    alice.sign_control_message(&mut frame).unwrap();
+    let signature = crate::protocol::base64_decode(
+        frame
+            .metadata
+            .get(crate::protocol::CTRL_SIG_META_KEY)
+            .unwrap(),
+    )
+    .unwrap();
+    let public_key = crate::protocol::base64_decode(
+        frame
+            .metadata
+            .get(crate::protocol::CTRL_PK_META_KEY)
+            .unwrap(),
+    )
+    .unwrap();
+    let v2 = OfflineProtocol::build_canonical_payload_v2(&frame).unwrap();
+    let v1 = OfflineProtocol::build_canonical_payload(&frame).unwrap();
+    assert!(
+        offline_protocol_mls::MlsManager::verify_signature(&public_key, &v2, &signature).unwrap(),
+        "the frame must be signed under the freshness-bound payload"
+    );
+    assert!(
+        !offline_protocol_mls::MlsManager::verify_signature(&public_key, &v1, &signature).unwrap(),
+        "and not under the older one — the two payloads must not both verify"
+    );
+
+    // A peer that stops advertising it moves back, because sending a payload
+    // a peer cannot verify breaks them entirely.
+    alice.handle_key_package_message(
+        &id("bob"),
+        key_package_frame_body(&id("bob"), false, Vec::new())
+            .strip_prefix(internal_prefixes::KEY_PACKAGE)
+            .unwrap(),
+        true,
+        Some(Utc::now().timestamp_millis()),
+    );
+    assert!(!alice.signs_freshness_bound_control_to(&id("bob")));
+}
+
+/// A frame carrying a valid signature over the freshness-bound payload, from
+/// long enough ago, is refused. This is the finding itself.
+#[test]
+fn a_control_frame_older_than_the_window_is_refused() {
+    let mut bob = protocol_with_mls("bob");
+    let past = -(offline_protocol_sealed::CTRL_FRESHNESS_PAST_MS as i64) - 60_000;
+    let stale = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), past);
+
+    assert!(
+        matches!(
+            bob.security_gate_control_message(&stale, None),
+            ControlGateOutcome::Rejected(_)
+        ),
+        "a frame stamped outside the window must not reach dispatch"
+    );
+
+    // The same frame, inside the window, passes — so the refusal above is
+    // about the age and not about the fixture.
+    let fresh = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    assert!(matches!(
+        bob.security_gate_control_message(&fresh, None),
+        ControlGateOutcome::Proceed {
+            signed: true,
+            freshness_bound: true
+        }
+    ));
+}
+
+/// A frame stamped well ahead of this device's clock is refused too, and
+/// distinguishably so in the logs, because that is what a *local* clock fault
+/// looks like from the inside.
+#[test]
+fn a_control_frame_from_the_future_is_refused() {
+    let mut bob = protocol_with_mls("bob");
+    let ahead = offline_protocol_sealed::CTRL_FRESHNESS_FUTURE_MS as i64 + 60_000;
+    let skewed = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), ahead);
+
+    assert!(matches!(
+        bob.security_gate_control_message(&skewed, None),
+        ControlGateOutcome::Rejected(_)
+    ));
+
+    // Modest skew is tolerated: a receiver that demanded `stamp <= now` would
+    // refuse its own peers over a second of clock disagreement.
+    let slight = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), 30_000);
+    assert!(matches!(
+        bob.security_gate_control_message(&slight, None),
+        ControlGateOutcome::Proceed { .. }
+    ));
+}
+
+/// The ratchet: once a peer has produced a freshness-bound signature, their
+/// frames under the older payload are refused. Without this, the whole check
+/// is side-stepped by replaying a capture made before that peer upgraded.
+#[test]
+fn a_peer_that_has_proved_the_newer_payload_may_not_fall_back_to_the_older_one() {
+    let mut bob = protocol_with_mls("bob");
+
+    // Before the ratchet closes, the older payload is accepted — refusing it
+    // would refuse first contact with every install that has not upgraded.
+    let legacy = frame_stamped_v1(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    assert!(matches!(
+        bob.security_gate_control_message(&legacy, None),
+        ControlGateOutcome::Proceed {
+            signed: true,
+            freshness_bound: false
+        }
+    ));
+    assert!(!bob.signs_freshness_bound_control(&id("alice")));
+
+    // One freshness-bound frame closes it.
+    let fresh = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    assert!(matches!(
+        bob.security_gate_control_message(&fresh, None),
+        ControlGateOutcome::Proceed { .. }
+    ));
+    assert!(bob.signs_freshness_bound_control(&id("alice")));
+
+    // And the same older-payload frame that passed a moment ago is now
+    // refused: this is the replayed pre-upgrade capture.
+    let replayed = frame_stamped_v1(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    assert!(
+        matches!(
+            bob.security_gate_control_message(&replayed, None),
+            ControlGateOutcome::Rejected(_)
+        ),
+        "a pre-upgrade capture must not verify once the peer has proved otherwise"
+    );
+}
+
+/// Nothing a peer sends may re-open the ratchet, because a ratchet a network
+/// attacker can clear is not one.
+#[test]
+fn the_ratchet_is_not_cleared_by_anything_the_peer_sends() {
+    let mut bob = protocol_with_mls("bob");
+    let fresh = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&fresh, None);
+    assert!(bob.signs_freshness_bound_control(&id("alice")));
+
+    // A key package that advertises nothing at all: the downgrade an attacker
+    // would strip the field to produce. It moves the *send* side back, and
+    // must leave the *accept* side exactly where it is.
+    bob.handle_key_package_message(
+        &id("alice"),
+        key_package_frame_body(&id("alice"), false, Vec::new())
+            .strip_prefix(internal_prefixes::KEY_PACKAGE)
+            .unwrap(),
+        true,
+        Some(Utc::now().timestamp_millis()),
+    );
+    assert!(
+        bob.signs_freshness_bound_control(&id("alice")),
+        "an advertisement must not be able to clear what a signature proved"
+    );
+
+    // Nor does an older-payload frame that is itself refused.
+    let replayed = frame_stamped_v1(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&replayed, None);
+    assert!(bob.signs_freshness_bound_control(&id("alice")));
+}
+
+/// The escape that keeps the ratchet from being a trap: a key package under
+/// the older payload from a held peer is admitted, so a peer that reinstalled
+/// can be re-taught, and its `session_reset` is ignored, so the destructive
+/// half stays shut.
+#[test]
+fn a_key_package_escapes_the_ratchet_but_its_reset_does_not() {
+    let mut bob = protocol_with_mls("bob");
+    let fresh = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&fresh, None);
+    assert!(bob.signs_freshness_bound_control(&id("alice")));
+
+    // A connection request under the older payload is refused...
+    let refused = frame_stamped_v1(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    assert!(matches!(
+        bob.security_gate_control_message(&refused, None),
+        ControlGateOutcome::Rejected(_)
+    ));
+
+    // ...while a key package is admitted, reporting that its age is not
+    // established, which is what makes the handler ignore the reset.
+    let body = key_package_frame_body(&id("alice"), true, Vec::new());
+    let kp = frame_stamped_v1(&id("alice"), &id("bob"), &body, -60_000);
+    assert!(
+        matches!(
+            bob.security_gate_control_message(&kp, None),
+            ControlGateOutcome::Proceed {
+                signed: true,
+                freshness_bound: false
+            }
+        ),
+        "a key package must escape, or a reinstalled peer can never be re-taught"
+    );
+
+    // And the escape really does re-open the reciprocal send, which is the
+    // only channel that can re-teach the peer.
+    assert!(
+        !bob.key_package_sent_to.contains(&id("alice")),
+        "the escape must clear the send record, or the peer is never re-advertised to"
+    );
+}
+
+/// A peer that has never proved the newer payload keeps every behaviour it
+/// had, resets included.
+///
+/// This is not a courtesy. A driven rekey arrives *as* a reset, so a peer
+/// whose resets are ignored is a peer this node can no longer heal a forked
+/// session with — post-compromise security stops arriving and the pair
+/// silently stops converging.
+#[test]
+fn a_legacy_peers_session_reset_is_still_honoured() {
+    let (mut alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+    assert!(bob_has_session(&bob, &id("alice")));
+
+    bob.handle_key_package_message(
+        &id("alice"),
+        key_package_frame_body(&id("alice"), true, Vec::new())
+            .strip_prefix(internal_prefixes::KEY_PACKAGE)
+            .unwrap(),
+        true,
+        // The gate's verdict for an older-payload frame from a peer that has
+        // proved nothing.
+        None,
+    );
+
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "a legacy peer's reset must still tear the stale session down, or a \
+         driven rekey can never heal this pair"
+    );
+}
+
+/// Whether `protocol` still holds a 1:1 MLS session with `peer`.
+fn bob_has_session(protocol: &OfflineProtocol, peer: &str) -> bool {
+    protocol
+        .mls_manager
+        .as_ref()
+        .and_then(|m| m.read().ok())
+        .map(|m| m.has_session(peer).unwrap_or(false))
+        .unwrap_or(false)
+}
+
+/// The same reset from a peer that *has* proved the newer payload is ignored.
+#[test]
+fn a_held_peers_reset_under_the_older_payload_is_ignored() {
+    let (mut alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+
+    // Alice proves she signs the freshness-bound payload.
+    let fresh = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&fresh, None);
+    assert!(bob.signs_freshness_bound_control(&id("alice")));
+    assert!(bob_has_session(&bob, &id("alice")));
+
+    // The captured reset, replayed. This is the attack: a recording that tore
+    // a session down once and would do it again on every delivery.
+    bob.handle_key_package_message(
+        &id("alice"),
+        key_package_frame_body(&id("alice"), true, Vec::new())
+            .strip_prefix(internal_prefixes::KEY_PACKAGE)
+            .unwrap(),
+        true,
+        None,
+    );
+
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "the session must survive a reset whose frame could be a recording"
+    );
+}
+
+/// The kill switch returns this node to its pre-403 behaviour exactly:
+/// signatures still verified, nothing refused for its age, resets honoured.
+#[test]
+fn the_kill_switch_restores_the_behaviour_that_shipped_before_freshness() {
+    let mut config = create_test_config_for_user("bob");
+    config.security.control_freshness_enforced = false;
+    let mut bob = OfflineProtocol::new(config).unwrap();
+    bob.initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
+        .unwrap();
+
+    // A frame from a year ago passes.
+    let ancient = frame_stamped_v2(
+        &id("alice"),
+        &id("bob"),
+        &conn_request_body(),
+        -365 * 24 * 3600 * 1000,
+    );
+    assert!(matches!(
+        bob.security_gate_control_message(&ancient, None),
+        ControlGateOutcome::Proceed { signed: true, .. }
+    ));
+
+    // And a held peer may still fall back, because nothing is being held.
+    let legacy = frame_stamped_v1(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    assert!(matches!(
+        bob.security_gate_control_message(&legacy, None),
+        ControlGateOutcome::Proceed { signed: true, .. }
+    ));
+
+    // A forged signature is still refused: the switch relaxes freshness, not
+    // authentication.
+    let mut forged = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    crate::test_identity::sign_as_v2("carol", &mut forged);
+    assert!(matches!(
+        bob.security_gate_control_message(&forged, None),
+        ControlGateOutcome::Rejected(_)
+    ));
+}
+
+/// The ratchet has to survive a restart, or the replay it closes is re-opened
+/// by waiting for one.
+#[test]
+fn the_ratchet_survives_a_restart() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    {
+        let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        bob.initialize_mls_for_test(storage.clone()).unwrap();
+        let fresh = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+        bob.security_gate_control_message(&fresh, None);
+        assert!(bob.signs_freshness_bound_control(&id("alice")));
+    }
+
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    bob.initialize_mls_for_test(storage).unwrap();
+    assert!(
+        bob.signs_freshness_bound_control(&id("alice")),
+        "the ratchet must be restored from durable storage"
+    );
+
+    let replayed = frame_stamped_v1(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    assert!(
+        matches!(
+            bob.security_gate_control_message(&replayed, None),
+            ControlGateOutcome::Rejected(_)
+        ),
+        "a capture must not become spendable again by waiting for a restart"
+    );
+}
+
+/// The refusal is reported under its own code, so an integrator can tell a
+/// clock fault from the signature failures it would otherwise be filed under.
+#[test]
+fn a_stale_frame_is_reported_as_stale_rather_than_as_a_bad_signature() {
+    let mut bob = protocol_with_mls("bob");
+    let warnings: Arc<Mutex<Vec<SecurityWarningCode>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let sink = Arc::clone(&warnings);
+        bob.on_event(move |e| {
+            if let Event::SecurityWarning { reason_code, .. } = e {
+                sink.lock().unwrap().push(reason_code);
+            }
+        });
+    }
+
+    let past = -(offline_protocol_sealed::CTRL_FRESHNESS_PAST_MS as i64) - 60_000;
+    let stale = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), past);
+    bob.security_gate_control_message(&stale, None);
+
+    assert!(
+        warnings
+            .lock()
+            .unwrap()
+            .contains(&SecurityWarningCode::StaleControlFrame),
+        "a stale frame must be classified as one (got {:?})",
+        warnings.lock().unwrap()
+    );
+}
+
+/// The heart of issue 403, end to end: one captured reset frame tears a
+/// session down **once**, and never again.
+///
+/// The window alone does not give this. Thirty days is a bound on how long a
+/// recording stays useful, and the receive deduplicator forgets a message id
+/// after an hour, so without the spent-reset mark the same frame is good for
+/// one teardown an hour for a month.
+#[test]
+fn a_captured_reset_frame_can_be_spent_exactly_once() {
+    let (mut alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+
+    // Alice proves she signs the freshness-bound payload, so her stamps count.
+    let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&proof, None);
+    assert!(bob.signs_freshness_bound_control(&id("alice")));
+    assert!(bob_has_session(&bob, &id("alice")));
+
+    // The reset frame, as captured off the air: one body, one stamp, replayed
+    // verbatim. Well inside the freshness window both times.
+    let body = key_package_frame_body(&id("alice"), true, Vec::new());
+    let captured_stamp = Utc::now().timestamp_millis() - 60_000;
+    let data = body.strip_prefix(internal_prefixes::KEY_PACKAGE).unwrap();
+
+    bob.handle_key_package_message(&id("alice"), data, true, Some(captured_stamp));
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "the genuine reset must be acted on"
+    );
+
+    // The pair rebuilds.
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+    assert!(bob_has_session(&bob, &id("alice")));
+
+    // The recording, delivered again.
+    bob.handle_key_package_message(&id("alice"), data, true, Some(captured_stamp));
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "a reset already spent must not tear the rebuilt session down"
+    );
+
+    // And a *genuinely newer* reset from alice still works, so the mark
+    // refuses replays without refusing the peer.
+    bob.handle_key_package_message(&id("alice"), data, true, Some(captured_stamp + 1));
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "a newer reset must still be honoured, or the pair can never heal again"
+    );
+}
+
+/// The mark is durable, or an attacker spends the same frame again by waiting
+/// for a restart.
+#[test]
+fn a_spent_reset_stays_spent_across_a_restart() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let stamp = Utc::now().timestamp_millis() - 60_000;
+    let body = key_package_frame_body(&id("alice"), true, Vec::new());
+    let data = body.strip_prefix(internal_prefixes::KEY_PACKAGE).unwrap();
+
+    {
+        let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        bob.initialize_mls_for_test(storage.clone()).unwrap();
+        let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+        bob.security_gate_control_message(&proof, None);
+        bob.handle_key_package_message(&id("alice"), data, true, Some(stamp));
+        assert!(!bob.reset_is_unspent(&id("alice"), stamp));
+    }
+
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    bob.initialize_mls_for_test(storage).unwrap();
+    assert!(
+        !bob.reset_is_unspent(&id("alice"), stamp),
+        "the spent-reset mark must survive a restart"
+    );
+    assert!(
+        bob.reset_is_unspent(&id("alice"), stamp + 1),
+        "and must still admit a genuinely newer reset"
+    );
+}
+
+/// A peer on the older payload cannot move the mark, because on that payload
+/// the timestamp is outside the signature and therefore attacker-chosen.
+///
+/// The failure this prevents is worse than the one the mark fixes: anyone able
+/// to inject could park a peer's mark at `i64::MAX` and permanently deny that
+/// peer the ability to heal a forked session with this node.
+#[test]
+fn an_unsigned_timestamp_cannot_move_the_replay_mark() {
+    let (mut alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+
+    // Deliberately driven through `process_internal_message_via` rather than
+    // by calling the handler: the protection under test is the *dispatch
+    // site's* refusal to hand a stamp on that the signature does not cover,
+    // and a test that passes `None` itself proves only that the handler
+    // honours what it is told.
+    let body = key_package_frame_body(&id("alice"), true, Vec::new());
+    let mut frame = unsigned_frame(&id("alice"), &id("bob"), &body);
+    // The end of time, on a frame whose signature does not cover it.
+    frame.timestamp = offline_protocol_core::Timestamp::from_millis(i64::MAX);
+    crate::test_identity::sign_as_sender(&mut frame);
+
+    bob.process_internal_message_via(&frame, None);
+
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "the reset itself is still honoured: alice has proved nothing, so she \
+         keeps the behaviour she always had"
+    );
+    assert!(
+        bob.reset_is_unspent(&id("alice"), 1),
+        "but an unsigned stamp must leave the mark where it was — parking it at \
+         i64::MAX would deny this peer every future reset, which is a worse \
+         failure than the replay the mark exists to stop"
+    );
+}
+
+/// And it cannot move it with the freshness check switched **off** either,
+/// which is the harder half of the same rule.
+///
+/// The switch is the lever a fleet reaches for when its clocks are wrong, so
+/// it is exactly the state an attacker waits for. A gate that reported "age
+/// established" merely because nobody was checking would hand the handler a
+/// timestamp the signature never covered, and one captured v1 reset frame
+/// would park this peer's durable mark past every reset it will ever send —
+/// surviving both a restart and the switch being turned back on. That is a
+/// worse failure than the replay the mark exists to stop, and unlike the
+/// replay it does not heal.
+#[test]
+fn an_unsigned_timestamp_cannot_move_the_replay_mark_with_the_switch_off() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let mut config = create_test_config_for_user("bob");
+    config.security.control_freshness_enforced = false;
+    let mut bob = OfflineProtocol::new(config).unwrap();
+    bob.initialize_mls_for_test(storage.clone()).unwrap();
+
+    let body = key_package_frame_body(&id("alice"), true, Vec::new());
+    let mut frame = unsigned_frame(&id("alice"), &id("bob"), &body);
+    // The end of time, on a frame whose signature does not cover it.
+    frame.timestamp = offline_protocol_core::Timestamp::from_millis(i64::MAX);
+    crate::test_identity::sign_as_sender(&mut frame);
+
+    bob.process_internal_message_via(&frame, None);
+
+    assert!(
+        bob.reset_is_unspent(&id("alice"), 1),
+        "an unsigned stamp must leave the mark where it was, switch or no switch"
+    );
+
+    // And the poisoning must not have been written through to storage either,
+    // which is what would make it outlive both the process and the switch.
+    let mut restarted = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    restarted.initialize_mls_for_test(storage).unwrap();
+    assert!(
+        restarted.reset_is_unspent(&id("alice"), 1),
+        "turning enforcement back on must not inherit a mark an unsigned stamp \
+         parked while it was off"
+    );
+}
+
+/// The *send* half has to survive a restart too, or a node comes back signing
+/// the older payload at peers that refuse it.
+///
+/// This is the quiet direction of the ratchet. The accept half is pinned by
+/// `the_ratchet_survives_a_restart`, and losing it would re-open a replay;
+/// losing this one instead breaks the pair from our side, because a peer that
+/// has proved the newer payload refuses everything we send under the older one
+/// bar a key package. Nothing else in the suite notices: delete the restore and
+/// every other test stays green while a restarted node talks to its established
+/// peers in a payload they will not accept until a live key-package exchange
+/// happens to run again.
+#[test]
+fn the_payload_we_sign_at_a_peer_survives_a_restart() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let peer = id("bob");
+
+    {
+        let mut alice = protocol_with_mls_storage(storage.clone());
+        alice.handle_key_package_message(
+            &peer,
+            key_package_frame_body(&peer, false, vec![offline_protocol_sealed::CTRL_SIGN_V2])
+                .strip_prefix(internal_prefixes::KEY_PACKAGE)
+                .unwrap(),
+            true,
+            Some(Utc::now().timestamp_millis()),
+        );
+        assert!(alice.signs_freshness_bound_control_to(&peer));
+    }
+
+    let mut restarted = protocol_with_mls_storage(storage);
+    assert!(
+        restarted.signs_freshness_bound_control_to(&peer),
+        "the advertised capability must be restored from the durable record"
+    );
+
+    // And the restored flag is not merely set but consulted: the frame this
+    // node now mints for that peer really carries the freshness-bound
+    // signature. Asserting the flag alone would pass on a node that restored
+    // it and then signed the older payload anyway.
+    let mut frame = unsigned_frame(&restarted.local_id.clone(), &peer, &conn_request_body());
+    restarted.sign_control_message(&mut frame).unwrap();
+    let signature = crate::protocol::base64_decode(
+        frame
+            .metadata
+            .get(crate::protocol::CTRL_SIG_META_KEY)
+            .unwrap(),
+    )
+    .unwrap();
+    let public_key = crate::protocol::base64_decode(
+        frame
+            .metadata
+            .get(crate::protocol::CTRL_PK_META_KEY)
+            .unwrap(),
+    )
+    .unwrap();
+    let v2 = OfflineProtocol::build_canonical_payload_v2(&frame).unwrap();
+    assert!(
+        offline_protocol_mls::MlsManager::verify_signature(&public_key, &v2, &signature).unwrap(),
+        "a restarted node must still sign the freshness-bound payload at this peer"
     );
 }

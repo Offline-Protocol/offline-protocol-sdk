@@ -11,6 +11,7 @@ Peers advertise what they can parse in the key package payload, the body of a
 | `env_versions` | End to end | Which `__MLS_ENC__` payload forms we may emit | Legacy JSON envelope only |
 | `rich_versions` | End to end | Whether we may seal a `__RICH_V1__` body, and the v2 media envelope | Plain text only, extras dropped |
 | `data_versions` | End to end | Whether we may send `__DATA_V1__` document sync frames, and which document encoding they carry. Entry 1 is 1:1 replication; entry 2 additionally means the peer intercepts these frames inside a *group* ciphertext; entry 3 additionally means the peer speaks the blob-fetch frames and routes a data-purposed media transfer into its document layer | No replication with that peer |
+| `ctrl_versions` | End to end | Which control-frame signing payload we build for this peer. Entry 2 means the peer verifies `offline-ctrl-v2`, which binds the frame's timestamp | Build `offline-ctrl-v1`, which states no freshness |
 | `nostr_pubkey` | End to end | Which key metadata is sealed to on the Nostr path | Seal to the publicly computable key |
 
 The key package payload also carries `user_id`, the MLS key package itself, a
@@ -39,6 +40,11 @@ the other.
 An absent capability list decodes to empty, and empty selects the permanent
 floor. A legacy peer that has never heard of a field is served the floor form
 automatically.
+
+`ctrl_versions` departs from this **on a leaf node only**, which is stated where
+that profile is described. On an install running the engine the rule holds
+unchanged: an absent `ctrl_versions` selects `offline-ctrl-v1`, which every
+engine verifies.
 
 ### 3. Downgrade loses the feature, never the confidentiality
 
@@ -92,7 +98,7 @@ outlive it.
 
 ## Trust boundary
 
-**The three capability lists are not cryptographically bound to the sender.**
+**The capability lists are not cryptographically bound to the sender.**
 
 They ride in the plaintext key package envelope *alongside* the signed MLS key
 package data, not *inside* the signature. A network attacker positioned on the
@@ -107,6 +113,22 @@ delivery and could deny service outright by dropping the packet.
 
 **These are performance and feature negotiations. They are never security
 controls.** An implementation MUST NOT derive a security decision from them.
+
+### The exception: `ctrl_versions`
+
+This field selects which payload a *signature* is built over, so unlike the
+lists above it sits next to a security decision rather than a rendering one.
+Stripping it makes us sign `offline-ctrl-v1` at a peer that would have verified
+`offline-ctrl-v2`, and a frame signed that way states no freshness.
+
+What keeps it from being a security control is the rule that does not consult
+it. A verifier records the first v2 signature it verifies from a peer and
+refuses that peer's v1 frames from then on
+([Control messages](control-messages.md#2-negotiation-and-the-downgrade-ratchet)),
+so a stripped advertisement works until the first genuine v2 frame arrives and
+never again. The field makes the first one possible; the durable record is what
+makes it stick. An implementation MUST NOT decide what it *accepts* from this
+field, only what it *emits*.
 
 ### The exception: `nostr_pubkey`
 
@@ -171,15 +193,29 @@ A minimal leaf advertises little and works fully:
 | `env_versions` | `[1]` if it decodes the compact envelope, else empty | Empty means peers send the JSON envelope, which is the permanent floor |
 | `rich_versions` | Empty | Peers send plain text and drop extras rather than sending them in a weaker form |
 | `data_versions` | Empty | No document replication with this peer |
+| `ctrl_versions` | `[2]`, always | Not optional, unlike every other row: a leaf verifies only the freshness-bound payload, so a peer that sent it the older one would have every control frame refused |
 | `nostr_pubkey` | Absent unless the device is reachable over that carrier | Peers seal to the publicly computable key |
 
 Two consequences follow from the universal rules above, and both are easy to
 get backwards on a device where every kilobyte is argued over.
 
-**A device that advertises nothing still interoperates.** Empty lists select
-the floor, and the floor is a complete conversation: a JSON-encoded `Message`
-carrying a JSON `__MLS_ENC__` envelope. Advertising a capability buys smaller
-frames, never a feature the peer would otherwise withhold.
+**A device that advertises nothing else still interoperates.** Empty lists
+select the floor, and the floor is a complete conversation: a JSON-encoded
+`Message` carrying a JSON `__MLS_ENC__` envelope. Advertising one of those
+capabilities buys smaller frames, never a feature the peer would otherwise
+withhold.
+
+**`ctrl_versions` is the one exception, and a leaf MUST advertise `[2]`.** It is
+the only row whose floor a leaf cannot accept: a leaf verifies only
+`offline-ctrl-v2`, so a peer that fell back to the older payload would have
+every control frame it sent refused, and the device would be unreachable rather
+than merely chattier. That is a deliberate departure from
+[rule 2](#2-absence-means-the-floor-never-an-error), and it is affordable for
+exactly one reason: a leaf has no legacy peer. The release that introduced the
+leaf profile is the release that introduced the device, so every phone that has
+ever paired with one already builds the newer payload. An implementer porting
+this profile MUST NOT treat the field as optional on the grounds that the others
+are.
 
 **Parsing is unconditional on a device too.** A leaf MUST accept every
 historical form of everything it receives regardless of what it advertised,

@@ -5246,10 +5246,11 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var cryptoRecoveryEnabled: Bool
     public var meshRelay: MeshRelayConfig?
     public var dataEnabled: Bool
+    public var controlFreshnessEnforced: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true, meshRelay: MeshRelayConfig? = nil, dataEnabled: Bool = true) {
+    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true, meshRelay: MeshRelayConfig? = nil, dataEnabled: Bool = true, controlFreshnessEnforced: Bool = true) {
         self.appId = appId
         self.profile = profile
         self.bleEnabled = bleEnabled
@@ -5281,6 +5282,7 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.cryptoRecoveryEnabled = cryptoRecoveryEnabled
         self.meshRelay = meshRelay
         self.dataEnabled = dataEnabled
+        self.controlFreshnessEnforced = controlFreshnessEnforced
     }
 
     
@@ -5327,7 +5329,8 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 richPayloadEnabled: FfiConverterBool.read(from: &buf), 
                 cryptoRecoveryEnabled: FfiConverterBool.read(from: &buf), 
                 meshRelay: FfiConverterOptionTypeMeshRelayConfig.read(from: &buf), 
-                dataEnabled: FfiConverterBool.read(from: &buf)
+                dataEnabled: FfiConverterBool.read(from: &buf), 
+                controlFreshnessEnforced: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -5363,6 +5366,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.cryptoRecoveryEnabled, into: &buf)
         FfiConverterOptionTypeMeshRelayConfig.write(value.meshRelay, into: &buf)
         FfiConverterBool.write(value.dataEnabled, into: &buf)
+        FfiConverterBool.write(value.controlFreshnessEnforced, into: &buf)
     }
 }
 

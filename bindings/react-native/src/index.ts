@@ -177,6 +177,9 @@ interface NativeConfig {
   data?: {
     enabled?: boolean;
   };
+  security?: {
+    controlFreshnessEnforced?: boolean;
+  };
   dors?: {
     preferOnline: boolean;
     switchHysteresis: number;
@@ -540,6 +543,29 @@ export class OfflineProtocol {
       if (dataConfig) {
         nativeConfig.data = dataConfig;
       }
+    }
+
+    // Security section, forwarded the same way and for the same reason: an
+    // omitted field stays omitted all the way to the core, so the default
+    // lives in exactly one place. `controlFreshnessEnforced` defaults to true
+    // in Rust, and writing that literal here is precisely how a default stops
+    // being changeable for every app that never set it.
+    //
+    // Read from the nested home *or* the top-level spelling, and normalized
+    // into the nested one on the way out. The native bridges honour both
+    // because this flag is the lever an app reaches for when its fleet's
+    // clocks are wrong and its control plane has gone quiet; that tolerance
+    // has to start here, since a value this layer drops never reaches them to
+    // be honoured. The section is built unconditionally for the same reason:
+    // gating it on `config.security` existing is exactly what made the flat
+    // spelling a no-op.
+    const securityConfig = sanitize({
+      controlFreshnessEnforced:
+        this.config.security?.controlFreshnessEnforced ??
+        this.config.controlFreshnessEnforced,
+    });
+    if (securityConfig) {
+      nativeConfig.security = securityConfig;
     }
 
     if (reliabilityConfig) {

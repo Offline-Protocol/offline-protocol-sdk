@@ -22,6 +22,9 @@
 //!   an ambiguity rather than a mismatch, accepts a forged one.
 //! - [`constants`]: a number configured differently on the two ends produces
 //!   a session that silently stops decrypting under load.
+//! - [`freshness`]: two ends that disagree about how old a signed control
+//!   frame may be produce a pair that refuses its own traffic in one direction
+//!   and accepts a replayed frame in the other.
 //!
 //! # Why this is not part of `offline-protocol-core`
 //!
@@ -50,12 +53,13 @@ pub mod constants;
 pub mod derive;
 pub mod envelope;
 pub mod error;
+pub mod freshness;
 pub mod keypackage;
 pub mod prefixes;
 
 pub use canonical::{
-    canonical_payload, control_signing_payload, CTRL_PK_META_KEY, CTRL_SIGN_DOMAIN,
-    CTRL_SIG_META_KEY,
+    canonical_payload, control_signing_payload, control_signing_payload_v2, CTRL_PK_META_KEY,
+    CTRL_SIGN_DOMAIN, CTRL_SIGN_DOMAIN_V2, CTRL_SIG_META_KEY,
 };
 pub use constants::{
     LEAF_KEY_PACKAGE_LIFETIME, LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS,
@@ -64,7 +68,11 @@ pub use constants::{
 pub use derive::{derive_address, ED25519_PUBLIC_KEY_LEN};
 pub use envelope::{EncryptedMessage, GroupId, MlsMessageType, WelcomeMessage};
 pub use error::{Result, SealedError};
-pub use keypackage::{KeyPackagePayload, MLS_ENVELOPE_COMPACT_V1};
+pub use freshness::{
+    control_frame_freshness, Freshness, CTRL_FRESHNESS_FUTURE_MS, CTRL_FRESHNESS_PAST_MS,
+    LEAF_CTRL_FRESHNESS_PAST_MS,
+};
+pub use keypackage::{KeyPackagePayload, CTRL_SIGN_V2, MLS_ENVELOPE_COMPACT_V1};
 
 #[cfg(all(test, feature = "std"))]
 mod manifest_guard_tests {

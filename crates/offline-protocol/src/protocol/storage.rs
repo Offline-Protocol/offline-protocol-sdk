@@ -3022,6 +3022,18 @@ impl OfflineProtocol {
             {
                 self.peer_rich_payload.insert(peer_id.clone());
             }
+            // Not gated on a config flag, unlike its neighbours. There is no
+            // kill switch for *which payload we sign*: signing the older one
+            // at a peer that has proved it signs the newer is exactly the
+            // downgrade the ratchet refuses, so this node would be talking
+            // itself out of a session. `control_freshness_enforced` gates
+            // whether frames are refused, not what we produce.
+            if caps
+                .ctrl_versions
+                .contains(&offline_protocol_sealed::CTRL_SIGN_V2)
+            {
+                self.peer_ctrl_freshness.insert(peer_id.clone());
+            }
             if self.config.encryption.rich_payload_enabled
                 && caps.attested_rich_versions.contains(&RICH_PAYLOAD_V1)
             {

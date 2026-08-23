@@ -255,6 +255,28 @@ pub enum SecurityWarningCode {
     /// attribution — a message shown as coming from a member is exactly what
     /// the forged leaf was for.
     GroupLeafIdentityUnproven,
+    /// A control frame was refused for what its signature says about *when*:
+    /// stamped further in the past than this node accepts, further ahead of
+    /// this node's clock than it accepts, or carrying the older signing
+    /// payload from a peer that has proved it can produce the newer one.
+    ///
+    /// The three share a code because they share a remedy, and the remedy is
+    /// the first thing to check: **this device's own clock**. The signed
+    /// timestamp is compared against it, so a device whose clock is wrong
+    /// refuses honest peers in bulk, and the event stream then looks like a
+    /// coordinated attack rather than a local fault. A run of these naming
+    /// *many different* peers is a clock; a run naming *one* peer while others
+    /// are fine is that peer, either replaying captures or running a broken
+    /// build.
+    ///
+    /// It is the fresh-frame counterpart to
+    /// [`Self::UnsignedControlRejected`]: both refuse a frame whose signature
+    /// proves less than this node requires, one for what it omits and one for
+    /// what it fails to state. Recovery of last resort is
+    /// `security.control_freshness_enforced = false`, which returns this node
+    /// to accepting frames of any age (see issue 403 for what that gives back
+    /// to an attacker).
+    StaleControlFrame,
 }
 
 impl SecurityWarningCode {
@@ -275,6 +297,7 @@ impl SecurityWarningCode {
             Self::RelayAddressBindingMismatch => "RELAY_ADDRESS_BINDING_MISMATCH",
             Self::RelayAddressDeclarationRefused => "RELAY_ADDRESS_DECLARATION_REFUSED",
             Self::GroupLeafIdentityUnproven => "GROUP_LEAF_IDENTITY_UNPROVEN",
+            Self::StaleControlFrame => "STALE_CONTROL_FRAME",
         }
     }
 }
@@ -4015,6 +4038,7 @@ mod tests {
             SecurityWarningCode::RelayAddressBindingMismatch,
             SecurityWarningCode::RelayAddressDeclarationRefused,
             SecurityWarningCode::GroupLeafIdentityUnproven,
+            SecurityWarningCode::StaleControlFrame,
         ];
         for code in all {
             // serde renders a unit enum variant as a quoted JSON string.
@@ -4041,7 +4065,8 @@ mod tests {
                 | SecurityWarningCode::PushKeyPackagePoolExhausted
                 | SecurityWarningCode::RelayAddressBindingMismatch
                 | SecurityWarningCode::RelayAddressDeclarationRefused
-                | SecurityWarningCode::GroupLeafIdentityUnproven => {}
+                | SecurityWarningCode::GroupLeafIdentityUnproven
+                | SecurityWarningCode::StaleControlFrame => {}
             }
         }
     }

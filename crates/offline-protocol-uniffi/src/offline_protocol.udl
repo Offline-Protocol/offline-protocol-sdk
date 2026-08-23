@@ -824,6 +824,29 @@ dictionary ProtocolConfig {
     // every mobile app opted out of a feature the Rust side considers on.
     // Defaulted so existing callers keep compiling.
     boolean data_enabled = true;
+    // Whether a control frame is refused for being stale, and whether a peer
+    // that has proved it signs the freshness-bound payload is held to it.
+    // ON by default: a control frame's signature covers the frame's timestamp,
+    // and a verifier refuses one stamped more than 30 days ago or more than 48
+    // hours ahead of its own clock (issue 403 -- without it, a captured frame
+    // verifies forever, and a recorded session_reset is a repeatable way to
+    // tear down a live session).
+    //
+    // The lever exists because the check is judged against THIS DEVICE's
+    // clock. A device that comes up with an unset one reads every honest peer
+    // as decades in the future and refuses all of them, taking its own control
+    // plane down -- key package exchange included -- until the clock is fixed.
+    // That is not a fault an app can wait for a new SDK release to repair,
+    // which is why it is here rather than internal.
+    //
+    // Turning it off returns this install to pre-403 behaviour exactly:
+    // signatures still verified, nothing refused for its age, session resets
+    // honoured on any verified frame. It gives an attacker back what 403
+    // describes, so it is a diagnosis and recovery tool rather than a setting
+    // to deploy on. Watch for STALE_CONTROL_FRAME security warnings naming
+    // MANY DIFFERENT peers, which is the clock; one peer while others are fine
+    // is that peer. Defaulted so existing callers keep compiling.
+    boolean control_freshness_enforced = true;
 };
 
 // ========================================================================

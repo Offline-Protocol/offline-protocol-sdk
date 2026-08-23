@@ -51,8 +51,23 @@ impl OfflineProtocol {
     /// see the comment at that use for why the distinction earns a separate
     /// trust level from the capability lists around it.
     ///
+    /// `freshness` gates **only** `session_reset`, which is the one field here
+    /// that destroys state: `Some(stamp)` when the frame's signature covers
+    /// that timestamp and this node checked it, `None` otherwise. It is an
+    /// option rather than a flag beside a number so that the stamp is
+    /// unreachable in exactly the case where trusting it would be a bug — on
+    /// the older payload the timestamp is outside the signature, and a peer's
+    /// replay watermark must never be moved by a value an attacker can
+    /// rewrite. See the comment at that use.
+    ///
     /// [`ControlGateOutcome::Proceed`]: super::ControlGateOutcome
-    pub(crate) fn handle_key_package_message(&mut self, sender: &str, data: &str, signed: bool) {
+    pub(crate) fn handle_key_package_message(
+        &mut self,
+        sender: &str,
+        data: &str,
+        signed: bool,
+        freshness: Option<i64>,
+    ) {
         if let Ok(payload) = serde_json::from_str::<KeyPackagePayload>(data) {
             debug!(sender = %sender, session_reset = %payload.session_reset, "Received key package");
 
@@ -109,6 +124,33 @@ impl OfflineProtocol {
                 self.peer_rich_payload.insert(sender.to_string());
             } else {
                 self.peer_rich_payload.remove(sender);
+            }
+
+            // Record whether this peer verifies the freshness-bound control
+            // payload, so frames addressed to them are signed under it. Same
+            // shape as the capabilities above, and the same downgrade
+            // semantics: a fresh key package that stops advertising it moves
+            // us back to the older payload for that peer.
+            //
+            // That downgrade is safe *here* and would not be on the accept
+            // side, which is why the two are different sets. Signing the older
+            // payload at a peer costs freshness on frames we send them, and
+            // they still refuse ours if they hold us to the newer one;
+            // *accepting* the older payload from a peer that has proved
+            // otherwise is the replay this whole change closes, and
+            // `control_freshness_peers` has no path that clears it.
+            if payload
+                .ctrl_versions
+                .contains(&offline_protocol_sealed::CTRL_SIGN_V2)
+            {
+                if !self.peer_ctrl_freshness.contains(sender)
+                    && self.peer_ctrl_freshness.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.peer_ctrl_freshness.clear();
+                }
+                self.peer_ctrl_freshness.insert(sender.to_string());
+            } else {
+                self.peer_ctrl_freshness.remove(sender);
             }
 
             // Record whether this peer replicates documents, so the data
@@ -243,6 +285,7 @@ impl OfflineProtocol {
                 &payload.env_versions,
                 &payload.rich_versions,
                 &payload.data_versions,
+                &payload.ctrl_versions,
                 advertised_nostr_pubkey.as_deref(),
             );
             if caps.is_any() {
@@ -254,7 +297,69 @@ impl OfflineProtocol {
             // If the sender has reset their session (e.g. after unblocking us),
             // we must discard our stale local session so both sides converge on
             // a fresh MLS group.
-            if payload.session_reset {
+            //
+            // Gated on the frame's age being *established*, not merely on its
+            // signature being valid. This is the destructive directive issue
+            // 403 named: a signature that states no freshness makes a captured
+            // reset frame a repeatable way to tear down a live session, and
+            // every teardown it earns is a session the pair has to rebuild.
+            // A frame under the older payload is still accepted, still
+            // refreshes capabilities, and simply does not get to do this.
+            //
+            // The switch is read here rather than folded into
+            // `freshness_bound`, so that an operator who turns freshness
+            // enforcement off gets back the *whole* pre-403 behaviour
+            // including this, rather than a half state where resets silently
+            // stop working.
+            //
+            // The third clause is what keeps this from breaking healing. A
+            // driven rekey *is* a reset, so a peer whose resets are ignored is
+            // a peer this node can no longer heal a forked session with, and
+            // post-compromise security stops arriving. Holding a peer to a
+            // payload they have never shown they can produce would do exactly
+            // that to every install that has not upgraded. So the bar is the
+            // ratchet, not the frame: a peer that has proved it signs the
+            // freshness-bound payload must use it here, and a peer that has
+            // not is where they always were. Their exposure closes by itself
+            // on their first freshness-bound frame.
+            let reset_admissible = freshness.is_some()
+                || !self.config.security.control_freshness_enforced
+                || !self.signs_freshness_bound_control(sender);
+            if payload.session_reset && !reset_admissible {
+                warn!(
+                    sender = %sender,
+                    "Ignoring a session reset on a control frame whose age is not established; \
+                     the peer re-sends a fresh one if the reset was real"
+                );
+            }
+
+            // Inside the window, a captured reset is still spendable: thirty
+            // days is a bound on replay, not an end to it, and the receive
+            // deduplicator forgets a message id after an hour. So a frame
+            // whose age *is* established is additionally required to be newer
+            // than the last reset acted on from this peer, which is what makes
+            // one recording good for exactly one teardown rather than one an
+            // hour for a month.
+            //
+            // Only for a frame whose stamp is signed. On the older payload the
+            // timestamp is attacker-rewritable, so consulting it would let
+            // anyone park the mark at `i64::MAX` and permanently deny this
+            // peer the ability to heal a forked session.
+            let reset_unspent = freshness.is_none_or(|stamp| self.reset_is_unspent(sender, stamp));
+            if payload.session_reset && reset_admissible && !reset_unspent {
+                warn!(
+                    sender = %sender,
+                    "Ignoring a session reset already acted on; the frame is a replay of one \
+                     this node has spent"
+                );
+            }
+            if payload.session_reset && reset_admissible && reset_unspent {
+                if let Some(stamp) = freshness {
+                    // Before the teardown, never after: the teardown is
+                    // followed by a fresh session, so a crash in between
+                    // leaves this frame able to destroy the replacement too.
+                    self.record_reset_spent(sender, stamp);
+                }
                 if let Some(mls) = self.mls_manager.clone() {
                     if let Ok(manager) = mls.read() {
                         if manager.has_session(sender).unwrap_or(false) {

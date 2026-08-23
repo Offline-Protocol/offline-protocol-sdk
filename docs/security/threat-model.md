@@ -141,6 +141,9 @@ This is the only boundary that survives a hostile relay.
 |---------|---------|
 | Self-certifying addresses | Impersonation by name claim (A2, A3) |
 | Canonical signing payload with domain separation and length prefixes | Signature replay across purposes, delimiter-shift forgery (A2) |
+| Freshness inside the signed payload, with a bounded window | A captured control frame verifying forever (A2) |
+| Refusing the older signing payload from a peer that has proved the newer | Side-stepping freshness with a capture made before that peer upgraded (A2) |
+| A session reset admitted only above a per-peer high-water mark | Repeatable teardown of a live session from one recording (A2) |
 | Address derivation from the presented key | Signature-by-any-key forgery (A2, A3) |
 | Envelope slot binding | One derivable session identifier aimed at arbitrary peers (A2) |
 | Leaf identity binding, three seams | A member speaking as another member (A4) |
@@ -308,12 +311,63 @@ does not cover it, because the broadcast was one frame.
 
 ### R7. Capability negotiation is unsigned
 
-The three capability lists are not bound to the sender's signature. Forging one
-onto a legacy peer is a targeted delivery denial of service. It grants nothing
-else, and an attacker in that position can already drop packets.
+The capability lists are not bound to the sender's signature. Forging one onto a
+legacy peer is a targeted delivery denial of service. It grants nothing else,
+and an attacker in that position can already drop packets.
 
-`nostr_pubkey` is the exception and is honoured only from a signed key package,
+`nostr_pubkey` is one exception and is honoured only from a signed key package,
 because it is consumed as a destination key rather than a feature hint.
+
+`ctrl_versions` is the other, and it is answered by a different mechanism rather
+than by a signature. Stripping it makes this node sign the payload that states
+no freshness. What bounds that is the rule that never reads the field: a
+verifier that has once verified a freshness-bound signature from a peer refuses
+that peer's older-payload frames from then on, durably. So the strip works until
+the first genuine such frame arrives and never afterwards, and the residual is
+the window before a peer's first one.
+
+### R7a. Control-frame replay is bounded, not closed, outside session reset
+
+A frame signed under the freshness-bound payload can still be replayed inside
+the window its verifier allows: 30 days on an install running the engine, two
+days on a leaf. Only `session_reset` is closed outright, by the per-peer
+high-water mark, because it is the directive that destroys state.
+
+**Why the rest are left bounded:** a mark per directive is a durable per-peer
+record per directive class, and the frames in question re-state something that
+is already true: a replayed presence update, typing indicator or capability
+advertisement asserts what the peer asserted when it sent the original. The cost
+of closing them is paid on every peer forever; the harm is a stale restatement
+inside a bounded window.
+
+**What stands in front of it:** the receive deduplicator refuses an exact repeat
+for an hour, so a replay must wait out that window to land at all.
+
+**Two exposures that are not in the window at all.** A peer that has never
+presented a freshness-bound signature is where it always was, since holding it
+to a payload it has not shown it can produce would stop its resets working and
+with them its ability to heal a forked session. And a **published Nostr key
+package** is signed under the older payload deliberately, because a record left
+on a relay for strangers has no known verifier and signing it the other way
+makes cold contact unverifiable to anyone who has not upgraded. That record
+carries no reset, and its replay is bounded instead by the key package's own
+lifetime, which is
+[issue 396](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/396).
+
+### R7b. Freshness is only as good as the verifier's clock
+
+Both the window and the high-water mark are judged against the verifying
+device's own clock, which no peer can attest to. A device whose clock is wrong
+does not fail quietly in one direction: set far enough back, it admits frames it
+should have refused; set forward or unset, it refuses every honest peer and
+takes its own control plane down, key package exchange included.
+
+**Mitigation:** the refusal is reported under its own `STALE_CONTROL_FRAME` code
+so that a run of them across many peers reads as a local fault rather than an
+attack, and `security.control_freshness_enforced` turns enforcement off without
+a new binary. A leaf node is required to have a time source at pairing for this
+among other reasons; see
+[leaf provisioning](../spec/leaf-provisioning.md).
 
 ### R8. Fan-out timing at large group sizes
 

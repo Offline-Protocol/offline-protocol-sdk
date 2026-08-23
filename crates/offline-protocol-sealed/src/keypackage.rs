@@ -137,6 +137,29 @@ pub struct KeyPackagePayload {
     #[serde(default)]
     pub data_versions: Vec<u8>,
 
+    /// Control-frame signing versions the sender **verifies** (e.g. `[2]` for
+    /// [`CTRL_SIGN_V2`], the payload that binds the frame's timestamp).
+    /// Absent on legacy nodes (`#[serde(default)]` gives empty, meaning the v1
+    /// payload only), so a peer that has never heard of the freshness-bound
+    /// domain is never sent a signature it would read as invalid.
+    ///
+    /// Unlike every capability list above, this one says what the sender
+    /// *accepts*, not what it emits. It has to: a signature is produced once
+    /// and verified by the far end, so the choice of domain belongs to whoever
+    /// is going to check it.
+    ///
+    /// Trust boundary: this is a plaintext field like the others, and an
+    /// attacker who strips it makes us sign the older payload toward a peer
+    /// that would have accepted the newer one. That downgrade is real and it
+    /// is why stripping it is not the end of the story: a receiver that has
+    /// **once** verified a v2 signature from a peer records that durably and
+    /// refuses that peer's v1 control frames from then on, so the strip works
+    /// only until the first genuine v2 frame arrives and never afterwards. The
+    /// field is what makes the first one possible; the record is what makes it
+    /// stick.
+    #[serde(default)]
+    pub ctrl_versions: Vec<u8>,
+
     /// This install's Nostr public key (x-only, 64-char lowercase hex), so a
     /// peer can seal Nostr gift wraps to a key only this install holds.
     ///
@@ -145,8 +168,8 @@ pub struct KeyPackagePayload {
     /// either way, but readable by anyone who guesses our user id, so the
     /// difference is real privacy rather than a mere optimization.
     ///
-    /// Trust boundary: **unlike the three capability lists above, this one is
-    /// only honoured from a signed key package.** All four ride in the same
+    /// Trust boundary: **unlike the capability lists above, this one is only
+    /// honoured from a signed key package.** All four ride in the same
     /// plaintext payload, but this field is consumed as a *destination key*,
     /// not as a feature hint, so the distinction matters: a wrong capability
     /// costs a fallback, whereas a wrong key here means envelope metadata is
@@ -181,3 +204,16 @@ pub struct KeyPackagePayload {
 /// [`prefixes::ENCRYPTED`]: crate::prefixes::ENCRYPTED
 /// [`EncryptedMessage::to_bytes`]: crate::EncryptedMessage::to_bytes
 pub const MLS_ENVELOPE_COMPACT_V1: u8 = 1;
+
+/// Control-frame signing version advertised in
+/// [`KeyPackagePayload::ctrl_versions`]: the sender verifies signatures over
+/// [`control_signing_payload_v2`], which binds the frame's timestamp and so
+/// can be refused for being stale.
+///
+/// There is no `CTRL_SIGN_V1` constant, and the absence is deliberate: an
+/// empty list already means "v1 only", and a named constant for it would
+/// invite a peer to advertise `[1]` as though declining the newer payload were
+/// a capability rather than the floor.
+///
+/// [`control_signing_payload_v2`]: crate::canonical::control_signing_payload_v2
+pub const CTRL_SIGN_V2: u8 = 2;

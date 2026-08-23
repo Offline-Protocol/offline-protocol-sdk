@@ -13,6 +13,44 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ## [Unreleased]
 
+### Security
+
+- **A control frame now states when it was made, and a captured one stops
+  verifying.** The canonical signing payload bound the sender, the message id,
+  the recipient and the content, and nothing about time, so a frame recorded off
+  the air verified as well on its tenth delivery as on its first. The
+  destructive case was a key package carrying `session_reset`, which tears down
+  a live session: anyone who recorded one held a repeatable way to break a pair
+  ([#403](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/403)).
+
+  `offline-ctrl-v2` adds the frame's timestamp to the signed payload, under its
+  own domain so the two can never be confused. Nothing on the wire grows: the
+  timestamp already crosses both codecs and is not rewritten in flight. A
+  verifier refuses a frame outside its window (30 days past and 48 hours future
+  on an install running the engine, 48 hours on a leaf node), refuses the older
+  payload from a peer that has once proved it can produce the newer, and admits
+  a `session_reset` only above a per-peer high-water mark, so one recording is
+  worth one teardown rather than one an hour for a month.
+
+  **Nothing an application does changes.** Peers negotiate the payload through
+  `ctrl_versions` in the key package, first contact converges in a single round
+  trip, and a peer that has never produced the newer payload keeps every
+  behaviour it had, including resets, which is what a driven rekey arrives as.
+  See [ADR 0023](./docs/adr/0023-a-control-frame-states-when-it-was-made.md).
+
+  Two things to know for a deployment. A new `STALE_CONTROL_FRAME` security
+  warning reports the refusal, and **the first thing to suspect when it appears
+  across many peers is the device's own clock**, since the timestamp is judged
+  against it. And `security.control_freshness_enforced` (default `true`,
+  `controlFreshnessEnforced` in the bindings) turns enforcement off without a
+  new binary, for a fleet whose clocks are wrong; it gives back what #403
+  describes, so it is a recovery tool rather than a setting to deploy on.
+
+  Raising `outbox_max_lifetime_ms` above 7.5 days now has a consequence worth
+  knowing: this device's own late retransmissions of signed control frames can
+  be refused as stale by the peer they finally reach. Ordinary messages are
+  unaffected. The default of 7 days sits well inside the window.
+
 ### Added
 
 - **`offline-protocol-core` compiles without `std`.** The crate now builds for

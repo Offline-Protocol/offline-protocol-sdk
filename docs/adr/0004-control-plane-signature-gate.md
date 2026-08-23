@@ -16,6 +16,11 @@ Require an Ed25519 signature over a domain-separated, length-prefixed canonical
 payload on every internal prefix, verified against **the key the claimed
 sender's address derives from**.
 
+[ADR 0023](0023-a-control-frame-states-when-it-was-made.md) extends the payload
+with the frame's timestamp and the verification with a window, because the gate
+described here answers *who sent this* and nothing about *when*, which leaves a
+captured frame verifying forever.
+
 Maintain the exceptions as an **exclusion** list, so a newly added prefix is
 gated by default.
 

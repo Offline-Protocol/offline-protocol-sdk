@@ -51,6 +51,24 @@ pub enum LeafError {
     #[error("Control frame refused: {0}")]
     ControlFrameRefused(String),
 
+    /// A control frame's signature verified, and the frame is too old, too far
+    /// ahead of this device's clock, or built on the payload that states
+    /// neither.
+    ///
+    /// Its own variant rather than a [`Self::ControlFrameRefused`] with
+    /// different text, because firmware has to be able to tell these apart and
+    /// the two mean opposite things about what to do. A signature that does
+    /// not verify accuses the sender. This one, in bulk and across peers,
+    /// accuses **this device's clock**: the signed timestamp is judged against
+    /// it, so a device whose time source is wrong or has not been set refuses
+    /// every honest peer and reports it as though it were under attack.
+    ///
+    /// A leaf gets a time source at pairing and is expected to keep one; see
+    /// the provisioning chapter of the specification for what that obligation
+    /// is and why it is not optional.
+    #[error("Control frame refused as stale: {0}")]
+    StaleControlFrame(String),
+
     /// A presented key did not derive to the address that claimed it, or the
     /// claimed identifier is not an address at all.
     ///

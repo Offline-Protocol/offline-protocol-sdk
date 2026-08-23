@@ -34,8 +34,8 @@ use mls_rs::Client;
 use mls_rs_core::mls_rs_codec::MlsEncode;
 use offline_protocol_core::WIRE_VERSION_V1;
 use offline_protocol_sealed::{
-    KeyPackagePayload, LEAF_KEY_PACKAGE_LIFETIME, LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS,
-    MLS_ENVELOPE_COMPACT_V1,
+    KeyPackagePayload, CTRL_SIGN_V2, LEAF_KEY_PACKAGE_LIFETIME,
+    LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS, MLS_ENVELOPE_COMPACT_V1,
 };
 
 use crate::error::{LeafError, Result};
@@ -124,6 +124,11 @@ pub(crate) fn payload(
         env_versions: alloc::vec![MLS_ENVELOPE_COMPACT_V1],
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
+        // A leaf verifies the freshness-bound payload and nothing else, so it
+        // says so on the one channel it has for saying anything. There is no
+        // legacy leaf to be compatible with: this crate's first release is
+        // the one that introduced the device at all.
+        ctrl_versions: alloc::vec![CTRL_SIGN_V2],
         nostr_pubkey: None,
     }
 }

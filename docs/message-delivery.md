@@ -238,6 +238,8 @@ Relay traffic is bounded differently in each of those branches. When the relay a
 
 The outbox lifetime bounds the entry itself, with one caveat worth knowing: each probe refreshes the entry's last-send timestamp, so the sliding 7-day window stops binding and terminal `message_failed` moves out to the absolute cap (4× the lifetime, i.e. ~28 days).
 
+**Raising `outbox_max_lifetime_ms` interacts with control-frame freshness.** A retransmitted control frame carries the signature it was minted with, timestamp included, and a receiver refuses one stamped more than 30 days ago (see [Control messages](spec/control-messages.md#freshness)). That window was chosen to clear the ~28-day absolute cap above, so the defaults are safe with room to spare. Configure a lifetime past a quarter of the window (7.5 days) and this device's own late retransmissions of `__CONN_REQ__` and the other signed control frames start being refused as stale by the peer they finally reach. Ordinary messages are unaffected: `__MLS_ENC__` is data-plane and carries no such signature. If a deployment genuinely needs a longer outbox, raise it for the reachability behaviour and expect control frames near the far end of the ladder to be dropped rather than delivered.
+
 **What parks and what doesn't**:
 
 | Message kind | Behavior on `recipient_unreachable` |

@@ -92,17 +92,31 @@ class AddressDeclarationPolicyTest {
     }
 
     /**
-     * The domain must not prefix, nor be prefixed by, the core's control-frame
-     * domain. If either did, a relay-chosen challenge could steer this
-     * signature into the control-message domain and replay as a frame from this
-     * peer. The relay pins the same relation from its side.
+     * The domain must not prefix, nor be prefixed by, **any** of the core's
+     * control-frame domains. If one did, a relay-chosen challenge could steer
+     * this signature into the control-message domain and replay as a frame from
+     * this peer. The relay pins the same relation from its side.
+     *
+     * Enumerated rather than checked against one, because the core gained a
+     * second control domain when the signing payload started binding the
+     * frame's timestamp, and a test that checked only the first would have gone
+     * quiet about the new one while still reading as though it covered the
+     * question.
      */
     @Test
     fun proofDomainCannotCollideWithControlFrameSigning() {
-        val controlDomain = "offline-ctrl-v1"
+        val controlDomains = listOf("offline-ctrl-v1", "offline-ctrl-v2")
         val proofDomain = AddressDeclarationPolicy.PROOF_DOMAIN
-        assertFalse(proofDomain.startsWith(controlDomain))
-        assertFalse(controlDomain.startsWith(proofDomain))
+        for (controlDomain in controlDomains) {
+            assertFalse(
+                "proof domain must not be prefixed by $controlDomain",
+                proofDomain.startsWith(controlDomain),
+            )
+            assertFalse(
+                "$controlDomain must not be prefixed by the proof domain",
+                controlDomain.startsWith(proofDomain),
+            )
+        }
     }
 
     /**

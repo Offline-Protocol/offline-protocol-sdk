@@ -165,14 +165,20 @@ pub struct Handled {
 /// accepts a pairing at all, and firmware that decides what an opened message
 /// may actuate. [`LeafDevice::peers`] is how it audits what accumulated.
 ///
-/// A replayed control frame. The signed payload states who, to whom, and what,
-/// with nothing that says *when*, so a captured frame verifies forever. The
-/// destructive case is a reset-flagged key package, which tears down a live
-/// session, and the peer record remembers the last few of those so the same
-/// frame cannot spend twice. An attacker holding an older one can still spend
-/// it once. Closing that needs freshness inside the signed payload, which is a
-/// change to the wire and to both ends rather than to this crate, and is
-/// tracked as [issue 403](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/403).
+/// A replayed control frame, **as far as this device's clock is honest**. The
+/// signed payload states when the frame was made, so one older than two days
+/// is refused outright, and a reset-flagged key package (the destructive case,
+/// since it tears down a live session) is additionally refused unless it is
+/// newer than the last reset this device acted on. One capture is therefore
+/// worth one teardown, and only inside a two-day window.
+///
+/// What that leaves is the clock. Both checks are made against the time source
+/// firmware supplies, so a device that supplies a wrong one either refuses its
+/// peer or, if the clock is far enough behind, admits frames it should have
+/// refused. The obligation is stated with the others in
+/// [the provisioning chapter](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/spec/leaf-provisioning.md),
+/// and it is why the time source is a parameter on every entry point here
+/// rather than something this crate reaches for.
 ///
 /// `Debug` renders the device's address and nothing else. Everything else it
 /// holds is either secret or a handle to secrets, and a device that printed
@@ -441,7 +447,7 @@ impl LeafDevice {
         body: &str,
         now_unix_secs: u64,
     ) -> Result<Handled> {
-        frames::verify_control_frame(message)?;
+        frames::verify_control_frame(message, now_unix_secs)?;
         let payload: KeyPackagePayload = serde_json::from_str(body)
             .map_err(|e| LeafError::MalformedFrame(format!("key package body: {e}")))?;
 
@@ -468,22 +474,40 @@ impl LeafDevice {
         let mut record = self.peer_record(sender)?;
 
         if payload.session_reset {
-            let frame_id = message.id.as_str();
-            if record.has_seen_reset(&frame_id) {
-                // A reset already acted on. Tearing down again on the same
-                // frame is how a captured one becomes a repeatable way to
-                // break a session that has since been rebuilt, so the
-                // teardown is what a repeat loses; the record below is still
-                // refreshed, because a peer restating its capabilities is
-                // harmless and a retransmission is the ordinary reason to see
-                // this twice.
+            // The frame's own stamp, which `verify_control_frame` has already
+            // proved is the sender's and inside the window this device
+            // accepts. Everything below rests on both of those: an unproved
+            // stamp would let anyone park the mark past every future reset.
+            let stamp = message.timestamp.as_millis();
+            if !record.reset_is_unspent(stamp) {
+                // A reset already acted on, or older than one that was.
+                // Tearing down again is how a captured frame becomes a
+                // repeatable way to break a session that has since been
+                // rebuilt, so the teardown is what a replay loses; the record
+                // below is still refreshed, because a peer restating its
+                // capabilities is harmless and a retransmission is the
+                // ordinary reason to see this twice.
                 events.push(LeafEvent::Ignored {
-                    reason: String::from("a session reset arrived twice on the same frame"),
+                    reason: String::from("a session reset arrived that this device has spent"),
                 });
             } else {
-                self.forget_session(sender)?;
-                record.remember_reset(&frame_id);
+                // Marked before the teardown, never after. The teardown is
+                // followed by a fresh pairing, so a power cut in between would
+                // leave this frame able to break the replacement too, and a
+                // power cut is the one event this crate assumes will happen.
+                record.remember_reset(stamp);
                 record.key_package_sent = false;
+                // Written here *and* again at the end of this function, which
+                // is deliberate rather than redundant: the second write
+                // carries the peer's refreshed capabilities and cannot be
+                // moved earlier, and this one cannot be moved later without
+                // putting a power cut between the mark and the teardown it
+                // authorizes. Two writes on a reset frame, which arrives about
+                // as often as a rekey; the ordinary frame still writes once.
+                record
+                    .save(&self.store, sender)
+                    .map_err(|e| LeafError::Storage(e.to_string()))?;
+                self.forget_session(sender)?;
                 events.push(LeafEvent::SessionReset {
                     peer: sender.to_string(),
                 });
@@ -512,7 +536,7 @@ impl LeafDevice {
     }
 
     fn on_welcome(&mut self, message: &Message, body: &str, now_unix_secs: u64) -> Result<Handled> {
-        frames::verify_control_frame(message)?;
+        frames::verify_control_frame(message, now_unix_secs)?;
         let welcome: WelcomeMessage = serde_json::from_str(body)
             .map_err(|e| LeafError::MalformedFrame(format!("welcome body: {e}")))?;
 
@@ -736,7 +760,7 @@ impl LeafDevice {
     /// This is the peer's own rule, applied on the device: it answers a probe
     /// only while it holds a session of its own.
     fn on_probe(&mut self, message: &Message, now_unix_secs: u64) -> Result<Handled> {
-        frames::verify_control_frame(message)?;
+        frames::verify_control_frame(message, now_unix_secs)?;
         let sender = message.sender.as_str();
 
         // Loaded rather than counted. "State is on flash" and "this device can

@@ -246,7 +246,7 @@ impl EncryptionConfig {
 }
 
 /// Security configuration for transport and control-message hardening.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityConfig {
     /// When `true`, control messages with no transport-level peer identity
     /// (`transport_peer_id` is `None`) are rejected. When `false` (default),
@@ -290,6 +290,52 @@ pub struct SecurityConfig {
     /// sender-less relay delivery, and wants frames without transport identity
     /// refused as a matter of policy rather than of authentication.
     pub require_transport_identity: bool,
+
+    /// Whether a control frame is refused for being stale, and whether a peer
+    /// that has proved it signs the freshness-bound payload is held to it.
+    ///
+    /// Defaults to `true`. With it on, a control frame signed under
+    /// `offline-ctrl-v2` is checked against
+    /// [`CTRL_FRESHNESS_PAST_MS`](offline_protocol_sealed::CTRL_FRESHNESS_PAST_MS)
+    /// and its future counterpart, a peer that once verifiably signed v2 may
+    /// not fall back to v1, and a `session_reset` is honoured only on a frame
+    /// whose freshness was actually checked. With it off, this node behaves
+    /// exactly as it did before any of that existed: signatures are still
+    /// verified, and no frame is refused for its age.
+    ///
+    /// # What it is for
+    ///
+    /// The timestamp is read against *this device's* clock, so the failure
+    /// this switch exists for is a clock, not a peer. A device that comes up
+    /// with an unset clock reads every honest peer's frame as being from
+    /// decades in the future and refuses all of them, which takes out the
+    /// whole control plane — key package exchange included — for as long as
+    /// the clock is wrong. That is a self-inflicted outage a shipped app
+    /// cannot wait for a new binary to fix, which is why the lever exists and
+    /// why it reaches the bindings rather than staying internal.
+    ///
+    /// # What turning it off costs
+    ///
+    /// A captured control frame verifies forever again, and a recorded
+    /// `session_reset` is once more a repeatable way to tear down a live
+    /// session (issue 403). It is a diagnosis and recovery tool, not a
+    /// configuration a deployment should settle on.
+    pub control_freshness_enforced: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            // Fail-open, and safe to: see the field's own documentation for
+            // why transport identity adds no authenticity over a signature
+            // that must derive to the sender's address.
+            require_transport_identity: false,
+            // Fail-closed, like `require_encryption`: a freshness check that
+            // has to be switched on is one that is off on every install that
+            // never heard about it.
+            control_freshness_enforced: true,
+        }
+    }
 }
 
 /// Transport-specific configuration.

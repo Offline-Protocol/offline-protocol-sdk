@@ -2331,6 +2331,12 @@ pub struct ProtocolConfig {
     /// forking members whose admin overlay disagrees.
     pub group_enforce_admin_commits: bool,
     pub require_transport_identity: bool,
+    /// Whether a control frame is refused for being stale, and whether a peer
+    /// that has proved it signs the freshness-bound payload is held to it
+    /// (default on). See the UDL dictionary and
+    /// `SecurityConfig::control_freshness_enforced` — the failure it exists to
+    /// recover from is this device's own clock, not a peer.
+    pub control_freshness_enforced: bool,
     /// Kill switch for the compact binary wire codec (default on). See the UDL
     /// dictionary and `TransportConfig::binary_wire_enabled` for semantics.
     pub binary_wire_enabled: bool,
@@ -2630,6 +2636,7 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.group.relay_broadcast_enabled = config.group_relay_broadcast_enabled;
         core_config.group.enforce_admin_commits = config.group_enforce_admin_commits;
         core_config.security.require_transport_identity = config.require_transport_identity;
+        core_config.security.control_freshness_enforced = config.control_freshness_enforced;
         if let Some(mesh_relay) = config.mesh_relay {
             core_config.mesh_relay = mesh_relay.overlay(core_config.mesh_relay);
         }
@@ -7705,6 +7712,93 @@ mod tests {
         );
     }
 
+    /// The security config section must be read by every bridge that parses
+    /// config, in both spellings its JSON can arrive in, **and in both the
+    /// nested and the top-level position**.
+    ///
+    /// The same failure as the data guard above, with a sharper edge.
+    /// `control_freshness_enforced` is not a feature flag: it is the lever an
+    /// app reaches for when its fleet's clocks are wrong, because the
+    /// freshness check is judged against the device's own clock and a device
+    /// whose clock is unset refuses every honest peer, taking its own control
+    /// plane down with it. A lever that is documented and dropped somewhere in
+    /// the bridge stack is worse than no lever, because it is reached for
+    /// precisely when nothing else is working.
+    ///
+    /// The flat spelling is pinned deliberately. It is the one section where a
+    /// value written one level too high is still honoured, and this test is
+    /// what stops that tolerance being tidied away by someone matching it to
+    /// the `data` section next to it.
+    #[test]
+    fn every_bridge_reads_the_security_config_section() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rn = manifest.join("../../bindings/react-native");
+        let read = |rel: std::path::PathBuf| -> String {
+            std::fs::read_to_string(&rel)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", rel.display()))
+        };
+
+        let udl = read(manifest.join("src/offline_protocol.udl"));
+        assert!(
+            udl.contains("boolean control_freshness_enforced = true;"),
+            "the UDL must default control_freshness_enforced to true: the check \
+             it gates is what stops a captured control frame verifying forever, \
+             and a UDL saying false would leave every mobile app opted out of a \
+             protection the Rust side considers on"
+        );
+
+        let kotlin =
+            read(rn.join("android/src/main/java/com/offlineprotocol/ProtocolConfigParser.kt"));
+        assert!(
+            kotlin.contains("optJSONObject(\"security\")")
+                && kotlin.contains("config.controlFreshnessEnforced = controlFreshnessEnforced"),
+            "the Kotlin parser must read the security section AND apply it to \
+             the ProtocolConfig; reading it and dropping it is the silent half \
+             of this failure"
+        );
+        assert!(
+            kotlin.contains("json.optBooleanCompat(\"controlFreshnessEnforced\""),
+            "the Kotlin parser must also accept the top-level spelling: this is \
+             the switch an app flips mid-incident, and it lands one level too \
+             high often enough to be worth honouring"
+        );
+
+        let swift = read(rn.join("ios/OfflineProtocolModule.swift"));
+        assert!(
+            swift.contains("raw[\"security\"]")
+                && swift.contains("config.controlFreshnessEnforced = controlFreshnessEnforced"),
+            "the Swift parser must read the security section AND apply it to \
+             the ProtocolConfig"
+        );
+        assert!(
+            swift.contains("raw[\"controlFreshnessEnforced\"] as? Bool"),
+            "the Swift parser must also accept the top-level spelling; see the \
+             Kotlin assertion above for why"
+        );
+
+        let ts = read(rn.join("src/index.ts"));
+        assert!(
+            ts.contains("nativeConfig.security = securityConfig"),
+            "transformConfigForNative must forward the security section"
+        );
+        assert!(
+            ts.contains("this.config.controlFreshnessEnforced"),
+            "transformConfigForNative must read the top-level spelling too. \
+             types.ts documents it, and both native parsers honour it, but they \
+             only ever see what this layer sends: gating the section on \
+             `config.security` existing made the documented flat spelling a \
+             silent no-op"
+        );
+        assert!(
+            !ts.contains(
+                "controlFreshnessEnforced: this.config.security?.controlFreshnessEnforced ?? true"
+            ),
+            "the bridge must not restate the default: an omitted field has to \
+             stay omitted all the way to the core, or the Rust default becomes \
+             unreachable"
+        );
+    }
+
     /// Backing store for [`TestMlsStorageProvider`], shareable so two protocol
     /// instances can stand in for two launches of one device.
     type TestStore = Arc<Mutex<HashMap<(String, String), Vec<u8>>>>;
@@ -7829,6 +7923,7 @@ mod tests {
             group_relay_broadcast_enabled: true,
             group_enforce_admin_commits: false,
             require_transport_identity: false,
+            control_freshness_enforced: true,
         }
     }
 
@@ -7865,6 +7960,7 @@ mod tests {
             group_relay_broadcast_enabled: true,
             group_enforce_admin_commits: false,
             require_transport_identity: false,
+            control_freshness_enforced: true,
         }
     }
 
@@ -8178,6 +8274,7 @@ mod tests {
             group_relay_broadcast_enabled: true,
             group_enforce_admin_commits: false,
             require_transport_identity: false,
+            control_freshness_enforced: true,
         }
     }
 
@@ -15137,9 +15234,10 @@ mod tests {
     ///
     /// The failure it prevents is not cosmetic. The domain separates an
     /// address proof from a control frame, and if a device signed an address
-    /// proof under a domain that collided with `offline-ctrl-v1`, a hostile
-    /// relay would harvest a replayable control-frame signature from every
-    /// device that ever authenticated to it.
+    /// proof under a domain that collided with either control-frame domain
+    /// (`offline-ctrl-v1` or `offline-ctrl-v2`), a hostile relay would harvest
+    /// a replayable control-frame signature from every device that ever
+    /// authenticated to it.
     #[test]
     fn relay_address_proof_domain_matches_across_both_bridges() {
         const EXPECTED: &str = "offline-relay-addr-v1";

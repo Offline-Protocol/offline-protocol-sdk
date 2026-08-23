@@ -563,6 +563,46 @@ pub(crate) const MAX_KEY_PACKAGE_LIFETIME_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 pub(crate) struct EncryptionCapableEntry {
     /// Milliseconds since epoch (UTC) when this peer last proved it runs MLS.
     pub(crate) last_seen_ms: i64,
+    /// Whether this peer has ever presented a control-frame signature over the
+    /// freshness-bound payload (`offline-ctrl-v2`).
+    ///
+    /// A **ratchet**, and the only reason the freshness check cannot be
+    /// side-stepped: without it an attacker replays a capture from before the
+    /// peer upgraded, the older payload verifies exactly as it always did, and
+    /// the whole check is bypassed by choosing an old enough recording. Once
+    /// this is set, that peer's v1 control frames are refused.
+    ///
+    /// It rides here rather than in [`PeerCapabilities`] because the two record
+    /// different things. That one holds what a peer *advertised*, is
+    /// overwritten wholesale by each fresh key package, and answers "what
+    /// should we send them"; this one holds what a peer *proved*, must never be
+    /// cleared by anything a network attacker can cause, and answers "what will
+    /// we accept from them". Storing it in a record that is routinely
+    /// overwritten is how a ratchet silently stops being one.
+    ///
+    /// `#[serde(default)]` gives `false` for records written before the field
+    /// existed, which is correct: an install that has never verified a v2
+    /// signature from a peer has not proved anything about them.
+    #[serde(default)]
+    pub(crate) ctrl_freshness_proved: bool,
+    /// The signed timestamp of the most recent session reset acted on from
+    /// this peer, or `0` if none.
+    ///
+    /// A high-water mark, and what turns the freshness *window* into an actual
+    /// closure for the one directive that destroys state. The window alone
+    /// bounds a captured reset to thirty days; it does not stop the frame
+    /// being spent inside them, and the receive deduplicator forgets a message
+    /// id after an hour. Without this, a recording tears the pair's session
+    /// down once an hour for a month.
+    ///
+    /// Only ever read from and written by a frame whose timestamp is *inside
+    /// the signature*. On a frame signed under the older payload the timestamp
+    /// is attacker-rewritable, so honouring one here would let anyone park
+    /// this mark at `i64::MAX` and permanently deny that peer the ability to
+    /// heal a forked session, which is a worse failure than the one being
+    /// fixed.
+    #[serde(default)]
+    pub(crate) last_reset_ms: i64,
 }
 
 /// Payload for key package exchange, and the compact envelope version it
@@ -1104,6 +1144,18 @@ pub(crate) struct PeerCapabilities {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) attested_data_versions: Vec<u8>,
 
+    /// Control-frame signing versions the peer advertised, from
+    /// [`KeyPackagePayload::ctrl_versions`]. Persisted for the same reason as
+    /// the lists above: without it, a peer met before a restart would be sent
+    /// the older signing payload until the next live key-package exchange, and
+    /// a peer that has *proved* it signs the newer one refuses that.
+    ///
+    /// This is the advertised half only. What the peer proved lives in
+    /// [`EncryptionCapableEntry::ctrl_freshness_proved`], deliberately in a
+    /// record this one's wholesale overwrite cannot reach.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) ctrl_versions: Vec<u8>,
+
     /// The peer's Nostr public key, from [`KeyPackagePayload::nostr_pubkey`].
     ///
     /// Persisted for the same reason as the capability lists: the cached key
@@ -1147,6 +1199,7 @@ impl PeerCapabilities {
         env_versions: &[u8],
         rich_versions: &[u8],
         data_versions: &[u8],
+        ctrl_versions: &[u8],
         nostr_pubkey: Option<&str>,
     ) -> Self {
         Self {
@@ -1165,6 +1218,11 @@ impl PeerCapabilities {
                 .copied()
                 .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
                 .collect(),
+            ctrl_versions: ctrl_versions
+                .iter()
+                .copied()
+                .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
+                .collect(),
             attested_rich_versions: Vec::new(),
             attested_data_versions: Vec::new(),
             nostr_pubkey: nostr_pubkey.and_then(normalize_nostr_pubkey),
@@ -1177,10 +1235,38 @@ impl PeerCapabilities {
         !self.env_versions.is_empty()
             || !self.rich_versions.is_empty()
             || !self.data_versions.is_empty()
+            || !self.ctrl_versions.is_empty()
             || !self.attested_rich_versions.is_empty()
             || !self.attested_data_versions.is_empty()
             || self.nostr_pubkey.is_some()
     }
+}
+
+/// Which canonical payload a control frame's signature verified against.
+///
+/// Both are legitimate: [`Self::V1`] is what every peer signed before the
+/// freshness-bound payload existed, and refusing it outright would refuse
+/// first contact with any peer that has not upgraded. What the distinction
+/// buys is that the two can be treated differently once a peer has *proved* it
+/// can produce the newer one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlSigVersion {
+    /// `offline-ctrl-v1`: sender, id, recipient, content. States no freshness,
+    /// so a signature over it never expires.
+    V1,
+    /// `offline-ctrl-v2`: the four fields above plus the frame's timestamp.
+    V2,
+}
+
+/// What verifying a control frame's signature established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlVerification {
+    /// No signature metadata at all. The caller decides policy; for a
+    /// security-gated prefix that policy is refusal.
+    Unsigned,
+    /// A signature verified, and the key that made it derives to the address
+    /// the frame claims to come from.
+    Verified(ControlSigVersion),
 }
 
 /// Outcome of [`OfflineProtocol::security_gate_control_message`].
@@ -1203,7 +1289,20 @@ pub(crate) enum ControlGateOutcome {
     /// longer reaches any *gated* handler; the bit survives because those two
     /// ungated paths still produce it, and because a handler that treats a
     /// payload field as authenticated should say so at the point it does.
-    Proceed { signed: bool },
+    ///
+    /// `freshness_bound` is the strictly narrower fact: the signature verified
+    /// against the payload that covers the frame's timestamp, **and** that
+    /// timestamp was inside the window this node allows. It is what a handler
+    /// consults before acting on a directive that destroys state, because such
+    /// a directive on a frame that could be a recording is a replayable way to
+    /// destroy that state (issue 403).
+    ///
+    /// It is deliberately the *fact* and not the *policy*: it stays `false`
+    /// when freshness enforcement is switched off, and the handler applies the
+    /// switch itself. A flag that folded the config in would read as "this
+    /// frame is fresh" while meaning "nobody looked", which is the reading that
+    /// gets copied to the next call site.
+    Proceed { signed: bool, freshness_bound: bool },
     /// The gate rejected the message; the caller must return this result
     /// without dispatching.
     Rejected(InternalMessageResult),
@@ -1975,7 +2074,7 @@ mod signing_domain_tests {
     use offline_protocol_mls::discovery::DISCOVERY_SIGN_DOMAIN;
     use offline_protocol_mls::invite::INVITE_SIGN_DOMAIN;
 
-    use offline_protocol_sealed::CTRL_SIGN_DOMAIN;
+    use offline_protocol_sealed::{CTRL_SIGN_DOMAIN, CTRL_SIGN_DOMAIN_V2};
 
     /// The relay's address-proof domain.
     ///
@@ -2013,8 +2112,9 @@ mod signing_domain_tests {
     /// every device that ever authenticated to it.
     #[test]
     fn signing_domains_are_mutually_non_prefixing() {
-        let domains: [(&str, &[u8]); 5] = [
+        let domains: [(&str, &[u8]); 6] = [
             ("offline-ctrl-v1", CTRL_SIGN_DOMAIN),
+            ("offline-ctrl-v2", CTRL_SIGN_DOMAIN_V2),
             ("offline-disc-v1", DISCOVERY_SIGN_DOMAIN),
             ("offline-invite-v1", INVITE_SIGN_DOMAIN),
             ("offline-relay-addr-v1", RELAY_ADDR_SIGN_DOMAIN),
@@ -2049,19 +2149,21 @@ mod signing_domain_tests {
     #[test]
     fn signing_domains_have_their_published_spellings() {
         assert_eq!(CTRL_SIGN_DOMAIN, b"offline-ctrl-v1");
+        assert_eq!(CTRL_SIGN_DOMAIN_V2, b"offline-ctrl-v2");
         assert_eq!(DISCOVERY_SIGN_DOMAIN, b"offline-disc-v1");
         assert_eq!(INVITE_SIGN_DOMAIN, b"offline-invite-v1");
         assert_eq!(RELAY_ADDR_SIGN_DOMAIN, b"offline-relay-addr-v1");
         assert_eq!(GATEWAY_ADDR_SIGN_DOMAIN, b"offline-gateway-addr-v1");
     }
 
-    /// All five must be distinct, which non-prefixing already implies for
+    /// All six must be distinct, which non-prefixing already implies for
     /// unequal strings but not for equal ones: two identical domains are
     /// prefixes of each other, and the loop above skips same-name pairs.
     #[test]
     fn signing_domains_are_distinct() {
-        let domains: [&[u8]; 5] = [
+        let domains: [&[u8]; 6] = [
             CTRL_SIGN_DOMAIN,
+            CTRL_SIGN_DOMAIN_V2,
             DISCOVERY_SIGN_DOMAIN,
             INVITE_SIGN_DOMAIN,
             RELAY_ADDR_SIGN_DOMAIN,

@@ -495,40 +495,47 @@ pub(crate) struct PeerRecord {
     #[serde(default)]
     pub(crate) key_package_ref: Option<String>,
 
-    /// Ids of the reset-flagged key package frames already acted on.
+    /// The signed timestamp of the most recent session reset acted on from
+    /// this peer, or `0` if none.
     ///
     /// A reset tears down a live session, so a frame carrying one is worth
-    /// capturing and sending again. Remembering the last few ids means the
-    /// same captured frame cannot tear down a session twice.
+    /// capturing and sending again, and a reset is honoured only when it is
+    /// **strictly newer** than this.
     ///
-    /// This bounds a repeat, and does not close replay. Nothing in the signed
-    /// payload states freshness, so an attacker holding a reset frame older
-    /// than this ring can still spend it once. Closing that is a wire change
-    /// rather than a device one, and is recorded on
-    /// [`LeafDevice`](crate::LeafDevice).
+    /// This replaced a ring of the last few frame ids, which was what a device
+    /// could do while nothing in the signed payload stated freshness: it
+    /// denied a repeat of a *remembered* frame and left a capture older than
+    /// the ring spendable once. A timestamp inside the signature makes the
+    /// stronger statement affordable — every older reset is refused, including
+    /// ones this device has no memory of — and it costs one integer per peer
+    /// instead of a list that grows with traffic, which on a device with a few
+    /// hundred kilobytes of flash is the difference that decides it.
+    ///
+    /// Sound only because the stamp is inside the signature. On a payload that
+    /// left it outside, an attacker would rewrite it, park this at `i64::MAX`
+    /// and deny the peer every future reset, which is worse than the replay.
+    /// A leaf verifies no such payload; see
+    /// [`frames`](crate::frames) for why it has no legacy peer to accommodate.
     #[serde(default)]
-    pub(crate) recent_reset_ids: Vec<String>,
+    pub(crate) last_reset_ms: i64,
 }
 
-/// How many reset frame ids a peer record remembers.
-pub(crate) const RECENT_RESET_IDS: usize = 4;
-
 impl PeerRecord {
-    /// Records `id` as acted on, dropping the oldest beyond the ring.
-    pub(crate) fn remember_reset(&mut self, id: &str) {
-        if self.recent_reset_ids.iter().any(|seen| seen == id) {
-            return;
-        }
-        self.recent_reset_ids.push(String::from(id));
-        if self.recent_reset_ids.len() > RECENT_RESET_IDS {
-            let excess = self.recent_reset_ids.len() - RECENT_RESET_IDS;
-            self.recent_reset_ids.drain(..excess);
-        }
+    /// Records a reset stamped `signed_ms` as acted on.
+    pub(crate) fn remember_reset(&mut self, signed_ms: i64) {
+        self.last_reset_ms = signed_ms;
     }
 
-    /// Whether this reset frame has already been acted on.
-    pub(crate) fn has_seen_reset(&self, id: &str) -> bool {
-        self.recent_reset_ids.iter().any(|seen| seen == id)
+    /// Whether a reset stamped `signed_ms` is one this device has not acted on.
+    ///
+    /// Strictly newer, because the stamp is what identifies the frame here:
+    /// admitting an equal one admits the frame itself a second time. Two
+    /// genuine resets inside one millisecond would need the phone's rekey
+    /// ladder to run far faster than its own floor allows, and if it ever
+    /// happened the pair still converges, because a refused reset shows up as
+    /// the next frame that will not open and drives another.
+    pub(crate) fn reset_is_unspent(&self, signed_ms: i64) -> bool {
+        signed_ms > self.last_reset_ms
     }
 
     pub(crate) fn load(store: &Arc<dyn LeafStore>, peer: &str) -> Result<Option<Self>, StoreError> {

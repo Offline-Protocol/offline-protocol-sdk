@@ -8495,6 +8495,8 @@ data class ProtocolConfig (
     var `meshRelay`: MeshRelayConfig? = null 
     , 
     var `dataEnabled`: kotlin.Boolean = true 
+    , 
+    var `controlFreshnessEnforced`: kotlin.Boolean = true 
     
 ){
     
@@ -8540,6 +8542,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalTypeMeshRelayConfig.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -8574,7 +8577,8 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.allocationSize(value.`richPayloadEnabled`) +
             FfiConverterBoolean.allocationSize(value.`cryptoRecoveryEnabled`) +
             FfiConverterOptionalTypeMeshRelayConfig.allocationSize(value.`meshRelay`) +
-            FfiConverterBoolean.allocationSize(value.`dataEnabled`)
+            FfiConverterBoolean.allocationSize(value.`dataEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`controlFreshnessEnforced`)
     )
 
     override fun write(value: ProtocolConfig, buf: ByteBuffer) {
@@ -8609,6 +8613,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.write(value.`cryptoRecoveryEnabled`, buf)
             FfiConverterOptionalTypeMeshRelayConfig.write(value.`meshRelay`, buf)
             FfiConverterBoolean.write(value.`dataEnabled`, buf)
+            FfiConverterBoolean.write(value.`controlFreshnessEnforced`, buf)
     }
 }
 

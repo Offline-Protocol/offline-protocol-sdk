@@ -60,12 +60,18 @@ class TestProofPayload:
         assert policy.proof_payload("ab", b"cX") != policy.proof_payload("abc", b"X")
 
     def test_proof_domain_cannot_collide_with_control_frame_signing(self) -> None:
-        """If either domain prefixed the other, a relay-chosen challenge could
-        steer this signature into the control-message domain and replay it as a
-        frame from this peer. The relay pins the same relation from its side."""
-        control_domain = b"offline-ctrl-v1"
-        assert not policy.PROOF_DOMAIN.startswith(control_domain)
-        assert not control_domain.startswith(policy.PROOF_DOMAIN)
+        """If one domain prefixed the other, a relay-chosen challenge could
+        steer this signature into a control-message domain and replay it as a
+        frame from this peer. The relay pins the same relation from its side.
+
+        Enumerated rather than checked against one, because the core gained a
+        second control domain when the signing payload started binding the
+        frame's timestamp, and a test that checked only the first would have
+        gone quiet about the new one while still reading as though it covered
+        the question."""
+        for control_domain in (b"offline-ctrl-v1", b"offline-ctrl-v2"):
+            assert not policy.PROOF_DOMAIN.startswith(control_domain)
+            assert not control_domain.startswith(policy.PROOF_DOMAIN)
 
     def test_payload_is_never_the_bare_challenge(self) -> None:
         """The naive implementation signs the challenge alone. The relay
