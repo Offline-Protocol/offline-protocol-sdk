@@ -177,6 +177,9 @@ interface NativeConfig {
   data?: {
     enabled?: boolean;
   };
+  security?: {
+    controlFreshnessEnforced?: boolean;
+  };
   dors?: {
     preferOnline: boolean;
     switchHysteresis: number;
@@ -539,6 +542,20 @@ export class OfflineProtocol {
       });
       if (dataConfig) {
         nativeConfig.data = dataConfig;
+      }
+    }
+
+    // Security section, forwarded the same way and for the same reason: an
+    // omitted field stays omitted all the way to the core, so the default
+    // lives in exactly one place. `controlFreshnessEnforced` defaults to true
+    // in Rust, and writing that literal here is precisely how a default stops
+    // being changeable for every app that never set it.
+    if (this.config.security) {
+      const securityConfig = sanitize({
+        controlFreshnessEnforced: this.config.security.controlFreshnessEnforced,
+      });
+      if (securityConfig) {
+        nativeConfig.security = securityConfig;
       }
     }
 

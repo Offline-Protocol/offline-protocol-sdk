@@ -783,6 +783,47 @@ export interface ProtocolConfig {
    * defaults live in the Rust core and nowhere else.
    */
   data?: DataConfig;
+  /**
+   * Control-plane hardening (optional).
+   *
+   * Every field is optional and an omitted one keeps the SDK default — the
+   * defaults live in the Rust core and nowhere else.
+   */
+  security?: SecurityConfig;
+}
+
+/**
+ * Control-plane hardening.
+ */
+export interface SecurityConfig {
+  /**
+   * Whether a control frame is refused for being stale (default `true`).
+   *
+   * A control frame's signature covers the frame's own timestamp, and the SDK
+   * refuses one stamped more than 30 days ago or more than 48 hours ahead of
+   * this device's clock. Without that, a frame captured off the air verifies
+   * forever, and a recorded session reset is a repeatable way to tear down a
+   * live session.
+   *
+   * **The failure this switch exists for is a clock, not a peer.** The
+   * timestamp is judged against *this device's* clock, so a device that comes
+   * up with an unset one reads every honest peer as decades in the future and
+   * refuses all of them — taking down its own control plane, key exchange
+   * included, until the clock is right.
+   *
+   * The signal is a run of `STALE_CONTROL_FRAME` security warnings. Many
+   * different `peer_id`s in a short window is this device's clock; a single
+   * `peer_id` while others are fine is that peer.
+   *
+   * Setting this to `false` restores the pre-hardening behaviour exactly:
+   * signatures are still verified, nothing is refused for its age, and session
+   * resets are honoured on any verified frame. It is a recovery tool for a
+   * fleet whose clocks are wrong, not a setting to ship with.
+   *
+   * Also accepted as a top-level `controlFreshnessEnforced`, so a lever reached
+   * for in an incident still works if it lands one level too high.
+   */
+  controlFreshnessEnforced?: boolean;
 }
 
 /**

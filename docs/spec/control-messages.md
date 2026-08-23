@@ -164,25 +164,56 @@ payload, verified against the key the claimed sender's address derives from.
 
 ### Canonical payload
 
+Two payloads are defined. Both are in use, and which one a sender builds is
+negotiated (see [Freshness](#freshness) below).
+
+`offline-ctrl-v2`, the current payload:
+
 ```
-CTRL_SIGN_DOMAIN ||
+"offline-ctrl-v2" ||
+  u32be(len(sender))    || sender    ||
+  u32be(len(id))        || id        ||
+  u32be(len(recipient)) || recipient ||
+  u32be(len(content))   || content    ||
+  u32be(8)              || i64be(timestamp_ms)
+```
+
+`offline-ctrl-v1`, which is the same without the final field:
+
+```
+"offline-ctrl-v1" ||
   u32be(len(sender))    || sender    ||
   u32be(len(id))        || id        ||
   u32be(len(recipient)) || recipient ||
   u32be(len(content))   || content
 ```
 
-Three properties matter:
+Four properties matter:
 
 - **Domain separation.** The payload opens with a fixed domain constant, so a
   signature produced for this purpose cannot be replayed as a signature for any
-  other purpose that shares the identity key.
+  other purpose that shares the identity key. The two domains here are mutually
+  non-prefixing, and every implementation MUST keep them so.
 - **Length prefixing.** Every field is length-prefixed, so no two distinct field
   tuples produce the same byte string. Concatenation without length prefixes is
   forgeable by shifting a delimiter.
 - **Big-endian lengths.** Fixed so implementations agree.
+- **The timestamp is fixed-width.** Eight big-endian bytes of milliseconds
+  since the Unix epoch, signed, so an instant has exactly one encoding. A
+  decimal rendering would let several spellings of one instant carry different
+  signatures.
 
-The signature and the signer's public key ride in the message metadata.
+The two are **separate domains rather than one payload with an optional
+field**, and an implementation MUST NOT append the timestamp under the v1
+domain. A signature does not say which byte string it was made over, so a
+verifier handed a payload it did not expect reports a signature failure, which
+is indistinguishable from a forgery. Separating the domains states the version
+difference instead of leaving it to be inferred from a failure.
+
+The signature and the signer's public key ride in the message metadata, outside
+both payloads, because relays and forwarders rewrite metadata in flight. The
+frame's timestamp is **not** rewritten in flight, which is what makes it
+signable.
 
 ### Verification
 
@@ -192,12 +223,97 @@ A verifier MUST:
 2. Verify the signature against the public key carried in the metadata.
 3. **Derive an address from that public key and check it equals the claimed
    `sender`.**
+4. If the signature was over the v2 payload, **check the timestamp against its
+   own clock** and refuse the frame outside the window
+   ([Freshness](#freshness)).
 
 Step 3 is the step that makes the gate meaningful. Steps 1 and 2 alone prove
 only that whoever supplied the public key also supplied a matching signature,
 which any party can do for any name. Deriving the address from the presented key
 is what binds the signature to the claimed identity, and it is why this protocol
 needs no trust-on-first-use store.
+
+Step 4 is what stops the result being permanent. Without it steps 1 to 3 accept
+a recording as readily as a live frame.
+
+A verifier that accepts both payloads MUST try v2 first and fall back to v1,
+and MUST NOT infer the version from anything but which signature verifies.
+
+### Freshness
+
+A signature that states no time is a bearer capability that never expires: a
+frame captured off the air verifies as well on its tenth delivery as on its
+first. Three rules close that, and each is load-bearing on its own.
+
+#### 1. The window
+
+A verifier MUST refuse a v2-signed frame whose timestamp lies outside the window
+it allows:
+
+| Verifier | Past | Future |
+|---|--:|--:|
+| An install running the engine | 30 days | 48 hours |
+| A leaf node | 48 hours | 48 hours |
+
+The past window MUST cover every path on which that verifier receives a
+legitimately old frame. For an engine those are the outbox, which retransmits
+frozen signed bytes up to four times `outbox_max_lifetime_ms` (about 28 days at
+the default), and a published key package, which is left on a relay for up to
+its own validity of 30 days. **An install configured with an
+`outbox_max_lifetime_ms` above a quarter of the past window pushes its own
+retransmissions outside it**, and either the window or the lifetime has to move.
+
+A leaf node's is shorter because none of those paths reach a device: it is
+paired with one phone over a direct radio link, is not addressed through a
+relay, and has no retransmission ladder measured in weeks.
+
+The future window is for clock disagreement between honest devices, not for
+delivery. A verifier MUST NOT require `timestamp <= now`, which refuses real
+peers over a second of drift.
+
+#### 2. Negotiation, and the downgrade ratchet
+
+A peer advertises that it verifies the v2 payload in `ctrl_versions` of its key
+package payload (see
+[Capability negotiation](capability-negotiation.md)). A sender SHOULD build the
+v2 payload for a recipient that advertises it, and MUST build v1 for one that
+does not: a signature a peer cannot verify makes every control frame it receives
+look like an attack.
+
+`ctrl_versions` is plaintext and strippable, so negotiation alone is not enough.
+A verifier that has **once** verified a v2 signature from a peer MUST record
+that durably and MUST refuse that peer's v1 control frames from then on. Without
+this rule, an attacker replays a capture made before the peer upgraded and the
+whole check is side-stepped.
+
+The record MUST NOT be cleared by anything a peer sends, including a key package
+that stops advertising `ctrl_versions`. A ratchet an ordinary frame can clear is
+not a ratchet.
+
+One exception, and it is required rather than permitted: a verifier MUST still
+accept a `__MLS_KEY_PKG__` frame from a held peer under the v1 payload, and MUST
+ignore that frame's `session_reset`. Without it a peer that reinstalls signs v1,
+because it no longer knows what this verifier accepts, and is refused on the one
+frame that would have told it — and a key package is the only frame that
+re-teaches capabilities, so the state is permanent.
+
+#### 3. Directives that destroy state
+
+The window bounds replay; it does not end it. A verifier MUST additionally
+refuse a `session_reset` whose signed timestamp is not **strictly newer** than
+the most recent reset it has acted on from that peer, and MUST record the new
+value **before** acting on the reset.
+
+The mark MUST be moved only by a timestamp that was inside a signature. On the
+v1 payload the timestamp is outside it and therefore attacker-rewritable, and a
+verifier that honoured one there could have its mark parked beyond every future
+reset — permanently denying that peer the ability to heal a forked session,
+which is worse than the replay.
+
+A verifier MUST NOT apply either this rule or the ratchet to a peer that has
+never presented a v2 signature. A driven rekey *is* a reset, so a peer whose
+resets are ignored is a peer that can no longer heal a session; holding a peer
+to a payload it has never shown it can produce breaks exactly that.
 
 ### Exemption class 1: the data plane
 

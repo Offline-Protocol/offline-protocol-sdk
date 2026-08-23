@@ -2074,7 +2074,7 @@ mod signing_domain_tests {
     use offline_protocol_mls::discovery::DISCOVERY_SIGN_DOMAIN;
     use offline_protocol_mls::invite::INVITE_SIGN_DOMAIN;
 
-    use offline_protocol_sealed::CTRL_SIGN_DOMAIN;
+    use offline_protocol_sealed::{CTRL_SIGN_DOMAIN, CTRL_SIGN_DOMAIN_V2};
 
     /// The relay's address-proof domain.
     ///
@@ -2112,8 +2112,9 @@ mod signing_domain_tests {
     /// every device that ever authenticated to it.
     #[test]
     fn signing_domains_are_mutually_non_prefixing() {
-        let domains: [(&str, &[u8]); 5] = [
+        let domains: [(&str, &[u8]); 6] = [
             ("offline-ctrl-v1", CTRL_SIGN_DOMAIN),
+            ("offline-ctrl-v2", CTRL_SIGN_DOMAIN_V2),
             ("offline-disc-v1", DISCOVERY_SIGN_DOMAIN),
             ("offline-invite-v1", INVITE_SIGN_DOMAIN),
             ("offline-relay-addr-v1", RELAY_ADDR_SIGN_DOMAIN),
@@ -2148,19 +2149,21 @@ mod signing_domain_tests {
     #[test]
     fn signing_domains_have_their_published_spellings() {
         assert_eq!(CTRL_SIGN_DOMAIN, b"offline-ctrl-v1");
+        assert_eq!(CTRL_SIGN_DOMAIN_V2, b"offline-ctrl-v2");
         assert_eq!(DISCOVERY_SIGN_DOMAIN, b"offline-disc-v1");
         assert_eq!(INVITE_SIGN_DOMAIN, b"offline-invite-v1");
         assert_eq!(RELAY_ADDR_SIGN_DOMAIN, b"offline-relay-addr-v1");
         assert_eq!(GATEWAY_ADDR_SIGN_DOMAIN, b"offline-gateway-addr-v1");
     }
 
-    /// All five must be distinct, which non-prefixing already implies for
+    /// All six must be distinct, which non-prefixing already implies for
     /// unequal strings but not for equal ones: two identical domains are
     /// prefixes of each other, and the loop above skips same-name pairs.
     #[test]
     fn signing_domains_are_distinct() {
-        let domains: [&[u8]; 5] = [
+        let domains: [&[u8]; 6] = [
             CTRL_SIGN_DOMAIN,
+            CTRL_SIGN_DOMAIN_V2,
             DISCOVERY_SIGN_DOMAIN,
             INVITE_SIGN_DOMAIN,
             RELAY_ADDR_SIGN_DOMAIN,

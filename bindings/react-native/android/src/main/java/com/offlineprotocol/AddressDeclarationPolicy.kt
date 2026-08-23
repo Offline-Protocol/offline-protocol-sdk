@@ -58,8 +58,8 @@ object AddressDeclarationPolicy {
 
     /**
      * Domain separator prefixing the signed payload. Must not prefix, nor be
-     * prefixed by, the core's `offline-ctrl-v1` control-frame domain; the relay
-     * pins that relation in
+     * prefixed by, **either** of the core's control-frame domains,
+     * `offline-ctrl-v1` and `offline-ctrl-v2`; the relay pins that relation in
      * `the_proof_domain_cannot_collide_with_control_message_signing`.
      */
     const val PROOF_DOMAIN = "offline-relay-addr-v1"

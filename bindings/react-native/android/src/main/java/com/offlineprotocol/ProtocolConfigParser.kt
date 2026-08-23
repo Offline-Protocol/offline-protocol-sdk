@@ -196,6 +196,21 @@ internal object ProtocolConfigParser {
         val dataJson = json.optJSONObject("data")
         val dataEnabled = dataJson?.optBooleanCompat("enabled")
 
+        // Security section (nested home under `security`, both cases), with a
+        // top-level spelling accepted too. Same absent-stays-absent rule as
+        // the two sections above, and the same reason: the Rust default is on,
+        // and restating it here as a literal is how a default that later moves
+        // stops moving for every app that never set it.
+        //
+        // Unlike `data`, a flat spelling is honoured. This flag is the lever an
+        // app reaches for when its fleet's clocks are wrong and its control
+        // plane has gone quiet, and a lever that silently does nothing because
+        // it was written one level too high is worse than no lever.
+        val securityJson = json.optJSONObject("security")
+        val controlFreshnessEnforced =
+            securityJson?.optBooleanCompat("controlFreshnessEnforced", "control_freshness_enforced")
+                ?: json.optBooleanCompat("controlFreshnessEnforced", "control_freshness_enforced")
+
         val config = ProtocolConfig(
             appId = json.safeOptString("appId", json.safeOptString("app_id")),
             profile = json.safeOptString("profile"),
@@ -240,6 +255,9 @@ internal object ProtocolConfigParser {
         // as `config.relay` sat at its defaults for several releases.
         if (dataEnabled != null) {
             config.dataEnabled = dataEnabled
+        }
+        if (controlFreshnessEnforced != null) {
+            config.controlFreshnessEnforced = controlFreshnessEnforced
         }
 
         return ParsedConfig(config, json)

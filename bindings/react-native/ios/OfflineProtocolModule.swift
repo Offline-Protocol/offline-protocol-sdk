@@ -427,6 +427,21 @@ class OfflineProtocolModule: RCTEventEmitter {
         let dataSection = raw["data"] as? [String: Any]
         let dataEnabled = dataSection?["enabled"] as? Bool
 
+        // Security section, with a top-level spelling accepted too. Absent
+        // stays absent, so the Rust default is the only default — see the
+        // assignment below for why a literal here would be the bug.
+        //
+        // Unlike `data`, a flat spelling is honoured: this flag is the lever an
+        // app reaches for when its fleet's clocks are wrong and its control
+        // plane has gone quiet, and a lever that silently does nothing because
+        // it was written one level too high is worse than no lever.
+        let securitySection = raw["security"] as? [String: Any]
+        let controlFreshnessEnforced =
+            securitySection?["controlFreshnessEnforced"] as? Bool
+            ?? securitySection?["control_freshness_enforced"] as? Bool
+            ?? raw["controlFreshnessEnforced"] as? Bool
+            ?? raw["control_freshness_enforced"] as? Bool
+
         var config = ProtocolConfig(
             appId: raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
             profile: raw["profile"] as? String ?? "",
@@ -469,6 +484,9 @@ class OfflineProtocolModule: RCTEventEmitter {
         // releases.
         if let dataEnabled {
             config.dataEnabled = dataEnabled
+        }
+        if let controlFreshnessEnforced {
+            config.controlFreshnessEnforced = controlFreshnessEnforced
         }
 
         return (config, raw)

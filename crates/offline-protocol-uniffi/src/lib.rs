@@ -2331,6 +2331,12 @@ pub struct ProtocolConfig {
     /// forking members whose admin overlay disagrees.
     pub group_enforce_admin_commits: bool,
     pub require_transport_identity: bool,
+    /// Whether a control frame is refused for being stale, and whether a peer
+    /// that has proved it signs the freshness-bound payload is held to it
+    /// (default on). See the UDL dictionary and
+    /// `SecurityConfig::control_freshness_enforced` — the failure it exists to
+    /// recover from is this device's own clock, not a peer.
+    pub control_freshness_enforced: bool,
     /// Kill switch for the compact binary wire codec (default on). See the UDL
     /// dictionary and `TransportConfig::binary_wire_enabled` for semantics.
     pub binary_wire_enabled: bool,
@@ -2630,6 +2636,7 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.group.relay_broadcast_enabled = config.group_relay_broadcast_enabled;
         core_config.group.enforce_admin_commits = config.group_enforce_admin_commits;
         core_config.security.require_transport_identity = config.require_transport_identity;
+        core_config.security.control_freshness_enforced = config.control_freshness_enforced;
         if let Some(mesh_relay) = config.mesh_relay {
             core_config.mesh_relay = mesh_relay.overlay(core_config.mesh_relay);
         }
@@ -7829,6 +7836,7 @@ mod tests {
             group_relay_broadcast_enabled: true,
             group_enforce_admin_commits: false,
             require_transport_identity: false,
+            control_freshness_enforced: true,
         }
     }
 
@@ -7865,6 +7873,7 @@ mod tests {
             group_relay_broadcast_enabled: true,
             group_enforce_admin_commits: false,
             require_transport_identity: false,
+            control_freshness_enforced: true,
         }
     }
 
@@ -8178,6 +8187,7 @@ mod tests {
             group_relay_broadcast_enabled: true,
             group_enforce_admin_commits: false,
             require_transport_identity: false,
+            control_freshness_enforced: true,
         }
     }
 
@@ -15137,9 +15147,10 @@ mod tests {
     ///
     /// The failure it prevents is not cosmetic. The domain separates an
     /// address proof from a control frame, and if a device signed an address
-    /// proof under a domain that collided with `offline-ctrl-v1`, a hostile
-    /// relay would harvest a replayable control-frame signature from every
-    /// device that ever authenticated to it.
+    /// proof under a domain that collided with either control-frame domain
+    /// (`offline-ctrl-v1` or `offline-ctrl-v2`), a hostile relay would harvest
+    /// a replayable control-frame signature from every device that ever
+    /// authenticated to it.
     #[test]
     fn relay_address_proof_domain_matches_across_both_bridges() {
         const EXPECTED: &str = "offline-relay-addr-v1";
