@@ -286,6 +286,39 @@ pub struct OfflineProtocol {
     /// by the wire-claimed sender).
     peer_compact_envelope: std::collections::HashSet<String>,
 
+    /// Peers whose key package advertised that they verify the
+    /// freshness-bound control payload ([`CTRL_SIGN_V2`] in `ctrl_versions`),
+    /// so control frames addressed to them are signed under
+    /// `offline-ctrl-v2`. Same lifecycle as `peer_compact_envelope` above:
+    /// learned from key-package exchange, persisted as [`PeerCapabilities`],
+    /// restored on `initialize_mls`, bounded like `key_package_sent_to`.
+    ///
+    /// This is the **send** half, and it is a hint: forgetting a peer costs
+    /// them the older payload, which they still verify. The **accept** half is
+    /// [`Self::control_freshness_peers`], which is a ratchet and is not
+    /// allowed to forget.
+    ///
+    /// [`CTRL_SIGN_V2`]: offline_protocol_sealed::CTRL_SIGN_V2
+    peer_ctrl_freshness: std::collections::HashSet<String>,
+
+    /// Peers that have presented a control-frame signature over the
+    /// freshness-bound payload, so their frames under the older one are
+    /// refused.
+    ///
+    /// A **ratchet**, and the difference from every capability set above is
+    /// the whole point: those record what a peer said and may be forgotten
+    /// harmlessly, this records what a peer *proved* and forgetting it
+    /// re-opens the replay it exists to close. It is durable (in the peer's
+    /// [`EncryptionCapableEntry`], not in [`PeerCapabilities`], which is
+    /// overwritten wholesale by every key package) and has no removal path
+    /// short of forgetting the peer entirely.
+    ///
+    /// A strict subset of [`Self::encryption_capable_peers`] by construction,
+    /// so `MAX_ENCRYPTION_CAPABLE_PEERS` bounds it too. See
+    /// `record_control_freshness_proved` for why the ordering that makes that
+    /// true is load-bearing.
+    pub(crate) control_freshness_peers: std::collections::HashSet<String>,
+
     /// Peers whose key package advertised the sealed rich payload
     /// ([`RICH_PAYLOAD_V1`] in `rich_versions`), so the send path may seal
     /// rich extras (reply context, rich media metadata, forward attribution)
@@ -897,6 +930,8 @@ impl OfflineProtocol {
             confirmed_sessions: std::collections::HashSet::new(),
             encryption_capable_peers: std::collections::HashSet::new(),
             peer_compact_envelope: std::collections::HashSet::new(),
+            peer_ctrl_freshness: std::collections::HashSet::new(),
+            control_freshness_peers: std::collections::HashSet::new(),
             peer_rich_payload: std::collections::HashSet::new(),
             peer_data_sync: std::collections::HashSet::new(),
             peer_data_group: std::collections::HashSet::new(),
@@ -1077,6 +1112,12 @@ impl OfflineProtocol {
         let previous_blocked_users = self.blocked_users.clone();
         let previous_outbox = self.outbox.clone();
         let previous_peer_compact_envelope = self.peer_compact_envelope.clone();
+        let previous_peer_ctrl_freshness = self.peer_ctrl_freshness.clone();
+        // Snapshotted with its siblings so a failed re-initialize restores it
+        // too. It is a ratchet, so the direction that matters is that a
+        // rollback must not *lose* it: a peer we hold to the newer payload has
+        // to still be held to it if the re-initialize is abandoned.
+        let previous_control_freshness_peers = self.control_freshness_peers.clone();
         let previous_peer_rich_payload = self.peer_rich_payload.clone();
         let previous_peer_data_sync = self.peer_data_sync.clone();
         let previous_peer_rich_attested = self.peer_rich_attested.clone();
@@ -1220,6 +1261,8 @@ impl OfflineProtocol {
             self.blocked_users = previous_blocked_users;
             self.outbox = previous_outbox;
             self.peer_compact_envelope = previous_peer_compact_envelope;
+            self.peer_ctrl_freshness = previous_peer_ctrl_freshness;
+            self.control_freshness_peers = previous_control_freshness_peers;
             self.peer_rich_payload = previous_peer_rich_payload;
             self.peer_data_sync = previous_peer_data_sync;
             self.peer_rich_attested = previous_peer_rich_attested;
@@ -2613,19 +2656,25 @@ impl OfflineProtocol {
         let content = &message.content;
 
         // Run the security gate for control messages (transport identity +
-        // signature verification). `Rejected` drops the message; `Proceed`
-        // carries whether the frame was actually signed, for the one handler
-        // that consumes a payload field as authenticated data.
-        let signed = match self.security_gate_control_message(message, arrival_transport) {
-            ControlGateOutcome::Rejected(result) => return Some(result),
-            ControlGateOutcome::Proceed { signed } => signed,
-        };
+        // signature verification + freshness). `Rejected` drops the message;
+        // `Proceed` carries whether the frame was actually signed, for the one
+        // handler that consumes a payload field as authenticated data, and
+        // whether its age was established, for the one that acts on a
+        // directive worth replaying.
+        let (signed, freshness_bound) =
+            match self.security_gate_control_message(message, arrival_transport) {
+                ControlGateOutcome::Rejected(result) => return Some(result),
+                ControlGateOutcome::Proceed {
+                    signed,
+                    freshness_bound,
+                } => (signed, freshness_bound),
+            };
 
         let sender = message.sender.as_str();
 
         // Handle key package messages
         if let Some(data) = content.strip_prefix(internal_prefixes::KEY_PACKAGE) {
-            self.handle_key_package_message(sender, data, signed);
+            self.handle_key_package_message(sender, data, signed, freshness_bound);
             return Some(InternalMessageResult::Consumed);
         }
 

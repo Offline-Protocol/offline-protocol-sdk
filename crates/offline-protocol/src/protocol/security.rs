@@ -2,15 +2,16 @@
 
 use super::storage::MAX_RESTORE_KEYS_PER_CATEGORY;
 use super::{
-    base64_decode, base64_encode, storage_keys, ControlGateOutcome, EncryptionCapableEntry,
-    InternalMessageResult, OfflineProtocol, CTRL_PK_META_KEY, CTRL_SIG_META_KEY,
-    DATA_PLANE_PREFIXES, INTERNAL_PREFIXES, MAX_CONTROL_GATE_WARNED_PEERS,
-    MAX_PLAINTEXT_RECEIVE_WARNED_PEERS, RELAY_ANSWER_PREFIXES,
+    base64_decode, base64_encode, internal_prefixes, storage_keys, ControlGateOutcome,
+    ControlSigVersion, ControlVerification, EncryptionCapableEntry, InternalMessageResult,
+    OfflineProtocol, CTRL_PK_META_KEY, CTRL_SIG_META_KEY, DATA_PLANE_PREFIXES, INTERNAL_PREFIXES,
+    MAX_CONTROL_GATE_WARNED_PEERS, MAX_PLAINTEXT_RECEIVE_WARNED_PEERS, RELAY_ANSWER_PREFIXES,
 };
 use crate::events::{Event, SecurityWarningCode};
 use crate::{Error, Result};
 use chrono::Utc;
 use offline_protocol_core::{Address, Message, UserId};
+use offline_protocol_sealed::Freshness;
 use offline_protocol_transport::TransportType;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -20,6 +21,20 @@ use tracing::{debug, error, info, warn};
 /// unauthorized-membership reports use, for the same reason: the condition
 /// persists, so an unsuppressed warning reports one cause many times.
 const PUSH_KEY_PACKAGE_WARNING_SUPPRESS_INTERVAL: Duration = Duration::from_secs(300);
+
+/// What [`OfflineProtocol::judge_control_frame_freshness`] concluded.
+///
+/// Private to this module: it is the gate's own vocabulary for a decision it
+/// then reports outward as `freshness_bound` plus an accept-or-drop.
+enum FreshnessVerdict {
+    /// Signed under the freshness-bound payload, inside the window.
+    Bound,
+    /// Authentic, but its age is not established. Accepted; may not carry a
+    /// directive that destroys state.
+    Unbound,
+    /// Refused. The caller drops the frame without acknowledging it.
+    Refused,
+}
 
 impl OfflineProtocol {
     /// Builds the canonical signing payload a control frame is authenticated
@@ -36,6 +51,19 @@ impl OfflineProtocol {
     /// field order starts accepting forgeries the moment the two drift.
     pub(crate) fn build_canonical_payload(message: &Message) -> Result<Vec<u8>> {
         offline_protocol_sealed::control_signing_payload(message)
+            .map_err(|e| Error::Other(e.to_string()))
+    }
+
+    /// Builds the freshness-bound signing payload: the four fields above plus
+    /// the frame's timestamp, under `offline-ctrl-v2`.
+    ///
+    /// Lives in the sealed layer beside its v1 sibling for the same reason
+    /// that one does, and the reason is sharper here: a leaf node has to
+    /// reproduce these bytes from a different MLS implementation, and a
+    /// verifier whose idea of the payload drifts from the signer's does not
+    /// fail loudly, it fails as "this peer's signatures are all invalid".
+    pub(crate) fn build_canonical_payload_v2(message: &Message) -> Result<Vec<u8>> {
+        offline_protocol_sealed::control_signing_payload_v2(message)
             .map_err(|e| Error::Other(e.to_string()))
     }
 
@@ -63,7 +91,36 @@ impl OfflineProtocol {
             }
         };
 
-        Self::sign_control_message_with(message, &manager)
+        let freshness_bound = self.signs_freshness_bound_control_to(message.recipient.as_str());
+        Self::sign_control_message_with(message, &manager, freshness_bound)
+    }
+
+    /// Whether a control frame addressed to `recipient` should carry the
+    /// freshness-bound signature.
+    ///
+    /// Signing v2 at a peer that cannot verify it makes every control frame we
+    /// send them fail their signature check, which reads on their side as an
+    /// attack rather than a version gap. So the newer payload is used only
+    /// where the recipient said it verifies one, on the one channel it has for
+    /// saying so.
+    ///
+    /// # First contact necessarily signs v1
+    ///
+    /// The first key package to a peer we have never met is signed under the
+    /// old payload, because their capabilities arrive *in their reply*. That
+    /// is inherent rather than a gap to close: nothing can know a stranger's
+    /// capabilities before meeting them. It converges in one round trip, and
+    /// the ratchet closes behind it — once a peer's v2 signature has verified
+    /// once, their v1 frames are refused, so the first-contact frame cannot be
+    /// replayed at us later.
+    ///
+    /// # Frames addressed to ourselves
+    ///
+    /// A relay hint is addressed to `local_id` and comes back to us if a
+    /// prefix-unaware relay echoes it, so the only possible verifier is this
+    /// node, whose capability is not in doubt.
+    pub(crate) fn signs_freshness_bound_control_to(&self, recipient: &str) -> bool {
+        recipient == self.local_id || self.peer_ctrl_freshness.contains(recipient)
     }
 
     /// Stamps `message` with an Ed25519 signature and public key from
@@ -73,9 +130,15 @@ impl OfflineProtocol {
     /// holds the signing identity — a test standing in for a peer's device —
     /// can produce the same bytes the peer's own instance would, rather than
     /// reimplementing the canonical payload and getting it subtly wrong.
+    ///
+    /// `freshness_bound` selects the payload: the one that covers the frame's
+    /// timestamp, or the one that does not. It is a parameter rather than a
+    /// lookup because this function has no `self` to look anything up on, and
+    /// making it guess would put the choice in two places.
     pub(crate) fn sign_control_message_with(
         message: &mut Message,
         manager: &offline_protocol_mls::MlsManager,
+        freshness_bound: bool,
     ) -> Result<()> {
         let public_key = match manager.get_identity_public_key() {
             Ok(pk) => pk,
@@ -85,7 +148,11 @@ impl OfflineProtocol {
                 return Err(Error::Other(reason));
             }
         };
-        let canonical = Self::build_canonical_payload(message)?;
+        let canonical = if freshness_bound {
+            Self::build_canonical_payload_v2(message)?
+        } else {
+            Self::build_canonical_payload(message)?
+        };
         let signature = match manager.sign_data(&canonical) {
             Ok(sig) => sig,
             Err(e) => {
@@ -108,12 +175,32 @@ impl OfflineProtocol {
     /// the key which signed it is the one the claimed sender's address names.
     ///
     /// Returns:
-    /// - `Ok(true)`  — valid signature, and the signing key derives to `sender`
-    /// - `Ok(false)` — no signature metadata at all (unsigned message)
+    /// - `Ok(Verified(version))` — valid signature, and the signing key derives
+    ///   to `sender`; `version` says which canonical payload it was over
+    /// - `Ok(Unsigned)` — no signature metadata at all
     /// - `Err(..)` — signature invalid, sender/key derivation mismatch, or
     ///   malformed metadata (e.g. public key present without a signature,
     ///   or vice versa)
-    pub(super) fn verify_control_message(&mut self, message: &Message) -> Result<bool> {
+    ///
+    /// # Why both payloads are tried
+    ///
+    /// A signature does not say which byte string it was made over, so a
+    /// verifier holding one candidate payload cannot distinguish "signed under
+    /// the other domain" from "forged". Trying the freshness-bound payload and
+    /// then the older one is what turns a version gap into a version answer.
+    /// The newer one goes first so the common case costs one verification, and
+    /// so that a frame which satisfies both — impossible, the domains differ —
+    /// would be read as the stronger claim rather than the weaker.
+    ///
+    /// The second verification is only reached by a frame that failed the
+    /// first, which is either a legacy peer or a forgery. Both are rare
+    /// relative to control traffic as a whole, and a control frame is not on
+    /// the message path, so the cost is one extra Ed25519 verification on a
+    /// path that already does a SHA-256 and an address parse.
+    pub(super) fn verify_control_message(
+        &mut self,
+        message: &Message,
+    ) -> Result<ControlVerification> {
         let sig_b64 = match message.metadata.get(CTRL_SIG_META_KEY) {
             Some(s) => s,
             None => {
@@ -125,7 +212,8 @@ impl OfflineProtocol {
                             .to_string(),
                     ));
                 }
-                return Ok(false); // Truly unsigned — caller decides policy
+                // Truly unsigned — caller decides policy.
+                return Ok(ControlVerification::Unsigned);
             }
         };
         let pk_b64 = match message.metadata.get(CTRL_PK_META_KEY) {
@@ -142,18 +230,24 @@ impl OfflineProtocol {
         let public_key = base64_decode(pk_b64)
             .map_err(|e| Error::Other(format!("Invalid control public key encoding: {}", e)))?;
 
-        // Verify Ed25519 signature over a length-prefixed canonical payload
-        // that binds sender, message ID, recipient, and content.
-        let canonical = Self::build_canonical_payload(message)?;
-        let valid =
-            offline_protocol_mls::MlsManager::verify_signature(&public_key, &canonical, &signature)
-                .map_err(|e| Error::Other(format!("Signature verification error: {}", e)))?;
+        // Verify the Ed25519 signature over a length-prefixed canonical
+        // payload. The freshness-bound one binds sender, message ID,
+        // recipient, content and the frame's timestamp; the older one binds
+        // every field but the last.
+        let verifies = |payload: &[u8]| -> Result<bool> {
+            offline_protocol_mls::MlsManager::verify_signature(&public_key, payload, &signature)
+                .map_err(|e| Error::Other(format!("Signature verification error: {}", e)))
+        };
 
-        if !valid {
+        let version = if verifies(&Self::build_canonical_payload_v2(message)?)? {
+            ControlSigVersion::V2
+        } else if verifies(&Self::build_canonical_payload(message)?)? {
+            ControlSigVersion::V1
+        } else {
             return Err(Error::Other(
                 "Control message signature verification failed".to_string(),
             ));
-        }
+        };
 
         // The claim is now *proved*, not pinned: the address the frame claims
         // to come from is the hash of the key that just signed it, or it is
@@ -166,7 +260,16 @@ impl OfflineProtocol {
         // returns the credential's `signature_key`). So this is proof the peer
         // runs MLS.
         self.record_encryption_capable(message.sender.as_str());
-        Ok(true)
+
+        // And, when the signature was over the freshness-bound payload, that
+        // this peer can produce one. This is the ratchet: from here on their
+        // frames under the older payload are refused, which is what stops the
+        // whole check being side-stepped with a recording made before they
+        // upgraded.
+        if version == ControlSigVersion::V2 {
+            self.record_control_freshness_proved(message.sender.as_str());
+        }
+        Ok(ControlVerification::Verified(version))
     }
 
     /// Requires `public_key` to derive to the address in `sender`.
@@ -324,7 +427,10 @@ impl OfflineProtocol {
         if !Self::is_security_gated_prefix(content) {
             // Not a security-gated control message — no gate needed, and
             // nothing verified, so `signed` stays false.
-            return ControlGateOutcome::Proceed { signed: false };
+            return ControlGateOutcome::Proceed {
+                signed: false,
+                freshness_bound: false,
+            };
         }
 
         // Transport-level identity check
@@ -356,12 +462,21 @@ impl OfflineProtocol {
         }
 
         // Cryptographic signature check
-        let signed = match self.verify_control_message(message) {
-            Ok(true) => {
-                // Signed and verified — proceed
-                true
+        let (signed, freshness_bound) = match self.verify_control_message(message) {
+            Ok(ControlVerification::Verified(version)) => {
+                match self.judge_control_frame_freshness(message, version) {
+                    FreshnessVerdict::Bound => (true, true),
+                    FreshnessVerdict::Unbound => (true, false),
+                    FreshnessVerdict::Refused => {
+                        return ControlGateOutcome::Rejected(
+                            InternalMessageResult::SecurityRejected,
+                        )
+                    }
+                }
             }
-            Ok(false) if Self::is_unsignable_relay_answer(message, arrival_transport) => {
+            Ok(ControlVerification::Unsigned)
+                if Self::is_unsignable_relay_answer(message, arrival_transport) =>
+            {
                 // A relay-originated answer, which no peer signed because no
                 // peer sent it. See `RELAY_ANSWER_PREFIXES` for why this cannot
                 // be signature-gated and what does and does not protect it.
@@ -370,9 +485,12 @@ impl OfflineProtocol {
                     message_id = %message.id,
                     "Accepting unsigned relay-originated control frame (no peer signs these)"
                 );
-                false
+                // Nothing signed it, so nothing bound its age either. The
+                // relay-answer forgery residual (threat model R1) is unchanged
+                // by any of this: a frame with no signer cannot be given one.
+                (false, false)
             }
-            Ok(false) => {
+            Ok(ControlVerification::Unsigned) => {
                 // Unsigned control traffic is refused, unconditionally.
                 //
                 // This used to be a two-part policy: reject if the sender had a
@@ -431,7 +549,143 @@ impl OfflineProtocol {
             }
         };
 
-        ControlGateOutcome::Proceed { signed }
+        ControlGateOutcome::Proceed {
+            signed,
+            freshness_bound,
+        }
+    }
+
+    /// Decides what a verified control frame's age means for it.
+    ///
+    /// Three outcomes, because a verified signature now carries three
+    /// different amounts of weight:
+    ///
+    /// - [`FreshnessVerdict::Bound`]: signed under the freshness-bound payload
+    ///   and inside the window, so it is provably not a recording. Only such a
+    ///   frame may carry a directive that destroys state.
+    /// - [`FreshnessVerdict::Unbound`]: authentic, but its age is not
+    ///   established. Everything a control frame did before this existed, it
+    ///   still does; what it may not do is tear a session down.
+    /// - [`FreshnessVerdict::Refused`]: the frame states an age this node will
+    ///   not accept, or comes under the older payload from a peer that has
+    ///   proved it can produce the newer one.
+    ///
+    /// # The key-package escape
+    ///
+    /// A peer held to the newer payload is refused *except* on
+    /// `__MLS_KEY_PKG__`, which is admitted and then has its `session_reset`
+    /// ignored (the `Unbound` verdict is what conveys that downstream). The
+    /// escape exists because the ratchet would otherwise be a trap with no
+    /// way out: a peer that reinstalls loses what it knew about us, signs the
+    /// older payload because it no longer knows we accept the newer one, and
+    /// is refused on the very frame that would have told it. Since a key
+    /// package is also the only frame that re-teaches capabilities, refusing
+    /// it makes the state permanent.
+    ///
+    /// Admitting it costs nothing an attacker wants: a key package with its
+    /// reset ignored advertises capabilities, which is the thing this protocol
+    /// treats as unauthenticated hint data everywhere else, and its destructive
+    /// half stays shut.
+    fn judge_control_frame_freshness(
+        &mut self,
+        message: &Message,
+        version: ControlSigVersion,
+    ) -> FreshnessVerdict {
+        let sender = message.sender.as_str();
+
+        if !self.config.security.control_freshness_enforced {
+            // The switch returns this node to its pre-403 behaviour exactly:
+            // signatures verified, no frame refused for its age, and a reset
+            // honoured on any verified frame. Reporting `Bound` here is what
+            // makes the last of those true, and it is the honest reading —
+            // "act as though age were established" is precisely what the
+            // operator asked for by turning the check off.
+            return FreshnessVerdict::Bound;
+        }
+
+        match version {
+            ControlSigVersion::V2 => {
+                let verdict = offline_protocol_sealed::control_frame_freshness(
+                    message.timestamp.as_millis(),
+                    Utc::now().timestamp_millis(),
+                    offline_protocol_sealed::CTRL_FRESHNESS_PAST_MS,
+                    offline_protocol_sealed::CTRL_FRESHNESS_FUTURE_MS,
+                );
+                match verdict {
+                    Freshness::Fresh => FreshnessVerdict::Bound,
+                    Freshness::Stale { age_ms } => {
+                        warn!(
+                            sender = %sender,
+                            message_id = %message.id,
+                            age_ms,
+                            "Dropping control message: stamped further in the past than the \
+                             freshness window allows"
+                        );
+                        self.warn_control_gate_rejection(
+                            sender,
+                            SecurityWarningCode::StaleControlFrame,
+                            "Control message refused as stale: its signed timestamp is older \
+                             than this node accepts, which is what a replayed capture looks like",
+                        );
+                        FreshnessVerdict::Refused
+                    }
+                    Freshness::FromTheFuture { skew_ms } => {
+                        warn!(
+                            sender = %sender,
+                            message_id = %message.id,
+                            skew_ms,
+                            "Dropping control message: stamped ahead of this device's clock by \
+                             more than the freshness window allows"
+                        );
+                        self.warn_control_gate_rejection(
+                            sender,
+                            SecurityWarningCode::StaleControlFrame,
+                            "Control message refused for clock skew: its signed timestamp is \
+                             further ahead of this device's clock than is allowed. If this \
+                             device's own clock is wrong, every peer looks like this",
+                        );
+                        FreshnessVerdict::Refused
+                    }
+                }
+            }
+            ControlSigVersion::V1 => {
+                if !self.signs_freshness_bound_control(sender) {
+                    // A peer that has never proved otherwise. Legacy, and
+                    // accepted exactly as before — refusing here would refuse
+                    // first contact with every install that has not upgraded.
+                    return FreshnessVerdict::Unbound;
+                }
+                if message.content.starts_with(internal_prefixes::KEY_PACKAGE) {
+                    debug!(
+                        sender = %sender,
+                        message_id = %message.id,
+                        "Admitting a key package under the older payload from a peer held to the \
+                         newer one; its session reset will be ignored"
+                    );
+                    // Clearing this is what makes the escape actually escape:
+                    // the reciprocal send in `handle_key_package_message` is
+                    // skipped for a peer we have already sent to, so without
+                    // it the peer never receives the advertisement that would
+                    // teach it to sign the newer payload again.
+                    self.key_package_sent_to.remove(sender);
+                    return FreshnessVerdict::Unbound;
+                }
+                warn!(
+                    sender = %sender,
+                    message_id = %message.id,
+                    "Dropping control message: peer has proved it signs the freshness-bound \
+                     payload and this frame does not carry one"
+                );
+                self.warn_control_gate_rejection(
+                    sender,
+                    SecurityWarningCode::StaleControlFrame,
+                    "Control message refused as a downgrade: this peer has proved it signs the \
+                     payload that states freshness, so one that does not is either a recording \
+                     or a stripped signature",
+                );
+                FreshnessVerdict::Refused
+            }
+        }
     }
 
     /// Whether this frame is a relay answer that structurally cannot be signed.
@@ -565,6 +819,7 @@ impl OfflineProtocol {
             SecurityWarningCode::ControlSignatureInvalid => 1 << 1,
             SecurityWarningCode::UnsignedControlRejected => 1 << 2,
             SecurityWarningCode::SenderAddressMismatch => 1 << 3,
+            SecurityWarningCode::StaleControlFrame => 1 << 4,
             _ => 0,
         }
     }
@@ -809,6 +1064,80 @@ impl OfflineProtocol {
             && !DATA_PLANE_PREFIXES.iter().any(|p| content.starts_with(p))
     }
 
+    /// Whether `peer_id` has ever presented a control-frame signature over the
+    /// freshness-bound payload.
+    ///
+    /// In memory rather than a storage read, exactly like
+    /// [`Self::is_encryption_capable`]: it is consulted on the control path of
+    /// every frame, and the durable record exists to survive a restart rather
+    /// than to be read per frame.
+    pub(crate) fn signs_freshness_bound_control(&self, peer_id: &str) -> bool {
+        self.control_freshness_peers.contains(peer_id)
+    }
+
+    /// Records that `peer_id` has proved it signs the freshness-bound payload.
+    ///
+    /// # Why this set needs no cap of its own
+    ///
+    /// It is a strict subset of the capped encryption-capable set, and the
+    /// order of the two checks below is what makes that true rather than
+    /// merely likely: a peer the capped set refused is not admitted here
+    /// either. Inserting first and checking after would let a forged-sender
+    /// flood grow this one without bound, and it is reachable by exactly the
+    /// same flood, since minting an identity that signs honestly as itself
+    /// costs one Ed25519 keygen.
+    ///
+    /// # Why refusal is safe here, unlike for encryption capability
+    ///
+    /// Failing to record leaves this peer able to send us the older payload,
+    /// which is where every peer started. It loses an improvement rather than
+    /// a protection, so the flood costs later peers the ratchet and never
+    /// costs an earlier peer anything they had.
+    pub(crate) fn record_control_freshness_proved(&mut self, peer_id: &str) {
+        if !self.is_encryption_capable(peer_id) {
+            return;
+        }
+        if !self.control_freshness_peers.insert(peer_id.to_string()) {
+            return;
+        }
+        // Reached once per peer per process, on the transition. The durable
+        // record is rewritten here rather than through
+        // `record_encryption_capable`, whose elision cache deliberately skips
+        // a peer whose record already exists — which is every peer that just
+        // upgraded.
+        self.persist_control_freshness_proved(peer_id);
+    }
+
+    /// Rewrites `peer_id`'s durable capability record with the ratchet set.
+    ///
+    /// Best-effort, like the record it extends: a failed write costs the
+    /// ratchet across a restart, and it is re-proved by that peer's next
+    /// freshness-bound frame. That is the fail-open direction, and it is the
+    /// right one here — the alternative, refusing the peer's traffic because
+    /// we could not write a note about them, breaks a working pair over a
+    /// storage error.
+    fn persist_control_freshness_proved(&self, peer_id: &str) {
+        let Some(storage) = &self.secure_storage else {
+            return;
+        };
+        let entry = EncryptionCapableEntry {
+            last_seen_ms: Utc::now().timestamp_millis(),
+            ctrl_freshness_proved: true,
+        };
+        match serde_json::to_vec(&entry) {
+            Ok(data) => {
+                if let Err(e) =
+                    storage.store(storage_keys::ENCRYPTION_CAPABLE_PEERS, peer_id, &data)
+                {
+                    warn!(peer_id = %peer_id, error = %e, "Failed to persist control-freshness ratchet");
+                }
+            }
+            Err(e) => {
+                warn!(peer_id = %peer_id, error = %e, "Failed to serialize control-freshness ratchet");
+            }
+        }
+    }
+
     /// Persists the durable "this peer runs MLS" record.
     ///
     /// Best-effort and idempotent: the in-memory set is already updated by the
@@ -827,6 +1156,13 @@ impl OfflineProtocol {
         };
         let entry = EncryptionCapableEntry {
             last_seen_ms: Utc::now().timestamp_millis(),
+            // Carried forward rather than defaulted. This path writes the
+            // whole record, so spelling `false` here would clear a ratchet
+            // that is set — and a ratchet any ordinary frame can clear is not
+            // one. In practice the elision cache means this rarely rewrites an
+            // existing record, which is exactly the kind of "cannot happen"
+            // that stops being true after a refactor.
+            ctrl_freshness_proved: self.signs_freshness_bound_control(peer_id),
         };
         match serde_json::to_vec(&entry) {
             Ok(data) => {
@@ -889,7 +1225,7 @@ impl OfflineProtocol {
         let listed = peer_ids.len();
         // Collected before marking: `mark_encryption_capable` takes `&mut self`
         // while `storage` is borrowed from `self`.
-        let mut capable: Vec<String> = Vec::new();
+        let mut capable: Vec<(String, bool)> = Vec::new();
         for peer_id in peer_ids.iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             // Storage keys bypass `UserId::new()`, so a corrupted or
             // pre-validation-era entry could contain hostile characters.
@@ -899,10 +1235,12 @@ impl OfflineProtocol {
             }
             match storage.load(storage_keys::ENCRYPTION_CAPABLE_PEERS, peer_id) {
                 Ok(Some(data)) => match serde_json::from_slice::<EncryptionCapableEntry>(&data) {
-                    // The record's presence *is* the fact; its timestamp is
-                    // diagnostic. Deserializing anyway keeps a garbage record
+                    // The record's presence *is* the encryption-capability
+                    // fact; its timestamp is diagnostic. The ratchet flag is
+                    // read, because that one is a field rather than a
+                    // presence. Deserializing anyway keeps a garbage record
                     // from being read as evidence.
-                    Ok(_) => capable.push(peer_id.clone()),
+                    Ok(entry) => capable.push((peer_id.clone(), entry.ctrl_freshness_proved)),
                     Err(e) => {
                         warn!(peer_id = %peer_id, error = %e, "Skipping corrupted capability record");
                     }
@@ -914,13 +1252,19 @@ impl OfflineProtocol {
             }
         }
         let restored = capable.len() as u32;
-        for peer_id in capable {
+        for (peer_id, ctrl_freshness_proved) in capable {
             // Read back from the category, so the record demonstrably exists:
             // seeding the elision cache here is what keeps the first verified
             // frame from a restored peer from rewriting a record that is
             // already on disk.
             self.encryption_capable_persisted.insert(peer_id.clone());
-            self.mark_encryption_capable(&peer_id);
+            let marked = self.mark_encryption_capable(&peer_id);
+            if ctrl_freshness_proved && marked {
+                // Restored through the same subset rule the live path applies,
+                // so a category that somehow holds more peers than the cap
+                // cannot seed a set that the cap is supposed to bound.
+                self.control_freshness_peers.insert(peer_id);
+            }
         }
         if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
             warn!(

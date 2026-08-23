@@ -119,6 +119,13 @@ impl OfflineProtocol {
         }
         self.delete_peer_key_package_from_storage(user_id);
         self.peer_compact_envelope.remove(user_id);
+        // The *advertised* half only. `control_freshness_peers` — what the
+        // peer proved — is deliberately left standing: a clean slate re-learns
+        // capabilities, and re-learning that a peer signs the freshness-bound
+        // payload is exactly what a ratchet must not require. Clearing it here
+        // would make "block, then unblock" a way to walk a peer's own
+        // protection back, requestable by anyone who can get a user to do it.
+        self.peer_ctrl_freshness.remove(user_id);
         self.peer_rich_payload.remove(user_id);
         self.peer_rich_attested.remove(user_id);
         self.forget_data_sync_peer(user_id);
@@ -1414,6 +1421,7 @@ mod tests {
             env_versions: Vec::new(),
             rich_versions: Vec::new(),
             data_versions: Vec::new(),
+            ctrl_versions: Vec::new(),
             nostr_pubkey: None,
         };
         let content = serde_json::to_string(&reset_payload).unwrap();
@@ -1421,7 +1429,7 @@ mod tests {
         // Bob handles the key package with session_reset=true.
         // This deletes the stale session and auto-establishes a fresh one
         // using Alice's new key package.
-        bob.handle_key_package_message(&id("alice"), &content, true);
+        bob.handle_key_package_message(&id("alice"), &content, true, true);
 
         // Bob should have a session (the NEW one, auto-established from
         // Alice's fresh key package — NOT the stale orphaned session).

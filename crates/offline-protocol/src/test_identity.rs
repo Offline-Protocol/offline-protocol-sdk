@@ -192,11 +192,49 @@ pub(crate) fn sign_as_sender(message: &mut offline_protocol_core::Message) {
 /// still sign their *own* frame and lie about who they are, and the derivation
 /// check is what answers that.
 pub(crate) fn sign_as(label: &str, message: &mut offline_protocol_core::Message) {
+    sign_as_with_payload(label, message, false);
+}
+
+/// [`sign_as_sender`] under the freshness-bound payload.
+///
+/// The default helpers sign under the older one on purpose: most fixtures
+/// exercise behaviour that predates freshness and would silently change what
+/// they test if the payload moved under them. A test about freshness asks for
+/// it by name.
+pub(crate) fn sign_as_sender_v2(message: &mut offline_protocol_core::Message) {
+    let sender = message.sender.as_str().to_string();
+    // Resolved and the guard dropped before any panic, for the reason
+    // `try_sign_as_sender` gives: panicking while holding it poisons the cache
+    // for every later test in the process.
+    let label = {
+        let guard = cache_guard();
+        guard.1.get(&sender).cloned()
+    };
+    let label = label
+        .unwrap_or_else(|| panic!("sign_as_sender_v2: '{sender}' is not a known test identity"));
+    sign_as_with_payload(&label, message, true);
+}
+
+/// [`sign_as`] under the freshness-bound payload: signs as `label` whatever
+/// the frame claims, so a misattributed *fresh* frame can be built too.
+pub(crate) fn sign_as_v2(label: &str, message: &mut offline_protocol_core::Message) {
+    sign_as_with_payload(label, message, true);
+}
+
+fn sign_as_with_payload(
+    label: &str,
+    message: &mut offline_protocol_core::Message,
+    freshness_bound: bool,
+) {
     use ed25519_dalek::Signer;
 
     let signing = identity(label).signing;
-    let canonical = crate::OfflineProtocol::build_canonical_payload(message)
-        .expect("canonical payload for a test control message");
+    let canonical = if freshness_bound {
+        crate::OfflineProtocol::build_canonical_payload_v2(message)
+    } else {
+        crate::OfflineProtocol::build_canonical_payload(message)
+    }
+    .expect("canonical payload for a test control message");
 
     message.metadata.insert(
         crate::protocol::CTRL_SIG_META_KEY.to_string(),
@@ -312,7 +350,7 @@ mod tests {
         sign_as_sender(&mut direct);
 
         let manager = manager_for("alice", seeded_storage("alice"));
-        crate::OfflineProtocol::sign_control_message_with(&mut via_manager, &manager)
+        crate::OfflineProtocol::sign_control_message_with(&mut via_manager, &manager, false)
             .expect("signing through the production path");
 
         // Ed25519 is deterministic (RFC 8032), so equal keys over equal payloads

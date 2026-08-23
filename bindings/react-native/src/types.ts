@@ -2290,7 +2290,8 @@ export type SecurityWarningCode =
   | 'PUSH_KEY_PACKAGE_POOL_EXHAUSTED'
   | 'RELAY_ADDRESS_BINDING_MISMATCH'
   | 'RELAY_ADDRESS_DECLARATION_REFUSED'
-  | 'GROUP_LEAF_IDENTITY_UNPROVEN';
+  | 'GROUP_LEAF_IDENTITY_UNPROVEN'
+  | 'STALE_CONTROL_FRAME';
 
 /**
  * A security-relevant anomaly was detected for a peer.
@@ -2357,6 +2358,18 @@ export type SecurityWarningCode =
  * delivering peer and it is this device's own id. `reason` is diagnostic text,
  * must not be parsed, and carries no identifier: the impersonated address stays
  * in the logs of the device that refused it.
+ *
+ * `STALE_CONTROL_FRAME` refuses a frame for what its signature says about
+ * *when*: stamped too far in the past, too far ahead of this device's clock, or
+ * carrying the older signing payload from a peer that has proved it can produce
+ * the newer one. **Check this device's clock first.** The signed timestamp is
+ * compared against it, so a device whose own clock is wrong refuses honest
+ * peers in bulk, and the event stream then looks like an attack rather than a
+ * local fault. Many different `peer_id`s in a short window is a clock; one
+ * `peer_id` while others are fine is that peer, either replaying captured
+ * frames or running a broken build. Nothing is torn down — the frame is
+ * dropped, unacknowledged, and a peer whose frame was genuinely just slow
+ * re-sends a fresh one.
  */
 export interface SecurityWarningEvent extends BaseEvent {
   type: 'security_warning';

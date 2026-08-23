@@ -413,7 +413,29 @@ impl OfflineProtocol {
         // left somewhere to be found. An outbox entry and a retry ladder behind
         // it would retransmit against a peer that does not exist.
         message.requires_ack = false;
-        self.sign_control_message(&mut message)?;
+        // Signed under the older payload, on purpose, and this is the one
+        // place in the engine that says so.
+        //
+        // A published record has no known verifier: it is left on a relay for
+        // any stranger to fetch, so there is no peer whose advertised
+        // capability could pick the payload. Signing the freshness-bound one
+        // would make the record unverifiable to every install that has not
+        // upgraded, which for cold contact means the record does not work at
+        // all — its whole purpose is being readable by someone this node has
+        // never met.
+        //
+        // It is not the hole it looks like. The record carries
+        // `session_reset: false` (see the call above), so it holds no
+        // directive worth replaying, and re-delivering it can do nothing but
+        // re-offer a key package that is still within its own validity. What
+        // bounds *that* is the key package's lifetime, which is issue 396's
+        // subject rather than this one's.
+        let mls = self.mls_manager.as_ref().ok_or(Error::MlsNotInitialized)?;
+        let manager = mls
+            .read()
+            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        Self::sign_control_message_with(&mut message, &manager, false)?;
+        drop(manager);
         Ok(message)
     }
 
