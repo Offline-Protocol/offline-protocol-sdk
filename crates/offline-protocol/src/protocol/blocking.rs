@@ -1429,7 +1429,12 @@ mod tests {
         // Bob handles the key package with session_reset=true.
         // This deletes the stale session and auto-establishes a fresh one
         // using Alice's new key package.
-        bob.handle_key_package_message(&id("alice"), &content, true, true);
+        bob.handle_key_package_message(
+            &id("alice"),
+            &content,
+            true,
+            Some(chrono::Utc::now().timestamp_millis()),
+        );
 
         // Bob should have a session (the NEW one, auto-established from
         // Alice's fresh key package — NOT the stale orphaned session).

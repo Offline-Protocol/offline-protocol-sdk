@@ -1123,6 +1123,11 @@ impl OfflineProtocol {
         let entry = EncryptionCapableEntry {
             last_seen_ms: Utc::now().timestamp_millis(),
             ctrl_freshness_proved: true,
+            last_reset_ms: self
+                .control_reset_watermark
+                .get(peer_id)
+                .copied()
+                .unwrap_or(0),
         };
         match serde_json::to_vec(&entry) {
             Ok(data) => {
@@ -1134,6 +1139,62 @@ impl OfflineProtocol {
             }
             Err(e) => {
                 warn!(peer_id = %peer_id, error = %e, "Failed to serialize control-freshness ratchet");
+            }
+        }
+    }
+
+    /// Whether a session reset stamped `signed_ms` from `peer_id` is one this
+    /// node has not already acted on.
+    ///
+    /// Strictly newer, not newer-or-equal: a frame is identified by its stamp
+    /// here, so admitting an equal one admits the frame itself a second time.
+    /// Two legitimate resets in the same millisecond would need a rekey ladder
+    /// far faster than `REKEY_INTERVAL_SECS`, and if one ever happened the
+    /// pair still converges — a refused reset shows up as the next decrypt
+    /// failure, which drives a fresh one.
+    pub(crate) fn reset_is_unspent(&self, peer_id: &str, signed_ms: i64) -> bool {
+        self.control_reset_watermark
+            .get(peer_id)
+            .is_none_or(|seen| signed_ms > *seen)
+    }
+
+    /// Records a session reset as spent, in memory and durably.
+    ///
+    /// **Call this before acting on the reset, never after.** The teardown it
+    /// authorizes is followed by a fresh session, so a crash between the two
+    /// leaves a frame that has already destroyed one session still able to
+    /// destroy its replacement. Recording first costs, at worst, a reset that
+    /// was recorded and not carried out, which the pair recovers from the same
+    /// way it recovers from a lost frame: the next decrypt failure drives
+    /// another.
+    pub(crate) fn record_reset_spent(&mut self, peer_id: &str, signed_ms: i64) {
+        // The same subset rule the ratchet uses, checked before the insert:
+        // this map inherits the encryption-capable cap rather than needing one
+        // of its own.
+        if !self.is_encryption_capable(peer_id) {
+            return;
+        }
+        self.control_reset_watermark
+            .insert(peer_id.to_string(), signed_ms);
+
+        let Some(storage) = &self.secure_storage else {
+            return;
+        };
+        let entry = EncryptionCapableEntry {
+            last_seen_ms: Utc::now().timestamp_millis(),
+            ctrl_freshness_proved: self.signs_freshness_bound_control(peer_id),
+            last_reset_ms: signed_ms,
+        };
+        match serde_json::to_vec(&entry) {
+            Ok(data) => {
+                if let Err(e) =
+                    storage.store(storage_keys::ENCRYPTION_CAPABLE_PEERS, peer_id, &data)
+                {
+                    warn!(peer_id = %peer_id, error = %e, "Failed to persist the spent-reset mark");
+                }
+            }
+            Err(e) => {
+                warn!(peer_id = %peer_id, error = %e, "Failed to serialize the spent-reset mark");
             }
         }
     }
@@ -1163,6 +1224,11 @@ impl OfflineProtocol {
             // existing record, which is exactly the kind of "cannot happen"
             // that stops being true after a refactor.
             ctrl_freshness_proved: self.signs_freshness_bound_control(peer_id),
+            last_reset_ms: self
+                .control_reset_watermark
+                .get(peer_id)
+                .copied()
+                .unwrap_or(0),
         };
         match serde_json::to_vec(&entry) {
             Ok(data) => {
@@ -1225,7 +1291,7 @@ impl OfflineProtocol {
         let listed = peer_ids.len();
         // Collected before marking: `mark_encryption_capable` takes `&mut self`
         // while `storage` is borrowed from `self`.
-        let mut capable: Vec<(String, bool)> = Vec::new();
+        let mut capable: Vec<(String, bool, i64)> = Vec::new();
         for peer_id in peer_ids.iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             // Storage keys bypass `UserId::new()`, so a corrupted or
             // pre-validation-era entry could contain hostile characters.
@@ -1240,7 +1306,11 @@ impl OfflineProtocol {
                     // read, because that one is a field rather than a
                     // presence. Deserializing anyway keeps a garbage record
                     // from being read as evidence.
-                    Ok(entry) => capable.push((peer_id.clone(), entry.ctrl_freshness_proved)),
+                    Ok(entry) => capable.push((
+                        peer_id.clone(),
+                        entry.ctrl_freshness_proved,
+                        entry.last_reset_ms,
+                    )),
                     Err(e) => {
                         warn!(peer_id = %peer_id, error = %e, "Skipping corrupted capability record");
                     }
@@ -1252,18 +1322,26 @@ impl OfflineProtocol {
             }
         }
         let restored = capable.len() as u32;
-        for (peer_id, ctrl_freshness_proved) in capable {
+        for (peer_id, ctrl_freshness_proved, last_reset_ms) in capable {
             // Read back from the category, so the record demonstrably exists:
             // seeding the elision cache here is what keeps the first verified
             // frame from a restored peer from rewriting a record that is
             // already on disk.
             self.encryption_capable_persisted.insert(peer_id.clone());
             let marked = self.mark_encryption_capable(&peer_id);
-            if ctrl_freshness_proved && marked {
+            if marked {
                 // Restored through the same subset rule the live path applies,
                 // so a category that somehow holds more peers than the cap
                 // cannot seed a set that the cap is supposed to bound.
-                self.control_freshness_peers.insert(peer_id);
+                if ctrl_freshness_proved {
+                    self.control_freshness_peers.insert(peer_id.clone());
+                }
+                if last_reset_ms != 0 {
+                    // Losing this across a restart would make every reset this
+                    // node already acted on spendable again, which is the
+                    // replay it exists to deny.
+                    self.control_reset_watermark.insert(peer_id, last_reset_ms);
+                }
             }
         }
         if listed > MAX_RESTORE_KEYS_PER_CATEGORY {

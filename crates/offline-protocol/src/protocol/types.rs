@@ -585,6 +585,24 @@ pub(crate) struct EncryptionCapableEntry {
     /// signature from a peer has not proved anything about them.
     #[serde(default)]
     pub(crate) ctrl_freshness_proved: bool,
+    /// The signed timestamp of the most recent session reset acted on from
+    /// this peer, or `0` if none.
+    ///
+    /// A high-water mark, and what turns the freshness *window* into an actual
+    /// closure for the one directive that destroys state. The window alone
+    /// bounds a captured reset to thirty days; it does not stop the frame
+    /// being spent inside them, and the receive deduplicator forgets a message
+    /// id after an hour. Without this, a recording tears the pair's session
+    /// down once an hour for a month.
+    ///
+    /// Only ever read from and written by a frame whose timestamp is *inside
+    /// the signature*. On a frame signed under the older payload the timestamp
+    /// is attacker-rewritable, so honouring one here would let anyone park
+    /// this mark at `i64::MAX` and permanently deny that peer the ability to
+    /// heal a forked session, which is a worse failure than the one being
+    /// fixed.
+    #[serde(default)]
+    pub(crate) last_reset_ms: i64,
 }
 
 /// Payload for key package exchange, and the compact envelope version it

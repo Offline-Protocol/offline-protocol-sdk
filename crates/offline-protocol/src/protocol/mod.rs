@@ -319,6 +319,21 @@ pub struct OfflineProtocol {
     /// true is load-bearing.
     pub(crate) control_freshness_peers: std::collections::HashSet<String>,
 
+    /// Per-peer high-water mark: the signed timestamp of the most recent
+    /// session reset acted on from that peer.
+    ///
+    /// A reset is honoured only when its signed timestamp is strictly newer
+    /// than this, which is what stops one captured reset frame from being
+    /// spent again and again inside the freshness window. Chosen over a set of
+    /// spent frame ids because it is one integer per peer instead of a list
+    /// that grows with traffic, and because it is strictly stronger: it
+    /// refuses *every* older reset, including ones this node has no memory of.
+    ///
+    /// Durable in the peer's [`EncryptionCapableEntry`], and bounded by
+    /// construction like [`Self::control_freshness_peers`]: entries are only
+    /// written for peers the capped encryption-capable set accepted.
+    pub(crate) control_reset_watermark: std::collections::HashMap<String, i64>,
+
     /// Peers whose key package advertised the sealed rich payload
     /// ([`RICH_PAYLOAD_V1`] in `rich_versions`), so the send path may seal
     /// rich extras (reply context, rich media metadata, forward attribution)
@@ -932,6 +947,7 @@ impl OfflineProtocol {
             peer_compact_envelope: std::collections::HashSet::new(),
             peer_ctrl_freshness: std::collections::HashSet::new(),
             control_freshness_peers: std::collections::HashSet::new(),
+            control_reset_watermark: std::collections::HashMap::new(),
             peer_rich_payload: std::collections::HashSet::new(),
             peer_data_sync: std::collections::HashSet::new(),
             peer_data_group: std::collections::HashSet::new(),
@@ -1118,6 +1134,7 @@ impl OfflineProtocol {
         // rollback must not *lose* it: a peer we hold to the newer payload has
         // to still be held to it if the re-initialize is abandoned.
         let previous_control_freshness_peers = self.control_freshness_peers.clone();
+        let previous_control_reset_watermark = self.control_reset_watermark.clone();
         let previous_peer_rich_payload = self.peer_rich_payload.clone();
         let previous_peer_data_sync = self.peer_data_sync.clone();
         let previous_peer_rich_attested = self.peer_rich_attested.clone();
@@ -1263,6 +1280,7 @@ impl OfflineProtocol {
             self.peer_compact_envelope = previous_peer_compact_envelope;
             self.peer_ctrl_freshness = previous_peer_ctrl_freshness;
             self.control_freshness_peers = previous_control_freshness_peers;
+            self.control_reset_watermark = previous_control_reset_watermark;
             self.peer_rich_payload = previous_peer_rich_payload;
             self.peer_data_sync = previous_peer_data_sync;
             self.peer_rich_attested = previous_peer_rich_attested;
@@ -2674,7 +2692,10 @@ impl OfflineProtocol {
 
         // Handle key package messages
         if let Some(data) = content.strip_prefix(internal_prefixes::KEY_PACKAGE) {
-            self.handle_key_package_message(sender, data, signed, freshness_bound);
+            // The stamp travels only when it was signed *and* checked, so a
+            // handler cannot reach for it in the case where it means nothing.
+            let freshness = freshness_bound.then(|| message.timestamp.as_millis());
+            self.handle_key_package_message(sender, data, signed, freshness);
             return Some(InternalMessageResult::Consumed);
         }
 

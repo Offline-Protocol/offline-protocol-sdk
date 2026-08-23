@@ -51,8 +51,14 @@ impl OfflineProtocol {
     /// see the comment at that use for why the distinction earns a separate
     /// trust level from the capability lists around it.
     ///
-    /// `freshness_bound` gates **only** `session_reset`, which is the one
-    /// field here that destroys state. See the comment at that use.
+    /// `freshness` gates **only** `session_reset`, which is the one field here
+    /// that destroys state: `Some(stamp)` when the frame's signature covers
+    /// that timestamp and this node checked it, `None` otherwise. It is an
+    /// option rather than a flag beside a number so that the stamp is
+    /// unreachable in exactly the case where trusting it would be a bug — on
+    /// the older payload the timestamp is outside the signature, and a peer's
+    /// replay watermark must never be moved by a value an attacker can
+    /// rewrite. See the comment at that use.
     ///
     /// [`ControlGateOutcome::Proceed`]: super::ControlGateOutcome
     pub(crate) fn handle_key_package_message(
@@ -60,7 +66,7 @@ impl OfflineProtocol {
         sender: &str,
         data: &str,
         signed: bool,
-        freshness_bound: bool,
+        freshness: Option<i64>,
     ) {
         if let Ok(payload) = serde_json::from_str::<KeyPackagePayload>(data) {
             debug!(sender = %sender, session_reset = %payload.session_reset, "Received key package");
@@ -316,7 +322,7 @@ impl OfflineProtocol {
             // freshness-bound payload must use it here, and a peer that has
             // not is where they always were. Their exposure closes by itself
             // on their first freshness-bound frame.
-            let reset_admissible = freshness_bound
+            let reset_admissible = freshness.is_some()
                 || !self.config.security.control_freshness_enforced
                 || !self.signs_freshness_bound_control(sender);
             if payload.session_reset && !reset_admissible {
@@ -326,7 +332,34 @@ impl OfflineProtocol {
                      the peer re-sends a fresh one if the reset was real"
                 );
             }
-            if payload.session_reset && reset_admissible {
+
+            // Inside the window, a captured reset is still spendable: thirty
+            // days is a bound on replay, not an end to it, and the receive
+            // deduplicator forgets a message id after an hour. So a frame
+            // whose age *is* established is additionally required to be newer
+            // than the last reset acted on from this peer, which is what makes
+            // one recording good for exactly one teardown rather than one an
+            // hour for a month.
+            //
+            // Only for a frame whose stamp is signed. On the older payload the
+            // timestamp is attacker-rewritable, so consulting it would let
+            // anyone park the mark at `i64::MAX` and permanently deny this
+            // peer the ability to heal a forked session.
+            let reset_unspent = freshness.is_none_or(|stamp| self.reset_is_unspent(sender, stamp));
+            if payload.session_reset && reset_admissible && !reset_unspent {
+                warn!(
+                    sender = %sender,
+                    "Ignoring a session reset already acted on; the frame is a replay of one \
+                     this node has spent"
+                );
+            }
+            if payload.session_reset && reset_admissible && reset_unspent {
+                if let Some(stamp) = freshness {
+                    // Before the teardown, never after: the teardown is
+                    // followed by a fresh session, so a crash in between
+                    // leaves this frame able to destroy the replacement too.
+                    self.record_reset_spent(sender, stamp);
+                }
                 if let Some(mls) = self.mls_manager.clone() {
                     if let Ok(manager) = mls.read() {
                         if manager.has_session(sender).unwrap_or(false) {

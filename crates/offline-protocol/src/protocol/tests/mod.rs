@@ -34460,6 +34460,7 @@ fn capability_restore_stops_at_the_category_bound_without_pruning() {
     let entry = serde_json::to_vec(&EncryptionCapableEntry {
         last_seen_ms: 1,
         ctrl_freshness_proved: false,
+        last_reset_ms: 0,
     })
     .unwrap();
     counting
@@ -36634,7 +36635,7 @@ fn a_key_package_exchange_moves_a_pair_onto_the_freshness_bound_payload() {
         .strip_prefix(internal_prefixes::KEY_PACKAGE)
         .unwrap(),
         true,
-        true,
+        Some(Utc::now().timestamp_millis()),
     );
 
     assert!(
@@ -36679,7 +36680,7 @@ fn a_key_package_exchange_moves_a_pair_onto_the_freshness_bound_payload() {
             .strip_prefix(internal_prefixes::KEY_PACKAGE)
             .unwrap(),
         true,
-        true,
+        Some(Utc::now().timestamp_millis()),
     );
     assert!(!alice.signs_freshness_bound_control_to(&id("bob")));
 }
@@ -36792,7 +36793,7 @@ fn the_ratchet_is_not_cleared_by_anything_the_peer_sends() {
             .strip_prefix(internal_prefixes::KEY_PACKAGE)
             .unwrap(),
         true,
-        true,
+        Some(Utc::now().timestamp_millis()),
     );
     assert!(
         bob.signs_freshness_bound_control(&id("alice")),
@@ -36868,7 +36869,7 @@ fn a_legacy_peers_session_reset_is_still_honoured() {
         true,
         // The gate's verdict for an older-payload frame from a peer that has
         // proved nothing.
-        false,
+        None,
     );
 
     assert!(
@@ -36909,7 +36910,7 @@ fn a_held_peers_reset_under_the_older_payload_is_ignored() {
             .strip_prefix(internal_prefixes::KEY_PACKAGE)
             .unwrap(),
         true,
-        false,
+        None,
     );
 
     assert!(
@@ -37013,5 +37014,124 @@ fn a_stale_frame_is_reported_as_stale_rather_than_as_a_bad_signature() {
             .contains(&SecurityWarningCode::StaleControlFrame),
         "a stale frame must be classified as one (got {:?})",
         warnings.lock().unwrap()
+    );
+}
+
+/// The heart of issue 403, end to end: one captured reset frame tears a
+/// session down **once**, and never again.
+///
+/// The window alone does not give this. Thirty days is a bound on how long a
+/// recording stays useful, and the receive deduplicator forgets a message id
+/// after an hour, so without the spent-reset mark the same frame is good for
+/// one teardown an hour for a month.
+#[test]
+fn a_captured_reset_frame_can_be_spent_exactly_once() {
+    let (mut alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+
+    // Alice proves she signs the freshness-bound payload, so her stamps count.
+    let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&proof, None);
+    assert!(bob.signs_freshness_bound_control(&id("alice")));
+    assert!(bob_has_session(&bob, &id("alice")));
+
+    // The reset frame, as captured off the air: one body, one stamp, replayed
+    // verbatim. Well inside the freshness window both times.
+    let body = key_package_frame_body(&id("alice"), true, Vec::new());
+    let captured_stamp = Utc::now().timestamp_millis() - 60_000;
+    let data = body.strip_prefix(internal_prefixes::KEY_PACKAGE).unwrap();
+
+    bob.handle_key_package_message(&id("alice"), data, true, Some(captured_stamp));
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "the genuine reset must be acted on"
+    );
+
+    // The pair rebuilds.
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+    assert!(bob_has_session(&bob, &id("alice")));
+
+    // The recording, delivered again.
+    bob.handle_key_package_message(&id("alice"), data, true, Some(captured_stamp));
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "a reset already spent must not tear the rebuilt session down"
+    );
+
+    // And a *genuinely newer* reset from alice still works, so the mark
+    // refuses replays without refusing the peer.
+    bob.handle_key_package_message(&id("alice"), data, true, Some(captured_stamp + 1));
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "a newer reset must still be honoured, or the pair can never heal again"
+    );
+}
+
+/// The mark is durable, or an attacker spends the same frame again by waiting
+/// for a restart.
+#[test]
+fn a_spent_reset_stays_spent_across_a_restart() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let stamp = Utc::now().timestamp_millis() - 60_000;
+    let body = key_package_frame_body(&id("alice"), true, Vec::new());
+    let data = body.strip_prefix(internal_prefixes::KEY_PACKAGE).unwrap();
+
+    {
+        let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        bob.initialize_mls_for_test(storage.clone()).unwrap();
+        let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+        bob.security_gate_control_message(&proof, None);
+        bob.handle_key_package_message(&id("alice"), data, true, Some(stamp));
+        assert!(!bob.reset_is_unspent(&id("alice"), stamp));
+    }
+
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    bob.initialize_mls_for_test(storage).unwrap();
+    assert!(
+        !bob.reset_is_unspent(&id("alice"), stamp),
+        "the spent-reset mark must survive a restart"
+    );
+    assert!(
+        bob.reset_is_unspent(&id("alice"), stamp + 1),
+        "and must still admit a genuinely newer reset"
+    );
+}
+
+/// A peer on the older payload cannot move the mark, because on that payload
+/// the timestamp is outside the signature and therefore attacker-chosen.
+///
+/// The failure this prevents is worse than the one the mark fixes: anyone able
+/// to inject could park a peer's mark at `i64::MAX` and permanently deny that
+/// peer the ability to heal a forked session with this node.
+#[test]
+fn an_unsigned_timestamp_cannot_move_the_replay_mark() {
+    let (mut alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+
+    // Deliberately driven through `process_internal_message_via` rather than
+    // by calling the handler: the protection under test is the *dispatch
+    // site's* refusal to hand a stamp on that the signature does not cover,
+    // and a test that passes `None` itself proves only that the handler
+    // honours what it is told.
+    let body = key_package_frame_body(&id("alice"), true, Vec::new());
+    let mut frame = unsigned_frame(&id("alice"), &id("bob"), &body);
+    // The end of time, on a frame whose signature does not cover it.
+    frame.timestamp = offline_protocol_core::Timestamp::from_millis(i64::MAX);
+    crate::test_identity::sign_as_sender(&mut frame);
+
+    bob.process_internal_message_via(&frame, None);
+
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "the reset itself is still honoured: alice has proved nothing, so she \
+         keeps the behaviour she always had"
+    );
+    assert!(
+        bob.reset_is_unspent(&id("alice"), 1),
+        "but an unsigned stamp must leave the mark where it was — parking it at \
+         i64::MAX would deny this peer every future reset, which is a worse \
+         failure than the replay the mark exists to stop"
     );
 }
