@@ -7712,6 +7712,93 @@ mod tests {
         );
     }
 
+    /// The security config section must be read by every bridge that parses
+    /// config, in both spellings its JSON can arrive in, **and in both the
+    /// nested and the top-level position**.
+    ///
+    /// The same failure as the data guard above, with a sharper edge.
+    /// `control_freshness_enforced` is not a feature flag: it is the lever an
+    /// app reaches for when its fleet's clocks are wrong, because the
+    /// freshness check is judged against the device's own clock and a device
+    /// whose clock is unset refuses every honest peer, taking its own control
+    /// plane down with it. A lever that is documented and dropped somewhere in
+    /// the bridge stack is worse than no lever, because it is reached for
+    /// precisely when nothing else is working.
+    ///
+    /// The flat spelling is pinned deliberately. It is the one section where a
+    /// value written one level too high is still honoured, and this test is
+    /// what stops that tolerance being tidied away by someone matching it to
+    /// the `data` section next to it.
+    #[test]
+    fn every_bridge_reads_the_security_config_section() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rn = manifest.join("../../bindings/react-native");
+        let read = |rel: std::path::PathBuf| -> String {
+            std::fs::read_to_string(&rel)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", rel.display()))
+        };
+
+        let udl = read(manifest.join("src/offline_protocol.udl"));
+        assert!(
+            udl.contains("boolean control_freshness_enforced = true;"),
+            "the UDL must default control_freshness_enforced to true: the check \
+             it gates is what stops a captured control frame verifying forever, \
+             and a UDL saying false would leave every mobile app opted out of a \
+             protection the Rust side considers on"
+        );
+
+        let kotlin =
+            read(rn.join("android/src/main/java/com/offlineprotocol/ProtocolConfigParser.kt"));
+        assert!(
+            kotlin.contains("optJSONObject(\"security\")")
+                && kotlin.contains("config.controlFreshnessEnforced = controlFreshnessEnforced"),
+            "the Kotlin parser must read the security section AND apply it to \
+             the ProtocolConfig; reading it and dropping it is the silent half \
+             of this failure"
+        );
+        assert!(
+            kotlin.contains("json.optBooleanCompat(\"controlFreshnessEnforced\""),
+            "the Kotlin parser must also accept the top-level spelling: this is \
+             the switch an app flips mid-incident, and it lands one level too \
+             high often enough to be worth honouring"
+        );
+
+        let swift = read(rn.join("ios/OfflineProtocolModule.swift"));
+        assert!(
+            swift.contains("raw[\"security\"]")
+                && swift.contains("config.controlFreshnessEnforced = controlFreshnessEnforced"),
+            "the Swift parser must read the security section AND apply it to \
+             the ProtocolConfig"
+        );
+        assert!(
+            swift.contains("raw[\"controlFreshnessEnforced\"] as? Bool"),
+            "the Swift parser must also accept the top-level spelling; see the \
+             Kotlin assertion above for why"
+        );
+
+        let ts = read(rn.join("src/index.ts"));
+        assert!(
+            ts.contains("nativeConfig.security = securityConfig"),
+            "transformConfigForNative must forward the security section"
+        );
+        assert!(
+            ts.contains("this.config.controlFreshnessEnforced"),
+            "transformConfigForNative must read the top-level spelling too. \
+             types.ts documents it, and both native parsers honour it, but they \
+             only ever see what this layer sends: gating the section on \
+             `config.security` existing made the documented flat spelling a \
+             silent no-op"
+        );
+        assert!(
+            !ts.contains(
+                "controlFreshnessEnforced: this.config.security?.controlFreshnessEnforced ?? true"
+            ),
+            "the bridge must not restate the default: an omitted field has to \
+             stay omitted all the way to the core, or the Rust default becomes \
+             unreachable"
+        );
+    }
+
     /// Backing store for [`TestMlsStorageProvider`], shareable so two protocol
     /// instances can stand in for two launches of one device.
     type TestStore = Arc<Mutex<HashMap<(String, String), Vec<u8>>>>;

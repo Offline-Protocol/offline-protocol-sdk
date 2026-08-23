@@ -790,6 +790,16 @@ export interface ProtocolConfig {
    * defaults live in the Rust core and nowhere else.
    */
   security?: SecurityConfig;
+  /**
+   * Top-level alias for {@link SecurityConfig.controlFreshnessEnforced}.
+   *
+   * `security.controlFreshnessEnforced` is the documented home. This spelling
+   * exists because that field is the lever an app reaches for mid-incident,
+   * when its fleet's clocks are wrong and its control plane has gone quiet,
+   * and a lever that silently does nothing because it was written one level
+   * too high is worse than no lever. The nested value wins if both are set.
+   */
+  controlFreshnessEnforced?: boolean;
 }
 
 /**
@@ -820,8 +830,9 @@ export interface SecurityConfig {
    * resets are honoured on any verified frame. It is a recovery tool for a
    * fleet whose clocks are wrong, not a setting to ship with.
    *
-   * Also accepted as a top-level `controlFreshnessEnforced`, so a lever reached
-   * for in an incident still works if it lands one level too high.
+   * Also accepted as a top-level `controlFreshnessEnforced` on
+   * {@link ProtocolConfig}, so a lever reached for in an incident still works
+   * if it lands one level too high. This nested spelling wins if both are set.
    */
   controlFreshnessEnforced?: boolean;
 }
