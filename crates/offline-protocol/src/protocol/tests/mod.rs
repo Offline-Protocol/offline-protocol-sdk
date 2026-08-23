@@ -37135,3 +37135,46 @@ fn an_unsigned_timestamp_cannot_move_the_replay_mark() {
          failure than the replay the mark exists to stop"
     );
 }
+
+/// And it cannot move it with the freshness check switched **off** either,
+/// which is the harder half of the same rule.
+///
+/// The switch is the lever a fleet reaches for when its clocks are wrong, so
+/// it is exactly the state an attacker waits for. A gate that reported "age
+/// established" merely because nobody was checking would hand the handler a
+/// timestamp the signature never covered, and one captured v1 reset frame
+/// would park this peer's durable mark past every reset it will ever send —
+/// surviving both a restart and the switch being turned back on. That is a
+/// worse failure than the replay the mark exists to stop, and unlike the
+/// replay it does not heal.
+#[test]
+fn an_unsigned_timestamp_cannot_move_the_replay_mark_with_the_switch_off() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let mut config = create_test_config_for_user("bob");
+    config.security.control_freshness_enforced = false;
+    let mut bob = OfflineProtocol::new(config).unwrap();
+    bob.initialize_mls_for_test(storage.clone()).unwrap();
+
+    let body = key_package_frame_body(&id("alice"), true, Vec::new());
+    let mut frame = unsigned_frame(&id("alice"), &id("bob"), &body);
+    // The end of time, on a frame whose signature does not cover it.
+    frame.timestamp = offline_protocol_core::Timestamp::from_millis(i64::MAX);
+    crate::test_identity::sign_as_sender(&mut frame);
+
+    bob.process_internal_message_via(&frame, None);
+
+    assert!(
+        bob.reset_is_unspent(&id("alice"), 1),
+        "an unsigned stamp must leave the mark where it was, switch or no switch"
+    );
+
+    // And the poisoning must not have been written through to storage either,
+    // which is what would make it outlive both the process and the switch.
+    let mut restarted = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    restarted.initialize_mls_for_test(storage).unwrap();
+    assert!(
+        restarted.reset_is_unspent(&id("alice"), 1),
+        "turning enforcement back on must not inherit a mark an unsigned stamp \
+         parked while it was off"
+    );
+}

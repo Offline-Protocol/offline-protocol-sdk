@@ -29,8 +29,15 @@ const PUSH_KEY_PACKAGE_WARNING_SUPPRESS_INTERVAL: Duration = Duration::from_secs
 enum FreshnessVerdict {
     /// Signed under the freshness-bound payload, inside the window.
     Bound,
-    /// Authentic, but its age is not established. Accepted; may not carry a
-    /// directive that destroys state.
+    /// Authentic, with its age not established: signed under the older
+    /// payload, or under either one with the freshness check switched off.
+    ///
+    /// Accepted, and it carries **no timestamp onward**, which is the point.
+    /// What a directive that destroys state may then do is the dispatch site's
+    /// decision, not this one: a peer that has never proved the newer payload
+    /// keeps its reset, and a peer that has proved it does not. Either way
+    /// nothing here can move a replay mark, because there is no stamp this
+    /// verdict vouches for.
     Unbound,
     /// Refused. The caller drops the frame without acknowledging it.
     Refused,
@@ -563,9 +570,12 @@ impl OfflineProtocol {
     /// - [`FreshnessVerdict::Bound`]: signed under the freshness-bound payload
     ///   and inside the window, so it is provably not a recording. Only such a
     ///   frame may carry a directive that destroys state.
-    /// - [`FreshnessVerdict::Unbound`]: authentic, but its age is not
+    /// - [`FreshnessVerdict::Unbound`]: authentic, with its age not
     ///   established. Everything a control frame did before this existed, it
-    ///   still does; what it may not do is tear a session down.
+    ///   still does, and no timestamp travels with it. Whether it may tear a
+    ///   session down is decided downstream, by the ratchet and the switch,
+    ///   because a peer that has proved nothing must keep its resets or it can
+    ///   never heal a forked session.
     /// - [`FreshnessVerdict::Refused`]: the frame states an age this node will
     ///   not accept, or comes under the older payload from a peer that has
     ///   proved it can produce the newer one.
@@ -597,11 +607,25 @@ impl OfflineProtocol {
         if !self.config.security.control_freshness_enforced {
             // The switch returns this node to its pre-403 behaviour exactly:
             // signatures verified, no frame refused for its age, and a reset
-            // honoured on any verified frame. Reporting `Bound` here is what
-            // makes the last of those true, and it is the honest reading —
-            // "act as though age were established" is precisely what the
-            // operator asked for by turning the check off.
-            return FreshnessVerdict::Bound;
+            // honoured on any verified frame.
+            //
+            // `Unbound` rather than `Bound`, and the difference is not
+            // cosmetic. What keeps resets working with the switch off is the
+            // dispatch site's own `!control_freshness_enforced` clause, not
+            // this verdict; reporting `Bound` here would additionally hand the
+            // handler the frame's timestamp as though the signature covered
+            // it, and on a v1 frame it does not. That is the failure this
+            // change calls worse than the replay it fixes: the stamp is
+            // metadata anyone can rewrite, so one captured v1 reset frame
+            // parks the peer's durable high-water mark at `i64::MAX` and
+            // denies that peer every future reset, across restarts and across
+            // the switch being turned back on.
+            //
+            // A clock is the reason this switch exists, so the honest reading
+            // of "the operator switched the check off" is that nobody looked,
+            // which is what `Unbound` says. Pre-403 recorded no mark at all,
+            // and with nothing established there is nothing to record.
+            return FreshnessVerdict::Unbound;
         }
 
         match version {

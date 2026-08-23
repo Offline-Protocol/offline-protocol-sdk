@@ -200,6 +200,18 @@ pre-403 behaviour exactly: signatures still verified, nothing refused for its
 age, resets honoured on any verified frame. It reaches the bindings for the same
 reason. It is a diagnosis and recovery tool, not a setting to deploy on.
 
+**With the switch off a node records nothing, and that half is load-bearing.**
+The gate reports the frame's age as *unestablished* rather than as established,
+so no timestamp travels to the handler and the high-water mark cannot move.
+Reporting the opposite would be the easier reading of "the operator asked us not
+to check", and it is the failure this decision calls worse than the replay
+itself: with the check off, one captured frame signed under the older payload
+carries an attacker-written timestamp, and honouring it parks a peer's mark at
+`i64::MAX`. That survives a restart and the switch being turned back on, and it
+denies that peer every future reset, which is to say every future chance to heal
+a forked session. What keeps resets working meanwhile is the dispatch site
+consulting the switch itself, not the gate pretending an age was checked.
+
 The refusal is also reported under its own `STALE_CONTROL_FRAME` code rather
 than folded into the signature failures, because an integrator who cannot tell a
 clock fault from a forgery cannot diagnose either. Many peers in a short window
