@@ -294,7 +294,7 @@ One exception, and it is required rather than permitted: a verifier MUST still
 accept a `__MLS_KEY_PKG__` frame from a held peer under the v1 payload, and MUST
 ignore that frame's `session_reset`. Without it a peer whose record of this node
 was lost signs v1, because it no longer knows what this verifier accepts, and is
-refused on the one frame that would have told it — and a key package is the only
+refused on the one frame that would have told it, and a key package is the only
 frame that re-teaches capabilities, so the state is permanent.
 
 The case is capability-record loss, not a reinstall: an address is the hash of an
@@ -313,7 +313,7 @@ value **before** acting on the reset.
 The mark MUST be moved only by a timestamp that was inside a signature. On the
 v1 payload the timestamp is outside it and therefore attacker-rewritable, and a
 verifier that honoured one there could have its mark parked beyond every future
-reset — permanently denying that peer the ability to heal a forked session,
+reset, permanently denying that peer the ability to heal a forked session,
 which is worse than the replay.
 
 A verifier MUST NOT apply either this rule or the ratchet to a peer that has

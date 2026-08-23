@@ -35,7 +35,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   **Nothing an application does changes.** Peers negotiate the payload through
   `ctrl_versions` in the key package, first contact converges in a single round
   trip, and a peer that has never produced the newer payload keeps every
-  behaviour it had — including resets, which is what a driven rekey arrives as.
+  behaviour it had, including resets, which is what a driven rekey arrives as.
   See [ADR 0023](./docs/adr/0023-a-control-frame-states-when-it-was-made.md).
 
   Two things to know for a deployment. A new `STALE_CONTROL_FRAME` security

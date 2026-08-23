@@ -211,7 +211,7 @@ the only row whose floor a leaf cannot accept: a leaf verifies only
 every control frame it sent refused, and the device would be unreachable rather
 than merely chattier. That is a deliberate departure from
 [rule 2](#2-absence-means-the-floor-never-an-error), and it is affordable for
-exactly one reason — a leaf has no legacy peer. The release that introduced the
+exactly one reason: a leaf has no legacy peer. The release that introduced the
 leaf profile is the release that introduced the device, so every phone that has
 ever paired with one already builds the newer payload. An implementer porting
 this profile MUST NOT treat the field as optional on the grounds that the others

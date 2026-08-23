@@ -148,7 +148,7 @@ this rule was clean and wrong.
 
 Without an escape the ratchet is a trap with no exit. A peer whose record of us
 was lost signs v1, because it no longer knows we accept v2, and is refused on the
-very frame that would have told it — and since a key package is the only frame
+very frame that would have told it, and since a key package is the only frame
 that re-teaches capabilities, the state is permanent.
 
 The case is **capability-record loss, not a reinstall.** An address is the hash
@@ -178,7 +178,7 @@ gap to close, it converges in one round trip, and the ratchet closes behind it.
 A published record has no known verifier: it is left on a relay for any stranger
 to fetch, so there is no advertised capability to pick a payload from. Signing
 v2 would make it unverifiable to every install that has not upgraded, and for
-cold contact that means the record does not work at all — being readable by
+cold contact that means the record does not work at all: being readable by
 someone never met is its entire purpose.
 
 It is not the hole it looks like. The record carries `session_reset: false`, so
@@ -191,7 +191,7 @@ subject, not this one's.
 
 Both checks read the verifier's own clock. A device that comes up with an unset
 one reads every honest peer as decades in the future and refuses all of them,
-taking out its whole control plane — key package exchange included — for as long
+taking out its whole control plane (key package exchange included) for as long
 as the clock is wrong.
 
 That is a self-inflicted outage a shipped app cannot wait for a new binary to
@@ -225,6 +225,16 @@ state, which is why the spent mark covers the reset alone and not every
 control frame: a mark per directive class is a per-peer record per class, and
 the cost is not worth paying for a frame whose replay re-states something
 already true.
+
+A control frame already sitting in the outbox when a peer's ratchet closes is
+refused for the rest of its retry ladder. Outbox entries are frozen signed
+bytes, so a frame minted under the older payload before that peer's first v2
+signature arrived cannot be re-signed, and it is refused on every attempt until
+terminal failure, up to the absolute cap of about 28 days. This is inherent to
+any ratchet rather than a gap in this one, it is bounded, and it heals: a key
+package still escapes, so the pair re-teaches itself and later frames are minted
+under the newer payload. It is written down here so the next reader meets it as
+a known cost rather than as a bug report.
 
 Nothing here changes the relay-answer forgery residual (threat model R1). A
 frame with no signer cannot be given a freshness statement either.

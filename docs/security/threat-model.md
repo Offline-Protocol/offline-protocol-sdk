@@ -335,7 +335,7 @@ high-water mark, because it is the directive that destroys state.
 
 **Why the rest are left bounded:** a mark per directive is a durable per-peer
 record per directive class, and the frames in question re-state something that
-is already true — a replayed presence update, typing indicator or capability
+is already true: a replayed presence update, typing indicator or capability
 advertisement asserts what the peer asserted when it sent the original. The cost
 of closing them is paid on every peer forever; the harm is a stale restatement
 inside a bounded window.
