@@ -28,8 +28,9 @@ use offline_protocol_leaf::{
 };
 use offline_protocol_mls::{storage::InMemoryStorage, MlsManager, MlsStorage};
 use offline_protocol_sealed::{
-    control_signing_payload, derive_address, prefixes, EncryptedMessage, GroupId,
-    KeyPackagePayload, WelcomeMessage, MLS_ENVELOPE_COMPACT_V1,
+    control_signing_payload_v2, derive_address, prefixes, EncryptedMessage, GroupId,
+    KeyPackagePayload, WelcomeMessage, CTRL_FRESHNESS_FUTURE_MS, LEAF_CTRL_FRESHNESS_PAST_MS,
+    MLS_ENVELOPE_COMPACT_V1,
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -72,7 +73,21 @@ fn device(store: Arc<dyn LeafStore>) -> LeafDevice {
 /// The canonical payload comes from the sealed layer, which is the one
 /// construction both ends use, so this is the phone's own signature rather
 /// than a second implementation of one.
+///
+/// The frame is stamped at [`NOW`], the same instant the device is told the
+/// time is, rather than at the wall clock. That is not tidiness: the stamp is
+/// inside the signature and the device refuses a frame older than its window,
+/// so a fixture stamped from the real clock would pass today and start failing
+/// on its own once wall-clock time drifted past `NOW` by more than the window
+/// allows. A test that expires is worse than no test, because it fails in a
+/// week on a change that had nothing to do with it.
 fn phone_control_frame(phone: &Phone, to: &str, content: String) -> Message {
+    phone_control_frame_at(phone, to, content, NOW)
+}
+
+/// [`phone_control_frame`] stamped at a chosen instant, for the tests whose
+/// subject is the stamp.
+fn phone_control_frame_at(phone: &Phone, to: &str, content: String, at_unix_secs: u64) -> Message {
     let mut message = Message::new(
         UserId::new(&phone.address).expect("phone address is a user id"),
         UserId::new(to).expect("device address is a user id"),
@@ -80,12 +95,19 @@ fn phone_control_frame(phone: &Phone, to: &str, content: String) -> Message {
         content,
     );
     message.priority = MessagePriority::High;
+    // Before signing, always: the timestamp is one of the signed fields, so a
+    // frame stamped afterwards carries a signature over a different frame than
+    // the one handed over, and every such test passes or fails for the wrong
+    // reason.
+    message.timestamp = offline_protocol_core::Timestamp::from_millis((at_unix_secs as i64) * 1000);
     sign_as(phone, &mut message);
     message
 }
 
 fn sign_as(phone: &Phone, message: &mut Message) {
-    let payload = control_signing_payload(message).expect("canonical payload");
+    // The freshness-bound payload, which is what the engine picks for a peer
+    // whose key package advertises it — and a leaf advertises nothing else.
+    let payload = control_signing_payload_v2(message).expect("canonical payload");
     let signature = phone.manager.sign_data(&payload).expect("phone signs");
     let public = phone
         .manager
@@ -439,6 +461,7 @@ fn a_key_package_that_claims_another_owner_is_refused() {
         env_versions: vec![],
         rich_versions: vec![],
         data_versions: vec![],
+        ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
         nostr_pubkey: None,
     };
 
@@ -687,6 +710,7 @@ fn a_peer_that_already_has_a_key_package_is_not_sent_another() {
         env_versions: vec![MLS_ENVELOPE_COMPACT_V1],
         rich_versions: vec![],
         data_versions: vec![],
+        ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
         nostr_pubkey: None,
     };
     let frame = phone_control_frame(
@@ -1178,6 +1202,7 @@ fn a_replayed_session_reset_does_not_tear_down_the_new_session() {
         env_versions: vec![MLS_ENVELOPE_COMPACT_V1],
         rich_versions: vec![],
         data_versions: vec![],
+        ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
         nostr_pubkey: None,
     };
     let reset_frame = phone_control_frame(
@@ -1213,11 +1238,12 @@ fn a_replayed_session_reset_does_not_tear_down_the_new_session() {
     device.handle(&welcome_frame, NOW).expect("device rejoins");
     assert!(device.has_session(&phone.address).expect("session check"));
 
-    // Now the captured frame is sent again. Nothing in the signed payload says
-    // when it was made, so it verifies exactly as well as it did the first
-    // time; what stops it is the device remembering that it already acted on
-    // it. Without that, one captured frame is a session teardown that can be
-    // replayed at will.
+    // Now the captured frame is sent again. Its signature verifies exactly as
+    // well as it did the first time, and it is inside the freshness window, so
+    // neither of those is what stops it: the device refuses it because its
+    // stamp is not newer than the last reset it acted on. Without that mark, a
+    // frame captured once is a session teardown replayable for as long as the
+    // window lasts.
     let replayed = device
         .handle(&reset_frame, NOW)
         .expect("the replay is handled");
@@ -1272,6 +1298,7 @@ fn a_flood_of_strangers_cannot_displace_an_established_peer() {
         env_versions: vec![MLS_ENVELOPE_COMPACT_V1],
         rich_versions: vec![],
         data_versions: vec![],
+        ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
         nostr_pubkey: None,
     };
     let frame = phone_control_frame(
@@ -1302,6 +1329,7 @@ fn a_flood_of_strangers_cannot_displace_an_established_peer() {
             env_versions: vec![],
             rich_versions: vec![],
             data_versions: vec![],
+            ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
             nostr_pubkey: None,
         };
         let frame = phone_control_frame(
@@ -1726,6 +1754,7 @@ fn advertisement_body(user_id: &str) -> String {
         env_versions: vec![MLS_ENVELOPE_COMPACT_V1],
         rich_versions: vec![],
         data_versions: vec![],
+        ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
         nostr_pubkey: None,
     };
     format!(
@@ -2511,5 +2540,239 @@ fn a_welcome_that_spends_a_package_the_device_no_longer_holds_names_the_real_fai
     assert!(
         matches!(err, LeafError::StaleKeyPackage(_)),
         "a welcome spending an evicted package produced {err:?}"
+    );
+}
+
+// ============================================================================
+// FRESHNESS (issue 403)
+// ============================================================================
+
+/// A frame the phone signed days ago is refused, whatever its signature says.
+#[test]
+fn a_frame_older_than_the_window_is_refused() {
+    let phone = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = pair(&phone, &mut device);
+
+    let stale_at = NOW - (LEAF_CTRL_FRESHNESS_PAST_MS / 1000) - 60;
+    let frame = phone_control_frame_at(
+        &phone,
+        &device_address,
+        format!("{}{{}}", prefixes::SESSION_CONFIRM_PROBE),
+        stale_at,
+    );
+
+    let refused = device.handle(&frame, NOW);
+    assert!(
+        matches!(refused, Err(LeafError::StaleControlFrame(_))),
+        "a frame older than the window must be refused as stale, got {refused:?}"
+    );
+
+    // The same frame, minted now, is answered — so the refusal is about the
+    // age and not about the fixture.
+    let fresh = phone_control_frame_at(
+        &phone,
+        &device_address,
+        format!("{}{{}}", prefixes::SESSION_CONFIRM_PROBE),
+        NOW,
+    );
+    assert!(device.handle(&fresh, NOW).is_ok());
+}
+
+/// And one stamped well ahead of the device's clock, which is what a *local*
+/// time-source fault looks like from the inside.
+#[test]
+fn a_frame_from_the_future_is_refused() {
+    let phone = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = pair(&phone, &mut device);
+
+    let ahead = NOW + (CTRL_FRESHNESS_FUTURE_MS / 1000) + 60;
+    let frame = phone_control_frame_at(
+        &phone,
+        &device_address,
+        format!("{}{{}}", prefixes::SESSION_CONFIRM_PROBE),
+        ahead,
+    );
+
+    assert!(matches!(
+        device.handle(&frame, NOW),
+        Err(LeafError::StaleControlFrame(_))
+    ));
+
+    // Modest skew is tolerated, or two honest devices refuse each other over a
+    // few seconds of clock disagreement.
+    let slight = phone_control_frame_at(
+        &phone,
+        &device_address,
+        format!("{}{{}}", prefixes::SESSION_CONFIRM_PROBE),
+        NOW + 30,
+    );
+    assert!(device.handle(&slight, NOW).is_ok());
+}
+
+/// A leaf verifies the freshness-bound payload and nothing else.
+///
+/// The older payload leaves the timestamp outside the signature, so accepting
+/// it would mean accepting a stamp an attacker rewrites — the window and the
+/// replay mark would both be reading attacker-chosen numbers. A phone accepts
+/// it because it must talk to installs that predate it; a leaf has no such
+/// peer, so here it is simply a refusal.
+#[test]
+fn a_frame_under_the_older_payload_is_refused() {
+    let phone = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = pair(&phone, &mut device);
+
+    let mut frame = Message::new(
+        UserId::new(&phone.address).expect("phone address"),
+        UserId::new(&device_address).expect("device address"),
+        offline_protocol_core::AppId::new(APP_ID).expect("app id"),
+        format!("{}{{}}", prefixes::SESSION_CONFIRM_PROBE),
+    );
+    frame.timestamp = offline_protocol_core::Timestamp::from_millis((NOW as i64) * 1000);
+    // The v1 payload: every field but the stamp.
+    let payload = offline_protocol_sealed::control_signing_payload(&frame).expect("v1 payload");
+    let signature = phone.manager.sign_data(&payload).expect("phone signs");
+    let public = phone
+        .manager
+        .get_identity_public_key()
+        .expect("phone public key");
+    frame.metadata.insert(
+        offline_protocol_sealed::CTRL_SIG_META_KEY.to_string(),
+        BASE64.encode(&signature),
+    );
+    frame.metadata.insert(
+        offline_protocol_sealed::CTRL_PK_META_KEY.to_string(),
+        BASE64.encode(&public),
+    );
+
+    let refused = device.handle(&frame, NOW);
+    assert!(
+        matches!(refused, Err(LeafError::ControlFrameRefused(_))),
+        "a frame under the older payload must not verify here, got {refused:?}"
+    );
+}
+
+/// The property a ring of remembered ids could never have: a reset *older*
+/// than the last one acted on is refused, even though this device has no
+/// memory of ever seeing it.
+///
+/// That is the difference between denying a repeat and denying a replay. An
+/// attacker holding several captures cannot pick the one that predates the
+/// device's memory and spend it.
+#[test]
+fn a_reset_older_than_the_last_one_acted_on_is_refused() {
+    let phone = new_phone();
+    let mut device = device(Arc::new(MemoryStore::new()));
+    let device_address = pair(&phone, &mut device);
+
+    let reset_frame_at = |at: u64| {
+        let package = phone
+            .manager
+            .take_push_key_package(&device_address)
+            .expect("phone mints a package");
+        let payload = KeyPackagePayload {
+            user_id: phone.address.clone(),
+            key_package_data: package.bundle.key_package_data,
+            remaining_lifetime_ms: 0,
+            timestamp_ms: 0,
+            session_reset: true,
+            wire_versions: vec![],
+            env_versions: vec![MLS_ENVELOPE_COMPACT_V1],
+            rich_versions: vec![],
+            data_versions: vec![],
+            ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
+            nostr_pubkey: None,
+        };
+        phone_control_frame_at(
+            &phone,
+            &device_address,
+            format!(
+                "{}{}",
+                prefixes::KEY_PACKAGE,
+                serde_json::to_string(&payload).expect("payload")
+            ),
+            at,
+        )
+    };
+
+    // An older capture the device never saw, and the current reset. Both are
+    // inside the window, so freshness alone admits either.
+    let older = reset_frame_at(NOW - 3600);
+    let current = reset_frame_at(NOW);
+
+    let acted = device.handle(&current, NOW).expect("device resets");
+    assert!(acted.events.contains(&LeafEvent::SessionReset {
+        peer: phone.address.clone(),
+    }));
+
+    let replayed = device
+        .handle(&older, NOW)
+        .expect("the older one is handled");
+    assert!(
+        !replayed.events.contains(&LeafEvent::SessionReset {
+            peer: phone.address.clone(),
+        }),
+        "a reset predating the last one acted on must not be spendable: {:?}",
+        replayed.events
+    );
+}
+
+/// The mark is on flash, not in RAM, or a power cut hands the attacker the
+/// replay back.
+#[test]
+fn a_spent_reset_stays_spent_across_a_power_cycle() {
+    let phone = new_phone();
+    let store: Arc<dyn LeafStore> = Arc::new(MemoryStore::new());
+    let mut device = device(store.clone());
+    let device_address = pair(&phone, &mut device);
+
+    let package = phone
+        .manager
+        .take_push_key_package(&device_address)
+        .expect("phone mints a package");
+    let payload = KeyPackagePayload {
+        user_id: phone.address.clone(),
+        key_package_data: package.bundle.key_package_data,
+        remaining_lifetime_ms: 0,
+        timestamp_ms: 0,
+        session_reset: true,
+        wire_versions: vec![],
+        env_versions: vec![MLS_ENVELOPE_COMPACT_V1],
+        rich_versions: vec![],
+        data_versions: vec![],
+        ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
+        nostr_pubkey: None,
+    };
+    let reset_frame = phone_control_frame_at(
+        &phone,
+        &device_address,
+        format!(
+            "{}{}",
+            prefixes::KEY_PACKAGE,
+            serde_json::to_string(&payload).expect("payload")
+        ),
+        NOW,
+    );
+
+    let acted = device.handle(&reset_frame, NOW).expect("device resets");
+    assert!(acted.events.contains(&LeafEvent::SessionReset {
+        peer: phone.address.clone(),
+    }));
+
+    // The power cut: everything in RAM is gone, the store is what is left.
+    drop(device);
+    let mut rebooted = crate::device(store);
+
+    let replayed = rebooted
+        .handle(&reset_frame, NOW)
+        .expect("the replay is handled");
+    assert!(
+        !replayed.events.contains(&LeafEvent::SessionReset {
+            peer: phone.address.clone(),
+        }),
+        "a reboot must not make a spent reset spendable again: {:?}",
+        replayed.events
     );
 }

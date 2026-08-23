@@ -5,19 +5,36 @@
 //!
 //! Every control frame in this protocol carries an Ed25519 signature in two
 //! metadata keys, over a domain-separated canonical payload built from the
-//! sender, the id, the recipient and the content. A leaf verifies three things
-//! and refuses on any of them:
+//! sender, the id, the recipient, the content and the frame's timestamp. A
+//! leaf verifies four things and refuses on any of them:
 //!
 //! 1. the signature metadata is present and complete,
 //! 2. the signature verifies under the key the frame presents,
-//! 3. **the presented key derives to the address the frame claims to be from**.
+//! 3. **the presented key derives to the address the frame claims to be from**,
+//! 4. **the frame is not older, or further ahead of this device's clock, than
+//!    the window allows**.
 //!
-//! The third is the one that means anything. The first two prove a key signed
+//! The third is the one that says *who*. The first two prove a key signed
 //! this; only the third proves it is the peer's key. Both halves of a
 //! mismatch, and an identifier that is not an address at all, are the same
 //! refusal: an identifier with no derivation to check is not a claim that
 //! needs waving through, it is the bypass, and answering "acceptable" for it
 //! is how an attacker skips the gate by claiming a nickname.
+//!
+//! The fourth says *when*, and without it the other three are a signature that
+//! never expires: a frame captured off the air verifies as well on its tenth
+//! delivery as on its first, and a key package carrying `session_reset` tears
+//! down a live session on each one (issue 403).
+//!
+//! # Why a leaf verifies only the freshness-bound payload
+//!
+//! A phone accepts both, because refusing the older one would refuse first
+//! contact with installs that predate it. A leaf has no such peer. This crate's
+//! first release is the one that introduced the device, so every phone that
+//! has ever paired with a leaf already produces the newer payload, and
+//! accepting the older one would buy compatibility with nothing while leaving
+//! the whole gap open. It is the same reasoning that makes an unsigned frame a
+//! refusal here rather than a downgrade.
 
 use alloc::{
     format,
@@ -30,7 +47,8 @@ use offline_protocol_core::{
     Address, AppId, LamportClock, Message, MessageId, MessagePriority, Timestamp, UserId,
 };
 use offline_protocol_sealed::{
-    control_signing_payload, derive_address, CTRL_PK_META_KEY, CTRL_SIG_META_KEY,
+    control_frame_freshness, control_signing_payload_v2, derive_address, Freshness,
+    CTRL_FRESHNESS_FUTURE_MS, CTRL_PK_META_KEY, CTRL_SIG_META_KEY, LEAF_CTRL_FRESHNESS_PAST_MS,
 };
 
 use crate::error::{LeafError, Result};
@@ -144,8 +162,15 @@ fn millis(now_unix_secs: u64) -> i64 {
 /// second construction here to get subtly wrong. Metadata is deliberately
 /// outside the signature because relays rewrite it, which is also why the
 /// order of these two inserts does not matter.
+///
+/// Always the freshness-bound payload, unconditionally. A phone chooses per
+/// recipient, because it talks to installs that predate it; a leaf has no such
+/// peer and no capability to consult, so there is nothing here to decide.
+/// The frame's timestamp is inside this signature, so whatever `mint` stamped
+/// is now covered: a device with a wrong clock produces frames its peer
+/// refuses, which is the direction that fails safely.
 pub(crate) fn sign_control_frame(identity: &Identity, message: &mut Message) -> Result<()> {
-    let payload = control_signing_payload(message)?;
+    let payload = control_signing_payload_v2(message)?;
     let signature = identity::sign(identity, &payload)?;
     message
         .metadata
@@ -163,7 +188,13 @@ pub(crate) fn sign_control_frame(identity: &Identity, message: &mut Message) -> 
 /// protocol is signed, so one that is not is either an implementation that
 /// skipped the step or an injection, and there is no third reading that would
 /// make accepting it safe.
-pub(crate) fn verify_control_frame(message: &Message) -> Result<Vec<u8>> {
+///
+/// `now_unix_secs` is this device's clock, and it is a parameter for the same
+/// reason it is one everywhere else in this crate: a leaf has no clock of its
+/// own to reach for, so the caller that has one supplies it. A device that
+/// supplies a wrong one refuses its peer, which is loud; a device that was
+/// allowed to skip supplying one would accept anything, which is silent.
+pub(crate) fn verify_control_frame(message: &Message, now_unix_secs: u64) -> Result<Vec<u8>> {
     let signature = message.metadata.get(CTRL_SIG_META_KEY);
     let public_key = message.metadata.get(CTRL_PK_META_KEY);
 
@@ -191,9 +222,27 @@ pub(crate) fn verify_control_frame(message: &Message) -> Result<Vec<u8>> {
 
     verify_sender_derivation(message.sender.as_str(), &public_key)?;
 
-    let payload = control_signing_payload(message)?;
+    let payload = control_signing_payload_v2(message)?;
     identity::verify(&public_key, &signature, &payload)?;
-    Ok(public_key)
+
+    // Only now, with the stamp proved to be the sender's own rather than
+    // something a relay or an attacker wrote on the way past. Judging it
+    // before the signature would be judging an attacker-chosen number.
+    match control_frame_freshness(
+        message.timestamp.as_millis(),
+        millis(now_unix_secs),
+        LEAF_CTRL_FRESHNESS_PAST_MS,
+        CTRL_FRESHNESS_FUTURE_MS,
+    ) {
+        Freshness::Fresh => Ok(public_key),
+        Freshness::Stale { age_ms } => Err(LeafError::StaleControlFrame(format!(
+            "frame is {age_ms} ms old, past what this device accepts"
+        ))),
+        Freshness::FromTheFuture { skew_ms } => Err(LeafError::StaleControlFrame(format!(
+            "frame is stamped {skew_ms} ms ahead of this device's clock; check the clock \
+             before the peer"
+        ))),
+    }
 }
 
 /// Requires the presented key to derive to the address the frame claims.
