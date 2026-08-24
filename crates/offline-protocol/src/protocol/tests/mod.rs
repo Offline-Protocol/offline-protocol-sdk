@@ -3,6 +3,7 @@ mod data_layer;
 #[cfg(feature = "data")]
 mod data_sync;
 mod data_sync_group;
+mod leaf_pairing;
 
 use super::*;
 use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY};

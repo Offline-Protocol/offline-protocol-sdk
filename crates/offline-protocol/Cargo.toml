@@ -60,6 +60,7 @@ rand_core = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+offline-protocol-leaf = { workspace = true }
 offline-protocol-transport = { workspace = true, features = ["test-utils"] }
 # Forging a leaf that lies about its identity needs raw OpenMLS, which this
 # crate deliberately does not depend on. The fixture lives with the code it
