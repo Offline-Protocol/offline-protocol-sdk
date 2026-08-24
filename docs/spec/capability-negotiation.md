@@ -41,10 +41,13 @@ An absent capability list decodes to empty, and empty selects the permanent
 floor. A legacy peer that has never heard of a field is served the floor form
 automatically.
 
-`ctrl_versions` departs from this **on a leaf node only**, which is stated where
-that profile is described. On an install running the engine the rule holds
-unchanged: an absent `ctrl_versions` selects `offline-ctrl-v1`, which every
-engine verifies.
+`ctrl_versions` departs from this **on a leaf node only**, and only after first
+contact, which is stated where that profile is described. A leaf accepts the
+floor form on `__MLS_KEY_PKG__`, because that is the frame which carries
+`ctrl_versions` and therefore the one a peer must be able to send before it
+knows anything; it refuses the floor form on every other control frame. On an
+install running the engine the rule holds unchanged: an absent `ctrl_versions`
+selects `offline-ctrl-v1`, which every engine verifies.
 
 ### 3. Downgrade loses the feature, never the confidentiality
 
@@ -193,7 +196,7 @@ A minimal leaf advertises little and works fully:
 | `env_versions` | `[1]` if it decodes the compact envelope, else empty | Empty means peers send the JSON envelope, which is the permanent floor |
 | `rich_versions` | Empty | Peers send plain text and drop extras rather than sending them in a weaker form |
 | `data_versions` | Empty | No document replication with this peer |
-| `ctrl_versions` | `[2]`, always | Not optional, unlike every other row: a leaf verifies only the freshness-bound payload, so a peer that sent it the older one would have every control frame refused |
+| `ctrl_versions` | `[2]`, always | Not optional, unlike every other row: a leaf verifies the freshness-bound payload on every control frame except `__MLS_KEY_PKG__`, so a peer that never learned this and kept sending the older one would have its Welcome refused and never complete a pairing |
 | `nostr_pubkey` | Absent unless the device is reachable over that carrier | Peers seal to the publicly computable key |
 
 Two consequences follow from the universal rules above, and both are easy to

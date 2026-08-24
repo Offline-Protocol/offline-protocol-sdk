@@ -663,6 +663,38 @@ When offline, key packages can be exchanged via:
 - Generate multiple key packages and upload to server
 - Delete used key packages from server after session creation
 
+### Post-compromise security is yours to schedule
+
+Post-compromise security is the property that an attacker who stole key material
+loses their read once the keys rotate. In MLS that happens when a commit rotates
+a member's leaf in the ratchet tree, and this SDK originates one on a **re-key**.
+
+**Nothing in the SDK schedules a re-key.** One fires on an epoch desync, which
+is a fault rather than a schedule, and one fires when your application asks. The
+re-key interval is a floor on how often either may happen, not a timer. So a
+pair that never forks and whose application never asks never rotates, and the
+window a stolen key stays useful for is bounded by nothing.
+
+Ask on whatever interval fits the deployment:
+
+```typescript
+// Rotate the session with a peer. Returns false when the per-peer rate-limit
+// window has not lapsed, which is not an error: call again later.
+const rotated = await protocol.rekeySession(peerId);
+```
+
+The peer sees exactly what a desync-driven re-key sends, and queued messages
+survive: they are sealed at flush time against whatever session is current then.
+The cost is a teardown, a key-package exchange and a re-establish, which is why
+the interval is yours rather than the SDK's. A mains-powered lock and a phone
+on a metered link do not want the same number, and nothing on the wire says
+which is on the other end.
+
+This matters most for a [leaf node](spec/leaf-provisioning.md), a lock or a
+sensor, which never commits at all, so every rotation in such a pair is your
+side's to originate. It is not exclusive to one: two phones that simply never
+desync are in the same position.
+
 ### Group Roles and Permissions
 
 Groups use a role-based permission model:

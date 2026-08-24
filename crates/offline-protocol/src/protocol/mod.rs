@@ -2322,26 +2322,6 @@ impl OfflineProtocol {
         self.mesh_relay.forget_peer(peer_id);
     }
 
-    /// Establishes a secure MLS session with a peer.
-    ///
-    /// This high-level method handles the complete session establishment flow:
-    /// 1. Checks if a session already exists (returns Ok(None) if so)
-    /// 2. Checks for a pending key package from the peer
-    /// 3. If found, imports the key package, creates the session, and sends the Welcome message
-    /// 4. If no key package is available, returns an error
-    ///
-    /// This method is designed for use by application code that needs explicit control
-    /// over session establishment, as opposed to the automatic encryption flow.
-    ///
-    /// # Arguments
-    ///
-    /// * `peer_id` - The ID of the peer to establish a session with
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(Some(WelcomeMessage))` - Session created, Welcome message returned (and sent to peer)
-    /// * `Ok(None)` - Session already exists
-    /// * `Err(SessionNotReady(state))` - Establishment in progress; caller can retry or show "Establishing…"
     /// Tears down the 1:1 session with `peer_id` and rebuilds it, advancing
     /// post-compromise security.
     ///
@@ -2419,6 +2399,26 @@ impl OfflineProtocol {
         Ok(true)
     }
 
+    /// Establishes a secure MLS session with a peer.
+    ///
+    /// This high-level method handles the complete session establishment flow:
+    /// 1. Checks if a session already exists (returns Ok(None) if so)
+    /// 2. Checks for a pending key package from the peer
+    /// 3. If found, imports the key package, creates the session, and sends the Welcome message
+    /// 4. If no key package is available, returns an error
+    ///
+    /// This method is designed for use by application code that needs explicit control
+    /// over session establishment, as opposed to the automatic encryption flow.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_id` - The ID of the peer to establish a session with
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(WelcomeMessage))` - Session created, Welcome message returned (and sent to peer)
+    /// * `Ok(None)` - Session already exists
+    /// * `Err(SessionNotReady(state))` - Establishment in progress; caller can retry or show "Establishing…"
     pub fn establish_secure_session(&mut self, peer_id: &str) -> Result<Option<WelcomeMessage>> {
         if self.is_user_blocked(peer_id) {
             return Err(Error::UserBlocked(peer_id.to_string()));

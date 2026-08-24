@@ -209,12 +209,16 @@ MLS key generation is exactly as strong as what it returns. The footprint
 harness registers a counter in that slot, which is sound for measuring an image
 that never executes and must never be copied into firmware.
 
-**Post-compromise security arrives on a cadence the phone sets.** Healing
-happens when a commit rotates the device's leaf. A never-committing device does
-not originate those, so the phone's existing session rekey path is what drives
-recovery, and its interval is what bounds the window. Letting a device originate
-Update proposals would make it self-healing and is deliberately not in this
-decision.
+**Post-compromise security is the phone's to originate, and nothing schedules
+it.** Healing happens when a commit rotates the device's leaf. A
+never-committing device does not originate those, so the phone's session rekey
+path is what drives recovery. That path fires on an epoch desync and on an
+application asking for one; the rekey interval is a floor on how often either
+may happen, not a timer. A pair that never forks and whose application never
+asks therefore never heals, so the cadence is an integrator obligation rather
+than a setting, and `rekey_session` is the call that discharges it. Letting a
+device originate Update proposals would make it self-healing on its own
+schedule and is deliberately not in this decision.
 
 **A QR code must not carry a key package.** An MLS init key is single-use and a
 sticker is not, so the second person to scan one gets a collision. Pairing keeps

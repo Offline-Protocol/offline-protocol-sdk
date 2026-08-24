@@ -130,6 +130,27 @@ specific except where the time in step 2 comes from.
 From step 4 the pair is an ordinary 1:1 session. Every later message is an
 `__MLS_ENC__` envelope in both directions.
 
+**Either end may send the first key package.** The order above is the one an
+out-of-band anchor produces, and a phone that meets a device over the radio
+sends its own package first instead, unprompted, on discovering the neighbour.
+A leaf MUST accept that order: it answers with a key package of its own, and
+the exchange continues from step 3. Refusing it does not make a device safer,
+it makes a phone-initiated pairing impossible, because the frame refused is the
+only thing that would have told the device the phone exists.
+
+That first frame is signed under the **older control payload**, whatever
+release its sender runs. A sender picks the payload from what the recipient has
+advertised in `ctrl_versions`, and `ctrl_versions` travels in a key package, so
+a peer never met has advertised nothing yet
+([ADR 0023](../adr/0023-a-control-frame-states-when-it-was-made.md)). A leaf
+MUST therefore accept `__MLS_KEY_PKG__` under the older payload, MUST ignore
+that frame's `session_reset`, and MUST NOT judge its age, since the payload
+leaves the timestamp outside the signature. Every other control frame a leaf
+accepts MUST be refused under it, and none of them needs the exception: a
+Welcome and a confirmation probe can only follow this device's own key package
+reaching the peer, which is the frame that teaches the peer to sign the
+freshness-bound payload.
+
 ### What the anchor is, and is not
 
 The out-of-band artifact is the whole of first-contact trust, exactly as it is
@@ -357,11 +378,28 @@ already right for a device: no hops, because a leaf is a direct peer, and BLE,
 because that is the radio a leaf is paired over. A device does not own its
 transport, so naming one would be firmware's guess crossing the wire as fact.
 
-### Post-compromise security arrives on the phone's cadence
+### Post-compromise security is the phone's to originate
 
 Healing happens when a commit rotates the device's leaf in the ratchet tree. A
 device that never commits does not originate those, so the phone's session
-rekey path drives recovery and its interval bounds the window.
+rekey path is the only thing that drives recovery in such a pair.
+
+**Nothing drives it on a timer.** An engine fires that path on an epoch desync
+and on an application asking for one, and the rekey interval is a floor on how
+often either may happen rather than a schedule that fires anything. A pair that
+never forks and whose application never asks therefore never heals, and the
+window an attacker holding old key material keeps open is bounded by nothing.
+
+So the cadence is the integrator's, and it is an obligation rather than a
+setting: a deployment that wants post-compromise security has to ask for it, on
+an interval it chooses. The engine cannot choose one, because a rotation costs a
+teardown, a key-package exchange and a re-establish, and what that is worth to a
+mains-powered lock and to a phone on a metered link are different answers that
+nothing on the wire distinguishes.
+
+Nothing about this is leaf-specific except how sharply it bites. Two installs
+that simply never desync are in the same position; a leaf is where it is
+guaranteed, because the device cannot originate a rotation even in principle.
 
 A phone-driven rekey reaches the device as a `__MLS_KEY_PKG__` frame with
 `session_reset` set, not as an unsolicited Welcome. A leaf MUST, on receiving
@@ -386,7 +424,9 @@ This is sound only because the stamp is inside the signature (see
 [Control message freshness](control-messages.md#freshness)). On a payload that
 left it outside, an attacker would rewrite it, park the mark past every future
 reset and permanently deny the pair the ability to heal, which is a worse
-failure than the replay. A leaf verifies no such payload.
+failure than the replay. That is why a leaf ignores the `session_reset` on the
+one frame it does accept under the older payload: the exception admits an
+advertisement, never a teardown.
 
 It supersedes the bounded list of recently-seen frame ids that earlier releases
 of this profile described, which denied a repeat of a remembered frame and left
