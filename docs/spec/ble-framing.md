@@ -74,11 +74,66 @@ response, and it MUST be subscribable.
 readable and carries the `off1…` address as UTF-8.
 
 **Identity** is read to prove that address. It MUST be readable and carries the
-signed identity assertion whose verification is specified in
-[identity and addressing](identity.md); this chapter does not restate its
-contents. The pair matters together: the device id says who a peer claims to
-be, the identity characteristic is what makes the claim checkable, and a
-central that reads the first without checking the second has learned nothing.
+signed identity assertion specified below. The pair matters together: the
+device id says who a peer claims to be, the identity characteristic is what
+makes the claim checkable, and a central that reads the first without checking
+the second has learned nothing.
+
+### The identity assertion
+
+The Identity characteristic carries one fixed-layout value:
+
+| Field | Size | Value |
+|-------|------|-------|
+| `public_key` | 32 | The peer's Ed25519 identity public key |
+| `signature` | 64 | Ed25519 signature by that key over `signed_data` |
+| `signed_data` | remainder | The bytes that signature covers |
+
+A reader MUST refuse a value shorter than 96 bytes. `signed_data` is whatever
+follows the signature, and may be empty.
+
+Verification runs in this order, and any failure means the peer is not
+surfaced at all rather than surfaced with a caveat:
+
+1. Parse `public_key` as an Ed25519 verifying key.
+2. Verify `signature` over `signed_data` under it.
+3. Derive an address from `public_key` using the single derivation in
+   [identity and addressing](identity.md#address-derivation).
+4. Compare that address to the Device id characteristic's string. The
+   comparison is exact. Addresses are canonical bech32m, so a value differing
+   only in case belongs to a peer that did not derive its own id the way this
+   one did, and is refused rather than normalised into agreement.
+
+There is no accept-but-flag state, because what this produces is not a label:
+it becomes `Message.recipient` on every outbound frame and the
+transport-verified peer id the receiving core matches `Message.sender`
+against. The address announced is always the **derived** one, never the string
+read from Device id. The two are equal whenever verification succeeds, so
+using the derived value costs nothing, and it means no code path can announce
+a name that arrived unauthenticated.
+
+Two limits are deliberate, and firmware should not read more into a verified
+assertion than it proves.
+
+**`signed_data` carries no meaning at this layer.** The shipped peripherals
+put their mesh advertisement there; the shipped centrals never decode it,
+never compare it against the advertisement received over the air, and never
+feed it into routing. It is a message to sign, and the signature over it
+proves possession of the private key for `public_key`, which is what makes
+step 3 mean anything: deriving an address without checking a signature proves
+nothing, because anyone can copy a public key. Nothing domain-separates these
+bytes, so any signature that key ever produced over any message verifies here.
+That is harmless only while `signed_data` is uninterpreted. Giving it meaning
+requires adding a domain separator first, and that is a wire break.
+
+**The assertion is static, so it is replayable.** Nothing in the read is
+challenged or timestamped, so a device in radio range can serve a value it
+copied from another peer and bind its own link to that peer's address. What it
+cannot do is produce the frames that address must sign, so the exposure is a
+link labelled with a name its holder cannot use, and message authenticity is
+established above by the layer that owns it. A receiver MUST NOT treat a
+verified assertion as evidence that the peer is live, is recent, or is the
+only holder of that address.
 
 ### Notify or indicate
 
@@ -129,6 +184,15 @@ frames cleanly instead of misparsing them.
 identifier inside the reassembled payload or draw any conclusion from it. It is
 an assembly key.
 
+Two frames are malformed on this encoding without being refused. A sender MUST
+NOT emit `id_len = 0`, because an empty assembly key is not a key: every such
+message from every peer in range merges into one assembly and none of them
+reassembles. A sender MUST NOT emit trailing bytes past `data_len` either. The
+reference receiver enforces neither, accepting the empty key and reading no
+further than `data_len`, so firmware MUST NOT infer from that silence that
+either frame conforms. Both cost the sender its own message, which is why the
+receiver spends nothing rejecting them.
+
 ### Payload
 
 `data` concatenated in index order is a hop-local encoding of one message,
@@ -175,7 +239,8 @@ anything:
 3. Refuse a `total_fragments` that disagrees with what an existing assembly for
    the same id already recorded.
 4. Refuse when the payload bytes buffered so far, plus this fragment, would
-   exceed the maximum message size, and drop the whole assembly when that
+   exceed `DEFAULT_MAX_MESSAGE_SIZE` (in the constants table below, 1 MiB on
+   this encoding), and drop the whole assembly when that
    happens rather than holding its bytes until a timeout. The check MUST run as
    fragments arrive, not once an assembly completes; an assembly that never
    reaches its declared total would otherwise never be measured at all. A
@@ -203,33 +268,67 @@ started.
 
 ### Constants
 
-Shipped values. The first three are wire-visible and a peer must agree on them;
-the rest are local policy, stated so an implementer has a working starting
-point rather than a blank.
+Shipped values. **Agreed** means a peer must use the same value: a receiver
+that picks its own drops messages a conforming sender is entitled to produce,
+which is an interop break between two implementations that each believe they
+conform. **Local** means the value is one implementation's policy and a peer
+cannot observe it, stated here so an implementer has a working starting point
+rather than a blank.
 
-| Constant | Value | Meaning |
-|----------|-------|---------|
-| `FRAGMENT_VERSION` | `1` | The version byte in every header |
-| `FRAGMENT_HEADER_FIXED` | `10` | Header bytes before `message_id` is added |
-| `BLE_MAX_FRAGMENT_SIZE` | `185` | Payload floor when no MTU has been negotiated |
-| `MAX_REASONABLE_BLE_PAYLOAD` | `512` | Clamp on a reported MTU |
-| `BLE_MAX_FRAGMENT_COUNT` | `512` | Cap on `total_fragments` |
-| `BLE_MAX_FRAGMENT_ASSEMBLIES` | `64` | Concurrent partial messages held |
-| `BLE_FRAGMENT_TIMEOUT_SECS` | `30` | Idle window before a partial assembly is evicted |
+| Constant | Value | Kind | Meaning |
+|----------|-------|------|---------|
+| `FRAGMENT_VERSION` | `1` | Agreed | The version byte in every header |
+| `FRAGMENT_HEADER_FIXED` | `10` | Agreed | Header bytes before `message_id` is added |
+| `BLE_MAX_FRAGMENT_SIZE` | `185` | Agreed | Payload floor when no MTU has been negotiated |
+| `BLE_MAX_FRAGMENT_COUNT` | `512` | Agreed | Cap on `total_fragments`, both emitted and accepted |
+| `DEFAULT_MAX_MESSAGE_SIZE` | `1048576` | Agreed | Ceiling on one reassembled message, in bytes |
+| `MAX_REASONABLE_BLE_PAYLOAD` | `512` | Local | Clamp on a reported MTU |
+| `BLE_MAX_FRAGMENT_ASSEMBLIES` | `64` | Local | Concurrent partial messages held |
+| `BLE_FRAGMENT_TIMEOUT_SECS` | `30` | Local | Idle window before a partial assembly is evicted |
+
+`BLE_MAX_FRAGMENT_COUNT` is agreed rather than local because both sides use it:
+a sender refuses to emit more than 512 fragments and a receiver refuses to
+accept a larger declared total, so a receiver that lowered it unilaterally
+would reject messages a conforming sender emits.
 
 The floor is the historical iOS auto-negotiated minimum ATT MTU. The clamp is
 BLE 5's 517-byte maximum less the 3-byte ATT header, rounded down for margin. A
 sender that has not yet learned a peer's MTU MUST use the floor rather than
 guess upward.
 
+### The ceiling this radio actually has
+
+The two agreed bounds are both ceilings on one message, and on this carrier the
+fragment count binds first:
+
+```
+max_message_on_ble = BLE_MAX_FRAGMENT_COUNT * (mtu - 10 - id_len)
+```
+
+With a UUID `message_id`, that is 512 x 139 = 71168 bytes at the 185-byte
+floor, and 512 x 466 = 238592 bytes at the 512-byte clamp. Both are far under
+`DEFAULT_MAX_MESSAGE_SIZE`, so a payload that the message layer accepts can
+still be unsendable over Bluetooth LE, and it fails at the sender rather than
+in flight. A firmware author sizing anything large, an MLS Welcome into a big
+group most of all, needs that number rather than the 1 MiB one.
+
 ## Conformance vectors
 
 `crates/offline-protocol-transport/tests/data/ble-framing-v1.vectors.json`
 carries frames in hex with the outcome each one requires: four reassembly cases
-including out-of-order and duplicated indices, and nine refusals covering every
-check above. They are computed from this chapter rather than from the
-implementation, so a disagreement is evidence about one of them rather than two
-copies of one mistake agreeing.
+including out-of-order and duplicated indices, and nine refusals. They are
+computed from this chapter rather than from the implementation, so a
+disagreement is evidence about one of them rather than two copies of one
+mistake agreeing.
+
+The refusals cover every check above except the size bound, which no practical
+vector can reach: exceeding 1 MiB takes at least seventeen full 64 KiB frames,
+and a vector file that carried them would be megabytes of hex pinning
+arithmetic that a unit test pins for free.
+`test_ble_reassembled_payload_rejects_oversized` in
+`crates/offline-protocol-transport/src/ble.rs` covers that bound instead, and
+pins the incremental part of it: rejection fires on the fragment that crosses
+the limit, not at completion.
 
 A vector that fails means the wire format moved, which needs a new
 `FRAGMENT_VERSION` and a new vector file. Editing an expected value to make a

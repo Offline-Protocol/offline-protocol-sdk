@@ -19,13 +19,13 @@ use offline_protocol_transport::ble::BleTransport;
 use offline_protocol_transport::ble::PeerDevice;
 use offline_protocol_transport::constants::{
     BLE_FRAGMENT_TIMEOUT_SECS, BLE_MAX_FRAGMENT_ASSEMBLIES, BLE_MAX_FRAGMENT_COUNT,
-    BLE_MAX_FRAGMENT_SIZE, FRAGMENT_HEADER_FIXED, FRAGMENT_VERSION, MAX_REASONABLE_BLE_PAYLOAD,
+    BLE_MAX_FRAGMENT_SIZE, DEFAULT_MAX_MESSAGE_SIZE, FRAGMENT_HEADER_FIXED, FRAGMENT_VERSION,
+    MAX_REASONABLE_BLE_PAYLOAD,
 };
 use offline_protocol_transport::Transport;
 use serde_json::Value;
 
 const VECTORS: &str = include_str!("data/ble-framing-v1.vectors.json");
-const CHAPTER: &str = include_str!("../../../docs/spec/ble-framing.md");
 
 fn vectors() -> Value {
     serde_json::from_str(VECTORS).expect("the vector file is valid JSON")
@@ -54,6 +54,24 @@ fn name(case: &Value) -> &str {
 
 fn transport() -> BleTransport {
     BleTransport::new("vectors-device")
+}
+
+/// The spec chapter, or `None` where the repo tree is absent.
+///
+/// Read at runtime rather than with `include_str!` because the chapter lives
+/// outside the package root: `cargo package` carries `tests/` and the vector
+/// file but cannot carry `docs/`, so compiling the path in would leave the
+/// published crate's tests unable to build at all.
+fn chapter() -> Option<String> {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/spec/ble-framing.md");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(_) => {
+            eprintln!("spec tree not present, skipping the BLE framing chapter drift checks");
+            None
+        }
+    }
 }
 
 /// Every reassembly vector produces exactly one message, on its last frame.
@@ -248,8 +266,13 @@ fn sizing_follows_the_stated_arithmetic() {
 /// follows it produces a device that fails in the field rather than at the
 /// document. The table is parsed out of the chapter so a value edited in one
 /// place and not the other fails here.
+///
 #[test]
 fn the_chapter_states_the_constants_the_code_uses() {
+    let Some(chapter) = chapter() else {
+        return;
+    };
+
     let expected: &[(&str, String)] = &[
         ("FRAGMENT_VERSION", FRAGMENT_VERSION.to_string()),
         ("FRAGMENT_HEADER_FIXED", FRAGMENT_HEADER_FIXED.to_string()),
@@ -267,10 +290,14 @@ fn the_chapter_states_the_constants_the_code_uses() {
             "BLE_FRAGMENT_TIMEOUT_SECS",
             BLE_FRAGMENT_TIMEOUT_SECS.to_string(),
         ),
+        (
+            "DEFAULT_MAX_MESSAGE_SIZE",
+            DEFAULT_MAX_MESSAGE_SIZE.to_string(),
+        ),
     ];
 
     for (constant, value) in expected {
-        let row = CHAPTER
+        let row = chapter
             .lines()
             .find(|line| line.contains(constant) && line.starts_with('|'))
             .unwrap_or_else(|| {
@@ -279,6 +306,42 @@ fn the_chapter_states_the_constants_the_code_uses() {
         assert!(
             row.contains(&format!("`{value}`")),
             "the chapter's `{constant}` row does not state `{value}`: {row}"
+        );
+    }
+}
+
+/// The chapter states the largest message this radio can actually carry, and
+/// that number is computed rather than measured, so nothing but a test keeps it
+/// true.
+///
+/// `BLE_MAX_FRAGMENT_COUNT` and `DEFAULT_MAX_MESSAGE_SIZE` are both ceilings on
+/// one message, and which of them binds is the whole point of the paragraph:
+/// a payload the message layer accepts can still be unsendable here. Lower the
+/// fragment cap or raise the floor and the stated bytes go stale silently,
+/// which is the same drift the constants table guard exists to catch.
+#[test]
+fn the_chapter_states_the_ceiling_this_radio_has() {
+    let Some(chapter) = chapter() else {
+        return;
+    };
+
+    let uuid_id_len = vectors()["sizing"]["uuid_id_len"].as_u64().unwrap_or(0) as usize;
+
+    for (label, mtu) in [
+        ("floor", BLE_MAX_FRAGMENT_SIZE),
+        ("clamp", MAX_REASONABLE_BLE_PAYLOAD),
+    ] {
+        let ceiling = BLE_MAX_FRAGMENT_COUNT * (mtu - FRAGMENT_HEADER_FIXED - uuid_id_len);
+        assert!(
+            chapter.contains(&ceiling.to_string()),
+            "the chapter does not state the {label} ceiling of {ceiling} bytes"
+        );
+        // The claim the paragraph rests on: on this carrier the fragment count
+        // runs out first, so quoting the 1 MiB message ceiling would mislead.
+        assert!(
+            ceiling < DEFAULT_MAX_MESSAGE_SIZE,
+            "the {label} ceiling {ceiling} no longer binds before DEFAULT_MAX_MESSAGE_SIZE; \
+             the chapter's claim that the fragment count binds first is now false"
         );
     }
 }
