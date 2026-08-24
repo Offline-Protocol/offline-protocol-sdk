@@ -431,9 +431,10 @@ fn the_phone_records_exactly_the_capabilities_a_leaf_advertises() {
         "a device advertises the compact envelope and the phone must seal to it that way"
     );
     assert!(
-        pair.phone.protocol.signs_freshness_bound_control(&leaf),
-        "a device signs the freshness-bound control payload, and a phone that \
-         did not record it would keep sending the older one"
+        pair.phone.protocol.signs_freshness_bound_control_to(&leaf),
+        "a device verifies the freshness-bound control payload, and a phone that \
+         did not record it would keep signing the older one, which the device \
+         refuses on everything but a key package"
     );
     assert!(
         !pair.phone.protocol.peer_rich_payload.contains(&leaf),
@@ -1027,5 +1028,34 @@ fn a_rotation_inside_the_window_is_refused_rather_than_repeated() {
         !pair.phone.protocol.rekey_session(&leaf).expect("second"),
         "a caller looping on this could tear a pair down as fast as it liked, \
          which is what the shared floor exists to prevent"
+    );
+}
+
+/// A relaunched phone still signs the payload the device can verify.
+///
+/// The device refuses every control frame but a key package under the older
+/// payload, and the phone picks its payload from what the device advertised. So
+/// that advertisement has to survive a relaunch: an engine that came back and
+/// forgot it would sign a Welcome the device refuses, and a pairing interrupted
+/// by a restart could never finish. The durable capability record is what
+/// carries it, and nothing else here would notice if that stopped being read.
+#[test]
+fn a_relaunched_phone_still_signs_what_the_device_can_verify() {
+    let mut pair = Pair::new("alice");
+    let leaf = pair.leaf_address();
+
+    pair.phone.protocol.on_neighbor_discovered(&leaf);
+    pair.settle();
+    assert!(
+        pair.phone.protocol.signs_freshness_bound_control_to(&leaf),
+        "the phone never recorded what the device advertised"
+    );
+
+    pair.phone.restart();
+
+    assert!(
+        pair.phone.protocol.signs_freshness_bound_control_to(&leaf),
+        "a relaunched phone forgot that this peer verifies the freshness-bound \
+         payload, so every control frame it now signs would be refused"
     );
 }
