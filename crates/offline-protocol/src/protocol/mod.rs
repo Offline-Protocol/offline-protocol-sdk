@@ -2342,6 +2342,83 @@ impl OfflineProtocol {
     /// * `Ok(Some(WelcomeMessage))` - Session created, Welcome message returned (and sent to peer)
     /// * `Ok(None)` - Session already exists
     /// * `Err(SessionNotReady(state))` - Establishment in progress; caller can retry or show "Establishing…"
+    /// Tears down the 1:1 session with `peer_id` and rebuilds it, advancing
+    /// post-compromise security.
+    ///
+    /// # Why an application has to ask
+    ///
+    /// Post-compromise security arrives when a commit rotates a member's leaf
+    /// in the ratchet tree. This engine originates one on a re-key, and until
+    /// now the only thing that drove a re-key was an **epoch desync**: a
+    /// healthy pair that never forked never rotated, so the window an attacker
+    /// holding old key material keeps open was bounded by nothing.
+    ///
+    /// That is felt hardest against a leaf node, which never commits at all, so
+    /// every rotation in such a pair is the phone's to originate. It is not
+    /// exclusive to one: two phones that simply never desync are in the same
+    /// position.
+    ///
+    /// The cadence is the application's because this engine cannot pick one.
+    /// A rotation costs a teardown, a key-package exchange and a re-establish,
+    /// and what that is worth depends on the deployment: a door lock on mains
+    /// power and a phone on a metered link do not want the same interval, and
+    /// nothing on the wire says which one is on the other end.
+    ///
+    /// # What the peer sees
+    ///
+    /// Exactly what a desync-driven re-key sends, because it is the same code:
+    /// a `__MLS_KEY_PKG__` frame carrying `session_reset`. A peer running this
+    /// engine discards its stale session and converges in one round trip; a
+    /// leaf node discards its session, mints a fresh key package and re-pairs.
+    /// Queued plaintext survives, because it is sealed at flush time against
+    /// whatever session is current then.
+    ///
+    /// # Rate limit
+    ///
+    /// Shared with the desync path, one re-key per peer per window. A caller
+    /// looping on this cannot do to a pair what that bound exists to stop an
+    /// attacker doing.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(true)` - the session was torn down and the reset advertised.
+    /// * `Ok(false)` - the rate-limit window has not lapsed; nothing was done,
+    ///   and a later call succeeds. Not an error: a caller on a fixed schedule
+    ///   that briefly runs faster than the floor is behaving correctly.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::MlsNotInitialized`] - encryption is not set up.
+    /// * [`Error::UserBlocked`] - the peer is blocked.
+    /// * [`Error::Mls`] with `SessionNotFound` - there is no session to rebuild.
+    ///   Establishing a first session is [`Self::establish_secure_session`];
+    ///   this heals one that exists.
+    pub fn rekey_session(&mut self, peer_id: &str) -> Result<bool> {
+        if self.is_user_blocked(peer_id) {
+            return Err(Error::UserBlocked(peer_id.to_string()));
+        }
+        if self.mls_manager.is_none() {
+            return Err(Error::MlsNotInitialized);
+        }
+        // A session has to exist for there to be one to heal. Checked before
+        // the slot is claimed, so a refused call does not spend the window and
+        // leave a real re-key waiting on it.
+        if !self.has_mls_session(peer_id)? {
+            return Err(Error::Mls(offline_protocol_mls::MlsError::SessionNotFound(
+                peer_id.to_string(),
+            )));
+        }
+        if !self.claim_rekey_slot(peer_id) {
+            debug!(
+                peer_id = %peer_id,
+                "rekey_session: the rate-limit window has not lapsed"
+            );
+            return Ok(false);
+        }
+        self.drive_session_rekey(peer_id, "requested by the application");
+        Ok(true)
+    }
+
     pub fn establish_secure_session(&mut self, peer_id: &str) -> Result<Option<WelcomeMessage>> {
         if self.is_user_blocked(peer_id) {
             return Err(Error::UserBlocked(peer_id.to_string()));

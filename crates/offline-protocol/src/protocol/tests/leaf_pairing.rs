@@ -27,6 +27,7 @@ use offline_protocol_transport::{MockTransport, Transport, TransportType};
 
 use crate::constants::ACK_FOR_KEY;
 use crate::mls::InMemoryStorage;
+use crate::protocol::prefixes::internal_prefixes;
 use crate::protocol::tests::{create_test_config_for_user, id};
 use crate::protocol::OfflineProtocol;
 use crate::ProtocolStateStorage;
@@ -182,6 +183,13 @@ impl Leaf {
     /// have reached the store.
     fn power_cycle(&mut self) {
         self.device = LeafDevice::open(Arc::clone(&self.store), APP_ID).expect("reopen");
+    }
+
+    /// Whether the device reported a session reset from `peer`.
+    fn saw_session_reset(&self, peer: &str) -> bool {
+        self.events
+            .iter()
+            .any(|event| matches!(event, LeafEvent::SessionReset { peer: p } if p == peer))
     }
 
     /// Whether the device reported an event of a given shape.
@@ -650,7 +658,7 @@ fn a_frame_delivered_twice_is_answered_twice_and_acted_on_once() {
     pair.phone.transport.clear_sent_messages();
     let sealed = captured
         .into_iter()
-        .find(|message| message.content.starts_with("__MLS_ENC__"))
+        .find(|message| message.content.starts_with(internal_prefixes::ENCRYPTED))
         .expect("the command left as a sealed frame");
 
     pair.feed_leaf(sealed.clone());
@@ -831,5 +839,193 @@ fn the_pair_survives_a_relaunch_of_the_phone() {
         pair.phone.inbox(),
         vec!["still paired".to_string()],
         "the relaunched phone could not open a frame from the device"
+    );
+}
+
+/// An application asks for a rotation, and the pair rebuilds.
+///
+/// This is the whole of post-compromise security for a pair containing a leaf.
+/// The device never commits, so it never rotates its own leaf in the ratchet
+/// tree; the phone's reset path is what does, and until an application calls
+/// for it nothing but an epoch desync ever fires that path. A healthy pair that
+/// never forks therefore never healed, and the window an attacker holding old
+/// key material keeps open was bounded by nothing.
+#[test]
+fn an_application_driven_rekey_rebuilds_the_pair() {
+    let mut pair = Pair::new("alice");
+    let phone = pair.phone_address();
+    let leaf = pair.leaf_address();
+
+    pair.phone.protocol.on_neighbor_discovered(&leaf);
+    pair.settle();
+    assert!(pair.phone.protocol.has_mls_session(&leaf).unwrap());
+
+    let driven = pair.phone.protocol.rekey_session(&leaf).expect("rekey");
+    assert!(driven, "the re-key was refused by its own rate limit");
+
+    let rounds = pair.settle();
+
+    assert!(
+        pair.leaf.saw_session_reset(&phone),
+        "the device never saw the reset, so it is holding a session the phone \
+         discarded and every later frame decrypts to nothing; events: {:?}",
+        pair.leaf.events
+    );
+    assert!(
+        pair.phone.protocol.has_mls_session(&leaf).unwrap(),
+        "the pair did not rebuild after the rotation"
+    );
+    assert!(
+        pair.leaf.device.has_session(&phone).unwrap(),
+        "the device did not re-pair after the rotation"
+    );
+    assert_eq!(
+        rounds.last(),
+        Some(&0),
+        "the rebuild never went quiet: {rounds:?}"
+    );
+}
+
+/// Traffic flows in both directions in the epoch a rotation produced.
+///
+/// A rebuild that converges but cannot carry a message is the failure this
+/// separates out: the pair reports a session, and the first command sent to the
+/// lock is sealed to an epoch nobody holds.
+#[test]
+fn traffic_flows_both_ways_after_a_rotation() {
+    let mut pair = Pair::new("alice");
+    let phone = pair.phone_address();
+    let leaf = pair.leaf_address();
+
+    pair.phone.protocol.on_neighbor_discovered(&leaf);
+    pair.settle();
+
+    pair.phone
+        .protocol
+        .send_message(&leaf, "before the rotation", None, None::<String>)
+        .expect("send");
+    pair.settle();
+
+    assert!(pair.phone.protocol.rekey_session(&leaf).expect("rekey"));
+    pair.settle();
+
+    let message_id = pair
+        .phone
+        .protocol
+        .send_message(&leaf, "after the rotation", None, None::<String>)
+        .expect("send");
+    pair.settle();
+
+    assert_eq!(
+        pair.leaf.received(),
+        vec![
+            "before the rotation".to_string(),
+            "after the rotation".to_string()
+        ],
+        "a command sent after the rotation never reached the device; events: {:?}",
+        pair.leaf.events
+    );
+    assert!(
+        !pair
+            .phone
+            .protocol
+            .ack_manager
+            .is_waiting_for_ack(&message_id),
+        "the device did not answer in the epoch the rotation produced"
+    );
+
+    let reply = pair
+        .leaf
+        .device
+        .seal(&phone, "acknowledged", pair.now)
+        .expect("the device can seal in the new epoch");
+    pair.leaf_outbound.push(reply);
+    pair.settle();
+    assert_eq!(
+        pair.phone.inbox(),
+        vec!["acknowledged".to_string()],
+        "the phone could not open a frame sealed in the epoch it just created"
+    );
+}
+
+/// The rotation's own reset frame cannot be replayed to break the pair again.
+///
+/// A reset tears down a live session, so the frame that carries one is worth
+/// capturing. The device admits one only above a per-peer high-water mark over
+/// a timestamp that is inside the signature, which makes one recording worth
+/// one teardown rather than one per delivery. This is that rule met by a reset
+/// the engine really produced rather than one a fixture built.
+#[test]
+fn the_rotations_reset_frame_cannot_be_replayed_to_break_the_pair_again() {
+    let mut pair = Pair::new("alice");
+    let phone = pair.phone_address();
+    let leaf = pair.leaf_address();
+
+    pair.phone.protocol.on_neighbor_discovered(&leaf);
+    pair.settle();
+
+    assert!(pair.phone.protocol.rekey_session(&leaf).expect("rekey"));
+
+    // Take the reset off the air so the same bytes can be delivered again.
+    let sent = pair.phone.transport.sent_messages();
+    pair.phone.transport.clear_sent_messages();
+    let reset = sent
+        .iter()
+        .find(|message| {
+            message.content.starts_with(internal_prefixes::KEY_PACKAGE)
+                && message.content.contains("\"session_reset\":true")
+        })
+        .expect("the rotation left as a key package carrying a reset")
+        .clone();
+    for message in sent {
+        pair.feed_leaf(message);
+    }
+    pair.settle();
+
+    assert!(
+        pair.leaf.device.has_session(&phone).unwrap(),
+        "the pair has to be back up before a replay is worth anything"
+    );
+    let resets_so_far = pair
+        .leaf
+        .events
+        .iter()
+        .filter(|event| matches!(event, LeafEvent::SessionReset { .. }))
+        .count();
+
+    pair.feed_leaf(reset);
+
+    assert_eq!(
+        pair.leaf
+            .events
+            .iter()
+            .filter(|event| matches!(event, LeafEvent::SessionReset { .. }))
+            .count(),
+        resets_so_far,
+        "a replayed reset tore the rebuilt session down; events: {:?}",
+        pair.leaf.events
+    );
+    assert!(
+        pair.leaf.device.has_session(&phone).unwrap(),
+        "the replay cost the pair the session it had just rebuilt"
+    );
+}
+
+/// A second rotation inside the window is refused, and says so.
+#[test]
+fn a_rotation_inside_the_window_is_refused_rather_than_repeated() {
+    let mut pair = Pair::new("alice");
+    let leaf = pair.leaf_address();
+
+    pair.phone.protocol.on_neighbor_discovered(&leaf);
+    pair.settle();
+
+    assert!(pair.phone.protocol.rekey_session(&leaf).expect("first"));
+    pair.settle();
+
+    assert!(
+        !pair.phone.protocol.rekey_session(&leaf).expect("second"),
+        "a caller looping on this could tear a pair down as fast as it liked, \
+         which is what the shared floor exists to prevent"
     );
 }

@@ -646,14 +646,47 @@ impl OfflineProtocol {
     /// Also see `docs/state-machines/session-lifecycle.md` ("Desync and heal")
     /// and `docs/security/threat-model.md` (residual risk R2).
     pub(super) fn schedule_session_rekey(&mut self, peer_id: &str) {
+        if !self.claim_rekey_slot(peer_id) {
+            return;
+        }
+
+        // A re-key is remotely triggerable and, until now, entirely silent to
+        // the app. A genuine fork produces these occasionally; a sustained rate
+        // for one peer is the signature of injected frames, which an operator
+        // cannot otherwise distinguish.
+        //
+        // Emitted on this path only. The warning names an epoch desync because
+        // that is what reached it, and an application asking for a re-key on
+        // its own schedule has not seen one: reusing the code there would put a
+        // fixed token in front of two different facts and leave an operator
+        // reading their own maintenance as the attack signature this exists to
+        // surface.
+        self.emit_security_warning(
+            peer_id,
+            SecurityWarningCode::SessionRekeyTriggered,
+            "1:1 session torn down and re-advertised after an epoch desync",
+        );
+        self.drive_session_rekey(peer_id, "after epoch desync");
+    }
+
+    /// Takes this peer's re-key slot, or reports that the floor has not lapsed.
+    ///
+    /// The floor is what bounds a peer replaying stale-epoch ciphertext to one
+    /// teardown per window rather than one per frame, and it is shared with the
+    /// application-driven entry deliberately: a re-key costs the same teardown
+    /// and re-exchange whoever asked for it, and a caller looping on it would
+    /// otherwise be able to do to a pair exactly what the bound exists to stop
+    /// an attacker doing.
+    pub(super) fn claim_rekey_slot(&mut self, peer_id: &str) -> bool {
         let now = Utc::now();
         if let Some(due_at) = self.rekey_due_at.get(peer_id) {
             if *due_at > now {
-                return;
+                return false;
             }
         }
         // Bounded like every other map keyed by a wire-claimed id: the desync
-        // that gets us here is classified before MLS authenticates anything.
+        // that reaches the caller is classified before MLS authenticates
+        // anything.
         if !self.rekey_due_at.contains_key(peer_id)
             && self.rekey_due_at.len() >= MAX_REKEY_TRACKED_PEERS
         {
@@ -663,16 +696,16 @@ impl OfflineProtocol {
             peer_id.to_string(),
             now + ChronoDuration::seconds(REKEY_INTERVAL_SECS),
         );
+        true
+    }
 
-        // A re-key is remotely triggerable and, until now, entirely silent to
-        // the app. A genuine fork produces these occasionally; a sustained rate
-        // for one peer is the signature of injected frames, which an operator
-        // cannot otherwise distinguish.
-        self.emit_security_warning(
-            peer_id,
-            SecurityWarningCode::SessionRekeyTriggered,
-            "1:1 session torn down and re-advertised after an epoch desync",
-        );
+    /// Tears the local session down and advertises a reset key package.
+    ///
+    /// This is the whole of what a re-key does on the wire, shared by the
+    /// desync path and by [`OfflineProtocol::rekey_session`] so the two cannot
+    /// drift into meaning different things to a peer. `reason` appears in the
+    /// log line only.
+    pub(super) fn drive_session_rekey(&mut self, peer_id: &str, reason: &str) {
         // Tear down our own stale session before advertising the reset key
         // package, mirroring the unblock `session_reset` flow. This is what makes
         // convergence symmetric regardless of user-id ordering: with no local
@@ -697,13 +730,15 @@ impl OfflineProtocol {
                 info!(
                     event = "session_rekey_triggered",
                     peer_id = %peer_id,
-                    "Triggered 1:1 session re-key after epoch desync"
+                    reason = %reason,
+                    "Triggered 1:1 session re-key"
                 );
             }
             Err(err) => {
                 warn!(
                     event = "session_rekey_send_failed",
                     peer_id = %peer_id,
+                    reason = %reason,
                     error = %err,
                     "session_rekey_send_failed"
                 );
