@@ -6470,6 +6470,34 @@ impl OfflineProtocol {
             .map_err(ProtocolError::from)
     }
 
+    /// Rotates the 1:1 session with a peer, advancing post-compromise security.
+    ///
+    /// Post-compromise security arrives when a commit rotates a member's leaf
+    /// in the ratchet tree, and the engine originates one on a re-key. Nothing
+    /// drives a re-key on its own except an epoch desync, so a pair that never
+    /// forks never rotates unless an application asks. That bites hardest
+    /// against a leaf node, which never commits at all, so every rotation in
+    /// such a pair is this side's to originate.
+    ///
+    /// The cadence is the application's on purpose: a rotation costs a
+    /// teardown, a key-package exchange and a re-establish, and what that is
+    /// worth depends on the deployment rather than on anything the wire says.
+    ///
+    /// Returns `true` when the rotation was driven and `false` when the
+    /// per-peer rate-limit window has not lapsed, which is not an error: a
+    /// caller on a fixed schedule that briefly runs faster than the floor is
+    /// behaving correctly and a later call succeeds.
+    ///
+    /// A rotation that fails changes nothing. The reset is advertised before
+    /// the local session is torn down, so an error leaves the session intact,
+    /// still usable, and the rate-limit window unspent. Rotate while the peer
+    /// is reachable and treat a failure as "try again later" rather than as a
+    /// session to rebuild.
+    pub fn rekey_session(&self, peer_id: String) -> Result<bool, ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard.rekey_session(&peer_id).map_err(ProtocolError::from)
+    }
+
     /// Create a 1:1 session
     pub fn mls_create_session(
         &self,

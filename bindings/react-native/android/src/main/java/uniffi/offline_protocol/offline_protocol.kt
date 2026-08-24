@@ -1168,6 +1168,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rece
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rekey_session(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group(
@@ -1644,6 +1646,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_receive_me
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reject_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rekey_session(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_release_transport_lock(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_from_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,`memberId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2314,6 +2318,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request() != 27126.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rekey_session() != 20206.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock() != 4494.toShort()) {
@@ -4269,6 +4276,8 @@ public interface OfflineProtocolInterface {
     
     fun `rejectConnectionRequest`(`recipient`: kotlin.String): kotlin.String
     
+    fun `rekeySession`(`peerId`: kotlin.String): kotlin.Boolean
+    
     fun `releaseTransportLock`()
     
     fun `removeFromGroup`(`groupId`: kotlin.String, `memberId`: kotlin.String)
@@ -5917,6 +5926,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reject_connection_request(
         it,
         FfiConverterString.lower(`recipient`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `rekeySession`(`peerId`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rekey_session(
+        it,
+        FfiConverterString.lower(`peerId`),_status)
 }
     }
     )

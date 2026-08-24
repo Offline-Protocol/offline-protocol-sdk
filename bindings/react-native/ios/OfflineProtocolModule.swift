@@ -4314,6 +4314,31 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
     
+    /// Rotate the 1:1 session with a peer, advancing post-compromise security.
+    ///
+    /// Resolves `true` when the rotation was driven and `false` when the
+    /// per-peer rate-limit window has not lapsed, which is not a failure: a
+    /// caller on a fixed schedule that briefly runs faster than the floor is
+    /// behaving correctly and a later call succeeds.
+    ///
+    /// A rejection changes nothing: the reset is advertised before the local
+    /// session is torn down, so the session is left intact and the window
+    /// unspent. Rotate while the peer is reachable and retry later.
+    @objc func rekeySession(_ peerId: String,
+                            resolver: @escaping RCTPromiseResolveBlock,
+                            rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MLS", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let rotated = try proto.rekeySession(peerId: peerId)
+            resolver(NSNumber(value: rotated))
+        } catch {
+            rejecter("ERROR_MLS", "Failed to rotate session: \(error.localizedDescription)", error)
+        }
+    }
+    
     /// Encrypt a message for a user
     @objc func mlsEncryptForUser(_ otherUserId: String,
                                  plaintext: [NSNumber],

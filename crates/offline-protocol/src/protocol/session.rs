@@ -646,14 +646,59 @@ impl OfflineProtocol {
     /// Also see `docs/state-machines/session-lifecycle.md` ("Desync and heal")
     /// and `docs/security/threat-model.md` (residual risk R2).
     pub(super) fn schedule_session_rekey(&mut self, peer_id: &str) {
+        if !self.claim_rekey_slot(peer_id) {
+            return;
+        }
+
+        // A re-key is remotely triggerable and, until now, entirely silent to
+        // the app. A genuine fork produces these occasionally; a sustained rate
+        // for one peer is the signature of injected frames, which an operator
+        // cannot otherwise distinguish.
+        //
+        // Emitted on this path only. The warning names an epoch desync because
+        // that is what reached it, and an application asking for a re-key on
+        // its own schedule has not seen one: reusing the code there would put a
+        // fixed token in front of two different facts and leave an operator
+        // reading their own maintenance as the attack signature this exists to
+        // surface.
+        self.emit_security_warning(
+            peer_id,
+            SecurityWarningCode::SessionRekeyTriggered,
+            "1:1 session torn down and re-advertised after an epoch desync",
+        );
+        if self
+            .drive_session_rekey(peer_id, "after epoch desync")
+            .is_err()
+        {
+            // The advertisement did not leave, and this path discards the
+            // session anyway. What reached it is a fork: every later frame on
+            // that session decrypts to nothing, so keeping it buys a pair that
+            // stays silently broken rather than one that rebuilds when the
+            // peer is next heard from. The application-driven entry makes the
+            // opposite choice, and for the opposite reason: the session it was
+            // asked to rotate is healthy.
+            self.discard_local_session(peer_id);
+        }
+    }
+
+    /// Takes this peer's re-key slot, or reports that the floor has not lapsed.
+    ///
+    /// The floor is what bounds a peer replaying stale-epoch ciphertext to one
+    /// teardown per window rather than one per frame, and it is shared with the
+    /// application-driven entry deliberately: a re-key costs the same teardown
+    /// and re-exchange whoever asked for it, and a caller looping on it would
+    /// otherwise be able to do to a pair exactly what the bound exists to stop
+    /// an attacker doing.
+    pub(super) fn claim_rekey_slot(&mut self, peer_id: &str) -> bool {
         let now = Utc::now();
         if let Some(due_at) = self.rekey_due_at.get(peer_id) {
             if *due_at > now {
-                return;
+                return false;
             }
         }
         // Bounded like every other map keyed by a wire-claimed id: the desync
-        // that gets us here is classified before MLS authenticates anything.
+        // that reaches the caller is classified before MLS authenticates
+        // anything.
         if !self.rekey_due_at.contains_key(peer_id)
             && self.rekey_due_at.len() >= MAX_REKEY_TRACKED_PEERS
         {
@@ -663,52 +708,84 @@ impl OfflineProtocol {
             peer_id.to_string(),
             now + ChronoDuration::seconds(REKEY_INTERVAL_SECS),
         );
+        true
+    }
 
-        // A re-key is remotely triggerable and, until now, entirely silent to
-        // the app. A genuine fork produces these occasionally; a sustained rate
-        // for one peer is the signature of injected frames, which an operator
-        // cannot otherwise distinguish.
-        self.emit_security_warning(
-            peer_id,
-            SecurityWarningCode::SessionRekeyTriggered,
-            "1:1 session torn down and re-advertised after an epoch desync",
+    /// Advertises a reset key package and tears the local session down.
+    ///
+    /// This is the whole of what a re-key does on the wire, shared by the
+    /// desync path and by [`OfflineProtocol::rekey_session`] so the two cannot
+    /// drift into meaning different things to a peer. `reason` appears in the
+    /// log line only.
+    ///
+    /// # Why the advertisement goes first
+    ///
+    /// An `Err` here means **nothing was sent and nothing was torn down**.
+    /// [`TransportManager::send`](crate::TransportManager::send) reports an
+    /// error only once no transport has accepted the frame, so a failure is a
+    /// peer that has been told nothing, and a caller rotating a *healthy*
+    /// session must be able to leave it alone: discarding it on the strength
+    /// of a frame that never left strands the pair, with this side holding no
+    /// session, the peer holding one it will never be told to drop, and
+    /// nothing in either that re-opens the exchange.
+    ///
+    /// The order is invisible to a peer. Both steps run under one `&mut self`,
+    /// so no inbound frame can be processed between them, and what a peer sees
+    /// on success is what this path has always sent. The property the old
+    /// order was written for still holds for the same reason: by the time the
+    /// peer's returning Welcome is processed there is no local session left,
+    /// so it is *joined* rather than gated by the greater-id-adopts tiebreaker
+    /// in `handle_welcome_message`, and both sides rebuild in a single round.
+    pub(super) fn drive_session_rekey(&mut self, peer_id: &str, reason: &str) -> Result<()> {
+        if let Err(err) = self.send_key_package_to(peer_id, true) {
+            warn!(
+                event = "session_rekey_send_failed",
+                peer_id = %peer_id,
+                reason = %reason,
+                error = %err,
+                "session_rekey_send_failed"
+            );
+            return Err(err);
+        }
+        self.discard_local_session(peer_id);
+        info!(
+            event = "session_rekey_triggered",
+            peer_id = %peer_id,
+            reason = %reason,
+            "Triggered 1:1 session re-key"
         );
-        // Tear down our own stale session before advertising the reset key
-        // package, mirroring the unblock `session_reset` flow. This is what makes
-        // convergence symmetric regardless of user-id ordering: with no local
-        // session left, the peer's returning Welcome is *joined* (not gated by
-        // the greater-id-adopts tiebreaker in `handle_welcome_message`), so both
-        // sides rebuild from scratch and converge in a single round. Keeping the
-        // stale session instead strands the smaller-id detector, which the
-        // tiebreaker forbids from adopting. Best-effort: a missing session is a
-        // no-op, and a failed delete still sends the reset (the peer rebuild plus
-        // the auto key-package exchange re-arm establishment either way).
+        Ok(())
+    }
+
+    /// Drops this side's 1:1 session with `peer_id`, best effort.
+    ///
+    /// Mirrors the unblock `session_reset` flow. A missing session is a no-op,
+    /// and a delete that fails is logged rather than raised: the peer has
+    /// already been sent the reset by every caller that reaches here, and the
+    /// rebuild plus the auto key-package exchange re-arm establishment either
+    /// way.
+    fn discard_local_session(&mut self, peer_id: &str) {
         if self.has_mls_session(peer_id).unwrap_or(false) {
             if let Err(err) = self.manual_mls_delete_session(peer_id) {
                 debug!(
                     peer_id = %peer_id,
                     error = %err,
-                    "rekey: failed to delete local stale session; sending reset anyway"
+                    "rekey: failed to delete local stale session"
                 );
             }
         }
-        match self.send_key_package_to(peer_id, true) {
-            Ok(()) => {
-                info!(
-                    event = "session_rekey_triggered",
-                    peer_id = %peer_id,
-                    "Triggered 1:1 session re-key after epoch desync"
-                );
-            }
-            Err(err) => {
-                warn!(
-                    event = "session_rekey_send_failed",
-                    peer_id = %peer_id,
-                    error = %err,
-                    "session_rekey_send_failed"
-                );
-            }
-        }
+    }
+
+    /// Gives back a re-key slot claimed for work that did not happen.
+    ///
+    /// Only the application-driven entry may call this, and only when the
+    /// advertisement never left: no teardown happened, so nothing was spent
+    /// and a caller back in range a second later should not be made to wait
+    /// out a window that bounds teardowns. The desync path must **not**, since
+    /// it discards the session whether or not the reset was sent, and that is
+    /// exactly the churn the floor exists to bound.
+    pub(super) fn release_rekey_slot(&mut self, peer_id: &str) {
+        self.rekey_due_at.remove(peer_id);
     }
 
     pub(super) fn retry_pending_session_confirmations(&mut self) {

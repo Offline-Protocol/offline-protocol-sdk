@@ -291,11 +291,16 @@ that stops advertising `ctrl_versions`. A ratchet an ordinary frame can clear is
 not a ratchet.
 
 One exception, and it is required rather than permitted: a verifier MUST still
-accept a `__MLS_KEY_PKG__` frame from a held peer under the v1 payload, and MUST
-ignore that frame's `session_reset`. Without it a peer whose record of this node
+accept a `__MLS_KEY_PKG__` frame under the v1 payload, and MUST ignore that
+frame's `session_reset`. This covers two cases with one rule. The first is
+first contact, where the sender has never seen this verifier's `ctrl_versions`
+and so signs v1 however new it is. The second is a held peer whose record of
+this verifier was lost. Without it a peer whose record of this node
 was lost signs v1, because it no longer knows what this verifier accepts, and is
 refused on the one frame that would have told it, and a key package is the only
-frame that re-teaches capabilities, so the state is permanent.
+frame that re-teaches capabilities, so the state is permanent. A verifier that
+applies the ratchet to first contact as well never pairs with anyone who
+addressed it first.
 
 The case is capability-record loss, not a reinstall: an address is the hash of an
 identity key, so a peer that reinstalls arrives under a different address and is

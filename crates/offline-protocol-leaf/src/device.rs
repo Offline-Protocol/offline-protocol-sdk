@@ -529,7 +529,14 @@ impl LeafDevice {
         body: &str,
         now_unix_secs: u64,
     ) -> Result<Handled> {
-        frames::verify_control_frame(message, now_unix_secs)?;
+        // The one frame class that admits the older payload, because it is the
+        // frame that *teaches* a peer which payload this device accepts: a
+        // sender that has never held this device's key package signs the older
+        // one, whatever release it runs, and refusing it makes a
+        // phone-initiated pairing impossible rather than making the device
+        // safer. See [`frames`] for the full reasoning and for what it costs.
+        let signed_under =
+            frames::verify_control_frame(message, now_unix_secs, frames::UndatedPayload::Admitted)?;
         let payload: KeyPackagePayload = serde_json::from_str(body)
             .map_err(|e| LeafError::MalformedFrame(format!("key package body: {e}")))?;
 
@@ -555,7 +562,24 @@ impl LeafDevice {
         let mut events = Vec::new();
         let mut record = self.peer_record(sender)?;
 
-        if payload.session_reset {
+        // A reset carried under the older payload is refused its teardown and
+        // nothing else. That payload leaves the timestamp outside the
+        // signature, so the high-water mark below would be comparing a number
+        // an attacker rewrote at will: parked in the future once, it would
+        // deny this pair every future reset, which is a worse failure than the
+        // replay it would be defending against. The rest of the frame is still
+        // acted on, because capability advertisement is unauthenticated hint
+        // data everywhere in this protocol, and the peer re-sends a reset
+        // under the newer payload as soon as this device's key package has
+        // taught it to.
+        if payload.session_reset && signed_under != frames::ControlPayload::Fresh {
+            events.push(LeafEvent::Ignored {
+                reason: String::from(
+                    "a session reset arrived on a frame that states no time, so its age \
+                     cannot be judged and its teardown is refused",
+                ),
+            });
+        } else if payload.session_reset {
             // The frame's own stamp, which `verify_control_frame` has already
             // proved is the sender's and inside the window this device
             // accepts. Everything below rests on both of those: an unproved
@@ -618,7 +642,11 @@ impl LeafDevice {
     }
 
     fn on_welcome(&mut self, message: &Message, body: &str, now_unix_secs: u64) -> Result<Handled> {
-        frames::verify_control_frame(message, now_unix_secs)?;
+        // The older payload is refused here and needs no accommodation: a
+        // Welcome can only follow this device's own key package reaching the
+        // peer, and that is the frame which teaches the peer to sign the
+        // freshness-bound one.
+        frames::verify_control_frame(message, now_unix_secs, frames::UndatedPayload::Refused)?;
         let welcome: WelcomeMessage = serde_json::from_str(body)
             .map_err(|e| LeafError::MalformedFrame(format!("welcome body: {e}")))?;
 
@@ -842,7 +870,10 @@ impl LeafDevice {
     /// This is the peer's own rule, applied on the device: it answers a probe
     /// only while it holds a session of its own.
     fn on_probe(&mut self, message: &Message, now_unix_secs: u64) -> Result<Handled> {
-        frames::verify_control_frame(message, now_unix_secs)?;
+        // The older payload is refused here too, and for the same reason it is
+        // refused on a Welcome: a probe only ever follows an established
+        // session, which this device's own key package is what starts.
+        frames::verify_control_frame(message, now_unix_secs, frames::UndatedPayload::Refused)?;
         let sender = message.sender.as_str();
 
         // Loaded rather than counted. "State is on flash" and "this device can

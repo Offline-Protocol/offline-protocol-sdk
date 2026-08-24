@@ -26,29 +26,57 @@
 //! delivery as on its first, and a key package carrying `session_reset` tears
 //! down a live session on each one (issue 403).
 //!
-//! # Why a leaf verifies only the freshness-bound payload
+//! # Which signing payload a leaf verifies
 //!
-//! A phone accepts both, because refusing the older one would refuse first
-//! contact with installs that predate it. A leaf has no such peer. This crate's
-//! first release is the one that introduced the device, so every phone that
-//! has ever paired with a leaf already produces the newer payload, and
-//! accepting the older one would buy compatibility with nothing while leaving
-//! the whole gap open. It is the same reasoning that makes an unsigned frame a
-//! refusal here rather than a downgrade.
+//! Two payloads exist: the older one, which binds the sender, the id, the
+//! recipient and the content, and the freshness-bound one, which additionally
+//! binds the frame's timestamp. A leaf verifies the freshness-bound payload on
+//! every control frame, and the older one on exactly one: `__MLS_KEY_PKG__`.
+//!
+//! The exception is required rather than permitted, and the reason is not that
+//! some phones are old. A sender builds the freshness-bound payload for a
+//! recipient that has advertised it and the older one for a recipient that has
+//! not, and capabilities arrive **in a key package**, so the first key package
+//! to a peer never met is signed under the older payload no matter how new the
+//! sender is. That is inherent to the negotiation rather than a gap to close
+//! (ADR 0023, "First contact necessarily signs v1"). The same shape recurs
+//! later: a peer whose record of this device was evicted or lost signs the
+//! older payload again, because it no longer knows what this device accepts,
+//! and a key package is the only frame that can re-teach it.
+//!
+//! So refusing the older payload here does not harden the device, it makes a
+//! phone-initiated pairing impossible: the frame is refused, the device never
+//! learns the phone exists, and the phone's retry ladder delivers the same
+//! refusal ten times over, which reaches firmware as a run of signature
+//! failures indistinguishable from an attack.
+//!
+//! What the exception costs is nothing an attacker wants. **A frame accepted
+//! under the older payload has its `session_reset` ignored**, so the one
+//! directive that destroys state still requires a stamp inside the signature,
+//! and the replay closed by issue 403 stays closed. What survives is
+//! capability advertisement, which this protocol treats as unauthenticated
+//! hint data everywhere else. The frame's age is not judged either, because
+//! the older payload leaves the timestamp outside the signature and judging it
+//! would be judging a number an attacker chose.
+//!
+//! Every other control frame a leaf accepts is refused under the older
+//! payload, and none of them needs it: a Welcome and a confirmation probe can
+//! only follow this device's own key package reaching the peer, which is the
+//! frame that teaches the peer to sign the newer payload.
 
 use alloc::{
     format,
     string::{String, ToString},
     sync::Arc,
-    vec::Vec,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use offline_protocol_core::{
     Address, AppId, LamportClock, Message, MessageId, MessagePriority, Timestamp, UserId,
 };
 use offline_protocol_sealed::{
-    control_frame_freshness, control_signing_payload_v2, derive_address, Freshness, ACK_FOR_KEY,
-    CTRL_FRESHNESS_FUTURE_MS, CTRL_PK_META_KEY, CTRL_SIG_META_KEY, LEAF_CTRL_FRESHNESS_PAST_MS,
+    control_frame_freshness, control_signing_payload, control_signing_payload_v2, derive_address,
+    Freshness, ACK_FOR_KEY, CTRL_FRESHNESS_FUTURE_MS, CTRL_PK_META_KEY, CTRL_SIG_META_KEY,
+    LEAF_CTRL_FRESHNESS_PAST_MS,
 };
 
 use crate::error::{LeafError, Result};
@@ -245,7 +273,45 @@ pub(crate) fn sign_control_frame(identity: &Identity, message: &mut Message) -> 
 /// own to reach for, so the caller that has one supplies it. A device that
 /// supplies a wrong one refuses its peer, which is loud; a device that was
 /// allowed to skip supplying one would accept anything, which is silent.
-pub(crate) fn verify_control_frame(message: &Message, now_unix_secs: u64) -> Result<Vec<u8>> {
+/// Which signing payload a control frame proved itself under.
+///
+/// Carried out of [`verify_control_frame`] rather than inferred again, because
+/// the one caller that admits the older payload has to treat what it carries
+/// differently: a `session_reset` under it is ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlPayload {
+    /// The freshness-bound payload. The frame's timestamp is inside the
+    /// signature and has been judged against this device's window.
+    Fresh,
+    /// The older payload. The timestamp is outside the signature, so it states
+    /// nothing about when the frame was made and has not been judged.
+    Undated,
+}
+
+/// Whether a frame class may carry the older payload.
+///
+/// Named rather than passed as a bare flag, because the call site is where
+/// this has to be readable: [`Admitted`](UndatedPayload::Admitted) appears
+/// once in this crate and every other control frame refuses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UndatedPayload {
+    /// `__MLS_KEY_PKG__` alone, where the older payload is required rather
+    /// than tolerated.
+    Admitted,
+    /// Every other control frame a leaf accepts.
+    Refused,
+}
+
+/// Verifies a control frame, admitting the older payload only when the caller
+/// says this frame class may carry it.
+///
+/// See this module's documentation for why `__MLS_KEY_PKG__` is required to
+/// admit it and why the rest are required not to.
+pub(crate) fn verify_control_frame(
+    message: &Message,
+    now_unix_secs: u64,
+    undated: UndatedPayload,
+) -> Result<ControlPayload> {
     let signature = message.metadata.get(CTRL_SIG_META_KEY);
     let public_key = message.metadata.get(CTRL_PK_META_KEY);
 
@@ -273,26 +339,44 @@ pub(crate) fn verify_control_frame(message: &Message, now_unix_secs: u64) -> Res
 
     verify_sender_derivation(message.sender.as_str(), &public_key)?;
 
-    let payload = control_signing_payload_v2(message)?;
-    identity::verify(&public_key, &signature, &payload)?;
-
-    // Only now, with the stamp proved to be the sender's own rather than
-    // something a relay or an attacker wrote on the way past. Judging it
-    // before the signature would be judging an attacker-chosen number.
-    match control_frame_freshness(
-        message.timestamp.as_millis(),
-        millis(now_unix_secs),
-        LEAF_CTRL_FRESHNESS_PAST_MS,
-        CTRL_FRESHNESS_FUTURE_MS,
-    ) {
-        Freshness::Fresh => Ok(public_key),
-        Freshness::Stale { age_ms } => Err(LeafError::StaleControlFrame(format!(
-            "frame is {age_ms} ms old, past what this device accepts"
-        ))),
-        Freshness::FromTheFuture { skew_ms } => Err(LeafError::StaleControlFrame(format!(
-            "frame is stamped {skew_ms} ms ahead of this device's clock; check the clock \
-             before the peer"
-        ))),
+    // The freshness-bound payload first, always, so that a peer able to produce
+    // it is never judged under the weaker one. Only a frame that fails it is
+    // considered for the fallback, and only when its class admits one.
+    let fresh_payload = control_signing_payload_v2(message)?;
+    match identity::verify(&public_key, &signature, &fresh_payload) {
+        Ok(()) => {
+            // Only now, with the stamp proved to be the sender's own rather
+            // than something a relay or an attacker wrote on the way past.
+            // Judging it before the signature would be judging an
+            // attacker-chosen number.
+            match control_frame_freshness(
+                message.timestamp.as_millis(),
+                millis(now_unix_secs),
+                LEAF_CTRL_FRESHNESS_PAST_MS,
+                CTRL_FRESHNESS_FUTURE_MS,
+            ) {
+                Freshness::Fresh => Ok(ControlPayload::Fresh),
+                Freshness::Stale { age_ms } => Err(LeafError::StaleControlFrame(format!(
+                    "frame is {age_ms} ms old, past what this device accepts"
+                ))),
+                Freshness::FromTheFuture { skew_ms } => Err(LeafError::StaleControlFrame(format!(
+                    "frame is stamped {skew_ms} ms ahead of this device's clock; check the \
+                         clock before the peer"
+                ))),
+            }
+        }
+        Err(refusal) => {
+            if undated == UndatedPayload::Refused {
+                return Err(refusal);
+            }
+            // The older payload, which binds everything the newer one does
+            // except the timestamp. Its age is deliberately not judged: the
+            // stamp is outside the signature, so it is whatever the last hand
+            // to touch the frame wrote there.
+            let undated_payload = control_signing_payload(message)?;
+            identity::verify(&public_key, &signature, &undated_payload)?;
+            Ok(ControlPayload::Undated)
+        }
     }
 }
 

@@ -2217,6 +2217,7 @@ dependencies = [
  "hex",
  "offline-protocol-core",
  "offline-protocol-data",
+ "offline-protocol-leaf",
  "offline-protocol-mls",
  "offline-protocol-reliability",
  "offline-protocol-router",

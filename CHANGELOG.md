@@ -89,6 +89,51 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **An application can now ask for a session rotation, which is the only way
+  post-compromise security arrives on a pair that never desyncs.** Healing
+  happens when a commit rotates a member's leaf in the ratchet tree, and this
+  SDK originates one on a re-key. Nothing scheduled a re-key: one fired on an
+  epoch desync, which is a fault rather than a cadence, and the rekey interval
+  is a floor on how often that may happen rather than a timer that fires
+  anything. So a pair that never forked never rotated, and the window a stolen
+  key stays useful for was bounded by nothing.
+
+  `rekey_session(peer_id)` drives the existing path deliberately, over the FFI
+  and in every binding (`rekeySession` in Swift, Kotlin and TypeScript). A peer
+  cannot tell it from a desync-driven re-key, because the teardown and the reset
+  advertisement are one shared step. Queued messages survive, sealed at flush
+  time against whatever session is current then.
+
+  It returns a boolean rather than nothing. `false` means the per-peer
+  rate-limit window has not lapsed, which is not a failure: a caller on a fixed
+  schedule that briefly outruns the floor is behaving correctly and a later call
+  succeeds. The floor is shared with the desync path, so a caller looping on
+  this cannot do to a pair what that bound exists to stop an attacker doing, and
+  the `SESSION_REKEY_TRIGGERED` warning is deliberately **not** raised here,
+  because it names an epoch desync and exists so a sustained rate of them reads
+  as an attack signature.
+
+  **A rotation that fails changes nothing.** The reset is advertised before the
+  local session is torn down, and a transport reports an error only once nothing
+  has accepted the frame, so a failure leaves the session intact, still usable,
+  and the window unspent. Rotate while the peer is reachable and treat a failure
+  as "try again later". The order matters most against a leaf node, which speaks
+  only when spoken to: discarding first and then failing to send would leave the
+  phone with no session, the device holding one it will never be told to drop,
+  and nothing on either side that re-opens the exchange. The desync path makes
+  the opposite choice on the same failure, because what reaches it is a fork
+  rather than a healthy session.
+
+  **The cadence is the application's, and this is an obligation rather than a
+  setting.** A rotation costs a teardown, a key-package exchange and a
+  re-establish, and what that is worth to a mains-powered lock and to a phone on
+  a metered link are different answers that nothing on the wire distinguishes.
+  It matters most against a leaf node, which never commits at all, so every
+  rotation in such a pair is the phone's to originate. The documentation
+  previously said healing arrived "on a cadence the phone sets", which read as a
+  schedule and described a rate limit; ADR 0021, the leaf provisioning chapter
+  and the session-lifecycle machine now say what actually drives it.
+
 - **`offline-protocol-core` compiles without `std`.** The crate now builds for
   bare-metal targets with `--no-default-features`, which is what a constrained
   leaf node links: a Cortex-M door lock, sensor or mains-powered relay that
@@ -389,6 +434,39 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   configuration nobody can build is worse than no row.
 
 ### Fixed
+
+- **A phone could not start a pairing with a leaf node.** A sender builds the
+  freshness-bound control payload for a recipient that has advertised it and the
+  older one for a recipient that has not, and capabilities travel in a key
+  package, so the first key package to a peer never met is signed under the
+  older payload however new the sender is. ADR 0023 records that as inherent to
+  the negotiation rather than a gap to close.
+
+  A leaf verified only the freshness-bound payload, on the reasoning that no
+  phone old enough to need the other one had ever paired with a device. That
+  reasoning was about releases, and this is not about releases: today's engine
+  signs the older payload on the frame that opens a phone-initiated pairing,
+  because at that moment it has never seen the device's `ctrl_versions`.
+
+  So the device refused it, and refused every retransmission. The pairing could
+  not start from that side at all: the device learned nothing about the phone,
+  so it had no address to advertise back to, and the phone's ladder delivered
+  ten signature failures to firmware whose only account of itself is that error
+  stream. Only a pairing the device began could complete, and beginning one
+  needs an address it could only have learned from the frame it refused.
+
+  A leaf now accepts the older payload on `__MLS_KEY_PKG__` and on nothing else,
+  which covers both first contact and the case the specification already
+  required, a peer whose record of the device was lost. **A frame admitted under
+  it has its `session_reset` ignored**, so the directive that destroys state
+  still needs a stamp inside the signature and the replay closed by issue 403
+  stays closed; what survives is capability advertisement, which this protocol
+  treats as unauthenticated hint data everywhere else. Its age is not judged,
+  because that payload leaves the timestamp outside the signature. A Welcome and
+  a confirmation probe keep refusing it and need no exception, neither being
+  able to arrive before the device's own key package has reached the peer.
+
+  Found by running the engine against the leaf crate for the first time.
 
 - **A Python node was never routable by its `off1…` address over the Internet
   transport.** The transport authenticated to the relay but never answered the

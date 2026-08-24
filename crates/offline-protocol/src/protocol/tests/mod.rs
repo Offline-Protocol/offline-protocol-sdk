@@ -3,6 +3,7 @@ mod data_layer;
 #[cfg(feature = "data")]
 mod data_sync;
 mod data_sync_group;
+mod leaf_pairing;
 
 use super::*;
 use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY};
@@ -37330,5 +37331,134 @@ fn the_payload_we_sign_at_a_peer_survives_a_restart() {
     assert!(
         offline_protocol_mls::MlsManager::verify_signature(&public_key, &v2, &signature).unwrap(),
         "a restarted node must still sign the freshness-bound payload at this peer"
+    );
+}
+
+/// A re-key an application asked for is refused before encryption exists.
+#[test]
+fn rekey_session_refuses_before_mls_is_initialized() {
+    let mut config = create_test_config_for_user("bob");
+    config.encryption.enabled = true;
+    let mut bob = OfflineProtocol::new(config).unwrap();
+
+    assert!(
+        matches!(
+            bob.rekey_session(&id("alice")),
+            Err(Error::MlsNotInitialized)
+        ),
+        "a re-key with no encryption set up must say so rather than send a frame"
+    );
+}
+
+/// A re-key is refused for a peer there is no session with.
+///
+/// Healing a session and establishing one are different operations, and
+/// answering "done" for a peer this device has never paired with would report a
+/// rotation that did not happen.
+#[test]
+fn rekey_session_refuses_a_peer_with_no_session() {
+    let mut config = create_test_config_for_user("bob");
+    config.encryption.enabled = true;
+    let mut bob = OfflineProtocol::new(config).unwrap();
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let refusal = bob.rekey_session(&id("alice"));
+    assert!(
+        matches!(
+            refusal,
+            Err(Error::Mls(offline_protocol_mls::MlsError::SessionNotFound(
+                _
+            )))
+        ),
+        "expected a session-not-found refusal, got {refusal:?}"
+    );
+}
+
+/// A refused re-key does not spend the peer's rate-limit window.
+///
+/// The floor is claimed after the session check rather than before, so a call
+/// that could never have worked does not leave a real re-key waiting out a
+/// window it never used.
+#[test]
+fn a_refused_rekey_does_not_spend_the_window() {
+    let mut config = create_test_config_for_user("bob");
+    config.encryption.enabled = true;
+    let mut bob = OfflineProtocol::new(config).unwrap();
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let _ = bob.rekey_session(&id("alice"));
+
+    assert!(
+        !bob.rekey_due_at.contains_key(&id("alice")),
+        "a refused re-key claimed the peer's window anyway"
+    );
+}
+
+/// An application-driven re-key does not report itself as an attack signature.
+///
+/// `SessionRekeyTriggered` exists so that a sustained rate of re-keys for one
+/// peer — the signature of injected frames — is visible to an operator. A
+/// scheduled rotation firing that same code would put the operator's own
+/// maintenance in front of them wearing the shape of the thing it warns about.
+#[test]
+fn an_application_driven_rekey_does_not_emit_the_desync_warning() {
+    let mut config = create_test_config_for_user("bob");
+    config.encryption.enabled = true;
+    let mut bob = OfflineProtocol::new(config).unwrap();
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    bob.on_event(move |event| sink.lock().unwrap().push(event));
+
+    // No session, so the call refuses — which is enough for this question: the
+    // warning must not be reachable from this entry point at all.
+    let _ = bob.rekey_session(&id("alice"));
+    // And the desync path, which must still emit it.
+    bob.schedule_session_rekey(&id("alice"));
+
+    let warnings: Vec<SecurityWarningCode> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::SecurityWarning { reason_code, .. } => Some(*reason_code),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|code| **code == SecurityWarningCode::SessionRekeyTriggered)
+            .count(),
+        1,
+        "the desync path must still warn exactly once, and the application path \
+         must not warn at all; got {warnings:?}"
+    );
+}
+
+/// The desync path keeps its rate limit after the extraction.
+///
+/// The floor moved into a helper the application entry point also calls, so
+/// this restates what `test_desync_rekey_is_rate_limited` covers from the other
+/// side: the shared slot is still claimed on the desync path, not merely on the
+/// new one.
+#[test]
+fn the_desync_path_still_claims_the_shared_rekey_window() {
+    let mut config = create_test_config_for_user("bob");
+    config.encryption.enabled = true;
+    let mut bob = OfflineProtocol::new(config).unwrap();
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    bob.schedule_session_rekey(&id("alice"));
+
+    assert!(
+        bob.rekey_due_at.contains_key(&id("alice")),
+        "a desync-driven re-key did not claim the window that bounds a re-key storm"
     );
 }

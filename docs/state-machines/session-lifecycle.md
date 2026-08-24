@@ -168,6 +168,36 @@ decrypt between replays force roughly one teardown per inbound message.
 The floor lapses only by the interval elapsing. Tier 1's withheld
 acknowledgement plus sender retries keep delivery honest during the wait.
 
+### The same path, driven deliberately
+
+An application may drive a re-key itself, through `rekey_session`. What reaches
+the peer is what a desync-driven one sends, because the teardown and the reset
+advertisement are one shared step, so a peer cannot tell the two apart.
+
+Two differences on this side. The rate-limit floor above is shared, so a caller
+looping on it cannot do to a pair what that bound exists to stop an attacker
+doing; a call inside the window reports that it did nothing rather than
+failing. And the `SessionRekeyTriggered` security warning is **not** emitted,
+because it names an epoch desync and exists so that a sustained rate of them
+reads as an attack signature. A scheduled rotation firing it would put an
+operator's own maintenance in front of them wearing that shape.
+
+**The reset is advertised before the session is discarded, and a rotation that
+cannot be sent discards nothing.** A transport reports an error only once
+nothing has accepted the frame, so a failure means the peer was told nothing,
+and the session an application asked to rotate is healthy: it is kept, and the
+window is not spent. The desync path makes the opposite choice on the same
+failure, because what reaches it is a fork rather than a healthy session, and a
+fork decrypts nothing whether or not the peer could be told. The order is
+invisible to a peer either way, since both steps run before any inbound frame
+can be processed.
+
+**This is the only way post-compromise security arrives on a pair that never
+desyncs**, and it is the only way at all on a pair containing a leaf node,
+which never commits. The interval is the application's to choose; nothing in
+the engine schedules one. See
+[Leaf node provisioning](../spec/leaf-provisioning.md#post-compromise-security-is-the-phones-to-originate).
+
 ### Tier 2: true no-loss (sender side)
 
 The sender re-seals each resend against the peer's current session. See
