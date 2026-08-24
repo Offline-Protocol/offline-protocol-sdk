@@ -216,6 +216,14 @@ context, matching the JSON path where a malformed value rejects the message.
 
 ## Size and fragmentation
 
+Two different things are called splitting here and they belong to different
+layers. **Chunks** are how a large payload is divided before it becomes
+messages at all, and the sizes below are theirs. **Fragments** are how one
+message is sliced to fit a single radio write, which is transport framing and
+is specified per carrier: for Bluetooth LE, in
+[Bluetooth LE framing](ble-framing.md). A 4 KiB chunk on a Bluetooth LE link
+still becomes many fragments.
+
 Chunk sizes are transport-dependent, because the constraint is the transport MTU
 and duty cycle, not the protocol:
 
