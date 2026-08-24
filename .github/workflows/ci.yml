@@ -476,9 +476,14 @@ jobs:
       # pre-built iOS XCFramework and Android .so binaries, which don't exist
       # outside a release run. The packaging invariants that need no binaries
       # are asserted directly below instead.
+      #
+      # Node 24 because release.yml is pinned there: it publishes to npm with
+      # trusted publishing, which needs the npm >= 11.5.1 that Node 24 bundles.
+      # Keeping the two in lockstep is the whole point of this job, so this
+      # version tracks that one rather than being chosen independently.
       - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: bindings/react-native/package-lock.json
 
