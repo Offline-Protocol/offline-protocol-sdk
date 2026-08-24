@@ -535,7 +535,8 @@ impl LeafDevice {
         // one, whatever release it runs, and refusing it makes a
         // phone-initiated pairing impossible rather than making the device
         // safer. See [`frames`] for the full reasoning and for what it costs.
-        let signed_under = frames::verify_control_frame(message, now_unix_secs, true)?;
+        let signed_under =
+            frames::verify_control_frame(message, now_unix_secs, frames::UndatedPayload::Admitted)?;
         let payload: KeyPackagePayload = serde_json::from_str(body)
             .map_err(|e| LeafError::MalformedFrame(format!("key package body: {e}")))?;
 
@@ -645,7 +646,7 @@ impl LeafDevice {
         // Welcome can only follow this device's own key package reaching the
         // peer, and that is the frame which teaches the peer to sign the
         // freshness-bound one.
-        frames::verify_control_frame(message, now_unix_secs, false)?;
+        frames::verify_control_frame(message, now_unix_secs, frames::UndatedPayload::Refused)?;
         let welcome: WelcomeMessage = serde_json::from_str(body)
             .map_err(|e| LeafError::MalformedFrame(format!("welcome body: {e}")))?;
 
@@ -872,7 +873,7 @@ impl LeafDevice {
         // The older payload is refused here too, and for the same reason it is
         // refused on a Welcome: a probe only ever follows an established
         // session, which this device's own key package is what starts.
-        frames::verify_control_frame(message, now_unix_secs, false)?;
+        frames::verify_control_frame(message, now_unix_secs, frames::UndatedPayload::Refused)?;
         let sender = message.sender.as_str();
 
         // Loaded rather than counted. "State is on flash" and "this device can

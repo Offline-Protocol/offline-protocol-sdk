@@ -288,16 +288,29 @@ pub(crate) enum ControlPayload {
     Undated,
 }
 
+/// Whether a frame class may carry the older payload.
+///
+/// Named rather than passed as a bare flag, because the call site is where
+/// this has to be readable: [`Admitted`](UndatedPayload::Admitted) appears
+/// once in this crate and every other control frame refuses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UndatedPayload {
+    /// `__MLS_KEY_PKG__` alone, where the older payload is required rather
+    /// than tolerated.
+    Admitted,
+    /// Every other control frame a leaf accepts.
+    Refused,
+}
+
 /// Verifies a control frame, admitting the older payload only when the caller
 /// says this frame class may carry it.
 ///
-/// `undated_admissible` is `true` for `__MLS_KEY_PKG__` alone. See this
-/// module's documentation for why that one is required and why the rest are
-/// not.
+/// See this module's documentation for why `__MLS_KEY_PKG__` is required to
+/// admit it and why the rest are required not to.
 pub(crate) fn verify_control_frame(
     message: &Message,
     now_unix_secs: u64,
-    undated_admissible: bool,
+    undated: UndatedPayload,
 ) -> Result<ControlPayload> {
     let signature = message.metadata.get(CTRL_SIG_META_KEY);
     let public_key = message.metadata.get(CTRL_PK_META_KEY);
@@ -353,7 +366,7 @@ pub(crate) fn verify_control_frame(
             }
         }
         Err(refusal) => {
-            if !undated_admissible {
+            if undated == UndatedPayload::Refused {
                 return Err(refusal);
             }
             // The older payload, which binds everything the newer one does
