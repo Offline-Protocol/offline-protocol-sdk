@@ -3257,3 +3257,245 @@ fn a_spent_reset_stays_spent_across_a_power_cycle() {
         replayed.events
     );
 }
+
+/// A phone signs a control frame under the older payload, which leaves the
+/// frame's timestamp outside the signature.
+///
+/// This is what an engine produces for a peer whose `ctrl_versions` it has
+/// never seen, which is every peer before that peer's key package has reached
+/// it.
+fn sign_as_undated(phone: &Phone, message: &mut Message) {
+    let payload =
+        offline_protocol_sealed::control_signing_payload(message).expect("canonical payload");
+    let signature = phone.manager.sign_data(&payload).expect("phone signs");
+    let public = phone
+        .manager
+        .get_identity_public_key()
+        .expect("phone public key");
+    message.metadata.insert(
+        offline_protocol_sealed::CTRL_SIG_META_KEY.to_string(),
+        BASE64.encode(&signature),
+    );
+    message.metadata.insert(
+        offline_protocol_sealed::CTRL_PK_META_KEY.to_string(),
+        BASE64.encode(&public),
+    );
+}
+
+/// [`phone_control_frame`], signed under the older payload.
+fn phone_undated_frame(phone: &Phone, to: &str, content: String) -> Message {
+    let mut message = Message::new(
+        UserId::new(&phone.address).expect("phone address is a user id"),
+        UserId::new(to).expect("device address is a user id"),
+        offline_protocol_core::AppId::new(APP_ID).expect("app id"),
+        content,
+    );
+    message.priority = MessagePriority::High;
+    message.timestamp = offline_protocol_core::Timestamp::from_millis((NOW as i64) * 1000);
+    sign_as_undated(phone, &mut message);
+    message
+}
+
+/// The frame that begins a phone-initiated pairing is accepted.
+///
+/// A sender builds the freshness-bound payload for a recipient that has
+/// advertised it and the older one for a recipient that has not, and
+/// capabilities travel **in a key package**. So the first key package to a peer
+/// never met is signed under the older payload however new the sender is: it is
+/// inherent to the negotiation, not a legacy peer.
+///
+/// A device that refused it would be a device no phone could ever start a
+/// pairing with. It would never learn the phone exists, and the phone's retry
+/// ladder would deliver the same refusal ten times over, reaching firmware as a
+/// run of signature failures indistinguishable from an attack.
+#[test]
+fn a_key_package_that_states_no_time_is_admitted_because_first_contact_has_none() {
+    let phone = new_phone();
+    let store: Arc<dyn LeafStore> = Arc::new(MemoryStore::new());
+    let mut device = device(Arc::clone(&store));
+    let device_address = device.address().to_string();
+
+    let frame = phone_undated_frame(&phone, &device_address, advertisement_body(&phone.address));
+    let handled = device
+        .handle(&frame, NOW)
+        .expect("a device that refuses this can never be paired with by a phone");
+
+    assert!(
+        handled.events.iter().any(
+            |event| matches!(event, LeafEvent::PeerAdvertised { peer } if *peer == phone.address)
+        ),
+        "the device did not record the phone that just introduced itself: {:?}",
+        handled.events
+    );
+    assert_eq!(
+        spoken(&handled).len(),
+        1,
+        "the device must answer first contact with a key package of its own"
+    );
+    assert!(
+        spoken(&handled)[0]
+            .content
+            .starts_with(prefixes::KEY_PACKAGE),
+        "the answer to a key package is a key package"
+    );
+}
+
+/// A reset carried on a frame that states no time is refused its teardown.
+///
+/// This is the whole cost of admitting the older payload, and it is the reason
+/// admitting it is safe. The high-water mark that makes one captured reset
+/// worth one teardown compares a timestamp; under this payload that timestamp
+/// sits outside the signature, so anyone in radio range could rewrite it. Set
+/// once to the far future, it would deny the pair every later reset, which is a
+/// durable denial of healing rather than a bounded replay.
+///
+/// The rest of the frame is still acted on, because capability advertisement is
+/// unauthenticated hint data everywhere in this protocol.
+#[test]
+fn a_session_reset_that_states_no_time_is_refused_its_teardown() {
+    let phone = new_phone();
+    let store: Arc<dyn LeafStore> = Arc::new(MemoryStore::new());
+    let mut device = device(Arc::clone(&store));
+    let device_address = pair(&phone, &mut device);
+
+    assert!(
+        device.has_session(&phone.address).expect("session"),
+        "the pair has to be up for a teardown to be worth refusing"
+    );
+
+    let payload = KeyPackagePayload {
+        user_id: phone.address.clone(),
+        key_package_data: vec![7],
+        remaining_lifetime_ms: 0,
+        timestamp_ms: 0,
+        session_reset: true,
+        wire_versions: vec![],
+        env_versions: vec![MLS_ENVELOPE_COMPACT_V1],
+        rich_versions: vec![],
+        data_versions: vec![],
+        ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
+        nostr_pubkey: None,
+    };
+    let content = format!(
+        "{}{}",
+        prefixes::KEY_PACKAGE,
+        serde_json::to_string(&payload).expect("payload")
+    );
+    let frame = phone_undated_frame(&phone, &device_address, content);
+
+    let handled = device.handle(&frame, NOW).expect("the frame is admitted");
+
+    assert!(
+        !handled
+            .events
+            .iter()
+            .any(|event| matches!(event, LeafEvent::SessionReset { .. })),
+        "a reset on a frame whose age cannot be judged tore the session down: {:?}",
+        handled.events
+    );
+    assert!(
+        device.has_session(&phone.address).expect("session"),
+        "the session is gone, so the teardown happened after all"
+    );
+    assert!(
+        handled
+            .events
+            .iter()
+            .any(|event| matches!(event, LeafEvent::PeerAdvertised { .. })),
+        "the frame's capability half must still be acted on: {:?}",
+        handled.events
+    );
+}
+
+/// A Welcome under the older payload is refused.
+///
+/// The exception is for key packages alone, and nothing else needs it: a
+/// Welcome can only follow this device's own key package reaching the peer, and
+/// that is the frame which teaches the peer to sign the freshness-bound
+/// payload. Admitting one here would put a frame whose age cannot be judged in
+/// front of a join.
+#[test]
+fn a_welcome_that_states_no_time_is_refused() {
+    let phone = new_phone();
+    let store: Arc<dyn LeafStore> = Arc::new(MemoryStore::new());
+    let mut device = device(Arc::clone(&store));
+    let device_address = device.address().to_string();
+
+    // The device advertises first, so the phone holds a real key package and
+    // the Welcome below is refused for its payload rather than for its body.
+    let advertisement = device
+        .key_package_frame(&phone.address, NOW)
+        .expect("device mints");
+    import_device_key_package(&phone, &advertisement);
+    let welcome = phone
+        .manager
+        .create_session(&device_address)
+        .expect("phone creates the session");
+    let content = format!(
+        "{}{}",
+        prefixes::WELCOME,
+        serde_json::to_string(&welcome).expect("welcome body")
+    );
+
+    let frame = phone_undated_frame(&phone, &device_address, content);
+    let refusal = device.handle(&frame, NOW);
+
+    assert!(
+        matches!(refusal, Err(LeafError::ControlFrameRefused(_))),
+        "a welcome that states no time was admitted: {refusal:?}"
+    );
+    assert!(
+        !device.has_session(&phone.address).expect("session"),
+        "the device joined from a welcome it should have refused"
+    );
+}
+
+/// A probe under the older payload is refused, for the same reason.
+#[test]
+fn a_probe_that_states_no_time_is_refused() {
+    let phone = new_phone();
+    let store: Arc<dyn LeafStore> = Arc::new(MemoryStore::new());
+    let mut device = device(Arc::clone(&store));
+    let device_address = pair(&phone, &mut device);
+
+    let frame = phone_undated_frame(
+        &phone,
+        &device_address,
+        prefixes::SESSION_CONFIRM_PROBE.to_string(),
+    );
+    let refusal = device.handle(&frame, NOW);
+
+    assert!(
+        matches!(refusal, Err(LeafError::ControlFrameRefused(_))),
+        "a probe that states no time was admitted: {refusal:?}"
+    );
+}
+
+/// The freshness-bound payload is still preferred, and still judged for age.
+///
+/// The fallback must not become a way around the window: a frame that carries
+/// a valid freshness-bound signature is judged under it, and an old one is
+/// refused rather than quietly retried under the payload that does not care.
+#[test]
+fn a_stale_key_package_is_still_refused_rather_than_retried_undated() {
+    let phone = new_phone();
+    let store: Arc<dyn LeafStore> = Arc::new(MemoryStore::new());
+    let mut device = device(Arc::clone(&store));
+    let device_address = device.address().to_string();
+
+    let stale_at = NOW - (LEAF_CTRL_FRESHNESS_PAST_MS / 1000) - 60;
+    let frame = phone_control_frame_at(
+        &phone,
+        &device_address,
+        advertisement_body(&phone.address),
+        stale_at,
+    );
+
+    let refusal = device.handle(&frame, NOW);
+
+    assert!(
+        matches!(refusal, Err(LeafError::StaleControlFrame(_))),
+        "a stale frame under the freshness-bound payload must stay refused for \
+         its age, not fall through to the payload that states none: {refusal:?}"
+    );
+}
