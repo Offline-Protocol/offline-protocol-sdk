@@ -109,6 +109,11 @@ Pairing is the ordinary session establishment described in
 whatever radio the device and the phone share. Nothing about it is leaf
 specific except where the time in step 2 comes from.
 
+The frames below are what a device sends. Getting them onto the radio is
+firmware's, and on Bluetooth LE the framing they must use is specified in
+[Bluetooth LE framing](ble-framing.md): a device that mints a correct key
+package and writes it in a shape the phone cannot reassemble has not paired.
+
 1. **Out-of-band anchor.** The person scans the device's `InviteV1` artifact,
    or the commissioner supplies the same `{address, pubkey}` pair. The verifier
    MUST run the full verification order in

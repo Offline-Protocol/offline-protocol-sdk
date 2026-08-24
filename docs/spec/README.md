@@ -21,6 +21,7 @@ document says which reading is normative for the wire.
 | [Group protocol](group-protocol.md) | Group frames, membership commits, leaf identity binding, relay broadcast and the delivery report |
 | [Capability negotiation](capability-negotiation.md) | What peers advertise, what each capability gates, and what happens on absence |
 | [Leaf node provisioning](leaf-provisioning.md) | What a constrained device owes at pairing, the never-committing profile, and the provisioning-time adversary |
+| [Bluetooth LE framing](ble-framing.md) | The GATT contract, the fragment header, and what a receiver owes on reassembly |
 | [Username discovery and invites](username-discovery.md) | The self-certifying invite payload, and the non-authoritative username directory |
 | [The gateway contract](gateway-contract.md) | What a gateway is, the five verbs it implements, the gateway-daemon wire protocol, and the backbone |
 
@@ -34,6 +35,7 @@ the crate whose code they pin, so a packaged build carries its own vectors:
 |---------|---------|
 | `crates/offline-protocol/tests/data/data-sync-v1.vectors.json` | [Document replication](data-sync.md) |
 | `crates/offline-protocol-transport/tests/data/nip44.vectors.json` | The NIP-44 sealing used on the Nostr carrier |
+| `crates/offline-protocol-transport/tests/data/ble-framing-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md) |
 
 A vector is computed independently of the code it pins wherever that is
 possible, so a mismatch is evidence about the code rather than a disagreement
@@ -53,7 +55,11 @@ own failure mode, and a reader should keep them apart:
 
 1. **Transport framing.** How bytes reach the next hop. Bluetooth LE, Wi-Fi
    Direct, Reticulum, Nostr, or an internet relay. Out of scope here except
-   where a transport constrains a payload size.
+   where a transport constrains a payload size, and except Bluetooth LE, which
+   [has its own chapter](ble-framing.md). That exception exists because a leaf
+   node's firmware implements the radio itself, so on that one carrier the
+   framing became part of the interop surface rather than an agreement between
+   two builds of this source tree.
 2. **Hop-local encoding.** How a `Message` becomes bytes for one hop. Either
    the JSON floor or the binary v1 codec. Negotiated per peer via
    `wire_versions`, and re-negotiated on every connection.

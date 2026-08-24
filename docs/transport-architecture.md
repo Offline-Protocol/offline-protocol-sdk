@@ -124,6 +124,11 @@ interface TransportManager {
 - Service: `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`
 - Message Characteristic: `6E400002-B5A3-F393-E0A9-E50E24DCCA9E`
 - Device ID Characteristic: `6E400003-B5A3-F393-E0A9-E50E24DCCA9E`
+- Identity Characteristic: `6E400004-B5A3-F393-E0A9-E50E24DCCA9E`
+
+These, the fragment header and the reassembly rules are specified normatively
+in [Bluetooth LE framing](spec/ble-framing.md), which is the authority; this
+page is an orientation to the implementation.
 
 **Lifecycle**:
 1. `start()` → Begin scanning and advertising
