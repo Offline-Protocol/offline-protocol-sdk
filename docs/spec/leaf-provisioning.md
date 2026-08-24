@@ -151,6 +151,19 @@ Welcome and a confirmation probe can only follow this device's own key package
 reaching the peer, which is the frame that teaches the peer to sign the
 freshness-bound payload.
 
+**What this covers on a device is acceptance, and on a peer that lost its
+record that is not the whole of recovery.** A device answers a key package with
+one of its own only while it has not already sent this peer one, and the frame
+that clears that record is a `session_reset`, which is exactly what the
+exception refuses. So a peer that kept its identity but lost its capability
+record re-teaches the device about itself and is sent nothing back, and the
+pairing does not resume on its own. The device is what breaks the tie:
+firmware calls the key-package advertisement again, which mints regardless of
+that record, and the exchange continues from step 3. Withholding that and
+letting an undated frame clear the record instead would make one captured
+frame a way to farm init keys off the part, which is the failure this ordering
+exists to prevent.
+
 ### What the anchor is, and is not
 
 The out-of-band artifact is the whole of first-contact trust, exactly as it is
