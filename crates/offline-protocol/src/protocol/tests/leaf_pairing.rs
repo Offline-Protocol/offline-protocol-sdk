@@ -885,6 +885,19 @@ fn an_application_driven_rekey_rebuilds_the_pair() {
         Some(&0),
         "the rebuild never went quiet: {rounds:?}"
     );
+    // The unit test alongside this one proves a *refused* application call
+    // stays off the desync channel, which a warning added to the success arm
+    // would slip straight past. This is that arm, driven for real.
+    assert!(
+        !pair.phone.events().iter().any(|event| matches!(
+            event,
+            crate::Event::SecurityWarning { reason_code, .. }
+                if *reason_code == crate::events::SecurityWarningCode::SessionRekeyTriggered
+        )),
+        "a rotation the application asked for reported itself as an epoch \
+         desync, which is the attack signature an operator watches; events: {:?}",
+        pair.phone.events()
+    );
 }
 
 /// Traffic flows in both directions in the epoch a rotation produced.
@@ -1028,6 +1041,114 @@ fn a_rotation_inside_the_window_is_refused_rather_than_repeated() {
         !pair.phone.protocol.rekey_session(&leaf).expect("second"),
         "a caller looping on this could tear a pair down as fast as it liked, \
          which is what the shared floor exists to prevent"
+    );
+}
+
+/// A rotation that cannot be sent leaves the pair exactly as it was.
+///
+/// A lock is out of range far more often than it is compromised, so this is
+/// the ordinary case rather than the unlucky one. The reset is advertised
+/// before the session is discarded, and the transport reports an error only
+/// once nothing has accepted the frame, so a failure here means the peer was
+/// told nothing and this side must keep what it has.
+///
+/// Tearing down first is what makes that unrecoverable rather than merely
+/// failed: this side would hold no session, the device would hold one it will
+/// never be told to drop, and nothing on either side re-opens the exchange. A
+/// leaf speaks only when spoken to, and the phone's own key-package push is
+/// suppressed for a peer it has already sent one to, so the next reconnect
+/// carries nothing at all and every later message is sealed to an epoch the
+/// device threw away.
+#[test]
+fn a_rotation_that_cannot_be_sent_leaves_the_session_alone() {
+    let mut pair = Pair::new("alice");
+    let phone = pair.phone_address();
+    let leaf = pair.leaf_address();
+
+    pair.phone.protocol.on_neighbor_discovered(&leaf);
+    pair.settle();
+    assert!(pair.phone.protocol.has_mls_session(&leaf).unwrap());
+
+    // Out of range, and this radio is the only one.
+    pair.phone.transport.set_fail_next_sends(1);
+    let refused = pair.phone.protocol.rekey_session(&leaf);
+
+    assert!(
+        matches!(refused, Err(crate::Error::Transport(_))),
+        "a rotation nothing carried must say so rather than report success: {refused:?}"
+    );
+    assert!(
+        pair.phone.protocol.has_mls_session(&leaf).unwrap(),
+        "the phone discarded a healthy session on the strength of a reset that \
+         never left, so the device is now holding a session it will never be \
+         told to drop"
+    );
+    assert!(
+        pair.leaf.device.has_session(&phone).unwrap(),
+        "the device lost its session to a frame that was never sent"
+    );
+
+    // Back in range, with nothing to repair: the pair still carries traffic,
+    // and the failed attempt did not spend the window that bounds rotations.
+    pair.phone
+        .protocol
+        .send_message(&leaf, "still paired", None, None::<String>)
+        .expect("send");
+    pair.settle();
+    assert_eq!(
+        pair.leaf.received(),
+        vec!["still paired".to_string()],
+        "the pair stopped carrying traffic after a rotation that did nothing; \
+         events: {:?}",
+        pair.leaf.events
+    );
+
+    assert!(
+        pair.phone
+            .protocol
+            .rekey_session(&leaf)
+            .expect("the retry is carried this time"),
+        "a rotation that never left spent the peer's rate-limit window anyway, \
+         so a caller back in range is made to wait out a floor that bounds \
+         teardowns none of which happened"
+    );
+    pair.settle();
+    assert!(
+        pair.leaf.saw_session_reset(&phone),
+        "the retry did not reach the device; events: {:?}",
+        pair.leaf.events
+    );
+    assert!(
+        pair.phone.protocol.has_mls_session(&leaf).unwrap()
+            && pair.leaf.device.has_session(&phone).unwrap(),
+        "the pair did not rebuild once the rotation was carried"
+    );
+}
+
+/// A desync-driven re-key discards the fork even when the reset cannot be sent.
+///
+/// The opposite choice from the application-driven entry, and deliberately so.
+/// What reaches this path is a session that has already forked, so every later
+/// frame on it decrypts to nothing: keeping it because the peer could not be
+/// told leaves a pair that is silently broken rather than one that rebuilds on
+/// the next exchange. The application path keeps its session for the mirror
+/// reason, that the session it was asked to rotate is healthy.
+#[test]
+fn a_desync_rekey_discards_the_fork_even_when_the_reset_cannot_be_sent() {
+    let mut pair = Pair::new("alice");
+    let leaf = pair.leaf_address();
+
+    pair.phone.protocol.on_neighbor_discovered(&leaf);
+    pair.settle();
+    assert!(pair.phone.protocol.has_mls_session(&leaf).unwrap());
+
+    pair.phone.transport.set_fail_next_sends(1);
+    pair.phone.protocol.schedule_session_rekey(&leaf);
+
+    assert!(
+        !pair.phone.protocol.has_mls_session(&leaf).unwrap(),
+        "a forked session outlived the re-key that was meant to replace it, so \
+         every later frame on it decrypts to nothing and nothing tries again"
     );
 }
 

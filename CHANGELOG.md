@@ -113,6 +113,17 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   because it names an epoch desync and exists so a sustained rate of them reads
   as an attack signature.
 
+  **A rotation that fails changes nothing.** The reset is advertised before the
+  local session is torn down, and a transport reports an error only once nothing
+  has accepted the frame, so a failure leaves the session intact, still usable,
+  and the window unspent. Rotate while the peer is reachable and treat a failure
+  as "try again later". The order matters most against a leaf node, which speaks
+  only when spoken to: discarding first and then failing to send would leave the
+  phone with no session, the device holding one it will never be told to drop,
+  and nothing on either side that re-opens the exchange. The desync path makes
+  the opposite choice on the same failure, because what reaches it is a fork
+  rather than a healthy session.
+
   **The cadence is the application's, and this is an obligation rather than a
   setting.** A rotation costs a teardown, a key-package exchange and a
   re-establish, and what that is worth to a mains-powered lock and to a phone on

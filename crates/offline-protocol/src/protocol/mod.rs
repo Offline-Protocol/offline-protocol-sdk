@@ -2361,10 +2361,23 @@ impl OfflineProtocol {
     ///
     /// # Returns
     ///
-    /// * `Ok(true)` - the session was torn down and the reset advertised.
+    /// * `Ok(true)` - the reset was advertised and the session torn down.
     /// * `Ok(false)` - the rate-limit window has not lapsed; nothing was done,
     ///   and a later call succeeds. Not an error: a caller on a fixed schedule
     ///   that briefly runs faster than the floor is behaving correctly.
+    ///
+    /// # A rotation that fails changes nothing
+    ///
+    /// The reset is advertised **before** the local session is torn down, so
+    /// an `Err` leaves the pair exactly as it was: the session is still there,
+    /// still usable, and the rate-limit window is not spent. Rotate while the
+    /// peer is reachable, and treat a failure as "try again later" rather than
+    /// as a session to rebuild.
+    ///
+    /// The order matters most against a leaf node, which speaks only when
+    /// spoken to. Tearing down first and failing to send would leave this side
+    /// with no session, the device holding one it will never be told to drop,
+    /// and nothing on either side that re-opens the exchange.
     ///
     /// # Errors
     ///
@@ -2373,6 +2386,8 @@ impl OfflineProtocol {
     /// * [`Error::Mls`] with `SessionNotFound` - there is no session to rebuild.
     ///   Establishing a first session is [`Self::establish_secure_session`];
     ///   this heals one that exists.
+    /// * [`Error::Transport`] - no transport accepted the reset frame. The
+    ///   session is untouched, as above.
     pub fn rekey_session(&mut self, peer_id: &str) -> Result<bool> {
         if self.is_user_blocked(peer_id) {
             return Err(Error::UserBlocked(peer_id.to_string()));
@@ -2395,7 +2410,13 @@ impl OfflineProtocol {
             );
             return Ok(false);
         }
-        self.drive_session_rekey(peer_id, "requested by the application");
+        if let Err(err) = self.drive_session_rekey(peer_id, "requested by the application") {
+            // Nothing was sent and nothing was torn down, so nothing was
+            // spent: a caller back in range a second from now is asking for a
+            // rotation this pair has not had.
+            self.release_rekey_slot(peer_id);
+            return Err(err);
+        }
         Ok(true)
     }
 

@@ -414,6 +414,14 @@ Nothing about this is leaf-specific except how sharply it bites. Two installs
 that simply never desync are in the same position; a leaf is where it is
 guaranteed, because the device cannot originate a rotation even in principle.
 
+A rotation the phone asks for and cannot send changes nothing on either side.
+The reset is advertised before the phone's own session is discarded, so a
+device out of range keeps the session it has and the phone keeps its own.
+Discarding first would be unrecoverable rather than merely failed: the phone
+would hold no session, the device would hold one it will never be told to
+drop, and a leaf speaks only when spoken to, so nothing on either side would
+re-open the exchange.
+
 A phone-driven rekey reaches the device as a `__MLS_KEY_PKG__` frame with
 `session_reset` set, not as an unsolicited Welcome. A leaf MUST, on receiving
 it, discard the existing session and mint a fresh key package, so that the

@@ -685,6 +685,11 @@ const rotated = await protocol.rekeySession(peerId);
 
 The peer sees exactly what a desync-driven re-key sends, and queued messages
 survive: they are sealed at flush time against whatever session is current then.
+
+Rotate while the peer is reachable. A rotation that fails changes nothing (the
+reset goes out before the local session is discarded), so the session is left
+intact and the window unspent: treat a failure as "try again later" rather than
+as a session to rebuild.
 The cost is a teardown, a key-package exchange and a re-establish, which is why
 the interval is yours rather than the SDK's. A mains-powered lock and a phone
 on a metered link do not want the same number, and nothing on the wire says

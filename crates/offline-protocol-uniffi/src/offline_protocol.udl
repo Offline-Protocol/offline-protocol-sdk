@@ -1628,8 +1628,10 @@ interface OfflineProtocol {
     // Rotate the 1:1 session with a peer, advancing post-compromise security.
     // Returns true when the rotation was driven, false when the per-peer rate
     // limit window has not lapsed yet (not an error; call again later).
-    // Throws if encryption is not initialized, the peer is blocked, or there is
-    // no session to rotate.
+    // Throws if encryption is not initialized, the peer is blocked, there is
+    // no session to rotate, or no transport carried the reset. A rotation that
+    // throws changes nothing: the session is left intact and the window
+    // unspent, so rotate while the peer is reachable and retry later.
     [Throws=ProtocolError]
     boolean rekey_session(string peer_id);
     

@@ -4192,6 +4192,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * rate-limit window has not lapsed, which is not a failure: a caller on a
      * fixed schedule that briefly runs faster than the floor is behaving
      * correctly and a later call succeeds.
+     *
+     * A rejection changes nothing: the reset is advertised before the local
+     * session is torn down, so the session is left intact and the window
+     * unspent. Rotate while the peer is reachable and retry later.
      */
     @ReactMethod
     fun rekeySession(peerId: String, promise: Promise) {

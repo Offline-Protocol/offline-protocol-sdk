@@ -182,6 +182,16 @@ because it names an epoch desync and exists so that a sustained rate of them
 reads as an attack signature. A scheduled rotation firing it would put an
 operator's own maintenance in front of them wearing that shape.
 
+**The reset is advertised before the session is discarded, and a rotation that
+cannot be sent discards nothing.** A transport reports an error only once
+nothing has accepted the frame, so a failure means the peer was told nothing,
+and the session an application asked to rotate is healthy: it is kept, and the
+window is not spent. The desync path makes the opposite choice on the same
+failure, because what reaches it is a fork rather than a healthy session, and a
+fork decrypts nothing whether or not the peer could be told. The order is
+invisible to a peer either way, since both steps run before any inbound frame
+can be processed.
+
 **This is the only way post-compromise security arrives on a pair that never
 desyncs**, and it is the only way at all on a pair containing a leaf node,
 which never commits. The interval is the application's to choose; nothing in

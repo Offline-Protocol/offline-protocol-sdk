@@ -2940,12 +2940,19 @@ export class OfflineProtocol {
    * survive, because they are sealed at flush time against whatever session is
    * current then.
    *
+   * A rotation that fails changes nothing. The reset is advertised before the
+   * local session is torn down, so a rejection leaves the session intact,
+   * still usable, and the rate-limit window unspent. Rotate while the peer is
+   * reachable and treat a failure as "try again later" rather than as a
+   * session to rebuild.
+   *
    * @param peerId - Peer's ID
    * @returns true when the rotation was driven; false when the per-peer
    *   rate-limit window has not lapsed. False is not a failure — call again
    *   later.
-   * @throws Error if encryption is not initialized, the peer is blocked, or
-   *   there is no session to rotate (establish one first).
+   * @throws Error if encryption is not initialized, the peer is blocked, there
+   *   is no session to rotate (establish one first), or no transport carried
+   *   the reset.
    */
   async rekeySession(peerId: string): Promise<boolean> {
     return await OfflineProtocolNativeModule.rekeySession(peerId);

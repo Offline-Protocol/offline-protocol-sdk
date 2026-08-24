@@ -6487,6 +6487,12 @@ impl OfflineProtocol {
     /// per-peer rate-limit window has not lapsed, which is not an error: a
     /// caller on a fixed schedule that briefly runs faster than the floor is
     /// behaving correctly and a later call succeeds.
+    ///
+    /// A rotation that fails changes nothing. The reset is advertised before
+    /// the local session is torn down, so an error leaves the session intact,
+    /// still usable, and the rate-limit window unspent. Rotate while the peer
+    /// is reachable and treat a failure as "try again later" rather than as a
+    /// session to rebuild.
     pub fn rekey_session(&self, peer_id: String) -> Result<bool, ProtocolError> {
         let mut guard = self.lock_inner()?;
         guard.rekey_session(&peer_id).map_err(ProtocolError::from)
