@@ -304,7 +304,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -436,7 +436,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
 dependencies = [
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1995,7 +1995,7 @@ dependencies = [
  "serde",
  "spin 0.10.1",
  "subtle",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "wasm-bindgen",
  "zeroize",
 ]
@@ -2008,7 +2008,7 @@ checksum = "45bd834f164dc06c1fed805540ae307a460b7ed7c2769a35a376f1de577a0dc1"
 dependencies = [
  "itertools 0.14.0",
  "mls-rs-codec-derive",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "wasm-bindgen",
 ]
 
@@ -2035,7 +2035,7 @@ dependencies = [
  "maybe-async",
  "mls-rs-codec",
  "serde",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "wasm-bindgen",
  "zeroize",
 ]
@@ -2051,7 +2051,7 @@ dependencies = [
  "maybe-async",
  "mls-rs-core",
  "mls-rs-crypto-traits",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "zeroize",
 ]
 
@@ -2079,7 +2079,7 @@ dependencies = [
  "rand_core 0.6.4",
  "sec1 0.8.1",
  "sha2 0.10.9",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "x25519-dalek",
  "zeroize",
 ]
@@ -2105,7 +2105,7 @@ dependencies = [
  "async-trait",
  "maybe-async",
  "mls-rs-core",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "wasm-bindgen",
 ]
 
@@ -2230,7 +2230,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "tracing",
  "uuid",
  "zeroize",
@@ -2258,7 +2258,7 @@ dependencies = [
  "postcard",
  "serde",
  "serde_json",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "tracing",
  "unicode-normalization",
  "uuid",
@@ -2271,7 +2271,7 @@ dependencies = [
  "loro",
  "serde",
  "serde_json",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "tracing",
 ]
 
@@ -2289,7 +2289,7 @@ dependencies = [
  "offline-protocol-sealed",
  "serde",
  "serde_json",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "zeroize",
 ]
 
@@ -2310,7 +2310,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "uuid",
@@ -2323,7 +2323,7 @@ dependencies = [
  "chrono",
  "offline-protocol-core",
  "serde",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2334,7 +2334,7 @@ dependencies = [
  "offline-protocol-core",
  "offline-protocol-transport",
  "serde",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "tracing",
 ]
 
@@ -2347,7 +2347,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2357,7 +2357,7 @@ dependencies = [
  "offline-protocol-core",
  "serde",
  "serde_json",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "tracing",
  "uuid",
 ]
@@ -2378,7 +2378,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "subtle",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "tracing",
  "zeroize",
 ]
@@ -2395,7 +2395,7 @@ dependencies = [
  "offline-protocol-transport",
  "serde",
  "serde_json",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "tracing",
  "uniffi",
 ]
@@ -2429,7 +2429,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_bytes",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "tls_codec",
  "zeroize",
 ]
@@ -2458,7 +2458,7 @@ dependencies = [
  "openmls_traits",
  "serde",
  "serde_json",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2482,7 +2482,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "serde",
  "sha2 0.10.9",
- "thiserror 2.0.17",
+ "thiserror 2.0.20",
  "tls_codec",
 ]
 
@@ -3397,11 +3397,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.17"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f63587ca0f12b72a0600bcba1d40081f830876000bb46dd2337a3051618f4fc8"
+checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
 dependencies = [
- "thiserror-impl 2.0.17",
+ "thiserror-impl 2.0.20",
 ]
 
 [[package]]
@@ -3417,13 +3417,13 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.17"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ff15c8ecd7de3849db632e14d18d2571fa09dfc5ed93479bc4485c7a517c913"
+checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.108",
+ "syn 3.0.3",
 ]
 
 [[package]]
