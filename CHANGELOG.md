@@ -11,30 +11,6 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
-## [Unreleased]
-
-### Security
-
-- **The npm package publishes over trusted publishing, so no long-lived npm
-  credential exists anywhere.** `release.yml` authenticated with an `NPM_TOKEN`
-  repository secret until now; it exchanges the workflow's own OIDC identity for
-  a short-lived, workflow-scoped registry token instead, which cannot be
-  exfiltrated from a build log or replayed from anywhere else. The trust is
-  registered at the registry against this repository and the workflow
-  *filename*, so renaming `release.yml`, or moving the publish into a reusable
-  workflow, revokes the ability to publish with nothing in the diff that says
-  so.
-- **Provenance is no longer conditional on a flag this repository computes.**
-  `--provenance` was resolved from `github.event.repository.visibility`, because
-  the registry answers HTTP 422 to a provenance publish from a private source
-  repository, and that failure took down the v0.20.1 release after the GitHub
-  release had already been created. npm applies the same rule itself now, by
-  declining before publishing rather than by rejecting, so the workaround is
-  deleted rather than carried forward. What actually shipped is read back from
-  the registry after the upload: a published version without an attestation
-  fails the run, because a green publish step proves the tarball uploaded and
-  never that it carried provenance.
-
 ## [0.24.0] — 2026-08-24
 
 > **A door lock speaks this protocol now, and not a smaller version of it.**
@@ -176,6 +152,26 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   knowing: this device's own late retransmissions of signed control frames can
   be refused as stale by the peer they finally reach. Ordinary messages are
   unaffected. The default of 7 days sits well inside the window.
+
+- **The npm package publishes over trusted publishing, so no long-lived npm
+  credential exists anywhere.** `release.yml` authenticated with an `NPM_TOKEN`
+  repository secret until now; it exchanges the workflow's own OIDC identity for
+  a short-lived, workflow-scoped registry token instead, which cannot be
+  exfiltrated from a build log or replayed from anywhere else. The trust is
+  registered at the registry against this repository and the workflow
+  *filename*, so renaming `release.yml`, or moving the publish into a reusable
+  workflow, revokes the ability to publish with nothing in the diff that says
+  so.
+- **Provenance is no longer conditional on a flag this repository computes.**
+  `--provenance` was resolved from `github.event.repository.visibility`, because
+  the registry answers HTTP 422 to a provenance publish from a private source
+  repository, and that failure took down the v0.20.1 release after the GitHub
+  release had already been created. npm applies the same rule itself now, by
+  declining before publishing rather than by rejecting, so the workaround is
+  deleted rather than carried forward. What actually shipped is read back from
+  the registry after the upload: a published version without an attestation
+  fails the run, because a green publish step proves the tarball uploaded and
+  never that it carried provenance.
 
 ### Added
 
