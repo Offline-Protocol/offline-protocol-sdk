@@ -82,7 +82,7 @@ implementation written against these documents should interoperate.
 
 | Document | Scope |
 |----------|-------|
-| [ADR index](adr/README.md) | Nineteen decisions that are expensive to reverse or easy to undo by accident |
+| [ADR index](adr/README.md) | Twenty-three decisions that are expensive to reverse or easy to undo by accident |
 
 If something in the codebase looks redundant or over-engineered, check here
 before simplifying it.

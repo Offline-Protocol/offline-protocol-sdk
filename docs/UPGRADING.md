@@ -1,7 +1,7 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.23.x` line.
+current `v0.24.x` line.
 
 The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 `initialize_mls` changes shape, three config updaters become fallible, and
@@ -23,7 +23,13 @@ more, in the one place nothing was reading: the learned-route API is deleted,
 eight methods and four types that wrote into a table the delivery path never
 consulted, along with `ProtocolConfig.path`.
 [§15](#15-the-learned-route-api-is-gone-v0230) lists them; delete the calls,
-because there is nothing to replace them with.
+because there is nothing to replace them with. `v0.24.0` breaks nothing and
+still needs reading before you deploy it: a key package claiming more than 90
+days is now refused, a control frame is judged against the device's clock, and
+rotating a session for post-compromise security became something your
+application schedules rather than something that happens on its own.
+[§17](#17-two-refusals-that-are-new-and-one-rotation-you-now-owe-v0240) covers
+all three.
 
 Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
@@ -1678,12 +1684,123 @@ on it is rendering state that survives a restart.
 The CRDT engine adds roughly 1.5 MB. Native crates.io consumers can drop it:
 
 ```toml
-offline-protocol = { version = "0.23", default-features = false }
+offline-protocol = { version = "0.24", default-features = false }
 ```
 
 The mobile artifact carries it either way: two binding flavors would mean a
 runtime FFI checksum mismatch rather than a build error, which is a worse
 failure than the bytes.
+
+---
+
+## 17. Two refusals that are new, and one rotation you now owe *(v0.24.0)*
+
+Nothing in `v0.24.0` breaks a build. No binding method changed shape, no type
+was removed, and no configuration key you already set means something else.
+What changed is what a peer will be refused for, and what your application is
+now responsible for scheduling.
+
+### Peers whose key packages claim more than 90 days are refused
+
+RFC 9420 leaves the maximum total lifetime of a key package to the application,
+and this SDK defined none, so a package claiming a century was admitted and
+stayed usable for establishing new sessions until the century ran out. All
+three routes by which a key package this install did not mint is admitted now
+refuse a window wider than **90 days**: the 1:1 import, every read of the
+contact cache, and a group invite.
+
+**For a fleet running this SDK, nothing changes.** 90 days admits every key
+package any released version has ever put on the wire, and a leaf node's 28
+days clears it three times over. Closing the gap also fixed the other half:
+this SDK was minting 84-day windows while documenting 30, because the builder
+was never told a lifetime and OpenMLS applied its own default of three months
+plus an hour. A package minted by `v0.24.0` says 30 days because it is 30 days.
+
+**Interoperating with a non-OpenMLS stack is where this bites.** mls-rs
+defaults to a one-year lifetime, so a peer built on it is refused at import
+with an `InvalidKeyPackage` naming both widths. If you talk to such a peer,
+configure its key package lifetime at or under 90 days.
+
+The cap is 90 rather than the bound OpenMLS declares because three months plus
+an hour is exactly what an unconfigured build emits: a cap set there would
+admit every package this SDK has ever minted with no margin, and refuse any
+peer whose skew allowance is a second wider.
+
+### A recorded control frame stops verifying, and the clock is what judges it
+
+The canonical signing payload bound the sender, the message id, the recipient
+and the content, and nothing about time, so a frame recorded off the air
+verified as well on its tenth delivery as on its first. `offline-ctrl-v2` puts
+the frame's timestamp inside the signature, under its own domain. Nothing on
+the wire grows, and peers negotiate the payload through `ctrl_versions` in the
+key package, so **no application code changes and first contact still converges
+in one round trip**.
+
+Two operational consequences are worth knowing before you deploy.
+
+**A new `STALE_CONTROL_FRAME` security warning reports the refusal.** When it
+appears across many peers at once, suspect the device's own clock first. The
+timestamp is judged against local time, so a device whose clock is wrong reads
+every correct peer as stale. Surface it the way you surface other security
+warnings; do not treat a single occurrence as an attack.
+
+**`security.control_freshness_enforced` (`controlFreshnessEnforced` in the
+bindings, default `true`) turns enforcement off without shipping a new binary.**
+It exists for a fleet whose clocks are wrong, and it gives back exactly the
+replay this closed, so treat it as a recovery lever rather than a setting to
+deploy on.
+
+One configuration interaction: raising `outbox_max_lifetime_ms` above about
+7.5 days means this device's own late retransmissions of signed control frames
+can be refused as stale by the peer they finally reach. Ordinary messages are
+unaffected, and the 7-day default sits well inside the window.
+
+### Rotating a session is now yours to schedule
+
+Post-compromise security arrives when a commit rotates a member's leaf in the
+ratchet tree, and this SDK originates one on a re-key. Nothing scheduled a
+re-key: one fired on an epoch desync, which is a fault rather than a cadence.
+A pair that never forked therefore never rotated, and the window a stolen key
+stays useful for was bounded by nothing.
+
+```swift
+let rotated = try protocol.rekeySession(peerId: peer)
+```
+
+`rekeySession` / `rekey_session` exists on every binding and returns a boolean.
+**`false` is not a failure**: it means the per-peer rate-limit window has not
+lapsed, and a caller on a fixed schedule that briefly outruns the floor is
+behaving correctly, so a later call succeeds. An error means the rotation did
+not happen, and **a rotation that fails changes nothing** — the reset is
+advertised before the local session is torn down, so the session is still
+intact and still usable. Rotate while the peer is reachable and treat a failure
+as "try again later".
+
+The right cadence is yours, because what a rotation costs a mains-powered lock
+and a phone on a metered link are different answers and nothing on the wire
+distinguishes them. It matters most against a leaf node, which never commits at
+all, so every rotation in such a pair is the phone's to originate. Queued
+messages survive a rotation, sealed at flush time against whatever session is
+current then.
+
+### If you build firmware
+
+`offline-protocol-leaf` is new, and a constrained device that speaks this
+protocol is a peer rather than a class of peer: the same frames, the same
+envelope, the same trust gates. Four obligations sit with the integrator and
+none of them is revealed by a passing build. Start at
+[docs/spec/leaf-provisioning.md](spec/leaf-provisioning.md), and read
+[docs/spec/ble-framing.md](spec/ble-framing.md) for the link itself.
+
+### Rust consumers
+
+`EncryptedMessage::from_bytes`, `EncryptedMessage::from_base64` and
+`GroupId::new` now return `SealedError` rather than `MlsError`, the envelope
+codec having moved into the new `offline-protocol-sealed` crate. `From<SealedError>`
+exists for both `MlsError` and the engine's `Error` and passes the inner
+message through, so every rendered error string, every FFI error code and every
+wire byte is what it was. Only code that matches on those functions' error type
+directly needs a change.
 
 ---
 
