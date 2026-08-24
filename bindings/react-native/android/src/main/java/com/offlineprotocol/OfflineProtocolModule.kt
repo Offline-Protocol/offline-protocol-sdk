@@ -4186,6 +4186,24 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     /**
+     * Rotate the 1:1 session with a peer, advancing post-compromise security.
+     *
+     * Resolves true when the rotation was driven and false when the per-peer
+     * rate-limit window has not lapsed, which is not a failure: a caller on a
+     * fixed schedule that briefly runs faster than the floor is behaving
+     * correctly and a later call succeeds.
+     */
+    @ReactMethod
+    fun rekeySession(peerId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            promise.resolve(proto.rekeySession(peerId))
+        } catch (e: Exception) {
+            promise.reject("ERROR_MLS", "Failed to rotate session: ${e.message}", e)
+        }
+    }
+
+    /**
      * Encrypt a message for a user
      */
     @ReactMethod

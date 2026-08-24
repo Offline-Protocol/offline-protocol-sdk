@@ -2922,6 +2922,35 @@ export class OfflineProtocol {
     };
   }
 
+  /**
+   * Rotate the 1:1 session with a peer, advancing post-compromise security.
+   *
+   * Post-compromise security arrives when a commit rotates a member's leaf in
+   * the ratchet tree, and the SDK originates one on a re-key. Nothing drives a
+   * re-key on its own except an epoch desync, so a pair that never forks never
+   * rotates unless the application asks. That bites hardest against a leaf
+   * node — a lock, a sensor — which never commits at all, so every rotation in
+   * such a pair is this side's to originate.
+   *
+   * The cadence is yours on purpose: a rotation costs a teardown, a key-package
+   * exchange and a re-establish, and what that is worth depends on the
+   * deployment rather than on anything the wire says.
+   *
+   * The peer sees exactly what a desync-driven re-key sends. Queued messages
+   * survive, because they are sealed at flush time against whatever session is
+   * current then.
+   *
+   * @param peerId - Peer's ID
+   * @returns true when the rotation was driven; false when the per-peer
+   *   rate-limit window has not lapsed. False is not a failure — call again
+   *   later.
+   * @throws Error if encryption is not initialized, the peer is blocked, or
+   *   there is no session to rotate (establish one first).
+   */
+  async rekeySession(peerId: string): Promise<boolean> {
+    return await OfflineProtocolNativeModule.rekeySession(peerId);
+  }
+
   private normalizeMlsGroupInfo(raw: any): MlsGroupInfo {
     return {
       groupId: raw.groupId,

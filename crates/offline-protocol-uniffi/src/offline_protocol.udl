@@ -1625,6 +1625,14 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     MlsWelcomeMessage? establish_secure_session(string peer_id);
     
+    // Rotate the 1:1 session with a peer, advancing post-compromise security.
+    // Returns true when the rotation was driven, false when the per-peer rate
+    // limit window has not lapsed yet (not an error; call again later).
+    // Throws if encryption is not initialized, the peer is blocked, or there is
+    // no session to rotate.
+    [Throws=ProtocolError]
+    boolean rekey_session(string peer_id);
+    
     // Create a 1:1 session with another user (returns Welcome to send)
     [Throws=ProtocolError]
     MlsWelcomeMessage mls_create_session(string other_user_id);

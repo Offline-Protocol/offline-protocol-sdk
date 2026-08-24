@@ -1435,6 +1435,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func rejectConnectionRequest(recipient: String) throws  -> String
     
+    func rekeySession(peerId: String) throws  -> Bool
+    
     func releaseTransportLock() 
     
     func removeFromGroup(groupId: String, memberId: String) throws 
@@ -2525,6 +2527,15 @@ open func rejectConnectionRequest(recipient: String)throws  -> String  {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reject_connection_request(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(recipient),$0
+    )
+})
+}
+    
+open func rekeySession(peerId: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rekey_session(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(peerId),$0
     )
 })
 }
@@ -10707,6 +10718,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request() != 27126) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rekey_session() != 20206) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock() != 4494) {
