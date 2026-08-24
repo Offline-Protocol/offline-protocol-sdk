@@ -45,10 +45,15 @@ env:
 # This workflow is where that matters most, and the blast radius is wider than
 # "a bad binary":
 #   - The `release` job holds `contents: write` (publishes the GitHub release),
-#     `id-token: write` and `attestations: write` (mints GitHub attestations and
-#     npm provenance), and reads NPM_TOKEN. Anything running there can sign a
-#     forged artifact with this workflow's own identity — which is exactly the
-#     signal consumers are told to trust over SHA256SUMS.txt.
+#     `id-token: write` and `attestations: write`. Those mint GitHub
+#     attestations and npm provenance, and since the npm publish moved to
+#     trusted publishing, `id-token: write` *is* the npm publish credential:
+#     the job exchanges this workflow's OIDC identity for a short-lived
+#     registry token, so there is no NPM_TOKEN to exfiltrate and nothing to
+#     rotate. That removes a long-lived secret, but it concentrates trust in
+#     this job's identity: anything running here can both publish to npm and
+#     sign a forged artifact as this workflow, which is exactly the signal
+#     consumers are told to trust over SHA256SUMS.txt.
 #   - The `publish-crates` job reads CARGO_REGISTRY_TOKEN. Anything running
 #     there can publish arbitrary code to crates.io under this project's crate
 #     names — and crates.io versions are immutable, so a poisoned publish can
@@ -63,8 +68,9 @@ env:
 # because there the argument above turns back on itself:
 # `attest-build-provenance` is the action that *mints* the signature consumers
 # are told to trust, `download-artifact` is what hands it the binaries to sign,
-# `setup-node` configures the registry the NPM_TOKEN publish authenticates
-# against, and `checkout` decides which source gets packaged into the .crate
+# `setup-node` both points the publish at the registry and installs the npm that
+# performs the OIDC exchange, and `checkout` decides which source gets packaged
+# into the .crate
 # files CARGO_REGISTRY_TOKEN uploads. Leaving those mutable would reopen
 # exactly the hole the rest of this pinning closes. Org membership does not cover
 # it either — the attack that actually happens is tag re-pointing from a
@@ -776,11 +782,66 @@ jobs:
 
           echo "All artifacts verified."
 
+      # Node 24 (LTS) rather than 20 because this job publishes to npm with
+      # trusted publishing, and the OIDC token exchange lives in the npm CLI
+      # itself: npm >= 11.5.1 is required, and it is the *bundled* npm that
+      # decides. Node 20 ships npm 10.8.2 and Node 22 LTS still ships 10.9.8 --
+      # neither contains the OIDC code path at all. Node 24 ships npm 11.17.0.
+      #
+      # ci.yml's TypeScript job tracks this version deliberately. That job
+      # exists to catch a tsc or tsconfig break on the PR rather than during a
+      # release, which it can only do from the Node the release will run on.
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+
+      # The failure this prevents is silent, which is why it is a hard gate and
+      # not a comment on the step above. `npm/cli/lib/utils/oidc.js` is
+      # documented as "intended to never throw": every failure branch returns
+      # undefined and the publish continues with whatever credential .npmrc
+      # holds. On an npm that predates that file, trusted publishing therefore
+      # does not fail -- it simply never happens. A future `node-version`
+      # downgrade would reopen that with nothing in the diff to review.
+      - name: Assert npm supports trusted publishing
+        run: |
+          set -euo pipefail
+          REQUIRED=11.5.1
+          NPM_VERSION="$(npm --version)"
+          LOWEST="$(printf '%s\n%s\n' "$REQUIRED" "$NPM_VERSION" | sort -V | head -1)"
+          if [ "$LOWEST" != "$REQUIRED" ]; then
+            echo "::error title=npm is too old for trusted publishing::npm \
+          $NPM_VERSION does not implement the OIDC token exchange (needs >= $REQUIRED). \
+          It would not fail the publish, it would silently fall back to token auth or 404. \
+          Raise node-version instead."
+            exit 1
+          fi
+          echo "npm $NPM_VERSION supports trusted publishing (>= $REQUIRED)."
+
+      # `setup-node` with `registry-url` always writes
+      # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into the .npmrc it
+      # points NPM_CONFIG_USERCONFIG at. Nothing sets NODE_AUTH_TOKEN any more,
+      # and npm leaves an unresolvable ${...} in a config file *literally*
+      # rather than expanding it to empty -- so that key's value becomes the
+      # string "${NODE_AUTH_TOKEN}", which is a non-empty credential as far as
+      # npm is concerned.
+      #
+      # That does not block the exchange: npm 11's publish.js calls oidc()
+      # before it reads credentials, and the exchanged token overwrites this
+      # key. It matters for the failure case. If the exchange fails for any
+      # reason, npm falls back to that garbage token and the run dies with a 404
+      # from the registry, which reads as "this package does not exist" rather
+      # than "trusted publishing is misconfigured". Deleting the line turns that
+      # into a plain ENEEDAUTH naming the real problem.
+      - name: Strip the placeholder auth token from .npmrc
+        run: |
+          set -euo pipefail
+          NPMRC="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          if [ -f "$NPMRC" ]; then
+            sed -i '/_authToken/d' "$NPMRC"
+            echo "Stripped _authToken from $NPMRC; the OIDC exchange is now the only credential path."
+          fi
 
       - name: Get version from tag
         id: version
@@ -876,45 +937,135 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # --provenance is the npm-side counterpart to the attestation above: it
-      # publishes a signed link from the tarball back to this workflow run, so
-      # the registry copy is verifiable too rather than trusted on the strength
-      # of the publishing token alone.
+      # release.yml runs only on a `v*` tag or a dispatch, so nothing in it has
+      # PR-time coverage: its first real execution is a real release. That is
+      # exactly how the --provenance 422 described below reached production.
+      # Trusted publishing has the same shape and a worse failure mode, because
+      # a misconfigured trusted publisher -- wrong workflow filename, wrong
+      # owner casing, an environment named on one side only -- surfaces as a 404
+      # from the publish, at the last step of a release, after the GitHub
+      # release has already been created.
       #
-      # It is conditional because the registry refuses it from a private source
-      # repository — "Unsupported GitHub Actions source repository visibility"
-      # (HTTP 422), which failed the v0.20.1 publish after the GitHub release had
-      # already been created. The rule is npm's, not ours, and it is coherent:
-      # a provenance statement nobody can check against the named source proves
-      # nothing. So the flag follows repository visibility rather than being
-      # hardcoded either way, and this re-enables itself if the repo is ever made
-      # public. Note the GitHub attestation above is unaffected — it verifies via
-      # the API against the repo, so a private repo is fine there.
+      # So a dry run exercises the real exchange. publish.js calls oidc() before
+      # it branches on --dry-run, so the token request, the exchange, and the
+      # registry's verdict on this workflow's identity all happen here; only the
+      # upload is skipped. A dispatch from a branch is a valid rehearsal: npm
+      # matches a trusted publisher on repository and workflow filename, not on
+      # the ref, so this answers for the tag before the tag exists.
       #
-      # Decided in its own always-running step so a dry run reports which branch a
-      # real release would take; the publish itself is the only part dry runs skip.
-      - name: Resolve npm provenance eligibility
-        id: provenance
+      # Output is redirected to a file rather than piped, because piping would
+      # make this step's exit status the pipe's rather than npm's. Only matched
+      # lines are ever echoed: --loglevel silly is needed for the "skipped"
+      # diagnostics, and at that level npm's own request logging is not somewhere
+      # to be printing wholesale into a public build log.
+      - name: Rehearse the trusted-publishing exchange
+        if: inputs.dry_run == true
+        working-directory: bindings/react-native
         env:
-          REPO_VISIBILITY: ${{ github.event.repository.visibility }}
+          NPM_TAG: ${{ steps.version.outputs.NPM_TAG }}
         run: |
-          if [[ "$REPO_VISIBILITY" == "public" ]]; then
-            echo "FLAG=--provenance" >> "$GITHUB_OUTPUT"
-            echo "Source repository is public — publishing with provenance."
-          else
-            echo "FLAG=" >> "$GITHUB_OUTPUT"
-            echo "::warning title=npm provenance skipped::Source repository visibility is \
-          '${REPO_VISIBILITY:-unknown}'; npm accepts provenance only from public repositories, \
-          so the tarball publishes without it. The GitHub release assets are still attested."
+          set -euo pipefail
+
+          set +e
+          npm publish --dry-run --access public --tag "$NPM_TAG" --loglevel silly \
+            > publish-rehearsal.log 2>&1
+          NPM_STATUS=$?
+          set -e
+
+          if ! grep -q 'oidc Successfully retrieved and set token' publish-rehearsal.log; then
+            echo "::error title=Trusted publishing did not engage::npm did not obtain a \
+          publish credential from the OIDC exchange, so a real release would fail at the \
+          publish step. The oidc and error lines follow. No oidc lines at all means either \
+          that the npm CLI predates trusted publishing, or that npm failed before reaching \
+          the exchange: it packs first, so a prepublishOnly or packaging failure never gets \
+          that far. The npm error lines say which."
+            grep -i 'oidc' publish-rehearsal.log || echo "  (no oidc log lines at all)"
+            grep -i 'npm error' publish-rehearsal.log || true
+            echo "npm exited $NPM_STATUS"
+            exit 1
           fi
 
+          echo "Trusted publishing is configured correctly: npm exchanged this workflow's"
+          echo "OIDC token for a publish credential, so a real release would upload."
+          grep -i 'oidc' publish-rehearsal.log || true
+
+          if [ "$NPM_STATUS" -ne 0 ]; then
+            echo "::warning title=Dry-run publish reported an unrelated error::The OIDC \
+          exchange succeeded, but the dry-run publish exited $NPM_STATUS for some other \
+          reason. The npm error lines follow."
+            grep -i 'npm error' publish-rehearsal.log || true
+          fi
+
+      # Provenance is no longer a flag we pass. Under trusted publishing the npm
+      # CLI decides for itself: after a successful exchange it reads the OIDC
+      # token's own `repository_visibility` claim and the package's registry
+      # visibility, and enables provenance only when both are public.
+      #
+      # That deletes a workaround rather than porting it. `--provenance` used to
+      # be resolved in a step of its own from
+      # `github.event.repository.visibility`, because the registry answers
+      # "Unsupported GitHub Actions source repository visibility" (HTTP 422) to a
+      # provenance publish from a private repo -- which failed the v0.20.1
+      # release after the GitHub release had already been created. npm now
+      # applies that same rule itself, by declining before publishing rather than
+      # by rejecting, so a private source repo degrades to a publish without
+      # provenance instead of a hard failure. Passing the flag explicitly opts
+      # back out of npm's check and reinstates the 422, so it stays off.
+      #
+      # The GitHub attestation above is unaffected either way: it verifies
+      # through the API against the repo, so repository visibility never mattered
+      # to it.
+      #
+      # Two things here are load-bearing and invisible in the diff that would
+      # break them:
+      #   - The *filename* `release.yml`. npm matches a trusted publisher on the
+      #     repository plus the workflow filename, so renaming this file revokes
+      #     this job's ability to publish, silently, until a release runs.
+      #   - Publishing from this workflow rather than a reusable one. npm
+      #     validates the *calling* workflow's name, so factoring this step out
+      #     into a `workflow_call` file breaks it for the same reason.
       - name: Publish to npm
         if: inputs.dry_run != true
         working-directory: bindings/react-native
-        run: npm publish --access public --tag "$NPM_TAG" ${{ steps.provenance.outputs.FLAG }}
+        run: npm publish --access public --tag "$NPM_TAG"
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TAG: ${{ steps.version.outputs.NPM_TAG }}
+
+      # Verified from the registry rather than from a green step. The publish
+      # succeeding proves the tarball uploaded; it does not prove the upload
+      # carried provenance, because npm decides that internally and declines
+      # silently. The presence of dist.attestations on the published version is
+      # the only direct evidence either way.
+      #
+      # This necessarily runs after the upload, so it cannot prevent a
+      # provenance-less publish -- it makes one loud instead of invisible. The
+      # version is immutable by now, so a red run here means "shipped, without
+      # provenance", never "did not ship".
+      - name: Verify the published version carries provenance
+        if: inputs.dry_run != true
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          set -euo pipefail
+          PKG="@offline-protocol/mesh-sdk@$VERSION"
+
+          # A just-published version can take a few seconds to become readable.
+          for attempt in 1 2 3 4 5; do
+            ATTESTATIONS="$(npm view "$PKG" dist.attestations.url 2>/dev/null || true)"
+            if [ -n "$ATTESTATIONS" ]; then
+              echo "$PKG published with provenance: $ATTESTATIONS"
+              exit 0
+            fi
+            echo "No provenance visible for $PKG yet (attempt $attempt of 5); retrying."
+            sleep 10
+          done
+
+          echo "::error title=Published without provenance::$PKG is on the registry but \
+          carries no provenance attestation. The publish itself succeeded and the version is \
+          immutable, so this reports what shipped rather than a failure to ship. npm enables \
+          provenance only when the source repository and the package are both public; check \
+          both, and confirm nothing set provenance=false."
+          exit 1
 
   # ---------------------------------------------------------------------------
   # crates.io

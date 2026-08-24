@@ -285,7 +285,14 @@ an rc must never burn the number the final tag needs. Point the rc at the same
 `X.Y.Z` the workspace already carries; the gate compares release cores and
 ignores the suffix.
 
-Three failure modes worth naming:
+A `workflow_dispatch` run with `dry_run: true` rehearses something an rc tag
+cannot, and it works from a branch: it performs the real npm OIDC exchange and
+fails if the registry does not recognise this workflow's identity, without
+uploading anything. Pass an explicit `version` when you do, because a dry run
+without one resolves to `0.0.0-dev` and `scripts/prepare-npm.sh` rejects that
+before the rehearsal is reached.
+
+Four failure modes worth naming:
 
 - **`release.yml` refuses to publish a tag whose number does not match
   `[workspace.package].version`** (and `pyproject.toml`'s). That gate exists
@@ -312,6 +319,16 @@ Three failure modes worth naming:
   that carries the `publish-crates` job passes every gate and publishes crates
   built from source that the npm package of the same number never contained.
   Both are permanent. Recover by cutting the next patch version instead.
+- **npm publishing depends on configuration that lives at the registry, not in
+  this repository.** The package authenticates with trusted publishing, which
+  npm matches against this repository plus the workflow *filename*
+  `release.yml`. Renaming that file, or factoring the publish step out into a
+  reusable `workflow_call` workflow (npm validates the *calling* workflow's
+  name), revokes publishing with nothing in the diff to review, and the failure
+  surfaces as a 404 at the last step of a release. It is worth naming because
+  the recovery above no longer exists: a tag that has already published crates
+  cannot be moved, so a publish that fails here costs a patch version. The
+  `dry_run` dispatch is what makes that cheap to check beforehand.
 
 ## Architecture Decisions
 
