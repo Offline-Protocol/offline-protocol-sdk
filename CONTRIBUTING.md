@@ -255,8 +255,10 @@ Version files to bump together:
 
 | File | How |
 | --- | --- |
-| `Cargo.toml` | `[workspace.package].version` **and** the eight internal-dependency versions in `[workspace.dependencies]`. A partial *minor* bump fails to resolve immediately and locally; a partial *patch* bump resolves silently, because `version = "X.Y.Z"` is a caret requirement that a sibling one patch ahead still satisfies. Harmless if it ships, but move them together |
+| `Cargo.toml` | `[workspace.package].version` **and** the ten internal-dependency versions in `[workspace.dependencies]`. A partial *minor* bump fails to resolve immediately and locally; a partial *patch* bump resolves silently, because `version = "X.Y.Z"` is a caret requirement that a sibling one patch ahead still satisfies. Harmless if it ships, but move them together |
+| `crates/offline-protocol-sealed/Cargo.toml`, `crates/offline-protocol-leaf/Cargo.toml` | Four more internal-dependency versions live here, not in the workspace table: the dual `std`/`no_std` crates declare their dependencies locally, because cargo silently ignores `default-features = false` on an inherited dependency (ADR [0020](docs/adr/0020-core-compiles-without-std.md), [0022](docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md)). Miss these and the workspace stops resolving; `local_dep_versions_match_the_workspace_table` is the guard |
 | `Cargo.lock` | any `cargo` command refreshes it once the manifests change |
+| `tools/embedded-footprint/Cargo.lock`, `tools/mls-interop/Cargo.lock` | Separate workspaces that depend on the SDK crates by path, so their lockfiles pin the versions too. CI builds both with `--locked`, so a stale one fails the run. `cargo metadata --manifest-path <tool>/Cargo.toml` refreshes each |
 | `bindings/python/pyproject.toml` | `version` — release.yml gates this one against the tag too |
 | `bindings/react-native/package.json` + `package-lock.json` | `npm version X.Y.Z --no-git-tag-version --allow-same-version` from `bindings/react-native/` |
 | `THIRD-PARTY-NOTICES.md` (×3) | `scripts/generate-third-party-notices.sh` — the notices list our own crates by version, and the CI drift gate fails on a stale copy |

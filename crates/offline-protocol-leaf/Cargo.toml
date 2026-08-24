@@ -51,8 +51,8 @@ bare-metal-rng = ["dep:getrandom", "getrandom/custom"]
 # in this crate is the counterweight: dropping inheritance means a
 # workspace-wide version bump would otherwise stop applying here silently.
 [dependencies]
-offline-protocol-core = { path = "../offline-protocol-core", version = "0.23.0", default-features = false }
-offline-protocol-sealed = { path = "../offline-protocol-sealed", version = "0.23.0", default-features = false }
+offline-protocol-core = { path = "../offline-protocol-core", version = "0.24.0", default-features = false }
+offline-protocol-sealed = { path = "../offline-protocol-sealed", version = "0.24.0", default-features = false }
 
 # Pinned with `=` deliberately. An interop result is a claim about two exact
 # versions (ADR 0021), `tools/mls-interop` pins the same two, and this
@@ -93,5 +93,5 @@ getrandom = { version = "0.2", default-features = false, optional = true }
 # here is the only place in the workspace where the two implementations meet
 # inside one process; `tools/mls-interop` is the other, out of process.
 [dev-dependencies]
-offline-protocol-mls = { path = "../offline-protocol-mls", version = "0.23.0" }
+offline-protocol-mls = { path = "../offline-protocol-mls", version = "0.24.0" }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }

@@ -1030,10 +1030,16 @@ jobs:
       # and the re-run must pick up where the last one stopped rather than
       # choke on the crates that already landed. Native `cargo publish
       # --workspace` covers neither: it refuses to proceed once any member
-      # already exists at the target version. All eight names are already
-      # reserved on crates.io at 0.0.0 under the offline-protocol maintainers
-      # team, so every publish here is a new version of an existing crate —
-      # the much stricter brand-new-crate-name rate limit does not apply.
+      # already exists at the target version.
+      #
+      # Most names are reserved on crates.io at 0.0.0 under the
+      # offline-protocol maintainers team, so those publishes are a new version
+      # of an existing crate and the much stricter brand-new-crate-name rate
+      # limit does not apply. A workspace member added since the last release is
+      # the exception: reserve its name before tagging, or the first release
+      # carrying it spends new-crate budget (1 per 10 minutes, burst 5) and can
+      # die partway. The resume above makes that recoverable rather than fatal,
+      # but reserving first turns a possible incident into a no-op.
       #
       # Compiled fresh with --locked rather than cached (wrkflw-style
       # actions/cache would be faster): a cached binary executes with the
@@ -1082,9 +1088,9 @@ jobs:
           # sits atop the internal dependency graph — it is what the topological
           # publish below reaches last — so if it is already published at this
           # version, every other crate is too and the whole run is a no-op. Say
-          # so as a warning annotation rather than letting eight "skipping"
-          # lines scroll by. Since `version-gate` pins the version to the tag,
-          # this can only mean a re-run of a release that already published,
+          # so as a warning annotation rather than letting a screenful of
+          # "skipping" lines scroll by. Since `version-gate` pins the version
+          # to the tag, this can only mean a re-run of a release that published,
           # which is exactly what the skip below exists to make safe — but it is
           # worth saying out loud, because the run reports success either way.
           #

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "offline-protocol-sdk"
-version = "0.23.0"
+version = "0.24.0"
 description = "Python bindings for the Offline Protocol SDK — offline-first mesh networking with MLS encryption"
 readme = "README.md"
 license = "AGPL-3.0-only"
