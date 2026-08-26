@@ -12666,6 +12666,7 @@ mod tests {
             .collect();
         const CALL: &str = "OfflineProtocolNativeModule.";
         let mut uncallable: Vec<&str> = Vec::new();
+        let mut calls = 0usize;
         let mut from = 0usize;
         while let Some(hit) = js[from..].find(CALL) {
             let start = from + hit + CALL.len();
@@ -12675,11 +12676,24 @@ mod tests {
                 .unwrap_or(rest.len());
             // Only an immediate `(` is a call; `typeof mod.foo === ...` and
             // other property reads are not.
-            if rest[end..].starts_with('(') && !heads.contains(&rest[..end]) {
-                uncallable.push(&rest[..end]);
+            if rest[end..].starts_with('(') {
+                calls += 1;
+                if !heads.contains(&rest[..end]) {
+                    uncallable.push(&rest[..end]);
+                }
             }
             from = start + end;
         }
+        // The same floor the two parsers above carry, for the same reason and
+        // against a likelier trigger: this scan keys off one identifier, so
+        // renaming the binding, destructuring it, or moving to a TurboModule
+        // spec finds nothing and passes while checking nothing. The other two
+        // directions cannot go quiet this way; this one can, so it says so.
+        assert!(
+            calls >= 150,
+            "only found {calls} native-module calls in bindings/react-native/src/index.ts; \
+             the scanner is broken, not the TypeScript"
+        );
         uncallable.sort_unstable();
         uncallable.dedup();
         assert!(
