@@ -30,12 +30,29 @@ Type mapping:
 |-------|-------------|
 | `String` | `NSString *` |
 | `String?` | `NSString *` (nullable) |
-| `Int` | `nonnull NSNumber *` |
+| `Int` | `NSInteger` |
+| `Double` | `double` |
 | `Bool` | `BOOL` |
+| `NSNumber` | `nonnull NSNumber *` |
 | Promise | `RCTPromiseResolveBlock` / `RCTPromiseRejectBlock` |
 
 A method present in Swift and absent from the bridge is simply not callable from
 JavaScript. There is no error at build time.
+
+**A primitive and an object are not interchangeable, and mixing them does not
+fail, it lies.** React Native chooses the `RCTConvert` converter from the
+bridge's type text and the calling convention from the Swift parameter's runtime
+encoding, then calls the one through a function pointer cast to the other. Pair
+`nonnull NSNumber *` with a Swift `Int` and the returned object pointer is read
+as a 64-bit integer, so the method runs on the pointer bits of a tagged
+`NSNumber` rather than on the number; pair it with a `Double` and an integer
+register is read as a floating-point one. The selector still resolves, the
+method still runs, and nothing is logged. This table said `Int` to
+`nonnull NSNumber *` from v0.3.3 until this release, and seven methods
+followed it: message and
+presence priorities were silently pinned to their `default:` arm, the battery
+level to a clamp bound, and the three file-transfer scalars aborted the app on
+a trapping conversion.
 
 **The two halves must agree on the whole selector, not just the method name.**
 React Native resolves each declared selector against the class when it parses
@@ -53,11 +70,13 @@ Native takes the JS method name from the selector text before its first colon,
 so writing `fWithResolver:` in the bridge renames the JS method instead of
 repairing it.
 
-All three shapes are pinned by
+All of these are pinned by
 `react_native_ios_objc_shim_and_swift_agree_on_every_selector` in
-`offline-protocol-uniffi`, which reads both files and compares selector sets.
-It runs in `cargo test`, because neither compiler sees both halves and this
-file's Swift counterpart is the one bridge source no CI job compiles.
+`offline-protocol-uniffi`, which reads both files and compares them as sets:
+the selectors in both directions, and then, behind each shared selector, the
+ABI class of every parameter. It runs in `cargo test`, because neither compiler
+sees both halves and this file's Swift counterpart is the one bridge source no
+CI job compiles.
 
 ## S2. Five registration points per new Swift file
 

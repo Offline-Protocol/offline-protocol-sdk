@@ -2868,7 +2868,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            try proto.blePeerDiscovered(peerId: peerId, rssi: Int16(rssi))
+            try proto.blePeerDiscovered(peerId: peerId, rssi: Int16(clamping: rssi))
             resolver(nil)
         } catch {
             rejecter("ERROR_BLE", "BLE peer discovered failed: \(error.localizedDescription)", error)
@@ -3557,6 +3557,20 @@ class OfflineProtocolModule: RCTEventEmitter {
                                 rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {
             rejecter("ERROR_FILE", "Protocol not initialized", nil)
+            return
+        }
+        // Every one of these narrows, and each narrowing traps rather than
+        // returning a value React Native could reject. The arguments come
+        // straight from JavaScript, so out-of-range is a caller mistake and
+        // must surface as a rejected promise, not as an abort.
+        guard chunkIndex >= 0, chunkIndex <= Int(UInt32.max),
+              totalChunks >= 0, totalChunks <= Int(UInt32.max),
+              // NaN fails both comparisons. The ceiling is 2^64 exactly, and
+              // every non-negative Double below it truncates into UInt64.
+              fileSize >= 0, fileSize < 18_446_744_073_709_551_616.0 else {
+            rejecter("ERROR_FILE",
+                     "Chunk index, chunk count and file size must be non-negative and in range",
+                     nil)
             return
         }
         do {

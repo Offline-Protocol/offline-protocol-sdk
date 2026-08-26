@@ -42,7 +42,7 @@ Add or update the corresponding `RCT_EXTERN_METHOD` in `OfflineProtocolModule.m`
 ```objective-c
 RCT_EXTERN_METHOD(sendMessage:(NSString *)recipient
                   content:(NSString *)content
-                  priority:(nonnull NSNumber *)priority
+                  priority:(NSInteger)priority
                   replyToMsg:(NSString *)replyToMsg
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
@@ -56,10 +56,29 @@ Map Swift types to Objective-C types:
 |------------|------------------|
 | `String` | `NSString *` |
 | `String?` | `NSString *` (nullable) |
-| `Int` | `nonnull NSNumber *` |
+| `Int` | `NSInteger` |
+| `Double` | `double` |
 | `Bool` | `BOOL` |
+| `NSNumber` | `nonnull NSNumber *` |
 | `[NSNumber]` | `NSArray *` |
 | `NSDictionary?` | `NSDictionary *` (nullable) |
+
+**A primitive and an object are not interchangeable here, and mixing them is
+silent.** React Native picks the `RCTConvert` converter from the type text you
+write above and the calling convention from the Swift parameter's runtime
+encoding, then calls the first through a function pointer cast to the second.
+Write `nonnull NSNumber *` against a Swift `Int` and `+[RCTConvert NSNumber:]`
+returns an object pointer that is then read as a 64-bit integer, so the method
+runs with the pointer bits of a tagged `NSNumber` where the number should be.
+Write it against a Swift `Double` and an integer register is read as a floating
+point one. Nothing is logged either way. This row read `Int` to
+`nonnull NSNumber *` from v0.3.3 until this release, and seven methods
+followed it.
+
+Take an `NSNumber` on the Swift side only where the argument is genuinely
+optional, and note that React Native does not support that: it forces every
+`NSNumber` argument to non-null and rejects a null one, so `forwardMessage`'s
+absent priority is refused in a debug build.
 
 **Note**: All `@objc` methods must include `resolver` and `rejecter` parameters (React Native Promise pattern).
 

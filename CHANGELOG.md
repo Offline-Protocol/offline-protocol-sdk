@@ -39,6 +39,25 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   bridge halves and the TypeScript, and fails on any selector one side has and
   another does not.
 
+- **Seven more iOS methods resolved but ran on the wrong argument bits.** The
+  bridge declares each parameter's type as text, and React Native picks the
+  `RCTConvert` converter from that text and the calling convention from the
+  Swift parameter's runtime encoding, then calls the one through a function
+  pointer cast to the other. `nonnull NSNumber *` against a Swift `Int`
+  therefore hands the method an object pointer read as a 64-bit integer, which
+  is the pointer bits of a tagged `NSNumber` and never the number. The type
+  table in `BRIDGE_MAINTENANCE.md` had recommended exactly that pairing since
+  v0.3.3, the release that also introduced the first of these methods, so
+  `sendMessage`, `sendMessageRich` and `sendPresenceUpdate` silently pinned
+  every priority and status to their
+  `default:` arm, `setBatteryLevel` and `setBatteryState` recorded a clamp bound
+  rather than the level, and `processFileChunk` and `blePeerDiscovered` reached
+  a narrowing conversion that traps, aborting the application. Nothing was
+  logged in any of the seven cases. The type table is corrected, the two
+  conversions that now receive real values reject or clamp out-of-range input
+  instead of trapping, and the selector guard gained a third direction that
+  compares the ABI class of every parameter behind a shared selector.
+
 ## [0.24.0] — 2026-08-24
 
 > **A door lock speaks this protocol now, and not a smaller version of it.**

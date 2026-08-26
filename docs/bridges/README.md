@@ -167,8 +167,18 @@ absent from JavaScript. Eight methods were unreachable on iOS across 0.21.0 to
 method never declared in the bridge at all, and a labelled first parameter,
 which Swift exports with a `With` infix. `react_native_ios_objc_shim_and_swift_agree_on_every_selector`
 reads both files plus `src/index.ts` and compares the three as sets. It is a
-Rust guard for the C5 reason: the `.m` compiles standalone, and its Swift
-counterpart is the one bridge source no CI job compiles at all.
+Rust guard for the C5 reason: the `.m` never compiles the text it stores, and
+its Swift counterpart is the one bridge source no CI job compiles at all.
+
+The same guard pins a second agreement behind each shared selector: **the ABI
+class of every parameter**. React Native chooses the `RCTConvert` converter from
+the bridge's type text and the calling convention from the Swift parameter's
+runtime encoding, then calls the one through a function pointer cast to the
+other, so `nonnull NSNumber *` against a Swift `Int` hands the method the
+pointer bits of a tagged `NSNumber` in place of the number. That one is quieter
+than a missing selector, because the call arrives and the method runs: it cost
+seven more methods, whose type table had recommended the wrong mapping since
+before any of them were written.
 
 ## C6. Config parsers must not default to literals
 

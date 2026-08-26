@@ -47,14 +47,14 @@ RCT_EXTERN_METHOD(stop:(RCTPromiseResolveBlock)resolve
 
 RCT_EXTERN_METHOD(sendMessage:(NSString *)recipient
                   content:(NSString *)content
-                  priority:(nonnull NSNumber *)priority
+                  priority:(NSInteger)priority
 									replyToMsg:(NSString *)replyToMsg
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
 RCT_EXTERN_METHOD(sendMessageRich:(NSString *)recipient
                   content:(NSString *)content
-                  priority:(nonnull NSNumber *)priority
+                  priority:(NSInteger)priority
                   replyToMsg:(NSString *)replyToMsg
                   options:(NSDictionary *)options
                   resolver:(RCTPromiseResolveBlock)resolve
@@ -164,7 +164,7 @@ RCT_EXTERN_METHOD(getActiveTransports:(RCTPromiseResolveBlock)resolve
 
 // BLE transport methods
 RCT_EXTERN_METHOD(blePeerDiscovered:(NSString *)peerId
-                  rssi:(nonnull NSNumber *)rssi
+                  rssi:(NSInteger)rssi
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
@@ -194,11 +194,11 @@ RCT_EXTERN_METHOD(bleGetDiagnostics:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
 // Battery management
-RCT_EXTERN_METHOD(setBatteryLevel:(nonnull NSNumber *)level
+RCT_EXTERN_METHOD(setBatteryLevel:(NSInteger)level
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(setBatteryState:(nonnull NSNumber *)level
+RCT_EXTERN_METHOD(setBatteryState:(NSInteger)level
                   isCharging:(BOOL)isCharging
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
@@ -282,9 +282,9 @@ RCT_EXTERN_METHOD(shouldEscalateToWifi:(RCTPromiseResolveBlock)resolve
 
 // File Transfer Operations
 RCT_EXTERN_METHOD(processFileChunk:(NSString *)fileId
-                  chunkIndex:(nonnull NSNumber *)chunkIndex
-                  totalChunks:(nonnull NSNumber *)totalChunks
-                  fileSize:(nonnull NSNumber *)fileSize
+                  chunkIndex:(NSInteger)chunkIndex
+                  totalChunks:(NSInteger)totalChunks
+                  fileSize:(double)fileSize
                   fileName:(NSString *)fileName
                   fileChecksum:(NSString *)fileChecksum
                   data:(NSArray *)data
@@ -696,7 +696,7 @@ RCT_EXTERN_METHOD(internetForceReconnect:(RCTPromiseResolveBlock)resolve
 
 // Presence, Typing, Read Receipts
 RCT_EXTERN_METHOD(sendPresenceUpdate:(NSString *)recipient
-                  status:(nonnull NSNumber *)status
+                  status:(NSInteger)status
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 

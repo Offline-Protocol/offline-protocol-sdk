@@ -12131,24 +12131,28 @@ mod tests {
     }
 
     /// Every method React Native can reach on iOS is spelled the same way in
-    /// both halves of the hand-written bridge.
+    /// both halves of the hand-written bridge, and hands over each argument
+    /// the same way.
     ///
-    /// `RCT_EXTERN_METHOD` does not declare the Swift method. It records a
-    /// selector string that React Native resolves against the class at module
-    /// load, in `parseExportedMethods`. A selector no Swift method implements
-    /// is dropped there behind an `RCTLogWarn` and the JS method is simply
-    /// absent, so the application fails at the call site with `undefined is
-    /// not a function`, or, where the caller wraps the call in a `catch` that
-    /// only logs, does not fail at all and quietly keeps its defaults.
-    ///
-    /// Neither half's compiler can see the other. The `.m` compiles standalone
-    /// against the macro, and `OfflineProtocolModule.swift` is the one bridge
-    /// source no CI job compiles at all, because it needs real React headers.
-    /// So a source-reading guard is the only reachable pin, which is C5
+    /// `RCT_EXTERN_METHOD` does not declare the Swift method. It stringifies
+    /// its argument and stores the text; React Native parses that text at
+    /// module load, resolves the selector against the class, and marshals each
+    /// call through `NSInvocation`. Nothing in either compiler sees both
+    /// halves: the `.m` never compiles the text it stores, and
+    /// `OfflineProtocolModule.swift` is the one bridge source no CI job
+    /// compiles at all, because it needs real React headers. So a
+    /// source-reading guard is the only reachable pin, which is C5
     /// (`docs/bridges/README.md`) applied to a selector table rather than to a
     /// constant.
     ///
-    /// Three ways this has actually broken, all of them shipped to npm:
+    /// Two independent things have to agree, and each has shipped broken.
+    ///
+    /// **The selector**, or the binding does not exist. A selector no Swift
+    /// method implements is dropped at module load behind an `RCTLogWarn` and
+    /// the JS method is simply absent, so the application fails at the call
+    /// site with `undefined is not a function`, or, where the caller wraps the
+    /// call in a `catch` that only logs, does not fail at all and quietly
+    /// keeps its defaults. Three shapes of this shipped to npm:
     ///
     /// 1. **A renamed label.** The `userId` to `profile` rename reached Swift,
     ///    Kotlin and TypeScript and missed the shim, so `wipePersistedState`
@@ -12168,17 +12172,34 @@ mod tests {
     ///    spelling it in the shim renames the JS method instead of repairing
     ///    it.
     ///
-    /// The set of Swift methods held to this is **derived, not listed**: an
-    /// `@objc` method is one React Native exports exactly when it takes the
-    /// promise pair. That keeps the guard blind to the `@objc` methods which
-    /// are not bridge entry points (two `NotificationCenter` targets, and
-    /// React Native's own `addListener`/`removeListeners` overrides) without
-    /// naming them, and it puts a *new* bridge method inside the invariant the
-    /// moment it is written, which a hand-maintained list could not.
+    /// **The argument ABI**, or the binding exists and lies. This is the
+    /// quieter of the two, because the call arrives and the method runs.
+    /// `RCTModuleMethod` picks the *converter* from the macro's type text
+    /// (`+[RCTConvert NSNumber:]` for `NSNumber *`, `+[RCTConvert NSInteger:]`
+    /// for `NSInteger`) and the *calling convention* from the Swift
+    /// parameter's runtime type encoding, then calls the one through a
+    /// function pointer cast to the other. Pair `(nonnull NSNumber *)` with a
+    /// Swift `Int` and the `NSNumber *` the converter returns is reinterpreted
+    /// as a 64-bit integer, so the method runs with the pointer bits of a
+    /// tagged `NSNumber` in place of the number. Pair it with a Swift `Double`
+    /// and the integer register is read as a floating-point one, which is not
+    /// even deterministic. Neither logs anything.
     ///
-    /// What this does not check is parameter types. A selector pins the
-    /// argument count and the labels, not that `(BOOL)` on one side is `Bool`
-    /// on the other; that mapping is S1 in `docs/bridges/swift.md`.
+    /// So the two type texts must land in the same ABI class, which is what
+    /// the `Abi` enum below names. Both classifiers are exhaustive over the
+    /// vocabulary the bridge actually uses and refuse anything else rather
+    /// than guessing: a wrong equivalence here is invisible in exactly the way
+    /// this guard exists to prevent, so a new type must be classified
+    /// deliberately.
+    ///
+    /// The set of Swift methods held to all of this is **derived, not
+    /// listed**: an `@objc` method is one React Native exports exactly when it
+    /// takes the promise pair. That keeps the guard blind to the `@objc`
+    /// methods which are not bridge entry points (two `NotificationCenter`
+    /// targets, and React Native's own `addListener`/`removeListeners`
+    /// overrides) without naming them, and it puts a *new* bridge method
+    /// inside the invariant the moment it is written, which a hand-maintained
+    /// list could not.
     #[test]
     fn react_native_ios_objc_shim_and_swift_agree_on_every_selector() {
         /// Modifiers that may sit between `@objc` and `func`.
@@ -12196,57 +12217,172 @@ mod tests {
             "nonisolated",
         ];
 
-        /// The selectors `RCT_EXTERN_METHOD` declares.
+        /// How React Native passes one argument slot, which is the property
+        /// the two type texts have to share. The names are ABI classes, not
+        /// types: what matters is the register the converter's return value
+        /// arrives in and the width it is read at, so `NSString *` and
+        /// `NSDictionary *` are one class and `NSInteger` and `double` are two
+        /// despite both being 64 bits.
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        enum Abi {
+            /// `_C_ID`: the converter returns a retained object pointer.
+            Object,
+            /// `_C_LNG_LNG`: the converter returns a signed 64-bit integer.
+            Integer,
+            /// `_C_DBL`: the converter returns a double, in a float register.
+            Double,
+            /// `_C_BOOL`: the converter returns a single byte.
+            Bool,
+            /// The promise pair, which `RCTModuleMethod` special-cases by name
+            /// rather than routing through `RCTConvert` at all.
+            Block,
+        }
+
+        /// The macro's type text, as React Native parses it to choose a
+        /// converter.
+        ///
+        /// Deliberately not exhaustive over Objective-C: it covers what this
+        /// bridge uses and returns `None` for everything else, so a type
+        /// nobody has classified fails the test instead of defaulting into a
+        /// class that might be wrong.
+        fn objc_abi(ty: &str) -> Option<Abi> {
+            let bare = ty
+                .replace("nonnull", " ")
+                .replace("nullable", " ")
+                .replace("_Nonnull", " ")
+                .replace("_Nullable", " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if bare.ends_with('*') {
+                return Some(Abi::Object);
+            }
+            match bare.as_str() {
+                "NSInteger" => Some(Abi::Integer),
+                "double" => Some(Abi::Double),
+                "BOOL" => Some(Abi::Bool),
+                "RCTPromiseResolveBlock" | "RCTPromiseRejectBlock" => Some(Abi::Block),
+                _ => None,
+            }
+        }
+
+        /// The Swift parameter type, as the Objective-C runtime encodes it.
+        ///
+        /// Every optional is [`Abi::Object`], including `Int?`: an optional
+        /// value type crosses into Objective-C as a boxed `NSNumber`, not as
+        /// the primitive it wraps.
+        fn swift_abi(ty: &str) -> Option<Abi> {
+            let bare = ty
+                .replace("@escaping", " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if bare.ends_with('?') {
+                return Some(Abi::Object);
+            }
+            match bare.as_str() {
+                "Int" => Some(Abi::Integer),
+                "Double" => Some(Abi::Double),
+                "Bool" => Some(Abi::Bool),
+                "RCTPromiseResolveBlock" | "RCTPromiseRejectBlock" => Some(Abi::Block),
+                "String" | "NSNumber" | "NSDictionary" | "NSArray" | "[NSNumber]" | "[String]" => {
+                    Some(Abi::Object)
+                }
+                _ => None,
+            }
+        }
+
+        /// One `RCT_EXTERN_METHOD` declaration: the selector it names, and the
+        /// macro type text of each of its parameters, in order.
+        struct ObjcMethod {
+            selector: String,
+            types: Vec<String>,
+        }
+
+        /// The selectors `RCT_EXTERN_METHOD` declares, with their types.
         ///
         /// A label is an identifier that precedes a `:` at the depth of the
-        /// macro's own argument list. Parameter types sit one paren deeper and
-        /// parameter names are never followed by a colon, so tracking depth is
-        /// what separates the label `profile:` both from the type
-        /// `(NSString *)` and from the `profile` that names the variable after
-        /// it. Do not collapse this to a whitespace-stripped scan: that glues
-        /// each parameter's name onto the next label and every selector comes
-        /// out wrong in a way that still looks plausible.
-        fn objc_selectors(src: &str) -> Vec<String> {
+        /// macro's own argument list; the parenthesised type always follows
+        /// it, and the parameter name follows that. Stepping the cursor over
+        /// the whole `(type)` group is what keeps the type's own words out of
+        /// the label stream. Do not collapse this to a whitespace-stripped
+        /// scan: that glues each parameter's name onto the next label and
+        /// every selector comes out wrong in a way that still looks plausible.
+        fn objc_methods(src: &str) -> Vec<ObjcMethod> {
             const MARKER: &str = "RCT_EXTERN_METHOD(";
             let bytes = src.as_bytes();
             let mut out = Vec::new();
             let mut from = 0usize;
             while let Some(hit) = src[from..].find(MARKER) {
-                let mut i = from + hit + MARKER.len();
+                let open = from + hit + MARKER.len();
                 let mut depth = 1usize;
+                let mut end = open;
+                while end < bytes.len() && depth > 0 {
+                    match bytes[end] {
+                        b'(' => depth += 1,
+                        b')' => depth -= 1,
+                        _ => {}
+                    }
+                    end += 1;
+                }
+                let body = &src[open..end - 1];
+                from = end;
+
+                let body_bytes = body.as_bytes();
                 let mut labels: Vec<String> = Vec::new();
+                let mut types: Vec<String> = Vec::new();
                 let mut ident = String::new();
-                while i < bytes.len() && depth > 0 {
-                    let c = bytes[i] as char;
-                    match c {
-                        '(' => {
-                            depth += 1;
-                            ident.clear();
+                let mut i = 0usize;
+                while i < body_bytes.len() {
+                    let c = body_bytes[i] as char;
+                    if c == ':' && !ident.is_empty() {
+                        labels.push(std::mem::take(&mut ident));
+                        let mut j = i + 1;
+                        while j < body_bytes.len() && (body_bytes[j] as char).is_ascii_whitespace()
+                        {
+                            j += 1;
                         }
-                        ')' => {
-                            depth -= 1;
-                            ident.clear();
+                        if body_bytes.get(j) == Some(&b'(') {
+                            let mut d = 1usize;
+                            let mut k = j + 1;
+                            while k < body_bytes.len() && d > 0 {
+                                match body_bytes[k] {
+                                    b'(' => d += 1,
+                                    b')' => d -= 1,
+                                    _ => {}
+                                }
+                                k += 1;
+                            }
+                            types.push(body[j + 1..k - 1].trim().to_string());
+                            i = k;
+                        } else {
+                            types.push(String::new());
+                            i = j;
                         }
-                        ':' if depth == 1 && !ident.is_empty() => {
-                            labels.push(std::mem::take(&mut ident));
-                        }
-                        _ if depth == 1 && (c.is_ascii_alphanumeric() || c == '_') => ident.push(c),
-                        _ => ident.clear(),
+                        continue;
+                    }
+                    if c.is_ascii_alphanumeric() || c == '_' {
+                        ident.push(c);
+                    } else {
+                        ident.clear();
                     }
                     i += 1;
                 }
                 if !labels.is_empty() {
-                    out.push(format!("{}:", labels.join(":")));
+                    out.push(ObjcMethod {
+                        selector: format!("{}:", labels.join(":")),
+                        types,
+                    });
                 }
-                from = i;
             }
             out
         }
 
-        /// One `@objc` method: the selector Swift exports it under, and
-        /// whether React Native exports it at all.
+        /// One `@objc` method: the selector Swift exports it under, the type
+        /// of each parameter, and whether React Native exports it at all.
         struct SwiftMethod {
             selector: String,
+            types: Vec<String>,
             exported: bool,
         }
 
@@ -12357,6 +12493,21 @@ mod tests {
                         .trim_end_matches(':')
                         .to_string()
                 };
+                // The type is everything past the parameter's own colon, which
+                // is the first one at bracket depth zero: `[String: Any]`
+                // carries a colon that is not this one.
+                let type_of = |part: &str| -> String {
+                    let mut depth = 0i32;
+                    for (idx, ch) in part.char_indices() {
+                        match ch {
+                            '(' | '[' | '{' => depth += 1,
+                            ')' | ']' | '}' => depth -= 1,
+                            ':' if depth == 0 => return part[idx + 1..].trim().to_string(),
+                            _ => {}
+                        }
+                    }
+                    String::new()
+                };
 
                 let selector = if let Some(pinned) = explicit {
                     pinned
@@ -12386,6 +12537,7 @@ mod tests {
 
                 out.push(SwiftMethod {
                     selector,
+                    types: parts.iter().map(|part| type_of(part)).collect(),
                     exported: params.contains("RCTPromiseResolveBlock")
                         && params.contains("RCTPromiseRejectBlock"),
                 });
@@ -12397,7 +12549,7 @@ mod tests {
         let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
         let js = rn_source_code_only("src/index.ts");
 
-        let declared = objc_selectors(&objc);
+        let objc_declarations = objc_methods(&objc);
         let implemented = swift_methods(&swift);
 
         // Both parsers have to prove they found something before any set
@@ -12405,10 +12557,10 @@ mod tests {
         // reformatted signature would otherwise leave two empty sets agreeing
         // perfectly.
         assert!(
-            declared.len() >= 150,
+            objc_declarations.len() >= 150,
             "only parsed {} RCT_EXTERN_METHOD selectors out of OfflineProtocolModule.m; \
              the parser is broken, not the bridge",
-            declared.len()
+            objc_declarations.len()
         );
         let exported: std::collections::BTreeSet<&str> = implemented
             .iter()
@@ -12422,8 +12574,10 @@ mod tests {
             exported.len()
         );
 
-        let declared: std::collections::BTreeSet<&str> =
-            declared.iter().map(String::as_str).collect();
+        let declared: std::collections::BTreeSet<&str> = objc_declarations
+            .iter()
+            .map(|method| method.selector.as_str())
+            .collect();
 
         let dangling: Vec<&str> = declared.difference(&exported).copied().collect();
         assert!(
@@ -12440,6 +12594,67 @@ mod tests {
             "OfflineProtocolModule.swift implements {invisible:?} with no matching \
              RCT_EXTERN_METHOD. The Swift compiles and the method is unreachable from \
              JavaScript, with no diagnostic at build time and none at run time either"
+        );
+
+        // Same selector on both sides, so now the arguments behind it. A
+        // mismatch here is not a missing method but a method that runs on the
+        // wrong bits, which is why it is worth a distinct failure message.
+        let by_selector: std::collections::BTreeMap<&str, &ObjcMethod> = objc_declarations
+            .iter()
+            .map(|method| (method.selector.as_str(), method))
+            .collect();
+        let mut mismatched: Vec<String> = Vec::new();
+        for method in implemented.iter().filter(|method| method.exported) {
+            let Some(declaration) = by_selector.get(method.selector.as_str()) else {
+                continue;
+            };
+            assert_eq!(
+                declaration.types.len(),
+                method.types.len(),
+                "{} is declared with {} parameters and implemented with {}",
+                method.selector,
+                declaration.types.len(),
+                method.types.len()
+            );
+            for (index, (objc_type, swift_type)) in
+                declaration.types.iter().zip(&method.types).enumerate()
+            {
+                let objc_class = objc_abi(objc_type).unwrap_or_else(|| {
+                    panic!(
+                        "{} parameter {index} is declared `{objc_type}`, which `objc_abi` does \
+                         not classify. Decide which ABI class React Native passes it in and add \
+                         it there; a guess would be invisibly wrong",
+                        method.selector
+                    )
+                });
+                let swift_class = swift_abi(swift_type).unwrap_or_else(|| {
+                    panic!(
+                        "{} parameter {index} is implemented as `{swift_type}`, which \
+                         `swift_abi` does not classify. Decide which ABI class the Objective-C \
+                         runtime encodes it in and add it there; a guess would be invisibly wrong",
+                        method.selector
+                    )
+                });
+                if objc_class != swift_class {
+                    mismatched.push(format!(
+                        "{} parameter {index}: `{objc_type}` ({objc_class:?}) in the shim, \
+                         `{swift_type}` ({swift_class:?}) in Swift",
+                        method.selector
+                    ));
+                }
+            }
+        }
+        assert!(
+            mismatched.is_empty(),
+            "the two halves disagree on how React Native should pass an argument:\n  {}\n\
+             React Native chooses the RCTConvert converter from the shim's type text and the \
+             calling convention from the Swift parameter's runtime encoding, then calls the one \
+             through a function pointer cast to the other. The selector still resolves and the \
+             method still runs, on the converter's return value read as the wrong kind of \
+             register: an `NSNumber *` reinterpreted as an `Int` arrives as the pointer bits of \
+             a tagged pointer, not as the number. See the type table in \
+             bindings/react-native/ios/BRIDGE_MAINTENANCE.md",
+            mismatched.join("\n  ")
         );
 
         // The TypeScript is the third copy of the same table. React Native
