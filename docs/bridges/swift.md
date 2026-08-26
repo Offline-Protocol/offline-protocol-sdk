@@ -76,10 +76,14 @@ returning something the bridge could reject. Every number crossing here came
 from JavaScript, so out-of-range is a caller mistake, and a caller mistake that
 aborts is a crash any caller can reach. Byte arrays go through the `jsBytes`
 helper, which throws into the rejection the call site already has; scalars are
-bounded where they are written, or behind a `guard` that rejects. Twelve array
-conversions and the `initialTtl` config field were unbounded until this
-release, which made a malformed BLE fragment and an `initialTtl: 300` both fatal on iOS
-and harmless on Android.
+bounded where they are written, or behind a `guard` that rejects. A clamp
+*around* a narrowing conversion does not count, because the conversion runs
+first and traps before the clamp applies; that reaches unsigned values too,
+since a negative JavaScript number arrives at `uint64Value` as `UInt64.max`.
+Twelve array conversions, the `initialTtl` config field and two DORS config
+paths were unbounded until this release, which made a malformed BLE fragment,
+an `initialTtl: 300` and a `historyWindowSize: -1` all fatal on iOS and
+harmless on Android.
 
 All of these are pinned in `offline-protocol-uniffi`, in `cargo test`, because
 neither compiler sees both halves and this file's Swift counterpart is the one

@@ -12268,9 +12268,11 @@ mod tests {
 
         /// The Swift parameter type, as the Objective-C runtime encodes it.
         ///
-        /// Every optional is [`Abi::Object`], including `Int?`: an optional
-        /// value type crosses into Objective-C as a boxed `NSNumber`, not as
-        /// the primitive it wraps.
+        /// Every optional is [`Abi::Object`], and only a reference type can
+        /// reach that branch: `@objc` refuses a method outright when a
+        /// parameter is an optional value type, because Objective-C has
+        /// nowhere to put the nil, so an optional here is always a nullable
+        /// object pointer.
         fn swift_abi(ty: &str) -> Option<Abi> {
             let bare = ty
                 .replace("@escaping", " ")
@@ -12761,8 +12763,10 @@ mod tests {
             }
             let argument = &swift[open..end - 1];
             from = open;
-            // `[UInt8](...)` and `-> [UInt8]` are not conversions; only a
-            // construction from something has an argument to bound.
+            // `UInt8()` is the default initializer: it is zero, and there
+            // is no argument to bound. Note that `[UInt8](...)` is not this
+            // case and never reaches here at all, because the `]` before its
+            // paren keeps it from matching the search above.
             if argument.trim().is_empty() {
                 continue;
             }

@@ -123,9 +123,20 @@ conversions and the `initialTtl` config field were unbounded until this
 release: a peer sending a malformed fragment, or an application passing `initialTtl: 300`
 to `create()`, aborted the app on iOS where Android truncated.
 
+**The clamp has to sit inside the conversion, not around it.** Wrapping a
+narrowing conversion in `min`/`max` reads as bounded and is not: the conversion
+runs first, so it traps before any of the clamp applies. This reaches unsigned
+values too, because a negative JavaScript number arrives at `uint64Value` as
+`UInt64.max`, and narrowing that to `Int` aborts. Clamp in the domain the value
+arrives in, or convert with `Int(clamping:)`. Two DORS config paths carried the
+wrong order until this release, so a `historyWindowSize` of `-1` passed to
+`create()` aborted the app on iOS.
+
 `react_native_ios_bridge_bounds_every_byte_it_builds_from_javascript` in
 `offline-protocol-uniffi` fails on any `UInt8(...)` in this file whose argument
-does not carry its own bound.
+does not carry its own bound. It reads bytes only: a scalar narrowing like the
+one above is held by this checklist and by review, because the text of
+`Int(raw)` cannot say whether `raw` is already bounded.
 
 ## Common Issues
 

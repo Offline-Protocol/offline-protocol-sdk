@@ -58,19 +58,25 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   instead of trapping, and the selector guard gained a third direction that
   compares the ABI class of every parameter behind a shared selector.
 
-- **Thirteen iOS conversions aborted the app instead of rejecting the call.**
-  `UInt8(_:)` traps on out-of-range input rather than returning a value the
-  bridge could reject, and every number reaching these conversions came
-  straight from JavaScript. Twelve of them turned a `[NSNumber]` argument into
-  bytes, so any array element outside 0...255 crashed the application: reachable
-  from a malformed BLE fragment, a Wi-Fi Direct or internet frame, an MLS
-  ciphertext or Welcome, a key package, or a file chunk. The thirteenth was the
-  `initialTtl` config field, which made `create()` abort on iOS for an
-  application passing a value above 255, where Android truncated the same value
-  and started normally. Byte arrays now convert through a helper that throws
-  into the rejection each call site already had, `initialTtl` is clamped, and
-  `react_native_ios_bridge_bounds_every_byte_it_builds_from_javascript` fails on
-  any byte conversion in the bridge that does not carry its own bound.
+- **Fifteen iOS conversions aborted the app instead of rejecting the call.**
+  A narrowing conversion like `UInt8(_:)` traps on out-of-range input rather
+  than returning a value the bridge could reject, and every number reaching
+  these conversions came straight from JavaScript. Twelve of them turned a
+  `[NSNumber]` argument into bytes, so any array element outside 0...255
+  crashed the application: reachable from a malformed BLE fragment, a Wi-Fi
+  Direct or internet frame, an MLS ciphertext or Welcome, a key package, or a
+  file chunk. The thirteenth was the `initialTtl` config field, which made
+  `create()` abort on iOS for an application passing a value above 255, where
+  Android truncated the same value and started normally. The last two narrowed
+  the DORS `historyWindowSize` to `Int` before clamping it, which is too late
+  to help: a negative number from JavaScript arrives at `uint64Value` as
+  `UInt64.max`, so the conversion traps before the surrounding clamp can run,
+  and both `create()` and `updateDorsConfig` aborted on a negative value. Byte
+  arrays now convert through a helper that throws into the rejection each call
+  site already had, `initialTtl` and `historyWindowSize` are clamped in the
+  domain they arrive in, and
+  `react_native_ios_bridge_bounds_every_byte_it_builds_from_javascript` fails
+  on any byte conversion in the bridge that does not carry its own bound.
 
   Unlike the ABI mismatches above, these were never masked by anything. Array
   arguments cross as `NSArray *` against `[NSNumber]`, which has agreed since

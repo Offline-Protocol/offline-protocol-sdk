@@ -608,7 +608,11 @@ class OfflineProtocolModule: RCTEventEmitter {
         let historyWindowRaw = UInt64((dorsDict["historyWindowSize"] as? NSNumber)?.uint64Value
                                       ?? (dorsDict["history_window_size"] as? NSNumber)?.uint64Value
                                       ?? 10)
-        let historyWindow = max(1, min(100, Int(historyWindowRaw)))
+        // Clamped in the unsigned domain, never through `Int`: a negative
+        // `historyWindowSize` from JavaScript reaches `uint64Value` as
+        // `UInt64.max`, and narrowing that to `Int` traps and aborts the
+        // application before the clamp around it can run.
+        let historyWindow = max(1, min(100, historyWindowRaw))
         let rawQueueRecovery = Float((dorsDict["queueRecoveryRatio"] as? NSNumber)?.floatValue
                                      ?? (dorsDict["queue_recovery_ratio"] as? NSNumber)?.floatValue
                                      ?? 0.5)
@@ -637,7 +641,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             ttlEscalationThreshold: ttlThreshold,
             congestionDurationSecs: congestionDuration,
             ttlEscalationHoldSecs: ttlHold,
-            historyWindowSize: UInt64(historyWindow),
+            historyWindowSize: historyWindow,
             queueRecoveryRatio: queueRecovery,
             lowBatteryThreshold: lowBattery,
             relayMinBatteryLevel: relayMinBattery,
@@ -3316,7 +3320,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             let congestionDuration = max((config["congestionDurationSecs"] as? NSNumber)?.uint64Value ?? current.congestionDurationSecs, 0)
             let ttlHold = max((config["ttlEscalationHoldSecs"] as? NSNumber)?.uint64Value ?? current.ttlEscalationHoldSecs, 1)
             let historyWindowRaw = (config["historyWindowSize"] as? NSNumber)?.uint64Value ?? current.historyWindowSize
-            let historyWindow = max(1, min(100, Int(historyWindowRaw)))
+            // Clamped in the unsigned domain, never through `Int`: a negative
+            // `historyWindowSize` from JavaScript reaches `uint64Value` as
+            // `UInt64.max`, and narrowing that to `Int` traps and aborts the
+            // application before the clamp around it can run.
+            let historyWindow = max(1, min(100, historyWindowRaw))
             let rawQueueRecovery = (config["queueRecoveryRatio"] as? NSNumber)?.floatValue ?? current.queueRecoveryRatio
             let queueRecovery = min(max(rawQueueRecovery, 0.0), 1.0)
 
@@ -3337,7 +3345,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                 ttlEscalationThreshold: ttlThreshold,
                 congestionDurationSecs: UInt64(congestionDuration),
                 ttlEscalationHoldSecs: UInt64(ttlHold),
-                historyWindowSize: UInt64(historyWindow),
+                historyWindowSize: historyWindow,
                 queueRecoveryRatio: queueRecovery,
                 lowBatteryThreshold: UInt8(min(100, max(0, (config["lowBatteryThreshold"] as? NSNumber)?.intValue ?? Int(current.lowBatteryThreshold)))),
                 relayMinBatteryLevel: UInt8(min(100, max(0, (config["relayMinBatteryLevel"] as? NSNumber)?.intValue ?? Int(current.relayMinBatteryLevel)))),
