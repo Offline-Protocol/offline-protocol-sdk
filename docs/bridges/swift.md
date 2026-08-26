@@ -37,6 +37,28 @@ Type mapping:
 A method present in Swift and absent from the bridge is simply not callable from
 JavaScript. There is no error at build time.
 
+**The two halves must agree on the whole selector, not just the method name.**
+React Native resolves each declared selector against the class when it parses
+the module, drops any it cannot find, and logs that the JS method will not be
+available. A renamed parameter label is therefore as fatal as a missing
+declaration, and it is the easier of the two to ship: the `userId` to `profile`
+rename reached Swift, Kotlin and TypeScript and missed this file, which left
+`wipePersistedState` uncallable on iOS from 0.21.0 through 0.24.0.
+
+**The first parameter must be unlabelled (`_`).** Swift exports
+`f(resolver:rejecter:)` as `fWithResolver:rejecter:`, not as `f:rejecter:`, so a
+labelled first parameter silently changes the selector. Fix that shape by
+dropping the label in Swift, never by spelling the `With` form here: React
+Native takes the JS method name from the selector text before its first colon,
+so writing `fWithResolver:` in the bridge renames the JS method instead of
+repairing it.
+
+All three shapes are pinned by
+`react_native_ios_objc_shim_and_swift_agree_on_every_selector` in
+`offline-protocol-uniffi`, which reads both files and compares selector sets.
+It runs in `cargo test`, because neither compiler sees both halves and this
+file's Swift counterpart is the one bridge source no CI job compiles.
+
 ## S2. Five registration points per new Swift file
 
 A new Swift source file in the React Native iOS package must be registered in

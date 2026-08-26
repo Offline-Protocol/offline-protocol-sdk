@@ -12130,6 +12130,351 @@ mod tests {
         );
     }
 
+    /// Every method React Native can reach on iOS is spelled the same way in
+    /// both halves of the hand-written bridge.
+    ///
+    /// `RCT_EXTERN_METHOD` does not declare the Swift method. It records a
+    /// selector string that React Native resolves against the class at module
+    /// load, in `parseExportedMethods`. A selector no Swift method implements
+    /// is dropped there behind an `RCTLogWarn` and the JS method is simply
+    /// absent, so the application fails at the call site with `undefined is
+    /// not a function`, or, where the caller wraps the call in a `catch` that
+    /// only logs, does not fail at all and quietly keeps its defaults.
+    ///
+    /// Neither half's compiler can see the other. The `.m` compiles standalone
+    /// against the macro, and `OfflineProtocolModule.swift` is the one bridge
+    /// source no CI job compiles at all, because it needs real React headers.
+    /// So a source-reading guard is the only reachable pin, which is C5
+    /// (`docs/bridges/README.md`) applied to a selector table rather than to a
+    /// constant.
+    ///
+    /// Three ways this has actually broken, all of them shipped to npm:
+    ///
+    /// 1. **A renamed label.** The `userId` to `profile` rename reached Swift,
+    ///    Kotlin and TypeScript and missed the shim, so `wipePersistedState`
+    ///    was uncallable from 0.21.0 through 0.24.0 and logging out could not
+    ///    erase the account it had just signed out of.
+    /// 2. **No declaration at all.** `setBatteryState`, `getIsCharging`,
+    ///    `updateRelayConfig` and `getRelayConfig` were written in Swift,
+    ///    Kotlin and TypeScript and never added to the shim, so from 0.22.0
+    ///    every relay setting an application passed to `create()` was
+    ///    discarded on iOS behind a `console.warn`.
+    /// 3. **A labelled first parameter.** Swift exports `f(resolver:rejecter:)`
+    ///    as `fWithResolver:rejecter:`, not as `f:rejecter:`. Three data-layer
+    ///    methods drifted into that shape in 0.23.0 and stopped resolving. The
+    ///    fix for that shape is always to drop the label in Swift rather than
+    ///    to spell the `With` form in the shim: React Native takes the JS
+    ///    method name from the selector text before its first colon, so
+    ///    spelling it in the shim renames the JS method instead of repairing
+    ///    it.
+    ///
+    /// The set of Swift methods held to this is **derived, not listed**: an
+    /// `@objc` method is one React Native exports exactly when it takes the
+    /// promise pair. That keeps the guard blind to the `@objc` methods which
+    /// are not bridge entry points (two `NotificationCenter` targets, and
+    /// React Native's own `addListener`/`removeListeners` overrides) without
+    /// naming them, and it puts a *new* bridge method inside the invariant the
+    /// moment it is written, which a hand-maintained list could not.
+    ///
+    /// What this does not check is parameter types. A selector pins the
+    /// argument count and the labels, not that `(BOOL)` on one side is `Bool`
+    /// on the other; that mapping is S1 in `docs/bridges/swift.md`.
+    #[test]
+    fn react_native_ios_objc_shim_and_swift_agree_on_every_selector() {
+        /// Modifiers that may sit between `@objc` and `func`.
+        const MODIFIERS: &[&str] = &[
+            "private",
+            "fileprivate",
+            "internal",
+            "public",
+            "open",
+            "override",
+            "static",
+            "class",
+            "final",
+            "dynamic",
+            "nonisolated",
+        ];
+
+        /// The selectors `RCT_EXTERN_METHOD` declares.
+        ///
+        /// A label is an identifier that precedes a `:` at the depth of the
+        /// macro's own argument list. Parameter types sit one paren deeper and
+        /// parameter names are never followed by a colon, so tracking depth is
+        /// what separates the label `profile:` both from the type
+        /// `(NSString *)` and from the `profile` that names the variable after
+        /// it. Do not collapse this to a whitespace-stripped scan: that glues
+        /// each parameter's name onto the next label and every selector comes
+        /// out wrong in a way that still looks plausible.
+        fn objc_selectors(src: &str) -> Vec<String> {
+            const MARKER: &str = "RCT_EXTERN_METHOD(";
+            let bytes = src.as_bytes();
+            let mut out = Vec::new();
+            let mut from = 0usize;
+            while let Some(hit) = src[from..].find(MARKER) {
+                let mut i = from + hit + MARKER.len();
+                let mut depth = 1usize;
+                let mut labels: Vec<String> = Vec::new();
+                let mut ident = String::new();
+                while i < bytes.len() && depth > 0 {
+                    let c = bytes[i] as char;
+                    match c {
+                        '(' => {
+                            depth += 1;
+                            ident.clear();
+                        }
+                        ')' => {
+                            depth -= 1;
+                            ident.clear();
+                        }
+                        ':' if depth == 1 && !ident.is_empty() => {
+                            labels.push(std::mem::take(&mut ident));
+                        }
+                        _ if depth == 1 && (c.is_ascii_alphanumeric() || c == '_') => ident.push(c),
+                        _ => ident.clear(),
+                    }
+                    i += 1;
+                }
+                if !labels.is_empty() {
+                    out.push(format!("{}:", labels.join(":")));
+                }
+                from = i;
+            }
+            out
+        }
+
+        /// One `@objc` method: the selector Swift exports it under, and
+        /// whether React Native exports it at all.
+        struct SwiftMethod {
+            selector: String,
+            exported: bool,
+        }
+
+        fn swift_methods(src: &str) -> Vec<SwiftMethod> {
+            let bytes = src.as_bytes();
+            let ident_char = |c: u8| (c as char).is_ascii_alphanumeric() || c == b'_';
+            let skip_spaces = |mut i: usize| {
+                while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+                    i += 1;
+                }
+                i
+            };
+            let close_paren = |open: usize| {
+                let mut depth = 1usize;
+                let mut i = open + 1;
+                while i < bytes.len() && depth > 0 {
+                    match bytes[i] {
+                        b'(' => depth += 1,
+                        b')' => depth -= 1,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                i
+            };
+
+            let mut out = Vec::new();
+            let mut from = 0usize;
+            while let Some(hit) = src[from..].find("@objc") {
+                let start = from + hit;
+                let mut i = start + "@objc".len();
+                // Bail past this `@objc` by default; only a real method
+                // declaration advances further.
+                from = i;
+
+                // `@objc(explicitSelector:)` pins the selector outright, which
+                // is how the two methods whose Swift names differ from their
+                // JS names stay bound to the right one.
+                let mut explicit: Option<String> = None;
+                if bytes.get(i) == Some(&b'(') {
+                    let end = close_paren(i);
+                    explicit = Some(src[i + 1..end - 1].trim().to_string());
+                    i = end;
+                }
+
+                // Modifiers, then `func`. Anything else means this `@objc`
+                // decorates something other than a method: the class
+                // declaration itself, most importantly.
+                let mut cursor = i;
+                let is_func = loop {
+                    cursor = skip_spaces(cursor);
+                    let tok_start = cursor;
+                    while cursor < bytes.len() && ident_char(bytes[cursor]) {
+                        cursor += 1;
+                    }
+                    if tok_start == cursor {
+                        break false;
+                    }
+                    match &src[tok_start..cursor] {
+                        "func" => break true,
+                        token if MODIFIERS.contains(&token) => continue,
+                        _ => break false,
+                    }
+                };
+                if !is_func {
+                    continue;
+                }
+
+                cursor = skip_spaces(cursor);
+                let name_start = cursor;
+                while cursor < bytes.len() && ident_char(bytes[cursor]) {
+                    cursor += 1;
+                }
+                let name = &src[name_start..cursor];
+                cursor = skip_spaces(cursor);
+                if bytes.get(cursor) != Some(&b'(') {
+                    continue;
+                }
+                let params_end = close_paren(cursor);
+                let params = &src[cursor + 1..params_end - 1];
+                from = params_end;
+
+                // Split the parameter list on its top-level commas. Brackets
+                // count toward depth (`[String: Any]`), angle brackets do not:
+                // a `->` in a closure type would otherwise unbalance them.
+                let mut parts: Vec<&str> = Vec::new();
+                let mut depth = 0i32;
+                let mut seg = 0usize;
+                for (idx, ch) in params.char_indices() {
+                    match ch {
+                        '(' | '[' | '{' => depth += 1,
+                        ')' | ']' | '}' => depth -= 1,
+                        ',' if depth == 0 => {
+                            parts.push(&params[seg..idx]);
+                            seg = idx + 1;
+                        }
+                        _ => {}
+                    }
+                }
+                if !params[seg..].trim().is_empty() {
+                    parts.push(&params[seg..]);
+                }
+                let label_of = |part: &str| -> String {
+                    part.trim()
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or_default()
+                        .trim_end_matches(':')
+                        .to_string()
+                };
+
+                let selector = if let Some(pinned) = explicit {
+                    pinned
+                } else if parts.is_empty() {
+                    name.to_string()
+                } else {
+                    let mut selector = String::from(name);
+                    let first = label_of(parts[0]);
+                    // An unlabelled first parameter gives `name:`; a labelled
+                    // one gives `nameWithLabel:`. This is the shape that broke
+                    // three data-layer methods while reading correctly.
+                    if first != "_" {
+                        selector.push_str("With");
+                        let mut chars = first.chars();
+                        if let Some(initial) = chars.next() {
+                            selector.extend(initial.to_uppercase());
+                            selector.push_str(chars.as_str());
+                        }
+                    }
+                    selector.push(':');
+                    for part in &parts[1..] {
+                        selector.push_str(&label_of(part));
+                        selector.push(':');
+                    }
+                    selector
+                };
+
+                out.push(SwiftMethod {
+                    selector,
+                    exported: params.contains("RCTPromiseResolveBlock")
+                        && params.contains("RCTPromiseRejectBlock"),
+                });
+            }
+            out
+        }
+
+        let objc = rn_source_code_only("ios/OfflineProtocolModule.m");
+        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        let js = rn_source_code_only("src/index.ts");
+
+        let declared = objc_selectors(&objc);
+        let implemented = swift_methods(&swift);
+
+        // Both parsers have to prove they found something before any set
+        // comparison below means anything: a moved file, a renamed macro or a
+        // reformatted signature would otherwise leave two empty sets agreeing
+        // perfectly.
+        assert!(
+            declared.len() >= 150,
+            "only parsed {} RCT_EXTERN_METHOD selectors out of OfflineProtocolModule.m; \
+             the parser is broken, not the bridge",
+            declared.len()
+        );
+        let exported: std::collections::BTreeSet<&str> = implemented
+            .iter()
+            .filter(|method| method.exported)
+            .map(|method| method.selector.as_str())
+            .collect();
+        assert!(
+            exported.len() >= 150,
+            "only parsed {} promise-taking @objc methods out of OfflineProtocolModule.swift; \
+             the parser is broken, not the bridge",
+            exported.len()
+        );
+
+        let declared: std::collections::BTreeSet<&str> =
+            declared.iter().map(String::as_str).collect();
+
+        let dangling: Vec<&str> = declared.difference(&exported).copied().collect();
+        assert!(
+            dangling.is_empty(),
+            "OfflineProtocolModule.m declares {dangling:?}, which no Swift method implements. \
+             React Native resolves every declared selector against the class at module load, \
+             logs that the JS method will not be available, and drops the binding, so the \
+             application sees `undefined is not a function` at the call site"
+        );
+
+        let invisible: Vec<&str> = exported.difference(&declared).copied().collect();
+        assert!(
+            invisible.is_empty(),
+            "OfflineProtocolModule.swift implements {invisible:?} with no matching \
+             RCT_EXTERN_METHOD. The Swift compiles and the method is unreachable from \
+             JavaScript, with no diagnostic at build time and none at run time either"
+        );
+
+        // The TypeScript is the third copy of the same table. React Native
+        // names the JS method after the selector text before its first colon,
+        // so that prefix is what a call site has to match.
+        let heads: std::collections::BTreeSet<&str> = declared
+            .iter()
+            .map(|selector| selector.split(':').next().unwrap_or(selector))
+            .collect();
+        const CALL: &str = "OfflineProtocolNativeModule.";
+        let mut uncallable: Vec<&str> = Vec::new();
+        let mut from = 0usize;
+        while let Some(hit) = js[from..].find(CALL) {
+            let start = from + hit + CALL.len();
+            let rest = &js[start..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            // Only an immediate `(` is a call; `typeof mod.foo === ...` and
+            // other property reads are not.
+            if rest[end..].starts_with('(') && !heads.contains(&rest[..end]) {
+                uncallable.push(&rest[..end]);
+            }
+            from = start + end;
+        }
+        uncallable.sort_unstable();
+        uncallable.dedup();
+        assert!(
+            uncallable.is_empty(),
+            "bindings/react-native/src/index.ts calls {uncallable:?} on the native module, \
+             which the Objective-C shim never exports, so the call is undefined on iOS \
+             however well it works on Android"
+        );
+    }
+
     /// No transport manager may take its ordering from the app's main looper.
     ///
     /// This is OFF-2123 as an invariant. Every call these managers make into

@@ -63,6 +63,19 @@ Map Swift types to Objective-C types:
 
 **Note**: All `@objc` methods must include `resolver` and `rejecter` parameters (React Native Promise pattern).
 
+### Step 4: Leave the first parameter unlabelled
+
+Write `_ recipient: String`, not `recipient: String`. Swift exports a labelled
+first parameter with a `With` infix, so `dataListSpaces(resolver:rejecter:)`
+becomes the selector `dataListSpacesWithResolver:rejecter:` and no longer
+matches `RCT_EXTERN_METHOD(dataListSpaces:...)`. Three data-layer methods
+drifted into that shape in 0.23.0 and stopped resolving.
+
+Repair it by dropping the label in Swift. Do not write the `With` form in the
+bridge instead: React Native derives the JS method name from the selector text
+before its first colon, so that spelling renames the JS method rather than
+fixing it.
+
 ## Common Issues
 
 ### Missing Parameter
@@ -80,6 +93,26 @@ Map Swift types to Objective-C types:
 **Cause**: Objective-C type doesn't match Swift type
 
 **Fix**: Check the type mapping table above
+
+### Renamed Parameter Label
+
+**Error (boot log)**: ``The Objective-C `...` method signature for the JS method
+`...` can not be found in the Objective-C definition of the
+OfflineProtocolModule module.``
+
+**Cause**: The selector here and the selector Swift exports differ. Renaming a
+parameter in Swift renames the selector, so a bridge left on the old label
+declares a method that no longer exists.
+
+**Fix**: Rename the label here too. This is not caught by any compiler; it is
+caught by `react_native_ios_objc_shim_and_swift_agree_on_every_selector` in
+`offline-protocol-uniffi`, which compares the selector sets of both files and
+also fails when the TypeScript calls a method this bridge never exports. Run
+it with:
+
+```bash
+cargo test -p offline-protocol-uniffi --lib react_native_ios_objc_shim
+```
 
 ## Threading contract for the transport managers
 

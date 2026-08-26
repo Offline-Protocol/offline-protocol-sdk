@@ -1623,8 +1623,8 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
-    @objc func dataListSpaces(resolver: @escaping RCTPromiseResolveBlock,
-                              rejecter: @escaping RCTPromiseRejectBlock) {
+    @objc func dataListSpaces(_ resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
         do {
             guard let store = dataStoreInstance else {
                 throw NSError(domain: "OfflineProtocol", code: -1,
@@ -1909,8 +1909,8 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
-    @objc func dataFlushAll(resolver: @escaping RCTPromiseResolveBlock,
-                            rejecter: @escaping RCTPromiseRejectBlock) {
+    @objc func dataFlushAll(_ resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
         do {
             guard let store = dataStoreInstance else {
                 throw NSError(domain: "OfflineProtocol", code: -1,
@@ -2040,8 +2040,8 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
-    @objc func dataWipeAll(resolver: @escaping RCTPromiseResolveBlock,
-                           rejecter: @escaping RCTPromiseRejectBlock) {
+    @objc func dataWipeAll(_ resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
         do {
             guard let store = dataStoreInstance else {
                 throw NSError(domain: "OfflineProtocol", code: -1,

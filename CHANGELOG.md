@@ -11,6 +11,34 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+### Fixed
+
+- **Eight React Native methods were unreachable on iOS, and the bridge now
+  proves it cannot happen again.** `RCT_EXTERN_METHOD` does not declare a Swift
+  method, it records a selector that React Native resolves against the class at
+  module load; one it cannot find is dropped with a log line and the JS method
+  is simply absent. Neither compiler sees both halves, and
+  `OfflineProtocolModule.swift` is the one bridge source no CI job compiles, so
+  three separate drifts shipped. `wipePersistedState` kept the pre-rename
+  `userId:` label and had been uncallable since 0.21.0, which meant logging out
+  could not erase the account it had just signed out of and every prior
+  account's MLS identity and sealed state stayed on disk. `setBatteryState`,
+  `getIsCharging`, `updateRelayConfig` and `getRelayConfig` were written in
+  Swift, Kotlin and TypeScript and never declared in the bridge at all, so
+  since 0.22.0 every relay setting an application passed to `create()` was
+  discarded on iOS behind a `console.warn`: **applications that configure
+  `allowRelay`, `minBatteryForRelay` or `relayPriority` will see those settings
+  take effect on iOS for the first time on this release.** `dataListSpaces`,
+  `dataFlushAll` and `dataWipeAll` took a labelled first parameter, which Swift
+  exports as `dataListSpacesWithResolver:` rather than `dataListSpaces:`, and
+  stopped resolving in 0.23.0. Android was never affected: its dispatch is by
+  method name and position, and the Kotlin side was correct throughout.
+  `react_native_ios_objc_shim_and_swift_agree_on_every_selector` now reads both
+  bridge halves and the TypeScript, and fails on any selector one side has and
+  another does not.
+
 ## [0.24.0] — 2026-08-24
 
 > **A door lock speaks this protocol now, and not a smaller version of it.**

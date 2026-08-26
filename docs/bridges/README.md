@@ -157,6 +157,19 @@ than the engine hands every silent-relay resolution to the sweep instead of to
 the bridge that knows which relays replied. Nothing on either side of the
 boundary would show that, so the guard asserts the ordering too.
 
+**The iOS selector table** is the seventh, and the only one that is not a
+constant. `OfflineProtocolModule.m` mirrors every `@objc` method of
+`OfflineProtocolModule.swift` as an `RCT_EXTERN_METHOD` selector, and React
+Native resolves those selectors against the class at module load rather than at
+build time, so a method the two files spell differently is dropped there and is
+absent from JavaScript. Eight methods were unreachable on iOS across 0.21.0 to
+0.24.0 this way, in three shapes: a parameter label renamed on one side only, a
+method never declared in the bridge at all, and a labelled first parameter,
+which Swift exports with a `With` infix. `react_native_ios_objc_shim_and_swift_agree_on_every_selector`
+reads both files plus `src/index.ts` and compares the three as sets. It is a
+Rust guard for the C5 reason: the `.m` compiles standalone, and its Swift
+counterpart is the one bridge source no CI job compiles at all.
+
 ## C6. Config parsers must not default to literals
 
 A bridge parsing a config object must distinguish "the caller did not supply this
