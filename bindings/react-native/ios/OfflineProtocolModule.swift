@@ -1480,7 +1480,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// Forwards a message to a new recipient with original sender attribution.
     @objc func forwardMessage(_ originalMessageJson: String,
                               newRecipient: String,
-                              priority: NSNumber?,
+                              priority: Int,
                               resolver: @escaping RCTPromiseResolveBlock,
                               rejecter: @escaping RCTPromiseRejectBlock) {
         do {
@@ -1489,16 +1489,15 @@ class OfflineProtocolModule: RCTEventEmitter {
                             userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
             }
 
-            var msgPriority: MessagePriority? = nil
-            if let p = priority {
-                switch p.intValue {
-                case 0: msgPriority = .low
-                case 1: msgPriority = .medium
-                case 2: msgPriority = .high
-                case 3: msgPriority = .critical
-                default: break
+            let msgPriority: MessagePriority = {
+                switch priority {
+                case 0: return .low
+                case 1: return .medium
+                case 2: return .high
+                case 3: return .critical
+                default: return .medium
                 }
-            }
+            }()
 
             let messageId = try proto.forwardMessage(originalMessageJson: originalMessageJson, newRecipient: newRecipient, priority: msgPriority)
             resolver(messageId)

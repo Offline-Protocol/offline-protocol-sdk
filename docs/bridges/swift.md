@@ -96,11 +96,19 @@ own scan finds nothing to check.
 `react_native_ios_bridge_bounds_every_byte_it_builds_from_javascript` fails on
 any byte conversion whose argument does not carry its own bound.
 
-One gap is known and unfixable here: React Native forces every `NSNumber`
-argument to non-null, so `forwardMessage`'s optional priority is refused before
-the Swift method runs and its promise never settles in a debug build. It needs
-a contract change across all three languages, tracked in
-[#417](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/417).
+**A nullable number is not something this bridge can express**, and the guard
+above cannot say so. React Native forces every `NSNumber` argument to non-null
+whatever the declaration says, because numbers are not nullable on Android, and
+it refuses a null one before entering the Swift method, so neither the resolver
+nor the rejecter runs and the promise never settles. The check lives inside
+`#if RCT_DEBUG`, so the release build passes the null through and only
+developers meet the hang. `forwardMessage`'s priority was declared that way
+until this release. The repair is not a spelling of the declaration but the
+removal of the nullability: TypeScript resolves the documented default, and the
+shim, Swift and Kotlin all take a required integer. That costs nothing, because
+the core already turns an absent priority into Medium. The guard misses this class
+because a nullable number and a nullable object share an ABI class, so both
+halves agree while React Native rejects the call anyway.
 
 ## S2. Five registration points per new Swift file
 

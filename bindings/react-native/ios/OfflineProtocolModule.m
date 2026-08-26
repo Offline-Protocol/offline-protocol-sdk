@@ -62,7 +62,7 @@ RCT_EXTERN_METHOD(sendMessageRich:(NSString *)recipient
 
 RCT_EXTERN_METHOD(forwardMessage:(NSString *)originalMessageJson
                   newRecipient:(NSString *)newRecipient
-                  priority:(NSNumber *)priority
+                  priority:(NSInteger)priority
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
