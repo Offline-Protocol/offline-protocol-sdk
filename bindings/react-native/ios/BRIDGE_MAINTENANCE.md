@@ -42,7 +42,7 @@ Add or update the corresponding `RCT_EXTERN_METHOD` in `OfflineProtocolModule.m`
 ```objective-c
 RCT_EXTERN_METHOD(sendMessage:(NSString *)recipient
                   content:(NSString *)content
-                  priority:(nonnull NSNumber *)priority
+                  priority:(NSInteger)priority
                   replyToMsg:(NSString *)replyToMsg
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
@@ -56,12 +56,87 @@ Map Swift types to Objective-C types:
 |------------|------------------|
 | `String` | `NSString *` |
 | `String?` | `NSString *` (nullable) |
-| `Int` | `nonnull NSNumber *` |
+| `Int` | `NSInteger` |
+| `Double` | `double` |
 | `Bool` | `BOOL` |
+| `NSNumber` | `nonnull NSNumber *` |
 | `[NSNumber]` | `NSArray *` |
 | `NSDictionary?` | `NSDictionary *` (nullable) |
 
+**A primitive and an object are not interchangeable here, and mixing them is
+silent.** React Native picks the `RCTConvert` converter from the type text you
+write above and the calling convention from the Swift parameter's runtime
+encoding, then calls the first through a function pointer cast to the second.
+Write `nonnull NSNumber *` against a Swift `Int` and `+[RCTConvert NSNumber:]`
+returns an object pointer that is then read as a 64-bit integer, so the method
+runs with the pointer bits of a tagged `NSNumber` where the number should be.
+Write it against a Swift `Double` and an integer register is read as a floating
+point one. Nothing is logged either way. This row read `Int` to
+`nonnull NSNumber *` from v0.3.3 until this release, and seven methods
+followed it.
+
+Take an `NSNumber` on the Swift side only where the argument is genuinely
+optional, and know that React Native does not really support that: it forces
+every `NSNumber` argument to non-null whatever you declare, because numbers are
+not nullable on Android. A null one is then refused before the Swift method is
+entered, so neither the resolver nor the rejecter runs and the promise never
+settles. `forwardMessage` is the one method in this bridge that relies on a
+nullable number, and it hangs on iOS debug builds for that reason; there is no
+spelling of the declaration that fixes it, so it needs a contract change across
+all three languages. That is tracked in
+[#417](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/417).
+Until it lands, do not add a second nullable-number argument.
+
 **Note**: All `@objc` methods must include `resolver` and `rejecter` parameters (React Native Promise pattern).
+
+### Step 4: Leave the first parameter unlabelled
+
+Write `_ recipient: String`, not `recipient: String`. Swift exports a labelled
+first parameter with a `With` infix, so `dataListSpaces(resolver:rejecter:)`
+becomes the selector `dataListSpacesWithResolver:rejecter:` and no longer
+matches `RCT_EXTERN_METHOD(dataListSpaces:...)`. Three data-layer methods
+drifted into that shape in 0.23.0 and stopped resolving.
+
+Repair it by dropping the label in Swift. Do not write the `With` form in the
+bridge instead: React Native derives the JS method name from the selector text
+before its first colon, so that spelling renames the JS method rather than
+fixing it.
+
+### Step 5: Bound every number you narrow
+
+`UInt8(someInt)` traps. It does not return nil, throw, or truncate: it aborts
+the process, and every number reaching this file came from JavaScript, so an
+out-of-range value is a caller mistake that must reject the promise instead.
+
+Convert byte arrays through the `jsBytes` helper, which throws an `NSError`
+into the rejection your `do`/`catch` already has:
+
+```swift
+let bytes = try jsBytes(data, "data")          // not data.map { UInt8($0.intValue) }
+let optional = try maybe.map { try jsBytes($0, "keyPackage") }
+```
+
+For a scalar, bound it where you write it (`min`/`max`, `UInt8(exactly:)`,
+`UInt8(clamping:)`) or `guard` the range before the conversion, as
+`processFileChunk` does for its `UInt32` and `UInt64` arguments. Twelve array
+conversions and the `initialTtl` config field were unbounded until this
+release: a peer sending a malformed fragment, or an application passing `initialTtl: 300`
+to `create()`, aborted the app on iOS where Android truncated.
+
+**The clamp has to sit inside the conversion, not around it.** Wrapping a
+narrowing conversion in `min`/`max` reads as bounded and is not: the conversion
+runs first, so it traps before any of the clamp applies. This reaches unsigned
+values too, because a negative JavaScript number arrives at `uint64Value` as
+`UInt64.max`, and narrowing that to `Int` aborts. Clamp in the domain the value
+arrives in, or convert with `Int(clamping:)`. Two DORS config paths carried the
+wrong order until this release, so a `historyWindowSize` of `-1` passed to
+`create()` aborted the app on iOS.
+
+`react_native_ios_bridge_bounds_every_byte_it_builds_from_javascript` in
+`offline-protocol-uniffi` fails on any `UInt8(...)` in this file whose argument
+does not carry its own bound. It reads bytes only: a scalar narrowing like the
+one above is held by this checklist and by review, because the text of
+`Int(raw)` cannot say whether `raw` is already bounded.
 
 ## Common Issues
 
@@ -80,6 +155,26 @@ Map Swift types to Objective-C types:
 **Cause**: Objective-C type doesn't match Swift type
 
 **Fix**: Check the type mapping table above
+
+### Renamed Parameter Label
+
+**Error (boot log)**: ``The Objective-C `...` method signature for the JS method
+`...` can not be found in the Objective-C definition of the
+OfflineProtocolModule module.``
+
+**Cause**: The selector here and the selector Swift exports differ. Renaming a
+parameter in Swift renames the selector, so a bridge left on the old label
+declares a method that no longer exists.
+
+**Fix**: Rename the label here too. This is not caught by any compiler; it is
+caught by `react_native_ios_objc_shim_and_swift_agree_on_every_selector` in
+`offline-protocol-uniffi`, which compares the selector sets of both files and
+also fails when the TypeScript calls a method this bridge never exports. Run
+it with:
+
+```bash
+cargo test -p offline-protocol-uniffi --lib react_native_ios_objc_shim
+```
 
 ## Threading contract for the transport managers
 
@@ -153,6 +248,9 @@ Before committing changes:
 - [ ] All `@objc func` methods in Swift have corresponding `RCT_EXTERN_METHOD` declarations
 - [ ] Parameter names and types match between Swift and Objective-C
 - [ ] All methods include `resolver` and `rejecter` parameters
+- [ ] The first Swift parameter is unlabelled (`_`)
+- [ ] Every narrowing conversion is bounded, and byte arrays go through `jsBytes`
+- [ ] `cargo test -p offline-protocol-uniffi --lib react_native_ios` passes
 - [ ] Build succeeds without warnings
 - [ ] Test the method from JavaScript to ensure it works
 

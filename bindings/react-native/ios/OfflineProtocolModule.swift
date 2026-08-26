@@ -451,7 +451,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             reticulumEnabled: raw["reticulumEnabled"] as? Bool ?? raw["reticulum_enabled"] as? Bool ?? false,
             nostrEnabled: raw["nostrEnabled"] as? Bool ?? raw["nostr_enabled"] as? Bool ?? false,
             preferOnline: raw["preferOnline"] as? Bool ?? raw["prefer_online"] as? Bool ?? false,
-            initialTtl: UInt8(raw["initialTtl"] as? Int ?? raw["initial_ttl"] as? Int ?? 8),
+            // Clamped, not converted: `initialTtl` is a public config field
+            // of unbounded `number` type in TypeScript, so an application
+            // passing 300 would trap here and abort inside `create()`.
+            // Android truncates the same value through `toUByte()`.
+            initialTtl: UInt8(min(255, max(0, raw["initialTtl"] as? Int ?? raw["initial_ttl"] as? Int ?? 8))),
             encryptionEnabled: encryption.enabled,
             autoKeyExchange: encryption.autoKeyExchange,
             storePending: encryption.storePending,
@@ -536,6 +540,31 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    /// The bytes behind a JavaScript number array.
+    ///
+    /// `UInt8(_:)` traps on anything outside 0...255, and every array these
+    /// methods receive came straight from JavaScript, so an out-of-range
+    /// element is a caller mistake rather than an impossible state. A caller
+    /// mistake has to reject the promise; the trapping form aborts the
+    /// application instead, which makes a crash reachable from any JavaScript
+    /// call site. Throwing reaches the rejection each of these methods
+    /// already has.
+    ///
+    /// Fractional elements still truncate, as they always have: JavaScript
+    /// byte arrays are integral, and a caller passing 3.7 is not the failure
+    /// this guards.
+    private func jsBytes(_ numbers: [NSNumber], _ field: String) throws -> [UInt8] {
+        try numbers.map { number in
+            guard let byte = UInt8(exactly: number.intValue) else {
+                throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "\(field) must hold byte values in 0...255, found \(number.intValue)"
+                ])
+            }
+            return byte
+        }
+    }
+
     private func applyInitialRuntimeConfig(_ proto: OfflineProtocol, rawConfig: [String: Any]) {
         if let dorsDict = rawConfig["dors"] as? [String: Any] {
             let preferOnline = dorsDict["preferOnline"] as? Bool ?? dorsDict["prefer_online"] as? Bool ?? false
@@ -579,7 +608,11 @@ class OfflineProtocolModule: RCTEventEmitter {
         let historyWindowRaw = UInt64((dorsDict["historyWindowSize"] as? NSNumber)?.uint64Value
                                       ?? (dorsDict["history_window_size"] as? NSNumber)?.uint64Value
                                       ?? 10)
-        let historyWindow = max(1, min(100, Int(historyWindowRaw)))
+        // Clamped in the unsigned domain, never through `Int`: a negative
+        // `historyWindowSize` from JavaScript reaches `uint64Value` as
+        // `UInt64.max`, and narrowing that to `Int` traps and aborts the
+        // application before the clamp around it can run.
+        let historyWindow = max(1, min(100, historyWindowRaw))
         let rawQueueRecovery = Float((dorsDict["queueRecoveryRatio"] as? NSNumber)?.floatValue
                                      ?? (dorsDict["queue_recovery_ratio"] as? NSNumber)?.floatValue
                                      ?? 0.5)
@@ -608,7 +641,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             ttlEscalationThreshold: ttlThreshold,
             congestionDurationSecs: congestionDuration,
             ttlEscalationHoldSecs: ttlHold,
-            historyWindowSize: UInt64(historyWindow),
+            historyWindowSize: historyWindow,
             queueRecoveryRatio: queueRecovery,
             lowBatteryThreshold: lowBattery,
             relayMinBatteryLevel: relayMinBattery,
@@ -1486,7 +1519,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                             userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
             }
 
-            let keyPackageData = keyPackage?.map { UInt8($0.intValue) }
+            let keyPackageData = try keyPackage.map { try jsBytes($0, "keyPackage") }
             let messageId = try proto.sendConnectionRequest(
                 recipient: recipient,
                 senderName: senderName,
@@ -1510,7 +1543,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                             userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
             }
 
-            let keyPackageData = keyPackage?.map { UInt8($0.intValue) }
+            let keyPackageData = try keyPackage.map { try jsBytes($0, "keyPackage") }
             let messageId = try proto.acceptConnectionRequest(
                 recipient: recipient,
                 accepterName: accepterName,
@@ -1623,8 +1656,8 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
-    @objc func dataListSpaces(resolver: @escaping RCTPromiseResolveBlock,
-                              rejecter: @escaping RCTPromiseRejectBlock) {
+    @objc func dataListSpaces(_ resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
         do {
             guard let store = dataStoreInstance else {
                 throw NSError(domain: "OfflineProtocol", code: -1,
@@ -1909,8 +1942,8 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
-    @objc func dataFlushAll(resolver: @escaping RCTPromiseResolveBlock,
-                            rejecter: @escaping RCTPromiseRejectBlock) {
+    @objc func dataFlushAll(_ resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
         do {
             guard let store = dataStoreInstance else {
                 throw NSError(domain: "OfflineProtocol", code: -1,
@@ -2040,8 +2073,8 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
-    @objc func dataWipeAll(resolver: @escaping RCTPromiseResolveBlock,
-                           rejecter: @escaping RCTPromiseRejectBlock) {
+    @objc func dataWipeAll(_ resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
         do {
             guard let store = dataStoreInstance else {
                 throw NSError(domain: "OfflineProtocol", code: -1,
@@ -2868,7 +2901,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            try proto.blePeerDiscovered(peerId: peerId, rssi: Int16(rssi))
+            try proto.blePeerDiscovered(peerId: peerId, rssi: Int16(clamping: rssi))
             resolver(nil)
         } catch {
             rejecter("ERROR_BLE", "BLE peer discovered failed: \(error.localizedDescription)", error)
@@ -2914,7 +2947,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let fragment = fragmentData.map { UInt8($0.intValue) }
+            let fragment = try jsBytes(fragmentData, "fragment")
             try proto.bleFragmentReceived(senderId: senderId, fragment: fragment)
             resolver(nil)
         } catch {
@@ -3287,7 +3320,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             let congestionDuration = max((config["congestionDurationSecs"] as? NSNumber)?.uint64Value ?? current.congestionDurationSecs, 0)
             let ttlHold = max((config["ttlEscalationHoldSecs"] as? NSNumber)?.uint64Value ?? current.ttlEscalationHoldSecs, 1)
             let historyWindowRaw = (config["historyWindowSize"] as? NSNumber)?.uint64Value ?? current.historyWindowSize
-            let historyWindow = max(1, min(100, Int(historyWindowRaw)))
+            // Clamped in the unsigned domain, never through `Int`: a negative
+            // `historyWindowSize` from JavaScript reaches `uint64Value` as
+            // `UInt64.max`, and narrowing that to `Int` traps and aborts the
+            // application before the clamp around it can run.
+            let historyWindow = max(1, min(100, historyWindowRaw))
             let rawQueueRecovery = (config["queueRecoveryRatio"] as? NSNumber)?.floatValue ?? current.queueRecoveryRatio
             let queueRecovery = min(max(rawQueueRecovery, 0.0), 1.0)
 
@@ -3308,7 +3345,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                 ttlEscalationThreshold: ttlThreshold,
                 congestionDurationSecs: UInt64(congestionDuration),
                 ttlEscalationHoldSecs: UInt64(ttlHold),
-                historyWindowSize: UInt64(historyWindow),
+                historyWindowSize: historyWindow,
                 queueRecoveryRatio: queueRecovery,
                 lowBatteryThreshold: UInt8(min(100, max(0, (config["lowBatteryThreshold"] as? NSNumber)?.intValue ?? Int(current.lowBatteryThreshold)))),
                 relayMinBatteryLevel: UInt8(min(100, max(0, (config["relayMinBatteryLevel"] as? NSNumber)?.intValue ?? Int(current.relayMinBatteryLevel)))),
@@ -3559,8 +3596,22 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejecter("ERROR_FILE", "Protocol not initialized", nil)
             return
         }
+        // Every one of these narrows, and each narrowing traps rather than
+        // returning a value React Native could reject. The arguments come
+        // straight from JavaScript, so out-of-range is a caller mistake and
+        // must surface as a rejected promise, not as an abort.
+        guard chunkIndex >= 0, chunkIndex <= Int(UInt32.max),
+              totalChunks >= 0, totalChunks <= Int(UInt32.max),
+              // NaN fails both comparisons. The ceiling is 2^64 exactly, and
+              // every non-negative Double below it truncates into UInt64.
+              fileSize >= 0, fileSize < 18_446_744_073_709_551_616.0 else {
+            rejecter("ERROR_FILE",
+                     "Chunk index, chunk count and file size must be non-negative and in range",
+                     nil)
+            return
+        }
         do {
-            let bytes = data.map { UInt8($0.intValue) }
+            let bytes = try jsBytes(data, "data")
             try proto.processFileChunk(
                 fileId: fileId,
                 chunkIndex: UInt32(chunkIndex),
@@ -3617,7 +3668,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let bytes = data.map { UInt8($0.intValue) }
+            let bytes = try jsBytes(data, "data")
             try proto.wifiDirectMessageReceived(senderId: senderId, data: bytes)
             resolver(nil)
         } catch {
@@ -3698,7 +3749,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let bytes = data.map { UInt8($0.intValue) }
+            let bytes = try jsBytes(data, "data")
             try proto.internetMessageReceived(senderId: senderId, data: bytes)
             resolver(nil)
         } catch {
@@ -4142,7 +4193,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
             
             let welcomeDataNumbers = json["welcomeData"] as? [NSNumber] ?? []
-            let welcomeData = welcomeDataNumbers.map { UInt8($0.intValue) }
+            let welcomeData = try jsBytes(welcomeDataNumbers, "welcomeData")
             
             let welcome = MlsWelcomeMessage(
                 groupId: json["groupId"] as? String ?? "",
@@ -4183,7 +4234,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
             
             let ciphertextNumbers = json["ciphertext"] as? [NSNumber] ?? []
-            let ciphertext = ciphertextNumbers.map { UInt8($0.intValue) }
+            let ciphertext = try jsBytes(ciphertextNumbers, "ciphertext")
             
             let encrypted = MlsEncryptedMessage(
                 groupId: json["groupId"] as? String ?? "",
@@ -4230,7 +4281,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let data = keyPackageData.map { UInt8($0.intValue) }
+            let data = try jsBytes(keyPackageData, "keyPackageData")
             try proto.mlsImportKeyPackage(userId: userId, keyPackageData: data)
             resolver(nil)
         } catch {
@@ -4349,7 +4400,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let data = plaintext.map { UInt8($0.intValue) }
+            let data = try jsBytes(plaintext, "plaintext")
             let encrypted = try proto.mlsEncryptForUser(otherUserId: otherUserId, plaintext: data)
             let result: [String: Any] = [
                 "groupId": encrypted.groupId,
@@ -4380,7 +4431,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
             
             let ciphertextNumbers = json["ciphertext"] as? [NSNumber] ?? []
-            let ciphertext = ciphertextNumbers.map { UInt8($0.intValue) }
+            let ciphertext = try jsBytes(ciphertextNumbers, "ciphertext")
             
             let encrypted = MlsEncryptedMessage(
                 groupId: json["groupId"] as? String ?? "",
@@ -4426,7 +4477,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
             
             let welcomeDataNumbers = json["welcomeData"] as? [NSNumber] ?? []
-            let welcomeData = welcomeDataNumbers.map { UInt8($0.intValue) }
+            let welcomeData = try jsBytes(welcomeDataNumbers, "welcomeData")
             
             let welcome = MlsWelcomeMessage(
                 groupId: json["groupId"] as? String ?? "",

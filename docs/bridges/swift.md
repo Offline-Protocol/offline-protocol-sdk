@@ -30,12 +30,77 @@ Type mapping:
 |-------|-------------|
 | `String` | `NSString *` |
 | `String?` | `NSString *` (nullable) |
-| `Int` | `nonnull NSNumber *` |
+| `Int` | `NSInteger` |
+| `Double` | `double` |
 | `Bool` | `BOOL` |
+| `NSNumber` | `nonnull NSNumber *` |
 | Promise | `RCTPromiseResolveBlock` / `RCTPromiseRejectBlock` |
 
 A method present in Swift and absent from the bridge is simply not callable from
 JavaScript. There is no error at build time.
+
+**A primitive and an object are not interchangeable, and mixing them does not
+fail, it lies.** React Native chooses the `RCTConvert` converter from the
+bridge's type text and the calling convention from the Swift parameter's runtime
+encoding, then calls the one through a function pointer cast to the other. Pair
+`nonnull NSNumber *` with a Swift `Int` and the returned object pointer is read
+as a 64-bit integer, so the method runs on the pointer bits of a tagged
+`NSNumber` rather than on the number; pair it with a `Double` and an integer
+register is read as a floating-point one. The selector still resolves, the
+method still runs, and nothing is logged. This table said `Int` to
+`nonnull NSNumber *` from v0.3.3 until this release, and seven methods
+followed it: message and
+presence priorities were silently pinned to their `default:` arm, the battery
+level to a clamp bound, and the three file-transfer scalars aborted the app on
+a trapping conversion.
+
+**The two halves must agree on the whole selector, not just the method name.**
+React Native resolves each declared selector against the class when it parses
+the module, drops any it cannot find, and logs that the JS method will not be
+available. A renamed parameter label is therefore as fatal as a missing
+declaration, and it is the easier of the two to ship: the `userId` to `profile`
+rename reached Swift, Kotlin and TypeScript and missed this file, which left
+`wipePersistedState` uncallable on iOS from 0.21.0 through 0.24.0.
+
+**The first parameter must be unlabelled (`_`).** Swift exports
+`f(resolver:rejecter:)` as `fWithResolver:rejecter:`, not as `f:rejecter:`, so a
+labelled first parameter silently changes the selector. Fix that shape by
+dropping the label in Swift, never by spelling the `With` form here: React
+Native takes the JS method name from the selector text before its first colon,
+so writing `fWithResolver:` in the bridge renames the JS method instead of
+repairing it.
+
+**An argument that arrives is still not a value you can narrow.** `UInt8(_:)`
+and its siblings trap on out-of-range input: they abort the process rather than
+returning something the bridge could reject. Every number crossing here came
+from JavaScript, so out-of-range is a caller mistake, and a caller mistake that
+aborts is a crash any caller can reach. Byte arrays go through the `jsBytes`
+helper, which throws into the rejection the call site already has; scalars are
+bounded where they are written, or behind a `guard` that rejects. A clamp
+*around* a narrowing conversion does not count, because the conversion runs
+first and traps before the clamp applies; that reaches unsigned values too,
+since a negative JavaScript number arrives at `uint64Value` as `UInt64.max`.
+Twelve array conversions, the `initialTtl` config field and two DORS config
+paths were unbounded until this release, which made a malformed BLE fragment,
+an `initialTtl: 300` and a `historyWindowSize: -1` all fatal on iOS and
+harmless on Android.
+
+All of these are pinned in `offline-protocol-uniffi`, in `cargo test`, because
+neither compiler sees both halves and this file's Swift counterpart is the one
+bridge source no CI job compiles.
+`react_native_ios_objc_shim_and_swift_agree_on_every_selector` reads both files
+and compares them as sets: the selectors in both directions, and then, behind
+each shared selector, the ABI class of every parameter. It also checks that the
+TypeScript only calls methods the bridge exports, and refuses to pass when its
+own scan finds nothing to check.
+`react_native_ios_bridge_bounds_every_byte_it_builds_from_javascript` fails on
+any byte conversion whose argument does not carry its own bound.
+
+One gap is known and unfixable here: React Native forces every `NSNumber`
+argument to non-null, so `forwardMessage`'s optional priority is refused before
+the Swift method runs and its promise never settles in a debug build. It needs
+a contract change across all three languages, tracked in
+[#417](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/417).
 
 ## S2. Five registration points per new Swift file
 

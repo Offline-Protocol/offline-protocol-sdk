@@ -11,6 +11,89 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+### Fixed
+
+- **Eight React Native methods were unreachable on iOS, and the bridge now
+  proves it cannot happen again.** `RCT_EXTERN_METHOD` does not declare a Swift
+  method, it records a selector that React Native resolves against the class at
+  module load; one it cannot find is dropped with a log line and the JS method
+  is simply absent. Neither compiler sees both halves, and
+  `OfflineProtocolModule.swift` is the one bridge source no CI job compiles, so
+  three separate drifts shipped. `wipePersistedState` kept the pre-rename
+  `userId:` label and had been uncallable since 0.21.0, which meant logging out
+  could not erase the account it had just signed out of and every prior
+  account's MLS identity and sealed state stayed on disk. `setBatteryState`,
+  `getIsCharging`, `updateRelayConfig` and `getRelayConfig` were written in
+  Swift, Kotlin and TypeScript and never declared in the bridge at all, so
+  since 0.22.0 every relay setting an application passed to `create()` was
+  discarded on iOS behind a `console.warn`: **applications that configure
+  `allowRelay`, `minBatteryForRelay` or `relayPriority` will see those settings
+  take effect on iOS for the first time on this release.** `dataListSpaces`,
+  `dataFlushAll` and `dataWipeAll` took a labelled first parameter, which Swift
+  exports as `dataListSpacesWithResolver:` rather than `dataListSpaces:`, and
+  stopped resolving in 0.23.0. Android was never affected: its dispatch is by
+  method name and position, and the Kotlin side was correct throughout.
+  `react_native_ios_objc_shim_and_swift_agree_on_every_selector` now reads both
+  bridge halves and the TypeScript, and fails on any selector one side has and
+  another does not.
+
+- **Seven more iOS methods resolved but ran on the wrong argument bits.** The
+  bridge declares each parameter's type as text, and React Native picks the
+  `RCTConvert` converter from that text and the calling convention from the
+  Swift parameter's runtime encoding, then calls the one through a function
+  pointer cast to the other. `nonnull NSNumber *` against a Swift `Int`
+  therefore hands the method an object pointer read as a 64-bit integer, which
+  is the pointer bits of a tagged `NSNumber` and never the number. The type
+  table in `BRIDGE_MAINTENANCE.md` had recommended exactly that pairing since
+  v0.3.3, the release that also introduced the first of these methods, so
+  `sendMessage`, `sendMessageRich` and `sendPresenceUpdate` silently pinned
+  every priority and status to their
+  `default:` arm, `setBatteryLevel` and `setBatteryState` recorded a clamp bound
+  rather than the level, and `processFileChunk` and `blePeerDiscovered` reached
+  a narrowing conversion that traps, aborting the application. Nothing was
+  logged in any of the seven cases. The type table is corrected, the two
+  conversions that now receive real values reject or clamp out-of-range input
+  instead of trapping, and the selector guard gained a third direction that
+  compares the ABI class of every parameter behind a shared selector.
+
+- **Fifteen iOS conversions aborted the app instead of rejecting the call.**
+  A narrowing conversion like `UInt8(_:)` traps on out-of-range input rather
+  than returning a value the bridge could reject, and every number reaching
+  these conversions came straight from JavaScript. Twelve of them turned a
+  `[NSNumber]` argument into bytes, so any array element outside 0...255
+  crashed the application: reachable from a malformed BLE fragment, a Wi-Fi
+  Direct or internet frame, an MLS ciphertext or Welcome, a key package, or a
+  file chunk. The thirteenth was the `initialTtl` config field, which made
+  `create()` abort on iOS for an application passing a value above 255, where
+  Android truncated the same value and started normally. The last two narrowed
+  the DORS `historyWindowSize` to `Int` before clamping it, which is too late
+  to help: a negative number from JavaScript arrives at `uint64Value` as
+  `UInt64.max`, so the conversion traps before the surrounding clamp can run,
+  and both `create()` and `updateDorsConfig` aborted on a negative value. Byte
+  arrays now convert through a helper that throws into the rejection each call
+  site already had, `initialTtl` and `historyWindowSize` are clamped in the
+  domain they arrive in, and
+  `react_native_ios_bridge_bounds_every_byte_it_builds_from_javascript` fails
+  on any byte conversion in the bridge that does not carry its own bound.
+
+  Unlike the ABI mismatches above, these were never masked by anything. Array
+  arguments cross as `NSArray *` against `[NSNumber]`, which has agreed since
+  the UniFFI migration, so every one of these has been reachable in every
+  release that shipped the method, and the transport ones are reachable by a
+  remote peer rather than only by the application's own code.
+
+- **`forwardMessage` hangs on iOS in debug builds** rather than forwarding.
+  React Native forces every `NSNumber` argument to non-null, because numbers
+  are not nullable on Android, and refuses a null one before the Swift method
+  is entered, so neither the resolver nor the rejecter ever runs. The
+  TypeScript passes `null` whenever a caller omits the priority. No declaration
+  in the bridge can fix this; it needs a contract change across TypeScript,
+  Swift and Kotlin, and is tracked in
+  [#417](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/417).
+  Release builds are unaffected, as the check is compiled out.
+
 ## [0.24.0] — 2026-08-24
 
 > **A door lock speaks this protocol now, and not a smaller version of it.**
