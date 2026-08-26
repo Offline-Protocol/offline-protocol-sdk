@@ -12704,6 +12704,90 @@ mod tests {
         );
     }
 
+    /// Every byte the iOS bridge builds out of a JavaScript number is bounded
+    /// where it is built.
+    ///
+    /// `UInt8(_:)` traps. It does not return nil, throw, or truncate: it
+    /// aborts the process. Every number this module converts arrived from
+    /// JavaScript, either as an element of an array argument or as a field of
+    /// the config object, so out-of-range input is a caller mistake, and a
+    /// caller mistake that aborts the application is a crash any JavaScript
+    /// caller can reach on purpose or by accident.
+    ///
+    /// Twelve array conversions were written `UInt8($0.intValue)` and one
+    /// config field `UInt8(raw["initialTtl"] as? Int ?? 8)`, so a peer sending
+    /// a malformed fragment, or an application passing `initialTtl: 300` to
+    /// `create()`, aborted on iOS where Android truncated. They now route
+    /// through `jsBytes`, which throws into the rejection each call site
+    /// already had, or clamp inline.
+    ///
+    /// The rule is bounded-at-the-site, which is why this reads text rather
+    /// than counting call sites: a conversion is fine when its own argument
+    /// carries the bound (`exactly:`, `clamping:`, `min(`, an already-`UInt8`
+    /// `uint8Value`, or a mask or shift), and suspect otherwise. The scalar
+    /// narrowings in `processFileChunk` are bounded by a `guard` several lines
+    /// above instead, which no textual rule can see; they are held by review
+    /// and by that guard clause, not by this test.
+    #[test]
+    fn react_native_ios_bridge_bounds_every_byte_it_builds_from_javascript() {
+        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
+
+        /// Markers that bound a conversion at the point it is written.
+        const BOUNDED: &[&str] = &[
+            "exactly:",
+            "clamping:",
+            "truncatingIfNeeded:",
+            "min(",
+            "uint8Value",
+            ">>",
+            "&",
+        ];
+
+        let bytes = swift.as_bytes();
+        let mut unbounded: Vec<String> = Vec::new();
+        let mut found = 0usize;
+        let mut from = 0usize;
+        while let Some(hit) = swift[from..].find("UInt8(") {
+            let open = from + hit + "UInt8(".len();
+            let mut depth = 1usize;
+            let mut end = open;
+            while end < bytes.len() && depth > 0 {
+                match bytes[end] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                end += 1;
+            }
+            let argument = &swift[open..end - 1];
+            from = open;
+            // `[UInt8](...)` and `-> [UInt8]` are not conversions; only a
+            // construction from something has an argument to bound.
+            if argument.trim().is_empty() {
+                continue;
+            }
+            found += 1;
+            if !BOUNDED.iter().any(|marker| argument.contains(marker)) {
+                unbounded.push(argument.trim().to_string());
+            }
+        }
+
+        assert!(
+            found >= 8,
+            "only found {found} UInt8 conversions in OfflineProtocolModule.swift; \
+             the scanner is broken, not the bridge"
+        );
+        assert!(
+            unbounded.is_empty(),
+            "these iOS bridge conversions trap instead of rejecting:\n  {}\n\
+             `UInt8(_:)` aborts the process on out-of-range input, and every value here \
+             came from JavaScript. Route an array through `jsBytes`, which throws into the \
+             rejection the call site already has, or bound the value inline with `min`/`max` \
+             as the config fields do",
+            unbounded.join("\n  ")
+        );
+    }
+
     /// No transport manager may take its ordering from the app's main looper.
     ///
     /// This is OFF-2123 as an invariant. Every call these managers make into

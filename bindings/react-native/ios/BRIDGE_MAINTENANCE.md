@@ -76,9 +76,16 @@ point one. Nothing is logged either way. This row read `Int` to
 followed it.
 
 Take an `NSNumber` on the Swift side only where the argument is genuinely
-optional, and note that React Native does not support that: it forces every
-`NSNumber` argument to non-null and rejects a null one, so `forwardMessage`'s
-absent priority is refused in a debug build.
+optional, and know that React Native does not really support that: it forces
+every `NSNumber` argument to non-null whatever you declare, because numbers are
+not nullable on Android. A null one is then refused before the Swift method is
+entered, so neither the resolver nor the rejecter runs and the promise never
+settles. `forwardMessage` is the one method in this bridge that relies on a
+nullable number, and it hangs on iOS debug builds for that reason; there is no
+spelling of the declaration that fixes it, so it needs a contract change across
+all three languages. That is tracked in
+[#417](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/417).
+Until it lands, do not add a second nullable-number argument.
 
 **Note**: All `@objc` methods must include `resolver` and `rejecter` parameters (React Native Promise pattern).
 
@@ -94,6 +101,31 @@ Repair it by dropping the label in Swift. Do not write the `With` form in the
 bridge instead: React Native derives the JS method name from the selector text
 before its first colon, so that spelling renames the JS method rather than
 fixing it.
+
+### Step 5: Bound every number you narrow
+
+`UInt8(someInt)` traps. It does not return nil, throw, or truncate: it aborts
+the process, and every number reaching this file came from JavaScript, so an
+out-of-range value is a caller mistake that must reject the promise instead.
+
+Convert byte arrays through the `jsBytes` helper, which throws an `NSError`
+into the rejection your `do`/`catch` already has:
+
+```swift
+let bytes = try jsBytes(data, "data")          // not data.map { UInt8($0.intValue) }
+let optional = try maybe.map { try jsBytes($0, "keyPackage") }
+```
+
+For a scalar, bound it where you write it (`min`/`max`, `UInt8(exactly:)`,
+`UInt8(clamping:)`) or `guard` the range before the conversion, as
+`processFileChunk` does for its `UInt32` and `UInt64` arguments. Twelve array
+conversions and the `initialTtl` config field were unbounded until this
+release: a peer sending a malformed fragment, or an application passing `initialTtl: 300`
+to `create()`, aborted the app on iOS where Android truncated.
+
+`react_native_ios_bridge_bounds_every_byte_it_builds_from_javascript` in
+`offline-protocol-uniffi` fails on any `UInt8(...)` in this file whose argument
+does not carry its own bound.
 
 ## Common Issues
 
@@ -205,6 +237,9 @@ Before committing changes:
 - [ ] All `@objc func` methods in Swift have corresponding `RCT_EXTERN_METHOD` declarations
 - [ ] Parameter names and types match between Swift and Objective-C
 - [ ] All methods include `resolver` and `rejecter` parameters
+- [ ] The first Swift parameter is unlabelled (`_`)
+- [ ] Every narrowing conversion is bounded, and byte arrays go through `jsBytes`
+- [ ] `cargo test -p offline-protocol-uniffi --lib react_native_ios` passes
 - [ ] Build succeeds without warnings
 - [ ] Test the method from JavaScript to ensure it works
 

@@ -58,6 +58,36 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   instead of trapping, and the selector guard gained a third direction that
   compares the ABI class of every parameter behind a shared selector.
 
+- **Thirteen iOS conversions aborted the app instead of rejecting the call.**
+  `UInt8(_:)` traps on out-of-range input rather than returning a value the
+  bridge could reject, and every number reaching these conversions came
+  straight from JavaScript. Twelve of them turned a `[NSNumber]` argument into
+  bytes, so any array element outside 0...255 crashed the application: reachable
+  from a malformed BLE fragment, a Wi-Fi Direct or internet frame, an MLS
+  ciphertext or Welcome, a key package, or a file chunk. The thirteenth was the
+  `initialTtl` config field, which made `create()` abort on iOS for an
+  application passing a value above 255, where Android truncated the same value
+  and started normally. Byte arrays now convert through a helper that throws
+  into the rejection each call site already had, `initialTtl` is clamped, and
+  `react_native_ios_bridge_bounds_every_byte_it_builds_from_javascript` fails on
+  any byte conversion in the bridge that does not carry its own bound.
+
+  Unlike the ABI mismatches above, these were never masked by anything. Array
+  arguments cross as `NSArray *` against `[NSNumber]`, which has agreed since
+  the UniFFI migration, so every one of these has been reachable in every
+  release that shipped the method, and the transport ones are reachable by a
+  remote peer rather than only by the application's own code.
+
+- **`forwardMessage` hangs on iOS in debug builds** rather than forwarding.
+  React Native forces every `NSNumber` argument to non-null, because numbers
+  are not nullable on Android, and refuses a null one before the Swift method
+  is entered, so neither the resolver nor the rejecter ever runs. The
+  TypeScript passes `null` whenever a caller omits the priority. No declaration
+  in the bridge can fix this; it needs a contract change across TypeScript,
+  Swift and Kotlin, and is tracked in
+  [#417](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/417).
+  Release builds are unaffected, as the check is compiled out.
+
 ## [0.24.0] — 2026-08-24
 
 > **A door lock speaks this protocol now, and not a smaller version of it.**

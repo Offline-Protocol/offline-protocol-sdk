@@ -451,7 +451,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             reticulumEnabled: raw["reticulumEnabled"] as? Bool ?? raw["reticulum_enabled"] as? Bool ?? false,
             nostrEnabled: raw["nostrEnabled"] as? Bool ?? raw["nostr_enabled"] as? Bool ?? false,
             preferOnline: raw["preferOnline"] as? Bool ?? raw["prefer_online"] as? Bool ?? false,
-            initialTtl: UInt8(raw["initialTtl"] as? Int ?? raw["initial_ttl"] as? Int ?? 8),
+            // Clamped, not converted: `initialTtl` is a public config field
+            // of unbounded `number` type in TypeScript, so an application
+            // passing 300 would trap here and abort inside `create()`.
+            // Android truncates the same value through `toUByte()`.
+            initialTtl: UInt8(min(255, max(0, raw["initialTtl"] as? Int ?? raw["initial_ttl"] as? Int ?? 8))),
             encryptionEnabled: encryption.enabled,
             autoKeyExchange: encryption.autoKeyExchange,
             storePending: encryption.storePending,
@@ -533,6 +537,31 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejecter(mapped.code, mapped.message, error)
         } else {
             rejecter(fallbackCode, "\(fallbackMessage): \(error.localizedDescription)", error)
+        }
+    }
+
+    /// The bytes behind a JavaScript number array.
+    ///
+    /// `UInt8(_:)` traps on anything outside 0...255, and every array these
+    /// methods receive came straight from JavaScript, so an out-of-range
+    /// element is a caller mistake rather than an impossible state. A caller
+    /// mistake has to reject the promise; the trapping form aborts the
+    /// application instead, which makes a crash reachable from any JavaScript
+    /// call site. Throwing reaches the rejection each of these methods
+    /// already has.
+    ///
+    /// Fractional elements still truncate, as they always have: JavaScript
+    /// byte arrays are integral, and a caller passing 3.7 is not the failure
+    /// this guards.
+    private func jsBytes(_ numbers: [NSNumber], _ field: String) throws -> [UInt8] {
+        try numbers.map { number in
+            guard let byte = UInt8(exactly: number.intValue) else {
+                throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "\(field) must hold byte values in 0...255, found \(number.intValue)"
+                ])
+            }
+            return byte
         }
     }
 
@@ -1486,7 +1515,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                             userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
             }
 
-            let keyPackageData = keyPackage?.map { UInt8($0.intValue) }
+            let keyPackageData = try keyPackage.map { try jsBytes($0, "keyPackage") }
             let messageId = try proto.sendConnectionRequest(
                 recipient: recipient,
                 senderName: senderName,
@@ -1510,7 +1539,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                             userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
             }
 
-            let keyPackageData = keyPackage?.map { UInt8($0.intValue) }
+            let keyPackageData = try keyPackage.map { try jsBytes($0, "keyPackage") }
             let messageId = try proto.acceptConnectionRequest(
                 recipient: recipient,
                 accepterName: accepterName,
@@ -2914,7 +2943,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let fragment = fragmentData.map { UInt8($0.intValue) }
+            let fragment = try jsBytes(fragmentData, "fragment")
             try proto.bleFragmentReceived(senderId: senderId, fragment: fragment)
             resolver(nil)
         } catch {
@@ -3574,7 +3603,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let bytes = data.map { UInt8($0.intValue) }
+            let bytes = try jsBytes(data, "data")
             try proto.processFileChunk(
                 fileId: fileId,
                 chunkIndex: UInt32(chunkIndex),
@@ -3631,7 +3660,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let bytes = data.map { UInt8($0.intValue) }
+            let bytes = try jsBytes(data, "data")
             try proto.wifiDirectMessageReceived(senderId: senderId, data: bytes)
             resolver(nil)
         } catch {
@@ -3712,7 +3741,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let bytes = data.map { UInt8($0.intValue) }
+            let bytes = try jsBytes(data, "data")
             try proto.internetMessageReceived(senderId: senderId, data: bytes)
             resolver(nil)
         } catch {
@@ -4156,7 +4185,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
             
             let welcomeDataNumbers = json["welcomeData"] as? [NSNumber] ?? []
-            let welcomeData = welcomeDataNumbers.map { UInt8($0.intValue) }
+            let welcomeData = try jsBytes(welcomeDataNumbers, "welcomeData")
             
             let welcome = MlsWelcomeMessage(
                 groupId: json["groupId"] as? String ?? "",
@@ -4197,7 +4226,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
             
             let ciphertextNumbers = json["ciphertext"] as? [NSNumber] ?? []
-            let ciphertext = ciphertextNumbers.map { UInt8($0.intValue) }
+            let ciphertext = try jsBytes(ciphertextNumbers, "ciphertext")
             
             let encrypted = MlsEncryptedMessage(
                 groupId: json["groupId"] as? String ?? "",
@@ -4244,7 +4273,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let data = keyPackageData.map { UInt8($0.intValue) }
+            let data = try jsBytes(keyPackageData, "keyPackageData")
             try proto.mlsImportKeyPackage(userId: userId, keyPackageData: data)
             resolver(nil)
         } catch {
@@ -4363,7 +4392,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let data = plaintext.map { UInt8($0.intValue) }
+            let data = try jsBytes(plaintext, "plaintext")
             let encrypted = try proto.mlsEncryptForUser(otherUserId: otherUserId, plaintext: data)
             let result: [String: Any] = [
                 "groupId": encrypted.groupId,
@@ -4394,7 +4423,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
             
             let ciphertextNumbers = json["ciphertext"] as? [NSNumber] ?? []
-            let ciphertext = ciphertextNumbers.map { UInt8($0.intValue) }
+            let ciphertext = try jsBytes(ciphertextNumbers, "ciphertext")
             
             let encrypted = MlsEncryptedMessage(
                 groupId: json["groupId"] as? String ?? "",
@@ -4440,7 +4469,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
             
             let welcomeDataNumbers = json["welcomeData"] as? [NSNumber] ?? []
-            let welcomeData = welcomeDataNumbers.map { UInt8($0.intValue) }
+            let welcomeData = try jsBytes(welcomeDataNumbers, "welcomeData")
             
             let welcome = MlsWelcomeMessage(
                 groupId: json["groupId"] as? String ?? "",

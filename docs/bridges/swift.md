@@ -70,13 +70,33 @@ Native takes the JS method name from the selector text before its first colon,
 so writing `fWithResolver:` in the bridge renames the JS method instead of
 repairing it.
 
-All of these are pinned by
-`react_native_ios_objc_shim_and_swift_agree_on_every_selector` in
-`offline-protocol-uniffi`, which reads both files and compares them as sets:
-the selectors in both directions, and then, behind each shared selector, the
-ABI class of every parameter. It runs in `cargo test`, because neither compiler
-sees both halves and this file's Swift counterpart is the one bridge source no
-CI job compiles.
+**An argument that arrives is still not a value you can narrow.** `UInt8(_:)`
+and its siblings trap on out-of-range input: they abort the process rather than
+returning something the bridge could reject. Every number crossing here came
+from JavaScript, so out-of-range is a caller mistake, and a caller mistake that
+aborts is a crash any caller can reach. Byte arrays go through the `jsBytes`
+helper, which throws into the rejection the call site already has; scalars are
+bounded where they are written, or behind a `guard` that rejects. Twelve array
+conversions and the `initialTtl` config field were unbounded until this
+release, which made a malformed BLE fragment and an `initialTtl: 300` both fatal on iOS
+and harmless on Android.
+
+All of these are pinned in `offline-protocol-uniffi`, in `cargo test`, because
+neither compiler sees both halves and this file's Swift counterpart is the one
+bridge source no CI job compiles.
+`react_native_ios_objc_shim_and_swift_agree_on_every_selector` reads both files
+and compares them as sets: the selectors in both directions, and then, behind
+each shared selector, the ABI class of every parameter. It also checks that the
+TypeScript only calls methods the bridge exports, and refuses to pass when its
+own scan finds nothing to check.
+`react_native_ios_bridge_bounds_every_byte_it_builds_from_javascript` fails on
+any byte conversion whose argument does not carry its own bound.
+
+One gap is known and unfixable here: React Native forces every `NSNumber`
+argument to non-null, so `forwardMessage`'s optional priority is refused before
+the Swift method runs and its promise never settles in a debug build. It needs
+a contract change across all three languages, tracked in
+[#417](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/417).
 
 ## S2. Five registration points per new Swift file
 
