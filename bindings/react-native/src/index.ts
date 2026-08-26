@@ -1265,7 +1265,7 @@ export class OfflineProtocol {
    * @throws Error if forwarding fails
    */
   async forwardMessage(params: ForwardMessageParams): Promise<string> {
-    const priority = params.priority ?? null;
+    const priority = params.priority ?? MessagePriority.Medium;
     const messageId = await OfflineProtocolNativeModule.forwardMessage(
       params.originalMessageJson,
       params.newRecipient,

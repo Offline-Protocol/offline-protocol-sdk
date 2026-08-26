@@ -1606,17 +1606,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun forwardMessage(originalMessageJson: String, newRecipient: String, priority: Int?, promise: Promise) {
+    fun forwardMessage(originalMessageJson: String, newRecipient: String, priority: Int, promise: Promise) {
         try {
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val msgPriority = priority?.let {
-                when (it) {
-                    0 -> MessagePriority.LOW
-                    1 -> MessagePriority.MEDIUM
-                    2 -> MessagePriority.HIGH
-                    3 -> MessagePriority.CRITICAL
-                    else -> null
-                }
+            val msgPriority = when (priority) {
+                0 -> MessagePriority.LOW
+                1 -> MessagePriority.MEDIUM
+                2 -> MessagePriority.HIGH
+                3 -> MessagePriority.CRITICAL
+                else -> MessagePriority.MEDIUM
             }
             val messageId = proto.forwardMessage(originalMessageJson, newRecipient, msgPriority)
             promise.resolve(messageId)

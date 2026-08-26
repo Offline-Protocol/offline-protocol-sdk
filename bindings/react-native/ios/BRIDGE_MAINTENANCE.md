@@ -75,17 +75,29 @@ point one. Nothing is logged either way. This row read `Int` to
 `nonnull NSNumber *` from v0.3.3 until this release, and seven methods
 followed it.
 
-Take an `NSNumber` on the Swift side only where the argument is genuinely
-optional, and know that React Native does not really support that: it forces
-every `NSNumber` argument to non-null whatever you declare, because numbers are
-not nullable on Android. A null one is then refused before the Swift method is
-entered, so neither the resolver nor the rejecter runs and the promise never
-settles. `forwardMessage` is the one method in this bridge that relies on a
-nullable number, and it hangs on iOS debug builds for that reason; there is no
-spelling of the declaration that fixes it, so it needs a contract change across
-all three languages. That is tracked in
-[#417](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/417).
-Until it lands, do not add a second nullable-number argument.
+**A nullable number never crosses this bridge.** React Native forces every
+`NSNumber` argument to non-null whatever you declare, because numbers are not
+nullable on Android. A null one is then refused before the Swift method is
+entered, so neither the resolver nor the rejecter runs, the promise never
+settles, and the caller waits forever behind a redbox. The whole check sits
+inside `#if RCT_DEBUG`, so the release build works and only development hangs.
+That makes the failure confusing rather than harmless, and no spelling of the
+declaration avoids it.
+
+An optional number is therefore not modelled as a nullable one. Resolve its
+documented default in TypeScript and declare a required primitive in the shim
+and on both native sides. `forwardMessage`'s priority is the precedent: TypeScript sends
+`params.priority ?? MessagePriority.Medium`, the shim takes `NSInteger`, Swift
+and Kotlin take `Int`, and each maps an unrecognised value back to Medium. It
+costs nothing, because the core already resolves an absent priority to Medium,
+so the null carried no information to begin with. That shape shipped as the fix
+for [#417](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/417),
+where the argument was a nullable `NSNumber` until this release.
+
+The selector guard cannot catch a regression here. A nullable number and a
+nullable object have the same ABI class on both sides, so the two halves agree
+and the test passes; this rule is the only thing holding it. Take an `NSNumber`
+on the Swift side only where the argument is genuinely required.
 
 **Note**: All `@objc` methods must include `resolver` and `rejecter` parameters (React Native Promise pattern).
 

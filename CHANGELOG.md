@@ -84,15 +84,20 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   release that shipped the method, and the transport ones are reachable by a
   remote peer rather than only by the application's own code.
 
-- **`forwardMessage` hangs on iOS in debug builds** rather than forwarding.
+- **`forwardMessage` hung forever on iOS debug builds instead of forwarding**
+  ([#417](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/417)).
   React Native forces every `NSNumber` argument to non-null, because numbers
   are not nullable on Android, and refuses a null one before the Swift method
-  is entered, so neither the resolver nor the rejecter ever runs. The
-  TypeScript passes `null` whenever a caller omits the priority. No declaration
-  in the bridge can fix this; it needs a contract change across TypeScript,
-  Swift and Kotlin, and is tracked in
-  [#417](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/417).
-  Release builds are unaffected, as the check is compiled out.
+  is entered, so neither the resolver nor the rejecter ran and the promise
+  never settled. The TypeScript passed `null` whenever a caller omitted the
+  priority, which was the only nullable number in the bridge. No spelling of
+  the declaration repairs that, so the nullability is gone instead: an omitted
+  priority now resolves to `MessagePriority.Medium` in TypeScript, exactly as
+  `sendMessage` has always done, and crosses to Swift and Kotlin as a required
+  integer. No caller sees a behaviour change on either platform, because the
+  core already resolved an absent priority to Medium and the null therefore
+  carried no information. The check that refused it is compiled out of release
+  builds, so only development was affected.
 
 ## [0.24.0] — 2026-08-24
 
