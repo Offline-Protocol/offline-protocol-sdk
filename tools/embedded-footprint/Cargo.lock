@@ -746,7 +746,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-core"
-version = "0.24.0"
+version = "0.24.1"
 dependencies = [
  "base64",
  "bech32",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-leaf"
-version = "0.24.0"
+version = "0.24.1"
 dependencies = [
  "base64",
  "mls-rs",
@@ -776,7 +776,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-sealed"
-version = "0.24.0"
+version = "0.24.1"
 dependencies = [
  "base64",
  "offline-protocol-core",

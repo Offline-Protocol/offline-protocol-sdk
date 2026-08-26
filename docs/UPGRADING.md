@@ -93,6 +93,19 @@ an internet carrier is up and scoring would have put the relay first. What is
 delivered does not change; which radio carries it does, and so does how fast it
 settles when the recipient is standing next to you.
 
+`v0.24.1` adds one more, and it is React Native on iOS only. Eight bridge
+methods were unreachable there, so configuration your application already
+passes was being discarded and the engine kept its own permissive defaults.
+The `relay` block has been dropped since `v0.22.0`, which means **an iOS device
+you configured *not* to relay has been carrying other people's traffic anyway,
+and stops on this release**, and `wipePersistedState` since `v0.21.0`, which
+means logging out could not erase the account it had just signed out of. Seven
+more methods resolved but read their arguments as the wrong bits, so message
+priority and presence status collapsed to their defaults on every iOS send.
+[§18](#18-settings-you-already-pass-start-applying-on-ios-v0241) covers what
+changes and what to check. Nothing changes shape, and Android was never
+affected in any of it.
+
 Work through it in order. [§0](#0-before-you-ship-downgrade-is-not-a-rollback)
 is a release-engineering decision, not a code change, and it is the one that
 cannot be undone later.
@@ -1801,6 +1814,129 @@ exists for both `MlsError` and the engine's `Error` and passes the inner
 message through, so every rendered error string, every FFI error code and every
 wire byte is what it was. Only code that matches on those functions' error type
 directly needs a change.
+
+---
+
+## 18. Settings you already pass start applying on iOS *(v0.24.1)*
+
+Nothing in `v0.24.1` changes shape. No method signature moved, no type was
+added or removed, and the upgrade is a version bump. What changed is that a set
+of React Native methods reached the iOS engine for the first time, so
+configuration your application has been passing all along stops being
+discarded. **Read this before you roll it to a fleet**, because a device can
+start or stop doing something on this release that it has done, or not done,
+since `v0.22.0`, and nothing in your code will have changed.
+
+**React Native on iOS only.** Android was never affected: its dispatch is by
+method name and position, and the Kotlin side of every method named here was
+correct throughout. Applications consuming the Rust crates directly are not
+affected either.
+
+### An iOS device told not to relay has been relaying anyway
+
+`updateRelayConfig` and `getRelayConfig` were never declared in the bridge, so
+from `v0.22.0` onward every `relay` setting handed to `create()` was dropped on
+iOS behind a `console.warn` and the engine kept `RelayConfig`'s own defaults:
+`allowRelay: true`, `minBatteryForRelay: 30`, `relayPriority: 'auto'`. The
+direction of the surprise is the opposite of the usual one, because the
+defaults are permissive. **The settings that were ignored are the ones that
+turn something off.**
+
+- `allowRelay: false` never reached the engine, so the forwarding gate on an
+  iOS device you meant to keep out of the path has been open since `v0.22.0`,
+  carrying other people's traffic whenever the mesh handed it any. It closes on
+  this release. If some of your mesh's delivery has been leaning on those
+  devices, that capacity goes away with it, so this is a topology change and
+  not only a settings fix.
+- `allowRelay: true` is what the engine already had. Nothing changes.
+- `minBatteryForRelay` above 30 was ignored and the device relayed down to
+  30%; your stricter floor applies now. Below 30 it stopped earlier than you
+  asked, and now goes as low as you set.
+- `relayPriority` inside the config block was dropped, but `setRelayPriority()`
+  is a separate bridge method that always resolved. A device configured through
+  that call has been honouring it all along.
+
+The battery feed the floor reads is live for the first time here too, and it
+was not merely absent: `setBatteryLevel` received the bit pattern of an object
+pointer, a large positive number that the surrounding `min(100, max(0, …))`
+clamped to 100, so every call told the engine the device was fully charged.
+`setBatteryState` was not in the bridge at all. Both carry the real charge now,
+which means a device that stays on the relay path will drop off it when its
+charge falls under the floor, where before the floor could never bite. If your
+application never calls either method, wire one to the platform's charge
+notifications before you rely on `minBatteryForRelay` at all.
+
+### Logging out erases the account, including the ones before it
+
+`wipePersistedState` kept a pre-rename `userId:` parameter label and has been
+uncallable on iOS since `v0.21.0`. It did not fail loudly; React Native could
+not find the selector at module load and the JavaScript method was simply
+absent, so a logout path that called it rejected with a `TypeError` naming a
+function that is not one, which an unawaited call swallows entirely.
+
+The consequence is on disk right now on every affected device: each account
+signed out of since `v0.21.0` left its MLS identity, sealed protocol state and
+message store behind. The first successful `wipePersistedState` on this release
+clears the account it is called for. It does **not** sweep the residue of
+earlier accounts, which is keyed by `(app_id, user_id)` as
+[§10](#10-storage-is-now-isolated-per-app_id-user_id) describes, so if you need
+those gone, enumerate them. A custom data-layer backend still owes
+`DataStore.wipeAll()` alongside it, unchanged from
+[§16](#16-replicated-documents-are-available-11-and-in-groups-v0230).
+
+### Priority and presence status stop collapsing to their defaults
+
+`sendMessage`, `sendMessageRich` and `sendPresenceUpdate` resolved and ran, but
+the priority and status arguments arrived as the bit pattern of an object
+pointer rather than the number, which fell through to the `default:` arm every
+time. Both defaults are the innocuous-looking value, which is why nobody caught
+it: every message an iOS build has sent went out `medium`, and **every presence
+update went out `online`, including the ones your application sent to say
+`away` or `offline`.** Peers were told the user was present whenever presence
+was updated at all.
+
+Both are honoured now, and no call site changes. Priority is what decides who
+survives pressure rather than who goes first: a full pending-ACK table evicts a
+lower-priority message to admit a higher-priority one, and the retry queue pops
+the higher priority first among entries due at the same moment. Until this
+release every iOS message competed as `medium`, so nothing marked `critical`
+was protected and nothing marked `low` was given up first. The `priority` field
+on `ackEvicted` starts carrying real values too.
+
+`forwardMessage` is the one place a caller sees a difference in the
+TypeScript's own behaviour: an omitted `priority` used to cross as `null`,
+which React Native refused before the Swift method ran, hanging the promise
+forever on debug builds. It now resolves to `MessagePriority.Medium` in
+TypeScript, matching what `sendMessage` has always done and what the core
+already inferred from an absent value. Callers who passed a priority are
+unaffected, and release builds never hit the hang.
+
+### Take this promptly even if you use none of the above
+
+Twelve conversions from a JavaScript number array into bytes used a narrowing
+initializer that traps rather than one that rejects, so any element outside
+`0...255` aborted the process rather than failing the call. These were live in
+every release that shipped the method, and the transport ones are driven by
+what arrives from a peer rather than by your own code: a malformed BLE
+fragment, a Wi-Fi Direct or internet frame, an MLS ciphertext or Welcome, a key
+package, or a file chunk. The remaining three aborted `create()` on an
+`initialTtl` above 255, and `create()` or `updateDorsConfig` on a negative
+DORS `historyWindowSize`.
+
+All of them now reject or clamp, and the rejection surfaces as the promise
+failure your call site already handles. This is the reason to schedule the
+upgrade rather than fold it into your next feature release.
+
+### After upgrading
+
+- Read `getRelayConfig` back on an iOS device, which now returns what the
+  engine holds rather than failing, and confirm it is the policy you meant.
+- Exercise your logout path on iOS once and verify the account directory is
+  gone.
+- If your application publishes `away` or `offline` presence, check what peers
+  now see, because until this release they only ever saw `online`.
+- If you persist or assert on message priority, re-check the iOS path, since
+  it now carries the value you set.
 
 ---
 
