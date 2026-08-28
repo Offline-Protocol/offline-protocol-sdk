@@ -6332,7 +6332,7 @@ class _UniffiFfiConverterOptionalTypeMeshRelayConfig(_UniffiConverterRustBuffer)
 
 @dataclass
 class ProtocolConfig:
-    def __init__(self, *, app_id:str, profile:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, max_group_members:int = 256, group_relay_enabled:bool = True, group_relay_broadcast_enabled:bool = True, group_enforce_admin_commits:bool = False, require_transport_identity:bool = False, binary_wire_enabled:bool = True, nostr_sealing_enabled:bool = True, nostr_cold_contact_enabled:bool = True, nostr_username_discovery_enabled:bool = False, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True, crypto_recovery_enabled:bool = True, mesh_relay:typing.Optional[MeshRelayConfig] = _DEFAULT, data_enabled:bool = True, control_freshness_enforced:bool = True):
+    def __init__(self, *, app_id:str, profile:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, edge_driven_unreachable_dm:bool = False, max_group_members:int = 256, group_relay_enabled:bool = True, group_relay_broadcast_enabled:bool = True, group_enforce_admin_commits:bool = False, require_transport_identity:bool = False, binary_wire_enabled:bool = True, nostr_sealing_enabled:bool = True, nostr_cold_contact_enabled:bool = True, nostr_username_discovery_enabled:bool = False, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True, crypto_recovery_enabled:bool = True, mesh_relay:typing.Optional[MeshRelayConfig] = _DEFAULT, data_enabled:bool = True, control_freshness_enforced:bool = True):
         self.app_id = app_id
         self.profile = profile
         self.ble_enabled = ble_enabled
@@ -6350,6 +6350,7 @@ class ProtocolConfig:
         self.max_pending_global = max_pending_global
         self.pending_ttl_ms = pending_ttl_ms
         self.overflow_policy = overflow_policy
+        self.edge_driven_unreachable_dm = edge_driven_unreachable_dm
         self.max_group_members = max_group_members
         self.group_relay_enabled = group_relay_enabled
         self.group_relay_broadcast_enabled = group_relay_broadcast_enabled
@@ -6373,7 +6374,7 @@ class ProtocolConfig:
 
     
     def __str__(self):
-        return "ProtocolConfig(app_id={}, profile={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, max_group_members={}, group_relay_enabled={}, group_relay_broadcast_enabled={}, group_enforce_admin_commits={}, require_transport_identity={}, binary_wire_enabled={}, nostr_sealing_enabled={}, nostr_cold_contact_enabled={}, nostr_username_discovery_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={}, crypto_recovery_enabled={}, mesh_relay={}, data_enabled={}, control_freshness_enforced={})".format(self.app_id, self.profile, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.max_group_members, self.group_relay_enabled, self.group_relay_broadcast_enabled, self.group_enforce_admin_commits, self.require_transport_identity, self.binary_wire_enabled, self.nostr_sealing_enabled, self.nostr_cold_contact_enabled, self.nostr_username_discovery_enabled, self.compact_envelope_enabled, self.rich_payload_enabled, self.crypto_recovery_enabled, self.mesh_relay, self.data_enabled, self.control_freshness_enforced)
+        return "ProtocolConfig(app_id={}, profile={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, edge_driven_unreachable_dm={}, max_group_members={}, group_relay_enabled={}, group_relay_broadcast_enabled={}, group_enforce_admin_commits={}, require_transport_identity={}, binary_wire_enabled={}, nostr_sealing_enabled={}, nostr_cold_contact_enabled={}, nostr_username_discovery_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={}, crypto_recovery_enabled={}, mesh_relay={}, data_enabled={}, control_freshness_enforced={})".format(self.app_id, self.profile, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.edge_driven_unreachable_dm, self.max_group_members, self.group_relay_enabled, self.group_relay_broadcast_enabled, self.group_enforce_admin_commits, self.require_transport_identity, self.binary_wire_enabled, self.nostr_sealing_enabled, self.nostr_cold_contact_enabled, self.nostr_username_discovery_enabled, self.compact_envelope_enabled, self.rich_payload_enabled, self.crypto_recovery_enabled, self.mesh_relay, self.data_enabled, self.control_freshness_enforced)
     def __eq__(self, other):
         if self.app_id != other.app_id:
             return False
@@ -6408,6 +6409,8 @@ class ProtocolConfig:
         if self.pending_ttl_ms != other.pending_ttl_ms:
             return False
         if self.overflow_policy != other.overflow_policy:
+            return False
+        if self.edge_driven_unreachable_dm != other.edge_driven_unreachable_dm:
             return False
         if self.max_group_members != other.max_group_members:
             return False
@@ -6462,6 +6465,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
             max_pending_global=_UniffiFfiConverterUInt64.read(buf),
             pending_ttl_ms=_UniffiFfiConverterUInt64.read(buf),
             overflow_policy=_UniffiFfiConverterTypeOverflowPolicy.read(buf),
+            edge_driven_unreachable_dm=_UniffiFfiConverterBoolean.read(buf),
             max_group_members=_UniffiFfiConverterUInt32.read(buf),
             group_relay_enabled=_UniffiFfiConverterBoolean.read(buf),
             group_relay_broadcast_enabled=_UniffiFfiConverterBoolean.read(buf),
@@ -6498,6 +6502,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt64.check_lower(value.max_pending_global)
         _UniffiFfiConverterUInt64.check_lower(value.pending_ttl_ms)
         _UniffiFfiConverterTypeOverflowPolicy.check_lower(value.overflow_policy)
+        _UniffiFfiConverterBoolean.check_lower(value.edge_driven_unreachable_dm)
         _UniffiFfiConverterUInt32.check_lower(value.max_group_members)
         _UniffiFfiConverterBoolean.check_lower(value.group_relay_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.group_relay_broadcast_enabled)
@@ -6533,6 +6538,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt64.write(value.max_pending_global, buf)
         _UniffiFfiConverterUInt64.write(value.pending_ttl_ms, buf)
         _UniffiFfiConverterTypeOverflowPolicy.write(value.overflow_policy, buf)
+        _UniffiFfiConverterBoolean.write(value.edge_driven_unreachable_dm, buf)
         _UniffiFfiConverterUInt32.write(value.max_group_members, buf)
         _UniffiFfiConverterBoolean.write(value.group_relay_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.group_relay_broadcast_enabled, buf)
@@ -6689,19 +6695,20 @@ class _UniffiFfiConverterTypeRelayConfig(_UniffiConverterRustBuffer):
 
 @dataclass
 class RetryConfig:
-    def __init__(self, *, max_retries:int, initial_delay_ms:int, max_delay_ms:int, backoff_multiplier:float, outbox_max_lifetime_ms:int, pending_message_max_lifetime_ms:int):
+    def __init__(self, *, max_retries:int, initial_delay_ms:int, max_delay_ms:int, backoff_multiplier:float, outbox_max_lifetime_ms:int, pending_message_max_lifetime_ms:int, edge_driven_unreachable_dm:bool = False):
         self.max_retries = max_retries
         self.initial_delay_ms = initial_delay_ms
         self.max_delay_ms = max_delay_ms
         self.backoff_multiplier = backoff_multiplier
         self.outbox_max_lifetime_ms = outbox_max_lifetime_ms
         self.pending_message_max_lifetime_ms = pending_message_max_lifetime_ms
+        self.edge_driven_unreachable_dm = edge_driven_unreachable_dm
         
         
 
     
     def __str__(self):
-        return "RetryConfig(max_retries={}, initial_delay_ms={}, max_delay_ms={}, backoff_multiplier={}, outbox_max_lifetime_ms={}, pending_message_max_lifetime_ms={})".format(self.max_retries, self.initial_delay_ms, self.max_delay_ms, self.backoff_multiplier, self.outbox_max_lifetime_ms, self.pending_message_max_lifetime_ms)
+        return "RetryConfig(max_retries={}, initial_delay_ms={}, max_delay_ms={}, backoff_multiplier={}, outbox_max_lifetime_ms={}, pending_message_max_lifetime_ms={}, edge_driven_unreachable_dm={})".format(self.max_retries, self.initial_delay_ms, self.max_delay_ms, self.backoff_multiplier, self.outbox_max_lifetime_ms, self.pending_message_max_lifetime_ms, self.edge_driven_unreachable_dm)
     def __eq__(self, other):
         if self.max_retries != other.max_retries:
             return False
@@ -6715,6 +6722,8 @@ class RetryConfig:
             return False
         if self.pending_message_max_lifetime_ms != other.pending_message_max_lifetime_ms:
             return False
+        if self.edge_driven_unreachable_dm != other.edge_driven_unreachable_dm:
+            return False
         return True
 
 class _UniffiFfiConverterTypeRetryConfig(_UniffiConverterRustBuffer):
@@ -6727,6 +6736,7 @@ class _UniffiFfiConverterTypeRetryConfig(_UniffiConverterRustBuffer):
             backoff_multiplier=_UniffiFfiConverterFloat32.read(buf),
             outbox_max_lifetime_ms=_UniffiFfiConverterUInt64.read(buf),
             pending_message_max_lifetime_ms=_UniffiFfiConverterUInt64.read(buf),
+            edge_driven_unreachable_dm=_UniffiFfiConverterBoolean.read(buf),
         )
 
     @staticmethod
@@ -6737,6 +6747,7 @@ class _UniffiFfiConverterTypeRetryConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterFloat32.check_lower(value.backoff_multiplier)
         _UniffiFfiConverterUInt64.check_lower(value.outbox_max_lifetime_ms)
         _UniffiFfiConverterUInt64.check_lower(value.pending_message_max_lifetime_ms)
+        _UniffiFfiConverterBoolean.check_lower(value.edge_driven_unreachable_dm)
 
     @staticmethod
     def write(value, buf):
@@ -6746,6 +6757,7 @@ class _UniffiFfiConverterTypeRetryConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterFloat32.write(value.backoff_multiplier, buf)
         _UniffiFfiConverterUInt64.write(value.outbox_max_lifetime_ms, buf)
         _UniffiFfiConverterUInt64.write(value.pending_message_max_lifetime_ms, buf)
+        _UniffiFfiConverterBoolean.write(value.edge_driven_unreachable_dm, buf)
 
 @dataclass
 class ReliabilityConfig:

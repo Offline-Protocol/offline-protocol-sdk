@@ -72,6 +72,31 @@ pub(crate) const WELCOME_NO_CARRIER_RETRY_SECS: i64 = 15;
 /// escalation carries the whole bound, since that probe runs on every carrier
 /// (see `park_unreachable_dm`), including internet-only devices.
 pub(crate) const WELCOME_UNREACHABLE_RETRY_CAP_SECS: i64 = 600;
+/// Only used when `RetryConfig::edge_driven_unreachable_dm` is opted in. How
+/// many escalating timed probes a plain DM to an unreachable peer gets before
+/// it goes edge-driven (stops being timed-probed and rests in the outbox until
+/// the peer next proves reachable). One probe (plus the original send) gives a
+/// brief blip tolerance; beyond that, recovery is the reachability edge — which
+/// in an opted-in deployment is reliable (peers interact / advertise presence
+/// on return), so more blind probes only lengthen the transient after a mass
+/// disconnect. Default-off deployments never consult this (they probe forever
+/// at the documented 15s->600s cap).
+pub(crate) const DM_UNREACHABLE_PROBE_LIMIT: u32 = 1;
+/// Only used when `RetryConfig::edge_driven_unreachable_dm` is opted in. On the
+/// startup/reconnect re-drive, a still-undelivered outbox message first sent
+/// longer ago than this is left edge-driven rather than re-driven, so a restart
+/// does not re-ramp a durably-failing backlog. Default-off deployments never
+/// consult this.
+pub(crate) const OUTBOX_DURABLE_UNREACHABLE_AGE_SECS: i64 = 300;
+/// Only used when `RetryConfig::edge_driven_unreachable_dm` is opted in.
+/// Sustained rate (per second) and burst budget for the RETRY/PROBE resend path
+/// (`process_retry_queue`). Set below the reference relay's per-connection limit
+/// (10/s sustained, 30 burst) so resends to a fleet of unreachable peers can
+/// never burst the connection into a rate-limit disconnect. Only resends are
+/// bounded; first-attempt sends, ACKs, control frames and handshakes are never
+/// throttled.
+pub(crate) const RETRY_DRAIN_RATE_PER_SEC: f64 = 8.0;
+pub(crate) const RETRY_DRAIN_BURST: f64 = 24.0;
 /// Age limit for a welcome lifecycle to keep its peer on the presence
 /// watchlist (`welcome_pending_peers`). Without it the watch set only ever
 /// grows: every offline presence answer re-parks the record and pushes its

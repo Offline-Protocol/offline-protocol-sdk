@@ -2169,6 +2169,9 @@ pub struct RetryConfig {
     pub backoff_multiplier: f32,
     pub outbox_max_lifetime_ms: u64,
     pub pending_message_max_lifetime_ms: u64,
+    /// Opt-in (default false): edge-driven delivery for durably-unreachable DMs.
+    /// See `RetryConfig::edge_driven_unreachable_dm` and the UDL dictionary.
+    pub edge_driven_unreachable_dm: bool,
 }
 
 /// Deduplication configuration
@@ -2318,6 +2321,15 @@ pub struct ProtocolConfig {
     pub max_pending_global: u64,
     pub pending_ttl_ms: u64,
     pub overflow_policy: OverflowPolicy,
+    /// Opt-in (default false): treat a durably-unreachable direct message as
+    /// edge-driven after a few reachability probes, instead of probing it
+    /// forever at the 15s->600s cap. Zeros steady-state relay traffic to gone
+    /// peers and makes a restart skip re-driving a durably-failing backlog, at
+    /// the cost of the timed-probe self-recovery guarantee for a silent
+    /// returning peer. See the UDL dictionary and
+    /// `RetryConfig::edge_driven_unreachable_dm`. Safe only where peers always
+    /// interact or advertise presence on return (e.g. machine-to-machine).
+    pub edge_driven_unreachable_dm: bool,
     pub max_group_members: u32,
     pub group_relay_enabled: bool,
     /// Whether a relay-synced group may send one O(1) relay broadcast instead
@@ -2619,6 +2631,8 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.encryption.enabled = config.encryption_enabled;
         core_config.encryption.auto_key_exchange = config.auto_key_exchange;
         core_config.encryption.store_pending = config.store_pending;
+        core_config.reliability.retry.edge_driven_unreachable_dm =
+            config.edge_driven_unreachable_dm;
         core_config.encryption.require_encryption = config.require_encryption;
         core_config.encryption.pending_queue = CorePendingQueueConfig {
             max_pending_per_peer: config.max_pending_per_peer as usize,
@@ -6162,6 +6176,7 @@ impl OfflineProtocol {
             backoff_multiplier: config.backoff_multiplier,
             outbox_max_lifetime_ms: config.outbox_max_lifetime_ms,
             pending_message_max_lifetime_ms: config.pending_message_max_lifetime_ms,
+            edge_driven_unreachable_dm: config.edge_driven_unreachable_dm,
         };
         let mut protocol = self.lock_inner_recovering();
         protocol
@@ -7946,6 +7961,7 @@ mod tests {
             max_pending_global: 4096,
             pending_ttl_ms: DEFAULT_PENDING_TTL_MS,
             overflow_policy: OverflowPolicy::DropOldest,
+            edge_driven_unreachable_dm: false,
             max_group_members: 256,
             group_relay_enabled: true,
             group_relay_broadcast_enabled: true,
@@ -7983,6 +7999,7 @@ mod tests {
             max_pending_global: 4096,
             pending_ttl_ms: DEFAULT_PENDING_TTL_MS,
             overflow_policy: OverflowPolicy::DropOldest,
+            edge_driven_unreachable_dm: false,
             max_group_members: 256,
             group_relay_enabled: true,
             group_relay_broadcast_enabled: true,
@@ -8297,6 +8314,7 @@ mod tests {
             max_pending_global: 4096,
             pending_ttl_ms: DEFAULT_PENDING_TTL_MS,
             overflow_policy: OverflowPolicy::DropOldest,
+            edge_driven_unreachable_dm: false,
             max_group_members: 256,
             group_relay_enabled: true,
             group_relay_broadcast_enabled: true,

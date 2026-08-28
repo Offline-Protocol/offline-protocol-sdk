@@ -610,6 +610,9 @@ dictionary RetryConfig {
     f32 backoff_multiplier;
     u64 outbox_max_lifetime_ms;
     u64 pending_message_max_lifetime_ms;
+    // Opt-in (default false): edge-driven delivery for durably-unreachable DMs.
+    // See RetryConfig::edge_driven_unreachable_dm.
+    boolean edge_driven_unreachable_dm = false;
 };
 
 // Deduplication configuration
@@ -701,6 +704,14 @@ dictionary ProtocolConfig {
     u64 max_pending_global;
     u64 pending_ttl_ms;
     OverflowPolicy overflow_policy;
+    // Opt-in (default false): treat a durably-unreachable direct message as
+    // edge-driven after a few reachability probes instead of probing it forever
+    // (15s->600s cap). Zeros steady-state relay traffic to gone peers and makes
+    // a restart skip re-driving a durably-failing backlog, at the cost of the
+    // timed-probe self-recovery guarantee for a silent returning peer. Safe only
+    // where peers always interact or advertise presence on return (e.g. M2M).
+    // See RetryConfig::edge_driven_unreachable_dm.
+    boolean edge_driven_unreachable_dm = false;
     u32 max_group_members = 256;
     boolean group_relay_enabled = true;
     // Whether a relay-synced group may send one O(1) relay broadcast instead

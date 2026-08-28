@@ -447,6 +447,45 @@ impl OfflineProtocol {
     pub(super) fn clear_confirmation_recovery_tracking(&mut self, peer_id: &str) {
         self.confirmation_retry_due_at.remove(peer_id);
         self.confirmation_probe_due_at.remove(peer_id);
+        self.confirmation_probe_unreachable_parks.remove(peer_id);
+    }
+
+    /// Fold a relay "recipient unreachable" verdict into the session-confirmation
+    /// probe schedule: escalate this peer's next probe on the same 15s -> 600s
+    /// ladder the welcome lifecycle uses (see
+    /// [`Self::apply_recipient_unreachable_failure`]). Without this, a peer that
+    /// established an MLS session then vanished before confirming is re-probed
+    /// every `CONFIRMATION_PROBE_INTERVAL_SECS` (5s) indefinitely, because
+    /// `kick_pending_session_reconciliation` re-arms it every scan and
+    /// `on_transport_send_failed` otherwise never consults this scheduler. A
+    /// handful of such peers pushes aggregate relay traffic past the
+    /// per-connection rate limit, which disconnects the socket on a loop.
+    ///
+    /// No-op unless the peer is currently a probe target (a `confirmation_probe`
+    /// entry exists, so a probe was just attempted), so ordinary DM failures to
+    /// confirmed peers do not touch the probe schedule. The counter is reset on
+    /// a reachability edge in [`Self::on_peer_presence`] so a returning peer is
+    /// re-probed immediately and its session still converges.
+    pub(super) fn note_confirmation_probe_unreachable(&mut self, peer_id: &str) {
+        if !self.confirmation_probe_due_at.contains_key(peer_id) {
+            return;
+        }
+        let parks = {
+            let counter = self
+                .confirmation_probe_unreachable_parks
+                .entry(peer_id.to_string())
+                .or_insert(0);
+            *counter = counter.saturating_add(1);
+            *counter
+        };
+        // parks >= 1; shift clamped so 15 << 6 = 960 is the largest pre-cap
+        // value (no overflow), then capped — identical to the welcome ladder.
+        let backoff_secs = (WELCOME_NO_CARRIER_RETRY_SECS << (parks - 1).min(6))
+            .min(WELCOME_UNREACHABLE_RETRY_CAP_SECS);
+        self.confirmation_probe_due_at.insert(
+            peer_id.to_string(),
+            Utc::now() + ChronoDuration::seconds(backoff_secs),
+        );
     }
 
     pub(super) fn collect_pending_session_peers(&mut self) -> Result<Vec<String>> {
@@ -545,6 +584,8 @@ impl OfflineProtocol {
 
         let pending_set: HashSet<String> = pending_peers.iter().cloned().collect();
         self.confirmation_probe_due_at
+            .retain(|peer, _| pending_set.contains(peer));
+        self.confirmation_probe_unreachable_parks
             .retain(|peer, _| pending_set.contains(peer));
 
         for peer_id in pending_peers {
@@ -1323,6 +1364,16 @@ impl OfflineProtocol {
                 self.on_neighbor_discovered_via(peer_id, Some(TransportType::Internet));
                 self.resend_unconfirmed_sent_welcome(peer_id, "peer_presence_online");
                 self.note_welcome_rescue_attempt(peer_id);
+            }
+            // A reachability edge resets the session-confirmation probe's
+            // unreachable backoff: clear the escalation counter and mark a probe
+            // due now, so a peer that went unreachable while unconfirmed is
+            // re-probed immediately and its session converges rather than
+            // waiting out the (up to 600s) backoff.
+            if self.confirmation_probe_due_at.contains_key(peer_id) {
+                self.confirmation_probe_unreachable_parks.remove(peer_id);
+                self.confirmation_probe_due_at
+                    .insert(peer_id.to_string(), Utc::now());
             }
         } else {
             self.park_welcome_peer_unreachable(peer_id);

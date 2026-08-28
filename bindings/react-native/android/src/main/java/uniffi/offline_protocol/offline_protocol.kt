@@ -8491,6 +8491,8 @@ data class ProtocolConfig (
     , 
     var `overflowPolicy`: OverflowPolicy
     , 
+    var `edgeDrivenUnreachableDm`: kotlin.Boolean = false 
+    , 
     var `maxGroupMembers`: kotlin.UInt = 256u 
     , 
     var `groupRelayEnabled`: kotlin.Boolean = true 
@@ -8551,6 +8553,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterTypeOverflowPolicy.read(buf),
+            FfiConverterBoolean.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
@@ -8587,6 +8590,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterULong.allocationSize(value.`maxPendingGlobal`) +
             FfiConverterULong.allocationSize(value.`pendingTtlMs`) +
             FfiConverterTypeOverflowPolicy.allocationSize(value.`overflowPolicy`) +
+            FfiConverterBoolean.allocationSize(value.`edgeDrivenUnreachableDm`) +
             FfiConverterUInt.allocationSize(value.`maxGroupMembers`) +
             FfiConverterBoolean.allocationSize(value.`groupRelayEnabled`) +
             FfiConverterBoolean.allocationSize(value.`groupRelayBroadcastEnabled`) +
@@ -8622,6 +8626,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterULong.write(value.`maxPendingGlobal`, buf)
             FfiConverterULong.write(value.`pendingTtlMs`, buf)
             FfiConverterTypeOverflowPolicy.write(value.`overflowPolicy`, buf)
+            FfiConverterBoolean.write(value.`edgeDrivenUnreachableDm`, buf)
             FfiConverterUInt.write(value.`maxGroupMembers`, buf)
             FfiConverterBoolean.write(value.`groupRelayEnabled`, buf)
             FfiConverterBoolean.write(value.`groupRelayBroadcastEnabled`, buf)
@@ -8879,6 +8884,8 @@ data class RetryConfig (
     var `outboxMaxLifetimeMs`: kotlin.ULong
     , 
     var `pendingMessageMaxLifetimeMs`: kotlin.ULong
+    , 
+    var `edgeDrivenUnreachableDm`: kotlin.Boolean = false 
     
 ){
     
@@ -8899,6 +8906,7 @@ public object FfiConverterTypeRetryConfig: FfiConverterRustBuffer<RetryConfig> {
             FfiConverterFloat.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -8908,7 +8916,8 @@ public object FfiConverterTypeRetryConfig: FfiConverterRustBuffer<RetryConfig> {
             FfiConverterULong.allocationSize(value.`maxDelayMs`) +
             FfiConverterFloat.allocationSize(value.`backoffMultiplier`) +
             FfiConverterULong.allocationSize(value.`outboxMaxLifetimeMs`) +
-            FfiConverterULong.allocationSize(value.`pendingMessageMaxLifetimeMs`)
+            FfiConverterULong.allocationSize(value.`pendingMessageMaxLifetimeMs`) +
+            FfiConverterBoolean.allocationSize(value.`edgeDrivenUnreachableDm`)
     )
 
     override fun write(value: RetryConfig, buf: ByteBuffer) {
@@ -8918,6 +8927,7 @@ public object FfiConverterTypeRetryConfig: FfiConverterRustBuffer<RetryConfig> {
             FfiConverterFloat.write(value.`backoffMultiplier`, buf)
             FfiConverterULong.write(value.`outboxMaxLifetimeMs`, buf)
             FfiConverterULong.write(value.`pendingMessageMaxLifetimeMs`, buf)
+            FfiConverterBoolean.write(value.`edgeDrivenUnreachableDm`, buf)
     }
 }
 

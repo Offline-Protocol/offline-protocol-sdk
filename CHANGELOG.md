@@ -11,6 +11,41 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+### Fixed
+
+- **Internet-only providers no longer flap a relay's rate limiter into a
+  disconnect loop under a backlog of unreachable direct messages.** Three
+  compounding defects drove unbounded resends to gone peers. (1) A resend that
+  had to register a fresh ACK (for example after an ACK-timeout re-queue)
+  restarted the backoff ladder at `retry_count` 0, pinning `delay_for_retry` at
+  its 1s floor forever for a never-ACKing recipient;
+  `AckManager::set_retry_count` now carries the retry-queue entry's accumulated
+  count onto the fresh ACK so backoff continues instead of resetting. (2) An
+  unconfirmed peer that vanished was re-probed every 5s indefinitely; the
+  confirmation probe now escalates on the same 15s to 600s ladder as the welcome
+  lifecycle and resets on a reachability edge. (3) The Python relay bridge
+  dropped the relay's recipient-keyed `DeliveryError` verdict; it now correlates
+  in-flight sends per recipient (a port of the iOS/Android
+  `RecipientInFlightTracker`), fails the affected message ids fast, and feeds
+  `internet_peer_presence(online=false)`. Default behavior is otherwise
+  unchanged; the always-on fixes only reduce redundant relay traffic.
+
+### Added
+
+- **`RetryConfig.edge_driven_unreachable_dm`** (default `false`): an opt-in that,
+  for deployments whose peers always interact or advertise presence on return
+  (for example a machine-to-machine capability exchange), stops timed-probing a
+  durably-unreachable direct message after a bounded number of probes and
+  re-drives it only on a reachability edge, additionally bounding the core resend
+  rate to gone peers. Default `false` preserves the documented perpetual-probe
+  contract (a parked message "never goes fully quiet") so every existing native
+  and third-party integration is unaffected. Exposed across the UDL, all
+  generated bindings (Swift, Kotlin, Python), and the React Native TypeScript and
+  native layers. See
+  [docs/configuration.md](docs/configuration.md#reliability-configuration).
+
 ## [0.24.1] — 2026-08-26
 
 > **Every fix here is the same defect found four ways: the iOS React Native

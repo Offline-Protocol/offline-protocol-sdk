@@ -3788,6 +3788,12 @@ impl OfflineProtocol {
             .outbound_media_chunks
             .get(&parsed_id)
             .map(|(file_id, _)| file_id.clone());
+        // If this peer is also an unconfirmed-session probe target, fold the
+        // verdict into the probe schedule so it backs off (15s -> 600s) instead
+        // of re-probing every 5s forever. No-op for peers that are not probe
+        // targets (e.g. an ordinary DM to a confirmed peer). Done here, after
+        // the `entry` borrow of `self.outbox` has ended.
+        self.note_confirmation_probe_unreachable(&recipient);
         warn!(
             message_id = %message_id,
             file_id = ?file_id,
@@ -3867,10 +3873,20 @@ impl OfflineProtocol {
     /// internet-only fleet is on this path:
     /// - verdict branch: the escalation is the bound — one frame per interval
     ///   per parked *message*, settling at one per 600s;
-    /// - accepted branch: the probe registers a fresh ACK at `retry_count` 0,
-    ///   so it rides the ordinary ACK ladder (up to `max_retries` sends,
-    ///   1s → 300s backoff, ~800s cumulative on the defaults) before
-    ///   `try_repark_exhausted_dm` re-parks it at the escalated interval.
+    /// - accepted branch: the probe registers a fresh ACK, and
+    ///   [`crate::protocol::OfflineProtocol::process_retry_queue`] seeds that
+    ///   ACK with the retry-queue entry's carried count (`retry_count + 1`)
+    ///   rather than letting it restart at 0. A probe whose entry is fresh (a
+    ///   reachability edge re-drove it with a new budget) still walks the full
+    ///   ladder — up to `max_retries` sends, 1s → 300s backoff, ~800s
+    ///   cumulative on the defaults — but a probe whose entry already carries
+    ///   backoff resumes near its current position and re-parks after roughly
+    ///   one more timeout instead of replaying the 1s floor. Plan relay
+    ///   capacity against the fresh-entry number; the carried case only sends
+    ///   less. Either way `try_repark_exhausted_dm` re-parks it at the
+    ///   escalated interval. The carry-forward is load-bearing: without it a
+    ///   never-ACKing (offline) recipient's probe pins `delay_for_retry` at
+    ///   its 1s floor and floods the relay ~once per second.
     ///
     /// The outbox lifetime bounds the entry itself — and note the probe
     /// refreshes `last_sent_at` on every send, so the sliding 7-day window
@@ -3927,11 +3943,23 @@ impl OfflineProtocol {
             // bounds how often we ask, and each offer spends the same own-send
             // tokens as any other frame of ours.
             handed_to_mesh = self.offer_to_mesh(&message);
-            let _ = self.retry_queue.enqueue_with_delay(
-                message,
-                attempt_count,
-                (retry_in_secs * 1000) as u64,
-            );
+            // Default: keep the documented perpetual timed probe (15s->600s cap
+            // on every carrier). Opt-in (`edge_driven_unreachable_dm`): after a
+            // bounded number of probes, stop the timer and leave the message in
+            // the outbox edge-driven — re-driven only when the peer next proves
+            // reachable (inbound frame / presence-online -> on_neighbor_discovered
+            // -> flush_outbox_for_peer_via). This zeroes steady-state relay
+            // traffic to a durably-gone peer, at the cost of the timed-probe
+            // self-recovery guarantee for a silent returning peer.
+            let edge_driven = self.config.reliability.retry.edge_driven_unreachable_dm
+                && parks > crate::protocol::types::DM_UNREACHABLE_PROBE_LIMIT;
+            if !edge_driven {
+                let _ = self.retry_queue.enqueue_with_delay(
+                    message,
+                    attempt_count,
+                    (retry_in_secs * 1000) as u64,
+                );
+            }
         }
         debug!(
             message_id = %message_id,

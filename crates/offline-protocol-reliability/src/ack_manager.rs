@@ -264,6 +264,22 @@ impl AckManager {
         }
     }
 
+    /// Carry an accumulated retry count onto a pending ACK.
+    ///
+    /// `register_pending_ack*` always starts a fresh ACK at `retry_count: 0`.
+    /// When a message is *re-sent* from the retry queue and its prior ACK had
+    /// already been cleared (the resend registers a brand-new ACK), that new ACK
+    /// would otherwise reset the backoff ladder to 0 — pinning `delay_for_retry`
+    /// at its 1s floor for a recipient that never ACKs (an offline peer), which
+    /// re-sends ~once per second forever. Seeding the new ACK with the count the
+    /// retry-queue entry already carries lets the exponential backoff advance
+    /// across resends. No-op if the message has no pending ACK.
+    pub fn set_retry_count(&mut self, message_id: &MessageId, retry_count: u32) {
+        if let Some(pending) = self.pending_acks.get_mut(message_id) {
+            pending.retry_count = retry_count;
+        }
+    }
+
     /// Gets information about a pending ACK.
     pub fn get_pending_ack(&self, message_id: &MessageId) -> Option<&PendingAck> {
         self.pending_acks.get(message_id)
@@ -364,6 +380,34 @@ mod tests {
 
         let pending = manager.get_pending_ack(&msg_id).unwrap();
         assert_eq!(pending.retry_count, 1);
+    }
+
+    #[test]
+    fn test_set_retry_count_carries_backoff_forward() {
+        // Pins the flap fix: when a relay-accepted resend registers a FRESH ACK
+        // (the prior one was cleared by an ACK timeout that re-queued the
+        // message), the backoff ladder must be seeded from the accumulated
+        // count instead of resetting to 0. Resetting to 0 pins delay_for_retry
+        // to its 1s floor forever for an offline peer, which floods the relay
+        // and flaps the connection. If a future change reverts set_retry_count
+        // to a no-op or drops the call site, this test fails loudly.
+        let mut manager = AckManager::new();
+        let msg_id = MessageId::new();
+
+        // Fresh ACK always starts at 0 (register hardcodes it).
+        manager.register_pending_ack(msg_id.clone(), None).unwrap();
+        assert_eq!(manager.get_pending_ack(&msg_id).unwrap().retry_count, 0);
+
+        // Carry an accumulated count forward onto the freshly-registered ACK.
+        manager.set_retry_count(&msg_id, 5);
+        assert_eq!(manager.get_pending_ack(&msg_id).unwrap().retry_count, 5);
+
+        // Idempotent/absolute set (not increment).
+        manager.set_retry_count(&msg_id, 7);
+        assert_eq!(manager.get_pending_ack(&msg_id).unwrap().retry_count, 7);
+
+        // No-op for an unknown message (no pending ACK).
+        manager.set_retry_count(&MessageId::new(), 9);
     }
 
     #[test]

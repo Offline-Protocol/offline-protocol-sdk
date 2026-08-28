@@ -65,6 +65,15 @@ export interface RetryConfig {
    * terminal `message_failed` event is emitted (default 7 days).
    */
   pendingMessageMaxLifetimeMs?: number;
+  /**
+   * Opt-in (default false): treat a durably-unreachable direct message as
+   * edge-driven after a few reachability probes instead of probing it forever
+   * (15s→600s cap). Zeros steady-state relay traffic to gone peers and makes a
+   * restart skip re-driving a durably-failing backlog, at the cost of the
+   * timed-probe self-recovery guarantee for a silent returning peer. Safe only
+   * where peers always interact or advertise presence on return (e.g. M2M).
+   */
+  edgeDrivenUnreachableDm?: boolean;
 }
 
 export interface DedupConfig {

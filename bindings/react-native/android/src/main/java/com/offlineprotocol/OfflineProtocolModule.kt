@@ -3301,7 +3301,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 backoffMultiplier = json.optDouble("backoffMultiplier", 2.0).toFloat(),
                 outboxMaxLifetimeMs = json.optLong("outboxMaxLifetimeMs", 604800000).toULong(),
                 pendingMessageMaxLifetimeMs =
-                    json.optLong("pendingMessageMaxLifetimeMs", 604800000).toULong()
+                    json.optLong("pendingMessageMaxLifetimeMs", 604800000).toULong(),
+                edgeDrivenUnreachableDm = json.optBoolean("edgeDrivenUnreachableDm", false)
             )
             
             protocol?.updateRetryConfig(retryConfig)

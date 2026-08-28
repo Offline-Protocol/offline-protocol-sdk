@@ -521,6 +521,28 @@ read them.
 | `backoffMultiplier` | number | 2.0 | Backoff multiplier |
 | `outboxMaxLifetimeMs` | number | 604800000 | Max message lifetime (7 days) |
 | `pendingMessageMaxLifetimeMs` | number | 604800000 | Max lifetime while waiting for MLS session establishment (7 days) |
+| `edgeDrivenUnreachableDm` | boolean | false | Opt-in flood control for durably-unreachable DMs (see below) |
+
+**`edgeDrivenUnreachableDm` (default `false`)** changes how a direct message to
+a peer that stays unreachable is retried. With the default, the SDK honors the
+["a parked message never goes fully quiet"](message-delivery.md#reachability-probing)
+contract: it keeps a timed reachability probe running on every carrier forever
+(escalating to one per 600s). Set it to `true` and, after the probe has run a
+bounded number of times, the message stops being timed-probed and rests in the
+outbox — re-driven only when the peer next proves reachable (an inbound frame or
+a presence-online edge flushes it), and a restart skips re-driving a
+durably-failing backlog. Enabling the flag also bounds the core resend rate to
+gone peers, which is what prevents a large unreachable backlog from tripping a
+relay's rate limiter into a disconnect loop.
+
+This trades the SDK's "self-recovers even for a silent returning peer that never
+advertises presence" guarantee for zero steady-state relay traffic to gone
+peers. Enable it only for deployments whose peers always interact or advertise
+presence when they return (for example a machine-to-machine capability
+exchange). **Do not enable it for consumers that rely on the timed probe as
+their only recovery path** — a pure-relay peer that comes back silently and
+never polls presence would not be re-driven. The flag is off by default so every
+existing native and third-party integration is unaffected.
 
 **Fixed (not configurable) message-plane limits**, listed here because they can
 surface as errors or as `message_failed` events:
