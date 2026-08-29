@@ -25,7 +25,14 @@ logger = logging.getLogger(__name__)
 
 # -- Constants (matching iOS InternetManager.swift) ---------------------------
 
-_MESSAGE_POLL_INTERVAL = 0.1  # 100 ms
+_MESSAGE_POLL_INTERVAL = 0.1  # idle poll, 100 ms
+# Activity-adaptive send polling. For a short window after any inbound frame or
+# outbound drain the send loop polls tightly, so an asynchronously-queued reply
+# ships in a few ms instead of waiting a full idle interval; when genuinely idle
+# it relaxes back to _MESSAGE_POLL_INTERVAL to keep CPU near zero. This gives low
+# latency under load without a fixed busy-poll.
+_SEND_HOT_WINDOW = 0.5  # stay "hot" this long after activity (seconds)
+_SEND_HOT_INTERVAL = 0.002  # 2 ms poll while hot
 _RECONNECT_INITIAL_DELAY = 1.0  # seconds
 _RECONNECT_MAX_DELAY = 30.0
 _RECONNECT_BACKOFF_MULTIPLIER = 2.0
@@ -198,6 +205,9 @@ class InternetManager(TransportManager):
 
         # Event loop — captured in start() for thread-safe scheduling
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Monotonic timestamp of the last send/recv activity, driving the
+        # activity-adaptive send poll (see _poll_outgoing_loop).
+        self._last_activity: float = 0.0
 
         # Async tasks
         self._recv_task: asyncio.Task[None] | None = None
@@ -679,6 +689,11 @@ class InternetManager(TransportManager):
                 else:
                     data = raw.encode("utf-8")
                 self._bytes_received += len(data)
+                # An inbound frame is likely to produce an outbound reply soon
+                # (the handler queues it, possibly from a worker thread). Mark
+                # the transport "hot" so the send loop polls tightly and picks
+                # that reply up in a few ms rather than a full idle interval.
+                self._last_activity = time.monotonic()
                 self._process_received(data)
         except websockets.ConnectionClosed:
             await self._handle_connection_closed(None)
@@ -1003,20 +1018,39 @@ class InternetManager(TransportManager):
     # -- outgoing message poll loop -------------------------------------------
 
     async def _poll_outgoing_loop(self) -> None:
-        """Poll the protocol core for outgoing messages every 100 ms."""
+        """Drain the core's outbound queue, adaptively.
+
+        The old form slept a fixed _MESSAGE_POLL_INTERVAL between every drain, so
+        a reply queued just after a tick waited up to a full interval per
+        direction (the dominant single-call latency under load). Instead, when a
+        drain moved at least one frame, yield and re-drain immediately so a burst
+        empties at event-loop speed; only sleep when the queue came back empty,
+        and then only briefly for a short window after recent activity, relaxing
+        to the full idle interval once genuinely quiet. When the send-concurrency
+        semaphore is saturated the drain reports 0 (no free slots), so the loop
+        sleeps rather than busy-spinning.
+        """
         try:
             while self._connected and self._authenticated:
-                self._poll_and_send_messages()
-                await asyncio.sleep(_MESSAGE_POLL_INTERVAL)
+                drained = self._poll_and_send_messages()
+                if drained > 0:
+                    self._last_activity = time.monotonic()
+                    await asyncio.sleep(0)
+                elif time.monotonic() - self._last_activity < _SEND_HOT_WINDOW:
+                    await asyncio.sleep(_SEND_HOT_INTERVAL)
+                else:
+                    await asyncio.sleep(_MESSAGE_POLL_INTERVAL)
         except asyncio.CancelledError:
             return
 
-    def _poll_and_send_messages(self) -> None:
+    def _poll_and_send_messages(self) -> int:
         """Drain outgoing messages from the protocol and send them.
 
         Only dequeues up to the number of available semaphore slots to
         prevent unbounded task creation when the protocol core has a large
         outbox.  Remaining messages will be picked up on the next poll tick.
+        Returns the number of frames drained this call so the caller can
+        re-drain immediately under load instead of sleeping a fixed interval.
         """
         # Drop in-flight tracker entries older than the TTL each tick.
         self._inflight.prune(self._now_ms())
@@ -1047,6 +1081,8 @@ class InternetManager(TransportManager):
             self._send_tasks.add(task)
             task.add_done_callback(self._send_tasks.discard)
             drained += 1
+
+        return drained
 
     @staticmethod
     def _now_ms() -> int:

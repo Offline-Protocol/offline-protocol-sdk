@@ -1092,3 +1092,26 @@ class TestDeliveryErrorRecipientKeyed:
         }
         assert "delivered" not in failed
         assert "stuck" in failed
+
+
+class TestAdaptiveSendDrain:
+    """Pins the drain-until-empty contract the activity-adaptive send loop relies
+    on: _poll_and_send_messages must report how many frames it moved so the loop
+    can re-drain immediately under load and relax only when the queue is empty.
+    """
+
+    @pytest.mark.asyncio
+    async def test_poll_returns_drained_count(self, mock_protocol: MagicMock) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr._send_message = AsyncMock()  # type: ignore[method-assign]
+        msgs = [MagicMock(message_id=f"m{i}", recipient_id="r", data=b"x") for i in range(3)]
+        mock_protocol.internet_get_next_message = MagicMock(side_effect=[*msgs, None])
+        drained = mgr._poll_and_send_messages()
+        assert drained == 3, "must report the number of frames drained"
+
+    @pytest.mark.asyncio
+    async def test_poll_empty_queue_returns_zero(self, mock_protocol: MagicMock) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr._send_message = AsyncMock()  # type: ignore[method-assign]
+        mock_protocol.internet_get_next_message = MagicMock(return_value=None)
+        assert mgr._poll_and_send_messages() == 0, "empty queue drains nothing (loop then relaxes)"
