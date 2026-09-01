@@ -2318,3 +2318,134 @@ mod send_failure_classification_tests {
         );
     }
 }
+
+/// Holds the spec's conformance-vector index against the files on disk.
+///
+/// # Why this test exists here, of all places
+///
+/// `docs/spec/README.md` carries a table naming every vector file and the
+/// chapter it pins, and that table is what a second implementer reads to find
+/// out what they can test themselves against. It is maintained by hand and
+/// nothing compared it to the tree, so it was correct only by attention.
+///
+/// The failure is quiet in both directions. A vector file added without a row
+/// is a conformance surface nobody outside this repository knows exists. A row
+/// left behind by a moved or renamed file sends an implementer looking for
+/// something that is not there, and the reasonable conclusion is that the
+/// protocol has no vectors for that chapter rather than that the index is
+/// stale.
+///
+/// It lives beside the signing-domain guard for the same reason that one is
+/// here: this is the cross-cutting registry module, and the check needs no
+/// crate's code at all, only the repository tree.
+#[cfg(test)]
+mod spec_vector_index_tests {
+    use std::path::{Path, PathBuf};
+
+    fn repo() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// The two documents that index the vectors.
+    ///
+    /// `spec/README.md` is the table of contents a reader lands on;
+    /// `spec/conformance.md` repeats the list with the direction each file
+    /// pins. The duplication is deliberate, because a conformance chapter that
+    /// sent the reader elsewhere for the list of what to test against would be
+    /// missing its own subject. Both are checked, so the duplication cannot
+    /// become a disagreement.
+    const INDEXES: [&str; 2] = ["docs/spec/README.md", "docs/spec/conformance.md"];
+
+    /// One index document, or `None` where the repo tree is absent:
+    /// `cargo package` cannot carry `docs/`, so a published crate's tests must
+    /// still build.
+    fn index(name: &str) -> Option<String> {
+        std::fs::read_to_string(repo().join(name)).ok().or_else(|| {
+            eprintln!("spec tree not present, skipping the vector index checks");
+            None
+        })
+    }
+
+    /// Every vector file either index names exists.
+    #[test]
+    fn every_indexed_vector_file_exists() {
+        for doc in INDEXES {
+            let Some(text) = index(doc) else { return };
+
+            let mut named = 0;
+            for token in text.split('`') {
+                if token.ends_with(".vectors.json") && token.starts_with("crates/") {
+                    named += 1;
+                    assert!(
+                        repo().join(token).is_file(),
+                        "{doc} names {token}, which is not in the tree"
+                    );
+                }
+            }
+            assert!(
+                named >= 8,
+                "the scan of {doc} found only {named} vector files, so it is no \
+                 longer reading the table and would pass against anything"
+            );
+        }
+    }
+
+    /// Every vector file in the tree is named by the index.
+    ///
+    /// This is the direction that catches a surface shipped without being
+    /// published, which is the one a reviewer cannot see: the tests pass, the
+    /// file is real, and only an outside implementer ever notices it is
+    /// undocumented.
+    #[test]
+    fn every_vector_file_in_the_tree_is_indexed() {
+        let Some(text) = index(INDEXES[0]) else {
+            return;
+        };
+
+        let mut found = Vec::new();
+        for crate_dir in std::fs::read_dir(repo().join("crates")).expect("crates/") {
+            let data = crate_dir.expect("an entry").path().join("tests/data");
+            let Ok(entries) = std::fs::read_dir(&data) else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry.expect("an entry").path();
+                let name = path
+                    .file_name()
+                    .expect("a name")
+                    .to_string_lossy()
+                    .to_string();
+                if name.ends_with(".vectors.json") {
+                    // Compared against a path written in a markdown table, so
+                    // the separator has to be the one the document uses, not
+                    // the one this platform builds. `Path::join` yields
+                    // backslashes on Windows and the table is all forward
+                    // slashes, so without the replace, every comparison below
+                    // fails there and passes everywhere else.
+                    //
+                    // Falling back to the bare file name if the prefix will not
+                    // strip would be worse than failing: the table holds full
+                    // paths that end in that name, so `contains` would match on
+                    // any of them and the check would quietly degrade to
+                    // asserting the file is mentioned somewhere.
+                    let relative = path.strip_prefix(repo()).unwrap_or_else(|_| {
+                        panic!("{} is not under the repo root", path.display())
+                    });
+                    found.push(relative.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+
+        assert!(
+            !found.is_empty(),
+            "no vector files were found, so this test proves nothing"
+        );
+        for path in found {
+            assert!(
+                text.contains(&path),
+                "{path} is a conformance surface that docs/spec/README.md does \
+                 not list, so nobody outside this repository knows it exists"
+            );
+        }
+    }
+}

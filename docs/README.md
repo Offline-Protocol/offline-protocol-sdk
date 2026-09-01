@@ -58,6 +58,10 @@ implementation written against these documents should interoperate.
 | [Group protocol](spec/group-protocol.md) | Group frames, membership commits, leaf identity binding, relay broadcast |
 | [Capability negotiation](spec/capability-negotiation.md) | What peers advertise, what it gates, what absence means |
 | [Leaf node provisioning](spec/leaf-provisioning.md) | What a constrained device owes at pairing, the never-committing profile |
+| [Bluetooth LE framing](spec/ble-framing.md) | The GATT contract, the fragment header, and what a receiver owes on reassembly |
+| [Username discovery and invites](spec/username-discovery.md) | The self-certifying invite payload, the username directory, and the signing-domain registry |
+| [The gateway contract](spec/gateway-contract.md) | What a gateway is, the five verbs, the daemon wire protocol, and the backbone |
+| [Conformance](spec/conformance.md) | The two profiles, what every implementation owes, and the vectors that decide it |
 
 ## Security
 
