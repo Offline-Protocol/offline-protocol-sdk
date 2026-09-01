@@ -79,12 +79,13 @@ would let a record verify against a tag it was never published at.
 
 ## Signing domains
 
-Four domains are live across this protocol, and a fifth is reserved. All of
+Five domains are live across this protocol, and a sixth is reserved. All of
 them MUST be mutually non-prefixing:
 
 | Domain | Signs | Status |
 |--------|-------|--------|
-| `offline-ctrl-v1` | Control-plane frames | Live |
+| `offline-ctrl-v1` | Control-plane frames, stating no freshness | Live |
+| `offline-ctrl-v2` | Control-plane frames, binding the frame's timestamp ([control messages](control-messages.md#canonical-payload)) | Live |
 | `offline-relay-addr-v1` | The relay address-declaration proof | Live |
 | `offline-disc-v1` | Discovery records | Live |
 | `offline-invite-v1` | Invite payloads | Live |

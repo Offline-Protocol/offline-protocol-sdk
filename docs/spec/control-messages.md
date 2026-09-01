@@ -138,8 +138,16 @@ explicit trackers and bounded attempts.
 ### Service discovery
 
 Service messages use their own prefix family: `__SVC_DISC_Q__`,
-`__SVC_DISC_R__`, `__SVC_REQ__`, `__SVC_RESP__`, plus a generic service message
-prefix. They are reserved on the same terms.
+`__SVC_DISC_R__`, `__SVC_REQ__`, `__SVC_RESP__`, plus the generic service
+message prefix `__SVC_`. They are reserved on the same terms.
+
+`__SVC_` is a prefix of the other four rather than a sibling of them, which is
+deliberate and is the one entry in this registry that MUST NOT be read as a
+frame type. It reserves the whole family, so a service frame added later is
+refused as application content before it is specified. A conformance check that
+treats the registry as a set of mutually non-prefixing frame tags fails on this
+entry alone; the correct reading is that `__SVC_` bounds a namespace and the
+four spellings above name the frames currently in it.
 
 They are signature-gated like any control frame, but they are **exempt from the
 encryption requirement**, so discovery gossip and the application-supplied
