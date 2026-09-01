@@ -57,6 +57,33 @@ jobs:
       - name: NIP-44 vector integrity
         run: ./scripts/check-nip44-vectors.sh
 
+  # The NIP-44 vectors above are vendored, so a checksum the upstream spec
+  # publishes is what pins them. The spec vectors in this repository have no
+  # such external publisher: they are pinned instead by being regenerable from
+  # a second implementation that never reads the crates under test.
+  #
+  # Without this job the Rust tests still compare code against the vector
+  # files, but nothing compares the vector files against anything, so a red
+  # test could be turned green by editing an expectation -- exactly the move
+  # every vector file's header forbids. Regenerating and diffing makes that
+  # edit impossible without also editing the generator, and that diff reads as
+  # what it is: a change to the specified wire format.
+  spec-vectors:
+    name: Spec Vector Provenance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # Standard library only, by design: the generator is a conformance
+      # artifact, and a dependency is a second thing that has to be trusted to
+      # compute a wire format correctly.
+      - name: Regenerate the spec vectors and fail on any difference
+        run: python3 tools/spec-vectors/generate.py --check
+
   # The License Consistency job catches the three THIRD-PARTY-NOTICES.md copies
   # drifting from each other, but a dependency bump leaves all three identical
   # and uniformly stale — regenerating after Cargo.lock changes was manual

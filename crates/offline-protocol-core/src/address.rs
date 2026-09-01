@@ -593,3 +593,165 @@ mod tests {
         );
     }
 }
+
+/// The frozen conformance vectors for the address encoding.
+///
+/// The chapter these pin is `docs/spec/identity.md`. The vectors were computed
+/// by `tools/spec-vectors/generate.py` using the BIP-350 reference
+/// implementation of bech32m, not by running the type below: a vector produced
+/// by `Display` would agree with any rendering this crate happened to emit.
+///
+/// A failure here is a break in the identity layer rather than a formatting
+/// detail. Two spellings of one address split every set, map and dedup keyed on
+/// the rendered form, which is why the parser refuses non-canonical input
+/// instead of normalising it.
+#[cfg(all(test, feature = "std"))]
+mod spec_vectors {
+    use super::*;
+
+    const VECTORS: &str = include_str!("../tests/data/address-v1.vectors.json");
+
+    fn vectors() -> serde_json::Value {
+        serde_json::from_str(VECTORS).expect("the vector file is JSON")
+    }
+
+    fn hash_from(hex: &str) -> [u8; Address::HASH_LEN] {
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex digit"))
+            .collect();
+        bytes.try_into().expect("20 bytes")
+    }
+
+    /// Asserts the file still carries what it carried, before anything iterates
+    /// it: a loop over an array a bad merge emptied passes by not running.
+    #[test]
+    fn the_vector_file_is_the_size_it_was() {
+        let v = vectors();
+        assert_eq!(v["hrp"], "off");
+        assert_eq!(v["version_byte"], 1);
+        assert_eq!(v["hash_len"], Address::HASH_LEN);
+        assert_eq!(v["encoded_len"], Address::ENCODED_LEN);
+        assert_eq!(v["encode"].as_array().expect("encode").len(), 4);
+        assert_eq!(v["reject"].as_array().expect("reject").len(), 5);
+        assert!(
+            !v["ordering"].as_array().expect("ordering").is_empty(),
+            "the ordering cases are the reason this file exists"
+        );
+    }
+
+    #[test]
+    fn every_hash_renders_to_its_vector() {
+        for case in vectors()["encode"].as_array().expect("encode") {
+            let name = case["name"].as_str().expect("a name");
+            let hash = hash_from(case["hash_hex"].as_str().expect("a hash"));
+            assert_eq!(
+                Address::from_hash_bytes(hash).to_string(),
+                case["address"].as_str().expect("an address"),
+                "[{name}] rendered differently than the chapter specifies"
+            );
+        }
+    }
+
+    #[test]
+    fn every_vector_parses_back_into_its_hash() {
+        for case in vectors()["encode"].as_array().expect("encode") {
+            let name = case["name"].as_str().expect("a name");
+            let text = case["address"].as_str().expect("an address");
+            let parsed: Address = text.parse().unwrap_or_else(|e| panic!("[{name}]: {e:?}"));
+            assert_eq!(
+                parsed.hash_bytes(),
+                &hash_from(case["hash_hex"].as_str().expect("a hash")),
+                "[{name}] parsed to a different hash"
+            );
+            assert_eq!(
+                parsed.to_string(),
+                text,
+                "[{name}] did not re-encode to the string it came from"
+            );
+        }
+    }
+
+    #[test]
+    fn reject_vectors_are_refused() {
+        for case in vectors()["reject"].as_array().expect("reject") {
+            let name = case["name"].as_str().expect("a name");
+            let reason = case["reason"].as_str().expect("a reason");
+            let input = case["input"].as_str().expect("an input");
+            assert!(
+                input.parse::<Address>().is_err(),
+                "[{name}] was accepted, but the chapter refuses it: {reason}"
+            );
+        }
+    }
+
+    /// Hash-byte order and rendered-string order are different orders.
+    ///
+    /// The vectors carry pairs chosen because the two disagree, which is the
+    /// only kind of pair that can catch a tiebreaker moved from one order onto
+    /// the other. A pair that sorts the same way both ways proves nothing, and
+    /// every pair in a test written without searching for a disagreement is
+    /// that kind of pair.
+    #[test]
+    fn the_two_orderings_disagree_where_the_vectors_say_they_do() {
+        for case in vectors()["ordering"].as_array().expect("ordering") {
+            let a: Address = case["a"].as_str().expect("a").parse().expect("a parses");
+            let b: Address = case["b"].as_str().expect("b").parse().expect("b parses");
+
+            let by_hash = if a <= b { a } else { b };
+            assert_eq!(
+                by_hash.to_string(),
+                case["first_by_hash_bytes"].as_str().expect("hash order"),
+                "the derived Ord no longer compares hash bytes"
+            );
+
+            let by_string = core::cmp::min(a.to_string(), b.to_string());
+            assert_eq!(
+                by_string,
+                case["first_by_rendered_string"]
+                    .as_str()
+                    .expect("string order"),
+                "string order moved"
+            );
+
+            assert_ne!(
+                by_hash.to_string(),
+                by_string,
+                "this pair no longer disagrees, so it can no longer catch a \
+                 tiebreaker that swapped orders"
+            );
+        }
+    }
+
+    /// The chapter, or `None` where the repo tree is absent. See the note on
+    /// the identical helper in `wire::spec_vectors`.
+    fn chapter() -> Option<String> {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/spec/identity.md");
+        std::fs::read_to_string(&path).ok().or_else(|| {
+            eprintln!("spec tree not present, skipping the identity chapter drift checks");
+            None
+        })
+    }
+
+    #[test]
+    fn the_chapter_states_the_constants_the_code_uses() {
+        let Some(text) = chapter() else { return };
+
+        assert!(
+            text.contains(&format!("truncated to {} bytes", Address::HASH_LEN)),
+            "the chapter does not state the {}-byte truncation",
+            Address::HASH_LEN
+        );
+        assert!(
+            text.contains(&format!("exactly {} characters", Address::ENCODED_LEN)),
+            "the chapter does not state the {}-character canonical rendering",
+            Address::ENCODED_LEN
+        );
+        assert!(
+            text.contains("bech32m"),
+            "the chapter no longer names bech32m, and bech32 is a different \
+             checksum constant that this parser refuses"
+        );
+    }
+}

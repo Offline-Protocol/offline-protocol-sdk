@@ -282,3 +282,245 @@ mod tests {
         assert!(payload.ends_with(&(-1i64).to_be_bytes()));
     }
 }
+
+/// The frozen conformance vectors for the control-plane canonical payloads.
+///
+/// The chapter these pin is `docs/spec/control-messages.md`. They were computed
+/// by `tools/spec-vectors/generate.py` from the construction stated there, not
+/// by running the builders below.
+///
+/// These pin the bytes that go under the signing key, not a signature. Ed25519
+/// is specified by RFC 8032 and carries its own vectors; what is specific to
+/// this protocol is *which* bytes are signed, and that is the half a second
+/// implementation gets wrong.
+#[cfg(all(test, feature = "std"))]
+mod spec_vectors {
+    use super::*;
+    use offline_protocol_core::{AppId, Message, MessageId, Timestamp, UserId};
+
+    const VECTORS: &str = include_str!("../tests/data/control-signing-v1.vectors.json");
+
+    fn vectors() -> serde_json::Value {
+        serde_json::from_str(VECTORS).expect("the vector file is JSON")
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Asserts the file still carries what it carried, before anything iterates
+    /// it: a loop over an array a bad merge emptied passes by not running.
+    #[test]
+    fn the_vector_file_is_the_size_it_was() {
+        let v = vectors();
+        assert_eq!(v["payloads"].as_array().expect("payloads").len(), 6);
+        assert_eq!(v["domains"]["live"].as_array().expect("live").len(), 5);
+        assert_eq!(
+            v["domains"]["reserved"].as_array().expect("reserved").len(),
+            1
+        );
+    }
+
+    /// Every case, pinned through the primitive both builders are made of.
+    ///
+    /// This runs for all six including the ones no valid `Message` can carry:
+    /// an empty recipient is exactly the case the length prefixes exist for,
+    /// and it would go untested if the only route in were the message builders.
+    #[test]
+    fn every_payload_matches_its_vector_through_the_primitive() {
+        for case in vectors()["payloads"].as_array().expect("payloads") {
+            let name = case["name"].as_str().expect("a name");
+            let sender = case["sender"].as_str().expect("sender");
+            let id = case["id"].as_str().expect("id");
+            let recipient = case["recipient"].as_str().expect("recipient");
+            let content = case["content"].as_str().expect("content");
+            let stamp = case["timestamp_ms"].as_i64().expect("timestamp");
+
+            let v1 = canonical_payload(
+                CTRL_SIGN_DOMAIN,
+                &[
+                    sender.as_bytes(),
+                    id.as_bytes(),
+                    recipient.as_bytes(),
+                    content.as_bytes(),
+                ],
+            )
+            .expect("v1 builds");
+            assert_eq!(
+                hex(&v1),
+                case["v1_hex"].as_str().expect("v1"),
+                "[{name}] v1 payload"
+            );
+
+            let stamped = stamp.to_be_bytes();
+            let v2 = canonical_payload(
+                CTRL_SIGN_DOMAIN_V2,
+                &[
+                    sender.as_bytes(),
+                    id.as_bytes(),
+                    recipient.as_bytes(),
+                    content.as_bytes(),
+                    &stamped,
+                ],
+            )
+            .expect("v2 builds");
+            assert_eq!(
+                hex(&v2),
+                case["v2_hex"].as_str().expect("v2"),
+                "[{name}] v2 payload"
+            );
+        }
+    }
+
+    /// The message builders produce the same bytes for every case a valid
+    /// message can express.
+    ///
+    /// Pinning only the primitive would leave the field order the builders
+    /// choose unpinned, which is the thing that actually differs between two
+    /// implementations.
+    #[test]
+    fn the_builders_agree_with_the_vectors() {
+        let mut exercised = 0;
+        for case in vectors()["payloads"].as_array().expect("payloads") {
+            let name = case["name"].as_str().expect("a name");
+            let recipient = case["recipient"].as_str().expect("recipient");
+            if recipient.is_empty() {
+                // No valid `Message` carries an empty recipient; the primitive
+                // test above is what covers that case.
+                continue;
+            }
+            exercised += 1;
+
+            let m = Message::from_parts(
+                MessageId::from_str(case["id"].as_str().expect("id")).expect("a uuid"),
+                UserId::new(case["sender"].as_str().expect("sender")).expect("a sender"),
+                UserId::new(recipient).expect("a recipient"),
+                AppId::new("com.example.chat").expect("an app id"),
+                case["content"].as_str().expect("content"),
+                Timestamp::from_millis(case["timestamp_ms"].as_i64().expect("timestamp")),
+            );
+
+            assert_eq!(
+                hex(&control_signing_payload(&m).expect("v1")),
+                case["v1_hex"].as_str().expect("v1"),
+                "[{name}] the v1 builder disagrees with the chapter"
+            );
+            assert_eq!(
+                hex(&control_signing_payload_v2(&m).expect("v2")),
+                case["v2_hex"].as_str().expect("v2"),
+                "[{name}] the v2 builder disagrees with the chapter"
+            );
+        }
+        assert!(exercised >= 5, "the builders were barely exercised");
+    }
+
+    /// v1 with the stamp appended is not v2.
+    ///
+    /// They are separate domains rather than one payload with an optional
+    /// field. An implementation that appends instead of re-domaining produces
+    /// signatures that every verifier reports as forgeries, which is
+    /// indistinguishable from an attack and sends the reader hunting the wrong
+    /// bug.
+    #[test]
+    fn appending_the_stamp_does_not_produce_the_v2_payload() {
+        let v = vectors();
+        let case = &v["v1_is_not_v2_with_a_stamp"];
+        assert_ne!(
+            case["v1_with_stamp_appended_hex"]
+                .as_str()
+                .expect("appended"),
+            case["v2_hex"].as_str().expect("v2"),
+            "the two domains have collapsed into one"
+        );
+    }
+
+    /// The domains this file names are the domains the code uses, and no domain
+    /// prefixes another.
+    ///
+    /// The domain is not length-prefixed, so a domain that prefixed another
+    /// would let a signature made under the shorter verify under the longer.
+    #[test]
+    fn the_domain_registry_matches_the_code() {
+        let v = vectors();
+        assert_eq!(
+            v["domains"]["v1"].as_str().expect("v1"),
+            core::str::from_utf8(CTRL_SIGN_DOMAIN).expect("utf8")
+        );
+        assert_eq!(
+            v["domains"]["v2"].as_str().expect("v2"),
+            core::str::from_utf8(CTRL_SIGN_DOMAIN_V2).expect("utf8")
+        );
+
+        let mut all: Vec<String> = Vec::new();
+        for key in ["live", "reserved"] {
+            for d in v["domains"][key].as_array().expect("a domain list") {
+                all.push(d.as_str().expect("a domain").to_string());
+            }
+        }
+        for a in &all {
+            for b in &all {
+                if a != b {
+                    assert!(
+                        !a.starts_with(b.as_str()),
+                        "signing domain {b} is a prefix of {a}, which lets a \
+                         signature made under one verify under the other"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The chapter, or `None` where the repo tree is absent: `cargo package`
+    /// carries `tests/` and the vector file but cannot carry `docs/`.
+    fn chapter(name: &str) -> Option<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/spec")
+            .join(name);
+        std::fs::read_to_string(&path).ok().or_else(|| {
+            eprintln!("spec tree not present, skipping the {name} drift checks");
+            None
+        })
+    }
+
+    #[test]
+    fn the_chapter_states_the_payloads_the_code_builds() {
+        let Some(text) = chapter("control-messages.md") else {
+            return;
+        };
+        for domain in [CTRL_SIGN_DOMAIN, CTRL_SIGN_DOMAIN_V2] {
+            let domain = core::str::from_utf8(domain).expect("utf8");
+            assert!(
+                text.contains(domain),
+                "the chapter no longer names the {domain} payload"
+            );
+        }
+        assert!(
+            text.contains("u32be(len(sender))"),
+            "the chapter no longer states the length-prefixed construction"
+        );
+    }
+
+    /// The protocol-wide signing-domain registry lists every domain this file
+    /// pins.
+    ///
+    /// The registry lives in the username-discovery chapter for historical
+    /// reasons and is the one table that is supposed to see every domain at
+    /// once. A domain added here and not there is a domain chosen without being
+    /// checked against the whole set, which is how a prefixing pair ships.
+    #[test]
+    fn the_published_registry_lists_every_domain_this_file_pins() {
+        let Some(text) = chapter("username-discovery.md") else {
+            return;
+        };
+        let v = vectors();
+        for key in ["live", "reserved"] {
+            for d in v["domains"][key].as_array().expect("a domain list") {
+                let domain = d.as_str().expect("a domain");
+                assert!(
+                    text.contains(domain),
+                    "the signing-domain registry does not list {domain}"
+                );
+            }
+        }
+    }
+}

@@ -117,7 +117,19 @@ distinction carries no meaning.
 
 Validation on decode is not optional. Identifier length caps and the Lamport
 clock clamp are security checks, not conveniences, and the binary path is
-required to enforce the identical set.
+required to enforce the identical set:
+
+| Check | Bound | On breach |
+|-------|-------|-----------|
+| `sender`, `recipient`, `app_id` length | `256` bytes | Reject the message |
+| Identifier contents | Non-empty, and never `.`, `..`, a control character, `/`, `\` or `:` | Reject the message |
+| `lamport_clock` | 2^63 - 1 | Clamp, do not reject |
+
+The Lamport clock clamps rather than rejecting because the value is a peer's
+claim about ordering, not a structural error: a frame carrying `u64::MAX` is
+well formed, and refusing it would let any peer make its own messages
+undeliverable. Clamping bounds the damage instead, which matters because an
+unclamped peer clock parks every later message behind it permanently.
 
 ### Binary wire v1
 
@@ -148,6 +160,59 @@ forwarded_from_json  optional bytes   (forward attribution serialized as JSON)
 ext                  list of (u16 tag, bytes)
 ```
 
+#### Primitive encoding
+
+The field order above is not sufficient to produce a frame. Each primitive in it
+has exactly one encoding, and an implementation that writes fixed-width fields
+produces frames this protocol cannot decode.
+
+| Primitive | Encoding |
+|-----------|----------|
+| `u8` | One raw byte |
+| `u16`, `u64`, and every length prefix | Varint |
+| `i64` | Zigzag, then varint |
+| `bool` | `0x00` false, `0x01` true |
+| `string` | Varint byte length, then the UTF-8 bytes |
+| `bytes` | Varint byte length, then the raw bytes |
+| 16 raw bytes | Exactly 16 bytes, **no length prefix** |
+| `optional T` | `0x00` alone when absent; `0x01` followed by `T` when present |
+| `list of T` | Varint element count, then each element in order |
+| A tuple, such as a metadata pair or an `ext` entry | Its members concatenated in order, with no count and no framing of their own |
+
+A **varint** is little-endian base 128: seven data bits per byte, with the high
+bit set on every byte except the last. Zero is `0x00`, 127 is `0x7F`, 128 is
+`0x80 0x01`, and 300 is `0xAC 0x02`.
+
+**Zigzag** maps a signed integer onto an unsigned one before the varint is
+taken, so a small magnitude stays short in both directions. The mapping is
+`(n << 1) ^ (n >> 63)` with an arithmetic right shift, giving 0 to 0, -1 to 1,
+1 to 2, and -2 to 3. A timestamp of zero is therefore one byte, not eight.
+
+Two consequences are worth stating, because each is a way a plausible
+implementation goes wrong silently:
+
+- **The 16-byte fields are the exception, not the rule.** `id` and
+  `reply_to_msg` are fixed width and carry no length prefix, while every other
+  variable-length field carries one. A decoder that prefixes the id, or that
+  omits the prefix on `sender`, is misaligned from that point on and reads every
+  later field as garbage rather than failing where the mistake was made.
+- **The `ext` tag is a varint, not two fixed bytes.** Tags 1 and 2 each occupy a
+  single byte on the wire. The registry below calls the tag a `u16` to state its
+  value range, not its width.
+
+A length prefix is the varint of a pointer-sized unsigned integer, but the
+encoding is value-identical on every platform: nothing in this protocol emits a
+length a 32-bit implementation cannot represent. A receiver MUST reject a length
+prefix that exceeds the bytes remaining in the buffer, and MUST NOT allocate on
+the strength of one before checking it.
+
+These rules coincide with version 1 of
+[the postcard wire format](https://postcard.jamesmunns.com/wire-format), which
+is the encoding the reference implementation uses. That document is where these
+rules come from; it is not what makes them binding. The table above is normative
+here, and a second implementation conforms to it rather than to any particular
+library.
+
 Three deliberate choices in that layout:
 
 - **The id is 16 raw bytes, not a 36-character hyphenated string.** This is the
@@ -157,7 +222,22 @@ Three deliberate choices in that layout:
   keeps the frozen surface small and lets those structures keep evolving through
   their own additive rules without touching the wire contract.
 - **The metadata map is sorted by key.** A hash map iterates
-  nondeterministically, which would make the encoding non-reproducible.
+  nondeterministically, which would make the encoding non-reproducible. The
+  order is a byte-wise comparison of the UTF-8 keys, so it depends on neither a
+  locale nor a Unicode collation table. Comparing code points instead is the
+  same order for every valid string, because UTF-8 is constructed so that the
+  two never disagree, and an implementation may use either.
+
+  **UTF-16 code-unit order is a different order, and it is the one to watch.**
+  It is the default string comparison in Java (`String.compareTo`), JavaScript
+  (`<` on strings) and C# (ordinal). Surrogates occupy U+D800..U+DFFF, so a
+  character above U+FFFF leads with a code unit below every character in
+  U+E000..U+FFFF: the two orders invert any pair drawn from those ranges. An
+  implementation in one of those languages MUST compare the encoded UTF-8 bytes
+  (or the code points) rather than reaching for the built-in comparison. This is
+  the shape of bug that ships because every test key was ASCII, where all three
+  orders coincide, and
+  [the vectors](conformance.md#the-vectors) carry a case chosen to expose it.
 
 #### Why a separate DTO
 
