@@ -3440,7 +3440,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                 maxDelayMs: (config["maxDelayMs"] as? NSNumber)?.uint64Value ?? 300000,
                 backoffMultiplier: (config["backoffMultiplier"] as? NSNumber)?.floatValue ?? 2.0,
                 outboxMaxLifetimeMs: (config["outboxMaxLifetimeMs"] as? NSNumber)?.uint64Value ?? 604800000,
-                pendingMessageMaxLifetimeMs: (config["pendingMessageMaxLifetimeMs"] as? NSNumber)?.uint64Value ?? 604800000
+                pendingMessageMaxLifetimeMs: (config["pendingMessageMaxLifetimeMs"] as? NSNumber)?.uint64Value ?? 604800000,
+                edgeDrivenUnreachableDm: (config["edgeDrivenUnreachableDm"] as? NSNumber)?.boolValue ?? false
             )
             
             try proto.updateRetryConfig(config: retryConfig)

@@ -559,6 +559,26 @@ pub struct OfflineProtocol {
     /// Probe schedule for pending sessions to guarantee post-restart convergence.
     confirmation_probe_due_at: HashMap<String, DateTime<Utc>>,
 
+    /// Consecutive relay "recipient unreachable" verdicts per peer for the
+    /// session-confirmation probe. Drives an escalating backoff of
+    /// `confirmation_probe_due_at` (15s -> 600s cap, the same ladder the welcome
+    /// lifecycle uses) so a peer that established a session then vanished is not
+    /// probed every `CONFIRMATION_PROBE_INTERVAL_SECS` forever; a fleet of such
+    /// peers would otherwise exceed the relay's per-connection rate limit and
+    /// flap the connection. Reset on a reachability edge (`on_peer_presence`).
+    confirmation_probe_unreachable_parks: HashMap<String, u32>,
+
+    /// Token bucket that caps how fast the RETRY/PROBE path
+    /// (`process_retry_queue`) re-sends, so a large backlog of resends to
+    /// unreachable peers cannot burst past the relay's per-connection rate limit
+    /// and trigger the disconnect->reconnect->reflood loop ("flapping"). Only
+    /// consulted when `RetryConfig::edge_driven_unreachable_dm` is opted in. It
+    /// bounds ONLY resends — first-attempt sends, ACKs, control frames and
+    /// handshakes take other paths and are never throttled, so live traffic
+    /// keeps full throughput/latency. `retry_drain_last` is None until first use.
+    retry_drain_tokens: f64,
+    retry_drain_last: Option<Instant>,
+
     /// Rate-limit schedule for 1:1 session re-keys triggered by an epoch-desync
     /// decrypt failure. Bounds the re-key to at most one per peer per
     /// `REKEY_INTERVAL_SECS` so a peer replaying stale-epoch ciphertext (or an
@@ -973,6 +993,9 @@ impl OfflineProtocol {
             lamport_clock: LamportClock::new(),
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),
+            confirmation_probe_unreachable_parks: HashMap::new(),
+            retry_drain_tokens: 0.0,
+            retry_drain_last: None,
             rekey_due_at: HashMap::new(),
             welcome_lifecycles: HashMap::new(),
             pending_connection_requests: HashMap::new(),
@@ -2151,6 +2174,33 @@ impl OfflineProtocol {
             }
         }
 
+        // Opt-in (`edge_driven_unreachable_dm`): on the start/reconnect re-drive,
+        // leave durably-failing messages (first sent longer ago than
+        // OUTBOX_DURABLE_UNREACHABLE_AGE_SECS, still undelivered) edge-driven
+        // rather than re-driving them, so a restart does not re-ramp a large
+        // dead-peer backlog. They rest in the outbox and flush the instant their
+        // peer next proves reachable. Default-off preserves the documented
+        // "reconnect re-drives, ignoring timing" behaviour for every existing
+        // app. drain_all() already removed these from the retry queue and the
+        // outbox entry is untouched, so "not collected" == "resting edge-driven".
+        if self.config.reliability.retry.edge_driven_unreachable_dm {
+            let now = Utc::now();
+            let durable_age = chrono::Duration::seconds(
+                crate::protocol::types::OUTBOX_DURABLE_UNREACHABLE_AGE_SECS,
+            );
+            all_messages.retain(|(m, _)| {
+                match self
+                    .outbox
+                    .get(&m.id)
+                    .or_else(|| self.media_outbox.get(&m.id))
+                    .map(|e| e.first_sent_at)
+                {
+                    Some(first_sent) => now.signed_duration_since(first_sent) < durable_age,
+                    None => true,
+                }
+            });
+        }
+
         if all_messages.is_empty() {
             return;
         }
@@ -3186,7 +3236,35 @@ impl OfflineProtocol {
     /// - Properly tracks retry counts and transport failures
     fn process_retry_queue(&mut self) -> Result<()> {
         // Limit batch size to prevent blocking on large queues
-        let max_batch_size = crate::constants::FLUSH_BATCH_LIMIT;
+        let mut max_batch_size = crate::constants::FLUSH_BATCH_LIMIT;
+
+        // Opt-in resend rate cap: bound how fast the RETRY/PROBE path re-sends,
+        // so a backlog of resends to unreachable peers cannot burst past the
+        // relay's per-connection rate limit and flap the connection. Refills a
+        // token bucket by elapsed wall-time and caps this call's batch to the
+        // whole tokens available. Only resends are bounded; first-attempt sends,
+        // ACKs, control frames and handshakes take other paths and are never
+        // throttled, so live traffic keeps full throughput and latency. Fully
+        // off by default (unchanged retry behaviour for every existing app).
+        if self.config.reliability.retry.edge_driven_unreachable_dm {
+            let now = Instant::now();
+            match self.retry_drain_last {
+                Some(last) => {
+                    let elapsed = now.duration_since(last).as_secs_f64();
+                    self.retry_drain_tokens = (self.retry_drain_tokens
+                        + elapsed * crate::protocol::types::RETRY_DRAIN_RATE_PER_SEC)
+                        .min(crate::protocol::types::RETRY_DRAIN_BURST);
+                }
+                None => {
+                    // First drain: start with a full burst budget.
+                    self.retry_drain_tokens = crate::protocol::types::RETRY_DRAIN_BURST;
+                }
+            }
+            self.retry_drain_last = Some(now);
+            let budget = self.retry_drain_tokens.floor() as usize;
+            max_batch_size = max_batch_size.min(budget);
+        }
+
         let mut processed = 0;
 
         while processed < max_batch_size {
@@ -3218,7 +3296,21 @@ impl OfflineProtocol {
                 Ok(()) => {
                     let ack_registered_now = self.ensure_ack_registration(&entry.message)?;
 
-                    if !ack_registered_now {
+                    if ack_registered_now {
+                        // The resend registered a brand-new ACK (the prior one
+                        // was cleared, e.g. by an ACK timeout that re-queued
+                        // this message). A fresh ACK starts at retry_count 0, so
+                        // carry the count the retry-queue entry already holds —
+                        // advanced by this attempt — onto it. Without this the
+                        // backoff ladder resets to 0 on every relay-accepted
+                        // resend and `delay_for_retry` is pinned at its 1s floor
+                        // forever for a peer that never ACKs (an offline
+                        // recipient), flooding the relay ~once per second.
+                        self.ack_manager.set_retry_count(
+                            &entry.message.id,
+                            entry.retry_count.saturating_add(1),
+                        );
+                    } else {
                         self.ack_manager.increment_retry_count(&entry.message.id);
                     }
                     self.mark_message_sent(
@@ -3273,6 +3365,10 @@ impl OfflineProtocol {
 
         if processed > 0 {
             debug!(processed = processed, "Processed retry queue entries");
+            // Spend the resend-rate tokens actually used (opt-in cap only).
+            if self.config.reliability.retry.edge_driven_unreachable_dm {
+                self.retry_drain_tokens = (self.retry_drain_tokens - processed as f64).max(0.0);
+            }
         }
 
         Ok(())

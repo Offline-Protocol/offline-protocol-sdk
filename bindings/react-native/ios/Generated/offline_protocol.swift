@@ -5243,6 +5243,7 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var maxPendingGlobal: UInt64
     public var pendingTtlMs: UInt64
     public var overflowPolicy: OverflowPolicy
+    public var edgeDrivenUnreachableDm: Bool
     public var maxGroupMembers: UInt32
     public var groupRelayEnabled: Bool
     public var groupRelayBroadcastEnabled: Bool
@@ -5261,7 +5262,7 @@ public struct ProtocolConfig: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true, meshRelay: MeshRelayConfig? = nil, dataEnabled: Bool = true, controlFreshnessEnforced: Bool = true) {
+    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, edgeDrivenUnreachableDm: Bool = false, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true, meshRelay: MeshRelayConfig? = nil, dataEnabled: Bool = true, controlFreshnessEnforced: Bool = true) {
         self.appId = appId
         self.profile = profile
         self.bleEnabled = bleEnabled
@@ -5279,6 +5280,7 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.maxPendingGlobal = maxPendingGlobal
         self.pendingTtlMs = pendingTtlMs
         self.overflowPolicy = overflowPolicy
+        self.edgeDrivenUnreachableDm = edgeDrivenUnreachableDm
         self.maxGroupMembers = maxGroupMembers
         self.groupRelayEnabled = groupRelayEnabled
         self.groupRelayBroadcastEnabled = groupRelayBroadcastEnabled
@@ -5327,6 +5329,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 maxPendingGlobal: FfiConverterUInt64.read(from: &buf), 
                 pendingTtlMs: FfiConverterUInt64.read(from: &buf), 
                 overflowPolicy: FfiConverterTypeOverflowPolicy.read(from: &buf), 
+                edgeDrivenUnreachableDm: FfiConverterBool.read(from: &buf), 
                 maxGroupMembers: FfiConverterUInt32.read(from: &buf), 
                 groupRelayEnabled: FfiConverterBool.read(from: &buf), 
                 groupRelayBroadcastEnabled: FfiConverterBool.read(from: &buf), 
@@ -5363,6 +5366,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.maxPendingGlobal, into: &buf)
         FfiConverterUInt64.write(value.pendingTtlMs, into: &buf)
         FfiConverterTypeOverflowPolicy.write(value.overflowPolicy, into: &buf)
+        FfiConverterBool.write(value.edgeDrivenUnreachableDm, into: &buf)
         FfiConverterUInt32.write(value.maxGroupMembers, into: &buf)
         FfiConverterBool.write(value.groupRelayEnabled, into: &buf)
         FfiConverterBool.write(value.groupRelayBroadcastEnabled, into: &buf)
@@ -5700,16 +5704,18 @@ public struct RetryConfig: Equatable, Hashable {
     public var backoffMultiplier: Float
     public var outboxMaxLifetimeMs: UInt64
     public var pendingMessageMaxLifetimeMs: UInt64
+    public var edgeDrivenUnreachableDm: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(maxRetries: UInt32, initialDelayMs: UInt64, maxDelayMs: UInt64, backoffMultiplier: Float, outboxMaxLifetimeMs: UInt64, pendingMessageMaxLifetimeMs: UInt64) {
+    public init(maxRetries: UInt32, initialDelayMs: UInt64, maxDelayMs: UInt64, backoffMultiplier: Float, outboxMaxLifetimeMs: UInt64, pendingMessageMaxLifetimeMs: UInt64, edgeDrivenUnreachableDm: Bool = false) {
         self.maxRetries = maxRetries
         self.initialDelayMs = initialDelayMs
         self.maxDelayMs = maxDelayMs
         self.backoffMultiplier = backoffMultiplier
         self.outboxMaxLifetimeMs = outboxMaxLifetimeMs
         self.pendingMessageMaxLifetimeMs = pendingMessageMaxLifetimeMs
+        self.edgeDrivenUnreachableDm = edgeDrivenUnreachableDm
     }
 
     
@@ -5731,7 +5737,8 @@ public struct FfiConverterTypeRetryConfig: FfiConverterRustBuffer {
                 maxDelayMs: FfiConverterUInt64.read(from: &buf), 
                 backoffMultiplier: FfiConverterFloat.read(from: &buf), 
                 outboxMaxLifetimeMs: FfiConverterUInt64.read(from: &buf), 
-                pendingMessageMaxLifetimeMs: FfiConverterUInt64.read(from: &buf)
+                pendingMessageMaxLifetimeMs: FfiConverterUInt64.read(from: &buf), 
+                edgeDrivenUnreachableDm: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -5742,6 +5749,7 @@ public struct FfiConverterTypeRetryConfig: FfiConverterRustBuffer {
         FfiConverterFloat.write(value.backoffMultiplier, into: &buf)
         FfiConverterUInt64.write(value.outboxMaxLifetimeMs, into: &buf)
         FfiConverterUInt64.write(value.pendingMessageMaxLifetimeMs, into: &buf)
+        FfiConverterBool.write(value.edgeDrivenUnreachableDm, into: &buf)
     }
 }
 

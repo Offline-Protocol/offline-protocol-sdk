@@ -29,6 +29,26 @@ pub struct RetryConfig {
 
     /// Maximum lifetime for messages waiting on MLS session establishment.
     pub pending_message_max_lifetime_ms: u64,
+
+    /// Opt-in: treat a durably-unreachable direct message as EDGE-DRIVEN once
+    /// its escalating reachability probe has run a few times, instead of the
+    /// default of probing it forever at the 15s->600s cap on every carrier.
+    ///
+    /// Default `false` preserves the documented contract (a parked message
+    /// "never goes fully quiet"; see docs/message-delivery.md) and every
+    /// existing native/third-party app's behaviour is unchanged. When `true`,
+    /// after a bounded number of probes the message stops being timed-probed
+    /// and rests in the outbox, re-driven only when the peer next proves
+    /// reachable (an inbound frame or presence-online edge flushes it). It also
+    /// lets a restart skip re-driving a durably-failing backlog.
+    ///
+    /// This trades the SDK's "self-recovers even for a silent returning peer
+    /// with no presence" guarantee for zero steady-state relay traffic to gone
+    /// peers. It is correct for deployments whose peers always interact or
+    /// advertise presence on return (e.g. a machine-to-machine capability
+    /// exchange), and MUST NOT be enabled for consumers that rely on the timed
+    /// probe as their only recovery path.
+    pub edge_driven_unreachable_dm: bool,
 }
 
 impl Default for RetryConfig {
@@ -40,6 +60,8 @@ impl Default for RetryConfig {
             backoff_multiplier: DEFAULT_BACKOFF_MULTIPLIER,
             outbox_max_lifetime_ms: DEFAULT_OUTBOX_LIFETIME_MS,
             pending_message_max_lifetime_ms: DEFAULT_PENDING_MESSAGE_LIFETIME_MS,
+            // Default off: preserve the documented perpetual-probe contract.
+            edge_driven_unreachable_dm: false,
         }
     }
 }
@@ -372,6 +394,16 @@ mod tests {
         .content("Test message")
         .priority(priority)
         .build()
+    }
+
+    #[test]
+    fn test_edge_driven_unreachable_dm_defaults_off() {
+        // The opt-in flood-control behaviors (edge-driven parking, restart
+        // age-gate, core resend rate-cap) are all gated on this flag. It MUST
+        // default false so every existing native/third-party app keeps the
+        // documented perpetual-probe behavior unchanged. If a future change
+        // flips the default, this fails and flags the silent regression.
+        assert!(!RetryConfig::default().edge_driven_unreachable_dm);
     }
 
     #[test]

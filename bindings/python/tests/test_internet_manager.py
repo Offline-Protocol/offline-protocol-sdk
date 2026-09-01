@@ -570,6 +570,83 @@ class TestInternetManagerSendFrame:
             message_id="msg-1"
         )
 
+    @pytest.mark.asyncio
+    async def test_records_in_flight_before_the_wire_write(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        """The in-flight entry must exist BEFORE `await ws.send` returns.
+
+        `await ws.send` can suspend under backpressure and a relay
+        MessageSent/DeliveryError for the frame can be processed on the recv
+        task before it resumes; the entry has to already be present so the
+        exact id resolves rather than best-effort popping a different still-
+        stuck one. Mirrors the iOS/Android record-before-write ordering.
+        """
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr._connected = True
+        seen_at_write: list[str] = []
+
+        async def capture(_payload: str) -> None:
+            # Snapshot what the tracker holds at the instant of the write.
+            seen_at_write.extend(mgr._inflight.drain_recipient("peer-1", mgr._now_ms()))
+            # Put it back so the rest of the send path is unaffected.
+            mgr._inflight.record_sent("peer-1", "msg-1", mgr._now_ms())
+
+        ws = MagicMock()
+        ws.send = AsyncMock(side_effect=capture)
+        mgr._ws = ws
+
+        await mgr._send_message("msg-1", "peer-1", b"hello")
+
+        assert seen_at_write == ["msg-1"], (
+            "the send must be recorded before `await ws.send`, not after"
+        )
+
+    @pytest.mark.asyncio
+    async def test_unrecords_in_flight_when_the_write_fails(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        """If `await ws.send` raises, the frame never went out, so its
+        optimistic in-flight entry must be taken back — otherwise a later
+        recipient-keyed DeliveryError would false-fail a message never sent."""
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr._connected = True
+        ws = MagicMock()
+        ws.send = AsyncMock(side_effect=RuntimeError("socket broke"))
+        mgr._ws = ws
+
+        await mgr._send_message("msg-1", "peer-1", b"hello")
+
+        # No residual in-flight entry for the recipient.
+        assert mgr._inflight.drain_recipient("peer-1", mgr._now_ms()) == []
+        # And the failure was reported for the message.
+        mock_protocol.internet_send_failed_with_reason.assert_called()
+        assert (
+            mock_protocol.internet_send_failed_with_reason.call_args.kwargs["message_id"]
+            == "msg-1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_post_wire_failure_keeps_the_in_flight_entry(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        """A failure AFTER `await ws.send` succeeded (e.g. the internet_confirm_sent
+        FFI call raising) must NOT unrecord the entry: the frame is genuinely on
+        the wire and a later relay DeliveryError needs it to fast-fail. unrecord
+        fires only when the wire write itself never landed."""
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr._connected = True
+        ws = MagicMock()
+        ws.send = AsyncMock()  # the write SUCCEEDS
+        mgr._ws = ws
+        # ...but the post-write FFI confirm raises.
+        mock_protocol.internet_confirm_sent.side_effect = RuntimeError("ffi boom")
+
+        await mgr._send_message("msg-1", "peer-1", b"hello")
+
+        # The entry survives so a later DeliveryError can still fast-fail it.
+        assert mgr._inflight.drain_recipient("peer-1", mgr._now_ms()) == ["msg-1"]
+
 
 class TestInternetManagerSendMessageTOCTOU:
     @pytest.mark.asyncio
@@ -876,3 +953,142 @@ class TestAddressDeclaration:
         declaring_protocol.internet_address_declaration_refused.assert_called_once_with(
             reason="address_taken"
         )
+
+
+# ---------------------------------------------------------------------------
+# RecipientInFlightTracker + recipient-keyed DeliveryError correlation.
+# Ports the iOS/Android bridge behavior; these pin it per the repo's C9 policy
+# ("cargo test proves nothing about the bridges — each binding has its own
+# tests"). The highest-risk new logic is the tracker: a subtle error would
+# false-fail a delivered message, so the MessageSent-resolve path is tested
+# explicitly.
+# ---------------------------------------------------------------------------
+from offline_protocol_sdk.internet_manager import _RecipientInFlightTracker
+
+
+class TestRecipientInFlightTracker:
+    def test_record_cap_and_fifo(self) -> None:
+        t = _RecipientInFlightTracker(ttl_ms=1000, max_per_recipient=3)
+        for m in ("m1", "m2", "m3", "m4"):
+            t.record_sent("r1", m, 0)
+        # oldest dropped at the cap; FIFO order preserved
+        assert t.drain_recipient("r1", 0) == ["m2", "m3", "m4"]
+
+    def test_resolve_exact_prevents_false_fail(self) -> None:
+        # A delivered frame (relay echoed our id on MessageSent) must be
+        # resolved OUT so a later recipient-keyed DeliveryError cannot fail it.
+        t = _RecipientInFlightTracker(ttl_ms=10_000)
+        t.record_sent("r", "a", 0)
+        t.record_sent("r", "b", 0)
+        t.resolve_on_relay_accepted("r", "a", 0)  # 'a' delivered
+        assert t.drain_recipient("r", 0) == ["b"]  # only 'b' still in flight
+
+    def test_resolve_best_effort_oldest_when_no_id(self) -> None:
+        # Older relay: MessageSent carries no matching id -> drop oldest.
+        t = _RecipientInFlightTracker(ttl_ms=10_000)
+        t.record_sent("r", "a", 0)
+        t.record_sent("r", "b", 0)
+        t.resolve_on_relay_accepted("r", None, 0)
+        assert t.drain_recipient("r", 0) == ["b"]
+
+    def test_ttl_expiry(self) -> None:
+        t = _RecipientInFlightTracker(ttl_ms=1000)
+        t.record_sent("r", "a", 0)
+        assert t.drain_recipient("r", 5000) == []  # older than TTL -> not failed
+
+    def test_prune_and_clear(self) -> None:
+        t = _RecipientInFlightTracker(ttl_ms=1000)
+        t.record_sent("r", "a", 0)
+        t.prune(5000)
+        assert t.drain_recipient("r", 0) == []
+        t.record_sent("r2", "b", 0)
+        t.clear()
+        assert t.drain_recipient("r2", 0) == []
+
+    def test_unrecord_undoes_a_failed_send(self) -> None:
+        # When `await ws.send` raises, the frame never hit the wire and its
+        # optimistic entry must be taken back, or a later recipient-keyed
+        # DeliveryError would false-fail a message that was never sent.
+        t = _RecipientInFlightTracker(ttl_ms=10_000)
+        t.record_sent("r", "a", 0)
+        t.record_sent("r", "b", 0)
+        t.unrecord("r", "b")  # 'b' failed to send
+        assert t.drain_recipient("r", 0) == ["a"]
+
+    def test_unrecord_removes_only_the_newest_matching_id(self) -> None:
+        # A retry re-records the same id; unrecording the just-recorded send
+        # must leave the older same-id entry intact (FIFO retry semantics).
+        t = _RecipientInFlightTracker(ttl_ms=10_000)
+        t.record_sent("r", "a", 0)
+        t.record_sent("r", "a", 1)
+        t.unrecord("r", "a")
+        assert t.drain_recipient("r", 0) == ["a"]
+
+    def test_unrecord_missing_is_a_noop(self) -> None:
+        t = _RecipientInFlightTracker(ttl_ms=10_000)
+        t.record_sent("r", "a", 0)
+        t.unrecord("r", "absent")   # id not present
+        t.unrecord("nobody", "a")   # recipient not present
+        assert t.drain_recipient("r", 0) == ["a"]
+        # dropping the last id for a recipient prunes the empty bucket
+        t.unrecord("r", "a")
+        assert t.drain_recipient("r", 0) == []
+
+
+class TestDeliveryErrorRecipientKeyed:
+    def test_delivery_error_fails_all_in_flight_for_recipient(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1")
+        # two frames in flight to the same recipient
+        mgr._inflight.record_sent("offX", "id-1", mgr._now_ms())
+        mgr._inflight.record_sent("offX", "id-2", mgr._now_ms())
+        # relay says recipient offline; older relays send no message_id
+        mgr._process_received(
+            json.dumps({
+                "type": "DeliveryError",
+                "recipient": "offX",
+                "reason": "Recipient is offline",
+            }).encode()
+        )
+        failed = {
+            c.kwargs.get("message_id")
+            for c in mock_protocol.internet_send_failed_with_reason.call_args_list
+        }
+        assert failed == {"id-1", "id-2"}
+        # every fail is tagged with the core's classification prefix
+        for c in mock_protocol.internet_send_failed_with_reason.call_args_list:
+            assert c.kwargs.get("reason", "").startswith("recipient_unreachable:")
+        # and the peer is fed as offline so the core parks + watches for return
+        mock_protocol.internet_peer_presence.assert_called_once()
+        assert mock_protocol.internet_peer_presence.call_args.kwargs["peer_id"] == "offX"
+        assert mock_protocol.internet_peer_presence.call_args.kwargs["online"] is False
+
+    def test_message_sent_prevents_false_fail_of_delivered(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr._inflight.record_sent("offY", "delivered", mgr._now_ms())
+        mgr._inflight.record_sent("offY", "stuck", mgr._now_ms())
+        # relay confirms 'delivered' was forwarded
+        mgr._process_received(
+            json.dumps({
+                "type": "MessageSent",
+                "recipient": "offY",
+                "message_id": "delivered",
+            }).encode()
+        )
+        # later DeliveryError for the recipient must NOT fail the delivered one
+        mgr._process_received(
+            json.dumps({
+                "type": "DeliveryError",
+                "recipient": "offY",
+                "reason": "offline",
+            }).encode()
+        )
+        failed = {
+            c.kwargs.get("message_id")
+            for c in mock_protocol.internet_send_failed_with_reason.call_args_list
+        }
+        assert "delivered" not in failed
+        assert "stuck" in failed

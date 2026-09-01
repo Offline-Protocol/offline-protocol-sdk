@@ -11,6 +11,8 @@ import asyncio
 import base64
 import json
 import logging
+import time
+from collections import deque
 from typing import Any, Coroutine
 
 import websockets
@@ -31,6 +33,103 @@ _PING_INTERVAL = 10.0  # seconds
 _CONNECTION_TIMEOUT = 10.0
 _MAX_CONSECUTIVE_FAILURES = 2
 _MAX_CONCURRENT_SENDS = 50
+
+# In-flight tracker tuning (mirrors iOS/Android RecipientInFlightTracker).
+_RIFT_TTL_MS = 60_000
+_RIFT_MAX_PER_RECIPIENT = 32
+
+
+class _RecipientInFlightTracker:
+    """Python port of the iOS/Android ``RecipientInFlightTracker``.
+
+    Tracks wire-level in-flight message ids per recipient so the relay's
+    recipient-keyed failure signal — ``DeliveryError``, which on older relays
+    carries no ``message_id`` — can be correlated back to the SDK message ids
+    still awaiting an outcome. On a relay new enough to echo the outbox id we
+    resolve delivered frames precisely on ``MessageSent`` and fail the exact id
+    on ``DeliveryError``; on an older relay we fall back to failing every live
+    in-flight id for the recipient. "Everything in flight to an offline peer
+    failed" is safe by construction. Runs on the single asyncio loop, so no lock
+    is needed (unlike the mobile bridges).
+    """
+
+    def __init__(self, ttl_ms: int = _RIFT_TTL_MS, max_per_recipient: int = _RIFT_MAX_PER_RECIPIENT) -> None:
+        self._ttl_ms = ttl_ms
+        self._max = max_per_recipient
+        self._by_recipient: dict[str, deque[tuple[str, int]]] = {}
+
+    def record_sent(self, recipient: str, message_id: str, now_ms: int) -> None:
+        if not recipient or not message_id:
+            return
+        q = self._by_recipient.setdefault(recipient, deque())
+        q.append((message_id, now_ms))
+        while len(q) > self._max:
+            q.popleft()
+
+    def resolve_on_relay_accepted(self, recipient: str, message_id: str | None, now_ms: int) -> None:
+        """Relay ``MessageSent``: it accepted/forwarded a frame, so that frame
+        must not be swept into a later recipient-keyed ``DeliveryError`` (which
+        would false-fail a delivered message). Remove the exact id when the relay
+        echoed ours; otherwise (older relay / relay-minted id) drop the oldest as
+        a best-effort guess, bounded by the TTL and by the DeliveryError sweep."""
+        if not recipient:
+            return
+        q = self._by_recipient.get(recipient)
+        if q is None:
+            return
+        while q and now_ms - q[0][1] > self._ttl_ms:
+            q.popleft()
+        exact = False
+        if message_id:
+            q2 = deque((m, t) for (m, t) in q if m != message_id)
+            exact = len(q2) != len(q)
+            q = q2
+            self._by_recipient[recipient] = q
+        if not exact and q:
+            q.popleft()
+        if not q:
+            self._by_recipient.pop(recipient, None)
+
+    def unrecord(self, recipient: str, message_id: str) -> None:
+        """Undo a ``record_sent`` when the write never reached the wire.
+
+        The entry is recorded BEFORE ``await ws.send`` so a fast relay
+        ``DeliveryError`` interleaved on the recv task finds it; when the send
+        instead raises, the frame did not go out and its optimistic entry must
+        be taken back, or a later recipient-keyed ``DeliveryError`` would
+        false-fail a message that was never in flight. Mirrors the iOS/Android
+        failure-completion ``unrecord``."""
+        if not recipient or not message_id:
+            return
+        q = self._by_recipient.get(recipient)
+        if q is None:
+            return
+        # Remove the newest matching id (the one this call just recorded),
+        # leaving any older same-id retry entry intact.
+        for i in range(len(q) - 1, -1, -1):
+            if q[i][0] == message_id:
+                del q[i]
+                break
+        if not q:
+            self._by_recipient.pop(recipient, None)
+
+    def drain_recipient(self, recipient: str, now_ms: int) -> list[str]:
+        """Remove and return every live (non-expired) in-flight id for a peer."""
+        q = self._by_recipient.pop(recipient, None)
+        if q is None:
+            return []
+        return [m for (m, t) in q if now_ms - t <= self._ttl_ms]
+
+    def prune(self, now_ms: int) -> None:
+        for r in list(self._by_recipient.keys()):
+            q = self._by_recipient[r]
+            while q and now_ms - q[0][1] > self._ttl_ms:
+                q.popleft()
+            if not q:
+                self._by_recipient.pop(r, None)
+
+    def clear(self) -> None:
+        self._by_recipient.clear()
 
 
 class InternetManager(TransportManager):
@@ -110,6 +209,9 @@ class InternetManager(TransportManager):
         # weak task table cannot GC them mid-execution.
         self._process_tasks: set[asyncio.Task[None]] = set()
         self._send_semaphore: asyncio.Semaphore = asyncio.Semaphore(_MAX_CONCURRENT_SENDS)
+        # Correlates the relay's recipient-keyed DeliveryError back to in-flight
+        # sends (parity with the iOS/Android bridges).
+        self._inflight = _RecipientInFlightTracker()
         self._reconnect_handle: asyncio.TimerHandle | None = None
 
         # Re-entrancy guard for `_handle_connection_closed`. Set synchronously
@@ -478,6 +580,11 @@ class InternetManager(TransportManager):
             self._connected = False
             self._authenticated = False
 
+            # The socket died: forget in-flight correlations. Anything still
+            # unresolved is owned by the transport/core retry machinery now, and
+            # a fresh connection re-records from scratch.
+            self._inflight.clear()
+
             # Cancel recv/poll/ping tasks. Skip whichever (if any) is the
             # task currently running this coroutine — any task in the cancel
             # list can itself be the caller (recv-loop on ConnectionClosed,
@@ -684,13 +791,65 @@ class InternetManager(TransportManager):
         elif msg_type == "ConnectionRejected":
             self._handle_connection_rejected(msg)
 
+        elif msg_type == "MessageSent":
+            # The relay accepted/forwarded this frame (or push-poked an offline
+            # recipient) — either way it is no longer in flight and must not be
+            # swept into a later recipient-keyed DeliveryError, which would
+            # false-fail a delivered message. Resolve it out of the in-flight
+            # tracker (by exact id when the relay echoed ours, else best-effort
+            # oldest). Not a delivery guarantee, so we do not touch presence.
+            recipient = msg.get("recipient", "")
+            message_id = msg.get("message_id")
+            if recipient:
+                self._inflight.resolve_on_relay_accepted(
+                    recipient,
+                    message_id if message_id else None,
+                    self._now_ms(),
+                )
+
         elif msg_type == "DeliveryError":
-            recipient = msg.get("recipient", "unknown")
+            recipient = msg.get("recipient", "")
+            message_id = msg.get("message_id")
             reason = msg.get("reason", "unknown")
             self._emit_diagnostic("warning", "Delivery failed", {
                 "recipient": recipient,
                 "reason": reason,
             })
+            # The relay's authoritative "recipient offline" signal. Feed it back
+            # into the core tagged with the "recipient_unreachable" prefix the
+            # engine classifies on (see SEND_FAIL_REASON_RECIPIENT_UNREACHABLE)
+            # so the message is parked on the escalating reachability probe
+            # instead of re-sent ~once/second forever (which would exceed the
+            # relay's per-connection rate limit and flap the connection).
+            #
+            # Correlate by RECIPIENT, matching the iOS/Android bridges: the relay
+            # is recipient-keyed and older relays send no message_id at all, so
+            # we fail every live in-flight id for this recipient (delivered ones
+            # were already resolved out on their MessageSent). On a relay new
+            # enough to echo the outbox id we additionally fail that exact id in
+            # case it was never recorded. Then feed presence-offline so the core
+            # parks welcomes and starts watching for the peer's return.
+            now = self._now_ms()
+            failed_ids = self._inflight.drain_recipient(recipient, now) if recipient else []
+            if message_id and message_id not in failed_ids:
+                failed_ids.append(message_id)
+            for mid in failed_ids:
+                try:
+                    self._protocol.internet_send_failed_with_reason(
+                        message_id=mid,
+                        reason=f"recipient_unreachable: {reason}",
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "internet_send_failed_with_reason failed: %s", exc
+                    )
+            if recipient:
+                try:
+                    self._protocol.internet_peer_presence(
+                        peer_id=recipient, online=False, last_seen_ms=None
+                    )
+                except Exception as exc:
+                    logger.debug("internet_peer_presence(offline) failed: %s", exc)
 
         elif msg_type in ("GroupCreated", "GroupInvitation", "GroupMessageReceived"):
             self._handle_group_message(msg_type, msg)
@@ -859,6 +1018,9 @@ class InternetManager(TransportManager):
         prevent unbounded task creation when the protocol core has a large
         outbox.  Remaining messages will be picked up on the next poll tick.
         """
+        # Drop in-flight tracker entries older than the TTL each tick.
+        self._inflight.prune(self._now_ms())
+
         # Limit to available concurrency slots to avoid creating thousands
         # of tasks that all block on the semaphore.
         available_slots = max(0, _MAX_CONCURRENT_SENDS - len(self._send_tasks))
@@ -885,6 +1047,10 @@ class InternetManager(TransportManager):
             self._send_tasks.add(task)
             task.add_done_callback(self._send_tasks.discard)
             drained += 1
+
+    @staticmethod
+    def _now_ms() -> int:
+        return int(time.monotonic() * 1000)
 
     def _notify_send_failed(self, message_id: str, reason: str) -> None:
         """Best-effort notification to the protocol that a send failed."""
@@ -914,6 +1080,7 @@ class InternetManager(TransportManager):
                 self._notify_send_failed(message_id, "Disconnected while waiting")
                 return
 
+            recorded = False
             try:
                 try:
                     content = data.decode("utf-8")
@@ -932,7 +1099,26 @@ class InternetManager(TransportManager):
                     "content": content,
                     "message_id": message_id,
                 })
+                # Record the wire send BEFORE awaiting it: `await ws.send` can
+                # suspend (websockets drains under backpressure — the exact
+                # high-load path this correlation exists for), and a relay
+                # MessageSent/DeliveryError for this frame can be processed on
+                # the recv task before we resume. The entry must already be
+                # present so MessageSent resolves the exact id (rather than
+                # best-effort popping a different still-stuck one) and a
+                # DeliveryError finds it. If the send raises, the except path
+                # unrecords it. Mirrors the iOS/Android record-before-write.
+                if recipient and message_id:
+                    self._inflight.record_sent(recipient, message_id, self._now_ms())
+                    recorded = True
                 await ws.send(payload)
+                # The frame is on the wire now. From here `unrecord` must NOT
+                # fire: the entry is genuinely in flight, and a later relay
+                # DeliveryError needs it to fast-fail. Clear the flag before any
+                # subsequent line (counters, the internet_confirm_sent FFI call)
+                # can raise, so only a failure of `await ws.send` itself — where
+                # the frame never left — takes the entry back.
+                recorded = False
                 self._bytes_sent += len(payload)
                 self._messages_sent += 1
                 self._consecutive_send_failures = 0
@@ -940,6 +1126,12 @@ class InternetManager(TransportManager):
                 self._protocol.internet_confirm_sent(message_id=message_id)
 
             except Exception as exc:
+                # The frame never reached the wire; take back the optimistic
+                # in-flight entry so a later recipient-keyed DeliveryError does
+                # not false-fail a message that was never sent. (Only reachable
+                # for a pre-wire failure; a post-wire raise leaves it in flight.)
+                if recorded:
+                    self._inflight.unrecord(recipient, message_id)
                 self._consecutive_send_failures += 1
                 self._emit_diagnostic("error", f"Send failed: {exc}", {
                     "message_id": message_id,

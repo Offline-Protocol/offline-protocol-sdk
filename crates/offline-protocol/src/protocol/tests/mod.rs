@@ -37462,3 +37462,215 @@ fn the_desync_path_still_claims_the_shared_rekey_window() {
         "a desync-driven re-key did not claim the window that bounds a re-key storm"
     );
 }
+
+/// Pins component (B) of the flap fix: the confirmation-probe unreachable
+/// escalation. Without it an unconfirmed-but-vanished peer is re-probed every
+/// 5s forever, and a handful of such peers push aggregate relay traffic past
+/// the per-connection rate limit into a disconnect loop. The always-on
+/// behavior (never got a regression test in the earlier rounds) is: no-op
+/// unless the peer is an active probe target, escalate the shared 15s->600s
+/// ladder once per unreachable park, and reset to "probe now" on a
+/// reachability edge so a returning peer still converges.
+#[test]
+fn test_confirmation_probe_unreachable_escalation() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    // No-op gate: a peer that is NOT an active probe target (no
+    // confirmation_probe_due_at entry) must not touch the probe schedule, so
+    // ordinary DM failures to confirmed peers never escalate anything.
+    protocol.note_confirmation_probe_unreachable("ghost");
+    assert!(
+        !protocol
+            .confirmation_probe_unreachable_parks
+            .contains_key("ghost"),
+        "escalation must no-op for a peer that is not an active probe target"
+    );
+    assert!(
+        !protocol.confirmation_probe_due_at.contains_key("ghost"),
+        "escalation must not create a probe schedule for a non-target peer"
+    );
+
+    // Make "bob" an active probe target (a probe was just attempted).
+    protocol
+        .confirmation_probe_due_at
+        .insert("bob".to_string(), Utc::now());
+
+    // First unreachable park: counter -> 1, due_at pushed out ~15s (15 << 0).
+    protocol.note_confirmation_probe_unreachable("bob");
+    assert_eq!(
+        protocol.confirmation_probe_unreachable_parks.get("bob"),
+        Some(&1),
+        "first unreachable park must set the escalation counter to 1"
+    );
+    let secs_1 =
+        (*protocol.confirmation_probe_due_at.get("bob").unwrap() - Utc::now()).num_seconds();
+    assert!(
+        (WELCOME_NO_CARRIER_RETRY_SECS - 2..=WELCOME_NO_CARRIER_RETRY_SECS + 1).contains(&secs_1),
+        "first park must schedule the probe ~15s out, got {secs_1}s"
+    );
+
+    // Second unreachable park: counter -> 2, due_at ~30s (15 << 1). Proves the
+    // ladder doubles rather than re-probing at the flat 5s interval.
+    protocol.note_confirmation_probe_unreachable("bob");
+    assert_eq!(
+        protocol.confirmation_probe_unreachable_parks.get("bob"),
+        Some(&2),
+        "second unreachable park must escalate the counter to 2"
+    );
+    let secs_2 =
+        (*protocol.confirmation_probe_due_at.get("bob").unwrap() - Utc::now()).num_seconds();
+    assert!(
+        (2 * WELCOME_NO_CARRIER_RETRY_SECS - 2..=2 * WELCOME_NO_CARRIER_RETRY_SECS + 1)
+            .contains(&secs_2),
+        "second park must double the interval to ~30s, got {secs_2}s"
+    );
+
+    // A reachability edge (presence online) resets the escalation and marks a
+    // probe due now, so a peer that vanished while unconfirmed is re-probed
+    // immediately and its session converges instead of waiting out the backoff.
+    protocol.on_peer_presence("bob", true, None);
+    assert!(
+        !protocol
+            .confirmation_probe_unreachable_parks
+            .contains_key("bob"),
+        "a presence-online edge must clear the escalation counter"
+    );
+    let secs_reset =
+        (*protocol.confirmation_probe_due_at.get("bob").unwrap() - Utc::now()).num_seconds();
+    assert!(
+        secs_reset <= 2,
+        "a presence-online edge must mark the probe due now, got {secs_reset}s"
+    );
+}
+
+/// Pins component (D) of the flap fix: the opt-in edge-driven parking gate.
+/// With `edge_driven_unreachable_dm` on, a durably-unreachable DM keeps being
+/// timed-probed up to `DM_UNREACHABLE_PROBE_LIMIT` times, then stops (rests in
+/// the outbox, re-driven only on a reachability edge) instead of probing
+/// forever. Off (default) it probes on every park — covered by the existing
+/// `..._parked_dm_probe_escalates_...` test, which is the control case.
+#[test]
+fn test_edge_driven_parking_stops_probe_after_limit() {
+    let mut config = create_test_config();
+    config.reliability.retry.edge_driven_unreachable_dm = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    // Park #1 (== DM_UNREACHABLE_PROBE_LIMIT, not yet over it): still probes,
+    // so a timed re-check is scheduled exactly as in the default path.
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&1));
+    assert!(
+        protocol.retry_queue.time_until_next_retry().is_some(),
+        "within the probe limit, the message must still be timed-probed"
+    );
+
+    // Park #2 (> DM_UNREACHABLE_PROBE_LIMIT): goes edge-driven. No timed probe
+    // is scheduled; the message rests in the outbox to be re-driven on the
+    // peer's next reachability edge (inbound frame / presence-online).
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&2));
+    assert!(
+        protocol.retry_queue.time_until_next_retry().is_none(),
+        "past the probe limit, edge-driven parking must stop the timed probe"
+    );
+    assert!(
+        protocol.outbox.contains_key(&message_id),
+        "an edge-driven parked message must stay in the outbox for edge re-drive"
+    );
+
+    // The reachability edge still works: presence-online resets the escalation
+    // and re-drives, so an edge-driven message is never stranded.
+    protocol.on_peer_presence("bob", true, None);
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        None,
+        "a presence-online edge must reset the edge-driven park escalation"
+    );
+}
+
+/// Pins component (E) of the flap fix: the opt-in resend rate cap. With
+/// `edge_driven_unreachable_dm` on, `process_retry_queue` must bound resends to
+/// the token-bucket burst so a backlog of resends to unreachable peers cannot
+/// burst past the relay's per-connection rate limit and flap the connection.
+/// Off (default) the batch is bounded only by `FLUSH_BATCH_LIMIT` per call and
+/// the whole backlog drains — proving the cap is what throttles resends.
+#[test]
+fn test_resend_rate_cap_bounds_retry_drain_to_burst() {
+    fn drain_count(edge_driven: bool) -> usize {
+        let mut config = create_test_config();
+        config.reliability.retry.edge_driven_unreachable_dm = edge_driven;
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+
+        // A transport that fails every send: each processed entry re-enqueues
+        // with backoff (not immediately ready) and emits one MessageRetrying,
+        // so counting those events counts entries processed per call.
+        let flaky = FlakyTransport::fail_first(TransportType::Internet, u32::MAX);
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::Internet, Box::new(flaky));
+        protocol.start().unwrap();
+
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_handle = Arc::clone(&count);
+        protocol.on_event(move |event| {
+            if matches!(event, Event::MessageRetrying { .. }) {
+                count_handle.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        // 60 distinct messages, all ready now.
+        for i in 0..60 {
+            let msg = unsigned_frame("user123", "bob", format!("m{i}"));
+            protocol.retry_queue.enqueue_with_delay(msg, 0, 0);
+        }
+
+        // Three back-to-back drains. Elapsed between them is ~0, so the bucket
+        // barely refills; the cap (burst 24) binds after the first full batch.
+        for _ in 0..3 {
+            protocol.process_retry_queue().unwrap();
+        }
+        count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    let capped = drain_count(true);
+    let uncapped = drain_count(false);
+    assert!(
+        capped <= crate::protocol::types::RETRY_DRAIN_BURST as usize,
+        "the resend rate cap must bound a burst of resends to the token-bucket \
+         burst ({}), processed {capped}",
+        crate::protocol::types::RETRY_DRAIN_BURST as usize
+    );
+    assert!(
+        capped >= crate::constants::FLUSH_BATCH_LIMIT,
+        "the first drain should still deliver a full batch, processed {capped}"
+    );
+    assert_eq!(
+        uncapped, 60,
+        "with the cap off the whole backlog drains, processed {uncapped}"
+    );
+    assert!(
+        capped < uncapped,
+        "the cap must throttle resends relative to the default ({capped} vs {uncapped})"
+    );
+}
