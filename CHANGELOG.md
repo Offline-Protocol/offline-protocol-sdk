@@ -13,6 +13,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ## [Unreleased]
 
+### Changed
+
+- **The Python internet send loop is now activity-adaptive.** The relay bridge
+  drained the core's outbox on a fixed 100 ms tick, so a reply to an inbound
+  frame waited out most of a tick before leaving, and that wait dominated a
+  warm round trip. An inbound frame now wakes the send loop immediately, a
+  drain that moved frames re-drains at event-loop speed, and an empty drain
+  backs off exponentially (2 ms doubling up to the unchanged 100 ms idle
+  interval). A warm round trip drops from ~100 ms to single-digit
+  milliseconds, with no standing busy-poll and no change to quiet-link cost.
+  Python only; the Swift and Kotlin managers keep the fixed tick for now
+  (see [docs/bridges/python.md](docs/bridges/python.md#p7-the-internet-send-loop-is-adaptive-here-and-fixed-elsewhere)). (#421)
+
 ### Fixed
 
 - **Internet-only providers no longer flap a relay's rate limiter into a
