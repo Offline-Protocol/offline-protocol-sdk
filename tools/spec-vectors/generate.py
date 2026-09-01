@@ -127,6 +127,9 @@ B64_ALPHABET = set(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 )
 
+# The identifier cap from the validation table in docs/spec/wire-format.md.
+MAX_ID_LEN = 256
+
 
 def uuid_bytes(text: str) -> bytes:
     raw = bytes.fromhex(text.replace("-", ""))
@@ -258,8 +261,8 @@ def encode_frame(m: dict) -> bytes:
         ext.append((EXT_TAG_REPLY_CONTEXT, m["reply_context_json"].encode("utf-8")))
 
     metadata = sorted(
-        (k, v) for k, v in m.get("metadata", {}).items()
-    )  # byte-wise on UTF-8 keys; see note below
+        m.get("metadata", {}).items(), key=lambda kv: kv[0].encode("utf-8")
+    )  # byte-wise on the UTF-8 keys; see the note below on why the key is explicit
 
     body = b"".join(
         [
@@ -295,16 +298,41 @@ def encode_frame(m: dict) -> bytes:
     return bytes([WIRE_V1_MAGIC]) + body
 
 
-# Python sorts str by code point; the spec orders by UTF-8 bytes. The two
-# agree for every key below, and the sort is asserted to be byte-equivalent
-# rather than assumed: a key above U+FFFF would separate them.
-def _assert_sort_is_byte_wise(keys: list[str]) -> None:
-    by_codepoint = sorted(keys)
-    by_bytes = sorted(keys, key=lambda k: k.encode("utf-8"))
-    if by_codepoint != by_bytes:
+# The order that actually disagrees with the spec's.
+#
+# UTF-8 byte order and code-point order are the same order for every valid
+# string: UTF-8 is constructed so that comparing encoded bytes yields the
+# comparison of the scalar values. So a generator sorting by either is correct,
+# and asserting one against the other would assert a theorem. The sort above
+# passes the key explicitly anyway, so that it reads as the rule the chapter
+# states rather than as a Python default that happens to coincide with it.
+#
+# UTF-16 code-unit order is a different order, and it is the default string
+# comparison in Java, JavaScript and C#. Surrogates occupy U+D800..U+DFFF, so a
+# character above U+FFFF leads with a code unit *below* every character in
+# U+E000..U+FFFF, and the two orders invert a pair drawn from those ranges. That
+# is the divergence a second implementation ships, and the vectors below carry a
+# case chosen to expose it.
+def _utf16_code_units(text: str) -> list[int]:
+    raw = text.encode("utf-16-le")
+    return [int.from_bytes(raw[i : i + 2], "little") for i in range(0, len(raw), 2)]
+
+
+def _assert_distinguishes_utf16_order(keys: list[str]) -> None:
+    """Refuses a key set that byte order and UTF-16 code-unit order agree on.
+
+    A case whose keys sort the same way under both orders cannot catch an
+    implementation using the wrong one, and every key set chosen without
+    checking is that kind of set. This is the metadata analogue of the searched
+    address pairs in `_ordering_cases`.
+    """
+    if sorted(keys, key=lambda k: k.encode("utf-8")) == sorted(
+        keys, key=_utf16_code_units
+    ):
         raise AssertionError(
-            "a metadata key set orders differently by code point and by UTF-8 "
-            "bytes; the generator must sort by bytes"
+            f"the keys {keys} sort identically under UTF-8 byte order and "
+            "UTF-16 code-unit order, so this case cannot catch an "
+            "implementation that uses the second one"
         )
 
 
@@ -512,7 +540,6 @@ def message(**kw) -> dict:
 
 def frame_case(name: str, note: str, encoder_specific: bool = False, **kw) -> dict:
     m = message(**kw)
-    _assert_sort_is_byte_wise(list(m["metadata"].keys()))
     case = {
         "name": name,
         "message": m,
@@ -527,6 +554,13 @@ def frame_case(name: str, note: str, encoder_specific: bool = False, **kw) -> di
 def build_wire_vectors() -> dict:
     b64_tail = b64_encode(bytes(range(48)))  # 64 canonical base64 characters
     assert len(b64_tail) == 64
+
+    # A fullwidth capital A (U+FF21) and a grinning face (U+1F600). By UTF-8
+    # bytes, and so by code point, the fullwidth A sorts first. By UTF-16 code
+    # units the emoji leads with 0xD83D, below the fullwidth A's 0xFF21, so it
+    # sorts first instead. The assertion below is what keeps the pair honest.
+    utf16_keys = {"Ａ": "bmp", "\U0001f600": "astral"}
+    _assert_distinguishes_utf16_order(list(utf16_keys))
 
     frames = [
         frame_case(
@@ -556,10 +590,16 @@ def build_wire_vectors() -> dict:
             timestamp_ms=1700000000000,
         ),
         frame_case(
-            "the largest and smallest instants",
+            "the smallest instant",
             "i64::MIN. Zigzag maps it to u64::MAX, the longest varint a frame "
             "can carry: ten bytes.",
             timestamp_ms=-(2**63),
+        ),
+        frame_case(
+            "the largest instant",
+            "i64::MAX. Zigzag maps it to u64::MAX - 1, also ten bytes, and the "
+            "two extremes differ in the final byte alone.",
+            timestamp_ms=2**63 - 1,
         ),
         frame_case(
             "non-ASCII sender and content",
@@ -567,6 +607,15 @@ def build_wire_vectors() -> dict:
             "content is 4 characters and 10 bytes.",
             sender="ünïcode",
             content="héllo→",
+        ),
+        frame_case(
+            "an identifier at the cap is accepted",
+            f"Exactly {MAX_ID_LEN} bytes, which is the largest identifier this "
+            "version accepts; one more is refused below. The length prefix is "
+            "the first two-byte varint most frames ever carry, so an "
+            "implementation that wrote it as a single byte encodes every "
+            "shorter identifier correctly and this one not at all.",
+            sender="x" * MAX_ID_LEN,
         ),
         frame_case(
             "metadata is emitted sorted",
@@ -579,6 +628,19 @@ def build_wire_vectors() -> dict:
             "A key that is a prefix of another sorts first, and the empty "
             "value is length 0 rather than absent.",
             metadata={"ack_for": "x", "ack_for_more": "", "ack": "y"},
+        ),
+        frame_case(
+            "metadata order is UTF-8 bytes, not UTF-16 code units",
+            "U+FF21 is emitted before U+1F600, because that is their order by "
+            "UTF-8 bytes and therefore by code point. Comparing UTF-16 code "
+            "units inverts them: a character above U+FFFF leads with a "
+            "surrogate in U+D800..U+DFFF, below every character in "
+            "U+E000..U+FFFF. That is the default string comparison in Java, "
+            "JavaScript and C#, so this is the one metadata case an "
+            "implementation in those languages fails by writing the obvious "
+            "sort. Every other case here has ASCII keys, which is exactly the "
+            "blind spot that ships this bug.",
+            metadata=utf16_keys,
         ),
         frame_case(
             "every option present",
@@ -744,12 +806,12 @@ def build_wire_vectors() -> dict:
                 "decoder refuses it rather than guessing.",
             },
             {
-                "name": "an identifier past the 256-byte cap",
-                "hex": raw_frame(sender="x" * 257).hex(),
+                "name": f"an identifier past the {MAX_ID_LEN}-byte cap",
+                "hex": raw_frame(sender="x" * (MAX_ID_LEN + 1)).hex(),
                 "reason": "identifier too long",
-                "note": "The cap is enforced identically on both encodings. A "
-                "binary path that skipped it would be a way around a check the "
-                "JSON path makes.",
+                "note": "One byte over the accepted case above. The cap is "
+                "enforced identically on both encodings; a binary path that "
+                "skipped it would be a way around a check the JSON path makes.",
             },
             {
                 "name": "a truncated frame",
@@ -1123,13 +1185,16 @@ def build_envelope_vectors() -> dict:
             ),
         ],
         "json_disambiguation": {
-            "note": "A legacy JSON envelope begins `{\"`, which read as a "
-            "little-endian u32 group_id length is 8827, above the 4096 cap. "
-            "The compact parser therefore rejects it deterministically and the "
-            "caller falls through to JSON. This is why the two forms need no "
-            "version byte between them.",
+            "note": "A legacy JSON envelope begins `{\"`. Read as a "
+            "little-endian u32 group_id length, those two bytes are the low "
+            "half of the value, so the declared length is 8827 plus whatever "
+            "the next two bytes contribute: 8827 is its minimum, not its "
+            "value, and every JSON body is at or above it. The cap is 4096, so "
+            "the compact parser rejects the whole class deterministically and "
+            "the caller falls through to JSON. This is why the two forms need "
+            "no version byte between them.",
             "prefix_utf8": '{"',
-            "as_le_u32": 8827,
+            "min_as_le_u32": 8827,
             "exceeds_max_string_field_len": True,
         },
     }

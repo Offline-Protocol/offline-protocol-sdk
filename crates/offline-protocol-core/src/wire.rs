@@ -870,7 +870,7 @@ mod spec_vectors {
     fn the_vector_file_is_the_size_it_was() {
         let v = vectors();
         assert_eq!(v["magic"], "f5");
-        assert_eq!(v["frames"].as_array().expect("frames").len(), 15);
+        assert_eq!(v["frames"].as_array().expect("frames").len(), 18);
         assert_eq!(v["decode_only"].as_array().expect("decode_only").len(), 6);
         assert_eq!(v["rejects"].as_array().expect("rejects").len(), 5);
     }
@@ -933,6 +933,28 @@ mod spec_vectors {
             assert_eq!(got.metadata, want.metadata, "[{name}] metadata");
             assert_eq!(got.requires_ack, want.requires_ack, "[{name}] requires_ack");
             assert_eq!(got.reply_to_msg, want.reply_to_msg, "[{name}] reply_to_msg");
+            // The three that ride as embedded JSON. Their *bytes* are not
+            // pinned by this suite, because they evolve under their own
+            // additive rules rather than the frozen wire contract, but a
+            // decoder that dropped one on the way back would otherwise pass
+            // every assertion here while losing the field.
+            //
+            // `MediaMetadata` carries no `PartialEq`, so it is compared as
+            // serialized bytes, which is what the round-trip tests above this
+            // module do for the same reason.
+            assert_eq!(
+                serde_json::to_vec(&got.media_metadata).expect("it serializes"),
+                serde_json::to_vec(&want.media_metadata).expect("it serializes"),
+                "[{name}] media_metadata"
+            );
+            assert_eq!(
+                got.forwarded_from, want.forwarded_from,
+                "[{name}] forwarded_from"
+            );
+            assert_eq!(
+                got.reply_context, want.reply_context,
+                "[{name}] reply_context"
+            );
         }
     }
 
@@ -1044,6 +1066,11 @@ mod spec_vectors {
             "varint",
             "little-endian base 128",
             "no length prefix",
+            // The metadata order. Byte order and code-point order are the same
+            // order, so the only way to state this rule usefully is to name the
+            // order that differs, and a future trim that drops the warning
+            // leaves the surviving text true and useless.
+            "UTF-16 code-unit order",
         ] {
             assert!(
                 text.contains(required),

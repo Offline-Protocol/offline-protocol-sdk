@@ -770,8 +770,15 @@ mod spec_vectors {
         let v = vectors();
         let case = &v["json_disambiguation"];
         let prefix = case["prefix_utf8"].as_str().expect("a prefix");
-        let declared = case["as_le_u32"].as_u64().expect("the length it reads as");
+        let declared = case["min_as_le_u32"]
+            .as_u64()
+            .expect("the smallest length it can read as");
 
+        // The prefix is the low half of the little-endian length, so the two
+        // bytes that follow it can only raise the value. Zeroing them is the
+        // floor of the class, and the floor is what has to clear the cap: a
+        // check written against one particular continuation would say nothing
+        // about the JSON bodies that do not start that way.
         let mut probe = prefix.as_bytes().to_vec();
         probe.extend_from_slice(&[0u8; 2]);
         assert_eq!(
@@ -779,6 +786,14 @@ mod spec_vectors {
             declared,
             "the vector's arithmetic no longer describes what a decoder reads"
         );
+        for tail in [[0x00, 0x00], [0x67, 0x22], [0xff, 0xff]] {
+            let mut probe = prefix.as_bytes().to_vec();
+            probe.extend_from_slice(&tail);
+            assert!(
+                u32::from_le_bytes(probe[..4].try_into().expect("four bytes")) as u64 >= declared,
+                "the vector calls {declared} a minimum, but a continuation read below it"
+            );
+        }
         assert!(
             declared > MAX_STRING_FIELD_LEN as u64,
             "a JSON body no longer overflows the cap, so the two forms are \

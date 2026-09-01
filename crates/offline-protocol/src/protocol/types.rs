@@ -2346,15 +2346,36 @@ mod spec_vector_index_tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
-    /// The two documents that index the vectors.
+    /// The one vector file that is not a conformance surface for a chapter of
+    /// this specification.
+    ///
+    /// The NIP-44 vectors are the upstream specification's own, vendored for
+    /// the Nostr carrier's sealing and pinned to the checksum that
+    /// specification publishes. `spec/README.md` lists them anyway, with that
+    /// stated in place of a chapter, because a reader who finds the file in the
+    /// tree needs to know why it is different. `spec/conformance.md` does not,
+    /// because its table is the set of surfaces this specification defines, and
+    /// a row for someone else's vectors would make that table mean something
+    /// looser.
+    ///
+    /// Named here rather than left as a silent one-way check, because an
+    /// exemption a test does not state is indistinguishable from a test that
+    /// was never finished.
+    const NOT_A_CHAPTER_SURFACE: &str = "nip44.vectors.json";
+
+    /// The two documents that index the vectors, and what each is not required
+    /// to name.
     ///
     /// `spec/README.md` is the table of contents a reader lands on;
     /// `spec/conformance.md` repeats the list with the direction each file
     /// pins. The duplication is deliberate, because a conformance chapter that
     /// sent the reader elsewhere for the list of what to test against would be
-    /// missing its own subject. Both are checked, so the duplication cannot
-    /// become a disagreement.
-    const INDEXES: [&str; 2] = ["docs/spec/README.md", "docs/spec/conformance.md"];
+    /// missing its own subject. Both are checked in both directions, so the
+    /// duplication cannot become a disagreement.
+    const INDEXES: [(&str, &[&str]); 2] = [
+        ("docs/spec/README.md", &[]),
+        ("docs/spec/conformance.md", &[NOT_A_CHAPTER_SURFACE]),
+    ];
 
     /// One index document, or `None` where the repo tree is absent:
     /// `cargo package` cannot carry `docs/`, so a published crate's tests must
@@ -2369,7 +2390,7 @@ mod spec_vector_index_tests {
     /// Every vector file either index names exists.
     #[test]
     fn every_indexed_vector_file_exists() {
-        for doc in INDEXES {
+        for (doc, _) in INDEXES {
             let Some(text) = index(doc) else { return };
 
             let mut named = 0;
@@ -2398,10 +2419,6 @@ mod spec_vector_index_tests {
     /// undocumented.
     #[test]
     fn every_vector_file_in_the_tree_is_indexed() {
-        let Some(text) = index(INDEXES[0]) else {
-            return;
-        };
-
         let mut found = Vec::new();
         for crate_dir in std::fs::read_dir(repo().join("crates")).expect("crates/") {
             let data = crate_dir.expect("an entry").path().join("tests/data");
@@ -2440,12 +2457,19 @@ mod spec_vector_index_tests {
             !found.is_empty(),
             "no vector files were found, so this test proves nothing"
         );
-        for path in found {
-            assert!(
-                text.contains(&path),
-                "{path} is a conformance surface that docs/spec/README.md does \
-                 not list, so nobody outside this repository knows it exists"
-            );
+
+        for (doc, exempt) in INDEXES {
+            let Some(text) = index(doc) else { return };
+            for path in &found {
+                if exempt.iter().any(|name| path.ends_with(name)) {
+                    continue;
+                }
+                assert!(
+                    text.contains(path),
+                    "{path} is a conformance surface that {doc} does not list, \
+                     so nobody outside this repository knows it exists"
+                );
+            }
         }
     }
 }

@@ -122,7 +122,7 @@
       "note": "1700000000000 ms. Zigzag doubles it, so this is the multi-byte signed case a fleet actually sends."
     },
     {
-      "name": "the largest and smallest instants",
+      "name": "the smallest instant",
       "message": {
         "id": "00000000-0000-0000-0000-000000000000",
         "sender": "a",
@@ -145,6 +145,31 @@
       },
       "hex": "f500000000000000000000000000000000016101620163010800ffffffffffffffffff0100000000000001000000",
       "note": "i64::MIN. Zigzag maps it to u64::MAX, the longest varint a frame can carry: ten bytes."
+    },
+    {
+      "name": "the largest instant",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "a",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": 9223372036854775807,
+        "lamport_clock": 0,
+        "content_type": "text",
+        "content": "",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {},
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": null
+      },
+      "hex": "f500000000000000000000000000000000016101620163010800feffffffffffffffff0100000000000001000000",
+      "note": "i64::MAX. Zigzag maps it to u64::MAX - 1, also ten bytes, and the two extremes differ in the final byte alone."
     },
     {
       "name": "non-ASCII sender and content",
@@ -170,6 +195,31 @@
       },
       "hex": "f50000000000000000000000000000000009c3bc6ec3af636f6465016201630108000000000968c3a96c6c6fe2869200000001000000",
       "note": "Lengths are counted in UTF-8 bytes, never in characters. The content is 4 characters and 10 bytes."
+    },
+    {
+      "name": "an identifier at the cap is accepted",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": 0,
+        "lamport_clock": 0,
+        "content_type": "text",
+        "content": "",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {},
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": null
+      },
+      "hex": "f500000000000000000000000000000000800278787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878016201630108000000000000000001000000",
+      "note": "Exactly 256 bytes, which is the largest identifier this version accepts; one more is refused below. The length prefix is the first two-byte varint most frames ever carry, so an implementation that wrote it as a single byte encodes every shorter identifier correctly and this one not at all."
     },
     {
       "name": "metadata is emitted sorted",
@@ -228,6 +278,34 @@
       },
       "hex": "f500000000000000000000000000000000016101620163010800000000000000030361636b01790761636b5f666f7201780c61636b5f666f725f6d6f72650001000000",
       "note": "A key that is a prefix of another sorts first, and the empty value is length 0 rather than absent."
+    },
+    {
+      "name": "metadata order is UTF-8 bytes, not UTF-16 code units",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "a",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": 0,
+        "lamport_clock": 0,
+        "content_type": "text",
+        "content": "",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {
+          "Ａ": "bmp",
+          "😀": "astral"
+        },
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": null
+      },
+      "hex": "f5000000000000000000000000000000000161016201630108000000000000000203efbca103626d7004f09f98800661737472616c01000000",
+      "note": "U+FF21 is emitted before U+1F600, because that is their order by UTF-8 bytes and therefore by code point. Comparing UTF-16 code units inverts them: a character above U+FFFF leads with a surrogate in U+D800..U+DFFF, below every character in U+E000..U+FFFF. That is the default string comparison in Java, JavaScript and C#, so this is the one metadata case an implementation in those languages fails by writing the obvious sort. Every other case here has ASCII keys, which is exactly the blind spot that ships this bug."
     },
     {
       "name": "every option present",
@@ -479,7 +557,7 @@
       "name": "an identifier past the 256-byte cap",
       "hex": "f50000000000000000000000000000000081027878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878016201630108000000000000000001000000",
       "reason": "identifier too long",
-      "note": "The cap is enforced identically on both encodings. A binary path that skipped it would be a way around a check the JSON path makes."
+      "note": "One byte over the accepted case above. The cap is enforced identically on both encodings; a binary path that skipped it would be a way around a check the JSON path makes."
     },
     {
       "name": "a truncated frame",

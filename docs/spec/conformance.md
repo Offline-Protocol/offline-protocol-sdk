@@ -11,10 +11,12 @@ disagree without noticing. The vector files are the same formats as bytes.
 ## The two profiles
 
 An implementation conforms as one of two profiles. They differ almost entirely
-in what they must *emit*, with exactly one exception, which is the last row of
-the table: a leaf refuses the v1 control payload where a full node accepts it.
-That row is the only place in this specification where being smaller makes a
-requirement stricter, and
+in what they must *emit*. The exception is the control payload, which is two
+rows of the table below (`ctrl_versions` and the v1 payload on other control
+frames) because it is one rule with two halves: a leaf verifies only
+`offline-ctrl-v2`, so it MUST advertise `2` and MUST refuse the older payload
+where a full node may accept it. That pair is the only place in this
+specification where being smaller makes a requirement stricter, and
 [the leaf profile](capability-negotiation.md#the-leaf-profile) explains why it
 is affordable there and nowhere else.
 
@@ -28,7 +30,7 @@ is affordable there and nowhere else.
 | Emits the compact envelope | Only to a peer advertising `env_versions` `1` | Same |
 | Advertises `ctrl_versions` containing `2` | SHOULD | MUST |
 | Accepts `__MLS_KEY_PKG__` signed under `offline-ctrl-v1` | MUST | MUST |
-| Accepts the v1 payload on other control frames | MAY | MUST NOT, after first contact |
+| Accepts the v1 payload on other control frames | MAY, until that peer proves v2 | MUST NOT |
 | Replicates documents | MAY | MAY |
 
 Two rows are easy to get backwards, and both are stated where they belong
@@ -46,11 +48,29 @@ rather than inferred here:
   above is a restriction on the sender. No row anywhere in this table lets an
   implementation refuse a form on the grounds that it did not advertise it.
 
+Two more, on the control payload rows, because the qualifiers there are doing
+work:
+
+- **A leaf refuses the v1 payload unconditionally, not after some first
+  exchange.** First contact is already covered by the row above it: a
+  `__MLS_KEY_PKG__` frame under the v1 payload MUST be accepted by everyone,
+  which is what lets a peer that has never seen this device's `ctrl_versions`
+  reach it at all. Every *other* control frame a leaf receives MUST carry the v2
+  payload from the first one onward. A first-contact exemption on those frames
+  would be unauthenticatable, since nothing in a frame proves that it is the
+  first, so any sender could claim it indefinitely.
+- **A full node's MAY expires per peer.** It is not a standing permission: a
+  verifier that has once verified a v2 signature from a peer MUST record that
+  durably and refuse that peer's v1 control frames from then on, `__MLS_KEY_PKG__`
+  excepted
+  ([the downgrade ratchet](control-messages.md#2-negotiation-and-the-downgrade-ratchet)).
+  Without the record, an attacker replays a capture made before the peer
+  upgraded and the freshness binding is side-stepped.
+
 The leaf profile is described in full in
 [Capability negotiation](capability-negotiation.md#the-leaf-profile) and
-[Leaf node provisioning](leaf-provisioning.md). The one row where a leaf is
-*stricter* than a full node is `ctrl_versions`, and the reason is stated there:
-it is the only capability whose floor a leaf cannot accept.
+[Leaf node provisioning](leaf-provisioning.md), which states why `ctrl_versions`
+is the one capability whose floor a leaf cannot accept.
 
 ## What every implementation owes
 
@@ -102,7 +122,13 @@ are computed independently of that code.
 `tools/spec-vectors/generate.py` is a second implementation of these encodings,
 written from the chapters and forbidden from importing, linking against or
 shelling out to the Rust crates it pins. Running it with `--check` regenerates
-every file and fails on any difference, which is what CI does.
+the six files it owns (every row above except document replication and Bluetooth
+LE framing) and fails on any difference, which is what CI does.
+
+Those two remaining files predate the generator and were computed by hand from
+their chapters, as each says in its own header. They carry the same independence
+claim and the same rule below about what a failure means; what they do not have
+is a job that reproduces them, so the claim rests on review.
 
 The claim that buys is narrower than "independent", and it is worth stating
 exactly rather than letting a reader assume the stronger version: **the values
@@ -127,7 +153,9 @@ speaks the old bytes.
 If the vector is genuinely the thing that is wrong, the correction lands in
 `tools/spec-vectors/generate.py` and in the chapter together, and the diff shows
 a rule changing rather than a number changing. A change to a vector file alone
-is not a legitimate diff.
+is not a legitimate diff. For the two hand-computed files there is no generator
+to change, so the chapter edit is the whole of the justification and the review
+is where it has to hold up.
 
 ### What the vectors deliberately do not cover
 

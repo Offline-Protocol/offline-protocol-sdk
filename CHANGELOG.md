@@ -26,7 +26,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   produced frames this protocol cannot decode, misaligned from the first varint
   onward. The chapter now carries a normative primitive-encoding table, states
   the identifier and Lamport-clock bounds as numbers, and says that metadata
-  keys sort byte-wise on their UTF-8 rather than by code point.
+  keys sort byte-wise on their UTF-8, which is the same order as by code point
+  but not the order a Java, JavaScript or C# string comparison produces above
+  U+FFFF.
   Conformance vectors now cover the binary frame, address derivation and
   parsing, the session slot, the two control-plane canonical signing payloads,
   the compact MLS envelope, and the key package payload's parse behaviour. They

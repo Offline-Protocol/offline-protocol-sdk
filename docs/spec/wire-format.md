@@ -224,9 +224,20 @@ Three deliberate choices in that layout:
 - **The metadata map is sorted by key.** A hash map iterates
   nondeterministically, which would make the encoding non-reproducible. The
   order is a byte-wise comparison of the UTF-8 keys, so it depends on neither a
-  locale nor a Unicode collation table. Sorting decoded code points instead
-  agrees for ASCII keys and diverges above it, which is the shape of bug that
-  ships because every test key was ASCII.
+  locale nor a Unicode collation table. Comparing code points instead is the
+  same order for every valid string, because UTF-8 is constructed so that the
+  two never disagree, and an implementation may use either.
+
+  **UTF-16 code-unit order is a different order, and it is the one to watch.**
+  It is the default string comparison in Java (`String.compareTo`), JavaScript
+  (`<` on strings) and C# (ordinal). Surrogates occupy U+D800..U+DFFF, so a
+  character above U+FFFF leads with a code unit below every character in
+  U+E000..U+FFFF: the two orders invert any pair drawn from those ranges. An
+  implementation in one of those languages MUST compare the encoded UTF-8 bytes
+  (or the code points) rather than reaching for the built-in comparison. This is
+  the shape of bug that ships because every test key was ASCII, where all three
+  orders coincide, and
+  [the vectors](conformance.md#the-vectors) carry a case chosen to expose it.
 
 #### Why a separate DTO
 
