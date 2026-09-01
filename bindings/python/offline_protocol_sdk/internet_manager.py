@@ -25,14 +25,7 @@ logger = logging.getLogger(__name__)
 
 # -- Constants (matching iOS InternetManager.swift) ---------------------------
 
-_MESSAGE_POLL_INTERVAL = 0.1  # idle poll, 100 ms
-# Activity-adaptive send polling. For a short window after any inbound frame or
-# outbound drain the send loop polls tightly, so an asynchronously-queued reply
-# ships in a few ms instead of waiting a full idle interval; when genuinely idle
-# it relaxes back to _MESSAGE_POLL_INTERVAL to keep CPU near zero. This gives low
-# latency under load without a fixed busy-poll.
-_SEND_HOT_WINDOW = 0.5  # stay "hot" this long after activity (seconds)
-_SEND_HOT_INTERVAL = 0.002  # 2 ms poll while hot
+_MESSAGE_POLL_INTERVAL = 0.1  # idle send poll, 100 ms
 _RECONNECT_INITIAL_DELAY = 1.0  # seconds
 _RECONNECT_MAX_DELAY = 30.0
 _RECONNECT_BACKOFF_MULTIPLIER = 2.0
@@ -44,6 +37,18 @@ _MAX_CONCURRENT_SENDS = 50
 # In-flight tracker tuning (mirrors iOS/Android RecipientInFlightTracker).
 _RIFT_TTL_MS = 60_000
 _RIFT_MAX_PER_RECIPIENT = 32
+
+# -- Constants (Python only) --------------------------------------------------
+# The send loop here is activity-adaptive (see _poll_outgoing_loop); the
+# Swift/Kotlin managers still poll at the fixed _MESSAGE_POLL_INTERVAL.
+
+# Floor of the send loop's backoff ramp: the wait after activity, doubling on
+# every quiet pass until it reaches _MESSAGE_POLL_INTERVAL.
+_SEND_MIN_POLL_INTERVAL = 0.002  # 2 ms
+# The in-flight sweep in _poll_and_send_messages was sized for the old fixed
+# 10 Hz tick; the adaptive loop can drain at event-loop speed during a burst,
+# so the sweep is gated back to that original cadence.
+_PRUNE_MIN_INTERVAL_MS = 100
 
 
 class _RecipientInFlightTracker:
@@ -205,9 +210,6 @@ class InternetManager(TransportManager):
 
         # Event loop — captured in start() for thread-safe scheduling
         self._loop: asyncio.AbstractEventLoop | None = None
-        # Monotonic timestamp of the last send/recv activity, driving the
-        # activity-adaptive send poll (see _poll_outgoing_loop).
-        self._last_activity: float = 0.0
 
         # Async tasks
         self._recv_task: asyncio.Task[None] | None = None
@@ -219,9 +221,16 @@ class InternetManager(TransportManager):
         # weak task table cannot GC them mid-execution.
         self._process_tasks: set[asyncio.Task[None]] = set()
         self._send_semaphore: asyncio.Semaphore = asyncio.Semaphore(_MAX_CONCURRENT_SENDS)
+        # Set by the receive loop on every inbound frame; the send loop waits
+        # on it, so a reply the core queued while handling that frame ships
+        # immediately instead of waiting out a poll interval.
+        self._send_wake: asyncio.Event = asyncio.Event()
         # Correlates the relay's recipient-keyed DeliveryError back to in-flight
         # sends (parity with the iOS/Android bridges).
         self._inflight = _RecipientInFlightTracker()
+        # Gate for the tracker sweep in _poll_and_send_messages (see
+        # _PRUNE_MIN_INTERVAL_MS).
+        self._last_prune_ms: int = 0
         self._reconnect_handle: asyncio.TimerHandle | None = None
 
         # Re-entrancy guard for `_handle_connection_closed`. Set synchronously
@@ -689,11 +698,12 @@ class InternetManager(TransportManager):
                 else:
                     data = raw.encode("utf-8")
                 self._bytes_received += len(data)
-                # An inbound frame is likely to produce an outbound reply soon
-                # (the handler queues it, possibly from a worker thread). Mark
-                # the transport "hot" so the send loop polls tightly and picks
-                # that reply up in a few ms rather than a full idle interval.
-                self._last_activity = time.monotonic()
+                # Wake the send loop before dispatch: the handlers below feed
+                # the core synchronously, so by the time the send loop runs,
+                # any reply this frame produces is typically already queued.
+                # Replies queued later (from a worker thread) are covered by
+                # the loop's backoff ramp re-arming from its floor.
+                self._send_wake.set()
                 self._process_received(data)
         except websockets.ConnectionClosed:
             await self._handle_connection_closed(None)
@@ -1020,28 +1030,66 @@ class InternetManager(TransportManager):
     async def _poll_outgoing_loop(self) -> None:
         """Drain the core's outbound queue, adaptively.
 
-        The old form slept a fixed _MESSAGE_POLL_INTERVAL between every drain, so
-        a reply queued just after a tick waited up to a full interval per
-        direction (the dominant single-call latency under load). Instead, when a
-        drain moved at least one frame, yield and re-drain immediately so a burst
-        empties at event-loop speed; only sleep when the queue came back empty,
-        and then only briefly for a short window after recent activity, relaxing
-        to the full idle interval once genuinely quiet. When the send-concurrency
-        semaphore is saturated the drain reports 0 (no free slots), so the loop
-        sleeps rather than busy-spinning.
+        The core outbox is poll-only across the FFI, so some poll cadence is
+        unavoidable. A fixed cadence puts up to a full interval in front of
+        every frame (the dominant single-call latency), while a standing tight
+        poll burns CPU on a quiet link. Three rules bound both costs:
+
+        * A drain that moved frames re-drains after one yield, so a burst
+          empties at event-loop speed.
+        * An empty drain waits on ``_send_wake`` (set by the receive loop on
+          every inbound frame) with a timeout that doubles from
+          ``_SEND_MIN_POLL_INTERVAL`` up to ``_MESSAGE_POLL_INTERVAL``. The
+          wake ships a reply within milliseconds of the frame that provoked
+          it; the doubling covers replies queued slightly later (from a
+          worker thread) and converges to one poll per idle interval when
+          the link is genuinely quiet.
+        * When the send-concurrency slots are saturated the drain reports 0
+          without touching the FFI, so backpressure ramps the wait up
+          instead of busy-spinning; the next drain that moves frames resets
+          it to the floor.
+
+        A locally-queued send with no inbound trigger still waits at most one
+        idle interval, exactly as it did when the cadence was fixed.
         """
         try:
+            delay = _MESSAGE_POLL_INTERVAL
             while self._connected and self._authenticated:
+                self._send_wake.clear()
                 drained = self._poll_and_send_messages()
                 if drained > 0:
-                    self._last_activity = time.monotonic()
+                    # Yield once so the send tasks just created get scheduled,
+                    # then re-drain immediately.
+                    delay = _SEND_MIN_POLL_INTERVAL
                     await asyncio.sleep(0)
-                elif time.monotonic() - self._last_activity < _SEND_HOT_WINDOW:
-                    await asyncio.sleep(_SEND_HOT_INTERVAL)
-                else:
-                    await asyncio.sleep(_MESSAGE_POLL_INTERVAL)
+                    continue
+                woken = await self._wait_for_send_wake(delay)
+                delay = self._next_send_delay(delay, active=woken)
         except asyncio.CancelledError:
             return
+
+    async def _wait_for_send_wake(self, timeout: float) -> bool:
+        """Wait until an inbound frame wakes the send loop, or *timeout* passes.
+
+        Returns True when woken (activity), False on a quiet timeout.
+        """
+        try:
+            await asyncio.wait_for(self._send_wake.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+        return True
+
+    @staticmethod
+    def _next_send_delay(prev: float, active: bool) -> float:
+        """The send loop's next wait timeout after one empty drain pass.
+
+        Activity (an inbound-frame wake) resets the ramp to the floor so an
+        imminently-queued reply is picked up within a few ms; each quiet pass
+        doubles the wait, capped at the idle interval.
+        """
+        if active:
+            return _SEND_MIN_POLL_INTERVAL
+        return min(prev * 2.0, _MESSAGE_POLL_INTERVAL)
 
     def _poll_and_send_messages(self) -> int:
         """Drain outgoing messages from the protocol and send them.
@@ -1050,10 +1098,16 @@ class InternetManager(TransportManager):
         prevent unbounded task creation when the protocol core has a large
         outbox.  Remaining messages will be picked up on the next poll tick.
         Returns the number of frames drained this call so the caller can
-        re-drain immediately under load instead of sleeping a fixed interval.
+        re-drain immediately under load instead of waiting a fixed interval.
         """
-        # Drop in-flight tracker entries older than the TTL each tick.
-        self._inflight.prune(self._now_ms())
+        # Drop in-flight tracker entries older than the TTL. Time-gated: the
+        # adaptive send loop calls this at event-loop speed during a burst,
+        # and the sweep, which walks every tracked recipient, was sized for
+        # the old fixed 10 Hz tick.
+        now_ms = self._now_ms()
+        if now_ms - self._last_prune_ms >= _PRUNE_MIN_INTERVAL_MS:
+            self._inflight.prune(now_ms)
+            self._last_prune_ms = now_ms
 
         # Limit to available concurrency slots to avoid creating thousands
         # of tasks that all block on the semaphore.

@@ -1094,12 +1094,20 @@ class TestDeliveryErrorRecipientKeyed:
         assert "stuck" in failed
 
 
-class TestAdaptiveSendDrain:
-    """Pins the drain-until-empty contract the activity-adaptive send loop relies
-    on: _poll_and_send_messages must report how many frames it moved so the loop
-    can re-drain immediately under load and relax only when the queue is empty.
-    """
+# ---------------------------------------------------------------------------
+# The activity-adaptive send loop. Every piece of the policy is pinned here:
+# the drain-count contract, the backoff ramp, the inbound-frame wake, and the
+# saturation guard. A revert of any piece must fail one of these tests, not a
+# latency measurement.
+# ---------------------------------------------------------------------------
+from offline_protocol_sdk.internet_manager import (
+    _MAX_CONCURRENT_SENDS,
+    _MESSAGE_POLL_INTERVAL,
+    _SEND_MIN_POLL_INTERVAL,
+)
 
+
+class TestAdaptiveSendLoop:
     @pytest.mark.asyncio
     async def test_poll_returns_drained_count(self, mock_protocol: MagicMock) -> None:
         mgr = InternetManager(mock_protocol, "dev-1")
@@ -1115,3 +1123,109 @@ class TestAdaptiveSendDrain:
         mgr._send_message = AsyncMock()  # type: ignore[method-assign]
         mock_protocol.internet_get_next_message = MagicMock(return_value=None)
         assert mgr._poll_and_send_messages() == 0, "empty queue drains nothing (loop then relaxes)"
+
+    def test_saturated_slots_report_zero_without_touching_the_ffi(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        # With every concurrency slot occupied the drain must not call into
+        # the core at all: the loop's backoff then paces the retry, so
+        # saturation cannot become a busy-spin against the FFI.
+        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr._send_tasks = {MagicMock() for _ in range(_MAX_CONCURRENT_SENDS)}
+        assert mgr._poll_and_send_messages() == 0
+        mock_protocol.internet_get_next_message.assert_not_called()
+
+    def test_delay_resets_to_the_floor_on_activity(self) -> None:
+        assert (
+            InternetManager._next_send_delay(_MESSAGE_POLL_INTERVAL, active=True)
+            == _SEND_MIN_POLL_INTERVAL
+        )
+
+    def test_delay_doubles_when_quiet_and_caps_at_the_idle_interval(self) -> None:
+        delays = []
+        d = _SEND_MIN_POLL_INTERVAL
+        for _ in range(8):
+            d = InternetManager._next_send_delay(d, active=False)
+            delays.append(d)
+        assert delays == [
+            pytest.approx(x)
+            for x in [0.004, 0.008, 0.016, 0.032, 0.064, 0.1, 0.1, 0.1]
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_burst_redrains_immediately_then_ramps_down(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr._connected = True
+        mgr._authenticated = True
+        waits: list[float] = []
+        drains = [2, 0, 0, 0, 0]
+
+        def fake_drain() -> int:
+            if not drains:
+                mgr._connected = False  # end the loop
+                return 0
+            return drains.pop(0)
+
+        async def fake_wait(timeout: float) -> bool:
+            waits.append(timeout)
+            return False
+
+        mgr._poll_and_send_messages = MagicMock(side_effect=fake_drain)  # type: ignore[method-assign]
+        mgr._wait_for_send_wake = fake_wait  # type: ignore[method-assign]
+        await mgr._poll_outgoing_loop()
+        # The drain that moved frames slept 0 (no wait recorded); the empty
+        # drains after it ramp up from the floor.
+        assert waits == [
+            pytest.approx(x) for x in [0.002, 0.004, 0.008, 0.016, 0.032]
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_wake_resets_the_ramp_and_quiet_stays_at_idle(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr._connected = True
+        mgr._authenticated = True
+        waits: list[float] = []
+        wake_results = [False, True, False]
+
+        async def fake_wait(timeout: float) -> bool:
+            waits.append(timeout)
+            if len(wake_results) == 1:
+                mgr._connected = False  # end the loop
+            return wake_results.pop(0)
+
+        mgr._poll_and_send_messages = MagicMock(return_value=0)  # type: ignore[method-assign]
+        mgr._wait_for_send_wake = fake_wait  # type: ignore[method-assign]
+        await mgr._poll_outgoing_loop()
+        # Quiet at the idle interval stays there (no unbounded growth); the
+        # wake drops the very next wait to the floor.
+        assert waits == [pytest.approx(x) for x in [0.1, 0.1, 0.002]]
+
+    @pytest.mark.asyncio
+    async def test_an_inbound_frame_wakes_the_send_loop(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1")
+
+        class _OneFrameWS:
+            def __init__(self) -> None:
+                self._frames = [json.dumps({"type": "SomethingUnknown"}).encode()]
+
+            def __aiter__(self) -> "_OneFrameWS":
+                return self
+
+            async def __anext__(self) -> bytes:
+                if not self._frames:
+                    raise StopAsyncIteration
+                return self._frames.pop(0)
+
+        mgr._ws = _OneFrameWS()  # type: ignore[assignment]
+        assert not mgr._send_wake.is_set()
+        await mgr._receive_loop()
+        assert mgr._send_wake.is_set(), (
+            "every inbound frame must wake the send loop; the reply the core "
+            "queues while handling it would otherwise wait out a poll interval"
+        )

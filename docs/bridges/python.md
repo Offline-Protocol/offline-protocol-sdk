@@ -95,6 +95,35 @@ root, and if it pointed documents at a separate backend, call
 tombstones, so a wipe on a running engine with live sessions is undone by the
 peer's next version offer, which recreates and refills every document.
 
+## P7. The internet send loop is adaptive here, and fixed elsewhere
+
+The core's internet outbox is poll-only across the FFI in every binding. The
+Swift and Kotlin managers drain it on a fixed 100 ms tick. The Python manager
+(`internet_manager.py`) drains it adaptively: an inbound frame wakes the send
+loop immediately, a drain that moved frames re-drains at event-loop speed, and
+an empty drain backs off exponentially from 2 ms to the shared 100 ms idle
+interval.
+
+The invariant both shapes preserve: a locally queued message waits at most one
+idle interval, and a quiet link costs at most one poll per interval. What the
+adaptive shape adds is that a reply to an inbound frame does not pay the poll
+interval at all, which at 100 ms was most of a warm round trip.
+
+Two consequences worth knowing before touching it:
+
+- The policy is pinned by `TestAdaptiveSendLoop` in
+  `tests/test_internet_manager.py`, not by a latency measurement. Change the
+  tests with the policy, or a revert ships silently.
+- The in-flight tracker sweep inside `_poll_and_send_messages` is gated to the
+  old 10 Hz cadence (`_PRUNE_MIN_INTERVAL_MS`). The gate exists because the
+  adaptive loop can call the drain at event-loop speed during a burst, and the
+  sweep walks every tracked recipient; without the gate a burst turns into a
+  sweep storm.
+
+Porting the adaptive shape to Swift and Kotlin is intended eventually. Until
+then the latency profiles differ by design: a warm Python round trip is
+milliseconds, while the mobile bridges pay up to one tick per direction.
+
 ## Testing
 
 ```bash
