@@ -1,0 +1,111 @@
+{
+  "_comment": [
+    "Conformance vectors for the key package payload described in",
+    "docs/spec/capability-negotiation.md, the body of a",
+    "__MLS_KEY_PKG__ frame.",
+    "",
+    "These pin the PARSE direction only. The JSON floor is not a",
+    "byte-normative encoding: docs/spec/wire-format.md requires a",
+    "receiver to accept both spellings of every optional field, so",
+    "pinning an exact serialization here would assert a contract the",
+    "spec deliberately does not make. What a second implementation owes",
+    "is that these bodies parse to these values.",
+    "",
+    "The emission example is illustrative and is not asserted."
+  ],
+  "parse": [
+    {
+      "name": "a payload from a peer that predates every capability",
+      "json": "{\"user_id\":\"off1abc\",\"key_package_data\":[1,2,3]}",
+      "expect": {
+        "user_id": "off1abc",
+        "key_package_data": [
+          1,
+          2,
+          3
+        ],
+        "remaining_lifetime_ms": 0,
+        "timestamp_ms": 0,
+        "session_reset": false,
+        "wire_versions": [],
+        "env_versions": [],
+        "rich_versions": [],
+        "data_versions": [],
+        "ctrl_versions": [],
+        "nostr_pubkey": null
+      },
+      "note": "Every absent list defaults to empty, and empty selects the floor. This is rule 2 of capability negotiation expressed as a parse: absence is never an error."
+    },
+    {
+      "name": "a fully capable peer",
+      "json": "{\"user_id\":\"off1abc\",\"key_package_data\":[],\"remaining_lifetime_ms\":2419200000,\"timestamp_ms\":1700000000000,\"session_reset\":true,\"wire_versions\":[1],\"env_versions\":[1],\"rich_versions\":[1],\"data_versions\":[1,2,3],\"ctrl_versions\":[2],\"nostr_pubkey\":\"abcd\"}",
+      "expect": {
+        "user_id": "off1abc",
+        "key_package_data": [],
+        "remaining_lifetime_ms": 2419200000,
+        "timestamp_ms": 1700000000000,
+        "session_reset": true,
+        "wire_versions": [
+          1
+        ],
+        "env_versions": [
+          1
+        ],
+        "rich_versions": [
+          1
+        ],
+        "data_versions": [
+          1,
+          2,
+          3
+        ],
+        "ctrl_versions": [
+          2
+        ],
+        "nostr_pubkey": "abcd"
+      },
+      "note": "data_versions entries are read independently, so [1,2,3] is not a single level."
+    },
+    {
+      "name": "a field this version does not know",
+      "json": "{\"user_id\":\"off1abc\",\"key_package_data\":[],\"a_field_from_a_later_release\":42}",
+      "expect": {
+        "user_id": "off1abc",
+        "key_package_data": [],
+        "remaining_lifetime_ms": 0,
+        "timestamp_ms": 0,
+        "session_reset": false,
+        "wire_versions": [],
+        "env_versions": [],
+        "rich_versions": [],
+        "data_versions": [],
+        "ctrl_versions": [],
+        "nostr_pubkey": null
+      },
+      "note": "An unknown field is ignored rather than refused. A decoder that rejects it cannot be sent a newer key package, which is the frame that carries every other capability."
+    },
+    {
+      "name": "an explicit null nostr key",
+      "json": "{\"user_id\":\"off1abc\",\"key_package_data\":[],\"nostr_pubkey\":null}",
+      "expect": {
+        "user_id": "off1abc",
+        "key_package_data": [],
+        "remaining_lifetime_ms": 0,
+        "timestamp_ms": 0,
+        "session_reset": false,
+        "wire_versions": [],
+        "env_versions": [],
+        "rich_versions": [],
+        "data_versions": [],
+        "ctrl_versions": [],
+        "nostr_pubkey": null
+      },
+      "note": "Absent and null mean the same thing on the way in. On the way out the field is omitted rather than written null."
+    }
+  ],
+  "emission_is_not_pinned": {
+    "note": "Illustrative only. A conforming peer parses this; it is not required to produce these bytes, and this file does not assert that it does.",
+    "example": "{\"user_id\":\"off1abc\",\"key_package_data\":[],\"remaining_lifetime_ms\":0,\"timestamp_ms\":0,\"session_reset\":false,\"wire_versions\":[],\"env_versions\":[],\"rich_versions\":[],\"data_versions\":[],\"ctrl_versions\":[]}",
+    "nostr_pubkey_absent_is_omitted_not_null": true
+  }
+}

@@ -662,3 +662,162 @@ mod tests {
         assert_eq!(MlsMessageType::from_u8(4), None);
     }
 }
+
+/// The frozen conformance vectors for the compact MLS envelope.
+///
+/// The chapter these pin is `docs/spec/encryption-envelopes.md`. They were
+/// computed by `tools/spec-vectors/generate.py` from the layout stated there,
+/// not by running [`EncryptedMessage::to_bytes`].
+///
+/// Every multi-byte integer here is little-endian, which is the opposite of the
+/// canonical signing payloads in the same protocol. That is deliberate, it is
+/// the single easiest thing in this codebase to get backwards, and these
+/// vectors are what catches it.
+#[cfg(all(test, feature = "std"))]
+mod spec_vectors {
+    use super::*;
+
+    const VECTORS: &str = include_str!("../tests/data/mls-envelope-v1.vectors.json");
+
+    fn vectors() -> serde_json::Value {
+        serde_json::from_str(VECTORS).expect("the vector file is JSON")
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex digit"))
+            .collect()
+    }
+
+    fn envelope_from(spec: &serde_json::Value) -> EncryptedMessage {
+        EncryptedMessage {
+            group_id: GroupId::new(spec["group_id"].as_str().expect("a group id"))
+                .expect("a valid group id"),
+            sender_id: spec["sender_id"].as_str().expect("a sender").to_string(),
+            message_type: match spec["message_type"].as_str().expect("a type") {
+                "application" => MlsMessageType::Application,
+                "welcome" => MlsMessageType::Welcome,
+                "commit" => MlsMessageType::Commit,
+                "proposal" => MlsMessageType::Proposal,
+                other => panic!("the vector names a message type that does not exist: {other}"),
+            },
+            epoch: spec["epoch"].as_u64().expect("an epoch"),
+            timestamp_ms: spec["timestamp_ms"].as_u64().expect("a timestamp"),
+            ciphertext: unhex(spec["ciphertext_hex"].as_str().expect("a ciphertext")),
+        }
+    }
+
+    /// Asserts the file still carries what it carried, before anything iterates
+    /// it: a loop over an array a bad merge emptied passes by not running.
+    #[test]
+    fn the_vector_file_is_the_size_it_was() {
+        let v = vectors();
+        assert_eq!(v["envelopes"].as_array().expect("envelopes").len(), 6);
+        assert_eq!(v["max_string_field_len"], MAX_STRING_FIELD_LEN);
+    }
+
+    #[test]
+    fn every_envelope_encodes_to_its_vector() {
+        for case in vectors()["envelopes"].as_array().expect("envelopes") {
+            let name = case["name"].as_str().expect("a name");
+            assert_eq!(
+                hex(&envelope_from(&case["envelope"]).to_bytes()),
+                case["hex"].as_str().expect("expected hex"),
+                "[{name}] encoded to different bytes than the chapter specifies"
+            );
+        }
+    }
+
+    /// Every vector decodes back into the envelope it was built from.
+    ///
+    /// Encoding alone would pass for a codec whose decoder disagreed with it,
+    /// which is the shape a positional format fails in: a swapped pair of
+    /// same-width fields round-trips against itself perfectly and interoperates
+    /// with nothing.
+    #[test]
+    fn every_vector_decodes_back_into_its_envelope() {
+        for case in vectors()["envelopes"].as_array().expect("envelopes") {
+            let name = case["name"].as_str().expect("a name");
+            let want = envelope_from(&case["envelope"]);
+            let got = EncryptedMessage::from_bytes(&unhex(case["hex"].as_str().expect("hex")))
+                .unwrap_or_else(|e| panic!("[{name}] did not decode: {e}"));
+
+            assert_eq!(
+                got.group_id.as_str(),
+                want.group_id.as_str(),
+                "[{name}] group_id"
+            );
+            assert_eq!(got.sender_id, want.sender_id, "[{name}] sender_id");
+            assert_eq!(got.message_type, want.message_type, "[{name}] message_type");
+            assert_eq!(got.epoch, want.epoch, "[{name}] epoch");
+            assert_eq!(got.timestamp_ms, want.timestamp_ms, "[{name}] timestamp_ms");
+            assert_eq!(got.ciphertext, want.ciphertext, "[{name}] ciphertext");
+        }
+    }
+
+    /// A JSON envelope is refused by the compact parser deterministically.
+    ///
+    /// This is what lets the two forms share a prefix with no version byte
+    /// between them, so it is a property the wire depends on rather than an
+    /// implementation detail.
+    #[test]
+    fn a_json_body_is_refused_by_the_compact_parser() {
+        let v = vectors();
+        let case = &v["json_disambiguation"];
+        let prefix = case["prefix_utf8"].as_str().expect("a prefix");
+        let declared = case["as_le_u32"].as_u64().expect("the length it reads as");
+
+        let mut probe = prefix.as_bytes().to_vec();
+        probe.extend_from_slice(&[0u8; 2]);
+        assert_eq!(
+            u32::from_le_bytes(probe[..4].try_into().expect("four bytes")) as u64,
+            declared,
+            "the vector's arithmetic no longer describes what a decoder reads"
+        );
+        assert!(
+            declared > MAX_STRING_FIELD_LEN as u64,
+            "a JSON body no longer overflows the cap, so the two forms are \
+             ambiguous and the fallback is a guess"
+        );
+
+        let json = br#"{"group_id":"session:a:b","ciphertext":[1,2,3]}"#;
+        assert!(
+            EncryptedMessage::from_bytes(json).is_err(),
+            "the compact parser accepted a JSON envelope"
+        );
+    }
+
+    /// The chapter, or `None` where the repo tree is absent: `cargo package`
+    /// carries `tests/` and the vector file but cannot carry `docs/`.
+    fn chapter() -> Option<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/spec/encryption-envelopes.md");
+        std::fs::read_to_string(&path).ok().or_else(|| {
+            eprintln!("spec tree not present, skipping the envelope chapter drift checks");
+            None
+        })
+    }
+
+    #[test]
+    fn the_chapter_states_the_layout_the_code_writes() {
+        let Some(text) = chapter() else { return };
+
+        for required in [
+            "u32le len(group_id)",
+            "u8    message_type",
+            "u64le epoch",
+            "All integers are little-endian",
+        ] {
+            assert!(
+                text.contains(required),
+                "the chapter no longer states {required:?}, without which the \
+                 envelope cannot be implemented from it"
+            );
+        }
+    }
+}

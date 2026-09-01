@@ -769,3 +769,304 @@ mod tests {
         assert_eq!(encode(&wire).unwrap(), expected);
     }
 }
+
+/// The frozen conformance vectors for the binary wire v1 frame.
+///
+/// The chapter these pin is `docs/spec/wire-format.md`. The vectors were
+/// computed from the primitive encoding table in that chapter by
+/// `tools/spec-vectors/generate.py`, a second implementation that never reads
+/// this crate, rather than by running the codec below: a vector generated from
+/// `encode` would agree with any format this crate happened to emit, including
+/// a wrong one.
+///
+/// When one of these fails the wire format has changed. That needs a new magic
+/// byte and a negotiated version, not an edited expectation: editing the
+/// expected value to make a test pass converts a caught break into a shipped
+/// one.
+#[cfg(all(test, feature = "std"))]
+mod spec_vectors {
+    use super::*;
+    use crate::types::LAMPORT_CLOCK_MAX;
+    use crate::{AppId, ContentType, MessageId, MessagePriority, Timestamp, UserId, MAX_ID_LEN};
+    use crate::{HopCount, LamportClock, Message, ReplyContext, TTL};
+
+    const VECTORS: &str = include_str!("../tests/data/wire-v1.vectors.json");
+
+    fn vectors() -> serde_json::Value {
+        serde_json::from_str(VECTORS).expect("the vector file is JSON")
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        assert!(s.len() % 2 == 0, "hex has an even length");
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex digit"))
+            .collect()
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Builds the message a `frames` case describes.
+    ///
+    /// Every field is taken from the vector rather than defaulted, so a field
+    /// the generator stops emitting fails here instead of silently encoding
+    /// this crate's own default on both sides of the comparison.
+    fn message_from(spec: &serde_json::Value) -> Message {
+        let s = |k: &str| spec[k].as_str().expect("a string field").to_string();
+        let mut m = Message::from_parts(
+            MessageId::from_str(&s("id")).expect("a uuid"),
+            UserId::new(s("sender")).expect("a sender"),
+            UserId::new(s("recipient")).expect("a recipient"),
+            AppId::new(s("app_id")).expect("an app id"),
+            s("content"),
+            Timestamp::from_millis(spec["timestamp_ms"].as_i64().expect("an instant")),
+        );
+
+        m.priority = match spec["priority"].as_str().expect("a priority") {
+            "low" => MessagePriority::Low,
+            "medium" => MessagePriority::Medium,
+            "high" => MessagePriority::High,
+            "critical" => MessagePriority::Critical,
+            other => panic!("the vector names a priority that does not exist: {other}"),
+        };
+        m.ttl = TTL::from_value(spec["ttl"].as_u64().expect("a ttl") as u8);
+        m.hop_count = HopCount::from_value(spec["hop_count"].as_u64().expect("a hop count") as u8);
+        m.lamport_clock =
+            LamportClock::from_value(spec["lamport_clock"].as_u64().expect("a lamport clock"));
+        m.content_type = ContentType::parse(spec["content_type"].as_str().expect("a content type"));
+        m.requires_ack = spec["requires_ack"].as_bool().expect("requires_ack");
+
+        if let Some(h) = spec["binary_content_hex"].as_str() {
+            m.binary_content = Some(unhex(h));
+        }
+        if let Some(j) = spec["media_metadata_json"].as_str() {
+            m.media_metadata = Some(serde_json::from_str(j).expect("media metadata"));
+        }
+        if let Some(j) = spec["forwarded_from_json"].as_str() {
+            m.forwarded_from = Some(serde_json::from_str(j).expect("forward attribution"));
+        }
+        if let Some(j) = spec["reply_context_json"].as_str() {
+            m.reply_context = Some(serde_json::from_str::<ReplyContext>(j).expect("reply context"));
+        }
+        if let Some(id) = spec["reply_to_msg"].as_str() {
+            m.reply_to_msg = Some(MessageId::from_str(id).expect("a reply id"));
+        }
+        for (k, v) in spec["metadata"].as_object().expect("a metadata map") {
+            m.metadata
+                .insert(k.clone(), v.as_str().expect("a metadata value").to_string());
+        }
+        m
+    }
+
+    /// Asserts the file still carries what it carried, before anything iterates
+    /// it.
+    ///
+    /// Every test below loops over an array, and a loop over an array that a
+    /// bad merge emptied passes by not running. This is the only assertion here
+    /// that fails when the file is truncated rather than wrong.
+    #[test]
+    fn the_vector_file_is_the_size_it_was() {
+        let v = vectors();
+        assert_eq!(v["magic"], "f5");
+        assert_eq!(v["frames"].as_array().expect("frames").len(), 15);
+        assert_eq!(v["decode_only"].as_array().expect("decode_only").len(), 6);
+        assert_eq!(v["rejects"].as_array().expect("rejects").len(), 5);
+    }
+
+    #[test]
+    fn every_frame_encodes_to_its_vector() {
+        for case in vectors()["frames"].as_array().expect("frames") {
+            let name = case["name"].as_str().expect("a name");
+            let encoded = message_from(&case["message"])
+                .to_wire_v1_bytes()
+                .unwrap_or_else(|e| panic!("[{name}] did not encode: {e}"));
+            assert_eq!(
+                hex(&encoded),
+                case["hex"].as_str().expect("expected hex"),
+                "[{name}] encoded to different bytes than the chapter specifies"
+            );
+        }
+    }
+
+    /// Every frame vector decodes back into the message it was built from.
+    ///
+    /// Encoding alone would pass for a codec whose decoder disagreed with it,
+    /// which is the shape a positional format fails in: a reordered field
+    /// round-trips against itself perfectly.
+    #[test]
+    fn every_frame_decodes_back_into_its_message() {
+        for case in vectors()["frames"].as_array().expect("frames") {
+            let name = case["name"].as_str().expect("a name");
+            let want = message_from(&case["message"]);
+            let got = Message::from_wire_v1_bytes(&unhex(case["hex"].as_str().expect("hex")))
+                .unwrap_or_else(|e| panic!("[{name}] did not decode: {e}"));
+
+            assert_eq!(got.id, want.id, "[{name}] id");
+            assert_eq!(got.sender, want.sender, "[{name}] sender");
+            assert_eq!(got.recipient, want.recipient, "[{name}] recipient");
+            assert_eq!(got.app_id, want.app_id, "[{name}] app_id");
+            assert_eq!(got.priority, want.priority, "[{name}] priority");
+            assert_eq!(got.ttl.value(), want.ttl.value(), "[{name}] ttl");
+            assert_eq!(
+                got.hop_count.value(),
+                want.hop_count.value(),
+                "[{name}] hop_count"
+            );
+            assert_eq!(
+                got.timestamp.as_millis(),
+                want.timestamp.as_millis(),
+                "[{name}] timestamp"
+            );
+            assert_eq!(
+                got.lamport_clock.value(),
+                want.lamport_clock.value(),
+                "[{name}] lamport_clock"
+            );
+            assert_eq!(got.content_type, want.content_type, "[{name}] content_type");
+            assert_eq!(got.content, want.content, "[{name}] content");
+            assert_eq!(
+                got.binary_content, want.binary_content,
+                "[{name}] binary_content"
+            );
+            assert_eq!(got.metadata, want.metadata, "[{name}] metadata");
+            assert_eq!(got.requires_ack, want.requires_ack, "[{name}] requires_ack");
+            assert_eq!(got.reply_to_msg, want.reply_to_msg, "[{name}] reply_to_msg");
+        }
+    }
+
+    /// The cases no conforming encoder of this version can produce.
+    ///
+    /// An unknown discriminant is what a *later* sender emits, so these can
+    /// only be pinned from the wire inward.
+    #[test]
+    fn decode_only_vectors_decode_as_specified() {
+        for case in vectors()["decode_only"].as_array().expect("decode_only") {
+            let name = case["name"].as_str().expect("a name");
+            let got = Message::from_wire_v1_bytes(&unhex(case["hex"].as_str().expect("hex")))
+                .unwrap_or_else(|e| panic!("[{name}] did not decode: {e}"));
+            let expect = &case["expect"];
+
+            if let Some(want) = expect["content_type"].as_str() {
+                assert_eq!(
+                    got.content_type.as_wire_str(),
+                    want,
+                    "[{name}] content_type"
+                );
+            }
+            if let Some(want) = expect["priority"].as_str() {
+                let got = match got.priority {
+                    MessagePriority::Low => "low",
+                    MessagePriority::Medium => "medium",
+                    MessagePriority::High => "high",
+                    MessagePriority::Critical => "critical",
+                };
+                assert_eq!(got, want, "[{name}] priority");
+            }
+            if let Some(want) = expect["lamport_clock"].as_u64() {
+                assert_eq!(got.lamport_clock.value(), want, "[{name}] lamport_clock");
+            }
+            if let Some(want) = expect["content"].as_str() {
+                assert_eq!(got.content, want, "[{name}] content");
+            }
+        }
+    }
+
+    #[test]
+    fn reject_vectors_are_refused() {
+        for case in vectors()["rejects"].as_array().expect("rejects") {
+            let name = case["name"].as_str().expect("a name");
+            let reason = case["reason"].as_str().expect("a reason");
+            let bytes = unhex(case["hex"].as_str().expect("hex"));
+            assert!(
+                Message::from_wire_v1_bytes(&bytes).is_err(),
+                "[{name}] was accepted, but the chapter refuses it: {reason}"
+            );
+        }
+    }
+
+    /// The chapter, or `None` where the repo tree is absent.
+    ///
+    /// Read at runtime rather than with `include_str!` because the chapter
+    /// lives outside the package root: `cargo package` carries `tests/` and the
+    /// vector file but cannot carry `docs/`, so compiling the path in would
+    /// leave the published crate's tests unable to build at all.
+    fn chapter() -> Option<String> {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/spec/wire-format.md");
+        std::fs::read_to_string(&path).ok().or_else(|| {
+            eprintln!("spec tree not present, skipping the wire-format chapter drift checks");
+            None
+        })
+    }
+
+    /// The chapter states the constants this code uses.
+    ///
+    /// This is the drift that would otherwise leave a correct implementation
+    /// reading a stale document, which is worse than no document: the reader
+    /// has no reason to doubt it.
+    #[test]
+    fn the_chapter_states_the_constants_the_code_uses() {
+        let Some(text) = chapter() else { return };
+
+        assert!(
+            text.contains(&format!("`0x{:02X}` | Binary wire v1", WIRE_V1_MAGIC)),
+            "the chapter's encoding-detection table does not state the magic byte as 0x{WIRE_V1_MAGIC:02X}"
+        );
+        assert!(
+            text.contains(&format!(
+                "{B64_TAIL_MIN_LEN} base64 characters"
+            )),
+            "the chapter does not state the {B64_TAIL_MIN_LEN}-character minimum for the tag 1 split"
+        );
+        assert!(
+            text.contains(&format!("`{MAX_ID_LEN}`"))
+                || text.contains(&format!("{MAX_ID_LEN}-byte")),
+            "the chapter does not state the {MAX_ID_LEN}-byte identifier cap"
+        );
+    }
+
+    /// The chapter states the primitive encoding at all.
+    ///
+    /// This is the omission the vectors exist because of: the field-order block
+    /// alone reads as fixed-width to anyone who has not seen the codec, and an
+    /// implementation built from it is misaligned from the first varint. A
+    /// future edit that trims the table back to field order would restore that
+    /// gap silently, so the presence of each rule is asserted rather than
+    /// assumed.
+    #[test]
+    fn the_chapter_states_how_a_primitive_becomes_bytes() {
+        let Some(text) = chapter() else { return };
+
+        for required in [
+            "Zigzag",
+            "varint",
+            "little-endian base 128",
+            "no length prefix",
+        ] {
+            assert!(
+                text.contains(required),
+                "the binary chapter no longer states {required:?}, without which \
+                 the field-order block cannot be implemented"
+            );
+        }
+    }
+
+    /// The clamp the decode vectors rely on is the one the type enforces.
+    #[test]
+    fn the_lamport_clamp_the_vectors_pin_is_the_types_own() {
+        let v = vectors();
+        let case = v["decode_only"]
+            .as_array()
+            .expect("decode_only")
+            .iter()
+            .find(|c| c["expect"]["lamport_clock"].is_u64())
+            .expect("a clamp vector");
+        assert_eq!(
+            case["expect"]["lamport_clock"].as_u64().expect("a clamp"),
+            LAMPORT_CLOCK_MAX,
+            "the vector pins a ceiling the type does not enforce"
+        );
+    }
+}

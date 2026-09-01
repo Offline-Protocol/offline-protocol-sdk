@@ -1,0 +1,491 @@
+{
+  "_comment": [
+    "Frozen conformance vectors for the binary wire v1 frame described",
+    "in docs/spec/wire-format.md. `hex` is the whole frame including",
+    "the 0xF5 magic byte.",
+    "",
+    "Computed from the primitive encoding table in that chapter, not by",
+    "running the codec they pin: a vector generated from the encoder",
+    "would agree with any format it happened to emit, including a wrong",
+    "one.",
+    "",
+    "A case marked `encoder_specific` pins a choice the reference",
+    "encoder makes that the wire does not require. A second",
+    "implementation is bound by the decode direction of those cases,",
+    "not by the exact bytes.",
+    "",
+    "If one of these fails the wire format has changed. That needs a new",
+    "magic byte and a negotiated version, not an edited expectation:",
+    "editing the expected value converts a caught break into a shipped",
+    "one."
+  ],
+  "magic": "f5",
+  "frames": [
+    {
+      "name": "minimal frame",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "a",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": 0,
+        "lamport_clock": 0,
+        "content_type": "text",
+        "content": "",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {},
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": null
+      },
+      "hex": "f5000000000000000000000000000000000161016201630108000000000000000001000000",
+      "note": "Every optional field absent, every list empty. The id is 16 raw bytes with no length prefix; the trailing five zero bytes are binary_content, media_metadata, metadata, reply_to_msg, forwarded_from and ext in that order."
+    },
+    {
+      "name": "multi-byte varints",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "a",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": 0,
+        "lamport_clock": 300,
+        "content_type": "text",
+        "content": "",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {},
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": null
+      },
+      "hex": "f50000000000000000000000000000000001610162016301080000ac02000000000001000000",
+      "note": "lamport_clock 300 is 0xAC 0x02 and not a fixed-width u64. A decoder reading eight bytes here consumes the rest of the frame."
+    },
+    {
+      "name": "negative timestamp",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "a",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": -1,
+        "lamport_clock": 0,
+        "content_type": "text",
+        "content": "",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {},
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": null
+      },
+      "hex": "f5000000000000000000000000000000000161016201630108000100000000000001000000",
+      "note": "Zigzag sends -1 to 1, so the field is one byte. A decoder reading eight big-endian bytes reads a wildly wrong instant and stays misaligned for every field after it."
+    },
+    {
+      "name": "a real instant",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "a",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": 1700000000000,
+        "lamport_clock": 0,
+        "content_type": "text",
+        "content": "",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {},
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": null
+      },
+      "hex": "f50000000000000000000000000000000001610162016301080080a0abfef96200000000000001000000",
+      "note": "1700000000000 ms. Zigzag doubles it, so this is the multi-byte signed case a fleet actually sends."
+    },
+    {
+      "name": "the largest and smallest instants",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "a",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": -9223372036854775808,
+        "lamport_clock": 0,
+        "content_type": "text",
+        "content": "",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {},
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": null
+      },
+      "hex": "f500000000000000000000000000000000016101620163010800ffffffffffffffffff0100000000000001000000",
+      "note": "i64::MIN. Zigzag maps it to u64::MAX, the longest varint a frame can carry: ten bytes."
+    },
+    {
+      "name": "non-ASCII sender and content",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "ünïcode",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": 0,
+        "lamport_clock": 0,
+        "content_type": "text",
+        "content": "héllo→",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {},
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": null
+      },
+      "hex": "f50000000000000000000000000000000009c3bc6ec3af636f6465016201630108000000000968c3a96c6c6fe2869200000001000000",
+      "note": "Lengths are counted in UTF-8 bytes, never in characters. The content is 4 characters and 10 bytes."
+    },
+    {
+      "name": "metadata is emitted sorted",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "a",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": 0,
+        "lamport_clock": 0,
+        "content_type": "text",
+        "content": "",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {
+          "zebra": "3",
+          "apple": "1",
+          "mango": "2"
+        },
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": null
+      },
+      "hex": "f50000000000000000000000000000000001610162016301080000000000000003056170706c650131056d616e676f0132057a65627261013301000000",
+      "note": "Supplied as zebra, apple, mango; emitted apple, mango, zebra. A receiver never sees the sender's map order."
+    },
+    {
+      "name": "metadata sorts by UTF-8 bytes",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "a",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": 0,
+        "lamport_clock": 0,
+        "content_type": "text",
+        "content": "",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {
+          "ack_for": "x",
+          "ack_for_more": "",
+          "ack": "y"
+        },
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": null
+      },
+      "hex": "f500000000000000000000000000000000016101620163010800000000000000030361636b01790761636b5f666f7201780c61636b5f666f725f6d6f72650001000000",
+      "note": "A key that is a prefix of another sorts first, and the empty value is length 0 rather than absent."
+    },
+    {
+      "name": "every option present",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "a",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": 0,
+        "lamport_clock": 0,
+        "content_type": "text",
+        "content": "",
+        "binary_content_hex": "deadbeef",
+        "media_metadata_json": "{\"mime_type\":\"image/png\",\"file_name\":\"a.png\",\"file_size\":3}",
+        "metadata": {},
+        "requires_ack": true,
+        "reply_to_msg": "0102030a-0b0c-0d0e-0f10-111213141516",
+        "forwarded_from_json": "{\"original_sender\":\"z\",\"original_message_id\":\"3f2504e0-4f89-11d3-9a0c-0305e82c3301\",\"original_timestamp\":1700000000000,\"forward_count\":1}",
+        "reply_context_json": null
+      },
+      "hex": "f500000000000000000000000000000000016101620163010800000000000104deadbeef013b7b226d696d655f74797065223a22696d6167652f706e67222c2266696c655f6e616d65223a22612e706e67222c2266696c655f73697a65223a337d0001010102030a0b0c0d0e0f101112131415160189017b226f726967696e616c5f73656e646572223a227a222c226f726967696e616c5f6d6573736167655f6964223a2233663235303465302d346638392d313164332d396130632d303330356538326333333031222c226f726967696e616c5f74696d657374616d70223a313730303030303030303030302c22666f72776172645f636f756e74223a317d00",
+      "note": "binary_content, media_metadata, reply_to_msg and forwarded_from all take the 0x01 discriminant. Only reply_to_msg is fixed-width after it."
+    },
+    {
+      "name": "every priority and a non-text content type",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "a",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "critical",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": 0,
+        "lamport_clock": 0,
+        "content_type": "poll",
+        "content": "",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {},
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": null
+      },
+      "hex": "f5000000000000000000000000000000000161016201630308000000080000000001000000",
+      "note": "priority Critical is 3 and content_type Poll is 8, both single raw bytes rather than varints."
+    },
+    {
+      "name": "ttl and hop_count are raw bytes",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "a",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 255,
+        "hop_count": 255,
+        "timestamp_ms": 0,
+        "lamport_clock": 0,
+        "content_type": "text",
+        "content": "",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {},
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": null
+      },
+      "hex": "f50000000000000000000000000000000001610162016301ffff0000000000000001000000",
+      "note": "Both are u8 and neither is a varint, so 255 is one byte here where a varint would need two."
+    },
+    {
+      "name": "a base64 tail rides the ext TLV",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "a",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": 0,
+        "lamport_clock": 0,
+        "content_type": "text",
+        "content": "see AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {},
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": null
+      },
+      "hex": "f5000000000000000000000000000000000161016201630108000000000473656520000000010000010130000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "note": "The 64-character canonical tail is carried decoded under tag 1 and the wire content keeps only the head. Where the reference encoder splits is not normative: a conforming encoder may split elsewhere or not at all, because the decode vectors are what bind. What is pinned here is that the split reconstructs exactly.",
+      "encoder_specific": true
+    },
+    {
+      "name": "a 63-character base64 tail is left alone",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "a",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": 0,
+        "lamport_clock": 0,
+        "content_type": "text",
+        "content": "see AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {},
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": null
+      },
+      "hex": "f500000000000000000000000000000000016101620163010800000000437365652041414543417751464267634943516f4c4441304f4478415245684d554652595847426b6147787764486838674953496a4a43556d4a7967704b6973734c533400000001000000",
+      "note": "One character below the 64-character minimum, so no split is taken and the content rides whole."
+    },
+    {
+      "name": "a reply context rides the ext TLV",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "a",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": 0,
+        "lamport_clock": 0,
+        "content_type": "text",
+        "content": "",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {},
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": "{\"sender\":\"a\",\"text\":\"hi\"}"
+      },
+      "hex": "f5000000000000000000000000000000000161016201630108000000000000000001000001021a7b2273656e646572223a2261222c2274657874223a226869227d",
+      "note": "Tag 2 carries the quoted-reply preview as JSON. A decoder that skips it delivers the message without its preview."
+    },
+    {
+      "name": "both ext tags, in order",
+      "message": {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "sender": "a",
+        "recipient": "b",
+        "app_id": "c",
+        "priority": "medium",
+        "ttl": 8,
+        "hop_count": 0,
+        "timestamp_ms": 0,
+        "lamport_clock": 0,
+        "content_type": "text",
+        "content": "see AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v",
+        "binary_content_hex": null,
+        "media_metadata_json": null,
+        "metadata": {},
+        "requires_ack": true,
+        "reply_to_msg": null,
+        "forwarded_from_json": null,
+        "reply_context_json": "{\"sender\":\"a\",\"text\":\"hi\"}"
+      },
+      "hex": "f5000000000000000000000000000000000161016201630108000000000473656520000000010000020130000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f021a7b2273656e646572223a2261222c2274657874223a226869227d",
+      "note": "Tag 1 precedes tag 2 when the encoder emits both.",
+      "encoder_specific": true
+    }
+  ],
+  "decode_only": [
+    {
+      "name": "an unrecognised content type degrades to File",
+      "hex": "f5000000000000000000000000000000000161016201630108000000090000000001000000",
+      "expect": {
+        "content_type": "file"
+      },
+      "note": "Discriminant 9 is not defined by this version. It degrades rather than rejecting the containing message, so a later variant does not make a frame undeliverable. A decoder built from a derived enum deserializer refuses this and does not conform."
+    },
+    {
+      "name": "an unrecognised priority degrades to Medium",
+      "hex": "f5000000000000000000000000000000000161016201630708000000000000000001000000",
+      "expect": {
+        "priority": "medium"
+      },
+      "note": "The numeric form tolerates an unknown value. The JSON floor does not, which is why a new priority is a breaking change there and has to be designed around."
+    },
+    {
+      "name": "an adversarial Lamport clock is clamped",
+      "hex": "f50000000000000000000000000000000001610162016301080000ffffffffffffffffff01000000000001000000",
+      "expect": {
+        "lamport_clock": 9223372036854775807
+      },
+      "note": "u64::MAX clamps to u64::MAX/2. The clamp is a security check, not a convenience: an unclamped peer clock parks every later message behind it forever. The binary path enforces the identical set of checks the JSON path does."
+    },
+    {
+      "name": "a base64 tail is reconstructed byte for byte",
+      "hex": "f5000000000000000000000000000000000161016201630108000000000473656520000000010000010130000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "expect": {
+        "content": "see AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v"
+      },
+      "note": "This is the normative half of tag 1. A decoder re-encodes the carried bytes and appends them, reconstructing the sender's string exactly."
+    },
+    {
+      "name": "an unknown ext tag is ignored",
+      "hex": "f500000000000000000000000000000000016101620163010800000000026869000000010000010702dead",
+      "expect": {
+        "content": "hi"
+      },
+      "note": "Tag 7 is not in the registry. Skipping it is what lets a tag be added to v1 at all, and it is why a tag whose absence changes meaning cannot be added to v1."
+    },
+    {
+      "name": "only the first tag 1 entry is honoured",
+      "hex": "f5000000000000000000000000000000000161016201630108000000000473656520000000010000020130000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f0103ffffff",
+      "expect": {
+        "content": "see AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v"
+      },
+      "note": "A second entry is surplus, not a second append. Concatenating them would let a hostile frame extend content past what the sender signed."
+    }
+  ],
+  "rejects": [
+    {
+      "name": "a JSON document is not a v1 frame",
+      "hex": "7b0a",
+      "reason": "wrong magic byte",
+      "note": "0x7B opens JSON. Detection is by first byte alone and needs no negotiation, which is the property that lets the two encodings share a transport."
+    },
+    {
+      "name": "an empty buffer",
+      "hex": "",
+      "reason": "no magic byte"
+    },
+    {
+      "name": "a magic byte from a version that does not exist yet",
+      "hex": "f600",
+      "reason": "wrong magic byte",
+      "note": "0xF6 is reserved for a future breaking revision. A v1 decoder refuses it rather than guessing."
+    },
+    {
+      "name": "an identifier past the 256-byte cap",
+      "hex": "f50000000000000000000000000000000081027878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878016201630108000000000000000001000000",
+      "reason": "identifier too long",
+      "note": "The cap is enforced identically on both encodings. A binary path that skipped it would be a way around a check the JSON path makes."
+    },
+    {
+      "name": "a truncated frame",
+      "hex": "f500000000000000000000000000000000016101620163010800000000000000000100",
+      "reason": "truncated",
+      "note": "A length prefix that outruns the buffer is refused rather than allocated against."
+    }
+  ]
+}

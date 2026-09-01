@@ -294,3 +294,115 @@ mod tests {
         }
     }
 }
+
+/// The reserved prefix registry, held against the chapter that publishes it.
+///
+/// The chapter is `docs/spec/control-messages.md`, whose registry tables are
+/// the list a second implementation reserves from. Nothing else compares the
+/// two, and the failure is silent in the direction that matters: a prefix this
+/// build reserves but the chapter omits is a prefix another implementation
+/// happily lets application text impersonate, and the frame it forges is
+/// indistinguishable from a real one at the receiver.
+///
+/// This is a membership check in both directions rather than a byte vector,
+/// because a prefix registry has no bytes to pin: what it has is a set, and the
+/// bug is always a missing element.
+#[cfg(test)]
+mod spec_registry {
+    use super::*;
+
+    /// The chapter, or `None` where the repo tree is absent.
+    ///
+    /// Read at runtime rather than with `include_str!` because the chapter
+    /// lives outside the package root: `cargo package` carries `tests/` but
+    /// cannot carry `docs/`, so compiling the path in would leave the published
+    /// crate's tests unable to build at all.
+    fn chapter() -> Option<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/spec/control-messages.md");
+        std::fs::read_to_string(&path).ok().or_else(|| {
+            eprintln!("spec tree not present, skipping the control-messages registry checks");
+            None
+        })
+    }
+
+    /// Every prefix this build reserves is published.
+    ///
+    /// Without this, a prefix added to the macro and forgotten in the chapter
+    /// is reserved here and unreserved everywhere else.
+    #[test]
+    fn the_chapter_publishes_every_prefix_this_build_reserves() {
+        let Some(text) = chapter() else { return };
+
+        for prefix in INTERNAL_PREFIXES {
+            assert!(
+                text.contains(prefix),
+                "the control-messages chapter does not publish {prefix}, so a \
+                 second implementation would not reserve it and application \
+                 text could impersonate that frame"
+            );
+        }
+    }
+
+    /// Every prefix the chapter publishes is reserved by this build.
+    ///
+    /// The other direction, and the one that catches a rename: a chapter entry
+    /// with no constant behind it means this build accepts application content
+    /// that every conforming peer refuses, which is the asymmetry that turns
+    /// into an injection vector at exactly one end of a conversation.
+    ///
+    /// `__SVC_` is excluded from the token scan by construction rather than by
+    /// exception: it bounds a namespace instead of naming a frame, so it is
+    /// checked as a reserved entry above and not required to round-trip as a
+    /// frame tag here.
+    #[test]
+    fn this_build_reserves_every_prefix_the_chapter_publishes() {
+        let Some(text) = chapter() else { return };
+
+        let mut published: Vec<String> = Vec::new();
+        for token in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            if token.len() > 4 && token.starts_with("__") && token.ends_with("__") {
+                if !published.iter().any(|p| p == token) {
+                    published.push(token.to_string());
+                }
+            }
+        }
+
+        assert!(
+            published.len() > 20,
+            "the registry scan found only {} prefixes, so it is no longer \
+             reading the chapter's tables and would pass against anything",
+            published.len()
+        );
+
+        for prefix in &published {
+            assert!(
+                INTERNAL_PREFIXES.contains(&prefix.as_str()),
+                "the chapter publishes {prefix} but this build does not reserve \
+                 it, so application content beginning with it is accepted here \
+                 and refused by every conforming peer"
+            );
+        }
+    }
+
+    /// The two exemption classes stay disjoint, and the chapter says so.
+    ///
+    /// A prefix in both lists would make the narrow relay conditions
+    /// unreachable for it, because the data-plane exclusion is consulted first.
+    #[test]
+    fn the_chapter_states_the_exemption_classes_are_disjoint() {
+        let Some(text) = chapter() else { return };
+
+        assert!(
+            text.contains("The two exemption lists must stay disjoint"),
+            "the chapter no longer states the disjointness requirement that \
+             `relay_and_data_plane_exemptions_are_disjoint` enforces"
+        );
+        for relay in RELAY_ANSWER_PREFIXES {
+            assert!(
+                !DATA_PLANE_PREFIXES.contains(relay),
+                "{relay} is in both exemption lists"
+            );
+        }
+    }
+}

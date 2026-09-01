@@ -1,0 +1,93 @@
+{
+  "_comment": [
+    "Frozen conformance vectors for the address encoding described in",
+    "docs/spec/identity.md: 0x01 || SHA-256(pk)[0..20], rendered as",
+    "bech32m under the human-readable part `off`.",
+    "",
+    "Computed with the BIP-350 reference implementation of bech32m over",
+    "hashes computed here, not by running the Address type they pin.",
+    "",
+    "A failure here is a break in the identity layer, not a formatting",
+    "detail: two spellings of one address split every set, map and",
+    "dedup keyed by the rendered form."
+  ],
+  "hrp": "off",
+  "version_byte": 1,
+  "hash_len": 20,
+  "encoded_len": 44,
+  "encode": [
+    {
+      "name": "rfc8032-tv1",
+      "hash_hex": "21fe31dfa154a261626bf854046fd2271b7bed4b",
+      "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "zeros",
+      "hash_hex": "0000000000000000000000000000000000000000",
+      "address": "off1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqn8antf"
+    },
+    {
+      "name": "ff",
+      "hash_hex": "ffffffffffffffffffffffffffffffffffffffff",
+      "address": "off1q8llllllllllllllllllllllllllllllluvweh4p"
+    },
+    {
+      "name": "ramp",
+      "hash_hex": "000102030405060708090a0b0c0d0e0f10111213",
+      "address": "off1qyqqzqsrqszsvpcgpy9qkrqdpc83qygjzvpgkpr5"
+    }
+  ],
+  "reject": [
+    {
+      "name": "uppercase is refused even though BIP-173 permits it",
+      "input": "OFF1QYQQZQSRQSZSVPCGPY9QKRQDPC83QYGJZVPGKPR5",
+      "reason": "not lowercase"
+    },
+    {
+      "name": "a human-readable part other than off",
+      "input": "xff1qyqqzqsrqszsvpcgpy9qkrqdpc83qygjzvf0yzsd",
+      "reason": "hrp mismatch"
+    },
+    {
+      "name": "a version byte this specification does not define",
+      "input": "off1qgqqzqsrqszsvpcgpy9qkrqdpc83qygjzvwdywdm",
+      "reason": "version mismatch"
+    },
+    {
+      "name": "a payload one byte short",
+      "input": "off1qyqqzqsrqszsvpcgpy9qkrqdpc83qygjnej4xy",
+      "reason": "payload length"
+    },
+    {
+      "name": "a payload one byte long",
+      "input": "off1qyqqzqsrqszsvpcgpy9qkrqdpc83qygjzvqq6q0gwf",
+      "reason": "payload length"
+    }
+  ],
+  "ordering": [
+    {
+      "a": "off1qy6w5xvmwzc9rt9cvg7nstxd0rcvnzpgjs8escz6",
+      "b": "off1q9rwq4r0g4new607m3kjvwgsslz48tarhcg02s4s",
+      "a_hash_hex": "34ea199b70b051acb8623d382ccd78f0c9882894",
+      "b_hash_hex": "46e0546f45679769fedc6d26391087c553afa3be",
+      "first_by_hash_bytes": "off1qy6w5xvmwzc9rt9cvg7nstxd0rcvnzpgjs8escz6",
+      "first_by_rendered_string": "off1q9rwq4r0g4new607m3kjvwgsslz48tarhcg02s4s"
+    },
+    {
+      "a": "off1q9rwq4r0g4new607m3kjvwgsslz48tarhcg02s4s",
+      "b": "off1q8kjqzhddnllcuy3wqul6wp89q8hyze7ps2skcff",
+      "a_hash_hex": "46e0546f45679769fedc6d26391087c553afa3be",
+      "b_hash_hex": "ed200aed6cfffc70917039fd3827280f720b3e0c",
+      "first_by_hash_bytes": "off1q9rwq4r0g4new607m3kjvwgsslz48tarhcg02s4s",
+      "first_by_rendered_string": "off1q8kjqzhddnllcuy3wqul6wp89q8hyze7ps2skcff"
+    },
+    {
+      "a": "off1q8kjqzhddnllcuy3wqul6wp89q8hyze7ps2skcff",
+      "b": "off1q97kw5jwm70wqranhpzqmxst0keakcnu4v9adcqh",
+      "a_hash_hex": "ed200aed6cfffc70917039fd3827280f720b3e0c",
+      "b_hash_hex": "7d67524edf9ee00fb3b8440d9a0b7db3db627cab",
+      "first_by_hash_bytes": "off1q97kw5jwm70wqranhpzqmxst0keakcnu4v9adcqh",
+      "first_by_rendered_string": "off1q8kjqzhddnllcuy3wqul6wp89q8hyze7ps2skcff"
+    }
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "_comment": [
+    "Frozen conformance vectors for the compact MLS envelope described",
+    "in docs/spec/encryption-envelopes.md.",
+    "",
+    "Computed from the layout stated in that chapter, not by running",
+    "the codec they pin.",
+    "",
+    "Every multi-byte integer here is little-endian, which is the",
+    "opposite of the canonical signing payloads in the same protocol.",
+    "That is deliberate and it is the single easiest thing to get",
+    "backwards: these vectors are what catches it."
+  ],
+  "byte_order": "little-endian for every length, the epoch and the timestamp",
+  "layout": "group_id_len(4) group_id sender_len(4) sender_id message_type(1) epoch(8) timestamp_ms(8) ciphertext_len(4) ciphertext",
+  "max_string_field_len": 4096,
+  "envelopes": [
+    {
+      "name": "an application message in a 1:1 slot",
+      "note": "The ordinary shape. The group_id is the session slot the two addresses derive, so a receiver can check it without state.",
+      "envelope": {
+        "group_id": "session:off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn:off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
+        "sender_id": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+        "message_type": "application",
+        "epoch": 3,
+        "timestamp_ms": 1700000000000,
+        "ciphertext_hex": "deadbeef"
+      },
+      "hex": "6100000073657373696f6e3a6f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e3a6f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a3872302c0000006f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e0003000000000000000068e5cf8b01000004000000deadbeef"
+    },
+    {
+      "name": "a welcome",
+      "note": "message_type 1.",
+      "envelope": {
+        "group_id": "session:off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn:off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
+        "sender_id": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+        "message_type": "welcome",
+        "epoch": 0,
+        "timestamp_ms": 0,
+        "ciphertext_hex": ""
+      },
+      "hex": "6100000073657373696f6e3a6f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e3a6f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a3872302c0000006f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e010000000000000000000000000000000000000000"
+    },
+    {
+      "name": "a commit",
+      "note": "message_type 2.",
+      "envelope": {
+        "group_id": "session:off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn:off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
+        "sender_id": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+        "message_type": "commit",
+        "epoch": 0,
+        "timestamp_ms": 0,
+        "ciphertext_hex": ""
+      },
+      "hex": "6100000073657373696f6e3a6f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e3a6f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a3872302c0000006f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e020000000000000000000000000000000000000000"
+    },
+    {
+      "name": "a proposal",
+      "note": "message_type 3.",
+      "envelope": {
+        "group_id": "session:off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn:off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
+        "sender_id": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+        "message_type": "proposal",
+        "epoch": 0,
+        "timestamp_ms": 0,
+        "ciphertext_hex": ""
+      },
+      "hex": "6100000073657373696f6e3a6f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e3a6f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a3872302c0000006f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e030000000000000000000000000000000000000000"
+    },
+    {
+      "name": "an empty ciphertext",
+      "note": "A zero length prefix and no bytes. The envelope is still well-formed; emptiness is the payload's problem, not the codec's.",
+      "envelope": {
+        "group_id": "session:off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn:off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
+        "sender_id": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+        "message_type": "application",
+        "epoch": 0,
+        "timestamp_ms": 0,
+        "ciphertext_hex": ""
+      },
+      "hex": "6100000073657373696f6e3a6f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e3a6f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a3872302c0000006f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "a large epoch",
+      "note": "Epochs are fixed 8 bytes here, unlike the varints in the hop encoding. A codec that varints this field is misaligned from the epoch onward.",
+      "envelope": {
+        "group_id": "session:off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn:off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
+        "sender_id": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+        "message_type": "application",
+        "epoch": 18446744073709551615,
+        "timestamp_ms": 18446744073709551615,
+        "ciphertext_hex": ""
+      },
+      "hex": "6100000073657373696f6e3a6f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e3a6f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a3872302c0000006f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e00ffffffffffffffffffffffffffffffff00000000"
+    }
+  ],
+  "json_disambiguation": {
+    "note": "A legacy JSON envelope begins `{\"`, which read as a little-endian u32 group_id length is 8827, above the 4096 cap. The compact parser therefore rejects it deterministically and the caller falls through to JSON. This is why the two forms need no version byte between them.",
+    "prefix_utf8": "{\"",
+    "as_le_u32": 8827,
+    "exceeds_max_string_field_len": true
+  }
+}

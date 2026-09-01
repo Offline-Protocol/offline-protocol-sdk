@@ -217,3 +217,172 @@ pub const MLS_ENVELOPE_COMPACT_V1: u8 = 1;
 ///
 /// [`control_signing_payload_v2`]: crate::canonical::control_signing_payload_v2
 pub const CTRL_SIGN_V2: u8 = 2;
+
+/// The conformance vectors for the key package payload.
+///
+/// The chapter these pin is `docs/spec/capability-negotiation.md`, and they pin
+/// the **parse** direction only.
+///
+/// That is deliberate and it is the one place this suite declines to pin bytes.
+/// The JSON floor is not a byte-normative encoding: `docs/spec/wire-format.md`
+/// requires a receiver to accept both spellings of every optional field, so an
+/// exact serialization asserted here would be a contract the specification
+/// deliberately does not make, and a second implementation that omitted a null
+/// would be marked non-conforming for doing exactly what the floor allows.
+///
+/// What a peer genuinely owes is that these bodies parse to these values, which
+/// is what rule 2 of capability negotiation means in practice: absence selects
+/// the floor and is never an error.
+#[cfg(all(test, feature = "std"))]
+mod spec_vectors {
+    use super::*;
+
+    const VECTORS: &str = include_str!("../tests/data/key-package-v1.vectors.json");
+
+    fn vectors() -> serde_json::Value {
+        serde_json::from_str(VECTORS).expect("the vector file is JSON")
+    }
+
+    fn u8s(v: &serde_json::Value) -> Vec<u8> {
+        v.as_array()
+            .expect("a list")
+            .iter()
+            .map(|n| n.as_u64().expect("a number") as u8)
+            .collect()
+    }
+
+    /// Asserts the file still carries what it carried, before anything iterates
+    /// it: a loop over an array a bad merge emptied passes by not running.
+    #[test]
+    fn the_vector_file_is_the_size_it_was() {
+        assert_eq!(vectors()["parse"].as_array().expect("parse").len(), 4);
+    }
+
+    #[test]
+    fn every_body_parses_to_its_vector() {
+        for case in vectors()["parse"].as_array().expect("parse") {
+            let name = case["name"].as_str().expect("a name");
+            let json = case["json"].as_str().expect("a body");
+            let want = &case["expect"];
+
+            let got: KeyPackagePayload = serde_json::from_str(json)
+                .unwrap_or_else(|e| panic!("[{name}] did not parse: {e}"));
+
+            assert_eq!(
+                got.user_id,
+                want["user_id"].as_str().expect("a user id"),
+                "[{name}] user_id"
+            );
+            assert_eq!(
+                got.key_package_data,
+                u8s(&want["key_package_data"]),
+                "[{name}] key_package_data"
+            );
+            assert_eq!(
+                got.remaining_lifetime_ms,
+                want["remaining_lifetime_ms"].as_u64().expect("a lifetime"),
+                "[{name}] remaining_lifetime_ms"
+            );
+            assert_eq!(
+                got.timestamp_ms,
+                want["timestamp_ms"].as_u64().expect("a timestamp"),
+                "[{name}] timestamp_ms"
+            );
+            assert_eq!(
+                got.session_reset,
+                want["session_reset"].as_bool().expect("a reset flag"),
+                "[{name}] session_reset"
+            );
+            for (field, got) in [
+                ("wire_versions", &got.wire_versions),
+                ("env_versions", &got.env_versions),
+                ("rich_versions", &got.rich_versions),
+                ("data_versions", &got.data_versions),
+                ("ctrl_versions", &got.ctrl_versions),
+            ] {
+                assert_eq!(got, &u8s(&want[field]), "[{name}] {field}");
+            }
+            assert_eq!(
+                got.nostr_pubkey.as_deref(),
+                want["nostr_pubkey"].as_str(),
+                "[{name}] nostr_pubkey"
+            );
+        }
+    }
+
+    /// An absent Nostr key is omitted on the way out, not written as null.
+    ///
+    /// Both spellings parse to the same thing, so this is not a wire
+    /// requirement; it is the one emission property the vector file names, and
+    /// it exists because the field is consumed as a destination key rather than
+    /// as a feature hint. A `null` written where the field is simply unknown
+    /// invites a reader to treat absence as a decision.
+    #[test]
+    fn an_absent_nostr_key_is_omitted_rather_than_null() {
+        let v = vectors();
+        assert_eq!(
+            v["emission_is_not_pinned"]["nostr_pubkey_absent_is_omitted_not_null"],
+            true
+        );
+
+        let payload = KeyPackagePayload {
+            user_id: "off1abc".to_string(),
+            key_package_data: Vec::new(),
+            remaining_lifetime_ms: 0,
+            timestamp_ms: 0,
+            session_reset: false,
+            wire_versions: Vec::new(),
+            env_versions: Vec::new(),
+            rich_versions: Vec::new(),
+            data_versions: Vec::new(),
+            ctrl_versions: Vec::new(),
+            nostr_pubkey: None,
+        };
+        let rendered = serde_json::to_string(&payload).expect("it serializes");
+        assert!(
+            !rendered.contains("nostr_pubkey"),
+            "an absent Nostr key was written into the body: {rendered}"
+        );
+    }
+
+    /// The chapter, or `None` where the repo tree is absent: `cargo package`
+    /// carries `tests/` and the vector file but cannot carry `docs/`.
+    fn chapter() -> Option<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/spec/capability-negotiation.md");
+        std::fs::read_to_string(&path).ok().or_else(|| {
+            eprintln!("spec tree not present, skipping the negotiation chapter drift checks");
+            None
+        })
+    }
+
+    /// The chapter names every capability field this payload carries.
+    ///
+    /// A field added to the struct and not to the chapter is a capability a
+    /// second implementation cannot know to advertise, which is invisible: it
+    /// simply never receives the form the field gates.
+    #[test]
+    fn the_chapter_names_every_capability_field() {
+        let Some(text) = chapter() else { return };
+
+        for field in [
+            "wire_versions",
+            "env_versions",
+            "rich_versions",
+            "data_versions",
+            "ctrl_versions",
+            "nostr_pubkey",
+            "session_reset",
+        ] {
+            assert!(
+                text.contains(field),
+                "the chapter does not name {field}, so a peer built from it \
+                 cannot advertise or read that capability"
+            );
+        }
+        assert!(
+            text.contains(&format!("Entry {CTRL_SIGN_V2} means")),
+            "the chapter no longer states what ctrl_versions entry {CTRL_SIGN_V2} means"
+        );
+    }
+}

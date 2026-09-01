@@ -1,0 +1,69 @@
+{
+  "_comment": [
+    "Frozen conformance vectors for address derivation and the 1:1",
+    "session slot, from docs/spec/identity.md.",
+    "",
+    "Computed from the rules in that chapter with the BIP-350 reference",
+    "implementation, not by running derive_address.",
+    "",
+    "The public keys are the public halves of RFC 8032 section 7.1 test",
+    "vectors 1 to 3, chosen so both halves of each case can be checked",
+    "against a published source rather than against this file.",
+    "",
+    "`orders_disagree` marks a pair where ordering by hash bytes and",
+    "ordering by rendered string produce different slots. Those pairs",
+    "are the whole reason this file exists: an implementation that",
+    "sorts the rendered strings agrees with this one on every other",
+    "pair and silently addresses a different session on these."
+  ],
+  "derive": [
+    {
+      "name": "rfc8032-tv1",
+      "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "rfc8032-tv2",
+      "public_key_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "address": "off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0"
+    },
+    {
+      "name": "rfc8032-tv3",
+      "public_key_hex": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+      "address": "off1q8dvqulqzgaaafvamxemm2w0vqmlvwk2sgxvx0lk"
+    },
+    {
+      "name": "all-zero key",
+      "public_key_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "address": "off1q9nxs74dlp3t6amv3lqchr5l3csq39c5s5grq3yh"
+    },
+    {
+      "name": "all-ff key",
+      "public_key_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "address": "off1qxhevymkpaexxhaak3995znrcw039tesly56quef"
+    }
+  ],
+  "sessions": [
+    {
+      "a": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "b": "off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
+      "session_id": "session:off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn:off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
+      "orders_disagree": false,
+      "session_id_if_ordered_by_string": "session:off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn:off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0"
+    },
+    {
+      "a": "off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
+      "b": "off1q8dvqulqzgaaafvamxemm2w0vqmlvwk2sgxvx0lk",
+      "session_id": "session:off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0:off1q8dvqulqzgaaafvamxemm2w0vqmlvwk2sgxvx0lk",
+      "orders_disagree": true,
+      "session_id_if_ordered_by_string": "session:off1q8dvqulqzgaaafvamxemm2w0vqmlvwk2sgxvx0lk:off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0"
+    },
+    {
+      "a": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "b": "off1q8dvqulqzgaaafvamxemm2w0vqmlvwk2sgxvx0lk",
+      "session_id": "session:off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn:off1q8dvqulqzgaaafvamxemm2w0vqmlvwk2sgxvx0lk",
+      "orders_disagree": true,
+      "session_id_if_ordered_by_string": "session:off1q8dvqulqzgaaafvamxemm2w0vqmlvwk2sgxvx0lk:off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    }
+  ]
+}
