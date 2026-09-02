@@ -24,7 +24,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   and is never registered as a recipient. Nothing addressed to the device would
   ever have arrived, and the core meanwhile settled every frame as sent.
 
-  The attach is now the handshake the contract specifies — `Identify` with a
+  The attach is now the handshake the contract specifies: `Identify` with a
   version, a challenge signed under `offline-gateway-addr-v1`, `DeclareAddress`,
   the echo checked against this device's own address, capabilities, and only
   then the carrier announced. A refused declaration closes the connection rather
@@ -36,7 +36,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
   Sends settle on the gateway's verdict. `MessageSent` confirms, `DeliveryError`
   fails with the gateway's reason verbatim, and `recipient_unreachable` now
-  reaches the classifier that parks a direct message and offers it to the mesh —
+  reaches the classifier that parks a direct message and offers it to the mesh,
   which closes the Reticulum half of the mixed-neighbourhood residual
   `docs/mesh.md` has carried. Presence is watched from the SDK's own watchlist,
   and a gateway's answer un-parks over Reticulum rather than over the internet
@@ -64,7 +64,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   reconnection is owned by the native managers and configured from the app's
   transport config, `reconnect_delay` had no reader at all, and the payload
   constant was never enforced anywhere. `ReticulumTransport::new` is now the
-  only constructor. **Rust-library consumers only** — the FFI never threaded
+  only constructor. **Rust-library consumers only**: the FFI never threaded
   any of it, so no binding, no configuration key and no behaviour changes.
   See [docs/UPGRADING.md](docs/UPGRADING.md#19-the-reticulum-transports-inert-configuration-is-gone).
 
