@@ -28,9 +28,10 @@ pub use decryption_queue::PendingQueueMetrics;
 pub(crate) use prefixes::*;
 pub(crate) use storage::{PruneAllowance, RestorableRecord};
 pub(crate) use types::*;
-pub use types::{MediaSendOptions, ProtocolState, SendMessageOptions};
+pub use types::{GatewayCarrier, MediaSendOptions, ProtocolState, SendMessageOptions};
 
 use crate::file_transfer::{FileTransferManager, OutboundTransferState};
+use crate::group_mesh::{MAX_RELAY_CAPABILITIES, MAX_RELAY_CAPABILITY_TOKEN_BYTES};
 use crate::mls_observability::{MlsEventEmitter, MlsEventRateLimiter, NoopMlsEventEmitter};
 use crate::telemetry::aggregator::{
     build_metrics_frame, device_battery_from_available, diff_device_capability,
@@ -163,6 +164,18 @@ pub struct OfflineProtocol {
     /// verdict, a gateway presence answer), read at the send and carrying
     /// seams. In-memory only, and absent facts mean today's behaviour.
     pub(crate) reachability: reachability::ReachabilityFacts,
+
+    /// Capability tokens the attached Reticulum gateway advertised.
+    ///
+    /// Delivered at attach, before the bridge reports the carrier available,
+    /// and cleared when the carrier drops: a stale advertisement outlives the
+    /// gateway that made it, and a reconnect may land on a different one.
+    ///
+    /// Kept apart from `group_mesh.relay_capabilities` deliberately, though
+    /// both are capability sets from a gateway. That one gates the relay
+    /// group-broadcast path, and a token advertised by whatever box is
+    /// plugged into the venue Wi-Fi must not be able to open it.
+    gateway_capabilities: HashSet<String>,
 
     /// MLS manager for end-to-end encryption.
     mls_manager: Option<Arc<RwLock<MlsManager>>>,
@@ -954,6 +967,7 @@ impl OfflineProtocol {
             media_outbox: HashMap::new(),
             dm_unreachable_parks: HashMap::new(),
             reachability: reachability::ReachabilityFacts::default(),
+            gateway_capabilities: HashSet::new(),
             mls_manager: None,
             pending_encrypted_messages: HashMap::new(),
             deferred_restore_settlements: Vec::new(),
@@ -2225,15 +2239,16 @@ impl OfflineProtocol {
             let sent_via = self.try_flush_send(message, attempt_count);
             if parkable {
                 // Unlike the per-peer edges (discovery carries mesh-scoped
-                // proof, presence-online forces the internet transport), this
+                // proof, presence-online forces the answering carrier), this
                 // carrier-level edge re-drives via DORS with no per-peer
                 // reachability proof: a mesh-routed send "locally succeeds"
-                // into the mesh whether or not the peer is there, so only an
-                // internet-routed send — the one that can earn a relay
-                // verdict — counts as re-driven for counter-clearing. A
-                // mesh-routed success keeps the counter restore-eligible;
-                // if its ACK genuinely arrives, delivery prunes the counter.
-                if sent_via == Some(TransportType::Internet) {
+                // into the mesh whether or not the peer is there, so only a
+                // send over a carrier that answers verdicts counts as
+                // re-driven for counter-clearing — that is the send whose
+                // failure would say something. A mesh-routed success keeps
+                // the counter restore-eligible; if its ACK genuinely
+                // arrives, delivery prunes the counter.
+                if sent_via.and_then(GatewayCarrier::from_transport).is_some() {
                     parked_dm_redriven.insert(recipient);
                 } else {
                     parked_dm_seen.insert(recipient);
@@ -2262,15 +2277,62 @@ impl OfflineProtocol {
         }
     }
 
-    /// Peers the platform layer should watch via relay `CheckPresence`
-    /// queries: every peer with an undelivered or session-unproven MLS
-    /// welcome ([`Self::welcome_pending_peers`]) plus every recipient of an
-    /// outbox message not currently awaiting an ACK — which includes DMs
-    /// parked on a relay `recipient_unreachable` verdict. The relay's
-    /// presence-online answer lands in [`Self::on_peer_presence`], whose
-    /// `flush_outbox_for_peer_via` is what re-drives (un-parks) those messages,
-    /// so the SDK — not the app — owns the "watch my DeliveryError
+    /// Records what the attached Reticulum gateway says it can do.
+    ///
+    /// Wholesale replace, like the relay's: each attach describes the gateway
+    /// actually connected now. The bridge calls this **before** it reports the
+    /// carrier available, which is the contract's own ordering — a device must
+    /// not drain into a gateway whose features it has not been told — and it
+    /// clears the set when the carrier drops.
+    ///
+    /// The list is wire-supplied, so it is bounded exactly as the relay's is,
+    /// which is what the contract points at rather than inventing a second
+    /// pair of numbers: at most [`MAX_RELAY_CAPABILITIES`] tokens of at most
+    /// [`MAX_RELAY_CAPABILITY_TOKEN_BYTES`] bytes each. Oversized tokens are
+    /// dropped *before* the count is applied, so padding cannot evict real
+    /// ones.
+    ///
+    /// Nothing here gates a security decision. Tokens gate features, and an
+    /// attacker who can set them is already the gateway.
+    pub fn set_gateway_capabilities(&mut self, capabilities: Vec<String>) {
+        let caps: HashSet<String> = capabilities
+            .into_iter()
+            .filter(|c| !c.is_empty() && c.len() <= MAX_RELAY_CAPABILITY_TOKEN_BYTES)
+            .take(MAX_RELAY_CAPABILITIES)
+            .collect();
+        debug!(count = caps.len(), "Gateway capabilities updated");
+        self.gateway_capabilities = caps;
+    }
+
+    /// Forgets the attached gateway's advertisement, on carrier drop.
+    pub fn clear_gateway_capabilities(&mut self) {
+        if !self.gateway_capabilities.is_empty() {
+            debug!("Gateway capabilities cleared on carrier drop");
+            self.gateway_capabilities.clear();
+        }
+    }
+
+    /// The attached gateway's advertised capability tokens, sorted so the
+    /// order a caller sees does not depend on hashing.
+    pub fn gateway_capabilities(&self) -> Vec<String> {
+        let mut tokens: Vec<String> = self.gateway_capabilities.iter().cloned().collect();
+        tokens.sort();
+        tokens
+    }
+
+    /// Peers the platform layer should watch via a gateway `CheckPresence`
+    /// query: every peer with an undelivered or session-unproven MLS welcome
+    /// ([`Self::welcome_pending_peers`]) plus every recipient of an outbox
+    /// message not currently awaiting an ACK — which includes DMs parked on a
+    /// `recipient_unreachable` verdict. A gateway's presence-online answer
+    /// lands in [`Self::on_peer_presence_via`], whose
+    /// `flush_outbox_for_peer_via` is what re-drives (un-parks) those
+    /// messages, so the SDK — not the app — owns the "watch my DeliveryError
     /// recipients" duty. Bounded by the outbox cap (500 entries).
+    ///
+    /// Carrier-agnostic on purpose: the set is "who this device is waiting to
+    /// hear about", which does not depend on who is asked. Every attached
+    /// gateway watches the same peers.
     pub fn presence_watch_peers(&self) -> Vec<String> {
         let mut peers = self.welcome_pending_peers();
         let mut seen: std::collections::HashSet<String> = peers.iter().cloned().collect();

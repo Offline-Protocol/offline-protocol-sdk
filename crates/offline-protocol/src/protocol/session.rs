@@ -2,8 +2,8 @@
 
 use super::{
     classify_transport_send_error, internal_prefixes, lock_shared_state, send_failure_token,
-    OfflineProtocol, PresenceRescueThrottle, PruneAllowance, RestorableRecord, SessionState,
-    WelcomeDeliveryState, WelcomeLifecycleRecord, CONFIRMATION_PROBE_INTERVAL_SECS,
+    GatewayCarrier, OfflineProtocol, PresenceRescueThrottle, PruneAllowance, RestorableRecord,
+    SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord, CONFIRMATION_PROBE_INTERVAL_SECS,
     CONFIRMATION_RETRY_INTERVAL_SECS, MAX_REKEY_TRACKED_PEERS, RECONCILIATION_THROTTLE_MS,
     REKEY_INTERVAL_SECS, SEND_FAIL_REASON_CONFIRM_TIMEOUT, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS,
     WELCOME_LIFECYCLE_TTL_SECS, WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
@@ -1321,14 +1321,35 @@ impl OfflineProtocol {
     /// tick forever. A throttled online tick still flushes queued data-plane
     /// traffic for the peer.
     ///
-    /// Emits `presence_updated` with `source: Internet` — this function is
-    /// the relay-sourced half of the unified stream and must only be fed
-    /// relay-observed signals (bridged via `internet_peer_presence`);
-    /// peer-sent `__PRESENCE__` self-reports are handled in
-    /// `message_dispatch` and emit `source: Peer`. Self, blocked, or empty
-    /// peer ids are dropped entirely: an app waiting on `presence_updated`
-    /// for a blocked peer will never see it.
+    /// Emits `presence_updated` naming the carrier that answered — this
+    /// function is the gateway-sourced half of the unified stream and must
+    /// only be fed a gateway's own observation (bridged via
+    /// `internet_peer_presence` or `reticulum_peer_presence`); peer-sent
+    /// `__PRESENCE__` self-reports are handled in `message_dispatch` and emit
+    /// `source: Peer`. Self, blocked, or empty peer ids are dropped entirely:
+    /// an app waiting on `presence_updated` for a blocked peer will never see
+    /// it.
     pub fn on_peer_presence(&mut self, peer_id: &str, online: bool, last_seen_ms: Option<i64>) {
+        self.on_peer_presence_via(peer_id, online, last_seen_ms, GatewayCarrier::Internet);
+    }
+
+    /// [`Self::on_peer_presence`], for whichever gateway answered.
+    ///
+    /// The carrier is threaded rather than assumed because every effect below
+    /// is carrier-scoped and silently wrong under the wrong one: the fact is
+    /// recorded against the carrier that made the claim, the un-park flush is
+    /// pinned to the carrier that just proved it can reach the peer, and the
+    /// event names the carrier so an app filtering on relay-observed presence
+    /// still can. A Reticulum gateway's answer forcing a send over the
+    /// Internet transport would be a reachability proof about one carrier
+    /// spent on another.
+    pub fn on_peer_presence_via(
+        &mut self,
+        peer_id: &str,
+        online: bool,
+        last_seen_ms: Option<i64>,
+        carrier: GatewayCarrier,
+    ) {
         if peer_id.is_empty() || peer_id == self.local_id || self.is_user_blocked(peer_id) {
             return;
         }
@@ -1339,7 +1360,7 @@ impl OfflineProtocol {
         // this is a third party's report about someone else's connection.
         self.reachability.record(
             peer_id,
-            TransportType::Internet,
+            carrier.transport(),
             if online {
                 Claim::Reachable
             } else {
@@ -1349,19 +1370,19 @@ impl OfflineProtocol {
             std::time::Instant::now(),
         );
         if online {
-            // Relay-scoped reachability proof: un-park and re-drive the
-            // peer's DMs over the internet transport before anything else
+            // Carrier-scoped reachability proof: un-park and re-drive the
+            // peer's DMs over that carrier before anything else
             // (see `flush_outbox_for_peer_via` — this also cancels
             // unanswerable mesh-probe ACKs that would otherwise hold the
             // messages hostage past this edge). The rescue branch's inner
             // flush then finds successfully re-driven entries awaiting
             // fresh ACKs and leaves them alone; entries whose forced send
             // *failed* are picked up again, so the inner flush keeps the
-            // internet override — DORS must not re-route them into the
+            // carrier override — DORS must not re-route them into the
             // mesh void with the park counter already cleared.
-            self.flush_outbox_for_peer_via(peer_id, Some(TransportType::Internet));
+            self.flush_outbox_for_peer_via(peer_id, Some(carrier.transport()));
             if self.welcome_rescue_permitted(peer_id) {
-                self.on_neighbor_discovered_via(peer_id, Some(TransportType::Internet));
+                self.on_neighbor_discovered_via(peer_id, Some(carrier.transport()));
                 self.resend_unconfirmed_sent_welcome(peer_id, "peer_presence_online");
                 self.note_welcome_rescue_attempt(peer_id);
             }
@@ -1384,11 +1405,12 @@ impl OfflineProtocol {
         } else {
             crate::events::PresenceStatus::Offline
         };
-        self.emit_event(Event::presence_updated_with_last_seen(
+        self.emit_event(Event::presence_updated_from(
             peer_id.to_string(),
             status,
             Utc::now().timestamp_millis(),
             last_seen_ms,
+            carrier.presence_source(),
         ));
     }
 

@@ -1408,6 +1408,55 @@ interface OfflineProtocol {
 
     void reticulum_send_failed_with_reason(string message_id, string? reason);
 
+    // Reticulum: the gateway's AddressDeclared answer — the address it says
+    // it bound to this connection, verbatim. Checked against local_address():
+    // agreement means the gateway attributes our frames the way the core
+    // stamps them and answers presence about an address we hold. A
+    // disagreement emits a GATEWAY_ADDRESS_BINDING_MISMATCH security warning
+    // and nothing else — a gateway that controls the socket already controls
+    // what tearing it down would protect. What the bridge acts on is its own
+    // and is narrower: it does not report the carrier available unless the
+    // session was bound.
+    //
+    // A dedicated entry point (not message-plane injection) so a delivered
+    // frame cannot synthesize an acknowledgement.
+    void reticulum_address_declared(string address);
+
+    // Reticulum: the gateway's AddressError answer — it refused this
+    // connection's address declaration. Unlike the relay's refusal this is
+    // NOT a degraded-but-working connection: an unproved session may submit
+    // and be told a verdict, and is never registered as a recipient, so the
+    // bridge leaves the carrier unavailable. Emits
+    // GATEWAY_ADDRESS_DECLARATION_REFUSED, which is what explains a transport
+    // that stays down while its socket connects fine. The gateway's own
+    // wording is opaque and never travels onto the event.
+    void reticulum_address_declaration_refused(string reason);
+
+    // Reticulum: capability tokens from the gateway's Capabilities answer
+    // (e.g. "gateway_v1", "backbone_reticulum_v1"). MUST be called BEFORE
+    // reticulum_status_changed(true) on each attach — the contract's own
+    // ordering, so a device never drains into a gateway whose features it has
+    // not been told. Wholesale replace; the SDK clears the set itself when
+    // the transport drops. Bounded like the relay's (64 tokens of 128 bytes)
+    // and kept in its own set, so a token from whatever box is on the venue
+    // Wi-Fi cannot open the relay's group-broadcast gate.
+    [Throws=ProtocolError]
+    void reticulum_gateway_capabilities(sequence<string> capabilities);
+
+    // Reticulum: gateway-sourced presence for a peer (PresenceStatus).
+    // online=true records the fact against Reticulum and re-drives that
+    // peer's parked messages OVER RETICULUM, because that is the carrier that
+    // just proved it can reach them; online=false parks pending welcomes
+    // without burning retry budget. Emits presence_updated with
+    // source: reticulum, except for self, blocked, or empty peer ids.
+    void reticulum_peer_presence(string peer_id, boolean online, i64? last_seen_ms);
+
+    // Reticulum: peers the platform should watch via a gateway CheckPresence
+    // query. The same set internet_presence_watchlist returns, through its
+    // own entry point: the set is "who this device is waiting to hear about",
+    // which does not depend on who is asked.
+    sequence<string> reticulum_presence_watchlist();
+
     // Nostr transport callback (event-driven sending)
     void set_nostr_transport_callback(NostrTransportCallback callback);
 
@@ -1702,6 +1751,19 @@ interface OfflineProtocol {
     // Returns the signature as raw bytes (64 bytes).
     [Throws=ProtocolError]
     sequence<u8> sign_data(sequence<u8> data);
+
+    // The signed proof this device presents to attach to a gateway. Give it
+    // the 32-byte challenge the gateway minted for this connection; it
+    // returns the address, identity public key and signature for
+    // DeclareAddress. The bridge base64-encodes the two byte fields and does
+    // not build the signed bytes: the payload commits this device's address
+    // under a domain that must never be confusable with the relay's, so the
+    // construction exists once, pinned by conformance vectors CI runs.
+    // Throws InvalidArgument for a challenge that is not 32 bytes (a routine
+    // that signs whatever bytes a remote party chose is a signing oracle),
+    // and MlsNotInitialized when there is no identity to declare.
+    [Throws=ProtocolError]
+    GatewayAddressDeclaration gateway_address_declaration(sequence<u8> challenge);
     
     // Verify a signature against a public key.
     // Returns true if the signature is valid, false otherwise.
@@ -2112,6 +2174,15 @@ dictionary InternetMessage {
 dictionary WifiDirectMessage {
     string recipient_id;
     sequence<u8> data;
+};
+
+// The signed proof a device presents to attach to a gateway: everything
+// DeclareAddress needs, already committed to the offline-gateway-addr-v1
+// domain and the gateway's own challenge.
+dictionary GatewayAddressDeclaration {
+    string address;
+    sequence<u8> public_key;
+    sequence<u8> signature;
 };
 
 // Reticulum message for outgoing data

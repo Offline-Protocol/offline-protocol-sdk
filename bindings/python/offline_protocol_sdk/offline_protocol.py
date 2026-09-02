@@ -633,6 +633,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group() != 56646:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration() != 20226:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports() != 48673:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level() != 41959:
@@ -819,11 +821,21 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 16439:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused() != 25158:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared() != 58165:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent() != 25841:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities() != 3511:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message() != 23647:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received() != 3771:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence() != 15004:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist() != 44751:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed() != 62332:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1805,6 +1817,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_mess
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message_to_group.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_gateway_address_declaration.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_gateway_address_declaration.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_active_transports.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2346,12 +2364,30 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume.argty
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declaration_refused.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declaration_refused.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declared.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declared.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_confirm_sent.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_confirm_sent.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_gateway_capabilities.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_gateway_capabilities.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_get_next_message.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2364,6 +2400,19 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_me
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_message_received.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_peer_presence.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.c_int8,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_peer_presence.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_presence_watchlist.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_presence_watchlist.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2826,6 +2875,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forwar
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports.restype = ctypes.c_uint16
@@ -3105,15 +3157,30 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolv
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed.restype = ctypes.c_uint16
@@ -4128,6 +4195,48 @@ class _UniffiFfiConverterTypeForwardInfo(_UniffiConverterRustBuffer):
         _UniffiFfiConverterString.write(value.original_message_id, buf)
         _UniffiFfiConverterInt64.write(value.original_timestamp, buf)
         _UniffiFfiConverterUInt32.write(value.forward_count, buf)
+
+@dataclass
+class GatewayAddressDeclaration:
+    def __init__(self, *, address:str, public_key:typing.List[int], signature:typing.List[int]):
+        self.address = address
+        self.public_key = public_key
+        self.signature = signature
+        
+        
+
+    
+    def __str__(self):
+        return "GatewayAddressDeclaration(address={}, public_key={}, signature={})".format(self.address, self.public_key, self.signature)
+    def __eq__(self, other):
+        if self.address != other.address:
+            return False
+        if self.public_key != other.public_key:
+            return False
+        if self.signature != other.signature:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeGatewayAddressDeclaration(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return GatewayAddressDeclaration(
+            address=_UniffiFfiConverterString.read(buf),
+            public_key=_UniffiFfiConverterSequenceUInt8.read(buf),
+            signature=_UniffiFfiConverterSequenceUInt8.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterString.check_lower(value.address)
+        _UniffiFfiConverterSequenceUInt8.check_lower(value.public_key)
+        _UniffiFfiConverterSequenceUInt8.check_lower(value.signature)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterString.write(value.address, buf)
+        _UniffiFfiConverterSequenceUInt8.write(value.public_key, buf)
+        _UniffiFfiConverterSequenceUInt8.write(value.signature, buf)
 
 class _UniffiFfiConverterSequenceString(_UniffiConverterRustBuffer):
     @classmethod
@@ -10416,6 +10525,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def forward_message_to_group(self, original_message_json: str,group_id: str,priority: typing.Optional[MessagePriority]) -> typing.List[str]:
         raise NotImplementedError
+    def gateway_address_declaration(self, challenge: typing.List[int]) -> GatewayAddressDeclaration:
+        raise NotImplementedError
     def get_active_transports(self, ) -> typing.List[str]:
         raise NotImplementedError
     def get_battery_level(self, ) -> typing.Optional[int]:
@@ -10602,11 +10713,21 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def resume(self, ) -> None:
         raise NotImplementedError
+    def reticulum_address_declaration_refused(self, reason: str) -> None:
+        raise NotImplementedError
+    def reticulum_address_declared(self, address: str) -> None:
+        raise NotImplementedError
     def reticulum_confirm_sent(self, message_id: str) -> None:
+        raise NotImplementedError
+    def reticulum_gateway_capabilities(self, capabilities: typing.List[str]) -> None:
         raise NotImplementedError
     def reticulum_get_next_message(self, ) -> typing.Optional[ReticulumMessage]:
         raise NotImplementedError
     def reticulum_message_received(self, sender_id: str,data: typing.List[int]) -> None:
+        raise NotImplementedError
+    def reticulum_peer_presence(self, peer_id: str,online: bool,last_seen_ms: typing.Optional[int]) -> None:
+        raise NotImplementedError
+    def reticulum_presence_watchlist(self, ) -> typing.List[str]:
         raise NotImplementedError
     def reticulum_send_failed(self, message_id: str) -> None:
         raise NotImplementedError
@@ -11107,6 +11228,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message_to_group,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def gateway_address_declaration(self, challenge: typing.List[int]) -> GatewayAddressDeclaration:
+        
+        _UniffiFfiConverterSequenceUInt8.check_lower(challenge)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterSequenceUInt8.lower(challenge),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterTypeGatewayAddressDeclaration.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_gateway_address_declaration,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -12454,6 +12590,36 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def reticulum_address_declaration_refused(self, reason: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(reason)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(reason),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declaration_refused,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def reticulum_address_declared(self, address: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(address)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(address),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declared,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def reticulum_confirm_sent(self, message_id: str) -> None:
         
         _UniffiFfiConverterString.check_lower(message_id)
@@ -12466,6 +12632,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_confirm_sent,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def reticulum_gateway_capabilities(self, capabilities: typing.List[str]) -> None:
+        
+        _UniffiFfiConverterSequenceString.check_lower(capabilities)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterSequenceString.lower(capabilities),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_gateway_capabilities,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -12496,6 +12677,39 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_message_received,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def reticulum_peer_presence(self, peer_id: str,online: bool,last_seen_ms: typing.Optional[int]) -> None:
+        
+        _UniffiFfiConverterString.check_lower(peer_id)
+        
+        _UniffiFfiConverterBoolean.check_lower(online)
+        
+        _UniffiFfiConverterOptionalInt64.check_lower(last_seen_ms)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(peer_id),
+            _UniffiFfiConverterBoolean.lower(online),
+            _UniffiFfiConverterOptionalInt64.lower(last_seen_ms),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_peer_presence,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def reticulum_presence_watchlist(self, ) -> typing.List[str]:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterSequenceString.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_presence_watchlist,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -13296,6 +13510,7 @@ __all__ = [
     "EncryptionConfig",
     "FileProgress",
     "ForwardInfo",
+    "GatewayAddressDeclaration",
     "GroupRichReadiness",
     "InternetMessage",
     "InviteInfo",

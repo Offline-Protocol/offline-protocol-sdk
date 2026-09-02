@@ -13,7 +13,7 @@
 
 use offline_protocol::{
     DeduplicatorMode as CoreDeduplicatorMode, DeviceCapabilitySnapshot as CoreDeviceSnapshot,
-    EstablishmentState as CoreEstablishmentState, Event as CoreEvent,
+    EstablishmentState as CoreEstablishmentState, Event as CoreEvent, GatewayCarrier,
     MediaSendOptions as CoreMediaSendOptions, MeshRelayConfig as CoreMeshRelayConfig,
     MeshRelayStats as CoreMeshRelayStats, MetricsFrame as CoreMetricsFrame,
     MlsVerbosity as CoreMlsVerbosity, NetworkVisualizer,
@@ -2784,6 +2784,23 @@ pub struct ReticulumMessage {
     pub reply_to_msg: Option<String>,
 }
 
+/// The signed proof a device presents to attach to a gateway.
+///
+/// Everything `DeclareAddress` needs, already committed to the
+/// `offline-gateway-addr-v1` domain and the gateway's own challenge. A bridge
+/// base64-encodes `public_key` and `signature` and sends the three fields; it
+/// has nothing to compute.
+#[derive(Debug, Clone)]
+pub struct GatewayAddressDeclaration {
+    /// This device's `off1…` address, which is what the gateway binds.
+    pub address: String,
+    /// The Ed25519 identity key, 32 bytes. The gateway re-derives the address
+    /// from it, which is the check that makes the binding mean anything.
+    pub public_key: Vec<u8>,
+    /// The Ed25519 signature over the proof payload, 64 bytes.
+    pub signature: Vec<u8>,
+}
+
 /// Nostr message for outgoing data.
 ///
 /// The `event_json` field contains a complete, pre-signed `["EVENT", {...}]`
@@ -5076,6 +5093,17 @@ impl OfflineProtocol {
             protocol.flush_outbox_all();
         }
 
+        // A capability advertisement describes the gateway on the connection
+        // that just died, and a reconnect may land on a different box. The
+        // SDK clears it rather than trusting the bridge to, on the relay's
+        // precedent: a bridge that crashed between the drop and the clear
+        // would otherwise leave a stale advertisement standing for the life
+        // of the process.
+        if !is_connected && was_connected {
+            let mut protocol = self.lock_inner()?;
+            protocol.clear_gateway_capabilities();
+        }
+
         // Emit connection event
         let event = if is_connected {
             CoreEvent::TransportSwitched {
@@ -5223,6 +5251,93 @@ impl OfflineProtocol {
         self.with_transport(CoreTransportType::Reticulum, |rt| {
             rt.report_send_failure(&message_id);
         });
+    }
+
+    /// Reticulum: the gateway's `AddressDeclared` answer — the address it says
+    /// it bound to this connection, verbatim.
+    ///
+    /// Checked against `local_address()`: agreement means the gateway will
+    /// attribute our frames the way the core stamps them and answer presence
+    /// about an address we actually hold. A disagreement emits a
+    /// `GATEWAY_ADDRESS_BINDING_MISMATCH` security warning and nothing else —
+    /// a gateway that owns the socket already owns what tearing it down would
+    /// protect. What the bridge does act on is narrower and is its own
+    /// decision: it does not report the carrier available unless the session
+    /// was bound.
+    ///
+    /// A dedicated entry point (not message-plane injection) so a delivered
+    /// frame cannot synthesize an acknowledgement.
+    pub fn reticulum_address_declared(&self, address: String) {
+        let protocol = self.lock_inner_recovering();
+        protocol.on_gateway_address_declared(&address);
+    }
+
+    /// Reticulum: the gateway's `AddressError` answer — it refused this
+    /// connection's address declaration.
+    ///
+    /// Unlike the relay's refusal this is not a degraded-but-working
+    /// connection: an unproved session may submit and be told a verdict, and
+    /// is never registered as a recipient, so the bridge leaves the carrier
+    /// unavailable. Emits `GATEWAY_ADDRESS_DECLARATION_REFUSED`, which is what
+    /// explains a transport that stays down while its socket connects fine.
+    /// `reason` is the gateway's own text, treated as opaque and never carried
+    /// onto the event.
+    pub fn reticulum_address_declaration_refused(&self, reason: String) {
+        let protocol = self.lock_inner_recovering();
+        protocol.on_gateway_address_declaration_refused(&reason);
+    }
+
+    /// Reticulum: capability tokens from the gateway's `Capabilities` answer
+    /// (e.g. `gateway_v1`, `backbone_reticulum_v1`).
+    ///
+    /// The bridge MUST call this before `reticulum_status_changed(true)` on
+    /// each attach — the contract's own ordering, so a device never drains
+    /// into a gateway whose features it has not been told. Wholesale replace;
+    /// the SDK clears the set itself when the transport drops.
+    ///
+    /// Bounded like the relay's (64 tokens of 128 bytes), and kept in its own
+    /// set: a token from whatever box is on the venue Wi-Fi must not open the
+    /// relay's group-broadcast gate.
+    pub fn reticulum_gateway_capabilities(
+        &self,
+        capabilities: Vec<String>,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol.set_gateway_capabilities(capabilities);
+        Ok(())
+    }
+
+    /// Reticulum: gateway-sourced presence for a peer (`PresenceStatus`).
+    ///
+    /// `online=true` records the fact against Reticulum and re-drives that
+    /// peer's parked messages **over Reticulum**, because that is the carrier
+    /// that just proved it can reach them; `online=false` parks pending
+    /// welcomes without burning retry budget. Emits `presence_updated` with
+    /// `source: reticulum` — except for self, blocked, or empty peer ids,
+    /// which are dropped without an event.
+    pub fn reticulum_peer_presence(
+        &self,
+        peer_id: String,
+        online: bool,
+        last_seen_ms: Option<i64>,
+    ) {
+        if peer_id.is_empty() {
+            return;
+        }
+        let mut protocol = self.lock_inner_recovering();
+        protocol.on_peer_presence_via(&peer_id, online, last_seen_ms, GatewayCarrier::Reticulum);
+    }
+
+    /// Reticulum: peers the platform should watch via a gateway
+    /// `CheckPresence` query.
+    ///
+    /// The same set `internet_presence_watchlist` returns, through its own
+    /// entry point rather than a shared one: the set is "who this device is
+    /// waiting to hear about", which does not depend on who is asked, and a
+    /// bridge should not have to know that to call the right function.
+    pub fn reticulum_presence_watchlist(&self) -> Vec<String> {
+        let protocol = self.lock_inner_recovering();
+        protocol.presence_watch_peers()
     }
 
     // ========================================================================
@@ -6681,6 +6796,42 @@ impl OfflineProtocol {
         guard
             .sign_data(&data)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Builds the signed proof this device presents to attach to a gateway.
+    ///
+    /// Give it the 32-byte `challenge` the gateway minted for this connection
+    /// and it returns the address, the identity public key and the signature
+    /// to put in `DeclareAddress`. The bridge base64-encodes the two byte
+    /// fields; it does not build the signed bytes.
+    ///
+    /// That division is deliberate. The payload commits this device's address
+    /// under a domain that must never be confusable with the relay's, and the
+    /// key that signs it never leaves the core, so there is one
+    /// implementation of the construction pinned by conformance vectors CI
+    /// runs — rather than one per bridge, pinned by whatever that platform's
+    /// test target happens to compile.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgument` when the challenge is not 32 bytes: a gateway that
+    /// mints a shorter one has weakened the replay bound, and a routine that
+    /// puts this device's key over any bytes a remote party chose is the
+    /// shape of a signing oracle. `MlsNotInitialized` when this device has no
+    /// identity yet, so there is nothing to declare.
+    pub fn gateway_address_declaration(
+        &self,
+        challenge: Vec<u8>,
+    ) -> Result<GatewayAddressDeclaration, ProtocolError> {
+        let protocol = self.lock_inner()?;
+        let (address, public_key, signature) = protocol
+            .gateway_address_declaration(&challenge)
+            .map_err(ProtocolError::from)?;
+        Ok(GatewayAddressDeclaration {
+            address,
+            public_key,
+            signature,
+        })
     }
 
     /// Builds an invite blob for this identity.
@@ -8395,6 +8546,74 @@ mod tests {
             "nonexistent-id".to_string(),
             Some("timeout".to_string()),
         );
+    }
+
+    /// The gateway entry points reach the core and are infallible where the
+    /// relay twins are.
+    ///
+    /// Infallibility is the contract, not an oversight: an echo this node
+    /// cannot match is the finding being reported, and handing the bridge an
+    /// error for it would invite a bridge that treats the report as a failure
+    /// to be retried.
+    #[test]
+    fn test_reticulum_gateway_answers_reach_the_core() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        protocol.reticulum_address_declared("off1nobodyinparticular".to_string());
+        protocol.reticulum_address_declaration_refused("address_mismatch".to_string());
+        protocol.reticulum_peer_presence("bob".to_string(), true, Some(1));
+        protocol.reticulum_peer_presence(String::new(), true, None);
+
+        assert!(protocol.reticulum_presence_watchlist().is_empty());
+    }
+
+    /// Capabilities are stored, then cleared by the transport dropping —
+    /// which the SDK does itself rather than trusting the bridge to, because
+    /// a bridge that crashes between the drop and the clear would leave a
+    /// stale advertisement standing for the life of the process.
+    #[test]
+    fn test_reticulum_gateway_capabilities_clear_on_drop() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        protocol.reticulum_status_changed(true).unwrap();
+        protocol
+            .reticulum_gateway_capabilities(vec![
+                "gateway_v1".to_string(),
+                "backbone_reticulum_v1".to_string(),
+            ])
+            .unwrap();
+
+        {
+            let inner = protocol.lock_inner().unwrap();
+            assert_eq!(inner.gateway_capabilities().len(), 2);
+        }
+
+        protocol.reticulum_status_changed(false).unwrap();
+
+        let inner = protocol.lock_inner().unwrap();
+        assert!(
+            inner.gateway_capabilities().is_empty(),
+            "the advertisement must not outlive the connection that made it"
+        );
+    }
+
+    /// A challenge of the wrong size is refused at the FFI boundary rather
+    /// than signed, and without an identity there is nothing to declare.
+    #[test]
+    fn test_gateway_address_declaration_refuses_bad_input() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        // No MLS identity in this configuration, so even a well-formed
+        // challenge has nothing to declare — and a short one is refused
+        // before it gets that far.
+        assert!(protocol.gateway_address_declaration(vec![7u8; 31]).is_err());
+        assert!(protocol.gateway_address_declaration(vec![7u8; 32]).is_err());
     }
 
     #[test]

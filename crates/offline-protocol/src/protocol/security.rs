@@ -11,7 +11,7 @@ use crate::events::{Event, SecurityWarningCode};
 use crate::{Error, Result};
 use chrono::Utc;
 use offline_protocol_core::{Address, Message, UserId};
-use offline_protocol_sealed::Freshness;
+use offline_protocol_sealed::{gateway_address_proof_payload, Freshness};
 use offline_protocol_transport::TransportType;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -21,6 +21,33 @@ use tracing::{debug, error, info, warn};
 /// unauthorized-membership reports use, for the same reason: the condition
 /// persists, so an unsuppressed warning reports one cause many times.
 const PUSH_KEY_PACKAGE_WARNING_SUPPRESS_INTERVAL: Duration = Duration::from_secs(300);
+
+/// What a gateway's address echo says about this device, as a decision
+/// separate from how any one carrier reports it.
+///
+/// Private to this module: the relay and the daemon contract ask the same
+/// question and answer it with different text and different codes, and the
+/// question is the part that must not drift between them.
+/// Bytes of challenge a gateway mints per connection, from the contract.
+///
+/// A device refuses to sign a proof over anything else: the challenge is the
+/// whole of the replay bound, and one that is shorter than this is either a
+/// broken gateway or one trying to pick the bytes that go under our key.
+pub const GATEWAY_CHALLENGE_LEN: usize = 32;
+
+enum AddressBinding<'a> {
+    /// The echoed address is this device's.
+    Ours,
+    /// The echoed address is some other address, and this device holds
+    /// `local`. There is no benign reading: the gateway re-derives the
+    /// address from the key that signed the proof, so an echo naming another
+    /// address is a binding it never verified.
+    NotOurs { local: &'a str },
+    /// This device has no address yet, so nothing local can be compared. That
+    /// is itself the finding: the bridges do not declare before an identity
+    /// exists, so an echo answers a declaration that was never sent.
+    NoIdentity,
+}
 
 /// What [`OfflineProtocol::judge_control_frame_freshness`] concluded.
 ///
@@ -1010,14 +1037,14 @@ impl OfflineProtocol {
     /// Reached only through the FFI's dedicated entry point, not through
     /// message-plane injection, so a notification payload cannot synthesize it.
     pub fn on_relay_address_declared(&self, declared: &str) {
-        match self.local_address() {
-            Some(local) if local == declared => {
+        match self.classify_address_binding(declared) {
+            AddressBinding::Ours => {
                 info!(
                     address = %declared,
                     "Relay bound this connection to our address; frames are attributed by address"
                 );
             }
-            Some(local) => {
+            AddressBinding::NotOurs { local } => {
                 warn!(
                     declared = %declared,
                     local = %local,
@@ -1035,7 +1062,7 @@ impl OfflineProtocol {
                      will reject our security-gated control traffic",
                 );
             }
-            None => {
+            AddressBinding::NoIdentity => {
                 // The bridge does not declare before an identity exists, so an
                 // acknowledgement here answers a declaration this node never
                 // made. Same disposition, distinct text: nothing local can be
@@ -1081,6 +1108,167 @@ impl OfflineProtocol {
             "relay refused this connection's address declaration: frames stay \
              attributed by account name, so new encrypted sessions cannot be \
              established over the relay until a later connection declares successfully",
+        );
+    }
+
+    /// Builds the signed proof this device presents to attach to a gateway.
+    ///
+    /// The bridge does not build these bytes. It holds the socket, so it holds
+    /// the challenge, but the payload commits this device's own address under
+    /// a domain that must not be confusable with the relay's, and the private
+    /// key that signs it never leaves the core. Putting the construction here
+    /// means there is one implementation, pinned by conformance vectors that
+    /// CI runs, instead of one per bridge pinned by whatever that platform's
+    /// test target happens to compile.
+    ///
+    /// Returns `(address, public_key, signature)`. The caller base64-encodes
+    /// the two byte fields into `DeclareAddress`.
+    ///
+    /// # Errors
+    ///
+    /// - The challenge is not [`GATEWAY_CHALLENGE_LEN`] bytes. A gateway that
+    ///   mints a shorter one has weakened the replay bound it exists to
+    ///   provide, and signing whatever it sent would be the wrong way to find
+    ///   that out. The check is here rather than in the bridge because a
+    ///   signing routine that will put its key over any bytes a remote party
+    ///   chose is the shape of a signing oracle.
+    /// - This device has no identity yet, so there is nothing to declare.
+    pub fn gateway_address_declaration(
+        &self,
+        challenge: &[u8],
+    ) -> Result<(String, Vec<u8>, Vec<u8>)> {
+        if challenge.len() != GATEWAY_CHALLENGE_LEN {
+            return Err(Error::InvalidArgument(format!(
+                "gateway challenge must be {GATEWAY_CHALLENGE_LEN} bytes, got {}",
+                challenge.len()
+            )));
+        }
+        let address = self
+            .local_address()
+            .ok_or_else(|| {
+                Error::Other("no established identity to declare to a gateway".to_string())
+            })?
+            .to_string();
+        let mls = self
+            .mls_manager
+            .as_ref()
+            .ok_or_else(|| Error::Other("MLS is not initialized".to_string()))?;
+        let manager = mls
+            .read()
+            .map_err(|e| Error::Other(format!("MLS lock poisoned: {e}")))?;
+        let public_key = manager
+            .get_identity_public_key()
+            .map_err(|e| Error::Other(format!("failed to get identity public key: {e}")))?;
+        let payload = gateway_address_proof_payload(&address, challenge)
+            .map_err(|e| Error::Other(format!("failed to build the gateway proof: {e}")))?;
+        let signature = manager
+            .sign_data(&payload)
+            .map_err(|e| Error::Other(format!("failed to sign the gateway proof: {e}")))?;
+        debug!(address = %address, "Built a gateway address declaration");
+        Ok((address, public_key, signature))
+    }
+
+    /// What a gateway's `AddressDeclared` echo says about this device.
+    ///
+    /// Every gateway kind runs this same comparison, so it exists once: the
+    /// texts a caller reports differ per carrier, but the question does not,
+    /// and two copies of a security check are two chances for one of them to
+    /// be relaxed on its own.
+    fn classify_address_binding(&self, declared: &str) -> AddressBinding<'_> {
+        match self.local_address() {
+            Some(local) if local == declared => AddressBinding::Ours,
+            Some(local) => AddressBinding::NotOurs { local },
+            None => AddressBinding::NoIdentity,
+        }
+    }
+
+    /// Checks a gateway's `AddressDeclared` answer against this device's own
+    /// address.
+    ///
+    /// The gateway twin of [`Self::on_relay_address_declared`], and the same
+    /// disposition: report, do not act. A gateway verifies that the declared
+    /// address derives from the key that signed the proof before it echoes
+    /// anything, so an echo naming another address means it bound what it did
+    /// not verify, and a session attached under an address this device does
+    /// not control draws that address's inbound traffic here and poisons the
+    /// presence answers given about it. Tearing the connection down from here
+    /// buys nothing: a gateway that owns the socket owns everything a local
+    /// teardown would protect.
+    ///
+    /// What *is* acted on lives in the bridge and is narrower: it refuses to
+    /// report the carrier available at all unless the session was bound, so a
+    /// gateway that will not bind is a transport the selector never sees
+    /// rather than one it trusts.
+    ///
+    /// Reached only through the FFI's dedicated entry point, not through
+    /// message-plane injection, so a notification payload cannot synthesize
+    /// it.
+    pub fn on_gateway_address_declared(&self, declared: &str) {
+        match self.classify_address_binding(declared) {
+            AddressBinding::Ours => {
+                info!(
+                    address = %declared,
+                    "Gateway bound this connection to our address"
+                );
+            }
+            AddressBinding::NotOurs { local } => {
+                warn!(
+                    declared = %declared,
+                    local = %local,
+                    "Gateway acknowledged an address that is not ours"
+                );
+                // `declared` is this event's `peer_id`, where the scrubber
+                // hashes it; interpolating it into `reason` — which is
+                // shipped verbatim — would undo that hashing inside the same
+                // record. The raw pair is in the `warn!` above.
+                self.emit_security_warning(
+                    declared,
+                    SecurityWarningCode::GatewayAddressBindingMismatch,
+                    "gateway bound this connection to an address that is not this device's: \
+                     it will attribute our frames to an identity we cannot prove, and answer \
+                     presence about an address we do not hold",
+                );
+            }
+            AddressBinding::NoIdentity => {
+                warn!(
+                    declared = %declared,
+                    "Gateway acknowledged an address declaration this node never made"
+                );
+                self.emit_security_warning(
+                    declared,
+                    SecurityWarningCode::GatewayAddressBindingMismatch,
+                    "gateway bound this connection to an address while this device has no \
+                     established identity to declare: no declaration was sent from here",
+                );
+            }
+        }
+    }
+
+    /// Records a gateway refusing this connection's address declaration.
+    ///
+    /// Unlike the relay case, this is **not** a degraded-but-working
+    /// connection. The relay keeps delivering on established sessions in
+    /// account-name space; a gateway has no such space, so an unproved
+    /// session may submit and be told a verdict and is never registered as a
+    /// recipient. The bridge therefore does not report the carrier available,
+    /// and this warning is what explains a transport that stays down while
+    /// its socket connects perfectly well.
+    ///
+    /// `reason` is the gateway's own text: opaque, remote-chosen, and logged
+    /// rather than emitted — an event field never carries text a remote party
+    /// wrote. Attributed to this node rather than to a peer, since the
+    /// failure is ours and no peer is involved.
+    pub fn on_gateway_address_declaration_refused(&self, reason: &str) {
+        warn!(
+            reason = %reason,
+            "Gateway refused our address declaration; the carrier stays unavailable"
+        );
+        self.emit_security_warning(
+            &self.local_id,
+            SecurityWarningCode::GatewayAddressDeclarationRefused,
+            "gateway refused this connection's address declaration: the session can be \
+             told verdicts but is never a recipient, so the carrier is not offered for \
+             sending until a later connection declares successfully",
         );
     }
 

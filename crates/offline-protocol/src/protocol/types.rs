@@ -14,6 +14,68 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::warn;
 
+/// A carrier that speaks the gateway contract, and can therefore answer about
+/// a third party's reachability.
+///
+/// Two of the five transports qualify, and the type exists so the other three
+/// cannot be passed where a gateway answer is expected. That is not a
+/// theoretical tidiness: every effect of a presence answer is carrier-scoped,
+/// so a wrong carrier records a fact against a transport that never claimed
+/// it and pins an un-park flush to a transport that never proved anything,
+/// neither of which fails loudly.
+///
+/// - **BLE and Wi-Fi Direct** are zone carriers. A neighbour being in range
+///   is a fact about this device's own link, not a claim about a third party,
+///   and it arrives through discovery rather than through a verb.
+/// - **Nostr** structurally cannot answer: a broadcast relay reports no
+///   per-recipient delivery, so it is a carrier and never a gateway. See
+///   [ADR 0017](../../../docs/adr/0017-nostr-is-a-carrier-not-a-gateway.md).
+///   This is a permanent gap, recorded here in the type so it stops being
+///   rediscovered as a bug.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayCarrier {
+    /// The internet relay, which implemented every verb before the contract
+    /// named them.
+    Internet,
+    /// A gateway daemon reached over the Reticulum transport's local IP
+    /// contract.
+    Reticulum,
+}
+
+impl GatewayCarrier {
+    /// The transport this gateway's answers are recorded against.
+    pub fn transport(self) -> TransportType {
+        match self {
+            Self::Internet => TransportType::Internet,
+            Self::Reticulum => TransportType::Reticulum,
+        }
+    }
+
+    /// How a presence answer from this gateway is labelled to the app.
+    pub fn presence_source(self) -> crate::events::PresenceSource {
+        match self {
+            Self::Internet => crate::events::PresenceSource::Internet,
+            Self::Reticulum => crate::events::PresenceSource::Reticulum,
+        }
+    }
+
+    /// The gateway behind `transport`, or `None` for a carrier that answers
+    /// no verdicts.
+    ///
+    /// Exhaustive by construction rather than by a wildcard: a sixth
+    /// transport must be classified here deliberately, and the wrong default
+    /// is the silent one. A carrier that returns `None` is not broken; it
+    /// simply never contradicts the blanket "up means reachable" assumption,
+    /// which is the residual `docs/mesh.md` records.
+    pub fn from_transport(transport: TransportType) -> Option<Self> {
+        match transport {
+            TransportType::Internet => Some(Self::Internet),
+            TransportType::Reticulum => Some(Self::Reticulum),
+            TransportType::BLE | TransportType::WiFiDirect | TransportType::Nostr => None,
+        }
+    }
+}
+
 /// Retry interval for persisting session confirmation after a transient storage error.
 pub(crate) const CONFIRMATION_RETRY_INTERVAL_SECS: i64 = 5;
 /// Probe interval for reconciling pending sessions after restart.

@@ -35,6 +35,16 @@ pub enum PresenceSource {
     /// unreachable, so a failed send can produce an `Internet`-sourced
     /// offline event without any explicit presence query.
     Internet,
+    /// Gateway-observed presence over the Reticulum daemon contract: a
+    /// `PresenceStatus` answer from the gateway this device is attached to,
+    /// whether solicited by the SDK's watchlist or pushed when a watched
+    /// peer's state changes.
+    ///
+    /// Named for the carrier rather than for "gateway", because that is what
+    /// [`Self::Internet`] names too: the relay is a gateway, and an app that
+    /// wants to know which carrier answered has to be able to tell them
+    /// apart. A claim from either has the same standing and the same decay.
+    Reticulum,
     /// A peer-sent `__PRESENCE__` self-report. Transport-agnostic: it may
     /// arrive over BLE, WiFi Direct, or even relay-forwarded frames — hence
     /// "peer", not "mesh". Default for deserializing legacy events that
@@ -277,6 +287,32 @@ pub enum SecurityWarningCode {
     /// to accepting frames of any age (see issue 403 for what that gives back
     /// to an attacker).
     StaleControlFrame,
+    /// A gateway echoed an `AddressDeclared` naming an address that is not
+    /// this device's.
+    ///
+    /// The gateway twin of [`Self::RelayAddressBindingMismatch`], and it has
+    /// the same absence of a benign reading: the gateway verifies that the
+    /// declared address derives from the key that signed the proof, so an
+    /// echo naming anything else means it bound what it did not verify. A
+    /// session attached under an address this device does not control is how
+    /// another device's inbound traffic gets drawn here, and how the presence
+    /// answers given about that address are poisoned.
+    ///
+    /// Reported and not acted on, for the reason the relay case gives: a
+    /// gateway that owns the socket already owns everything a local teardown
+    /// would protect. What the bridges do act on is narrower and is not this
+    /// signal: they refuse to offer a carrier whose session was never bound.
+    GatewayAddressBindingMismatch,
+    /// A gateway refused this connection's address declaration.
+    ///
+    /// Unlike the relay case ([`Self::RelayAddressDeclarationRefused`]), this
+    /// is not a degraded-but-working connection. The relay keeps delivering
+    /// on established sessions in account-name space; a gateway has no such
+    /// space, so an unproved session can only be told verdicts and is never
+    /// registered as a recipient. The bridge therefore never reports the
+    /// carrier available, and this warning explains a transport that stays
+    /// down while its socket connects fine.
+    GatewayAddressDeclarationRefused,
 }
 
 impl SecurityWarningCode {
@@ -298,6 +334,8 @@ impl SecurityWarningCode {
             Self::RelayAddressDeclarationRefused => "RELAY_ADDRESS_DECLARATION_REFUSED",
             Self::GroupLeafIdentityUnproven => "GROUP_LEAF_IDENTITY_UNPROVEN",
             Self::StaleControlFrame => "STALE_CONTROL_FRAME",
+            Self::GatewayAddressBindingMismatch => "GATEWAY_ADDRESS_BINDING_MISMATCH",
+            Self::GatewayAddressDeclarationRefused => "GATEWAY_ADDRESS_DECLARATION_REFUSED",
         }
     }
 }
@@ -2274,12 +2312,36 @@ impl Event {
         timestamp: i64,
         last_seen_ms: Option<i64>,
     ) -> Self {
+        Self::presence_updated_from(
+            peer_id,
+            status,
+            timestamp,
+            last_seen_ms,
+            PresenceSource::Internet,
+        )
+    }
+
+    /// Creates a PresenceUpdated event for a gateway answer, naming which
+    /// carrier answered.
+    ///
+    /// The relay is one gateway among others now, so the source is a
+    /// parameter rather than a constant. It is still not free-form: a
+    /// peer-sent self-report goes through [`Self::presence_updated`], which
+    /// is the only way to produce `PresenceSource::Peer`, so a carrier answer
+    /// can never be mislabelled as one.
+    pub fn presence_updated_from(
+        peer_id: String,
+        status: PresenceStatus,
+        timestamp: i64,
+        last_seen_ms: Option<i64>,
+        source: PresenceSource,
+    ) -> Self {
         Self::PresenceUpdated {
             peer_id,
             status,
             timestamp,
             last_seen_ms,
-            source: PresenceSource::Internet,
+            source,
         }
     }
 
@@ -4039,6 +4101,8 @@ mod tests {
             SecurityWarningCode::RelayAddressDeclarationRefused,
             SecurityWarningCode::GroupLeafIdentityUnproven,
             SecurityWarningCode::StaleControlFrame,
+            SecurityWarningCode::GatewayAddressBindingMismatch,
+            SecurityWarningCode::GatewayAddressDeclarationRefused,
         ];
         for code in all {
             // serde renders a unit enum variant as a quoted JSON string.
@@ -4066,7 +4130,9 @@ mod tests {
                 | SecurityWarningCode::RelayAddressBindingMismatch
                 | SecurityWarningCode::RelayAddressDeclarationRefused
                 | SecurityWarningCode::GroupLeafIdentityUnproven
-                | SecurityWarningCode::StaleControlFrame => {}
+                | SecurityWarningCode::StaleControlFrame
+                | SecurityWarningCode::GatewayAddressBindingMismatch
+                | SecurityWarningCode::GatewayAddressDeclarationRefused => {}
             }
         }
     }
@@ -4361,6 +4427,91 @@ mod tests {
         assert!(
             stale.is_empty(),
             "types.ts declares security warning codes with no Rust variant: {stale:?}"
+        );
+    }
+
+    /// The same drift guard for `PresenceSource`, which had none.
+    ///
+    /// This union is the discriminator on the one event that merges two
+    /// unrelated streams, and the documented advice is to filter on it, so an
+    /// app that switches exhaustively over the TS union silently drops every
+    /// event carrying a source TypeScript has never heard of. Nothing else
+    /// catches that: unlike `SecurityWarningCode` there is no `as_str` here,
+    /// the wire form is serde's alone, and a new variant compiles and ships
+    /// green on both sides of a seam that disagrees.
+    #[test]
+    fn react_native_types_cover_all_presence_sources() {
+        use std::collections::BTreeSet;
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let events_rs = std::fs::read_to_string(manifest_dir.join("src/events.rs")).unwrap();
+        let types_ts_path = manifest_dir.join("../../bindings/react-native/src/types.ts");
+        let types_ts = std::fs::read_to_string(&types_ts_path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", types_ts_path.display()));
+
+        // Scanned from the source text rather than from a hand-kept list of
+        // variants, because a hand-kept list is the thing that drifts.
+        let body = events_rs
+            .split_once("pub enum PresenceSource {")
+            .expect("PresenceSource not found")
+            .1
+            .split_once(
+                "
+}",
+            )
+            .expect("PresenceSource body not terminated")
+            .0;
+        let rust_sources: BTreeSet<String> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//") && !l.starts_with("#["))
+            .filter_map(|l| l.strip_suffix(','))
+            .filter(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric()))
+            .map(|name| serde_snake_case(name))
+            .collect();
+
+        // Negative control: an empty scan would make both assertions below
+        // vacuously true.
+        assert!(
+            rust_sources.len() >= 2,
+            "PresenceSource scan looks broken: only {} found",
+            rust_sources.len()
+        );
+
+        // Pins the scan against serde itself, so a rename rule change is
+        // caught here rather than in an app's switch statement.
+        assert_eq!(
+            serde_json::to_string(&PresenceSource::Internet).unwrap(),
+            "\"internet\"",
+            "serde's rendering of PresenceSource changed"
+        );
+
+        let union = types_ts
+            .split_once("export type PresenceSource =")
+            .expect("PresenceSource union not found in types.ts")
+            .1
+            .split_once(';')
+            .expect("PresenceSource union not terminated")
+            .0;
+        let ts_sources: BTreeSet<String> = union
+            .split('|')
+            .map(str::trim)
+            .filter_map(|t| t.strip_prefix('\''))
+            .filter_map(|t| t.strip_suffix('\''))
+            .map(str::to_string)
+            .collect();
+
+        let missing: Vec<_> = rust_sources.difference(&ts_sources).collect();
+        assert!(
+            missing.is_empty(),
+            "PresenceSource variants missing from the union in \
+             bindings/react-native/src/types.ts: {missing:?}"
+        );
+
+        let stale: Vec<_> = ts_sources.difference(&rust_sources).collect();
+        assert!(
+            stale.is_empty(),
+            "types.ts declares presence sources with no Rust variant: {stale:?}"
         );
     }
 }
