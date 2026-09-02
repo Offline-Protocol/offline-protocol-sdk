@@ -1126,7 +1126,7 @@ impl OfflineProtocol {
     ///
     /// # Errors
     ///
-    /// - The challenge is not [`GATEWAY_CHALLENGE_LEN`] bytes. A gateway that
+    /// - The challenge is not 32 bytes (`GATEWAY_CHALLENGE_LEN`). A gateway that
     ///   mints a shorter one has weakened the replay bound it exists to
     ///   provide, and signing whatever it sent would be the wrong way to find
     ///   that out. The check is here rather than in the bridge because a

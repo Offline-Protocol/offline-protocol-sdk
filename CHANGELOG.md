@@ -13,6 +13,46 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ## [Unreleased]
 
+### Added
+
+- **The Reticulum transport speaks the gateway contract.** Both mobile managers
+  attached to a daemon by opening a TCP socket, sending `Identify`, announcing
+  the carrier, and confirming every send the instant the write returned. They
+  read two frame types and ignored the rest, so a daemon answering
+  [contract v1](docs/spec/gateway-contract.md) got nothing back: the session was
+  never bound, which on the other side means it may submit and be told a verdict
+  and is never registered as a recipient. Nothing addressed to the device would
+  ever have arrived, and the core meanwhile settled every frame as sent.
+
+  The attach is now the handshake the contract specifies — `Identify` with a
+  version, a challenge signed under `offline-gateway-addr-v1`, `DeclareAddress`,
+  the echo checked against this device's own address, capabilities, and only
+  then the carrier announced. A refused declaration closes the connection rather
+  than offering a transport that can only refuse, which is where this
+  deliberately differs from the relay: an undeclared relay connection still
+  works in account-name space, and a gateway has no such space. Two new
+  `SecurityWarningCode` values, `GATEWAY_ADDRESS_BINDING_MISMATCH` and
+  `GATEWAY_ADDRESS_DECLARATION_REFUSED`, report both answers.
+
+  Sends settle on the gateway's verdict. `MessageSent` confirms, `DeliveryError`
+  fails with the gateway's reason verbatim, and `recipient_unreachable` now
+  reaches the classifier that parks a direct message and offers it to the mesh —
+  which closes the Reticulum half of the mixed-neighbourhood residual
+  `docs/mesh.md` has carried. Presence is watched from the SDK's own watchlist,
+  and a gateway's answer un-parks over Reticulum rather than over the internet
+  transport.
+
+  `offline-gateway-addr-v1` is now a live signing domain with published
+  [conformance vectors](docs/spec/conformance.md). The proof is built and signed
+  in the core rather than in each bridge, so there is one implementation of the
+  construction instead of one per platform.
+
+  New FFI: `reticulum_address_declared`, `reticulum_address_declaration_refused`,
+  `reticulum_gateway_capabilities`, `reticulum_peer_presence`,
+  `reticulum_presence_watchlist` and `gateway_address_declaration`. New
+  `PresenceSource` value `reticulum`, so an app filtering presence by carrier
+  still can.
+
 ### Removed
 
 - **The Reticulum transport's inert configuration, in full.** `ReticulumConfig`

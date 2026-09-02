@@ -111,6 +111,31 @@ above.
 
 ### Attach
 
+The full sequence, in order. `Capabilities` and `StatusUpdate` are separate
+sections below; they are shown here because the order is what a client
+implements against:
+
+```
+→ Identify
+← Challenge
+→ DeclareAddress
+← AddressDeclared | AddressError
+← Capabilities
+← StatusUpdate(connected)
+```
+
+A gateway MUST send `Capabilities` before `StatusUpdate(connected)`, and a
+client SHOULD treat `StatusUpdate(connected)` as the point at which the carrier
+becomes usable. A client that starts submitting earlier is not wrong, but it is
+submitting into a gateway whose features it has not been told.
+
+**A client SHOULD NOT offer an unbound session to its transport selector.** A
+session whose declaration was refused, or never made, may submit and be told a
+verdict and is never registered as a recipient, so nothing addressed to that
+device arrives over it. This differs from the internet relay, where an
+undeclared connection keeps delivering on established sessions in account-name
+space; a gateway has no such space.
+
 ```
 → {"type":"Identify","device_id":"<off1…>","protocol_version":1}
 ← {"type":"Challenge","challenge":"<base64, 32 bytes>","protocol_version":1}
@@ -182,15 +207,33 @@ session to an address this device does not control.
 ### Submit and Verdict
 
 ```
-→ {"type":"SendMessage","recipient":"<off1…>","content":"<base64>","encoding":"base64","reply_to_msg":"<id>"}
-← {"type":"MessageSent","message_id":"<id>"}
+→ {"type":"SendMessage","recipient":"<off1…>","content":"<base64>","encoding":"base64","message_id":"<id>","reply_to_msg":"<id>"}
+← {"type":"MessageSent","message_id":"<id>","recipient":"<off1…>"}
   or
-← {"type":"DeliveryError","message_id":"<id>","reason":"recipient_unreachable: <text>"}
+← {"type":"DeliveryError","message_id":"<id>","recipient":"<off1…>","reason":"recipient_unreachable: <text>"}
 ```
 
 A gateway MUST answer every `SendMessage` with exactly one of these. Silence is
 not permitted: the sender's outbox holds the message either way, but a gateway
 that neither forwards nor refuses converts a routing decision into a timeout.
+
+`message_id` on the request is **optional and client-chosen**. A gateway MUST
+echo a client-supplied id verbatim on the verdict, and MUST mint one when the
+request carries none or carries one it will not accept. It MAY bound what it
+accepts; the shape both implementations use is 1 to 64 characters of
+`[A-Za-z0-9._-]`, which a UUID satisfies.
+
+**A client MUST correlate by id and MUST NOT correlate by order.** A gateway
+answers submissions as their routing resolves, which is not the order they
+arrived: one recipient is attached locally and answers immediately, the next
+needs a backbone query. A client that sends no id therefore cannot correlate at
+all, because the id it is answered under is one the gateway chose. That is the
+reason to send one, and the reason a gateway that silently rewrote an id it
+disliked would be worse than one that rejected the submission outright.
+
+`recipient` on both verdicts is the address the verdict is about. Additive, and
+a client that does not read it is unaffected; a client that does can act on the
+recipient without keeping its own id-to-recipient map.
 
 `reason` MUST begin with `recipient_unreachable` when the recipient is not
 reachable through this gateway. That token is the one the SDK classifier matches
@@ -202,8 +245,13 @@ event.
 ### Deliver
 
 ```
-← {"type":"MessageReceived","sender":"<off1…>","content":"<base64>","encoding":"base64"}
+← {"type":"MessageReceived","sender":"<off1…>","content":"<base64>","encoding":"base64","message_id":"<id>","reply_to_msg":"<id>"}
 ```
+
+`message_id` and `reply_to_msg` are additive and MAY be absent. They carry the
+sender's own correlation forward so a gateway does not have to be the place
+where it is lost; nothing in delivery depends on either, and the frame
+authenticates itself regardless.
 
 A frame the gateway holds for this device, handed to it over the attach
 connection. `encoding` is optional; absent means UTF-8 text, and every binary

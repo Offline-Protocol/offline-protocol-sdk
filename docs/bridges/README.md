@@ -102,7 +102,7 @@ See [ADR 0014](../adr/0014-dedicated-ffi-entry-points.md).
 
 ## C5. Hand-mirrored constants must be pinned in every language
 
-Some constants exist in several places no single compiler sees together. Six
+Some constants exist in several places no single compiler sees together. Nine
 sets do today, and they are pinned by **two different** mechanisms, so knowing
 which one you are touching matters.
 
@@ -157,7 +157,30 @@ than the engine hands every silent-relay resolution to the sweep instead of to
 the bridge that knows which relays replied. Nothing on either side of the
 boundary would show that, so the guard asserts the ordering too.
 
-**The iOS selector table** is the seventh, and the only one that is not a
+**The gateway attach constants** are the seventh: the Swift and Kotlin
+`GatewayAttachPolicy` each hold the protocol version, the challenge length, the
+attach and verdict timeouts, the in-flight cap and the presence-peer cap, and a
+Rust guard reads both sources. Like the Nostr deadline, one of these is pinned
+for a *relationship* as well as a spelling: the 60s verdict timeout has to stay
+below the core's 120s pending-confirmation expiry, because two clocks describe
+the same frame and if the bridge's were the longer one the core would settle the
+frame first and the verdict would then land on an id it had already moved past.
+
+The signing domain is deliberately **not** in this list, though the relay's is.
+The gateway proof commits only this device's own address, so it is built and
+signed in the core and pinned by a conformance vector CI executes; no bridge
+holds a copy of the layout, and there is nothing to mirror. A `GatewayAttachPolicy`
+that grew one would be reintroducing the problem the relay's copy already is —
+which is why the same guard asserts neither bridge contains the domain string.
+
+**The presence-watch defaults** are the eighth, and were unpinned for as long as
+they have existed: `PresenceWatchPolicy`'s idle TTL, per-tick query cap and tick
+interval are hand-mirrored in Swift and Kotlin, and both the relay and gateway
+managers now drive from them. A tick interval that drifted apart would give the
+two platforms different presence latency, which reads in the field as a device
+problem rather than as a constant.
+
+**The iOS selector table** is the ninth, and the only one that is not a
 constant. `OfflineProtocolModule.m` mirrors every `@objc` method of
 `OfflineProtocolModule.swift` as an `RCT_EXTERN_METHOD` selector, and React
 Native resolves those selectors against the class at module load rather than at
@@ -201,6 +224,8 @@ alone.
 | Constraint | Why |
 |------------|-----|
 | Relay capabilities injected **before** the internet-available transition | The flush that transition triggers must already see them |
+| Gateway capabilities injected **before** the Reticulum-available transition | Same flush, same reason, different carrier |
+| Reticulum available reported **only after** the gateway binds the session | An unbound session may submit and be told a verdict, and is never a recipient — offering it to the selector offers a transport that can only refuse |
 | Relay capabilities cleared **on** internet drop | Otherwise a stale capability keeps the broadcast gate open |
 | Per-peer end-to-end capabilities restored **before** queued sends flush | Otherwise the startup flush emits downgraded envelopes to every established peer |
 

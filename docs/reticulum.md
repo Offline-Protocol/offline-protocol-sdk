@@ -6,7 +6,7 @@ The Reticulum transport provides long-range, resilient mesh networking via the [
 
 Reticulum is one of five transports in the Offline Protocol SDK, alongside BLE, Wi-Fi Direct, Internet and Nostr. It is disabled by default because it requires external infrastructure (a running Reticulum instance, an RNode radio, or a gateway).
 
-> **No counterpart daemon ships yet.** The Rust transport opens no Reticulum link of its own: it manages queues, metrics and the send-confirmation loop, and expects the platform to bridge to a real Reticulum stack. Both mobile managers speak the protocol below to a configurable address, and nothing in this repository or any companion repository answers on the other end. Until a daemon exists, enabling Reticulum gives you a transport that queues and never drains. See [the gateway contract](spec/gateway-contract.md), which specifies what that daemon has to be.
+> **This repository ships the device half.** The Rust transport opens no Reticulum link of its own: it manages queues, metrics and the confirmation loop, and expects the platform to bridge to a real Reticulum stack. Both mobile managers now speak [the gateway daemon contract](spec/gateway-contract.md) to a configurable address — they attach with a signed address declaration, settle each send on the gateway's verdict, and watch presence. What answers on the other end is a gateway daemon built to that contract, which is a deployment rather than something this SDK ships. With nothing listening at `daemonAddress`, enabling Reticulum gives you a transport that never becomes available.
 
 ## When to Use Reticulum
 
@@ -173,38 +173,29 @@ The longer timeouts reflect the high-latency reality of LoRa multi-hop paths.
 
 Regardless of which integration strategy you choose, the platform bridge interacts with `ReticulumTransport` through the same UniFFI API:
 
-1. **Initialize** your Reticulum integration (embedded Python, `reticulum-rs`, gateway connection, etc.)
-2. **Report status** via `reticulumStatusChanged(true)` when the Reticulum stack is ready
-3. **Poll for outgoing messages** via `reticulumGetNextMessage()` in a loop
-4. **Send** each message through your Reticulum integration
-5. **Confirm** each send via `reticulumConfirmSent(messageId)` or `reticulumSendFailed(messageId)`
-6. **Receive** incoming messages and pass to `reticulumDataReceived(data)` or `reticulumDataReceivedFrom(data, peerId)`
-7. **Report disconnection** via `reticulumStatusChanged(false)` on connection loss
-8. **Reconnect** automatically if `auto_reconnect` is enabled (default)
+1. **Initialize** your Reticulum integration (embedded Python, `reticulum-rs`, a gateway daemon connection, and so on)
+2. **Attach**, if you speak the gateway contract: `gatewayAddressDeclaration(challenge)` builds the proof, `reticulumAddressDeclared(address)` and `reticulumAddressDeclarationRefused(reason)` report the answer, and `reticulumGatewayCapabilities(tokens)` hands over the advertisement
+3. **Report status** via `reticulumStatusChanged(true)` once the session is bound — not when the socket opens
+4. **Poll for outgoing messages** via `reticulumGetNextMessage()` in a loop
+5. **Send** each message through your Reticulum integration
+6. **Settle** each send on the answer: `reticulumConfirmSent(messageId)`, or `reticulumSendFailedWithReason(messageId, reason)` so a `recipient_unreachable` verdict can park the message
+7. **Receive** incoming messages and pass them to `reticulumMessageReceived(senderId, data)`
+8. **Watch presence** by polling `reticulumPresenceWatchlist()` and reporting answers through `reticulumPeerPresence(peerId, online, lastSeenMs)`
+9. **Report disconnection** via `reticulumStatusChanged(false)` on connection loss, having first failed every unanswered frame
+10. **Reconnect** with backoff (the bundled managers use 1s doubling to 30s)
 
 ### Daemon TCP Protocol
 
 > **Normative home:** this protocol is specified in
 > [the gateway contract](spec/gateway-contract.md#gateway-daemon-contract-v1),
 > which is the document to implement against. What follows describes what the
-> shipped managers do today: contract v1 minus the verbs that make a gateway a
-> gateway (address declaration, per-recipient verdicts, presence, capabilities,
-> the version field). `Identify`, `SendMessage`, `MessageReceived` and
-> `StatusUpdate` are the whole of what they speak.
+> managers do, which is that contract.
 >
-> One difference is easy to miss when implementing the daemon side, because it
-> is a silence rather than a message: **the shipped clients confirm a send on
-> the socket write, not on a daemon answer.** They call
-> `reticulumConfirmSent()` as soon as the line is written and ignore both
-> `MessageSent` and `DeliveryError`, so a daemon that answers contract v1
-> correctly gets no verdict handling from today's bridges. Teaching them to
-> settle on the daemon's answer is part of the transport work, not the daemon's.
->
-> Note what this section used to imply and does not: **no Reticulum daemon
-> speaks this protocol.** `rnsd`'s own shared-instance IPC is HDLC-framed
-> Reticulum packets over a Unix domain socket (Strategy 3 above), not this. This
-> is a bespoke protocol whose counterpart has never existed, which is why the
-> gateway contract promotes it rather than inventing a third one.
+> Note what this section does not say: **`rnsd` does not speak this protocol.**
+> Its own shared-instance IPC is HDLC-framed Reticulum packets over a Unix
+> domain socket (Strategy 3 above), not this. A gateway daemon is a separate
+> program that attaches to a Reticulum stack on one side and speaks this
+> contract to devices on the other.
 
 The built-in `ReticulumManager` (iOS and Android) speaks a newline-delimited JSON protocol over TCP to a configurable `daemonAddress` (default `localhost:4242`). Both platforms implement the same message types to stay in sync.
 
@@ -212,17 +203,50 @@ The built-in `ReticulumManager` (iOS and Android) speaks a newline-delimited JSO
 
 | Type | Fields | Description |
 |------|--------|-------------|
-| `Identify` | `device_id` (string) | Sent immediately after TCP connect to register this device with the daemon |
-| `SendMessage` | `recipient` (string), `content` (string), `encoding` (string, `"base64"`), `reply_to_msg` (string, optional) | Request the daemon to deliver a message to a recipient. Content is base64-encoded binary. |
+| `Identify` | `device_id` (string), `protocol_version` (int) | Sent immediately after TCP connect. `device_id` is this device's `off1…` address where one exists, but it is an unverified claim: only `DeclareAddress` binds a session. |
+| `DeclareAddress` | `address` (string), `public_key` (base64), `signature` (base64) | Proves this device holds the address it claims, over the gateway's per-connection challenge. The SDK builds and signs it; the manager only frames it. |
+| `SendMessage` | `recipient` (string), `content` (base64), `encoding` (`"base64"`), `message_id` (string), `reply_to_msg` (string, optional) | Submit one frame. The `message_id` is the SDK's own, and is what the verdict is correlated by. |
+| `CheckPresence` | `peers` (array of string) | Ask about the peers the SDK is waiting to hear about. One frame for the batch, capped at 64 peers. |
 
 **Daemon-to-client messages:**
 
 | Type | Fields | Description |
 |------|--------|-------------|
-| `MessageReceived` | `sender` (string), `content` (string), `encoding` (string, optional `"base64"`) | An incoming message from a remote peer. If `encoding` is `"base64"`, content is base64-decoded; otherwise treated as UTF-8. |
-| `StatusUpdate` | `status` (string) | Informational daemon status (logged, not acted upon) |
+| `Challenge` | `challenge` (base64, 32 bytes), `protocol_version` (int) | Minted per connection. A challenge of any other length is refused rather than signed. |
+| `AddressDeclared` | `address` (string) | The address the gateway bound. Checked against `local_address()`: a mismatch is a `GATEWAY_ADDRESS_BINDING_MISMATCH` security warning and closes the connection. |
+| `AddressError` | `reason` (string) | The declaration was refused. Emits `GATEWAY_ADDRESS_DECLARATION_REFUSED` and closes the connection; the carrier is never announced. |
+| `Capabilities` | `tokens` (array of string) | Bounded at 64 tokens of 128 bytes and handed to the SDK before the carrier is announced. |
+| `MessageSent` | `message_id` (string), `recipient` (string) | The frame was forwarded. Confirms that id, and nothing else. |
+| `DeliveryError` | `message_id` (string), `recipient` (string), `reason` (string) | The frame was not forwarded. The reason travels to the SDK verbatim; a `recipient_unreachable` prefix parks the message and offers it to the mesh. |
+| `MessageReceived` | `sender` (string), `content` (string), `encoding` (optional `"base64"`) | An incoming message from a remote peer. |
+| `PresenceStatus` | `peer` (string), `online` (bool), `last_seen_ms` (int, optional) | Answers a `CheckPresence`, or arrives unsolicited when a watched peer's state changes. |
+| `StatusUpdate` | `status` (string) | `connected` completes the attach and announces the carrier. Others are logged. |
 
-All messages are JSON objects terminated by a newline (`\n`). Each TCP read is buffered and split on newlines to handle partial reads.
+All messages are JSON objects terminated by a newline (`\n`). Each TCP read is buffered and split on newlines to handle partial reads; a line longer than 1 MiB abandons the connection, because its tail would otherwise be read as a fresh line and every frame after it would be garbage.
+
+### The attach handshake
+
+```
+→ Identify              → DeclareAddress
+← Challenge             ← AddressDeclared | AddressError
+                        ← Capabilities
+                        ← StatusUpdate(connected)   ← the carrier is announced here
+```
+
+**The TCP connection is not the transport.** A session the gateway has not
+bound is verdict-only on the other side: it may submit and be told
+`attach_required`, and it is never registered as a recipient, so nothing
+addressed to this device would arrive over it. The managers therefore announce
+the carrier only on `StatusUpdate(connected)` with a bound session, and close
+the connection on a refusal rather than offering a transport that can only
+refuse. This is where the Reticulum managers deliberately differ from the
+Internet manager, which reports up after a refused declaration because the
+relay keeps delivering on established sessions in account-name space.
+
+The signed proof is built in the SDK, not in the bridges: the payload commits
+this device's address under `offline-gateway-addr-v1` and is pinned by
+[conformance vectors](spec/conformance.md#the-vectors). A bridge only frames
+what `gatewayAddressDeclaration()` returns.
 
 ### Send Confirmation Loop
 
@@ -238,7 +262,9 @@ The send confirmation loop is critical for accurate DORS scoring. Without it, DO
 └─────────────┘        └──────────────┘        └──────────────┘
 ```
 
-**Important**: Messages enter `pending_confirmation` state when dequeued by `reticulumGetNextMessage()`. The platform **must** call either `reticulumConfirmSent(messageId)` or `reticulumSendFailed(messageId)` for every message. Unconfirmed messages automatically expire after 120 seconds and are counted as failures.
+**Important**: Messages enter `pending_confirmation` state when dequeued by `reticulumGetNextMessage()`. The platform **must** settle every one of them, and against a gateway it settles on the gateway's verdict rather than on the socket write: a successful write means the gateway has the bytes, which says nothing about whether it could forward them.
+
+Unconfirmed messages expire after 120 seconds and are counted as failures. The bundled managers give up on a verdict at **60 seconds** and fail the frame themselves, deliberately the shorter of the two clocks: were it the longer one, the core would expire the frame first and the verdict would then settle an id it had already moved past. They also cap frames in flight at 8, and refuse to re-send an id that is still outstanding — the core re-queues an unconfirmed frame after its own acknowledgement timeout, and sending it again would forward it twice and later fail an id the gateway had already confirmed.
 
 ### Example: Platform Bridge Skeleton (Android/Kotlin)
 
@@ -264,10 +290,13 @@ class ReticulumBridge(
             if (next != null) {
                 val (messageId, data) = next
                 try {
-                    sendViaReticulum(data) // Your integration strategy
-                    protocol.reticulumConfirmSent(messageId)
+                    // Submit, then settle when the answer comes back. Against
+                    // a gateway, confirming here would settle a frame that may
+                    // yet be refused — and would hide the one verdict that
+                    // parks a message, `recipient_unreachable`.
+                    submitViaReticulum(messageId, data)
                 } catch (e: Exception) {
-                    protocol.reticulumSendFailed(messageId)
+                    protocol.reticulumSendFailedWithReason(messageId, "Write failed")
                 }
             } else {
                 delay(100)
@@ -279,11 +308,22 @@ class ReticulumBridge(
         protocol.reticulumDataReceivedFrom(data.toList(), peerId)
     }
 
+    /** The gateway's verdict for one submitted frame. */
+    fun onVerdict(messageId: String, reason: String?) {
+        if (reason == null) {
+            protocol.reticulumConfirmSent(messageId)
+        } else {
+            // Verbatim: the core matches the `recipient_unreachable` prefix
+            // and discards the rest at that boundary.
+            protocol.reticulumSendFailedWithReason(messageId, reason)
+        }
+    }
+
     // Implement based on your chosen strategy:
     // - Embedded Python: call RNS.Packet.send() via Chaquopy
     // - reticulum-rs: call the Rust crate directly
-    // - TCP gateway: write to TCP socket
-    private suspend fun sendViaReticulum(data: ByteArray) { /* ... */ }
+    // - Gateway daemon: write a SendMessage line carrying this messageId
+    private suspend fun submitViaReticulum(messageId: String, data: ByteArray) { /* ... */ }
 }
 ```
 
@@ -480,6 +520,23 @@ On disconnection:
 
 ## Troubleshooting
 
+### The Transport Connects But Never Becomes Available
+
+The socket is open and the session is not bound. Every submission draws
+`attach_required` from the gateway and nothing addressed to this device is
+delivered, which is why the carrier is deliberately not offered.
+
+1. Look for a `security_warning` event. `GATEWAY_ADDRESS_DECLARATION_REFUSED`
+   means the gateway rejected the proof; `GATEWAY_ADDRESS_BINDING_MISMATCH`
+   means it bound an address this device does not hold, which has no benign
+   reading.
+2. Check the device has an identity at all. Before MLS storage is initialized
+   there is no address to declare, and the declaration is skipped.
+3. Check the gateway mints a 32-byte challenge. Any other length is refused
+   rather than signed.
+4. Check the gateway sends `StatusUpdate` with status `connected`. The attach
+   completes on that frame, and times out after 10 seconds without it.
+
 ### Reticulum Not Connecting
 
 1. Verify the Reticulum stack is running: `rnstatus`
@@ -489,7 +546,7 @@ On disconnection:
 
 ### Messages Not Delivering
 
-1. Check `reticulumConfirmSent` / `reticulumSendFailed` are being called for every message
+1. Check that every message is settled — `reticulumConfirmSent` or `reticulumSendFailedWithReason`, on the gateway's verdict rather than on the socket write
 2. Verify Reticulum has active interfaces: `rnstatus -a`
 3. Check if pending confirmations are timing out (120s) — may indicate the Reticulum stack is not reporting delivery
 4. Monitor DORS transport switch events — Reticulum may be deprioritized if other transports score higher
@@ -505,7 +562,7 @@ On disconnection:
 ### DORS Not Selecting Reticulum
 
 1. Verify `reticulumEnabled: true` in config
-2. Verify `reticulumStatusChanged(true)` was called after the Reticulum stack is ready
+2. Verify the session actually attached. Against a gateway, `reticulumStatusChanged(true)` fires only once the address declaration is bound, so a transport that never becomes available usually means a refused or unanswered handshake — look for a `GATEWAY_ADDRESS_DECLARATION_REFUSED` or `GATEWAY_ADDRESS_BINDING_MISMATCH` security warning
 3. Check DORS scores — Reticulum has a low tie-break priority (only Nostr is lower), so it needs to outscore alternatives
 4. Reticulum is excluded from media transfers by design
 

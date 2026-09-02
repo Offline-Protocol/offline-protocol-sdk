@@ -2287,8 +2287,9 @@ impl OfflineProtocol {
     ///
     /// The list is wire-supplied, so it is bounded exactly as the relay's is,
     /// which is what the contract points at rather than inventing a second
-    /// pair of numbers: at most [`MAX_RELAY_CAPABILITIES`] tokens of at most
-    /// [`MAX_RELAY_CAPABILITY_TOKEN_BYTES`] bytes each. Oversized tokens are
+    /// pair of numbers: at most 64 tokens of at most 128 bytes each, the same
+    /// `MAX_RELAY_CAPABILITIES` and `MAX_RELAY_CAPABILITY_TOKEN_BYTES` the
+    /// relay's advertisement is bounded by. Oversized tokens are
     /// dropped *before* the count is applied, so padding cannot evict real
     /// ones.
     ///
