@@ -855,6 +855,10 @@ pub struct OfflineProtocol {
     /// pool at its ceiling, which persists until packages are consumed or
     /// expire, and every push while it holds would otherwise emit.
     last_push_key_package_warning: Option<Instant>,
+
+    /// When the last `GatewayAddressDeclarationRefused` warning was emitted,
+    /// for the same suppression the push-key-package warning uses.
+    last_gateway_refusal_warning: Option<Instant>,
 }
 
 impl Drop for OfflineProtocol {
@@ -1062,6 +1066,7 @@ impl OfflineProtocol {
             nostr_resolutions: HashMap::new(),
             nostr_resolution_requests: HashMap::new(),
             last_push_key_package_warning: None,
+            last_gateway_refusal_warning: None,
             config,
         })
     }

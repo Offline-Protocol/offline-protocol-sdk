@@ -22,6 +22,15 @@ use tracing::{debug, error, info, warn};
 /// persists, so an unsuppressed warning reports one cause many times.
 const PUSH_KEY_PACKAGE_WARNING_SUPPRESS_INTERVAL: Duration = Duration::from_secs(300);
 
+/// Minimum interval between two `GatewayAddressDeclarationRefused` warnings.
+///
+/// A refusing gateway is retried on the reconnect ladder, which tops out at
+/// 30s, so without this the app is told about one misconfigured box twice a
+/// minute for as long as the transport is enabled. The condition persists,
+/// and the second report says nothing the first did not; the refusal itself
+/// is still logged every time.
+const GATEWAY_REFUSAL_WARNING_SUPPRESS_INTERVAL: Duration = Duration::from_secs(300);
+
 /// Bytes of challenge a gateway mints per connection, from the contract.
 ///
 /// A device refuses to sign a proof over anything else: the challenge is the
@@ -1147,8 +1156,7 @@ impl OfflineProtocol {
         }
         // One variant for both: the address exists once the MLS identity
         // does, so "no identity yet" and "no MLS" are one condition to a
-        // caller, and a generic error would hide it from the bridge that has
-        // to decide whether to hold the connection open.
+        // caller, and it is the code the FFI documents for it.
         let address = self
             .local_address()
             .ok_or(Error::MlsNotInitialized)?
@@ -1259,11 +1267,24 @@ impl OfflineProtocol {
     /// rather than emitted — an event field never carries text a remote party
     /// wrote. Attributed to this node rather than to a peer, since the
     /// failure is ours and no peer is involved.
-    pub fn on_gateway_address_declaration_refused(&self, reason: &str) {
+    ///
+    /// Emitted at most once per
+    /// `GATEWAY_REFUSAL_WARNING_SUPPRESS_INTERVAL` (five minutes): the bridge closes a
+    /// refused connection and reconnects on its ladder, so a gateway that
+    /// keeps refusing would otherwise produce a security event per rung,
+    /// forever. The `warn!` is not suppressed.
+    pub fn on_gateway_address_declaration_refused(&mut self, reason: &str) {
         warn!(
-            reason = %reason,
+            reason = %reason.chars().take(256).collect::<String>(),
             "Gateway refused our address declaration; the carrier stays unavailable"
         );
+        let now = Instant::now();
+        if let Some(last) = self.last_gateway_refusal_warning {
+            if now.duration_since(last) < GATEWAY_REFUSAL_WARNING_SUPPRESS_INTERVAL {
+                return;
+            }
+        }
+        self.last_gateway_refusal_warning = Some(now);
         self.emit_security_warning(
             &self.local_id,
             SecurityWarningCode::GatewayAddressDeclarationRefused,

@@ -14784,8 +14784,12 @@ fn a_gateway_declaration_refuses_a_wrong_sized_challenge() {
     for len in [0usize, 31, 33, 64] {
         let challenge = vec![7u8; len];
         assert!(
-            alice.gateway_address_declaration(&challenge).is_err(),
-            "a {len}-byte challenge must be refused"
+            matches!(
+                alice.gateway_address_declaration(&challenge),
+                Err(Error::InvalidArgument(_))
+            ),
+            "a {len}-byte challenge must be refused as an invalid argument, the code the \
+             FFI documents for it"
         );
     }
     assert!(
@@ -14801,7 +14805,35 @@ fn a_gateway_declaration_needs_an_identity() {
     let alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     assert!(alice.local_address().is_none(), "premise: no identity");
 
-    assert!(alice.gateway_address_declaration(&vec![7u8; 32]).is_err());
+    assert!(
+        matches!(
+            alice.gateway_address_declaration(&vec![7u8; 32]),
+            Err(Error::MlsNotInitialized)
+        ),
+        "no identity is MlsNotInitialized, the code the FFI documents for it; a generic \
+         error hides the one condition a caller can wait out"
+    );
+}
+
+/// A gateway that keeps refusing is reported once per suppression interval,
+/// not once per reconnect rung: the bridge closes a refused connection and
+/// climbs its ladder, so the same fact would otherwise reach the app twice
+/// a minute for as long as the transport is enabled.
+#[test]
+fn test_gateway_declaration_refusal_warning_is_suppressed_on_repeat() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    let warnings = capture_security_warnings(&mut alice);
+    alice.start().unwrap();
+
+    alice.on_gateway_address_declaration_refused("bad_signature");
+    alice.on_gateway_address_declaration_refused("bad_signature");
+    alice.on_gateway_address_declaration_refused("address_mismatch");
+
+    assert_eq!(
+        warnings.lock().unwrap().len(),
+        1,
+        "three refusals inside the interval must produce one warning"
+    );
 }
 
 /// Gateway capabilities are bounded exactly as the relay's are, and a hostile

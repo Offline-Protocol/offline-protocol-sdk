@@ -5289,7 +5289,7 @@ impl OfflineProtocol {
     /// `reason` is the gateway's own text, treated as opaque and never carried
     /// onto the event.
     pub fn reticulum_address_declaration_refused(&self, reason: String) {
-        let protocol = self.lock_inner_recovering();
+        let mut protocol = self.lock_inner_recovering();
         protocol.on_gateway_address_declaration_refused(&reason);
     }
 
@@ -8639,9 +8639,17 @@ mod tests {
 
         // No MLS identity in this configuration, so even a well-formed
         // challenge has nothing to declare — and a short one is refused
-        // before it gets that far.
-        assert!(protocol.gateway_address_declaration(vec![7u8; 31]).is_err());
-        assert!(protocol.gateway_address_declaration(vec![7u8; 32]).is_err());
+        // before it gets that far. The variants are the documented contract:
+        // a bridge is told to expect these two codes, so a change to either
+        // is a change to the FFI, not an implementation detail.
+        assert!(matches!(
+            protocol.gateway_address_declaration(vec![7u8; 31]),
+            Err(ProtocolError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            protocol.gateway_address_declaration(vec![7u8; 32]),
+            Err(ProtocolError::MlsNotInitialized)
+        ));
     }
 
     #[test]
