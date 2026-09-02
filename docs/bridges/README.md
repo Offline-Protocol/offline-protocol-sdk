@@ -132,7 +132,7 @@ by Rust guards that read the binding sources.
 **The relay address-proof signing domain** is the fifth, and it is the one set
 pinned by both mechanisms at once. The Swift and Kotlin
 `AddressDeclarationPolicy` each hold a copy of `offline-relay-addr-v1`, and a
-Rust guard reads both sources. It belongs to the four-domain mutual non-prefix
+Rust guard reads both sources. It belongs to the six-domain mutual non-prefix
 rule the core pins separately, so an edit here that agrees with itself in one
 language still fails that guard rather than producing a signature nothing
 verifies.

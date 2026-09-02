@@ -11908,11 +11908,22 @@ mod tests {
             kotlin.contains("protocol.gatewayAddressDeclaration("),
             "ReticulumManager.kt must get its declaration from the core"
         );
-        for (name, code) in [("swift", &swift), ("kotlin", &kotlin)] {
+        // The policies too, because that is where a copy of the layout would
+        // land: they are the testable half, and the relay's copy lives in its
+        // policy for exactly that reason.
+        let swift_policy = rn_source_code_only("ios/GatewayAttachPolicy.swift");
+        let kotlin_policy =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/GatewayAttachPolicy.kt");
+        for (name, code) in [
+            ("swift", &swift),
+            ("kotlin", &kotlin),
+            ("swift policy", &swift_policy),
+            ("kotlin policy", &kotlin_policy),
+        ] {
             assert!(
                 !code.contains("offline-gateway-addr-v1"),
-                "{name} ReticulumManager must not carry the signing domain — the payload is \
-                 built once, in the core, where a conformance vector pins it"
+                "{name} must not carry the signing domain — the payload is built once, in the \
+                 core, where a conformance vector pins it"
             );
         }
 
@@ -11935,7 +11946,9 @@ mod tests {
         //    than returning with the timeout cancelled, which wedged the
         //    transport connected and mute.
         assert!(
-            swift.contains("if daemonStatus == \"connected\" { completeAttach() }"),
+            swift.contains(
+                "if daemonStatus == \"connected\" { completeAttach(generation: generation) }"
+            ),
             "ReticulumManager.swift must complete the attach on StatusUpdate(connected)"
         );
         assert!(
@@ -11944,12 +11957,12 @@ mod tests {
         );
         assert!(
             swift.contains(
-                "private func completeAttach() { let generation = sessionGeneration \
+                "private func completeAttach(generation: Int) { \
                  messageQueue.async { [weak self] in guard let self = self else { return } \
                  guard self.sessionGeneration == generation else { return } \
                  guard self.isBound else { self.emitDiagnostic(\"error\", \"Gateway reported \
-                 connected before binding the session\") self.handleConnectionClosed(error: nil) \
-                 return }"
+                 connected before binding the session\") \
+                 self.handleConnectionClosed(error: nil, generation: generation) return }"
             ),
             "ReticulumManager.swift must refuse to announce a session the gateway did not bind"
         );
@@ -12072,9 +12085,11 @@ mod tests {
                 code.contains("reticulumSendFailedWithReason("),
                 "{name} ReticulumManager must fail with the gateway's reason"
             );
+            // Any spelling of the bare call: `reticulumSendFailedWithReason(`
+            // does not contain this substring, so the reason-carrying form is
+            // the only one that passes.
             assert!(
-                !code.contains("reticulumSendFailed(messageId)")
-                    && !code.contains("reticulumSendFailed(messageId: messageId)"),
+                !code.contains("reticulumSendFailed("),
                 "{name} ReticulumManager must not use the reason-less failure — it discards \
                  the recipient_unreachable token the core parks on"
             );
@@ -12168,12 +12183,51 @@ mod tests {
              not only on stop()"
         );
         assert!(
-            kotlin.contains(
-                "isBound = false cancelAttachTimeout() stopPresenceWatch() \
-                 failInFlight(\"Disconnected\")"
+            kotlin.contains("connectGeneration.incrementAndGet() isBound = false")
+                && kotlin.contains(
+                    "cancelAttachTimeout() stopPresenceWatch() failInFlight(\"Disconnected\")"
+                ),
+            "ReticulumManager.kt's disconnect must clear the bind under the lock the bind \
+             checks its generation in, then disarm the timers and fail every frame in flight"
+        );
+
+        // iOS: the generation is bound to the socket, not read when a line is
+        // dispatched. It is minted as the attempt claims the flags, every
+        // completion of the receive it arms checks it first, and every close
+        // report carries it and is dropped before it touches the flags if the
+        // session is over. Read at dispatch time instead, the lines after an
+        // inline close in the same read carried the successor's number.
+        assert!(
+            swift.contains("if !skip { _isConnecting = true _sessionGeneration += 1 }"),
+            "ReticulumManager.swift must mint a session generation as connect() claims the flags"
+        );
+        assert!(
+            swift.contains(
+                "private func startReceiving(on conn: NWConnection, generation: Int) { \
+                 conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { \
+                 [weak self] content, _, isComplete, error in \
+                 guard let self = self, self.sessionGeneration == generation else { return }"
             ),
-            "ReticulumManager.kt's disconnect must clear the bind, disarm the timers and fail \
-             every frame in flight"
+            "ReticulumManager.swift must read under the generation the socket was armed with, \
+             and drop a completion for a retired socket before it appends"
+        );
+        assert!(
+            swift.contains(
+                "private func handleConnectionClosed(error: NWError?, generation: Int) { \
+                 stateLock.lock() guard _sessionGeneration == generation else { \
+                 stateLock.unlock() return }"
+            ),
+            "ReticulumManager.swift must drop a close report for a session that is already \
+             over before it touches the flags"
+        );
+        assert!(
+            swift.contains(
+                "messageQueue.async { [weak self] in guard let self = self, \
+                 self.sessionGeneration == generation else { return } \
+                 let identity = self.protocolInstance.localAddress()"
+            ),
+            "ReticulumManager.swift must not send a retired session's Identify down the \
+             successor's socket"
         );
     }
 
@@ -12191,8 +12245,14 @@ mod tests {
         let kotlin =
             rn_source_code_only("android/src/main/java/com/offlineprotocol/GatewayAttachPolicy.kt");
 
+        // The bridge's verdict timeout, as spelled in the Swift policy. Named
+        // once so the relationship assertion below derives its number from
+        // the same spelling the pin checks, rather than from a second literal
+        // that would agree with itself.
+        const SWIFT_VERDICT_TIMEOUT_DECL: &str = "VERDICT_TIMEOUT: TimeInterval = 60.0";
+
         // (name, swift spelling, kotlin spelling)
-        let pairs: [(&str, &str, &str); 6] = [
+        let pairs: [(&str, &str, &str); 7] = [
             (
                 "protocol version",
                 "PROTOCOL_VERSION = 1",
@@ -12210,8 +12270,13 @@ mod tests {
             ),
             (
                 "verdict timeout",
-                "VERDICT_TIMEOUT: TimeInterval = 60.0",
+                SWIFT_VERDICT_TIMEOUT_DECL,
                 "VERDICT_TIMEOUT_MS = 60_000L",
+            ),
+            (
+                "line cap",
+                "MAX_LINE_BYTES = 1 << 20",
+                "MAX_LINE_BYTES = 1 shl 20",
             ),
             ("in flight cap", "MAX_IN_FLIGHT = 8", "MAX_IN_FLIGHT = 8"),
             (
@@ -12241,13 +12306,24 @@ mod tests {
             "both bridges must bound capabilities the way the core does (64 x 128)"
         );
 
-        // The relationship the numbers exist to hold. `RETICULUM_PENDING_
-        // CONFIRMATION_TIMEOUT_SECS` is the core's clock on the same frame.
-        const CORE_PENDING_CONFIRMATION_SECS: u64 = 120;
-        const BRIDGE_VERDICT_TIMEOUT_SECS: u64 = 60;
+        // The relationship the numbers exist to hold, read from both ends:
+        // the core's clock on the same frame is the transport crate's own
+        // constant, and the bridge's is parsed out of the spelling pinned
+        // above. Two test-local literals here would agree with each other
+        // whatever either side changed to.
+        let bridge_verdict_timeout_secs = SWIFT_VERDICT_TIMEOUT_DECL
+            .rsplit('=')
+            .next()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .expect("the pinned Swift spelling ends in a number");
+        let core_pending_confirmation_secs =
+            offline_protocol_transport::constants::RETICULUM_PENDING_CONFIRMATION_TIMEOUT_SECS
+                as f64;
         assert!(
-            BRIDGE_VERDICT_TIMEOUT_SECS < CORE_PENDING_CONFIRMATION_SECS,
-            "the bridge must give up on a verdict before the core gives up on the frame"
+            bridge_verdict_timeout_secs < core_pending_confirmation_secs,
+            "the bridge must give up on a verdict ({bridge_verdict_timeout_secs}s) before the \
+             core gives up on the frame ({core_pending_confirmation_secs}s), or the verdict \
+             settles an id the core has already moved past"
         );
     }
 
@@ -13937,6 +14013,18 @@ mod tests {
                  isBound = true true } else { false } }",
             ),
             (
+                "checking it before a superseded reader injects its capabilities",
+                "val tokens = GatewayAttachPolicy.capabilityTokens(json) \
+                 if (connectGeneration.get() != generation) return",
+            ),
+            (
+                "sampling the writer and its generation together before the declaration \
+                 write, which waited on the mutex for its signature",
+                "ioHandler.post { val w = synchronized(this) { \
+                 if (connectGeneration.get() == generation) writer else null } ?: return@post \
+                 if (!writeLine(w, frame)) {",
+            ),
+            (
                 "leaving the in-flight flag for handleConnectionClosed to clear",
                 "} catch (e: Exception) { Log.e(TAG, \"Failed to connect to Reticulum daemon\", e)",
             ),
@@ -13977,18 +14065,21 @@ mod tests {
         // lock, so the failure it may report later names the session that write
         // actually belonged to.
         //
-        // The seventh and eighth are the gateway attach's: the announcement on
-        // `StatusUpdate(connected)` runs a hop after the frame, and the bind on
-        // `AddressDeclared` is a write the teardown races. Both are pinned
-        // above.
+        // The seventh to tenth are the gateway attach's: the announcement on
+        // `StatusUpdate(connected)` runs a hop after the frame, the bind on
+        // `AddressDeclared` is a write the teardown races, a superseded
+        // reader's `Capabilities` contends for the mutex with the successor's,
+        // and the declaration write follows a signature that waited on it.
+        // All four are pinned above.
         let generation_checks = code.matches("connectGeneration.get()").count();
         assert_eq!(
-            generation_checks, 8,
-            "ReticulumManager.kt: expected the connect generation to be consulted at all eight \
+            generation_checks, 10,
+            "ReticulumManager.kt: expected the connect generation to be consulted at all ten \
              points a retired attempt can still act — before building the streams, inside the \
              publish, inside the flag claim, inside the announcement block, inside the teardown \
              handler every posted failure funnels through, alongside the writer sampled by \
-             sendMessage, inside the attach announcement, and as part of the bind; found \
+             sendMessage, inside the attach announcement, as part of the bind, before a \
+             capability injection, and with the writer the declaration goes out on; found \
              {generation_checks}."
         );
 
@@ -14049,12 +14140,13 @@ mod tests {
     /// **Both platforms, deliberately.** The first version of this covered only
     /// the two Kotlin managers, which read as though the invariant held
     /// everywhere it applies — while the identical unguarded block sat in the
-    /// two Swift ones. The iOS Reticulum window is the wider of the two: its
-    /// announcement crosses `DispatchQueue.main` *and* then `messageQueue`, so
-    /// there are two scheduling boundaries for a `stop()` to land in rather
-    /// than one, and a gate at the first boundary does nothing about the
-    /// second. Both are covered now — this test owns the state write at the
-    /// first, and
+    /// two Swift ones. On iOS Reticulum the state write and the status flip
+    /// sit on different queues: the write runs on main from the open, and
+    /// the flip runs on `messageQueue` from `completeAttach`, a separate hop
+    /// driven by a later frame, so there are two scheduling boundaries for a
+    /// `stop()` to land in rather than one, and a gate at the first boundary
+    /// does nothing about the second. Both are covered — this test owns the
+    /// state write at the first, and
     /// [`react_native_ios_status_flips_are_ordered_against_stop`] owns the
     /// status flip at the second.
     ///
@@ -14177,10 +14269,11 @@ mod tests {
     /// them** — the name of this test is the dominant half, not the whole
     /// claim. `stop()` is not the only writer that can overtake the connected
     /// edge: on Reticulum, `handleConnectionClosed` reaches `messageQueue` in
-    /// one hop from `connectionQueue` while the connected edge takes two
-    /// (`connectionQueue` → main → `messageQueue`), so a link that opens and
-    /// dies immediately enqueues its `false` *ahead* of the `true` announcing
-    /// it. No state check can see that: with `autoReconnect` on — the default
+    /// one hop from wherever the close was observed, while the connected edge
+    /// is its own hop from `completeAttach`, driven by a later frame, so a
+    /// link that dies between the two enqueues its `false` *ahead* of the
+    /// `true` announcing it. No state check can see that: with
+    /// `autoReconnect` on — the default
     /// — that path leaves `.running` untouched, so the core is told "up" about
     /// a dead connection and routes to a transport that never drains until the
     /// next attempt resolves the flags. `isConnected` is the term that answers
@@ -15153,7 +15246,8 @@ mod tests {
                 "messageQueue.async { [weak self] in guard let self = self else { return } \
                  guard self.sessionGeneration == generation else { return } \
                  guard self.isBound else { self.emitDiagnostic(\"error\", \"Gateway reported \
-                 connected before binding the session\") self.handleConnectionClosed(error: nil) \
+                 connected before binding the session\") \
+                 self.handleConnectionClosed(error: nil, generation: generation) \
                  return } self.cancelAttachTimeout() self.statusFlipLock.lock() \
                  let announced = self.isConnected && self.state != .stopping && \
                  self.state != .stopped if announced { try? self.protocolInstance\

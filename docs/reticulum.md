@@ -288,15 +288,14 @@ class ReticulumBridge(
         while (isActive) {
             val next = protocol.reticulumGetNextMessage()
             if (next != null) {
-                val (messageId, data) = next
                 try {
                     // Submit, then settle when the answer comes back. Against
                     // a gateway, confirming here would settle a frame that may
                     // yet be refused, and would hide the one verdict that
                     // parks a message, `recipient_unreachable`.
-                    submitViaReticulum(messageId, data)
+                    submitViaReticulum(next.messageId, next.data.toByteArray())
                 } catch (e: Exception) {
-                    protocol.reticulumSendFailedWithReason(messageId, "Write failed")
+                    protocol.reticulumSendFailedWithReason(next.messageId, "Write failed")
                 }
             } else {
                 delay(100)
@@ -304,8 +303,8 @@ class ReticulumBridge(
         }
     }
 
-    fun onDataReceived(data: ByteArray, peerId: String) {
-        protocol.reticulumDataReceivedFrom(data.toList(), peerId)
+    fun onDataReceived(senderId: String, data: ByteArray) {
+        protocol.reticulumMessageReceived(senderId, data.map { it.toUByte() })
     }
 
     /** The gateway's verdict for one submitted frame. */
@@ -477,7 +476,7 @@ When acquiring multiple locks in `ReticulumTransport`, follow this order to prev
 3. `send_queue`
 4. `metrics`
 5. `receive_queue`
-6. `reconnect_attempts` / `platform_handle`
+6. `platform_handle`
 
 This is documented in the source at `crates/offline-protocol-transport/src/reticulum.rs`.
 
@@ -532,8 +531,9 @@ delivered, which is why the carrier is deliberately not offered.
    reading.
 2. Check the device has an identity at all. Before MLS storage is initialized
    there is no address to declare, so the connection is closed and the
-   reconnect ladder keeps trying; the carrier becomes available on the first
-   attach after the identity exists.
+   reconnect ladder keeps trying (with the default unlimited attempts; a
+   configured maximum counts these closes); the carrier becomes available on
+   the first attach after the identity exists.
 3. Check the gateway mints a 32-byte challenge. Any other length is refused
    rather than signed.
 4. Check the gateway sends `StatusUpdate` with status `connected`, after

@@ -339,9 +339,17 @@ public class ReticulumManager: NSObject, TransportManager {
     // MARK: - Connection Management
 
     private func connect() {
+        // The attempt takes a fresh session generation as it claims the
+        // flags, so a socket never shares a number with the one it replaces
+        // even if nothing retired the predecessor in between. Every callback
+        // this attempt arms carries it.
         stateLock.lock()
         let skip = _isConnecting || _isConnected
-        if !skip { _isConnecting = true }
+        if !skip {
+            _isConnecting = true
+            _sessionGeneration += 1
+        }
+        let generation = _sessionGeneration
         stateLock.unlock()
         guard !skip else { return }
 
@@ -355,17 +363,23 @@ public class ReticulumManager: NSObject, TransportManager {
 
         let conn = NWConnection(host: host, port: port, using: .tcp)
 
-        conn.stateUpdateHandler = { [weak self] newState in
+        conn.stateUpdateHandler = { [weak self, weak conn] newState in
             guard let self = self else { return }
             switch newState {
             case .ready:
-                self.handleConnectionOpened()
-                self.startReceiving()
+                // A late open for a session the connection timeout already
+                // retired would claim the flags for a socket nothing tracks.
+                guard self.sessionGeneration == generation, let conn = conn else {
+                    conn?.cancel()
+                    return
+                }
+                self.handleConnectionOpened(generation: generation)
+                self.startReceiving(on: conn, generation: generation)
             case .failed(let error):
                 self.emitDiagnostic("error", "Reticulum connection failed", context: [
                     "error": error.localizedDescription
                 ])
-                self.handleConnectionClosed(error: error)
+                self.handleConnectionClosed(error: error, generation: generation)
             case .cancelled:
                 // Intentional close, handled by disconnect()
                 break
@@ -386,7 +400,7 @@ public class ReticulumManager: NSObject, TransportManager {
         let timeoutItem = DispatchWorkItem { [weak self] in
             guard let self = self, self.isConnecting else { return }
             self.emitDiagnostic("error", "Connection timeout to Reticulum daemon")
-            self.handleConnectionClosed(error: nil)
+            self.handleConnectionClosed(error: nil, generation: generation)
         }
         connectionTimeoutWorkItem = timeoutItem
         connectionQueue.asyncAfter(deadline: .now() + CONNECTION_TIMEOUT, execute: timeoutItem)
@@ -400,10 +414,10 @@ public class ReticulumManager: NSObject, TransportManager {
         isConnected = false
         isConnecting = false
         retireSession(reason: "Disconnected")
-        // Reset receiveBuffer — safe because either we are already on
-        // connectionQueue (reconnect path) or the connection has been
-        // cancelled above so no receive callbacks can fire (stop path).
-        receiveBuffer = Data()
+        // `receiveBuffer` is not reset here: it belongs to connectionQueue,
+        // and this runs from main and the React Native method queue too. The
+        // next open resets it there, and a completion for this socket that
+        // is still in flight is dropped by its generation before it appends.
     }
 
     /// Ends the gateway session the current socket carried, whether this side
@@ -430,7 +444,7 @@ public class ReticulumManager: NSObject, TransportManager {
         failInFlight(reason: reason)
     }
 
-    private func handleConnectionOpened() {
+    private func handleConnectionOpened(generation: Int) {
         connectionTimeoutWorkItem?.cancel()
         connectionTimeoutWorkItem = nil
         isConnected = true
@@ -461,14 +475,14 @@ public class ReticulumManager: NSObject, TransportManager {
         // knows; it is logged and never routed on, so it was harmless and
         // useless. Only `DeclareAddress` binds either way.
         messageQueue.async { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, self.sessionGeneration == generation else { return }
             let identity = self.protocolInstance.localAddress() ?? self.deviceId
             if let frame = GatewayAttachPolicy.identifyJson(deviceId: identity) {
                 self.sendRaw(frame + "\n")
             }
         }
 
-        armAttachTimeout()
+        armAttachTimeout(generation: generation)
 
         // Start polling on main thread; notify protocol after state is .running
         // so that any protocol handler querying transport state sees the correct value.
@@ -511,51 +525,11 @@ public class ReticulumManager: NSObject, TransportManager {
             if !self.isPaused {
                 self.startMessagePolling()
             }
-            // The status flip is a UniFFI call and does not belong on main:
-            // it takes the global protocol mutex, and on the false→true edge
-            // takes it a second time to flush the entire outbox. That is the
-            // heaviest call this manager makes, at the cadence of a daemon
-            // that keeps reconnecting — the same work InternetManager already
-            // refuses to do on main (see its handleAuthenticated hop), and
-            // the scene-update watchdog does not care that the wait is the
-            // core's fault. messageQueue is where every other FFI call in
-            // this file runs.
-            //
-            // Enqueued from inside the main block on purpose: it puts the
-            // status flip ahead of the flush below on the same serial queue,
-            // preserving the ordering this block already had.
-            //
-            // The state re-check is not redundant with the gate above. This
-            // block runs a hop later, and `stop()` flips `false` inline on
-            // whichever thread tore the transport down — so between the gate
-            // and here a whole stop can complete, and an unchecked flip would
-            // tell the core "up" after it was told "down". Check and call are
-            // one decision under [statusFlipLock]; see it for why that is
-            // enough. Unlocked explicitly rather than by `defer`, which would
-            // hold it across the flush below.
-            //
-            // `isConnected` is the other half of that decision, and it answers
-            // what the state cannot: `stop()` is not the only thing that can
-            // overtake this block. [handleConnectionClosed] reaches
-            // `messageQueue` in ONE hop from `connectionQueue`, while this
-            // `true` takes two — `connectionQueue`, then main, then here — so
-            // a link that opens and dies immediately enqueues its `false`
-            // *ahead* of this `true`. The state says nothing about it: with
-            // `autoReconnect` on, that path leaves `.running` untouched, so
-            // the core would be told "up" about a dead connection and route to
-            // a transport that never drains until the next attempt resolves
-            // the flags. (Before the hop below existed, both flips ran on
-            // main — one queue, so enqueue order was causal. The hop is what
-            // made this reachable, so it is what has to answer for it.)
-            // `isConnected` is cleared before that `false` is enqueued and set
-            // again only by a successful open, so it reads exactly "is there
-            // still a connection to announce". Suppressing a flip can never
-            // lose one: every path that clears it either reconnects, which
-            // announces itself, or stops.
-            //
-            // [weak self] like every other closure here: a strong capture
-            // would let this flip fire against a manager the module already
-            // released through `destroy()`.
+            // No status flip here. The carrier is announced in
+            // [completeAttach], on `StatusUpdate(connected)` with a bound
+            // session, and that flip is where the check-and-call under
+            // [statusFlipLock] lives; see it for why `isConnected` is half
+            // of that decision.
         }
     }
 
@@ -581,8 +555,7 @@ public class ReticulumManager: NSObject, TransportManager {
     /// dispatched before that hop has taken the mutex. Read on the socket
     /// queue, `isBound` was still false here, the timeout was already
     /// cancelled, and the carrier was never announced.
-    private func completeAttach() {
-        let generation = sessionGeneration
+    private func completeAttach(generation: Int) {
         messageQueue.async { [weak self] in
             guard let self = self else { return }
             guard self.sessionGeneration == generation else { return }
@@ -593,7 +566,7 @@ public class ReticulumManager: NSObject, TransportManager {
                 // Returning with the timeout cancelled left the transport
                 // connected and mute until the daemon happened to drop it.
                 self.emitDiagnostic("error", "Gateway reported connected before binding the session")
-                self.handleConnectionClosed(error: nil)
+                self.handleConnectionClosed(error: nil, generation: generation)
                 return
             }
             self.cancelAttachTimeout()
@@ -620,11 +593,11 @@ public class ReticulumManager: NSObject, TransportManager {
     /// Bounds the handshake. A gateway that accepts the socket and then says
     /// nothing is not slow, and waiting out the connection timeout for it
     /// means a minute in which the selector has been told nothing at all.
-    private func armAttachTimeout() {
+    private func armAttachTimeout(generation: Int) {
         let item = DispatchWorkItem { [weak self] in
             guard let self = self, self.isConnected, !self.isBound else { return }
             self.emitDiagnostic("error", "Gateway attach timed out before the session was bound")
-            self.handleConnectionClosed(error: nil)
+            self.handleConnectionClosed(error: nil, generation: generation)
         }
         stateLock.lock()
         let previous = _attachTimeoutWorkItem
@@ -643,9 +616,19 @@ public class ReticulumManager: NSObject, TransportManager {
         item?.cancel()
     }
 
-    private func startReceiving() {
-        connection?.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, error in
-            guard let self = self else { return }
+    /// Reads frames off `conn` for the session `generation` names.
+    ///
+    /// The generation is the one this socket was armed under, not one read
+    /// when a line is dispatched: an inline close in the middle of a segment
+    /// (a refusal, a malformed challenge) bumps it, and the lines after the
+    /// close in the same read would otherwise capture the successor's number
+    /// and act on its session, injecting a refused session's capabilities
+    /// after the clear or closing the successor for a `connected` it never
+    /// saw. Every completion checks it first, so a socket that has been
+    /// retired stops being read the moment its next callback fires.
+    private func startReceiving(on conn: NWConnection, generation: Int) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, error in
+            guard let self = self, self.sessionGeneration == generation else { return }
 
             if let data = content {
                 self.receiveBuffer.append(data)
@@ -657,7 +640,7 @@ public class ReticulumManager: NSObject, TransportManager {
                     self.emitDiagnostic("error", "Over-long line from the gateway", context: [
                         "bytes": self.receiveBuffer.count
                     ])
-                    self.handleConnectionClosed(error: nil)
+                    self.handleConnectionClosed(error: nil, generation: generation)
                     return
                 }
 
@@ -667,28 +650,43 @@ public class ReticulumManager: NSObject, TransportManager {
                     let lineData = self.receiveBuffer.subdata(in: self.receiveBuffer.startIndex..<newlineRange.lowerBound)
                     self.receiveBuffer.removeSubrange(self.receiveBuffer.startIndex..<newlineRange.upperBound)
                     if !lineData.isEmpty {
-                        self.processReceivedData(lineData)
+                        self.processReceivedData(lineData, generation: generation)
                     }
+                    // A line that closed the session ends the segment: the
+                    // rest belongs to a socket this side has retired.
+                    if self.sessionGeneration != generation { return }
                 }
             }
 
             if isComplete {
-                self.handleConnectionClosed(error: nil)
+                self.handleConnectionClosed(error: nil, generation: generation)
                 return
             }
 
             if let error = error {
-                self.handleConnectionClosed(error: error)
+                self.handleConnectionClosed(error: error, generation: generation)
                 return
             }
 
             // Continue receiving
-            self.startReceiving()
+            self.startReceiving(on: conn, generation: generation)
         }
     }
 
-    private func handleConnectionClosed(error: NWError?) {
+    /// Ends the session `generation` names, if it is still the current one.
+    ///
+    /// Every caller reaches this with the generation of the socket it is
+    /// reporting on, and a report for a session that is already over is
+    /// dropped before it touches the flags: a stale close would otherwise
+    /// clear `isConnected` under a healthy successor, tell the core the
+    /// transport is down, and start a reconnect ladder against it. The
+    /// Android manager checks `connectGeneration` at the same point.
+    private func handleConnectionClosed(error: NWError?, generation: Int) {
         stateLock.lock()
+        guard _sessionGeneration == generation else {
+            stateLock.unlock()
+            return
+        }
         let wasConnected = _isConnected
         let wasConnecting = _isConnecting
         _isConnected = false
@@ -807,7 +805,7 @@ public class ReticulumManager: NSObject, TransportManager {
 
     // MARK: - Message Handling
 
-    private func processReceivedData(_ data: Data) {
+    private func processReceivedData(_ data: Data, generation: Int) {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let messageType = json["type"] as? String else {
             // Non-JSON data with no sender information — cannot route, skip
@@ -860,17 +858,16 @@ public class ReticulumManager: NSObject, TransportManager {
             }
 
         case "Challenge":
-            handleChallenge(json)
+            handleChallenge(json, generation: generation)
 
         case "AddressDeclared":
-            handleAddressDeclared(json)
+            handleAddressDeclared(json, generation: generation)
 
         case "AddressError":
-            handleAddressError(json)
+            handleAddressError(json, generation: generation)
 
         case "Capabilities":
             let tokens = GatewayAttachPolicy.capabilityTokens(from: json)
-            let generation = sessionGeneration
             messageQueue.async { [weak self] in
                 guard let self = self, self.sessionGeneration == generation else { return }
                 // Before the status flip, never after: the flush that flip
@@ -890,7 +887,7 @@ public class ReticulumManager: NSObject, TransportManager {
                 "status": daemonStatus
             ])
             if daemonStatus == "connected" {
-                completeAttach()
+                completeAttach(generation: generation)
             }
 
         default:
@@ -908,15 +905,14 @@ public class ReticulumManager: NSObject, TransportManager {
     /// back the three fields `DeclareAddress` carries. A failure here is not
     /// retried on this connection — the gateway spends a challenge per
     /// connection, and the next reconnect gets a fresh one.
-    private func handleChallenge(_ json: [String: Any]) {
+    private func handleChallenge(_ json: [String: Any], generation: Int) {
         switch GatewayAttachPolicy.decodeChallenge(json) {
         case .skip(let reason):
             emitDiagnostic("warning", "Cannot declare an address to the gateway", context: [
                 "reason": reason
             ])
-            handleConnectionClosed(error: nil)
+            handleConnectionClosed(error: nil, generation: generation)
         case .declare(let challenge):
-            let generation = sessionGeneration
             messageQueue.async { [weak self] in
                 guard let self = self, self.sessionGeneration == generation else { return }
                 do {
@@ -928,7 +924,7 @@ public class ReticulumManager: NSObject, TransportManager {
                         signature: Data(declaration.signature)
                     ) else {
                         self.emitDiagnostic("error", "Cannot serialize the address declaration")
-                        self.handleConnectionClosed(error: nil)
+                        self.handleConnectionClosed(error: nil, generation: generation)
                         return
                     }
                     // Checked again after the signature: it waited on the
@@ -944,7 +940,7 @@ public class ReticulumManager: NSObject, TransportManager {
                         "reason": GatewayAttachPolicy.SkipReason.signingFailed,
                         "error": error.localizedDescription
                     ])
-                    self.handleConnectionClosed(error: nil)
+                    self.handleConnectionClosed(error: nil, generation: generation)
                 }
             }
         }
@@ -955,12 +951,11 @@ public class ReticulumManager: NSObject, TransportManager {
     /// Both answers go to the core, which owns the security warning; what is
     /// decided here is narrower and is the bridge's own: whether this carrier
     /// can be offered to the selector at all.
-    private func handleAddressDeclared(_ json: [String: Any]) {
+    private func handleAddressDeclared(_ json: [String: Any], generation: Int) {
         guard let declared = json["address"] as? String, !declared.isEmpty else {
             emitDiagnostic("warning", "Invalid AddressDeclared: missing address")
             return
         }
-        let generation = sessionGeneration
         messageQueue.async { [weak self] in
             guard let self = self, self.sessionGeneration == generation else { return }
             self.protocolInstance.reticulumAddressDeclared(address: declared)
@@ -978,7 +973,7 @@ public class ReticulumManager: NSObject, TransportManager {
                 // else, and reconnecting is the only thing this side can do
                 // that might land somewhere honest.
                 self.emitDiagnostic("error", "Gateway bound a session to an address we do not hold")
-                self.handleConnectionClosed(error: nil)
+                self.handleConnectionClosed(error: nil, generation: generation)
             }
         }
     }
@@ -986,7 +981,7 @@ public class ReticulumManager: NSObject, TransportManager {
     /// The gateway refused the declaration, so this session can only be told
     /// verdicts. The carrier is never announced; the connection goes and the
     /// existing backoff decides when to try again.
-    private func handleAddressError(_ json: [String: Any]) {
+    private func handleAddressError(_ json: [String: Any], generation: Int) {
         let reason = json["reason"] as? String ?? "unspecified"
         messageQueue.async { [weak self] in
             guard let self = self else { return }
@@ -995,7 +990,7 @@ public class ReticulumManager: NSObject, TransportManager {
         emitDiagnostic("warning", "Gateway refused the address declaration", context: [
             "reason": reason
         ])
-        handleConnectionClosed(error: nil)
+        handleConnectionClosed(error: nil, generation: generation)
     }
 
     // MARK: - Verdicts
@@ -1048,6 +1043,11 @@ public class ReticulumManager: NSObject, TransportManager {
                         peerId: recipient, online: false, lastSeenMs: nil)
                 }
             }
+            // A verdict frees an in-flight slot, so the next frame goes out
+            // on it. Unless paused: with eight in flight, a paused transport
+            // would otherwise drain a batch per answer for the whole
+            // background stay, which is what `isPaused` exists to stop.
+            guard !self.isPaused else { return }
             self.pollAndSendMessages()
         }
     }
@@ -1364,6 +1364,9 @@ public class ReticulumManager: NSObject, TransportManager {
             return
         }
 
+        // Sampled before the write, so the failure it may report later
+        // names the session this write belonged to.
+        let generation = sessionGeneration
         sendRaw(jsonString + "\n") { [weak self] error in
             guard let self = self else { return }
 
@@ -1381,7 +1384,7 @@ public class ReticulumManager: NSObject, TransportManager {
                     self.emitDiagnostic("warning", "Too many consecutive send failures, triggering reconnect", context: [
                         "failures": self.consecutiveSendFailures
                     ])
-                    self.handleConnectionClosed(error: nil)
+                    self.handleConnectionClosed(error: nil, generation: generation)
                 }
             } else {
                 self.consecutiveSendFailures = 0

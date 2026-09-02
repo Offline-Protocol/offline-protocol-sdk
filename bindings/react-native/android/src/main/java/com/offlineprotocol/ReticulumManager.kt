@@ -616,6 +616,13 @@ class ReticulumManager(
             // comes next. See [connectGeneration].
             connectGeneration.incrementAndGet()
 
+            // Cleared here, under the same lock the bind takes with its
+            // generation check, so the two are ordered: a bind that lost the
+            // race sees the bump and refuses, and one that won is cleared
+            // by this. A volatile write, not an FFI call, so the
+            // lock-ordering rule below does not apply to it.
+            isBound = false
+
             receiveThread?.interrupt()
             receiveThread = null
             // Socket first. Socket.close() is the one call that makes a
@@ -656,7 +663,6 @@ class ReticulumManager(
         // Every one of them is owed an outcome, because a frame nobody reports
         // on waits out the core's own 120s expiry instead of going back on the
         // retry ladder now.
-        isBound = false
         cancelAttachTimeout()
         stopPresenceWatch()
         failInFlight("Disconnected")
@@ -1076,6 +1082,10 @@ class ReticulumManager(
 
             "Capabilities" -> {
                 val tokens = GatewayAttachPolicy.capabilityTokens(json)
+                // A reader that outlived its session must not overwrite the
+                // successor's advertisement: the two receive threads contend
+                // for the protocol mutex, which is not FIFO.
+                if (connectGeneration.get() != generation) return
                 // Before the status flip, never after: the flush that flip
                 // triggers has to see them.
                 try {
@@ -1150,8 +1160,18 @@ class ReticulumManager(
                     // waiting out the attach timeout to learn that is ten
                     // seconds of a carrier the selector has been told nothing
                     // about.
+                    //
+                    // The writer and the generation are sampled together
+                    // under the lock, as sendMessage samples them: the
+                    // signature above waited on the global mutex, and a
+                    // proof over a retired challenge written to the
+                    // successor's socket is a refusal, a spurious security
+                    // warning and a wasted attach.
                     ioHandler.post {
-                        if (!writeLine(frame)) {
+                        val w = synchronized(this) {
+                            if (connectGeneration.get() == generation) writer else null
+                        } ?: return@post
+                        if (!writeLine(w, frame)) {
                             transportHandler.post {
                                 handleConnectionClosed(generation, -1, "Declaration write failed")
                             }
@@ -1298,7 +1318,11 @@ class ReticulumManager(
         } catch (e: Exception) {
             Log.e(TAG, "Error settling verdict for ${verdict.messageId}", e)
         }
-        ioHandler.post { pollAndSendMessages() }
+        // A verdict frees an in-flight slot, so the next frame goes out on
+        // it. Unless paused: with eight in flight, a paused transport would
+        // otherwise drain a batch per answer for the whole background stay,
+        // which is what [isPaused] exists to stop.
+        if (!isPaused) ioHandler.post { pollAndSendMessages() }
     }
 
     /**
@@ -1334,7 +1358,11 @@ class ReticulumManager(
     }
 
     private fun startPresenceWatch() {
-        stopPresenceWatch()
+        // Replaces the tick without clearing the rotation policy, as the iOS
+        // manager does: a repeated `StatusUpdate(connected)` restarts the
+        // tick, and wiping the idle-TTL state each time would re-ask about
+        // every watched peer at once.
+        presenceWatchRunnable?.let { transportHandler.removeCallbacks(it) }
         val runnable = object : Runnable {
             override fun run() {
                 presenceWatchTick()
@@ -1387,14 +1415,18 @@ class ReticulumManager(
      */
     private fun writeLine(line: String): Boolean {
         val w = synchronized(this) { writer } ?: return false
-        return try {
+        return writeLine(w, line)
+    }
+
+    /** Writes one line on a writer the caller has already sampled. */
+    private fun writeLine(w: PrintWriter, line: String): Boolean =
+        try {
             w.println(line)
             !w.checkError()
         } catch (e: Exception) {
             Log.e(TAG, "Error writing to the gateway", e)
             false
         }
-    }
 
     /**
      * Monotonic and sleep-inclusive, like every tracker and watch call in

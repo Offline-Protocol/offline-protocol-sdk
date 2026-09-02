@@ -91,8 +91,8 @@ local IP (venue Wi-Fi, or a hotspot the gateway box provides).
 
 This promotes the protocol both mobile bridges already speak to a configurable
 `daemonAddress` (default `localhost:4242`), rather than designing a fresh one:
-the client side is already implemented twice, and no daemon exists anywhere yet,
-so extending it breaks nobody.
+the client side is already implemented twice, and every field this chapter adds
+to it is additive, so a daemon built to the earlier shape is unaffected.
 
 ### Framing
 
@@ -124,10 +124,19 @@ implements against:
 ← StatusUpdate(connected)
 ```
 
-A gateway MUST send `Capabilities` before `StatusUpdate(connected)`, and a
-client SHOULD treat `StatusUpdate(connected)` as the point at which the carrier
-becomes usable. A client that starts submitting earlier is not wrong, but it is
-submitting into a gateway whose features it has not been told.
+A gateway MUST send `StatusUpdate(connected)` once it has bound the session,
+MUST send `Capabilities` before it, and MUST NOT send it while a declaration it
+has received is unanswered. A client SHOULD treat `StatusUpdate(connected)` as
+the point at which the carrier becomes usable, and MAY treat one that arrives
+before its own declaration has been answered as a failed attach and close: a
+session announced before it is bound is the verdict-only session described
+below, and a gateway that announces it is not speaking this contract. A client
+that starts submitting earlier is not wrong, but it is submitting into a gateway
+whose features it has not been told.
+
+A gateway MAY still send the same two frames on a session that never declared,
+after a grace period, for clients that do not attach; such a session is
+verdict-only.
 
 **A client SHOULD NOT offer an unbound session to its transport selector.** A
 session whose declaration was refused, or never made, may submit and be told a
@@ -242,6 +251,12 @@ trailing prose after the token is for human logs and MUST NOT be relied on: the
 SDK discards it at the classification boundary and never carries it into an
 event.
 
+Every other reason is a plain failure to the SDK, which puts the frame back on
+its retry ladder and acts on nothing else in the text. Tokens a gateway may use
+for those, none of which is normative: `attach_required` (the session is not
+bound), `backbone_timeout`, `budget_exceeded`, `frame_too_large`,
+`malformed_request`.
+
 ### Deliver
 
 ```
@@ -305,8 +320,9 @@ an attacker who can set them is already the gateway.
 ← {"type":"StatusUpdate","status":"connected"|"degraded"|"disconnected"}
 ```
 
-Advisory. A device MUST NOT treat `StatusUpdate` as a delivery signal for any
-particular frame.
+Advisory for delivery: a device MUST NOT treat `StatusUpdate` as a delivery
+signal for any particular frame. `connected` is also the frame that completes
+an attach, with the obligations [Attach](#attach) places on it.
 
 ### No new zone control prefixes
 
