@@ -591,14 +591,6 @@ class ReticulumManager(
     }
 
     private fun disconnect() {
-        isBound = false
-        cancelAttachTimeout()
-        stopPresenceWatch()
-        // Every frame this connection was carrying is owed an outcome. A frame
-        // nobody reports on waits out the core's own 120s expiry instead of
-        // going back on the retry ladder now, so silence here is two minutes
-        // of nothing per message.
-        failInFlight("Disconnected")
         synchronized(this) {
             // Clear flags before interrupting the receive thread so it sees
             // isConnected == false and skips the redundant handleConnectionClosed post.
@@ -650,6 +642,21 @@ class ReticulumManager(
             try { pendingConnectSocket?.close() } catch (_: Exception) {}
             pendingConnectSocket = null
         }
+
+        // Gateway state, after the lock rather than inside it. [failInFlight]
+        // makes one FFI call per stranded frame, and every one of those takes
+        // the core's global protocol mutex — held under this manager's own
+        // lock, that is the lock-ordering hazard the whole file avoids.
+        //
+        // After the socket is closed is also when it is *true*: a frame the
+        // gateway might still have answered is now definitely unanswerable.
+        // Every one of them is owed an outcome, because a frame nobody reports
+        // on waits out the core's own 120s expiry instead of going back on the
+        // retry ladder now.
+        isBound = false
+        cancelAttachTimeout()
+        stopPresenceWatch()
+        failInFlight("Disconnected")
     }
 
     /**

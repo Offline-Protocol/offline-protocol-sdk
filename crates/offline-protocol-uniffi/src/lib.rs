@@ -11837,6 +11837,302 @@ mod tests {
         );
     }
 
+    /// The gateway attach is announced only after the session is bound, and
+    /// in the contract's order.
+    ///
+    /// Four things happen on a gateway attach and the order is the whole of
+    /// the correctness: the declaration goes out, the echo is reported, the
+    /// capabilities reach the core, and only then is the carrier announced and
+    /// drained. Get it wrong and nothing fails loudly — the transport comes up
+    /// against a session the gateway never bound, every submission draws
+    /// `attach_required`, and nothing addressed to the device is ever
+    /// delivered to it.
+    ///
+    /// Neither platform can test this itself. `ReticulumManager.swift` is on
+    /// `Package.swift`'s `exclude:` list and `ReticulumManager.kt` needs a live
+    /// socket, so CI typechecks one and executes neither. The decisions and
+    /// frame shapes are unit-tested on both sides
+    /// (`GatewayAttachPolicyTests` / `GatewayAttachPolicyTest`); what no test
+    /// there can reach is that the call sites run in this order. Same shape,
+    /// and same reason, as the relay guard above.
+    #[test]
+    fn react_native_reticulum_attaches_before_it_reports_available() {
+        let swift = rn_source_code_only("ios/ReticulumManager.swift");
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/ReticulumManager.kt");
+
+        // 1. Both build the declaration in the core rather than signing
+        //    bridge-side. A bridge that grew its own copy of the proof layout
+        //    is the thing this whole design avoids.
+        assert!(
+            swift.contains("self.protocolInstance.gatewayAddressDeclaration("),
+            "ReticulumManager.swift must get its declaration from the core"
+        );
+        assert!(
+            kotlin.contains("protocol.gatewayAddressDeclaration("),
+            "ReticulumManager.kt must get its declaration from the core"
+        );
+        for (name, code) in [("swift", &swift), ("kotlin", &kotlin)] {
+            assert!(
+                !code.contains("offline-gateway-addr-v1"),
+                "{name} ReticulumManager must not carry the signing domain — the payload is \
+                 built once, in the core, where a conformance vector pins it"
+            );
+        }
+
+        // 2. The order, pinned as a causal chain rather than by source
+        //    offset. The four steps live in four different functions here
+        //    (the daemon drives them, one frame each), so file order says
+        //    nothing — and a guard that asserted on it would fail the moment
+        //    someone moved a function, which teaches people to edit the guard.
+        //
+        //    What actually holds the order is: the announcement happens only
+        //    inside `completeAttach`, `completeAttach` runs only on
+        //    `StatusUpdate(connected)` — which the contract puts last — and it
+        //    refuses unless the declaration bound the session first.
+        assert!(
+            swift.contains("if daemonStatus == \"connected\" { completeAttach() }"),
+            "ReticulumManager.swift must complete the attach on StatusUpdate(connected)"
+        );
+        assert!(
+            kotlin.contains("if (daemonStatus == \"connected\") { completeAttach() }"),
+            "ReticulumManager.kt must complete the attach on StatusUpdate(connected)"
+        );
+        assert!(
+            swift.contains(
+                "private func completeAttach() { cancelAttachTimeout() guard isBound else {"
+            ),
+            "ReticulumManager.swift must refuse to announce a session the gateway did not bind"
+        );
+        assert!(
+            kotlin.contains(
+                "private fun completeAttach() { transportHandler.post { cancelAttachTimeout() \
+                 if (!isBound) {"
+            ),
+            "ReticulumManager.kt must refuse to announce a session the gateway did not bind"
+        );
+
+        // 3. `isBound` is set in exactly one place on each side: the branch
+        //    where the echoed address was ours. Anything else setting it is a
+        //    session announced on something other than a proven binding.
+        assert_eq!(
+            swift.matches("self.isBound = true").count(),
+            1,
+            "ReticulumManager.swift must bind the session only on a matching address echo"
+        );
+        assert_eq!(
+            kotlin.matches("isBound = true").count(),
+            1,
+            "ReticulumManager.kt must bind the session only on a matching address echo"
+        );
+        assert!(
+            swift.contains("case .bound: self.isBound = true"),
+            "ReticulumManager.swift must bind only on GatewayAttachPolicy's .bound outcome"
+        );
+        assert!(
+            kotlin.contains("GatewayAttachPolicy.BindingOutcome.BOUND -> { isBound = true"),
+            "ReticulumManager.kt must bind only on GatewayAttachPolicy's BOUND outcome"
+        );
+
+        // 4. The status flip is the only thing gated this way, and the
+        //    capabilities reach the core on their own frame, which the
+        //    contract delivers before StatusUpdate.
+        assert!(
+            swift.contains(
+                "try? self.protocolInstance.reticulumGatewayCapabilities(capabilities: tokens)"
+            ),
+            "ReticulumManager.swift must hand the capabilities to the SDK"
+        );
+        assert!(
+            kotlin.contains("protocol.reticulumGatewayCapabilities(tokens)"),
+            "ReticulumManager.kt must hand the capabilities to the SDK"
+        );
+        assert!(
+            swift.contains("self.protocolInstance.reticulumAddressDeclared(address: declared)"),
+            "ReticulumManager.swift must report the echo to the SDK"
+        );
+        assert!(
+            kotlin.contains("protocol.reticulumAddressDeclared(declared)"),
+            "ReticulumManager.kt must report the echo to the SDK"
+        );
+
+        // 4. Both refuse a declaration the core would not sign, and report the
+        //    refusal to the SDK rather than swallowing it.
+        assert!(
+            swift.contains(
+                "self.protocolInstance.reticulumAddressDeclarationRefused(reason: reason)"
+            ) && kotlin.contains("protocol.reticulumAddressDeclarationRefused(reason)"),
+            "both managers must report a refused declaration to the SDK"
+        );
+    }
+
+    /// A send settles on the gateway's verdict, never on the socket write.
+    ///
+    /// The shipped bridges confirmed the moment the write returned, so the
+    /// core settled messages the gateway had refused and never saw
+    /// `recipient_unreachable` — the one verdict that parks a DM and offers it
+    /// to the mesh. Nothing about that failed: the transport looked healthy
+    /// and messages vanished.
+    #[test]
+    fn react_native_reticulum_settles_on_the_verdict_not_the_write() {
+        let swift = rn_source_code_only("ios/ReticulumManager.swift");
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/ReticulumManager.kt");
+
+        // The confirm exists exactly once on each side, and it is inside the
+        // verdict handler. A second one is, by construction, a confirm on some
+        // other event.
+        assert_eq!(
+            swift
+                .matches("protocolInstance.reticulumConfirmSent(")
+                .count(),
+            1,
+            "ReticulumManager.swift must confirm in exactly one place: the verdict handler"
+        );
+        assert_eq!(
+            kotlin.matches("protocol.reticulumConfirmSent(").count(),
+            1,
+            "ReticulumManager.kt must confirm in exactly one place: the verdict handler"
+        );
+        assert!(
+            swift.contains("if verdict.sent { self.protocolInstance.reticulumConfirmSent("),
+            "ReticulumManager.swift must confirm on the verdict"
+        );
+        assert!(
+            kotlin.contains("if (verdict.sent) { protocol.reticulumConfirmSent("),
+            "ReticulumManager.kt must confirm on the verdict"
+        );
+
+        // The reason-carrying failure is what the classifier needs. The bare
+        // `reticulumSendFailed` throws the reason away, and with it the
+        // parking decision.
+        for (name, code) in [("swift", &swift), ("kotlin", &kotlin)] {
+            assert!(
+                code.contains("reticulumSendFailedWithReason("),
+                "{name} ReticulumManager must fail with the gateway's reason"
+            );
+            assert!(
+                !code.contains("reticulumSendFailed(messageId)")
+                    && !code.contains("reticulumSendFailed(messageId: messageId)"),
+                "{name} ReticulumManager must not use the reason-less failure — it discards \
+                 the recipient_unreachable token the core parks on"
+            );
+        }
+
+        // The id has to be on the wire or the verdict cannot be correlated:
+        // the gateway mints one for a submission that carries none, and
+        // answers under that.
+        assert!(
+            swift.contains("GatewayAttachPolicy.sendMessageJson(")
+                && kotlin.contains("GatewayAttachPolicy.sendMessageJson("),
+            "both managers must build SendMessage through the policy, which carries message_id"
+        );
+    }
+
+    /// The gateway constants agree across both bridges, and the verdict
+    /// timeout stays under the core's own expiry.
+    ///
+    /// Two hand-mirrored constant sets with no compiler between them, in the
+    /// C5 mould. The relationship matters more than the numbers: two clocks
+    /// describe the same frame, and if the bridge's were the longer one the
+    /// core would expire the frame first and the verdict would then settle an
+    /// id it had already moved past.
+    #[test]
+    fn gateway_manager_constants_match_across_both_bridges() {
+        let swift = rn_source_code_only("ios/GatewayAttachPolicy.swift");
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/GatewayAttachPolicy.kt");
+
+        // (name, swift spelling, kotlin spelling)
+        let pairs: [(&str, &str, &str); 6] = [
+            (
+                "protocol version",
+                "PROTOCOL_VERSION = 1",
+                "PROTOCOL_VERSION = 1",
+            ),
+            (
+                "challenge length",
+                "CHALLENGE_LENGTH = 32",
+                "CHALLENGE_LENGTH = 32",
+            ),
+            (
+                "attach timeout",
+                "ATTACH_TIMEOUT: TimeInterval = 10.0",
+                "ATTACH_TIMEOUT_MS = 10_000L",
+            ),
+            (
+                "verdict timeout",
+                "VERDICT_TIMEOUT: TimeInterval = 60.0",
+                "VERDICT_TIMEOUT_MS = 60_000L",
+            ),
+            ("in flight cap", "MAX_IN_FLIGHT = 8", "MAX_IN_FLIGHT = 8"),
+            (
+                "presence peers",
+                "MAX_PRESENCE_PEERS = 64",
+                "MAX_PRESENCE_PEERS = 64",
+            ),
+        ];
+        for (name, swift_decl, kotlin_decl) in pairs {
+            assert!(
+                swift.contains(swift_decl),
+                "GatewayAttachPolicy.swift must declare the {name} as `{swift_decl}`"
+            );
+            assert!(
+                kotlin.contains(kotlin_decl),
+                "GatewayAttachPolicy.kt must declare the {name} as `{kotlin_decl}`"
+            );
+        }
+
+        // The capability bounds are the core's, so they are pinned against it
+        // rather than against each other.
+        assert!(
+            swift.contains("MAX_CAPABILITY_TOKENS = 64")
+                && swift.contains("MAX_CAPABILITY_TOKEN_BYTES = 128")
+                && kotlin.contains("MAX_CAPABILITY_TOKENS = 64")
+                && kotlin.contains("MAX_CAPABILITY_TOKEN_BYTES = 128"),
+            "both bridges must bound capabilities the way the core does (64 x 128)"
+        );
+
+        // The relationship the numbers exist to hold. `RETICULUM_PENDING_
+        // CONFIRMATION_TIMEOUT_SECS` is the core's clock on the same frame.
+        const CORE_PENDING_CONFIRMATION_SECS: u64 = 120;
+        const BRIDGE_VERDICT_TIMEOUT_SECS: u64 = 60;
+        assert!(
+            BRIDGE_VERDICT_TIMEOUT_SECS < CORE_PENDING_CONFIRMATION_SECS,
+            "the bridge must give up on a verdict before the core gives up on the frame"
+        );
+    }
+
+    /// The presence-watch defaults agree across both bridges.
+    ///
+    /// Three hand-mirrored numbers with no pin at all until now: the relay
+    /// managers have carried them since presence watching shipped, and the
+    /// gateway managers now carry them too. A tick interval that drifted apart
+    /// would give the two platforms different presence latency, which reads as
+    /// a device problem rather than a constant.
+    #[test]
+    fn presence_watch_defaults_match_across_both_bridges() {
+        let swift = rn_source_code_only("ios/PresenceWatchPolicy.swift");
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/PresenceWatchPolicy.kt");
+
+        assert!(
+            swift.contains("defaultIdleTtlMs: Int64 = 10 * 60_000")
+                && kotlin.contains("DEFAULT_IDLE_TTL_MS = 10 * 60_000L"),
+            "the idle TTL must match across both bridges"
+        );
+        assert!(
+            swift.contains("defaultMaxQueriesPerTick = 10")
+                && kotlin.contains("DEFAULT_MAX_QUERIES_PER_TICK = 10"),
+            "the per-tick query cap must match across both bridges"
+        );
+        assert!(
+            swift.contains("defaultTickInterval: TimeInterval = 20.0")
+                && kotlin.contains("DEFAULT_TICK_INTERVAL_MS = 20_000L"),
+            "the tick interval must match across both bridges"
+        );
+    }
+
     /// Reads a React Native bridge source file and flattens it to a single
     /// line of code with comments stripped.
     ///
