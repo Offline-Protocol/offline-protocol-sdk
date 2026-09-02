@@ -2,8 +2,9 @@ package com.offlineprotocol
 
 import android.util.Log
 import uniffi.offline_protocol.OfflineProtocol
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import java.io.BufferedInputStream
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.io.PrintWriter
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
@@ -133,7 +134,9 @@ class ReticulumManager(
     // TCP connection
     private var socket: Socket? = null
     private var writer: PrintWriter? = null
-    private var reader: BufferedReader? = null
+    // Bytes, not a BufferedReader: the receive loop bounds each line itself,
+    // and `readLine()` offers no way to stop assembling one.
+    private var reader: InputStream? = null
     // Under the same `synchronized(this)` as the socket it reads, because it
     // crosses the same two threads: [startReceiveLoop] publishes it from the
     // IO thread, [disconnect] interrupts and clears it from the transport
@@ -502,7 +505,7 @@ class ReticulumManager(
                 sock.soTimeout = 0 // No read timeout — blocking receive
 
                 val w = PrintWriter(sock.getOutputStream(), true)
-                val r = BufferedReader(InputStreamReader(sock.getInputStream()))
+                val r = BufferedInputStream(sock.getInputStream())
 
                 // Second checkpoint, folded into the publish rather than
                 // standing beside it: the check and the write have to be one
@@ -681,9 +684,16 @@ class ReticulumManager(
             isConnected.set(true)
             isConnecting.set(false)
         }
-        reconnectAttempts.set(0)
-        currentReconnectDelay.set(RECONNECT_INITIAL_DELAY_MS)
         consecutiveSendFailures.set(0)
+
+        // Not a backoff reset. A TCP open proves only that something is
+        // listening; the handshake that follows has four places left to fail,
+        // and every one of them reconnects. Reset here, a refusing gateway was
+        // retried at the 1s floor forever, with a challenge, a signature and
+        // two events spent per turn, and `maxReconnectAttempts` never tripped
+        // because the count went back to zero each time. The reset lives in
+        // [completeAttach], on the bound session, which is what
+        // InternetManager does on `Authenticated`.
 
         emitDiagnostic("info", "Connected to Reticulum daemon")
 
@@ -757,20 +767,37 @@ class ReticulumManager(
      * closes the connection instead. That is the one place this manager
      * diverges from InternetManager, which reports up and keeps working in
      * account-name space after a refusal. A gateway has no such space.
+     *
+     * Under the generation of the connection that delivered the frame, like
+     * every other handler: the post runs a hop later, and a
+     * `StatusUpdate(connected)` from a socket that has since been replaced
+     * would otherwise announce, or tear down, the session that replaced it.
      */
-    private fun completeAttach() {
+    private fun completeAttach(generation: Int) {
         transportHandler.post {
-            cancelAttachTimeout()
+            if (connectGeneration.get() != generation) return@post
             if (!isBound) {
-                emitDiagnostic("warning", "Gateway reported connected before binding the session")
+                // A gateway that announces before it binds is not speaking the
+                // contract, and a session it never binds is verdict-only.
+                // Closing is the one action that can end somewhere usable.
+                // Returning with the timeout cancelled left the transport
+                // connected and mute until the daemon happened to drop it.
+                emitDiagnostic("error", "Gateway reported connected before binding the session")
+                handleConnectionClosed(generation, -1, "Connected before bound")
                 return@post
             }
+            cancelAttachTimeout()
             if (state == TransportState.STOPPING || state == TransportState.STOPPED) return@post
             try {
                 protocol.reticulumStatusChanged(true)
             } catch (e: Exception) {
                 Log.e(TAG, "Error notifying protocol of connect", e)
             }
+            // The gateway bound and announced this session: this, not the TCP
+            // open, is what proves the connection good and earns a backoff
+            // reset. See [handleConnectionOpened] for what resetting there cost.
+            reconnectAttempts.set(0)
+            currentReconnectDelay.set(RECONNECT_INITIAL_DELAY_MS)
             if (!isPaused) {
                 startPresenceWatch()
                 ioHandler.post { pollAndSendMessages() }
@@ -800,12 +827,43 @@ class ReticulumManager(
         attachTimeoutRunnable = null
     }
 
-    private fun startReceiveLoop(reader: BufferedReader, generation: Int) {
+    /**
+     * Reads newline-delimited frames until the socket closes or a line
+     * outgrows [GatewayAttachPolicy.MAX_LINE_BYTES].
+     *
+     * Assembled a byte at a time from a buffered stream rather than with
+     * `readLine()`, which has no cap: a peer that never sends the newline
+     * grows a `StringBuilder` until the process dies, and the link is
+     * plaintext to whatever `daemonHost` names. A line past the cap cannot be
+     * resynchronised either, since its tail would be read as a fresh line and
+     * every frame after it would be garbage, so the connection goes instead
+     * and the reconnect starts clean. The iOS manager applies the same cap to
+     * its receive buffer.
+     */
+    private fun startReceiveLoop(input: InputStream, generation: Int) {
         val thread = Thread {
+            var reason = "Connection lost"
             try {
+                val line = ByteArrayOutputStream()
                 while (isConnected.get() && !Thread.currentThread().isInterrupted) {
-                    val line = reader.readLine() ?: break
-                    processReceivedData(line.toByteArray(Charsets.UTF_8), generation)
+                    val b = input.read()
+                    if (b < 0) break
+                    if (b == '\n'.code) {
+                        if (line.size() > 0) {
+                            processReceivedData(line.toByteArray(), generation)
+                            line.reset()
+                        }
+                        continue
+                    }
+                    if (b == '\r'.code) continue
+                    if (line.size() >= GatewayAttachPolicy.MAX_LINE_BYTES) {
+                        emitDiagnostic("error", "Over-long line from the gateway", mapOf(
+                            "bytes" to line.size()
+                        ))
+                        reason = "Over-long line"
+                        break
+                    }
+                    line.write(b)
                 }
             } catch (e: Exception) {
                 if (isConnected.get()) {
@@ -819,7 +877,7 @@ class ReticulumManager(
             // again — belonging to the session that replaced this one. See
             // [handleConnectionClosed].
             if (isConnected.get()) {
-                transportHandler.post { handleConnectionClosed(generation, -1, "Connection lost") }
+                transportHandler.post { handleConnectionClosed(generation, -1, reason) }
             }
         }
         // Published under the socket's lock, because this runs on the IO
@@ -876,6 +934,22 @@ class ReticulumManager(
         // The hop that matters is inside [stopMessagePolling], which puts the
         // removal on the IO thread that owns the runnable.
         stopMessagePolling()
+
+        // The socket, its reader and the session state go now, through the
+        // same [disconnect] a stop() runs, rather than being left for the
+        // reconnect's connect() to publish over. Before this, every path
+        // other than stop() left them standing: a refused or mismatched
+        // session is still open on the gateway's side, so its reader stayed
+        // parked in a read for as long as the gateway held the socket and
+        // each reconnect leaked a thread and a descriptor; `isBound` stayed
+        // true for the successor to inherit, which defeated the attach
+        // timeout and let a `StatusUpdate(connected)` on an unbound session
+        // announce the carrier; the presence tick kept writing to the dead
+        // writer; and the ids in flight were never failed, so they held the
+        // in-flight slots against the next session and the core waited out
+        // its own 120s expiry on each. The generation bump inside retires any
+        // post still naming this session.
+        disconnect()
 
         // Notify protocol
         try {
@@ -1021,7 +1095,7 @@ class ReticulumManager(
                     "status" to daemonStatus
                 ))
                 if (daemonStatus == "connected") {
-                    completeAttach()
+                    completeAttach(generation)
                 }
             }
 
@@ -1069,7 +1143,20 @@ class ReticulumManager(
                         }
                         return
                     }
-                    writeLine(frame)
+                    // Written on the IO thread like every other frame, so a
+                    // gateway that has stopped reading stalls a write there
+                    // and not the thread its answers arrive on. A write that
+                    // fails leaves no frame for the gateway to answer, and
+                    // waiting out the attach timeout to learn that is ten
+                    // seconds of a carrier the selector has been told nothing
+                    // about.
+                    ioHandler.post {
+                        if (!writeLine(frame)) {
+                            transportHandler.post {
+                                handleConnectionClosed(generation, -1, "Declaration write failed")
+                            }
+                        }
+                    }
                 } catch (e: Exception) {
                     // No identity yet, or a challenge the core refused to sign.
                     // Either way this connection can only ever be verdict-only,
@@ -1112,7 +1199,19 @@ class ReticulumManager(
         }
         when (GatewayAttachPolicy.bindingOutcome(declared, local)) {
             GatewayAttachPolicy.BindingOutcome.BOUND -> {
-                isBound = true
+                // One step under the lock [disconnect] clears the flag in,
+                // with the generation check: a teardown landing between a
+                // check and a set would leave the successor bound on an echo
+                // it never received.
+                val bound = synchronized(this) {
+                    if (connectGeneration.get() == generation) {
+                        isBound = true
+                        true
+                    } else {
+                        false
+                    }
+                }
+                if (!bound) return
                 emitDiagnostic("info", "Gateway bound this session to our address")
             }
             else -> {
@@ -1179,12 +1278,21 @@ class ReticulumManager(
                 protocol.reticulumSendFailedWithReason(verdict.messageId, verdict.reason)
                 val recipient = verdict.recipient
                 if (recipient != null &&
-                    verdict.reason?.startsWith("recipient_unreachable") == true
+                    verdict.reason?.startsWith("recipient_unreachable") == true &&
+                    !isSelfPeer(recipient)
                 ) {
                     // Watch them: the gateway pushes a PresenceStatus when a
                     // watched peer attaches, and that answer is what un-parks
                     // the message this verdict just parked.
-                    presenceWatch.watch(recipient, System.currentTimeMillis())
+                    presenceWatch.watch(recipient, monotonicNowMs())
+                    // And feed the verdict in as presence, as InternetManager
+                    // does on its own DeliveryError. The core parks on the
+                    // verdict already; this is what emits the
+                    // `presence_updated(offline)` an app renders a header
+                    // from, labelled with the carrier that answered. Never
+                    // for self: the core drops that too, but a malformed
+                    // self-addressed frame should not cost a watch slot.
+                    protocol.reticulumPeerPresence(recipient, false, null)
                 }
             }
         } catch (e: Exception) {
@@ -1266,18 +1374,43 @@ class ReticulumManager(
         val candidates = coreWatchlist.filter {
             it.isNotEmpty() && it != deviceId && it != selfAddress
         }
-        val peers = presenceWatch.peersToQuery(candidates, System.currentTimeMillis())
+        val peers = presenceWatch.peersToQuery(candidates, monotonicNowMs())
         val frame = GatewayAttachPolicy.checkPresenceJson(peers) ?: return
         ioHandler.post { writeLine(frame) }
     }
 
-    /** Writes one line to the daemon, if the socket is still up. */
-    private fun writeLine(line: String) {
-        val w = synchronized(this) { writer } ?: return
-        try {
+    /**
+     * Writes one line to the daemon. Returns whether it went out: `false` for
+     * a socket that is already gone, and for a write the stream refused,
+     * which `PrintWriter` reports through its error flag and never by
+     * throwing.
+     */
+    private fun writeLine(line: String): Boolean {
+        val w = synchronized(this) { writer } ?: return false
+        return try {
             w.println(line)
+            !w.checkError()
         } catch (e: Exception) {
             Log.e(TAG, "Error writing to the gateway", e)
+            false
+        }
+    }
+
+    /**
+     * Monotonic and sleep-inclusive, like every tracker and watch call in
+     * InternetManager: a wall-clock step of a minute must not fail every frame
+     * in flight as unanswered, and one of ten minutes must not evict the whole
+     * watch set.
+     */
+    private fun monotonicNowMs(): Long = android.os.SystemClock.elapsedRealtime()
+
+    private fun isSelfPeer(peerId: String): Boolean {
+        if (peerId.isEmpty()) return false
+        if (peerId == deviceId) return true
+        return try {
+            peerId == protocol.localAddress()
+        } catch (e: Exception) {
+            false
         }
     }
 
@@ -1337,8 +1470,7 @@ class ReticulumManager(
      * shorter of the two.
      */
     private fun sweepExpiredVerdicts() {
-        val stale = verdicts.expired(
-            System.currentTimeMillis(), GatewayAttachPolicy.VERDICT_TIMEOUT_MS)
+        val stale = verdicts.expired(monotonicNowMs(), GatewayAttachPolicy.VERDICT_TIMEOUT_MS)
         if (stale.isEmpty()) return
         emitDiagnostic("warning", "Gateway did not answer for submitted frames", mapOf(
             "count" to stale.size
@@ -1385,7 +1517,7 @@ class ReticulumManager(
                 // this copy timed out, fail an id the gateway had already
                 // confirmed. Popping it was enough: the core's pending entry
                 // is refreshed by the pop.
-                if (!verdicts.begin(message.messageId, System.currentTimeMillis())) {
+                if (!verdicts.begin(message.messageId, monotonicNowMs())) {
                     continue
                 }
 

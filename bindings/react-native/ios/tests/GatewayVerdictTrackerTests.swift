@@ -97,4 +97,38 @@ final class GatewayVerdictTrackerTests: XCTestCase {
         XCTAssertEqual(admitted.count, 1)
         XCTAssertEqual(tracker.count, 1)
     }
+
+    /// The three ways an id leaves the tracker race each other in the
+    /// manager: a verdict on the socket queue, the sweep on the send queue,
+    /// and a teardown from wherever the close was observed. Exactly one of
+    /// them may own the outcome, or the core is told twice about one frame.
+    func testAnIdLeavesThroughExactlyOneDoor() {
+        let tracker = GatewayVerdictTracker()
+        _ = tracker.begin("contended", now: 0)
+        let outcomes = NSMutableArray()
+        let lock = NSLock()
+        let group = DispatchGroup()
+
+        for _ in 0..<16 {
+            DispatchQueue.global().async(group: group) {
+                if tracker.settle("contended") {
+                    lock.lock(); outcomes.add("settled"); lock.unlock()
+                }
+            }
+            DispatchQueue.global().async(group: group) {
+                if !tracker.expired(now: 120, timeout: 60).isEmpty {
+                    lock.lock(); outcomes.add("expired"); lock.unlock()
+                }
+            }
+            DispatchQueue.global().async(group: group) {
+                if !tracker.drainAll().isEmpty {
+                    lock.lock(); outcomes.add("drained"); lock.unlock()
+                }
+            }
+        }
+        group.wait()
+
+        XCTAssertEqual(outcomes.count, 1, "one door only, got \(outcomes)")
+        XCTAssertEqual(tracker.count, 0)
+    }
 }

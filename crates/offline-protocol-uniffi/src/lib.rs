@@ -11917,25 +11917,41 @@ mod tests {
         //    What actually holds the order is: the announcement happens only
         //    inside `completeAttach`, `completeAttach` runs only on
         //    `StatusUpdate(connected)` — which the contract puts last — and it
-        //    refuses unless the declaration bound the session first.
+        //    refuses unless the declaration bound the session first. The
+        //    decision is taken where the echo's own handling is ordered
+        //    against it: on the serial queue that handles the echo (iOS), or
+        //    under the generation of the socket that carried the frame
+        //    (Android). Read on the socket queue it was a race the gateway won
+        //    every time, by writing the three frames in one go. And a
+        //    `connected` on an unbound session closes the connection rather
+        //    than returning with the timeout cancelled, which wedged the
+        //    transport connected and mute.
         assert!(
             swift.contains("if daemonStatus == \"connected\" { completeAttach() }"),
             "ReticulumManager.swift must complete the attach on StatusUpdate(connected)"
         );
         assert!(
-            kotlin.contains("if (daemonStatus == \"connected\") { completeAttach() }"),
+            kotlin.contains("if (daemonStatus == \"connected\") { completeAttach(generation) }"),
             "ReticulumManager.kt must complete the attach on StatusUpdate(connected)"
         );
         assert!(
             swift.contains(
-                "private func completeAttach() { cancelAttachTimeout() guard isBound else {"
+                "private func completeAttach() { let generation = sessionGeneration \
+                 messageQueue.async { [weak self] in guard let self = self else { return } \
+                 guard self.sessionGeneration == generation else { return } \
+                 guard self.isBound else { self.emitDiagnostic(\"error\", \"Gateway reported \
+                 connected before binding the session\") self.handleConnectionClosed(error: nil) \
+                 return }"
             ),
             "ReticulumManager.swift must refuse to announce a session the gateway did not bind"
         );
         assert!(
             kotlin.contains(
-                "private fun completeAttach() { transportHandler.post { cancelAttachTimeout() \
-                 if (!isBound) {"
+                "private fun completeAttach(generation: Int) { transportHandler.post { \
+                 if (connectGeneration.get() != generation) return@post if (!isBound) { \
+                 emitDiagnostic(\"error\", \"Gateway reported connected before binding the \
+                 session\") handleConnectionClosed(generation, -1, \"Connected before bound\") \
+                 return@post }"
             ),
             "ReticulumManager.kt must refuse to announce a session the gateway did not bind"
         );
@@ -11944,7 +11960,7 @@ mod tests {
         //    where the echoed address was ours. Anything else setting it is a
         //    session announced on something other than a proven binding.
         assert_eq!(
-            swift.matches("self.isBound = true").count(),
+            swift.matches("_isBound = true").count(),
             1,
             "ReticulumManager.swift must bind the session only on a matching address echo"
         );
@@ -11953,12 +11969,21 @@ mod tests {
             1,
             "ReticulumManager.kt must bind the session only on a matching address echo"
         );
+        // And under the generation of the socket that carried the echo, one
+        // step with the set: a teardown landing between a check and a set
+        // leaves the successor bound on an echo it never received.
         assert!(
-            swift.contains("case .bound: self.isBound = true"),
+            swift.contains(
+                "case .bound: guard self.bindSession(ifCurrent: generation) else { return }"
+            ),
             "ReticulumManager.swift must bind only on GatewayAttachPolicy's .bound outcome"
         );
         assert!(
-            kotlin.contains("GatewayAttachPolicy.BindingOutcome.BOUND -> { isBound = true"),
+            kotlin.contains(
+                "GatewayAttachPolicy.BindingOutcome.BOUND -> { val bound = synchronized(this) { \
+                 if (connectGeneration.get() == generation) { isBound = true true } else { false } } \
+                 if (!bound) return"
+            ),
             "ReticulumManager.kt must bind only on GatewayAttachPolicy's BOUND outcome"
         );
 
@@ -12054,6 +12079,93 @@ mod tests {
             swift.contains("GatewayAttachPolicy.sendMessageJson(")
                 && kotlin.contains("GatewayAttachPolicy.sendMessageJson("),
             "both managers must build SendMessage through the policy, which carries message_id"
+        );
+    }
+
+    /// The reconnect ladder resets on the bound session, never on the TCP
+    /// open, and every close path retires the session.
+    ///
+    /// Both are one regression's shape. A TCP open proves only that something
+    /// is listening; the handshake that follows has four places left to fail
+    /// (a refusal, a mismatch, no identity to declare, an attach that never
+    /// completes), and every one of them reconnects. Reset on the open, each
+    /// of those reconnected at the 1s floor forever, with a challenge, a
+    /// signature and two events spent per turn, and `maxReconnectAttempts`
+    /// never tripped because the count went back to zero each time. And a
+    /// close that did not retire the session left `isBound` standing for the
+    /// successor, which defeated the attach timeout and let a
+    /// `StatusUpdate(connected)` on a session the gateway never bound announce
+    /// the carrier. Neither platform can test either; see the attach-ordering
+    /// guard above for why.
+    #[test]
+    fn react_native_reticulum_resets_backoff_on_the_bind_and_retires_every_close() {
+        let swift = rn_source_code_only("ios/ReticulumManager.swift");
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/ReticulumManager.kt");
+
+        // The reset exists once per file, and it sits after the status flip
+        // inside completeAttach. Pinned as adjacency so it cannot drift back
+        // into handleConnectionOpened and still pass on spelling.
+        assert_eq!(
+            swift.matches("reconnectAttempts = 0").count(),
+            1,
+            "ReticulumManager.swift must reset the reconnect ladder in exactly one place"
+        );
+        assert!(
+            swift.contains(
+                "self.statusFlipLock.unlock() guard announced else { return } \
+                 self.reconnectAttempts = 0 \
+                 self.currentReconnectDelay = self.RECONNECT_INITIAL_DELAY"
+            ),
+            "ReticulumManager.swift must reset the reconnect ladder only once the bound session \
+             is announced"
+        );
+        assert_eq!(
+            kotlin.matches("reconnectAttempts.set(0)").count(),
+            1,
+            "ReticulumManager.kt must reset the reconnect ladder in exactly one place"
+        );
+        assert!(
+            kotlin.contains(
+                "Log.e(TAG, \"Error notifying protocol of connect\", e) } \
+                 reconnectAttempts.set(0) currentReconnectDelay.set(RECONNECT_INITIAL_DELAY_MS)"
+            ),
+            "ReticulumManager.kt must reset the reconnect ladder only once the bound session is \
+             announced"
+        );
+
+        // Every close retires the session through the same teardown stop()
+        // runs, and that teardown is the one place the session state clears.
+        assert!(
+            swift.contains(
+                "guard wasConnected || wasConnecting else { return } connection?.cancel() \
+                 retireSession(reason: \"Connection lost\")"
+            ),
+            "ReticulumManager.swift must retire the session on every close, not only on stop()"
+        );
+        assert!(
+            swift.contains(
+                "private func retireSession(reason: String) { stateLock.lock() \
+                 _sessionGeneration += 1 _isBound = false stateLock.unlock() \
+                 cancelAttachTimeout() stopPresenceWatch() failInFlight(reason: reason) }"
+            ),
+            "ReticulumManager.swift's retireSession must bump the generation, clear the bind, \
+             disarm the timers and fail every frame in flight"
+        );
+        assert!(
+            kotlin.contains(
+                "if (!wasConnected && !wasConnecting) return stopMessagePolling() disconnect()"
+            ),
+            "ReticulumManager.kt must close the socket and retire the session on every close, \
+             not only on stop()"
+        );
+        assert!(
+            kotlin.contains(
+                "isBound = false cancelAttachTimeout() stopPresenceWatch() \
+                 failInFlight(\"Disconnected\")"
+            ),
+            "ReticulumManager.kt's disconnect must clear the bind, disarm the timers and fail \
+             every frame in flight"
         );
     }
 
@@ -13794,7 +13906,7 @@ mod tests {
             (
                 "stamping the failure a dead receive loop reports",
                 "if (isConnected.get()) { transportHandler.post { \
-                 handleConnectionClosed(generation, -1, \"Connection lost\") } }",
+                 handleConnectionClosed(generation, -1, reason) } }",
             ),
             (
                 "sampling the writer and its generation together",
@@ -13805,6 +13917,16 @@ mod tests {
                 "stamping the failure an exhausted send budget reports",
                 "transportHandler.post { \
                  handleConnectionClosed(generation, -1, \"Send failures exceeded threshold\") }",
+            ),
+            (
+                "checking it inside the attach announcement, a hop after the frame",
+                "private fun completeAttach(generation: Int) { transportHandler.post { \
+                 if (connectGeneration.get() != generation) return@post",
+            ),
+            (
+                "checking it as part of the bind, under the lock the teardown clears it in",
+                "val bound = synchronized(this) { if (connectGeneration.get() == generation) { \
+                 isBound = true true } else { false } }",
             ),
             (
                 "leaving the in-flight flag for handleConnectionClosed to clear",
@@ -13846,14 +13968,20 @@ mod tests {
         // check: it binds the generation to the writer it read under the same
         // lock, so the failure it may report later names the session that write
         // actually belonged to.
+        //
+        // The seventh and eighth are the gateway attach's: the announcement on
+        // `StatusUpdate(connected)` runs a hop after the frame, and the bind on
+        // `AddressDeclared` is a write the teardown races. Both are pinned
+        // above.
         let generation_checks = code.matches("connectGeneration.get()").count();
         assert_eq!(
-            generation_checks, 6,
-            "ReticulumManager.kt: expected the connect generation to be consulted at all six \
+            generation_checks, 8,
+            "ReticulumManager.kt: expected the connect generation to be consulted at all eight \
              points a retired attempt can still act — before building the streams, inside the \
              publish, inside the flag claim, inside the announcement block, inside the teardown \
-             handler every posted failure funnels through, and alongside the writer sampled by \
-             sendMessage; found {generation_checks}."
+             handler every posted failure funnels through, alongside the writer sampled by \
+             sendMessage, inside the attach announcement, and as part of the bind; found \
+             {generation_checks}."
         );
 
         // Only a close ends a blocked `Socket.connect` — it has no
@@ -14068,19 +14196,31 @@ mod tests {
     /// order there is causal.
     #[test]
     fn react_native_ios_status_flips_are_ordered_against_stop() {
-        for (manager, flip) in [
-            ("ReticulumManager", "reticulumStatusChanged"),
-            ("NostrManager", "nostrStatusChanged"),
+        for (manager, flip, connected) in [
+            (
+                "ReticulumManager",
+                "reticulumStatusChanged",
+                // The decision is bound to a name, because the attach hop
+                // gates the backoff reset and the presence watch on whether
+                // the flip happened. The two terms and the explicit unlock
+                // are what the pin is for, and they are unchanged.
+                "self.statusFlipLock.lock() let announced = self.isConnected && \
+                 self.state != .stopping && self.state != .stopped if announced { \
+                 try? self.protocolInstance.reticulumStatusChanged(isConnected: true) } \
+                 self.statusFlipLock.unlock()",
+            ),
+            (
+                "NostrManager",
+                "nostrStatusChanged",
+                "self.statusFlipLock.lock() if self.isConnected && self.state != .stopping && \
+                 self.state != .stopped { try? self.protocolInstance.nostrStatusChanged(\
+                 isConnected: true) } self.statusFlipLock.unlock()",
+            ),
         ] {
             let code = rn_source_code_only(&format!("ios/{manager}.swift"));
 
-            let connected = format!(
-                "self.statusFlipLock.lock() if self.isConnected && self.state != .stopping && \
-                 self.state != .stopped {{ try? self.protocolInstance.{flip}(isConnected: true) \
-                 }} self.statusFlipLock.unlock()"
-            );
             assert!(
-                code.contains(&connected),
+                code.contains(connected),
                 "ios/{manager}.swift's connected-edge flip must test that the connection is still \
                  live AND that the transport is not stopping, and call {flip}, as one decision \
                  under statusFlipLock, unlocked explicitly rather than by defer (which would hold \
@@ -14994,14 +15134,21 @@ mod tests {
         // earlier". The looser check passes against a hop whose block was
         // emptied out with the status call left behind on main — which is
         // exactly the regression this guards, so the pin has to span the hop
-        // and the call as one string, with nothing between them but the weak
-        // capture and the state gate that orders this against stop().
+        // and the call as one string, with nothing between them but the
+        // checks that order it: the weak capture, the session generation and
+        // the bind decision (which live in this hop so they are serialised
+        // behind the echo that sets them; see the attach-ordering guard), and
+        // the state gate that orders this against stop().
         for (edge, pinned) in [
             (
                 "connect",
-                "self.messageQueue.async { [weak self] in guard let self = self else { return } \
-                 self.statusFlipLock.lock() if self.isConnected && self.state != .stopping && \
-                 self.state != .stopped { try? self.protocolInstance\
+                "messageQueue.async { [weak self] in guard let self = self else { return } \
+                 guard self.sessionGeneration == generation else { return } \
+                 guard self.isBound else { self.emitDiagnostic(\"error\", \"Gateway reported \
+                 connected before binding the session\") self.handleConnectionClosed(error: nil) \
+                 return } self.cancelAttachTimeout() self.statusFlipLock.lock() \
+                 let announced = self.isConnected && self.state != .stopping && \
+                 self.state != .stopped if announced { try? self.protocolInstance\
                  .reticulumStatusChanged(isConnected: true)",
             ),
             (
@@ -15012,8 +15159,9 @@ mod tests {
         ] {
             assert!(
                 code.contains(pinned),
-                "the {edge}-edge reticulumStatusChanged must be the first statement inside a \
-                 messageQueue.async block, not run on main: it takes the global protocol mutex, \
+                "the {edge}-edge reticulumStatusChanged must run inside a messageQueue.async \
+                 block, behind nothing but the checks that order it, not on main: it takes the \
+                 global protocol mutex, \
                  and the connected edge flushes the entire outbox under it, which on the main \
                  thread is the App Hang class OFF-2123 tracked. Expected to find:\n  {pinned}"
             );

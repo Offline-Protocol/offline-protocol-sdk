@@ -6,7 +6,7 @@ The Reticulum transport provides long-range, resilient mesh networking via the [
 
 Reticulum is one of five transports in the Offline Protocol SDK, alongside BLE, Wi-Fi Direct, Internet and Nostr. It is disabled by default because it requires external infrastructure (a running Reticulum instance, an RNode radio, or a gateway).
 
-> **This repository ships the device half.** The Rust transport opens no Reticulum link of its own: it manages queues, metrics and the confirmation loop, and expects the platform to bridge to a real Reticulum stack. Both mobile managers now speak [the gateway daemon contract](spec/gateway-contract.md) to a configurable address — they attach with a signed address declaration, settle each send on the gateway's verdict, and watch presence. What answers on the other end is a gateway daemon built to that contract, which is a deployment rather than something this SDK ships. With nothing listening at `daemonAddress`, enabling Reticulum gives you a transport that never becomes available.
+> **This repository ships the device half.** The Rust transport opens no Reticulum link of its own: it manages queues, metrics and the confirmation loop, and expects the platform to bridge to a real Reticulum stack. Both mobile managers now speak [the gateway daemon contract](spec/gateway-contract.md) to a configurable address: they attach with a signed address declaration, settle each send on the gateway's verdict, and watch presence. What answers on the other end is a gateway daemon built to that contract, which is a deployment rather than something this SDK ships. With nothing listening at `daemonAddress`, enabling Reticulum gives you a transport that never becomes available.
 
 ## When to Use Reticulum
 
@@ -175,7 +175,7 @@ Regardless of which integration strategy you choose, the platform bridge interac
 
 1. **Initialize** your Reticulum integration (embedded Python, `reticulum-rs`, a gateway daemon connection, and so on)
 2. **Attach**, if you speak the gateway contract: `gatewayAddressDeclaration(challenge)` builds the proof, `reticulumAddressDeclared(address)` and `reticulumAddressDeclarationRefused(reason)` report the answer, and `reticulumGatewayCapabilities(tokens)` hands over the advertisement
-3. **Report status** via `reticulumStatusChanged(true)` once the session is bound — not when the socket opens
+3. **Report status** via `reticulumStatusChanged(true)` once the session is bound, not when the socket opens
 4. **Poll for outgoing messages** via `reticulumGetNextMessage()` in a loop
 5. **Send** each message through your Reticulum integration
 6. **Settle** each send on the answer: `reticulumConfirmSent(messageId)`, or `reticulumSendFailedWithReason(messageId, reason)` so a `recipient_unreachable` verdict can park the message
@@ -264,7 +264,7 @@ The send confirmation loop is critical for accurate DORS scoring. Without it, DO
 
 **Important**: Messages enter `pending_confirmation` state when dequeued by `reticulumGetNextMessage()`. The platform **must** settle every one of them, and against a gateway it settles on the gateway's verdict rather than on the socket write: a successful write means the gateway has the bytes, which says nothing about whether it could forward them.
 
-Unconfirmed messages expire after 120 seconds and are counted as failures. The bundled managers give up on a verdict at **60 seconds** and fail the frame themselves, deliberately the shorter of the two clocks: were it the longer one, the core would expire the frame first and the verdict would then settle an id it had already moved past. They also cap frames in flight at 8, and refuse to re-send an id that is still outstanding — the core re-queues an unconfirmed frame after its own acknowledgement timeout, and sending it again would forward it twice and later fail an id the gateway had already confirmed.
+Unconfirmed messages expire after 120 seconds and are counted as failures. The bundled managers give up on a verdict at **60 seconds** and fail the frame themselves, deliberately the shorter of the two clocks: were it the longer one, the core would expire the frame first and the verdict would then settle an id it had already moved past. They also cap frames in flight at 8, and refuse to re-send an id that is still outstanding: the core re-queues an unconfirmed frame after its own acknowledgement timeout, and sending it again would forward it twice and later fail an id the gateway had already confirmed.
 
 ### Example: Platform Bridge Skeleton (Android/Kotlin)
 
@@ -292,7 +292,7 @@ class ReticulumBridge(
                 try {
                     // Submit, then settle when the answer comes back. Against
                     // a gateway, confirming here would settle a frame that may
-                    // yet be refused — and would hide the one verdict that
+                    // yet be refused, and would hide the one verdict that
                     // parks a message, `recipient_unreachable`.
                     submitViaReticulum(messageId, data)
                 } catch (e: Exception) {
@@ -516,7 +516,7 @@ On disconnection:
 1. All pending confirmations are failed immediately
 2. Send queue is preserved (messages will be sent after reconnection)
 3. Reconnection attempts begin after the current backoff interval
-4. Reconnect counter resets on successful connection
+4. The reconnect counter and backoff reset once the gateway binds the session, not on the TCP open: a refused declaration climbs the ladder like a failed connect
 
 ## Troubleshooting
 
@@ -531,11 +531,15 @@ delivered, which is why the carrier is deliberately not offered.
    means it bound an address this device does not hold, which has no benign
    reading.
 2. Check the device has an identity at all. Before MLS storage is initialized
-   there is no address to declare, and the declaration is skipped.
+   there is no address to declare, so the connection is closed and the
+   reconnect ladder keeps trying; the carrier becomes available on the first
+   attach after the identity exists.
 3. Check the gateway mints a 32-byte challenge. Any other length is refused
    rather than signed.
-4. Check the gateway sends `StatusUpdate` with status `connected`. The attach
-   completes on that frame, and times out after 10 seconds without it.
+4. Check the gateway sends `StatusUpdate` with status `connected`, after
+   `AddressDeclared`. The attach completes on that frame and times out after
+   10 seconds without it; a `connected` that arrives before the session is
+   bound closes the connection.
 
 ### Reticulum Not Connecting
 
@@ -546,7 +550,7 @@ delivered, which is why the carrier is deliberately not offered.
 
 ### Messages Not Delivering
 
-1. Check that every message is settled — `reticulumConfirmSent` or `reticulumSendFailedWithReason`, on the gateway's verdict rather than on the socket write
+1. Check that every message is settled: `reticulumConfirmSent` or `reticulumSendFailedWithReason`, on the gateway's verdict rather than on the socket write
 2. Verify Reticulum has active interfaces: `rnstatus -a`
 3. Check if pending confirmations are timing out (120s) — may indicate the Reticulum stack is not reporting delivery
 4. Monitor DORS transport switch events — Reticulum may be deprioritized if other transports score higher
@@ -562,7 +566,7 @@ delivered, which is why the carrier is deliberately not offered.
 ### DORS Not Selecting Reticulum
 
 1. Verify `reticulumEnabled: true` in config
-2. Verify the session actually attached. Against a gateway, `reticulumStatusChanged(true)` fires only once the address declaration is bound, so a transport that never becomes available usually means a refused or unanswered handshake — look for a `GATEWAY_ADDRESS_DECLARATION_REFUSED` or `GATEWAY_ADDRESS_BINDING_MISMATCH` security warning
+2. Verify the session actually attached. Against a gateway, `reticulumStatusChanged(true)` fires only once the address declaration is bound, so a transport that never becomes available usually means a refused or unanswered handshake. Look for a `GATEWAY_ADDRESS_DECLARATION_REFUSED` or `GATEWAY_ADDRESS_BINDING_MISMATCH` security warning
 3. Check DORS scores — Reticulum has a low tie-break priority (only Nostr is lower), so it needs to outscore alternatives
 4. Reticulum is excluded from media transfers by design
 

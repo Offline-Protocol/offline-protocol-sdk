@@ -153,12 +153,35 @@ public class ReticulumManager: NSObject, TransportManager {
     /// The SDK-owned presence watchlist, rotated the same way the relay
     /// manager rotates its own.
     private let presenceWatch = PresenceWatchPolicy()
-    private var presenceWatchTimer: DispatchSourceTimer?
+    // Guarded by [stateLock], like `_messageTimer` and for the same reason:
+    // it is armed from [messageQueue] and torn down from main, the React
+    // Native method queue and [connectionQueue], and an unguarded swap lets a
+    // start and a stop that interleave orphan a source that ticks for the
+    // life of the manager.
+    private var _presenceWatchTimer: DispatchSourceTimer?
 
     /// Fires if the handshake does not finish, so a gateway that accepts the
     /// socket and then says nothing costs one attach timeout rather than the
-    /// connection timeout.
-    private var attachTimeoutWorkItem: DispatchWorkItem?
+    /// connection timeout. Guarded by [stateLock] for the reason above.
+    private var _attachTimeoutWorkItem: DispatchWorkItem?
+
+    /// Which gateway session the current socket belongs to.
+    ///
+    /// Every frame handler that acts a queue hop later captures this when the
+    /// frame arrives and checks it when the hop runs, because the hop can run
+    /// after the socket that carried the frame is gone and its successor is
+    /// up: [messageQueue] waits on the global protocol mutex, and a flush or
+    /// an MLS operation can hold that for longer than the reconnect delay. A
+    /// stale `StatusUpdate(connected)` acted on then would announce the
+    /// successor before the gateway bound it, or tear it down for not being
+    /// bound yet; a stale `Challenge` would sign the old challenge onto the
+    /// new socket and draw a refusal. Bumped on every teardown, under
+    /// [stateLock]. The Android manager threads `connectGeneration` the same
+    /// way.
+    private var _sessionGeneration = 0
+    private var sessionGeneration: Int {
+        stateLock.lock(); defer { stateLock.unlock() }; return _sessionGeneration
+    }
 
     /// True once the gateway has echoed our own address back.
     ///
@@ -372,22 +395,39 @@ public class ReticulumManager: NSObject, TransportManager {
     private func disconnect() {
         connectionTimeoutWorkItem?.cancel()
         connectionTimeoutWorkItem = nil
-        cancelAttachTimeout()
-        stopPresenceWatch()
         connection?.cancel()
         connection = nil
         isConnected = false
         isConnecting = false
-        isBound = false
-        // Every frame this connection was carrying is owed an outcome. A
-        // frame nobody reports on waits out the core's own 120s expiry
-        // instead of going back on the retry ladder now, so silence here is
-        // two minutes of nothing per message.
-        failInFlight(reason: "Disconnected")
+        retireSession(reason: "Disconnected")
         // Reset receiveBuffer — safe because either we are already on
         // connectionQueue (reconnect path) or the connection has been
         // cancelled above so no receive callbacks can fire (stop path).
         receiveBuffer = Data()
+    }
+
+    /// Ends the gateway session the current socket carried, whether this side
+    /// is closing the socket or the socket has already gone.
+    ///
+    /// Shared by [disconnect] and [handleConnectionClosed] so that every close
+    /// path runs it. Before it was shared, a daemon-side drop ran none of it:
+    /// the session stayed bound for the successor to inherit, which defeated
+    /// the attach timeout (it checks `isBound`), the presence watch kept
+    /// writing to a dead socket every 20s, and the ids in flight were never
+    /// failed, so the core waited out its own 120s expiry on each.
+    ///
+    /// Every frame the connection was carrying is owed an outcome. A frame
+    /// nobody reports on waits out that expiry instead of going back on the
+    /// retry ladder now, so silence here is two minutes of nothing per
+    /// message.
+    private func retireSession(reason: String) {
+        stateLock.lock()
+        _sessionGeneration += 1
+        _isBound = false
+        stateLock.unlock()
+        cancelAttachTimeout()
+        stopPresenceWatch()
+        failInFlight(reason: reason)
     }
 
     private func handleConnectionOpened() {
@@ -395,13 +435,17 @@ public class ReticulumManager: NSObject, TransportManager {
         connectionTimeoutWorkItem = nil
         isConnected = true
         isConnecting = false
-        reconnectAttempts = 0
-        currentReconnectDelay = RECONNECT_INITIAL_DELAY
         consecutiveSendFailures = 0
         receiveBuffer = Data()
 
-        isBound = false
-        _ = verdicts.drainAll()
+        // Not a backoff reset. A TCP open proves only that something is
+        // listening; the handshake that follows has four places left to
+        // fail, and every one of them reconnects. Reset here, a refusing
+        // gateway was retried at the 1s floor forever, with a challenge, a
+        // signature and two events spent per turn, and `maxReconnectAttempts`
+        // never tripped because the count went back to zero each time. The
+        // reset lives in [completeAttach], on the bound session, which is
+        // what the relay manager does on `Authenticated`.
 
         emitDiagnostic("info", "Connected to Reticulum daemon")
 
@@ -528,23 +572,47 @@ public class ReticulumManager: NSObject, TransportManager {
     /// closes the connection instead. That is the one place this manager
     /// diverges from the relay manager, which reports up and keeps working in
     /// account-name space. A gateway has no such space.
+    ///
+    /// Decided on [messageQueue], never on the queue the frame arrived on.
+    /// `isBound` is set by the `AddressDeclared` hop on that same serial
+    /// queue, behind two FFI calls that wait on the global protocol mutex,
+    /// and a conforming gateway writes `AddressDeclared`, `Capabilities` and
+    /// `StatusUpdate(connected)` in one go: they arrive in one read and are
+    /// dispatched before that hop has taken the mutex. Read on the socket
+    /// queue, `isBound` was still false here, the timeout was already
+    /// cancelled, and the carrier was never announced.
     private func completeAttach() {
-        cancelAttachTimeout()
-        guard isBound else {
-            emitDiagnostic("warning", "Gateway reported connected before binding the session")
-            return
-        }
-        self.messageQueue.async { [weak self] in
+        let generation = sessionGeneration
+        messageQueue.async { [weak self] in
             guard let self = self else { return }
+            guard self.sessionGeneration == generation else { return }
+            guard self.isBound else {
+                // A gateway that announces before it binds is not speaking
+                // the contract, and a session it never binds is verdict-only.
+                // Closing is the one action that can end somewhere usable.
+                // Returning with the timeout cancelled left the transport
+                // connected and mute until the daemon happened to drop it.
+                self.emitDiagnostic("error", "Gateway reported connected before binding the session")
+                self.handleConnectionClosed(error: nil)
+                return
+            }
+            self.cancelAttachTimeout()
             self.statusFlipLock.lock()
-            if self.isConnected && self.state != .stopping && self.state != .stopped {
+            let announced = self.isConnected && self.state != .stopping && self.state != .stopped
+            if announced {
                 try? self.protocolInstance.reticulumStatusChanged(isConnected: true)
             }
             self.statusFlipLock.unlock()
-            self.startPresenceWatch()
-            // Immediately flush queued messages — unless paused, for the
-            // same reason the poll restart above is skipped.
+            guard announced else { return }
+            // The gateway bound and announced this session: this, not the
+            // TCP open, is what proves the connection good and earns a
+            // backoff reset. See [handleConnectionOpened] for what resetting
+            // there cost.
+            self.reconnectAttempts = 0
+            self.currentReconnectDelay = self.RECONNECT_INITIAL_DELAY
+            // Skipped while paused, like the poll: `resume()` restarts both.
             guard !self.isPaused else { return }
+            self.startPresenceWatch()
             self.pollAndSendMessages()
         }
     }
@@ -553,20 +621,26 @@ public class ReticulumManager: NSObject, TransportManager {
     /// nothing is not slow, and waiting out the connection timeout for it
     /// means a minute in which the selector has been told nothing at all.
     private func armAttachTimeout() {
-        attachTimeoutWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self = self, self.isConnected, !self.isBound else { return }
             self.emitDiagnostic("error", "Gateway attach timed out before the session was bound")
             self.handleConnectionClosed(error: nil)
         }
-        attachTimeoutWorkItem = item
+        stateLock.lock()
+        let previous = _attachTimeoutWorkItem
+        _attachTimeoutWorkItem = item
+        stateLock.unlock()
+        previous?.cancel()
         connectionQueue.asyncAfter(
             deadline: .now() + GatewayAttachPolicy.ATTACH_TIMEOUT, execute: item)
     }
 
     private func cancelAttachTimeout() {
-        attachTimeoutWorkItem?.cancel()
-        attachTimeoutWorkItem = nil
+        stateLock.lock()
+        let item = _attachTimeoutWorkItem
+        _attachTimeoutWorkItem = nil
+        stateLock.unlock()
+        item?.cancel()
     }
 
     private func startReceiving() {
@@ -624,6 +698,15 @@ public class ReticulumManager: NSObject, TransportManager {
         // Prevent duplicate disconnect handling
         guard wasConnected || wasConnecting else { return }
 
+        // The socket goes now, not when the reconnect fires. A refused or
+        // mismatched session is still open on the gateway's side and it keeps
+        // sending on it, including, after its grace, the
+        // `StatusUpdate(connected)` of a session it never bound. The session
+        // state goes with it, on every close path and not only on `stop()`;
+        // see [retireSession] for what a drop that kept it cost.
+        connection?.cancel()
+        retireSession(reason: "Connection lost")
+
         // Stop polling immediately
         DispatchQueue.main.async { [weak self] in
             self?.stopMessagePolling()
@@ -663,6 +746,9 @@ public class ReticulumManager: NSObject, TransportManager {
             if self.autoReconnect && self.state != .stopping && self.state != .stopped {
                 self.scheduleReconnect()
             } else {
+                // No reconnect is coming to run [disconnect] for this
+                // socket, so release it here, as `stop()` does.
+                self.disconnect()
                 self.updateState(.stopped)
             }
         }
@@ -784,8 +870,9 @@ public class ReticulumManager: NSObject, TransportManager {
 
         case "Capabilities":
             let tokens = GatewayAttachPolicy.capabilityTokens(from: json)
+            let generation = sessionGeneration
             messageQueue.async { [weak self] in
-                guard let self = self else { return }
+                guard let self = self, self.sessionGeneration == generation else { return }
                 // Before the status flip, never after: the flush that flip
                 // triggers has to see them.
                 try? self.protocolInstance.reticulumGatewayCapabilities(capabilities: tokens)
@@ -829,8 +916,9 @@ public class ReticulumManager: NSObject, TransportManager {
             ])
             handleConnectionClosed(error: nil)
         case .declare(let challenge):
+            let generation = sessionGeneration
             messageQueue.async { [weak self] in
-                guard let self = self else { return }
+                guard let self = self, self.sessionGeneration == generation else { return }
                 do {
                     let declaration = try self.protocolInstance.gatewayAddressDeclaration(
                         challenge: [UInt8](challenge))
@@ -843,6 +931,10 @@ public class ReticulumManager: NSObject, TransportManager {
                         self.handleConnectionClosed(error: nil)
                         return
                     }
+                    // Checked again after the signature: it waited on the
+                    // global mutex, and a proof over a retired challenge
+                    // written to the successor's socket is a refusal.
+                    guard self.sessionGeneration == generation else { return }
                     self.sendRaw(frame + "\n")
                 } catch {
                     // No identity yet, or a challenge the core refused to
@@ -868,14 +960,15 @@ public class ReticulumManager: NSObject, TransportManager {
             emitDiagnostic("warning", "Invalid AddressDeclared: missing address")
             return
         }
+        let generation = sessionGeneration
         messageQueue.async { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, self.sessionGeneration == generation else { return }
             self.protocolInstance.reticulumAddressDeclared(address: declared)
 
             let local = self.protocolInstance.localAddress()
             switch GatewayAttachPolicy.bindingOutcome(declared: declared, local: local) {
             case .bound:
-                self.isBound = true
+                guard self.bindSession(ifCurrent: generation) else { return }
                 self.emitDiagnostic("info", "Gateway bound this session to our address")
             case .mismatch, .unknownLocal:
                 // The core has already reported this as a security warning.
@@ -938,11 +1031,21 @@ public class ReticulumManager: NSObject, TransportManager {
                 self.protocolInstance.reticulumSendFailedWithReason(
                     messageId: verdict.messageId, reason: verdict.reason)
                 if let recipient = verdict.recipient, !recipient.isEmpty,
-                   verdict.reason?.hasPrefix("recipient_unreachable") == true {
+                   verdict.reason?.hasPrefix("recipient_unreachable") == true,
+                   !self.isSelfPeer(recipient) {
                     // Watch them: the gateway pushes a PresenceStatus when a
                     // watched peer attaches, and that answer is what un-parks
                     // the message this verdict just parked.
-                    self.presenceWatch.watch(recipient, nowMs: Self.nowMs())
+                    self.presenceWatch.watch(recipient, nowMs: MonotonicClock.nowMs())
+                    // And feed the verdict in as presence, as the relay
+                    // manager does on its own DeliveryError. The core parks
+                    // on the verdict already; this is what emits the
+                    // `presence_updated(offline)` an app renders a header
+                    // from, labelled with the carrier that answered. Never
+                    // for self: the core drops that too, but a malformed
+                    // self-addressed frame should not cost a watch slot.
+                    self.protocolInstance.reticulumPeerPresence(
+                        peerId: recipient, online: false, lastSeenMs: nil)
                 }
             }
             self.pollAndSendMessages()
@@ -951,16 +1054,43 @@ public class ReticulumManager: NSObject, TransportManager {
 
     /// Fails every outstanding frame with `reason`, on a connection going away
     /// or on a gateway that answered nothing.
+    ///
+    /// The hop captures the core handle and never `self`. `deinit` reaches
+    /// here through `stop()`, and forming a weak reference to an object whose
+    /// deallocation has begun is a hard abort (BRIDGE_MAINTENANCE.md, the
+    /// SIGABRT class of #266), while a strong capture would resurrect it. The
+    /// handle alone is also what `destroy()` needs: it stops the manager and
+    /// releases it in one breath, and a block gated on `self` would find nil
+    /// and never report the stranded ids.
     private func failInFlight(reason: String) {
         let stranded = verdicts.drainAll()
         guard !stranded.isEmpty else { return }
-        messageQueue.async { [weak self] in
-            guard let self = self else { return }
+        let core = protocolInstance
+        messageQueue.async {
             for messageId in stranded {
-                self.protocolInstance.reticulumSendFailedWithReason(
-                    messageId: messageId, reason: reason)
+                core.reticulumSendFailedWithReason(messageId: messageId, reason: reason)
             }
         }
+    }
+
+    /// Binds the session, unless the socket that carried the echo is gone.
+    ///
+    /// One step under [stateLock] with the generation check, because
+    /// [retireSession] clears the flag under the same lock: checked and set
+    /// separately, a teardown landing between the two leaves the successor
+    /// bound on an echo it never received.
+    private func bindSession(ifCurrent generation: Int) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard _sessionGeneration == generation else { return false }
+        _isBound = true
+        return true
+    }
+
+    private func isSelfPeer(_ peerId: String) -> Bool {
+        if peerId.isEmpty { return false }
+        if peerId == deviceId { return true }
+        return peerId == protocolInstance.localAddress()
     }
 
     // MARK: - Presence
@@ -980,10 +1110,24 @@ public class ReticulumManager: NSObject, TransportManager {
         }
     }
 
+    /// Arms the presence tick, unless the transport is paused.
+    ///
+    /// Same shape as [startMessagePolling], for the same two reasons: the
+    /// pause gate and the timer swap are one [stateLock] critical section, so
+    /// a `pause()` on another queue cannot slip between them, and the source
+    /// is resumed on this straight-line path because releasing a suspended
+    /// one is a hard crash.
     private func startPresenceWatch() {
+        stateLock.lock()
+        guard !_isPaused else {
+            stateLock.unlock()
+            return
+        }
+        let previous = _presenceWatchTimer
         let timer = DispatchSource.makeTimerSource(queue: messageQueue)
-        let previous = presenceWatchTimer
-        presenceWatchTimer = timer
+        _presenceWatchTimer = timer
+        stateLock.unlock()
+
         previous?.cancel()
         timer.schedule(
             deadline: .now() + PresenceWatchPolicy.defaultTickInterval,
@@ -995,8 +1139,10 @@ public class ReticulumManager: NSObject, TransportManager {
     }
 
     private func stopPresenceWatch() {
-        let timer = presenceWatchTimer
-        presenceWatchTimer = nil
+        stateLock.lock()
+        let timer = _presenceWatchTimer
+        _presenceWatchTimer = nil
+        stateLock.unlock()
         timer?.cancel()
         presenceWatch.clear()
     }
@@ -1014,13 +1160,18 @@ public class ReticulumManager: NSObject, TransportManager {
         let candidates = coreWatchlist.filter { peer in
             !peer.isEmpty && peer != deviceId && peer != selfAddress
         }
-        let peers = presenceWatch.peersToQuery(coreWatchlist: candidates, nowMs: Self.nowMs())
+        let peers = presenceWatch.peersToQuery(coreWatchlist: candidates, nowMs: MonotonicClock.nowMs())
         guard let frame = GatewayAttachPolicy.checkPresenceJson(peers: peers) else { return }
         sendRaw(frame + "\n")
     }
 
-    private static func nowMs() -> Int64 {
-        Int64(Date().timeIntervalSince1970 * 1000)
+    /// The verdict tracker's clock, in seconds. Monotonic and sleep-inclusive
+    /// like every tracker and watch call in the relay manager: a wall-clock
+    /// step of a minute (an NTP correction after airplane mode) must not fail
+    /// every frame in flight as unanswered, and one of ten minutes must not
+    /// evict the whole watch set.
+    private static func nowSeconds() -> TimeInterval {
+        TimeInterval(MonotonicClock.nowMs()) / 1000.0
     }
 
     /// Arms the fallback poll timer, unless the transport is paused.
@@ -1109,7 +1260,7 @@ public class ReticulumManager: NSObject, TransportManager {
     /// timeout has to stay the shorter of the two.
     private func sweepExpiredVerdicts() {
         let stale = verdicts.expired(
-            now: Date().timeIntervalSince1970, timeout: GatewayAttachPolicy.VERDICT_TIMEOUT)
+            now: Self.nowSeconds(), timeout: GatewayAttachPolicy.VERDICT_TIMEOUT)
         guard !stale.isEmpty else { return }
         emitDiagnostic("warning", "Gateway did not answer for submitted frames", context: [
             "count": stale.count
@@ -1152,7 +1303,7 @@ public class ReticulumManager: NSObject, TransportManager {
         // frame twice and, when this copy timed out, fail an id the gateway
         // had already confirmed. Popping it was enough: the core's pending
         // entry is refreshed by the pop.
-        guard verdicts.begin(message.messageId, now: Date().timeIntervalSince1970) else {
+        guard verdicts.begin(message.messageId, now: Self.nowSeconds()) else {
             messageQueue.async { [weak self] in
                 self?.sendNextMessage(sent: sent, maxBatchSize: maxBatchSize)
             }

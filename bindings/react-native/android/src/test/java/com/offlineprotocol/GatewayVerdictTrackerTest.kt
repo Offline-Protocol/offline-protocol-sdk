@@ -126,4 +126,39 @@ class GatewayVerdictTrackerTest {
         assertEquals(1, admitted.get())
         assertEquals(1, tracker.count)
     }
+
+    /**
+     * The three ways an id leaves the tracker race each other in the manager:
+     * a verdict on the receive thread, the sweep on the IO looper, and a
+     * teardown on the transport thread. Exactly one of them may own the
+     * outcome, or the core is told twice about one frame.
+     */
+    @Test
+    fun `an id leaves through exactly one door`() {
+        val tracker = GatewayVerdictTracker()
+        tracker.begin("contended", 0)
+        val outcomes = AtomicInteger(0)
+        val pool = Executors.newFixedThreadPool(8)
+        val done = CountDownLatch(48)
+
+        repeat(16) {
+            pool.submit {
+                if (tracker.settle("contended")) outcomes.incrementAndGet()
+                done.countDown()
+            }
+            pool.submit {
+                if (tracker.expired(120_000, 60_000).isNotEmpty()) outcomes.incrementAndGet()
+                done.countDown()
+            }
+            pool.submit {
+                if (tracker.drainAll().isNotEmpty()) outcomes.incrementAndGet()
+                done.countDown()
+            }
+        }
+        assertTrue(done.await(10, TimeUnit.SECONDS))
+        pool.shutdown()
+
+        assertEquals(1, outcomes.get())
+        assertEquals(0, tracker.count)
+    }
 }
