@@ -1940,6 +1940,34 @@ upgrade rather than fold it into your next feature release.
 
 ---
 
+## 19. The Reticulum transport's inert configuration is gone
+
+**Rust crates only.** No binding, no configuration key and no behaviour
+changes: none of what follows was ever reachable through the FFI, and the
+React Native `transports.reticulum` section (`daemonAddress`, `autoReconnect`,
+`maxReconnectAttempts`) is untouched and still read by the native managers.
+
+| Removed | Surface |
+|---|---|
+| `ReticulumConfig` and its four fields | `offline-protocol-transport` |
+| `ReticulumTransport::with_config`, `config()` | `offline-protocol-transport` |
+| `ReticulumTransport::should_reconnect`, `increment_reconnect_attempts` | `offline-protocol-transport` |
+| `ReticulumTransportBuilder` | `offline-protocol-transport` |
+| `RETICULUM_CONNECTION_TIMEOUT_SECS`, `RETICULUM_MAX_PAYLOAD_SIZE` | `offline_protocol_transport::constants` |
+
+**Replace any construction with `ReticulumTransport::new(device_id)`.** There
+is nothing to carry across, because nothing was reading the values. Reconnection
+belongs to the platform bridge, which holds its own backoff and its own timeout
+and takes them from the app's transport config; `reconnect_delay` had no reader
+in any crate; and `RETICULUM_MAX_PAYLOAD_SIZE` was a declared intent that no
+code path enforced, so treating it as a limit was already wrong.
+
+If you set these fields expecting them to do something, the behaviour you
+wanted was never there, and the values you want live in your app's
+`transports.reticulum` configuration instead.
+
+---
+
 ## Appendix A: limits reference
 
 | Limit | Value | Where enforced |

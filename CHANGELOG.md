@@ -13,6 +13,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ## [Unreleased]
 
+### Removed
+
+- **The Reticulum transport's inert configuration, in full.** `ReticulumConfig`
+  and its four fields (`connection_timeout`, `auto_reconnect`, `reconnect_delay`,
+  `max_reconnect_attempts`), `ReticulumTransport::with_config`, `config()`,
+  `should_reconnect`, `increment_reconnect_attempts`, `ReticulumTransportBuilder`
+  and the constants `RETICULUM_CONNECTION_TIMEOUT_SECS` and
+  `RETICULUM_MAX_PAYLOAD_SIZE` are deleted. Nothing read any of them:
+  reconnection is owned by the native managers and configured from the app's
+  transport config, `reconnect_delay` had no reader at all, and the payload
+  constant was never enforced anywhere. `ReticulumTransport::new` is now the
+  only constructor. **Rust-library consumers only** — the FFI never threaded
+  any of it, so no binding, no configuration key and no behaviour changes.
+  See [docs/UPGRADING.md](docs/UPGRADING.md#19-the-reticulum-transports-inert-configuration-is-gone).
+
 ### Added
 
 - **The wire specification now says how a primitive becomes bytes, and six

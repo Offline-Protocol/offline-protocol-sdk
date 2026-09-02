@@ -161,9 +161,9 @@ let config = ProtocolConfig(
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| Connection timeout | 60s | Enforced by the native managers, which each hold their own constant. The identically-valued Rust `ReticulumConfig` field is not read by anything. |
+| Connection timeout | 60s | Enforced by the native managers, which each hold their own constant. Rust holds none: it opens no socket. |
 | Pending confirmation timeout | 120s | Time before treating an unconfirmed send as failed (vs 15s for Internet). Enforced in Rust. |
-| Max payload size | 64 KB | Declared as `RETICULUM_MAX_PAYLOAD_SIZE` and **not currently enforced anywhere**: no code reads it. Treat it as intent, not as a limit you can rely on. |
+| Max frame size | gateway-set | The gateway refuses an oversized frame with a `frame_too_large` verdict, so the limit is the one your gateway is configured with rather than an SDK constant. Rust enforces only the transport-wide `DEFAULT_MAX_MESSAGE_SIZE` on inbound bytes. |
 | Reticulum encrypted MDU | 383 bytes | Single-packet maximum for encrypted data; plain MDU is 465 bytes |
 | Reticulum MTU | 500 bytes | Total wire-format maximum including headers |
 
@@ -460,10 +460,10 @@ The `update_metrics` method preserves confirmation loop counts (success/failure)
 
 ## Reconnection
 
-Reconnection is owned entirely by the native managers, and is configured from
-the app's transport config, **not** from the Rust `ReticulumConfig`, whose
-fields are inert (nothing constructs it with non-default values, and
-`reconnect_delay` has no reader at all).
+Reconnection is owned entirely by the native managers and configured from the
+app's transport config. Rust holds no reconnection state: the transport opens
+no socket, so a retry budget there would describe a connection it does not
+hold.
 
 | Parameter | Where it lives | Default | Description |
 |-----------|----------------|---------|-------------|

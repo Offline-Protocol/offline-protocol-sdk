@@ -14,9 +14,7 @@
 //! [`ReticulumTransport::report_send_failure`], and injects inbound bytes
 //! via [`ReticulumTransport::on_data_received`].
 
-use crate::constants::{
-    RETICULUM_CONNECTION_TIMEOUT_SECS, RETICULUM_PENDING_CONFIRMATION_TIMEOUT_SECS,
-};
+use crate::constants::RETICULUM_PENDING_CONFIRMATION_TIMEOUT_SECS;
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::{Message, MutexExt};
 use std::collections::{HashMap, VecDeque};
@@ -25,35 +23,16 @@ use std::time::{Duration, Instant};
 
 use crate::common::recalculate_delivery_ratios;
 
-/// Reticulum transport configuration.
-#[derive(Debug, Clone)]
-pub struct ReticulumConfig {
-    /// Connection timeout for reaching the Reticulum daemon.
-    pub connection_timeout: Duration,
-    /// Enable automatic reconnection to the Reticulum daemon.
-    pub auto_reconnect: bool,
-    /// Reconnection delay.
-    pub reconnect_delay: Duration,
-    /// Maximum reconnection attempts (0 = infinite).
-    pub max_reconnect_attempts: u32,
-}
-
-impl Default for ReticulumConfig {
-    fn default() -> Self {
-        Self {
-            connection_timeout: Duration::from_secs(RETICULUM_CONNECTION_TIMEOUT_SECS),
-            auto_reconnect: true,
-            reconnect_delay: Duration::from_secs(5),
-            max_reconnect_attempts: 0,
-        }
-    }
-}
-
 /// Reticulum mesh transport implementation.
 ///
 /// Provides connectivity via the Reticulum network for long-range,
 /// low-bandwidth, resilient mesh networking. The platform bridges to a
-/// Reticulum daemon (sidecar, TCP gateway, or embedded Python).
+/// gateway daemon speaking the contract in `docs/spec/gateway-contract.md`.
+///
+/// Reconnection, the attach handshake and the verdict loop are the platform
+/// bridge's, not this type's: it never opens a socket, so a timeout or a
+/// retry budget here would describe a connection it does not hold. The
+/// bridges hold their own.
 ///
 /// ## Lock ordering
 ///
@@ -64,38 +43,29 @@ impl Default for ReticulumConfig {
 /// 3. `send_queue`
 /// 4. `metrics`
 /// 5. `receive_queue`
-/// 6. `reconnect_attempts` / `platform_handle`
+/// 6. `platform_handle`
 pub struct ReticulumTransport {
     device_id: String,
-    config: ReticulumConfig,
     status: Arc<Mutex<TransportStatus>>,
     receive_queue: Arc<Mutex<VecDeque<Message>>>,
     send_queue: Arc<Mutex<VecDeque<Message>>>,
     /// Messages dequeued by the platform but not yet confirmed as sent.
     pending_confirmation: Arc<Mutex<HashMap<String, Instant>>>,
     metrics: Arc<Mutex<TransportMetrics>>,
-    reconnect_attempts: Arc<Mutex<u32>>,
     platform_handle: Arc<Mutex<Option<usize>>>,
     on_messages_available: SharedCallback,
 }
 
 impl ReticulumTransport {
-    /// Creates a new Reticulum transport with default configuration.
+    /// Creates a new Reticulum transport.
     pub fn new(device_id: impl Into<String>) -> Self {
-        Self::with_config(device_id, ReticulumConfig::default())
-    }
-
-    /// Creates a new Reticulum transport with custom configuration.
-    pub fn with_config(device_id: impl Into<String>, config: ReticulumConfig) -> Self {
         Self {
             device_id: device_id.into(),
-            config,
             status: Arc::new(Mutex::new(TransportStatus::Unavailable)),
             receive_queue: Arc::new(Mutex::new(VecDeque::new())),
             send_queue: Arc::new(Mutex::new(VecDeque::new())),
             pending_confirmation: Arc::new(Mutex::new(HashMap::new())),
             metrics: Arc::new(Mutex::new(TransportMetrics::default())),
-            reconnect_attempts: Arc::new(Mutex::new(0)),
             platform_handle: Arc::new(Mutex::new(None)),
             on_messages_available: Arc::new(Mutex::new(None)),
         }
@@ -104,11 +74,6 @@ impl ReticulumTransport {
     /// Gets the local device ID.
     pub fn device_id(&self) -> &str {
         &self.device_id
-    }
-
-    /// Gets the configuration.
-    pub fn config(&self) -> &ReticulumConfig {
-        &self.config
     }
 
     /// Sets the platform-specific handle.
@@ -147,23 +112,6 @@ impl ReticulumTransport {
     /// Serializes a message to JSON bytes.
     pub fn serialize_message(&self, message: &Message) -> Result<Vec<u8>> {
         crate::common::serialize_message_with(message)
-    }
-
-    /// Whether the transport should attempt reconnection.
-    pub fn should_reconnect(&self) -> bool {
-        if !self.config.auto_reconnect {
-            return false;
-        }
-        if self.config.max_reconnect_attempts == 0 {
-            return true;
-        }
-        *self.reconnect_attempts.lock_or_recover() < self.config.max_reconnect_attempts
-    }
-
-    /// Increments the reconnection attempt counter.
-    pub fn increment_reconnect_attempts(&self) {
-        let mut attempts = self.reconnect_attempts.lock_or_recover();
-        *attempts = attempts.saturating_add(1);
     }
 
     /// Updates transport metrics, preserving confirmation-loop counts.
@@ -286,7 +234,6 @@ impl Transport for ReticulumTransport {
 
     /// Called when connection status changes.
     ///
-    /// Resets reconnect counter on successful connection.
     /// Fails all pending confirmations on disconnect.
     fn on_status_changed(&self, status: TransportStatus) {
         let previous_status = {
@@ -298,7 +245,6 @@ impl Transport for ReticulumTransport {
 
         if status == TransportStatus::Available {
             let queue_len = self.send_queue.lock_or_recover().len();
-            *self.reconnect_attempts.lock_or_recover() = 0;
 
             if queue_len > 0 {
                 tracing::info!(
@@ -394,51 +340,6 @@ impl Transport for ReticulumTransport {
     }
 }
 
-/// Builder for [`ReticulumTransport`].
-pub struct ReticulumTransportBuilder {
-    device_id: String,
-    config: ReticulumConfig,
-}
-
-impl ReticulumTransportBuilder {
-    /// Creates a new builder.
-    pub fn new(device_id: impl Into<String>) -> Self {
-        Self {
-            device_id: device_id.into(),
-            config: ReticulumConfig::default(),
-        }
-    }
-
-    /// Sets the connection timeout.
-    pub fn connection_timeout(mut self, timeout: Duration) -> Self {
-        self.config.connection_timeout = timeout;
-        self
-    }
-
-    /// Sets whether to auto-reconnect.
-    pub fn auto_reconnect(mut self, auto_reconnect: bool) -> Self {
-        self.config.auto_reconnect = auto_reconnect;
-        self
-    }
-
-    /// Sets the reconnection delay.
-    pub fn reconnect_delay(mut self, delay: Duration) -> Self {
-        self.config.reconnect_delay = delay;
-        self
-    }
-
-    /// Sets the maximum reconnection attempts.
-    pub fn max_reconnect_attempts(mut self, max: u32) -> Self {
-        self.config.max_reconnect_attempts = max;
-        self
-    }
-
-    /// Builds the transport.
-    pub fn build(self) -> ReticulumTransport {
-        ReticulumTransport::with_config(self.device_id, self.config)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,23 +361,6 @@ mod tests {
         assert_eq!(transport.device_id(), "device1");
         assert_eq!(transport.transport_type(), TransportType::Reticulum);
         assert_eq!(transport.status(), TransportStatus::Unavailable);
-    }
-
-    #[test]
-    fn test_builder() {
-        let transport = ReticulumTransportBuilder::new("device1")
-            .connection_timeout(Duration::from_secs(30))
-            .auto_reconnect(false)
-            .reconnect_delay(Duration::from_secs(10))
-            .max_reconnect_attempts(5)
-            .build();
-        assert_eq!(
-            transport.config().connection_timeout,
-            Duration::from_secs(30)
-        );
-        assert!(!transport.config().auto_reconnect);
-        assert_eq!(transport.config().reconnect_delay, Duration::from_secs(10));
-        assert_eq!(transport.config().max_reconnect_attempts, 5);
     }
 
     #[test]
@@ -582,20 +466,6 @@ mod tests {
         let data = transport.serialize_message(&msg).unwrap();
         let deserialized = transport.deserialize_message(&data).unwrap();
         assert_eq!(deserialized.id, msg.id);
-    }
-
-    #[test]
-    fn test_reconnect_logic() {
-        let transport = ReticulumTransportBuilder::new("device1")
-            .max_reconnect_attempts(3)
-            .build();
-
-        assert!(transport.should_reconnect());
-        transport.increment_reconnect_attempts();
-        transport.increment_reconnect_attempts();
-        assert!(transport.should_reconnect());
-        transport.increment_reconnect_attempts();
-        assert!(!transport.should_reconnect());
     }
 
     #[test]

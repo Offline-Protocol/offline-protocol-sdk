@@ -61,7 +61,7 @@ pub use error::{Error, Result};
 pub use internet::{InternetConfig, InternetTransport};
 pub use nostr::{NostrConfig, NostrTransport, NostrTransportBuilder, SignedNostrEvent};
 pub use nostr_crypto::{routing_tag_for_address, NostrEvent, NostrKeypair};
-pub use reticulum::{ReticulumConfig, ReticulumTransport};
+pub use reticulum::ReticulumTransport;
 pub use traits::{Transport, TransportStatus};
 pub use types::{
     LinkQuality, PeerLink, SharedCallback, TransportMetrics, TransportType,
