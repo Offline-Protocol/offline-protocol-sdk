@@ -5090,6 +5090,9 @@ impl OfflineProtocol {
         // outbox messages (bypasses backoff timers)
         if is_connected && !was_connected {
             let mut protocol = self.lock_inner()?;
+            // A bound session is what the suppressed attach warnings wait
+            // for: a refusal after a good session is news again.
+            protocol.note_gateway_attached();
             protocol.flush_outbox_all();
         }
 
@@ -5110,21 +5113,29 @@ impl OfflineProtocol {
             protocol.clear_gateway_capabilities();
         }
 
-        // Emit connection event
-        let event = if is_connected {
-            CoreEvent::TransportSwitched {
-                from: None,
-                to: "Reticulum".to_string(),
-                reason: "Connected to Reticulum daemon".to_string(),
-            }
-        } else {
-            CoreEvent::TransportSwitched {
-                from: Some("Reticulum".to_string()),
-                to: "None".to_string(),
-                reason: "Disconnected from Reticulum daemon".to_string(),
-            }
-        };
-        self.emit_event(event);
+        // Only a real transition is an event. The bridges route every close
+        // through here, including the close of a session that was refused or
+        // timed out before it was ever announced, and the internet twin gates
+        // the same way so duplicate reports do not show phantom switches
+        // downstream: without this a refusing gateway showed the app a
+        // Reticulum-to-None switch per reconnect rung, for a carrier it was
+        // never told was up.
+        if was_connected != is_connected {
+            let event = if is_connected {
+                CoreEvent::TransportSwitched {
+                    from: None,
+                    to: "Reticulum".to_string(),
+                    reason: "Connected to Reticulum daemon".to_string(),
+                }
+            } else {
+                CoreEvent::TransportSwitched {
+                    from: Some("Reticulum".to_string()),
+                    to: "None".to_string(),
+                    reason: "Disconnected from Reticulum daemon".to_string(),
+                }
+            };
+            self.emit_event(event);
+        }
 
         Ok(())
     }
@@ -5265,7 +5276,9 @@ impl OfflineProtocol {
     /// Checked against `local_address()`: agreement means the gateway will
     /// attribute our frames the way the core stamps them and answer presence
     /// about an address we actually hold. A disagreement emits a
-    /// `GATEWAY_ADDRESS_BINDING_MISMATCH` security warning and nothing else —
+    /// `GATEWAY_ADDRESS_BINDING_MISMATCH` security warning (once per five
+    /// minutes while it persists, since the bridge reconnects on its ladder)
+    /// and nothing else —
     /// a gateway that owns the socket already owns what tearing it down would
     /// protect. What the bridge does act on is narrower and is its own
     /// decision: it does not report the carrier available unless the session
@@ -5274,7 +5287,7 @@ impl OfflineProtocol {
     /// A dedicated entry point (not message-plane injection) so a delivered
     /// frame cannot synthesize an acknowledgement.
     pub fn reticulum_address_declared(&self, address: String) {
-        let protocol = self.lock_inner_recovering();
+        let mut protocol = self.lock_inner_recovering();
         protocol.on_gateway_address_declared(&address);
     }
 
@@ -5284,8 +5297,9 @@ impl OfflineProtocol {
     /// Unlike the relay's refusal this is not a degraded-but-working
     /// connection: an unproved session may submit and be told a verdict, and
     /// is never registered as a recipient, so the bridge leaves the carrier
-    /// unavailable. Emits `GATEWAY_ADDRESS_DECLARATION_REFUSED`, which is what
-    /// explains a transport that stays down while its socket connects fine.
+    /// unavailable. Emits `GATEWAY_ADDRESS_DECLARATION_REFUSED` (once per five
+    /// minutes while the refusal persists), which is what explains a transport
+    /// that stays down while its socket connects fine.
     /// `reason` is the gateway's own text, treated as opaque and never carried
     /// onto the event.
     pub fn reticulum_address_declaration_refused(&self, reason: String) {
@@ -8562,7 +8576,7 @@ mod tests {
     /// error for it would invite a bridge that treats the report as a failure
     /// to be retried.
     #[test]
-    fn test_reticulum_gateway_answers_reach_the_core() {
+    fn test_reticulum_gateway_entry_points_are_infallible() {
         let config = create_reticulum_config();
         let protocol = OfflineProtocol::new(config).unwrap();
         protocol.start().unwrap();
@@ -8626,6 +8640,41 @@ mod tests {
         assert!(
             inner.gateway_capabilities().is_empty(),
             "a session that advertised and was never announced must not leave its tokens standing"
+        );
+    }
+
+    /// A close that was never announced is not a transition. The bridges
+    /// route every close through here, including a refused or timed-out
+    /// attach, and the internet twin gates the same way; without the gate a
+    /// refusing gateway showed the app a phantom switch per reconnect rung.
+    #[test]
+    fn test_reticulum_status_changed_unannounced_close_emits_no_event() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+        drained_events(&protocol);
+
+        protocol.reticulum_status_changed(false).unwrap();
+        assert!(
+            !drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("transport_switched")),
+            "a close for a session that was never announced must not emit transport_switched"
+        );
+
+        protocol.reticulum_status_changed(true).unwrap();
+        assert!(
+            drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("transport_switched")),
+            "a real transition still emits transport_switched"
+        );
+        protocol.reticulum_status_changed(false).unwrap();
+        assert!(
+            drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("transport_switched")),
+            "and so does the drop that follows it"
         );
     }
 

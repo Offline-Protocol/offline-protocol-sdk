@@ -856,9 +856,11 @@ pub struct OfflineProtocol {
     /// expire, and every push while it holds would otherwise emit.
     last_push_key_package_warning: Option<Instant>,
 
-    /// When the last `GatewayAddressDeclarationRefused` warning was emitted,
-    /// for the same suppression the push-key-package warning uses.
+    /// When the last `GatewayAddressDeclarationRefused` and
+    /// `GatewayAddressBindingMismatch` warnings were emitted, for the same
+    /// suppression the push-key-package warning uses.
     last_gateway_refusal_warning: Option<Instant>,
+    last_gateway_binding_mismatch_warning: Option<Instant>,
 }
 
 impl Drop for OfflineProtocol {
@@ -1067,6 +1069,7 @@ impl OfflineProtocol {
             nostr_resolution_requests: HashMap::new(),
             last_push_key_package_warning: None,
             last_gateway_refusal_warning: None,
+            last_gateway_binding_mismatch_warning: None,
             config,
         })
     }

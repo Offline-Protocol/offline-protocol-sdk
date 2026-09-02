@@ -22,14 +22,17 @@ use tracing::{debug, error, info, warn};
 /// persists, so an unsuppressed warning reports one cause many times.
 const PUSH_KEY_PACKAGE_WARNING_SUPPRESS_INTERVAL: Duration = Duration::from_secs(300);
 
-/// Minimum interval between two `GatewayAddressDeclarationRefused` warnings.
+/// Minimum interval between two warnings of one kind about a gateway attach
+/// (`GatewayAddressDeclarationRefused`, `GatewayAddressBindingMismatch`).
 ///
-/// A refusing gateway is retried on the reconnect ladder, which tops out at
-/// 30s, so without this the app is told about one misconfigured box twice a
-/// minute for as long as the transport is enabled. The condition persists,
-/// and the second report says nothing the first did not; the refusal itself
-/// is still logged every time.
-const GATEWAY_REFUSAL_WARNING_SUPPRESS_INTERVAL: Duration = Duration::from_secs(300);
+/// A gateway that refuses, or binds the wrong address, is closed on and
+/// retried up the reconnect ladder, which tops out at 30s, so without this
+/// the app is told about one misconfigured box twice a minute for as long as
+/// the transport is enabled. The condition persists, and the second report
+/// says nothing the first did not; the refusal itself is still logged every
+/// time. A bound session resets the suppression, so a refusal after a good
+/// session is news again.
+const GATEWAY_ATTACH_WARNING_SUPPRESS_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Bytes of challenge a gateway mints per connection, from the contract.
 ///
@@ -1212,7 +1215,18 @@ impl OfflineProtocol {
     /// Reached only through the FFI's dedicated entry point, not through
     /// message-plane injection, so a notification payload cannot synthesize
     /// it.
-    pub fn on_gateway_address_declared(&self, declared: &str) {
+    ///
+    /// The warning is emitted at most once per
+    /// `GATEWAY_ATTACH_WARNING_SUPPRESS_INTERVAL` while the mismatch
+    /// persists, for the reason the refusal's is: the bridge closes on a
+    /// mismatch and reconnects on its ladder. The `warn!` is not suppressed.
+    pub fn on_gateway_address_declared(&mut self, declared: &str) {
+        let mismatch = !matches!(
+            self.classify_address_binding(declared),
+            AddressBinding::Ours
+        );
+        let due =
+            !mismatch || Self::attach_warning_due(&mut self.last_gateway_binding_mismatch_warning);
         match self.classify_address_binding(declared) {
             AddressBinding::Ours => {
                 info!(
@@ -1230,27 +1244,52 @@ impl OfflineProtocol {
                 // hashes it; interpolating it into `reason` — which is
                 // shipped verbatim — would undo that hashing inside the same
                 // record. The raw pair is in the `warn!` above.
-                self.emit_security_warning(
-                    declared,
-                    SecurityWarningCode::GatewayAddressBindingMismatch,
-                    "gateway bound this connection to an address that is not this device's: \
-                     it will attribute our frames to an identity we cannot prove, and answer \
-                     presence about an address we do not hold",
-                );
+                if due {
+                    self.emit_security_warning(
+                        declared,
+                        SecurityWarningCode::GatewayAddressBindingMismatch,
+                        "gateway bound this connection to an address that is not this device's: \
+                         it will attribute our frames to an identity we cannot prove, and answer \
+                         presence about an address we do not hold",
+                    );
+                }
             }
             AddressBinding::NoIdentity => {
                 warn!(
                     declared = %declared,
                     "Gateway acknowledged an address declaration this node never made"
                 );
-                self.emit_security_warning(
-                    declared,
-                    SecurityWarningCode::GatewayAddressBindingMismatch,
-                    "gateway bound this connection to an address while this device has no \
-                     established identity to declare: no declaration was sent from here",
-                );
+                if due {
+                    self.emit_security_warning(
+                        declared,
+                        SecurityWarningCode::GatewayAddressBindingMismatch,
+                        "gateway bound this connection to an address while this device has no \
+                         established identity to declare: no declaration was sent from here",
+                    );
+                }
             }
         }
+    }
+
+    /// Whether a gateway attach warning tracked by `last` is due now, and
+    /// marks it emitted if so.
+    fn attach_warning_due(last: &mut Option<Instant>) -> bool {
+        let now = Instant::now();
+        if let Some(prev) = *last {
+            if now.duration_since(prev) < GATEWAY_ATTACH_WARNING_SUPPRESS_INTERVAL {
+                return false;
+            }
+        }
+        *last = Some(now);
+        true
+    }
+
+    /// A gateway bound and announced this session. Resets the attach warning
+    /// suppression, so a refusal or mismatch after a good session, or from a
+    /// different box after a reconfigure, is reported immediately.
+    pub fn note_gateway_attached(&mut self) {
+        self.last_gateway_refusal_warning = None;
+        self.last_gateway_binding_mismatch_warning = None;
     }
 
     /// Records a gateway refusing this connection's address declaration.
@@ -1269,22 +1308,18 @@ impl OfflineProtocol {
     /// failure is ours and no peer is involved.
     ///
     /// Emitted at most once per
-    /// `GATEWAY_REFUSAL_WARNING_SUPPRESS_INTERVAL` (five minutes): the bridge closes a
-    /// refused connection and reconnects on its ladder, so a gateway that
-    /// keeps refusing would otherwise produce a security event per rung,
+    /// `GATEWAY_ATTACH_WARNING_SUPPRESS_INTERVAL` (five minutes): the bridge
+    /// closes a refused connection and reconnects on its ladder, so a gateway
+    /// that keeps refusing would otherwise produce a security event per rung,
     /// forever. The `warn!` is not suppressed.
     pub fn on_gateway_address_declaration_refused(&mut self, reason: &str) {
         warn!(
             reason = %reason.chars().take(256).collect::<String>(),
             "Gateway refused our address declaration; the carrier stays unavailable"
         );
-        let now = Instant::now();
-        if let Some(last) = self.last_gateway_refusal_warning {
-            if now.duration_since(last) < GATEWAY_REFUSAL_WARNING_SUPPRESS_INTERVAL {
-                return;
-            }
+        if !Self::attach_warning_due(&mut self.last_gateway_refusal_warning) {
+            return;
         }
-        self.last_gateway_refusal_warning = Some(now);
         self.emit_security_warning(
             &self.local_id,
             SecurityWarningCode::GatewayAddressDeclarationRefused,

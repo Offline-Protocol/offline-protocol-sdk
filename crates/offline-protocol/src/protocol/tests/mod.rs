@@ -14836,6 +14836,44 @@ fn test_gateway_declaration_refusal_warning_is_suppressed_on_repeat() {
     );
 }
 
+/// The same suppression for a mismatch, for the same reason: the bridge
+/// closes on a mismatch and climbs its ladder.
+#[test]
+fn test_gateway_binding_mismatch_warning_is_suppressed_on_repeat() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    let warnings = capture_security_warnings(&mut alice);
+    alice.start().unwrap();
+    let someone_else = id("bob");
+
+    alice.on_gateway_address_declared(&someone_else);
+    alice.on_gateway_address_declared(&someone_else);
+
+    assert_eq!(
+        warnings.lock().unwrap().len(),
+        1,
+        "a repeated mismatch inside the interval must produce one warning"
+    );
+}
+
+/// A bound session resets the suppression: a refusal after a good session
+/// is news again, and so is one from a different box after a reconfigure.
+#[test]
+fn test_a_gateway_attach_resets_the_warning_suppression() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    let warnings = capture_security_warnings(&mut alice);
+    alice.start().unwrap();
+
+    alice.on_gateway_address_declaration_refused("bad_signature");
+    alice.note_gateway_attached();
+    alice.on_gateway_address_declaration_refused("bad_signature");
+
+    assert_eq!(
+        warnings.lock().unwrap().len(),
+        2,
+        "a refusal after an attach must be reported again"
+    );
+}
+
 /// Gateway capabilities are bounded exactly as the relay's are, and a hostile
 /// advertisement cannot use padding to evict real tokens.
 #[test]

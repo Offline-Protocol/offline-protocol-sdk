@@ -1413,7 +1413,9 @@ interface OfflineProtocol {
     // agreement means the gateway attributes our frames the way the core
     // stamps them and answers presence about an address we hold. A
     // disagreement emits a GATEWAY_ADDRESS_BINDING_MISMATCH security warning
-    // and nothing else — a gateway that controls the socket already controls
+    // (once per five minutes while it persists, since the bridge reconnects
+    // on its ladder) and nothing else — a gateway that controls the socket
+    // already controls
     // what tearing it down would protect. What the bridge acts on is its own
     // and is narrower: it does not report the carrier available unless the
     // session was bound.
@@ -1427,7 +1429,8 @@ interface OfflineProtocol {
     // NOT a degraded-but-working connection: an unproved session may submit
     // and be told a verdict, and is never registered as a recipient, so the
     // bridge leaves the carrier unavailable. Emits
-    // GATEWAY_ADDRESS_DECLARATION_REFUSED, which is what explains a transport
+    // GATEWAY_ADDRESS_DECLARATION_REFUSED (once per five minutes while the
+    // refusal persists), which is what explains a transport
     // that stays down while its socket connects fine. The gateway's own
     // wording is opaque and never travels onto the event.
     void reticulum_address_declaration_refused(string reason);
