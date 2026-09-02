@@ -145,6 +145,35 @@ public class ReticulumManager: NSObject, TransportManager {
     // Receive buffer for line-delimited TCP (only accessed on connectionQueue)
     private var receiveBuffer = Data()
 
+    // MARK: - Gateway contract state
+
+    /// Frames submitted to the gateway and not yet answered.
+    private let verdicts = GatewayVerdictTracker()
+
+    /// The SDK-owned presence watchlist, rotated the same way the relay
+    /// manager rotates its own.
+    private let presenceWatch = PresenceWatchPolicy()
+    private var presenceWatchTimer: DispatchSourceTimer?
+
+    /// Fires if the handshake does not finish, so a gateway that accepts the
+    /// socket and then says nothing costs one attach timeout rather than the
+    /// connection timeout.
+    private var attachTimeoutWorkItem: DispatchWorkItem?
+
+    /// True once the gateway has echoed our own address back.
+    ///
+    /// This — not the TCP connection — is what makes the carrier usable. A
+    /// session the gateway did not bind is verdict-only on the other side: it
+    /// may submit and be told `attach_required`, and it is never registered as
+    /// a recipient, so nothing addressed to this device would ever arrive.
+    /// Offering that to the selector would be offering a transport that can
+    /// only refuse.
+    private var _isBound = false
+    private var isBound: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _isBound }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _isBound = newValue }
+    }
+
     // MARK: - Initialization
 
     public init(protocol protocolInstance: OfflineProtocol, deviceId: String) {
@@ -262,6 +291,10 @@ public class ReticulumManager: NSObject, TransportManager {
         // timer behind.
         isPaused = true
         stopMessagePolling()
+        // A backgrounded app must not keep spending battery on presence ticks
+        // against a gateway; the watchlist is rebuilt from the core after
+        // resume(). Mirrors `InternetManager.pause`.
+        stopPresenceWatch()
     }
 
     public func resume() {
@@ -271,6 +304,12 @@ public class ReticulumManager: NSObject, TransportManager {
             // scheduled at `.now()`, and the core does not re-issue
             // `onMessagesAvailable` for messages it already announced.
             startMessagePolling()
+            // Only a bound session has anyone to ask. An unbound one is not
+            // announced as a carrier either, so there is nothing waiting on
+            // its answers.
+            if isBound {
+                startPresenceWatch()
+            }
         }
     }
 
@@ -333,10 +372,18 @@ public class ReticulumManager: NSObject, TransportManager {
     private func disconnect() {
         connectionTimeoutWorkItem?.cancel()
         connectionTimeoutWorkItem = nil
+        cancelAttachTimeout()
+        stopPresenceWatch()
         connection?.cancel()
         connection = nil
         isConnected = false
         isConnecting = false
+        isBound = false
+        // Every frame this connection was carrying is owed an outcome. A
+        // frame nobody reports on waits out the core's own 120s expiry
+        // instead of going back on the retry ladder now, so silence here is
+        // two minutes of nothing per message.
+        failInFlight(reason: "Disconnected")
         // Reset receiveBuffer — safe because either we are already on
         // connectionQueue (reconnect path) or the connection has been
         // cancelled above so no receive callbacks can fire (stop path).
@@ -353,17 +400,31 @@ public class ReticulumManager: NSObject, TransportManager {
         consecutiveSendFailures = 0
         receiveBuffer = Data()
 
+        isBound = false
+        _ = verdicts.drainAll()
+
         emitDiagnostic("info", "Connected to Reticulum daemon")
 
-        // Send identification
-        let identifyMsg: [String: Any] = [
-            "type": "Identify",
-            "device_id": deviceId
-        ]
-        if let jsonData = try? JSONSerialization.data(withJSONObject: identifyMsg),
-           let jsonString = String(data: jsonData, encoding: .utf8) {
-            sendRaw(jsonString + "\n")
+        // Identify on messageQueue, not here. `localAddress()` is a UniFFI
+        // call that takes the global protocol mutex, and this runs on
+        // connectionQueue — the queue every inbound byte arrives on, so
+        // blocking it stalls the reads that carry the answer we are about to
+        // wait for.
+        //
+        // `device_id` is this device's address where there is one. The
+        // shipped clients sent `config.profile`, a local storage-namespace
+        // selector that is not an identity in any namespace the gateway
+        // knows; it is logged and never routed on, so it was harmless and
+        // useless. Only `DeclareAddress` binds either way.
+        messageQueue.async { [weak self] in
+            guard let self = self else { return }
+            let identity = self.protocolInstance.localAddress() ?? self.deviceId
+            if let frame = GatewayAttachPolicy.identifyJson(deviceId: identity) {
+                self.sendRaw(frame + "\n")
+            }
         }
+
+        armAttachTimeout()
 
         // Start polling on main thread; notify protocol after state is .running
         // so that any protocol handler querying transport state sees the correct value.
@@ -451,19 +512,61 @@ public class ReticulumManager: NSObject, TransportManager {
             // [weak self] like every other closure here: a strong capture
             // would let this flip fire against a manager the module already
             // released through `destroy()`.
-            self.messageQueue.async { [weak self] in
-                guard let self = self else { return }
-                self.statusFlipLock.lock()
-                if self.isConnected && self.state != .stopping && self.state != .stopped {
-                    try? self.protocolInstance.reticulumStatusChanged(isConnected: true)
-                }
-                self.statusFlipLock.unlock()
-                // Immediately flush queued messages — unless paused, for the
-                // same reason the poll restart above is skipped.
-                guard !self.isPaused else { return }
-                self.pollAndSendMessages()
-            }
         }
+    }
+
+    /// Announces the carrier once the gateway has bound this session.
+    ///
+    /// Called on `StatusUpdate(connected)`, which the contract puts after
+    /// `AddressDeclared` and after `Capabilities` — so by the time the core is
+    /// told this transport is available, it has already been told what the
+    /// gateway can do, and the flush that the false→true edge triggers sees
+    /// them. That ordering is the contract's, and it is pinned by a Rust
+    /// source guard because neither platform can test it alone.
+    ///
+    /// A session the gateway refused to bind never reaches here: the refusal
+    /// closes the connection instead. That is the one place this manager
+    /// diverges from the relay manager, which reports up and keeps working in
+    /// account-name space. A gateway has no such space.
+    private func completeAttach() {
+        cancelAttachTimeout()
+        guard isBound else {
+            emitDiagnostic("warning", "Gateway reported connected before binding the session")
+            return
+        }
+        self.messageQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.statusFlipLock.lock()
+            if self.isConnected && self.state != .stopping && self.state != .stopped {
+                try? self.protocolInstance.reticulumStatusChanged(isConnected: true)
+            }
+            self.statusFlipLock.unlock()
+            self.startPresenceWatch()
+            // Immediately flush queued messages — unless paused, for the
+            // same reason the poll restart above is skipped.
+            guard !self.isPaused else { return }
+            self.pollAndSendMessages()
+        }
+    }
+
+    /// Bounds the handshake. A gateway that accepts the socket and then says
+    /// nothing is not slow, and waiting out the connection timeout for it
+    /// means a minute in which the selector has been told nothing at all.
+    private func armAttachTimeout() {
+        attachTimeoutWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self, self.isConnected, !self.isBound else { return }
+            self.emitDiagnostic("error", "Gateway attach timed out before the session was bound")
+            self.handleConnectionClosed(error: nil)
+        }
+        attachTimeoutWorkItem = item
+        connectionQueue.asyncAfter(
+            deadline: .now() + GatewayAttachPolicy.ATTACH_TIMEOUT, execute: item)
+    }
+
+    private func cancelAttachTimeout() {
+        attachTimeoutWorkItem?.cancel()
+        attachTimeoutWorkItem = nil
     }
 
     private func startReceiving() {
@@ -472,6 +575,17 @@ public class ReticulumManager: NSObject, TransportManager {
 
             if let data = content {
                 self.receiveBuffer.append(data)
+
+                // A line past the cap cannot be resynchronised: its tail would
+                // be read as a fresh line, so every frame after it is garbage.
+                // The connection goes instead, and the reconnect starts clean.
+                if self.receiveBuffer.count > GatewayAttachPolicy.MAX_LINE_BYTES {
+                    self.emitDiagnostic("error", "Over-long line from the gateway", context: [
+                        "bytes": self.receiveBuffer.count
+                    ])
+                    self.handleConnectionClosed(error: nil)
+                    return
+                }
 
                 // Process complete lines (newline-delimited JSON)
                 let newlineByte = Data([0x0A])
@@ -659,17 +773,254 @@ public class ReticulumManager: NSObject, TransportManager {
                 }
             }
 
+        case "Challenge":
+            handleChallenge(json)
+
+        case "AddressDeclared":
+            handleAddressDeclared(json)
+
+        case "AddressError":
+            handleAddressError(json)
+
+        case "Capabilities":
+            let tokens = GatewayAttachPolicy.capabilityTokens(from: json)
+            messageQueue.async { [weak self] in
+                guard let self = self else { return }
+                // Before the status flip, never after: the flush that flip
+                // triggers has to see them.
+                try? self.protocolInstance.reticulumGatewayCapabilities(capabilities: tokens)
+            }
+
+        case "MessageSent", "DeliveryError":
+            handleVerdict(json, type: messageType)
+
+        case "PresenceStatus":
+            handlePresence(json)
+
         case "StatusUpdate":
             let daemonStatus = json["status"] as? String ?? "unknown"
             emitDiagnostic("debug", "Reticulum daemon status update", context: [
                 "status": daemonStatus
             ])
+            if daemonStatus == "connected" {
+                completeAttach()
+            }
 
         default:
             emitDiagnostic("debug", "Unknown Reticulum message type", context: [
                 "type": messageType
             ])
         }
+    }
+
+    // MARK: - The gateway handshake
+
+    /// Signs the gateway's challenge and declares this device's address.
+    ///
+    /// The signing happens in the core: this hands it the challenge and gets
+    /// back the three fields `DeclareAddress` carries. A failure here is not
+    /// retried on this connection — the gateway spends a challenge per
+    /// connection, and the next reconnect gets a fresh one.
+    private func handleChallenge(_ json: [String: Any]) {
+        switch GatewayAttachPolicy.decodeChallenge(json) {
+        case .skip(let reason):
+            emitDiagnostic("warning", "Cannot declare an address to the gateway", context: [
+                "reason": reason
+            ])
+            handleConnectionClosed(error: nil)
+        case .declare(let challenge):
+            messageQueue.async { [weak self] in
+                guard let self = self else { return }
+                do {
+                    let declaration = try self.protocolInstance.gatewayAddressDeclaration(
+                        challenge: [UInt8](challenge))
+                    guard let frame = GatewayAttachPolicy.declarationJson(
+                        address: declaration.address,
+                        publicKey: Data(declaration.publicKey),
+                        signature: Data(declaration.signature)
+                    ) else {
+                        self.emitDiagnostic("error", "Cannot serialize the address declaration")
+                        self.handleConnectionClosed(error: nil)
+                        return
+                    }
+                    self.sendRaw(frame + "\n")
+                } catch {
+                    // No identity yet, or a challenge the core refused to
+                    // sign. Either way this connection can only ever be
+                    // verdict-only, so it is not worth holding open.
+                    self.emitDiagnostic("warning", "Cannot build the address declaration", context: [
+                        "reason": GatewayAttachPolicy.SkipReason.signingFailed,
+                        "error": error.localizedDescription
+                    ])
+                    self.handleConnectionClosed(error: nil)
+                }
+            }
+        }
+    }
+
+    /// Checks what the gateway says it bound against what we hold.
+    ///
+    /// Both answers go to the core, which owns the security warning; what is
+    /// decided here is narrower and is the bridge's own: whether this carrier
+    /// can be offered to the selector at all.
+    private func handleAddressDeclared(_ json: [String: Any]) {
+        guard let declared = json["address"] as? String, !declared.isEmpty else {
+            emitDiagnostic("warning", "Invalid AddressDeclared: missing address")
+            return
+        }
+        messageQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.protocolInstance.reticulumAddressDeclared(address: declared)
+
+            let local = self.protocolInstance.localAddress()
+            switch GatewayAttachPolicy.bindingOutcome(declared: declared, local: local) {
+            case .bound:
+                self.isBound = true
+                self.emitDiagnostic("info", "Gateway bound this session to our address")
+            case .mismatch, .unknownLocal:
+                // The core has already reported this as a security warning.
+                // Here it costs the connection: a gateway that bound an
+                // address we do not control will attribute our frames to an
+                // identity we cannot prove and answer presence about someone
+                // else, and reconnecting is the only thing this side can do
+                // that might land somewhere honest.
+                self.emitDiagnostic("error", "Gateway bound a session to an address we do not hold")
+                self.handleConnectionClosed(error: nil)
+            }
+        }
+    }
+
+    /// The gateway refused the declaration, so this session can only be told
+    /// verdicts. The carrier is never announced; the connection goes and the
+    /// existing backoff decides when to try again.
+    private func handleAddressError(_ json: [String: Any]) {
+        let reason = json["reason"] as? String ?? "unspecified"
+        messageQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.protocolInstance.reticulumAddressDeclarationRefused(reason: reason)
+        }
+        emitDiagnostic("warning", "Gateway refused the address declaration", context: [
+            "reason": reason
+        ])
+        handleConnectionClosed(error: nil)
+    }
+
+    // MARK: - Verdicts
+
+    /// Settles one submitted frame on the gateway's answer.
+    ///
+    /// This is what the shipped bridges did not do. They called
+    /// `reticulumConfirmSent` the moment the socket write returned, so every
+    /// frame was "sent" whether the gateway forwarded it, refused it, or
+    /// dropped it — and `recipient_unreachable`, the one verdict that parks a
+    /// message and offers it to the mesh, never reached the core at all.
+    private func handleVerdict(_ json: [String: Any], type: String) {
+        guard let verdict = GatewayAttachPolicy.parseVerdict(json, type: type) else {
+            emitDiagnostic("warning", "Verdict with no message_id, ignored", context: [
+                "type": type
+            ])
+            return
+        }
+        guard verdicts.settle(verdict.messageId) else {
+            // Already settled: a duplicate, or an answer to a frame this
+            // connection timed out on. Reporting it again would settle an id
+            // the core has moved past.
+            return
+        }
+        messageQueue.async { [weak self] in
+            guard let self = self else { return }
+            if verdict.sent {
+                self.protocolInstance.reticulumConfirmSent(messageId: verdict.messageId)
+            } else {
+                // Verbatim. The core classifies on the `recipient_unreachable`
+                // prefix and discards the rest at that boundary, so nothing
+                // here needs to understand the gateway's wording.
+                self.protocolInstance.reticulumSendFailedWithReason(
+                    messageId: verdict.messageId, reason: verdict.reason)
+                if let recipient = verdict.recipient, !recipient.isEmpty,
+                   verdict.reason?.hasPrefix("recipient_unreachable") == true {
+                    // Watch them: the gateway pushes a PresenceStatus when a
+                    // watched peer attaches, and that answer is what un-parks
+                    // the message this verdict just parked.
+                    self.presenceWatch.watch(recipient, nowMs: Self.nowMs())
+                }
+            }
+            self.pollAndSendMessages()
+        }
+    }
+
+    /// Fails every outstanding frame with `reason`, on a connection going away
+    /// or on a gateway that answered nothing.
+    private func failInFlight(reason: String) {
+        let stranded = verdicts.drainAll()
+        guard !stranded.isEmpty else { return }
+        messageQueue.async { [weak self] in
+            guard let self = self else { return }
+            for messageId in stranded {
+                self.protocolInstance.reticulumSendFailedWithReason(
+                    messageId: messageId, reason: reason)
+            }
+        }
+    }
+
+    // MARK: - Presence
+
+    private func handlePresence(_ json: [String: Any]) {
+        guard let answer = GatewayAttachPolicy.parsePresence(json) else {
+            emitDiagnostic("warning", "Invalid PresenceStatus, ignored")
+            return
+        }
+        if answer.online {
+            presenceWatch.unwatch(answer.peer)
+        }
+        messageQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.protocolInstance.reticulumPeerPresence(
+                peerId: answer.peer, online: answer.online, lastSeenMs: answer.lastSeenMs)
+        }
+    }
+
+    private func startPresenceWatch() {
+        let timer = DispatchSource.makeTimerSource(queue: messageQueue)
+        let previous = presenceWatchTimer
+        presenceWatchTimer = timer
+        previous?.cancel()
+        timer.schedule(
+            deadline: .now() + PresenceWatchPolicy.defaultTickInterval,
+            repeating: PresenceWatchPolicy.defaultTickInterval)
+        timer.setEventHandler { [weak self] in
+            self?.presenceWatchTick()
+        }
+        timer.resume()
+    }
+
+    private func stopPresenceWatch() {
+        let timer = presenceWatchTimer
+        presenceWatchTimer = nil
+        timer?.cancel()
+        presenceWatch.clear()
+    }
+
+    /// Asks the gateway about the peers the core is waiting to hear about.
+    ///
+    /// One frame for the whole batch, which is the contract's shape. The core
+    /// owns the list — every peer with an undelivered welcome, and every
+    /// recipient of a parked message — so the app is not asked to maintain
+    /// one.
+    private func presenceWatchTick() {
+        guard isBound, !isPaused else { return }
+        let coreWatchlist = protocolInstance.reticulumPresenceWatchlist()
+        let selfAddress = protocolInstance.localAddress()
+        let candidates = coreWatchlist.filter { peer in
+            !peer.isEmpty && peer != deviceId && peer != selfAddress
+        }
+        let peers = presenceWatch.peersToQuery(coreWatchlist: candidates, nowMs: Self.nowMs())
+        guard let frame = GatewayAttachPolicy.checkPresenceJson(peers: peers) else { return }
+        sendRaw(frame + "\n")
+    }
+
+    private static func nowMs() -> Int64 {
+        Int64(Date().timeIntervalSince1970 * 1000)
     }
 
     /// Arms the fallback poll timer, unless the transport is paused.
@@ -743,14 +1094,41 @@ public class ReticulumManager: NSObject, TransportManager {
     }
 
     private func pollAndSendMessages() {
-        guard isConnected else { return }
+        guard isBound else { return }
+        sweepExpiredVerdicts()
         sendNextMessage(sent: 0, maxBatchSize: 10)
+    }
+
+    /// Fails frames the gateway never answered.
+    ///
+    /// The contract says a gateway MUST answer every submission, and silence
+    /// is the one failure the core cannot see: it holds the frame in
+    /// `pending_confirmation` until its own 120s expiry and counts it a
+    /// failure then. Failing it here, at 60s, puts it back on the retry
+    /// ladder while the core still considers it live — which is why this
+    /// timeout has to stay the shorter of the two.
+    private func sweepExpiredVerdicts() {
+        let stale = verdicts.expired(
+            now: Date().timeIntervalSince1970, timeout: GatewayAttachPolicy.VERDICT_TIMEOUT)
+        guard !stale.isEmpty else { return }
+        emitDiagnostic("warning", "Gateway did not answer for submitted frames", context: [
+            "count": stale.count
+        ])
+        for messageId in stale {
+            protocolInstance.reticulumSendFailedWithReason(
+                messageId: messageId, reason: "gateway_silent: no verdict within 60s")
+        }
     }
 
     /// Sends messages one at a time, chaining the next send from each completion
     /// handler so that NWConnection writes are serialized (no concurrent sends).
     private func sendNextMessage(sent: Int, maxBatchSize: Int) {
-        guard sent < maxBatchSize, isConnected else {
+        // Bounded by what is unanswered, not only by the batch: a gateway
+        // that is slow to answer must not have the whole outbox handed to it,
+        // because every id in flight is one the core cannot retry until it is
+        // settled.
+        guard verdicts.count < GatewayAttachPolicy.MAX_IN_FLIGHT else { return }
+        guard sent < maxBatchSize, isBound else {
             if sent > 1 {
                 emitDiagnostic("debug", "Batch sent messages via Reticulum", context: [
                     "count": sent
@@ -768,6 +1146,19 @@ public class ReticulumManager: NSObject, TransportManager {
             return
         }
 
+        // The core re-queues an unconfirmed frame under the same id after its
+        // own acknowledgement timeout, and a verdict can honestly take longer
+        // than that over a radio backbone. Sending it again would forward the
+        // frame twice and, when this copy timed out, fail an id the gateway
+        // had already confirmed. Popping it was enough: the core's pending
+        // entry is refreshed by the pop.
+        guard verdicts.begin(message.messageId, now: Date().timeIntervalSince1970) else {
+            messageQueue.async { [weak self] in
+                self?.sendNextMessage(sent: sent, maxBatchSize: maxBatchSize)
+            }
+            return
+        }
+
         sendMessage(
             messageId: message.messageId,
             recipientId: message.recipientId,
@@ -781,33 +1172,43 @@ public class ReticulumManager: NSObject, TransportManager {
         }
     }
 
+    /// Writes one frame. **The write is not the outcome.**
+    ///
+    /// A successful write means the gateway has the bytes, which says nothing
+    /// about whether it could forward them; the answer arrives later as a
+    /// `MessageSent` or a `DeliveryError` and is settled in [handleVerdict].
+    /// Confirming here is what the shipped bridge did, and it is why a
+    /// `recipient_unreachable` verdict — the one that parks a message and
+    /// offers it to the mesh — could never reach the core.
+    ///
+    /// A *failed* write is settled here, because there is no frame on the wire
+    /// for the gateway to answer about.
     private func sendMessage(messageId: String, recipientId: String, data: Data, replyToMsg: String? = nil, completion: (() -> Void)? = nil) {
-        guard isConnected, connection != nil else {
-            emitDiagnostic("warning", "Cannot send message - not connected", context: [
+        guard isBound, connection != nil else {
+            emitDiagnostic("warning", "Cannot send message - not attached", context: [
                 "messageId": messageId,
                 "recipientId": recipientId
             ])
-            protocolInstance.reticulumSendFailed(messageId: messageId)
+            settleLocally(messageId: messageId, reason: "Not attached to a gateway")
             completion?()
             return
         }
 
         let content = data.base64EncodedString()
 
-        var reticulumMessage: [String: Any] = [
-            "type": "SendMessage",
-            "recipient": recipientId,
-            "content": content,
-            "encoding": "base64"
-        ]
-        if let replyToMsg = replyToMsg, !replyToMsg.isEmpty {
-            reticulumMessage["reply_to_msg"] = replyToMsg
-        }
-
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: reticulumMessage),
-              let jsonString = String(data: jsonData, encoding: .utf8) else {
+        // Sanitised the way the gateway sanitises it: an id it would refuse
+        // is replaced *there* by one it mints, and the verdict then comes back
+        // under a name nothing here is waiting on. Message ids are UUIDs, so
+        // this passes; it is what keeps that from being an assumption.
+        guard let wireId = GatewayAttachPolicy.sanitizeMessageId(messageId),
+              let jsonString = GatewayAttachPolicy.sendMessageJson(
+                messageId: wireId,
+                recipient: recipientId,
+                content: content,
+                replyToMsg: replyToMsg
+              ) else {
             emitDiagnostic("error", "Failed to create Reticulum message")
-            protocolInstance.reticulumSendFailed(messageId: messageId)
+            settleLocally(messageId: messageId, reason: "Unserializable frame")
             completion?()
             return
         }
@@ -817,7 +1218,7 @@ public class ReticulumManager: NSObject, TransportManager {
 
             if let error = error {
                 self.consecutiveSendFailures += 1
-                self.protocolInstance.reticulumSendFailed(messageId: messageId)
+                self.settleLocally(messageId: messageId, reason: "Write failed")
                 self.emitDiagnostic("error", "Failed to send Reticulum message", context: [
                     "error": error.localizedDescription,
                     "messageId": messageId,
@@ -833,9 +1234,7 @@ public class ReticulumManager: NSObject, TransportManager {
                 }
             } else {
                 self.consecutiveSendFailures = 0
-                self.protocolInstance.reticulumConfirmSent(messageId: messageId)
-
-                self.emitDiagnostic("debug", "Message sent via Reticulum", context: [
+                self.emitDiagnostic("debug", "Message submitted to the gateway", context: [
                     "messageId": messageId,
                     "recipientId": recipientId,
                     "contentLength": content.count
@@ -844,6 +1243,14 @@ public class ReticulumManager: NSObject, TransportManager {
 
             completion?()
         }
+    }
+
+    /// Settles a frame that never reached the gateway, so no verdict is
+    /// coming for it. Only reports to the core if this call is the one that
+    /// took the id out of flight.
+    private func settleLocally(messageId: String, reason: String) {
+        guard verdicts.settle(messageId) else { return }
+        protocolInstance.reticulumSendFailedWithReason(messageId: messageId, reason: reason)
     }
 
     // MARK: - TCP Send

@@ -637,6 +637,7 @@ jobs:
             ble/BleDiscoveryBootstrapPolicy.swift \
             Generated/offline_protocol.swift ForcedPresenceCheckQueue.swift \
             AddressDeclarationPolicy.swift \
+            GatewayAttachPolicy.swift GatewayVerdictTracker.swift \
             InboundFragmentBuffer.swift OutboundFragmentQueue.swift \
             PeerIdentityBinding.swift RelayAnswerPrefixes.swift \
             RelayControlOpTranslator.swift RelayGroupSnapshotBridge.swift \
