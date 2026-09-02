@@ -1248,9 +1248,19 @@ public class ReticulumManager: NSObject, TransportManager {
     /// Settles a frame that never reached the gateway, so no verdict is
     /// coming for it. Only reports to the core if this call is the one that
     /// took the id out of flight.
+    ///
+    /// The decision is taken here and the report is hopped, because the two
+    /// callers are on different queues: the pre-flight guard runs on
+    /// [messageQueue] and the write completion runs on [connectionQueue],
+    /// which is the queue every inbound byte arrives on. An FFI call there
+    /// waits on the global protocol mutex and stalls the reads — including the
+    /// verdicts this manager is waiting for.
     private func settleLocally(messageId: String, reason: String) {
         guard verdicts.settle(messageId) else { return }
-        protocolInstance.reticulumSendFailedWithReason(messageId: messageId, reason: reason)
+        messageQueue.async { [weak self] in
+            self?.protocolInstance.reticulumSendFailedWithReason(
+                messageId: messageId, reason: reason)
+        }
     }
 
     // MARK: - TCP Send
