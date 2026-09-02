@@ -1,0 +1,64 @@
+{
+  "_comment": [
+    "Frozen conformance vectors for the gateway attach proof, from",
+    "docs/spec/gateway-contract.md.",
+    "",
+    "Computed from the construction stated in that chapter, not by",
+    "running the payload builder they pin.",
+    "",
+    "These pin the bytes that go under the signing key, not a",
+    "signature. Ed25519 is specified by RFC 8032 and carries its own",
+    "vectors; what is specific to this protocol is which bytes are",
+    "signed, and that is the half a second implementation gets wrong.",
+    "",
+    "The addresses are derived from the public halves of RFC 8032",
+    "section 7.1 test vectors 1 and 2, so both halves of each case",
+    "trace to a published source rather than to this file."
+  ],
+  "domain": "offline-gateway-addr-v1",
+  "layout": "domain || u32be(len(address_utf8)) || address_utf8 || challenge",
+  "layout_note": "The challenge is appended raw, not as a second length-prefixed field. Prefixing it as well produces a payload four bytes longer that every conforming verifier rejects, and a round-trip test written against the wrong builder never notices.",
+  "proofs": [
+    {
+      "name": "the ordinary attach",
+      "note": "A 44-character address and a 32-byte challenge. The length prefix is 0000002c, big-endian: an implementation writing it little-endian produces 2c000000 and fails every declaration at runtime while its own round-trip test passes.",
+      "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "challenge_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "payload_hex": "6f66666c696e652d676174657761792d616464722d76310000002c6f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "name": "an all-zero challenge",
+      "note": "Thirty-two zero bytes are a challenge like any other. They are present in the payload, not omitted, so the payload is the same length as any other case.",
+      "address": "off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
+      "challenge_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "payload_hex": "6f66666c696e652d676174657761792d616464722d76310000002c6f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a3872300000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "an all-ones challenge",
+      "note": "The high bit set in every challenge byte, which is what catches a bridge that carried the challenge through a text encoding instead of as bytes.",
+      "address": "off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
+      "challenge_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "payload_hex": "6f66666c696e652d676174657761792d616464722d76310000002c6f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a387230ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  ],
+  "the_length_prefix_makes_the_payload_unambiguous": {
+    "note": "Two different (address, challenge) pairs whose concatenations are identical. The address length prefix is the only thing separating them: drop it and a signature over one verifies as a signature over the other, and a device can be bound to an address it never named.",
+    "a": {
+      "address": "ab",
+      "challenge_hex": "6358",
+      "payload_hex": "6f66666c696e652d676174657761792d616464722d76310000000261626358"
+    },
+    "b": {
+      "address": "abc",
+      "challenge_hex": "58",
+      "payload_hex": "6f66666c696e652d676174657761792d616464722d76310000000361626358"
+    }
+  },
+  "the_domain_is_what_stops_a_cross_replay": {
+    "note": "The relay's address proof has this identical layout under its own domain. These are the same two fields under each domain, and they differ from the first byte, which is what keeps a proof harvested by a hostile gateway from replaying against the relay and the reverse. An implementation that reuses one domain for both attaches produces the same bytes twice and loses that separation without failing anything.",
+    "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+    "challenge_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "gateway_payload_hex": "6f66666c696e652d676174657761792d616464722d76310000002c6f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "same_fields_under_the_relay_domain_hex": "6f66666c696e652d72656c61792d616464722d76310000002c6f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+  }
+}

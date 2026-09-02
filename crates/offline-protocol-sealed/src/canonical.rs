@@ -165,6 +165,59 @@ pub fn control_signing_payload_v2(message: &Message) -> Result<Vec<u8>> {
     canonical_payload(CTRL_SIGN_DOMAIN_V2, &fields)
 }
 
+/// Domain separator for the proof a device signs to attach to a gateway.
+///
+/// Specified by the gateway contract (`docs/spec/gateway-contract.md`) and
+/// registered in the signing-domain table of
+/// `docs/spec/username-discovery.md`.
+///
+/// It **must not** equal, prefix, or be prefixed by
+/// `offline-relay-addr-v1`, for a reason beyond the general non-prefixing
+/// rule: the two payloads have an identical layout, so under a shared domain
+/// a proof harvested by a hostile gateway would replay against the relay, and
+/// the reverse. The engine's `signing_domains_are_mutually_non_prefixing`
+/// pins the property across every domain in the protocol.
+pub const GATEWAY_ADDR_SIGN_DOMAIN: &[u8] = b"offline-gateway-addr-v1";
+
+/// Builds the bytes a device signs to bind `address` on the connection that
+/// minted `challenge`.
+///
+/// The layout is `domain ‖ u32be(len(address)) ‖ address ‖ challenge`: the
+/// address is the one length-prefixed field and **the challenge is appended
+/// raw**. Prefixing the challenge as well would be the natural reading of
+/// "two fields" and produces a payload four bytes longer that no conforming
+/// verifier accepts, while a round-trip test written against the wrong
+/// builder agrees with itself and never notices. A conformance vector pins
+/// the bytes for that reason, as it does for a length written
+/// little-endian or a dropped domain.
+///
+/// One prefix is enough for an unambiguous parse: it already fixes where the
+/// address ends, and the challenge is the whole remainder. This is also the
+/// relay declaration's layout exactly, under a different domain, which is
+/// what lets one reviewer check both.
+///
+/// **The address is inside the signed bytes deliberately.** A signature over
+/// a bare gateway-chosen challenge is a signing oracle: the gateway picks
+/// challenge bytes that are also a valid control-frame payload and replays
+/// the result as a frame from that peer. Committing the domain and the
+/// address makes these bytes meaningful only as "this address, on this
+/// gateway, holds this key".
+///
+/// The challenge is passed through unexamined. Its length is a wire rule the
+/// caller enforces, not a property of the encoding: this function must build
+/// the same bytes a verifier does for whatever challenge was actually minted,
+/// including one a conformance vector chooses.
+///
+/// # Errors
+///
+/// Returns [`SealedError::FieldTooLarge`] under the same condition as
+/// [`canonical_payload`], which no caller here can reach.
+pub fn gateway_address_proof_payload(address: &str, challenge: &[u8]) -> Result<Vec<u8>> {
+    let mut payload = canonical_payload(GATEWAY_ADDR_SIGN_DOMAIN, &[address.as_bytes()])?;
+    payload.extend_from_slice(challenge);
+    Ok(payload)
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
@@ -210,6 +263,53 @@ mod tests {
     fn the_two_control_domains_are_mutually_non_prefixing() {
         assert!(!CTRL_SIGN_DOMAIN_V2.starts_with(CTRL_SIGN_DOMAIN));
         assert!(!CTRL_SIGN_DOMAIN.starts_with(CTRL_SIGN_DOMAIN_V2));
+    }
+
+    /// The gateway domain's spelling is wire-visible on every attach.
+    #[test]
+    fn the_gateway_domain_has_its_published_spelling() {
+        assert_eq!(GATEWAY_ADDR_SIGN_DOMAIN, b"offline-gateway-addr-v1");
+    }
+
+    /// The challenge is appended raw. Prefixing it too is the plausible wrong
+    /// reading, and it is four bytes longer, so the length alone catches it.
+    #[test]
+    fn the_challenge_is_not_length_prefixed() {
+        let challenge = [9u8; 32];
+        let payload = gateway_address_proof_payload("off1abc", &challenge).expect("payload");
+        assert_eq!(
+            payload.len(),
+            GATEWAY_ADDR_SIGN_DOMAIN.len() + 4 + "off1abc".len() + challenge.len()
+        );
+        assert!(payload.ends_with(&challenge));
+        let doubly_prefixed =
+            canonical_payload(GATEWAY_ADDR_SIGN_DOMAIN, &[b"off1abc", &challenge]).expect("alt");
+        assert_ne!(payload, doubly_prefixed);
+    }
+
+    /// The address prefix is what separates two pairs whose concatenation is
+    /// identical. Without it, a signature over one verifies over the other and
+    /// a device is bindable to an address it never named.
+    #[test]
+    fn the_address_prefix_makes_the_payload_unambiguous() {
+        let a = gateway_address_proof_payload("ab", b"cX").expect("a");
+        let b = gateway_address_proof_payload("abc", b"X").expect("b");
+        assert_ne!(a, b);
+    }
+
+    /// The same fields under the relay's domain are different bytes. This is
+    /// the whole of the cross-replay defence: the layouts are identical.
+    #[test]
+    fn the_gateway_and_relay_domains_do_not_collide() {
+        const RELAY_ADDR_SIGN_DOMAIN: &[u8] = b"offline-relay-addr-v1";
+        let challenge = [3u8; 32];
+        let gateway = gateway_address_proof_payload("off1abc", &challenge).expect("gateway");
+        let mut relay =
+            canonical_payload(RELAY_ADDR_SIGN_DOMAIN, &[b"off1abc"]).expect("relay payload");
+        relay.extend_from_slice(&challenge);
+        assert_ne!(gateway, relay);
+        assert!(!GATEWAY_ADDR_SIGN_DOMAIN.starts_with(RELAY_ADDR_SIGN_DOMAIN));
+        assert!(!RELAY_ADDR_SIGN_DOMAIN.starts_with(GATEWAY_ADDR_SIGN_DOMAIN));
     }
 
     fn control_frame(stamp_ms: i64) -> Message {
@@ -314,10 +414,11 @@ mod spec_vectors {
     fn the_vector_file_is_the_size_it_was() {
         let v = vectors();
         assert_eq!(v["payloads"].as_array().expect("payloads").len(), 6);
-        assert_eq!(v["domains"]["live"].as_array().expect("live").len(), 5);
+        assert_eq!(v["domains"]["live"].as_array().expect("live").len(), 6);
         assert_eq!(
             v["domains"]["reserved"].as_array().expect("reserved").len(),
-            1
+            0,
+            "every registered domain is live; a new reserved one needs a row here"
         );
     }
 
@@ -522,5 +623,116 @@ mod spec_vectors {
                 );
             }
         }
+    }
+}
+
+/// The frozen conformance vectors for the gateway attach proof.
+///
+/// The chapter these pin is `docs/spec/gateway-contract.md`. They were computed
+/// by `tools/spec-vectors/generate.py` from the construction stated there, not
+/// by running the builder below.
+///
+/// A second implementation of this protocol has one chance to get the attach
+/// proof right and no feedback when it does not: a wrong payload is a
+/// signature that verifies against nothing, which looks like a key problem
+/// rather than an encoding problem. These are the bytes that settle it.
+#[cfg(all(test, feature = "std"))]
+mod gateway_proof_vectors {
+    use super::*;
+
+    const VECTORS: &str = include_str!("../tests/data/gateway-address-proof-v1.vectors.json");
+
+    fn vectors() -> serde_json::Value {
+        serde_json::from_str(VECTORS).expect("the vector file is JSON")
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn unhex(text: &str) -> Vec<u8> {
+        assert!(text.len().is_multiple_of(2), "hex has an odd length");
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex digit"))
+            .collect()
+    }
+
+    /// Asserts the file still carries what it carried, before anything
+    /// iterates it: a loop over an array a bad merge emptied passes by not
+    /// running.
+    #[test]
+    fn the_vector_file_is_the_size_it_was() {
+        let v = vectors();
+        assert_eq!(v["proofs"].as_array().expect("proofs").len(), 3);
+        assert_eq!(
+            v["domain"].as_str().expect("domain"),
+            "offline-gateway-addr-v1"
+        );
+        assert_eq!(
+            v["layout"].as_str().expect("layout"),
+            "domain || u32be(len(address_utf8)) || address_utf8 || challenge"
+        );
+    }
+
+    /// Every case, through the builder both ends of an attach call.
+    #[test]
+    fn every_proof_matches_its_vector() {
+        for case in vectors()["proofs"].as_array().expect("proofs") {
+            let name = case["name"].as_str().expect("a name");
+            let address = case["address"].as_str().expect("address");
+            let challenge = unhex(case["challenge_hex"].as_str().expect("challenge"));
+
+            let payload = gateway_address_proof_payload(address, &challenge).expect("payload");
+            assert_eq!(
+                hex(&payload),
+                case["payload_hex"].as_str().expect("payload"),
+                "[{name}] gateway attach proof"
+            );
+        }
+    }
+
+    /// The length prefix, pinned as a pair rather than as a property: two
+    /// pairs whose concatenation is identical must not produce one payload.
+    #[test]
+    fn the_length_prefix_is_pinned_by_a_colliding_pair() {
+        let v = vectors();
+        let block = &v["the_length_prefix_makes_the_payload_unambiguous"];
+        let mut seen = Vec::new();
+        for key in ["a", "b"] {
+            let address = block[key]["address"].as_str().expect("address");
+            let challenge = unhex(block[key]["challenge_hex"].as_str().expect("challenge"));
+            let payload = gateway_address_proof_payload(address, &challenge).expect("payload");
+            assert_eq!(
+                hex(&payload),
+                block[key]["payload_hex"].as_str().expect("payload"),
+                "[{key}] colliding-pair payload"
+            );
+            seen.push(payload);
+        }
+        assert_ne!(seen[0], seen[1], "the prefix is what separates them");
+    }
+
+    /// The cross-replay defence, pinned as bytes: the relay's layout under
+    /// the relay's domain is not this payload, for the same fields.
+    #[test]
+    fn the_domain_separates_the_two_attaches() {
+        let v = vectors();
+        let block = &v["the_domain_is_what_stops_a_cross_replay"];
+        let address = block["address"].as_str().expect("address");
+        let challenge = unhex(block["challenge_hex"].as_str().expect("challenge"));
+
+        let gateway = gateway_address_proof_payload(address, &challenge).expect("gateway");
+        assert_eq!(
+            hex(&gateway),
+            block["gateway_payload_hex"].as_str().expect("gateway hex")
+        );
+        assert_ne!(
+            hex(&gateway),
+            block["same_fields_under_the_relay_domain_hex"]
+                .as_str()
+                .expect("relay hex"),
+            "a shared domain would make a harvested proof replayable"
+        );
     }
 }

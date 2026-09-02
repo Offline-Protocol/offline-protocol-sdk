@@ -131,8 +131,26 @@ domain**. The domain MUST be `offline-gateway-addr-v1` and MUST NOT be
 `offline-relay-addr-v1`: a shared domain would let a signature harvested by a
 hostile gateway be replayed against the relay, and vice versa. The domain itself
 is not length-prefixed, so it MUST remain mutually non-prefixing with every
-other domain, live or reserved (see
-[Signing domains](username-discovery.md#signing-domains)).
+other domain (see [Signing domains](username-discovery.md#signing-domains)).
+
+The address is the **only** length-prefixed field: the challenge is appended
+raw, and the one prefix already fixes where the address ends. Prefixing the
+challenge as well is the plausible misreading, and it produces a payload four
+bytes longer that no conforming verifier accepts, while an implementation's own
+round-trip test agrees with itself and reports nothing. For a 44-character
+address and a 32-byte challenge the payload is therefore 103 bytes.
+
+A worked example, which the
+[conformance vectors](conformance.md#the-vectors) carry with two more:
+
+```
+address    off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn
+challenge  000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+payload    6f66666c696e652d676174657761792d616464722d7631   "offline-gateway-addr-v1"
+           0000002c                                         address length, u32be (44)
+           6f6666317179736c7576776c…                        the address, UTF-8
+           000102…1f                                        the 32 challenge bytes
+```
 
 The address is inside the signed bytes deliberately. A signature over a bare
 gateway-chosen challenge would be a signing oracle: the gateway picks challenge

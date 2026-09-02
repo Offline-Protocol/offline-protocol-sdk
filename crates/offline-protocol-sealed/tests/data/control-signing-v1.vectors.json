@@ -19,11 +19,10 @@
       "offline-ctrl-v2",
       "offline-disc-v1",
       "offline-invite-v1",
-      "offline-relay-addr-v1"
-    ],
-    "reserved": [
+      "offline-relay-addr-v1",
       "offline-gateway-addr-v1"
-    ]
+    ],
+    "reserved": []
   },
   "payloads": [
     {

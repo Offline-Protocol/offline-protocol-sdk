@@ -58,8 +58,9 @@ pub mod keypackage;
 pub mod prefixes;
 
 pub use canonical::{
-    canonical_payload, control_signing_payload, control_signing_payload_v2, CTRL_PK_META_KEY,
-    CTRL_SIGN_DOMAIN, CTRL_SIGN_DOMAIN_V2, CTRL_SIG_META_KEY,
+    canonical_payload, control_signing_payload, control_signing_payload_v2,
+    gateway_address_proof_payload, CTRL_PK_META_KEY, CTRL_SIGN_DOMAIN, CTRL_SIGN_DOMAIN_V2,
+    CTRL_SIG_META_KEY, GATEWAY_ADDR_SIGN_DOMAIN,
 };
 pub use constants::{
     ACK_FOR_KEY, LEAF_KEY_PACKAGE_LIFETIME, LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS,
