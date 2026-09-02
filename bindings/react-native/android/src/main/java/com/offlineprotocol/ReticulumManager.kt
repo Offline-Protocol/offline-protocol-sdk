@@ -179,6 +179,34 @@ class ReticulumManager(
     // the core calls [onMessagesAvailable] from (its pre-post check), while
     // pause/resume write on the transport thread.
     @Volatile private var isPaused = false
+
+    // ---- Gateway contract state ----
+
+    /** Frames submitted to the gateway and not yet answered. */
+    private val verdicts = GatewayVerdictTracker()
+
+    /** The SDK-owned presence watchlist, rotated as the relay manager rotates its own. */
+    private val presenceWatch = PresenceWatchPolicy()
+    private var presenceWatchRunnable: Runnable? = null
+
+    /**
+     * True once the gateway has echoed our own address back.
+     *
+     * This — not the TCP connection — is what makes the carrier usable. A
+     * session the gateway did not bind is verdict-only on the other side: it
+     * may submit and be told `attach_required`, and it is never registered as
+     * a recipient, so nothing addressed to this device would ever arrive.
+     * Offering that to the selector would be offering a transport that can only
+     * refuse.
+     *
+     * Volatile for the same reason [isPaused] is: written on the receive
+     * thread, read on the IO thread's poll and on the transport thread.
+     */
+    @Volatile private var isBound = false
+
+    /** Fires if the handshake does not finish. */
+    private var attachTimeoutRunnable: Runnable? = null
+
     private var reconnectAttempts = AtomicInteger(0)
     private var currentReconnectDelay = AtomicLong(RECONNECT_INITIAL_DELAY_MS)
     private var reconnectRunnable: Runnable? = null
@@ -383,6 +411,10 @@ class ReticulumManager(
             // removal still reads it. See the note above.
             isPaused = true
             stopMessagePolling()
+            // A backgrounded app must not keep spending battery on presence
+            // ticks against a gateway; the watchlist is rebuilt from the core
+            // after resume(). Mirrors InternetManager.pause.
+            stopPresenceWatch()
         }
     }
 
@@ -396,6 +428,12 @@ class ReticulumManager(
                 // re-issue [onMessagesAvailable] for messages it already
                 // announced.
                 startMessagePolling()
+                // Only a bound session has anyone to ask. An unbound one is
+                // not announced as a carrier either, so nothing is waiting on
+                // its answers.
+                if (isBound) {
+                    startPresenceWatch()
+                }
             }
         }
     }
@@ -488,12 +526,18 @@ class ReticulumManager(
                     return@post
                 }
 
-                // Send identification
-                val identifyMsg = org.json.JSONObject().apply {
-                    put("type", "Identify")
-                    put("device_id", deviceId)
+                // `device_id` is this device's address where there is one.
+                // The shipped clients sent `config.profile`, a local
+                // storage-namespace selector that is not an identity in any
+                // namespace the gateway knows; it is logged and never routed
+                // on, so it was harmless and useless. Only `DeclareAddress`
+                // binds either way.
+                val identity = try {
+                    protocol.localAddress() ?: deviceId
+                } catch (e: Exception) {
+                    deviceId
                 }
-                w.println(identifyMsg.toString())
+                GatewayAttachPolicy.identifyJson(identity)?.let { w.println(it) }
 
                 // Third checkpoint, inside [handleConnectionOpened]: sending
                 // Identify sits between the publish and the flag claim, so a
@@ -547,6 +591,14 @@ class ReticulumManager(
     }
 
     private fun disconnect() {
+        isBound = false
+        cancelAttachTimeout()
+        stopPresenceWatch()
+        // Every frame this connection was carrying is owed an outcome. A frame
+        // nobody reports on waits out the core's own 120s expiry instead of
+        // going back on the retry ladder now, so silence here is two minutes
+        // of nothing per message.
+        failInFlight("Disconnected")
         synchronized(this) {
             // Clear flags before interrupting the receive thread so it sees
             // isConnected == false and skips the redundant handleConnectionClosed post.
@@ -659,16 +711,11 @@ class ReticulumManager(
 
             updateState(TransportState.RUNNING)
 
-            // Notify the protocol on the transport thread (consistent with
-            // handleConnectionClosed). This is the heaviest FFI call this
-            // manager makes: the false→true edge flushes the whole outbox
-            // under the global protocol mutex, which is why it must not run
-            // on main.
-            try {
-                protocol.reticulumStatusChanged(true)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error notifying protocol of connect", e)
-            }
+            // The carrier is NOT announced here. A TCP connection to a gateway
+            // is not a usable transport: until the gateway binds this session
+            // to our address, every submission draws `attach_required` and
+            // nothing addressed to this device is delivered. The announcement
+            // is in [completeAttach], on `StatusUpdate(connected)`.
 
             // Start polling + immediately flush queued messages — unless the
             // app paused the transport. The status flip above stands either
@@ -682,9 +729,68 @@ class ReticulumManager(
                 startMessagePolling()
                 ioHandler.post { pollAndSendMessages() }
             }
+
+            armAttachTimeout(generation)
         }
 
         return true
+    }
+
+    /**
+     * Announces the carrier once the gateway has bound this session.
+     *
+     * Called on `StatusUpdate(connected)`, which the contract puts after
+     * `AddressDeclared` and after `Capabilities` — so by the time the core is
+     * told this transport is available it has already been told what the
+     * gateway can do, and the flush the false→true edge triggers sees them.
+     * That ordering is the contract's, and a Rust source guard pins it because
+     * neither platform can test it alone.
+     *
+     * A session the gateway refused to bind never reaches here: the refusal
+     * closes the connection instead. That is the one place this manager
+     * diverges from InternetManager, which reports up and keeps working in
+     * account-name space after a refusal. A gateway has no such space.
+     */
+    private fun completeAttach() {
+        transportHandler.post {
+            cancelAttachTimeout()
+            if (!isBound) {
+                emitDiagnostic("warning", "Gateway reported connected before binding the session")
+                return@post
+            }
+            if (state == TransportState.STOPPING || state == TransportState.STOPPED) return@post
+            try {
+                protocol.reticulumStatusChanged(true)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error notifying protocol of connect", e)
+            }
+            if (!isPaused) {
+                startPresenceWatch()
+                ioHandler.post { pollAndSendMessages() }
+            }
+        }
+    }
+
+    /**
+     * Bounds the handshake. A gateway that accepts the socket and then says
+     * nothing is not slow, and waiting out the connection timeout for it means
+     * a minute in which the selector has been told nothing at all.
+     */
+    private fun armAttachTimeout(generation: Int) {
+        cancelAttachTimeout()
+        val runnable = Runnable {
+            attachTimeoutRunnable = null
+            if (!isConnected.get() || isBound) return@Runnable
+            emitDiagnostic("error", "Gateway attach timed out before the session was bound")
+            handleConnectionClosed(generation, -1, "Attach timeout")
+        }
+        attachTimeoutRunnable = runnable
+        transportHandler.postDelayed(runnable, GatewayAttachPolicy.ATTACH_TIMEOUT_MS)
+    }
+
+    private fun cancelAttachTimeout() {
+        attachTimeoutRunnable?.let { transportHandler.removeCallbacks(it) }
+        attachTimeoutRunnable = null
     }
 
     private fun startReceiveLoop(reader: BufferedReader, generation: Int) {
@@ -692,7 +798,7 @@ class ReticulumManager(
             try {
                 while (isConnected.get() && !Thread.currentThread().isInterrupted) {
                     val line = reader.readLine() ?: break
-                    processReceivedData(line.toByteArray(Charsets.UTF_8))
+                    processReceivedData(line.toByteArray(Charsets.UTF_8), generation)
                 }
             } catch (e: Exception) {
                 if (isConnected.get()) {
@@ -820,7 +926,18 @@ class ReticulumManager(
 
     // MARK: - Message Handling
 
-    private fun processReceivedData(data: ByteArray) {
+    /**
+     * Handles one line from the daemon, under the generation of the connection
+     * that delivered it.
+     *
+     * The generation is threaded in rather than read here. A handler that
+     * sampled `connectGeneration` itself would always find its own value and
+     * so would always pass [handleConnectionClosed]'s check — including when
+     * the frame it is acting on arrived on a connection that has since been
+     * replaced, in which case it would tear down the connection that replaced
+     * it.
+     */
+    private fun processReceivedData(data: ByteArray, generation: Int) {
         val json: org.json.JSONObject
         val messageType: String
 
@@ -870,11 +987,35 @@ class ReticulumManager(
                 }
             }
 
+            "Challenge" -> handleChallenge(json, generation)
+
+            "AddressDeclared" -> handleAddressDeclared(json, generation)
+
+            "AddressError" -> handleAddressError(json, generation)
+
+            "Capabilities" -> {
+                val tokens = GatewayAttachPolicy.capabilityTokens(json)
+                // Before the status flip, never after: the flush that flip
+                // triggers has to see them.
+                try {
+                    protocol.reticulumGatewayCapabilities(tokens)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error injecting gateway capabilities", e)
+                }
+            }
+
+            "MessageSent", "DeliveryError" -> handleVerdict(json, messageType)
+
+            "PresenceStatus" -> handlePresence(json)
+
             "StatusUpdate" -> {
                 val daemonStatus = json.optString("status", "unknown")
                 emitDiagnostic("debug", "Reticulum daemon status update", mapOf(
                     "status" to daemonStatus
                 ))
+                if (daemonStatus == "connected") {
+                    completeAttach()
+                }
             }
 
             else -> {
@@ -882,6 +1023,268 @@ class ReticulumManager(
                     "type" to messageType
                 ))
             }
+        }
+    }
+
+    // MARK: - The gateway handshake
+
+    /**
+     * Signs the gateway's challenge and declares this device's address.
+     *
+     * The signing happens in the core: this hands it the challenge and gets
+     * back the three fields `DeclareAddress` carries. A failure is not retried
+     * on this connection — the gateway spends a challenge per connection, and
+     * the next reconnect gets a fresh one.
+     */
+    private fun handleChallenge(json: org.json.JSONObject, generation: Int) {
+        when (val outcome = GatewayAttachPolicy.decodeChallenge(json)) {
+            is GatewayAttachPolicy.ChallengeOutcome.Skip -> {
+                emitDiagnostic("warning", "Cannot declare an address to the gateway", mapOf(
+                    "reason" to outcome.reason
+                ))
+                transportHandler.post { handleConnectionClosed(generation, -1, outcome.reason) }
+            }
+            is GatewayAttachPolicy.ChallengeOutcome.Declare -> {
+                try {
+                    val declaration = protocol.gatewayAddressDeclaration(
+                        outcome.challenge.map { it.toUByte() }
+                    )
+                    val frame = GatewayAttachPolicy.declarationJson(
+                        declaration.address,
+                        declaration.publicKey.map { it.toByte() }.toByteArray(),
+                        declaration.signature.map { it.toByte() }.toByteArray()
+                    )
+                    if (frame == null) {
+                        emitDiagnostic("error", "Cannot serialize the address declaration")
+                        transportHandler.post {
+                            handleConnectionClosed(
+                                generation, -1, GatewayAttachPolicy.Reason.FRAME_UNSERIALIZABLE)
+                        }
+                        return
+                    }
+                    writeLine(frame)
+                } catch (e: Exception) {
+                    // No identity yet, or a challenge the core refused to sign.
+                    // Either way this connection can only ever be verdict-only,
+                    // so it is not worth holding open.
+                    emitDiagnostic("warning", "Cannot build the address declaration", mapOf(
+                        "reason" to GatewayAttachPolicy.Reason.SIGNING_FAILED,
+                        "error" to (e.message ?: "unknown")
+                    ))
+                    transportHandler.post {
+                        handleConnectionClosed(
+                            generation, -1, GatewayAttachPolicy.Reason.SIGNING_FAILED)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Checks what the gateway says it bound against what we hold.
+     *
+     * Both answers go to the core, which owns the security warning; what is
+     * decided here is narrower and is the bridge's own: whether this carrier
+     * can be offered to the selector at all.
+     */
+    private fun handleAddressDeclared(json: org.json.JSONObject, generation: Int) {
+        val declared = json.optString("address", "")
+        if (declared.isEmpty()) {
+            emitDiagnostic("warning", "Invalid AddressDeclared: missing address")
+            return
+        }
+        try {
+            protocol.reticulumAddressDeclared(declared)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error reporting the address echo", e)
+        }
+        val local = try {
+            protocol.localAddress()
+        } catch (e: Exception) {
+            null
+        }
+        when (GatewayAttachPolicy.bindingOutcome(declared, local)) {
+            GatewayAttachPolicy.BindingOutcome.BOUND -> {
+                isBound = true
+                emitDiagnostic("info", "Gateway bound this session to our address")
+            }
+            else -> {
+                // The core has already reported this as a security warning.
+                // Here it costs the connection: a gateway that bound an address
+                // we do not control will attribute our frames to an identity we
+                // cannot prove and answer presence about someone else, and
+                // reconnecting is the only thing this side can do that might
+                // land somewhere honest.
+                emitDiagnostic("error", "Gateway bound a session to an address we do not hold")
+                transportHandler.post {
+                    handleConnectionClosed(generation, -1, "Address binding mismatch")
+                }
+            }
+        }
+    }
+
+    /**
+     * The gateway refused the declaration, so this session can only be told
+     * verdicts. The carrier is never announced; the connection goes and the
+     * existing backoff decides when to try again.
+     */
+    private fun handleAddressError(json: org.json.JSONObject, generation: Int) {
+        val reason = json.optString("reason", "unspecified")
+        try {
+            protocol.reticulumAddressDeclarationRefused(reason)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error reporting the declaration refusal", e)
+        }
+        emitDiagnostic("warning", "Gateway refused the address declaration", mapOf(
+            "reason" to reason
+        ))
+        transportHandler.post { handleConnectionClosed(generation, -1, "Address declaration refused") }
+    }
+
+    // MARK: - Verdicts
+
+    /**
+     * Settles one submitted frame on the gateway's answer.
+     *
+     * This is what the shipped bridges did not do. They called
+     * `reticulumConfirmSent` the moment the socket write returned, so every
+     * frame was "sent" whether the gateway forwarded it, refused it, or dropped
+     * it — and `recipient_unreachable`, the one verdict that parks a message
+     * and offers it to the mesh, never reached the core at all.
+     */
+    private fun handleVerdict(json: org.json.JSONObject, type: String) {
+        val verdict = GatewayAttachPolicy.parseVerdict(json, type)
+        if (verdict == null) {
+            emitDiagnostic("warning", "Verdict with no message_id, ignored", mapOf("type" to type))
+            return
+        }
+        // Already settled: a duplicate, or an answer to a frame this connection
+        // timed out on. Reporting it again would settle an id the core has
+        // moved past.
+        if (!verdicts.settle(verdict.messageId)) return
+        try {
+            if (verdict.sent) {
+                protocol.reticulumConfirmSent(verdict.messageId)
+            } else {
+                // Verbatim. The core classifies on the `recipient_unreachable`
+                // prefix and discards the rest at that boundary, so nothing here
+                // needs to understand the gateway's wording.
+                protocol.reticulumSendFailedWithReason(verdict.messageId, verdict.reason)
+                val recipient = verdict.recipient
+                if (recipient != null &&
+                    verdict.reason?.startsWith("recipient_unreachable") == true
+                ) {
+                    // Watch them: the gateway pushes a PresenceStatus when a
+                    // watched peer attaches, and that answer is what un-parks
+                    // the message this verdict just parked.
+                    presenceWatch.watch(recipient, System.currentTimeMillis())
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error settling verdict for ${verdict.messageId}", e)
+        }
+        ioHandler.post { pollAndSendMessages() }
+    }
+
+    /**
+     * Fails every outstanding frame with [reason], on a connection going away
+     * or on a gateway that answered nothing.
+     */
+    private fun failInFlight(reason: String) {
+        val stranded = verdicts.drainAll()
+        if (stranded.isEmpty()) return
+        for (messageId in stranded) {
+            try {
+                protocol.reticulumSendFailedWithReason(messageId, reason)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error failing stranded frame $messageId", e)
+            }
+        }
+    }
+
+    // MARK: - Presence
+
+    private fun handlePresence(json: org.json.JSONObject) {
+        val answer = GatewayAttachPolicy.parsePresence(json)
+        if (answer == null) {
+            emitDiagnostic("warning", "Invalid PresenceStatus, ignored")
+            return
+        }
+        if (answer.online) presenceWatch.unwatch(answer.peer)
+        try {
+            protocol.reticulumPeerPresence(answer.peer, answer.online, answer.lastSeenMs)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error reporting gateway presence", e)
+        }
+    }
+
+    private fun startPresenceWatch() {
+        stopPresenceWatch()
+        val runnable = object : Runnable {
+            override fun run() {
+                presenceWatchTick()
+                transportHandler.postDelayed(this, PresenceWatchPolicy.DEFAULT_TICK_INTERVAL_MS)
+            }
+        }
+        presenceWatchRunnable = runnable
+        transportHandler.postDelayed(runnable, PresenceWatchPolicy.DEFAULT_TICK_INTERVAL_MS)
+    }
+
+    private fun stopPresenceWatch() {
+        presenceWatchRunnable?.let { transportHandler.removeCallbacks(it) }
+        presenceWatchRunnable = null
+        presenceWatch.clear()
+    }
+
+    /**
+     * Asks the gateway about the peers the core is waiting to hear about.
+     *
+     * One frame for the whole batch, which is the contract's shape. The core
+     * owns the list — every peer with an undelivered welcome, and every
+     * recipient of a parked message — so the app is not asked to maintain one.
+     */
+    private fun presenceWatchTick() {
+        if (!isBound || isPaused) return
+        val coreWatchlist = try {
+            protocol.reticulumPresenceWatchlist()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error reading the presence watchlist", e)
+            return
+        }
+        val selfAddress = try {
+            protocol.localAddress()
+        } catch (e: Exception) {
+            null
+        }
+        val candidates = coreWatchlist.filter {
+            it.isNotEmpty() && it != deviceId && it != selfAddress
+        }
+        val peers = presenceWatch.peersToQuery(candidates, System.currentTimeMillis())
+        val frame = GatewayAttachPolicy.checkPresenceJson(peers) ?: return
+        ioHandler.post { writeLine(frame) }
+    }
+
+    /** Writes one line to the daemon, if the socket is still up. */
+    private fun writeLine(line: String) {
+        val w = synchronized(this) { writer } ?: return
+        try {
+            w.println(line)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error writing to the gateway", e)
+        }
+    }
+
+    /**
+     * Settles a frame that never reached the gateway, so no verdict is coming
+     * for it. Only reports to the core if this call is the one that took the id
+     * out of flight.
+     */
+    private fun settleLocally(messageId: String, reason: String) {
+        if (!verdicts.settle(messageId)) return
+        try {
+            protocol.reticulumSendFailedWithReason(messageId, reason)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to report send failure for $messageId", e)
         }
     }
 
@@ -916,22 +1319,69 @@ class ReticulumManager(
         ioHandler.post { ioHandler.removeCallbacks(messagePollingRunnable) }
     }
 
+    /**
+     * Fails frames the gateway never answered.
+     *
+     * The contract says a gateway MUST answer every submission, and silence is
+     * the one failure the core cannot see: it holds the frame in
+     * `pending_confirmation` until its own 120s expiry and counts it a failure
+     * then. Failing it here, at 60s, puts it back on the retry ladder while the
+     * core still considers it live — which is why this timeout has to stay the
+     * shorter of the two.
+     */
+    private fun sweepExpiredVerdicts() {
+        val stale = verdicts.expired(
+            System.currentTimeMillis(), GatewayAttachPolicy.VERDICT_TIMEOUT_MS)
+        if (stale.isEmpty()) return
+        emitDiagnostic("warning", "Gateway did not answer for submitted frames", mapOf(
+            "count" to stale.size
+        ))
+        for (messageId in stale) {
+            try {
+                protocol.reticulumSendFailedWithReason(
+                    messageId, "gateway_silent: no verdict within 60s")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error failing unanswered frame $messageId", e)
+            }
+        }
+    }
+
     private fun pollAndSendMessages() {
-        if (!isConnected.get()) return
+        if (!isBound) return
+
+        sweepExpiredVerdicts()
 
         try {
             var sent = 0
             val maxBatchSize = 10
 
             while (sent < maxBatchSize) {
-                if (!isConnected.get()) {
+                if (!isBound) {
                     emitDiagnostic("warning", "Connection lost mid-batch, stopping message send", mapOf(
                         "messagesSent" to sent
                     ))
                     break
                 }
 
+                // Bounded by what is unanswered, not only by the batch: a
+                // gateway slow to answer must not have the whole outbox handed
+                // to it, because every id in flight is one the core cannot
+                // retry until it is settled.
+                if (verdicts.count >= GatewayAttachPolicy.MAX_IN_FLIGHT) break
+
                 val message = protocol.reticulumGetNextMessage() ?: break
+
+                // The core re-queues an unconfirmed frame under the same id
+                // after its own acknowledgement timeout, and a verdict can
+                // honestly take longer than that over a radio backbone.
+                // Sending it again would forward the frame twice and, when
+                // this copy timed out, fail an id the gateway had already
+                // confirmed. Popping it was enough: the core's pending entry
+                // is refreshed by the pop.
+                if (!verdicts.begin(message.messageId, System.currentTimeMillis())) {
+                    continue
+                }
+
                 sendMessage(
                     message.messageId,
                     message.recipientId,
@@ -953,6 +1403,19 @@ class ReticulumManager(
         }
     }
 
+    /**
+     * Writes one frame. **The write is not the outcome.**
+     *
+     * A successful write means the gateway has the bytes, which says nothing
+     * about whether it could forward them; the answer arrives later as a
+     * `MessageSent` or a `DeliveryError` and is settled in [handleVerdict].
+     * Confirming here is what the shipped bridge did, and it is why a
+     * `recipient_unreachable` verdict — the one that parks a message and offers
+     * it to the mesh — could never reach the core.
+     *
+     * A *failed* write is settled here, because there is no frame on the wire
+     * for the gateway to answer about.
+     */
     private fun sendMessage(
         messageId: String,
         recipientId: String,
@@ -972,31 +1435,34 @@ class ReticulumManager(
             generation = connectGeneration.get()
         }
 
-        if (!isConnected.get() || w == null) {
-            emitDiagnostic("warning", "Cannot send message - not connected", mapOf(
+        if (!isBound || w == null) {
+            emitDiagnostic("warning", "Cannot send message - not attached", mapOf(
                 "messageId" to messageId,
                 "recipientId" to recipientId
             ))
-            try { protocol.reticulumSendFailed(messageId) } catch (e: Exception) {
-                Log.e(TAG, "Failed to report send failure for $messageId", e)
-            }
+            settleLocally(messageId, "Not attached to a gateway")
             return
         }
 
         val content = android.util.Base64.encodeToString(data, android.util.Base64.NO_WRAP)
 
-        val reticulumMessage = org.json.JSONObject().apply {
-            put("type", "SendMessage")
-            put("recipient", recipientId)
-            put("content", content)
-            put("encoding", "base64")
-            if (replyToMsg != null && replyToMsg.isNotEmpty()) {
-                put("reply_to_msg", replyToMsg)
-            }
+        // Sanitised the way the gateway sanitises it: an id it would refuse is
+        // replaced *there* by one it mints, and the verdict then comes back
+        // under a name nothing here is waiting on. Message ids are UUIDs, so
+        // this passes; it is what keeps that from being an assumption.
+        val wireId = GatewayAttachPolicy.sanitizeMessageId(messageId)
+        val jsonString = wireId?.let {
+            GatewayAttachPolicy.sendMessageJson(it, recipientId, content, replyToMsg)
+        }
+        if (jsonString == null) {
+            emitDiagnostic("error", "Failed to create Reticulum message", mapOf(
+                "messageId" to messageId
+            ))
+            settleLocally(messageId, "Unserializable frame")
+            return
         }
 
         try {
-            val jsonString = reticulumMessage.toString()
             w.println(jsonString)
 
             if (w.checkError()) {
@@ -1004,20 +1470,15 @@ class ReticulumManager(
             }
 
             consecutiveSendFailures.set(0)
-            try { protocol.reticulumConfirmSent(messageId) } catch (e: Exception) {
-                Log.e(TAG, "Failed to confirm send for $messageId", e)
-            }
 
-            emitDiagnostic("debug", "Message sent via Reticulum", mapOf(
+            emitDiagnostic("debug", "Message submitted to the gateway", mapOf(
                 "messageId" to messageId,
                 "recipientId" to recipientId,
                 "contentLength" to content.length
             ))
         } catch (e: Exception) {
             val failures = consecutiveSendFailures.incrementAndGet()
-            try { protocol.reticulumSendFailed(messageId) } catch (ex: Exception) {
-                Log.e(TAG, "Failed to report send failure for $messageId", ex)
-            }
+            settleLocally(messageId, "Write failed")
             emitDiagnostic("error", "Failed to send Reticulum message", mapOf(
                 "messageId" to messageId,
                 "recipientId" to recipientId,
