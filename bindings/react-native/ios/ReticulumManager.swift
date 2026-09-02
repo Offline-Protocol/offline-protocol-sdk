@@ -367,13 +367,13 @@ public class ReticulumManager: NSObject, TransportManager {
             guard let self = self else { return }
             switch newState {
             case .ready:
-                // A late open for a session the connection timeout already
-                // retired would claim the flags for a socket nothing tracks.
-                guard self.sessionGeneration == generation, let conn = conn else {
+                // The claim refuses a late open for a session the connection
+                // timeout already retired, and a stop() that landed while
+                // the open was in flight; either way the socket is stray.
+                guard let conn = conn, self.handleConnectionOpened(generation: generation) else {
                     conn?.cancel()
                     return
                 }
-                self.handleConnectionOpened(generation: generation)
                 self.startReceiving(on: conn, generation: generation)
             case .failed(let error):
                 self.emitDiagnostic("error", "Reticulum connection failed", context: [
@@ -444,11 +444,27 @@ public class ReticulumManager: NSObject, TransportManager {
         failInFlight(reason: reason)
     }
 
-    private func handleConnectionOpened(generation: Int) {
+    /// Claims the flags for the socket `generation` names, or refuses when
+    /// that session is already over.
+    ///
+    /// The generation check and the claim are one step under [stateLock],
+    /// as Android's `handleConnectionOpened` folds them. Checked and then
+    /// claimed as two, a `stop()` landing between them would leave
+    /// `isConnected` true on a retired generation with no connection behind
+    /// it, and the next `start()`'s `connect()` would skip on that flag with
+    /// nothing left to reconnect: a transport wedged at `.running` until
+    /// cycled by hand.
+    private func handleConnectionOpened(generation: Int) -> Bool {
+        stateLock.lock()
+        guard _sessionGeneration == generation else {
+            stateLock.unlock()
+            return false
+        }
+        _isConnected = true
+        _isConnecting = false
+        stateLock.unlock()
         connectionTimeoutWorkItem?.cancel()
         connectionTimeoutWorkItem = nil
-        isConnected = true
-        isConnecting = false
         consecutiveSendFailures = 0
         receiveBuffer = Data()
 
@@ -531,6 +547,7 @@ public class ReticulumManager: NSObject, TransportManager {
             // [statusFlipLock] lives; see it for why `isConnected` is half
             // of that decision.
         }
+        return true
     }
 
     /// Announces the carrier once the gateway has bound this session.
@@ -569,7 +586,6 @@ public class ReticulumManager: NSObject, TransportManager {
                 self.handleConnectionClosed(error: nil, generation: generation)
                 return
             }
-            self.cancelAttachTimeout()
             self.statusFlipLock.lock()
             let announced = self.isConnected && self.state != .stopping && self.state != .stopped
             if announced {
@@ -593,10 +609,16 @@ public class ReticulumManager: NSObject, TransportManager {
     /// Bounds the handshake. A gateway that accepts the socket and then says
     /// nothing is not slow, and waiting out the connection timeout for it
     /// means a minute in which the selector has been told nothing at all.
+    ///
+    /// Disarmed by `StatusUpdate(connected)` and by a teardown, and by
+    /// nothing else: it is not gated on the bind, because a gateway that
+    /// binds and then never announces is exactly the wedge this exists to
+    /// end, and a session that was bound but never announced is one the
+    /// core was never told about.
     private func armAttachTimeout(generation: Int) {
         let item = DispatchWorkItem { [weak self] in
-            guard let self = self, self.isConnected, !self.isBound else { return }
-            self.emitDiagnostic("error", "Gateway attach timed out before the session was bound")
+            guard let self = self, self.isConnected else { return }
+            self.emitDiagnostic("error", "Gateway attach timed out before StatusUpdate(connected)")
             self.handleConnectionClosed(error: nil, generation: generation)
         }
         stateLock.lock()
@@ -633,17 +655,6 @@ public class ReticulumManager: NSObject, TransportManager {
             if let data = content {
                 self.receiveBuffer.append(data)
 
-                // A line past the cap cannot be resynchronised: its tail would
-                // be read as a fresh line, so every frame after it is garbage.
-                // The connection goes instead, and the reconnect starts clean.
-                if self.receiveBuffer.count > GatewayAttachPolicy.MAX_LINE_BYTES {
-                    self.emitDiagnostic("error", "Over-long line from the gateway", context: [
-                        "bytes": self.receiveBuffer.count
-                    ])
-                    self.handleConnectionClosed(error: nil, generation: generation)
-                    return
-                }
-
                 // Process complete lines (newline-delimited JSON)
                 let newlineByte = Data([0x0A])
                 while let newlineRange = self.receiveBuffer.range(of: newlineByte) {
@@ -655,6 +666,20 @@ public class ReticulumManager: NSObject, TransportManager {
                     // A line that closed the session ends the segment: the
                     // rest belongs to a socket this side has retired.
                     if self.sessionGeneration != generation { return }
+                }
+
+                // What remains is one partial line. Past the cap it cannot be
+                // resynchronised: its tail would be read as a fresh line, so
+                // every frame after it is garbage. The connection goes
+                // instead, and the reconnect starts clean. Checked after the
+                // split so the cap is on the line, as on Android, and not on
+                // however many complete lines shared the read with it.
+                if self.receiveBuffer.count > GatewayAttachPolicy.MAX_LINE_BYTES {
+                    self.emitDiagnostic("error", "Over-long line from the gateway", context: [
+                        "bytes": self.receiveBuffer.count
+                    ])
+                    self.handleConnectionClosed(error: nil, generation: generation)
+                    return
                 }
             }
 
@@ -887,6 +912,11 @@ public class ReticulumManager: NSObject, TransportManager {
                 "status": daemonStatus
             ])
             if daemonStatus == "connected" {
+                // The gateway's half of the handshake is done, whatever the
+                // hop below decides about ours. Disarmed here rather than in
+                // the hop, so a hop stalled on the global mutex past the
+                // deadline is not closed out from under by its own timeout.
+                cancelAttachTimeout()
                 completeAttach(generation: generation)
             }
 
@@ -987,8 +1017,10 @@ public class ReticulumManager: NSObject, TransportManager {
             guard let self = self else { return }
             self.protocolInstance.reticulumAddressDeclarationRefused(reason: reason)
         }
+        // Remote-chosen text, bounded before it reaches a diagnostic the
+        // way the core bounds it before its own log.
         emitDiagnostic("warning", "Gateway refused the address declaration", context: [
-            "reason": reason
+            "reason": String(reason.prefix(256))
         ])
         handleConnectionClosed(error: nil, generation: generation)
     }
@@ -1119,7 +1151,11 @@ public class ReticulumManager: NSObject, TransportManager {
     /// one is a hard crash.
     private func startPresenceWatch() {
         stateLock.lock()
-        guard !_isPaused else {
+        // Bound as well as unpaused: a `stop()` that lands between the
+        // status flip and this call has already cleared the bind under this
+        // lock, and a timer armed past it would tick on a stopped transport
+        // until something else happened to cancel it.
+        guard !_isPaused, _isBound else {
             stateLock.unlock()
             return
         }

@@ -1942,10 +1942,21 @@ upgrade rather than fold it into your next feature release.
 
 ## 19. The Reticulum transport's inert configuration is gone
 
-**Rust crates only.** No binding, no configuration key and no behaviour
-changes: none of what follows was ever reachable through the FFI, and the
+**Rust crates only, for the removals below.** No binding and no configuration
+key changes: none of what follows was ever reachable through the FFI, and the
 React Native `transports.reticulum` section (`daemonAddress`, `autoReconnect`,
 `maxReconnectAttempts`) is untouched and still read by the native managers.
+
+**One behaviour change, for anyone running a custom daemon.** The bundled
+managers now attach with [contract v1](spec/gateway-contract.md#attach): they
+expect `Identify` to be answered with `Challenge`, sign and send
+`DeclareAddress`, and announce the carrier only on the `StatusUpdate(connected)`
+that follows a bound session. A daemon that speaks the earlier shape, `Identify`
+answered by nothing in particular and `StatusUpdate` treated as advisory, gets a
+transport that connects and never becomes available: the attach times out after
+ten seconds and the manager reconnects on its ladder. The frames a daemon has to
+send, and the security warnings that explain a refused or mismatched attach, are
+in [docs/reticulum.md](reticulum.md#the-attach-handshake).
 
 | Removed | Surface |
 |---|---|

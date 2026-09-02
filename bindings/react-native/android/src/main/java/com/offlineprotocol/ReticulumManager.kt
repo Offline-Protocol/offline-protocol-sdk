@@ -818,10 +818,15 @@ class ReticulumManager(
      */
     private fun armAttachTimeout(generation: Int) {
         cancelAttachTimeout()
+        // Disarmed by [completeAttach] and by a teardown, and by nothing
+        // else: not gated on the bind, because a gateway that binds and then
+        // never announces is exactly the wedge this exists to end, and a
+        // session bound but never announced is one the core was never told
+        // about.
         val runnable = Runnable {
             attachTimeoutRunnable = null
-            if (!isConnected.get() || isBound) return@Runnable
-            emitDiagnostic("error", "Gateway attach timed out before the session was bound")
+            if (!isConnected.get()) return@Runnable
+            emitDiagnostic("error", "Gateway attach timed out before StatusUpdate(connected)")
             handleConnectionClosed(generation, -1, "Attach timeout")
         }
         attachTimeoutRunnable = runnable
@@ -1082,16 +1087,21 @@ class ReticulumManager(
 
             "Capabilities" -> {
                 val tokens = GatewayAttachPolicy.capabilityTokens(json)
-                // A reader that outlived its session must not overwrite the
-                // successor's advertisement: the two receive threads contend
-                // for the protocol mutex, which is not FIFO.
-                if (connectGeneration.get() != generation) return
-                // Before the status flip, never after: the flush that flip
-                // triggers has to see them.
-                try {
-                    protocol.reticulumGatewayCapabilities(tokens)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error injecting gateway capabilities", e)
+                // Injected from the transport thread, in frame order with the
+                // announcement that follows it there, and under the generation
+                // of the socket that carried the frame. Inline on the receive
+                // thread, a reader that outlived its session contends for the
+                // protocol mutex with the successor's, and that mutex is not
+                // FIFO: a generation check that passed could still land its
+                // injection after the successor's. Before the status flip,
+                // never after: the flush that flip triggers has to see them.
+                transportHandler.post {
+                    if (connectGeneration.get() != generation) return@post
+                    try {
+                        protocol.reticulumGatewayCapabilities(tokens)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error injecting gateway capabilities", e)
+                    }
                 }
             }
 
@@ -1261,8 +1271,10 @@ class ReticulumManager(
         } catch (e: Exception) {
             Log.e(TAG, "Error reporting the declaration refusal", e)
         }
+        // Remote-chosen text, bounded before it reaches a diagnostic the way
+        // the core bounds it before its own log.
         emitDiagnostic("warning", "Gateway refused the address declaration", mapOf(
-            "reason" to reason
+            "reason" to reason.take(256)
         ))
         transportHandler.post { handleConnectionClosed(generation, -1, "Address declaration refused") }
     }

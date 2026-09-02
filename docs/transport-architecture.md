@@ -178,9 +178,9 @@ This feeds real delivery data into DORS so it can make accurate routing decision
 Device ←→ Platform Bridge ←→ Reticulum Stack ←→ LoRa/TCP/UDP/I2P ←→ Remote Device
 ```
 
-**Platform bridge pattern**: The platform bridges to a Reticulum stack via embedded Python (most proven for mobile, used by Sideband), the emerging `reticulum-rs` Rust crate, HDLC shared instance IPC (desktop), or a gateway daemon speaking [the gateway contract](spec/gateway-contract.md). The Rust transport manages queues, metrics, and the confirmation loop, and opens no Reticulum link itself. No gateway daemon ships yet, so this transport has no working counterpart today.
+**Platform bridge pattern**: The platform bridges to a Reticulum stack via embedded Python (most proven for mobile, used by Sideband), the emerging `reticulum-rs` Rust crate, HDLC shared instance IPC (desktop), or a gateway daemon speaking [the gateway contract](spec/gateway-contract.md). The Rust transport manages queues, metrics, and the confirmation loop, and opens no Reticulum link itself. A gateway daemon is a separate deployment rather than something this SDK ships; the bundled managers speak the contract to whatever answers at `daemonAddress`.
 
-**Send confirmation loop**: Like Internet transport, the platform drains the outgoing queue via `reticulumGetNextMessage()`, sends through the Reticulum daemon, and **must** report the outcome via `reticulumConfirmSent(messageId)` or `reticulumSendFailed(messageId)`. Pending confirmations time out after 120 seconds (longer than Internet's 15s due to high-latency LoRa paths).
+**Send confirmation loop**: Like Internet transport, the platform drains the outgoing queue via `reticulumGetNextMessage()`, sends through the Reticulum daemon, and **must** report the outcome via `reticulumConfirmSent(messageId)` or `reticulumSendFailedWithReason(messageId, reason)`, on the gateway's verdict rather than on the socket write, so a `recipient_unreachable` verdict can park the message. Pending confirmations time out after 120 seconds (longer than Internet's 15s due to high-latency LoRa paths).
 
 **Key characteristics**:
 - Disabled by default (`reticulumEnabled: false`) — requires external infrastructure
@@ -466,7 +466,7 @@ Update `AndroidManifest.xml` with required permissions.
 6. Platform reports outcome:
    - BLE: implicit (fragment send is synchronous)
    - Internet: internetConfirmSent(messageId) or internetSendFailed(messageId)
-   - Reticulum: reticulumConfirmSent(messageId) or reticulumSendFailed(messageId)
+   - Reticulum: reticulumConfirmSent(messageId) or reticulumSendFailedWithReason(messageId, reason), on the gateway's verdict
    - Nostr: nostrConfirmSent(messageId) or nostrSendFailed(messageId) (driven by relay `["OK", ...]` responses)
 7. Remote device receives data and passes to Rust core
 8. Rust core delivers message and sends ACK

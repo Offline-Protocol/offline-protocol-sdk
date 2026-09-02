@@ -255,6 +255,28 @@ final class GatewayAttachPolicyTests: XCTestCase {
         XCTAssertLessThan(GatewayAttachPolicy.ATTACH_TIMEOUT, 60.0)
     }
 
+    /// A refusal that carries no wording is still a refusal, and the
+    /// recipient it names still reaches the manager.
+    func testADeliveryErrorWithoutAReasonStillSettlesAndCarriesTheRecipient() throws {
+        let json = try frame(#"{"type":"DeliveryError","message_id":"m1","recipient":"off1bob"}"#)
+        let verdict = try XCTUnwrap(GatewayAttachPolicy.parseVerdict(json, type: "DeliveryError"))
+        XCTAssertFalse(verdict.sent)
+        XCTAssertEqual(verdict.reason, "DeliveryError")
+        XCTAssertEqual(verdict.recipient, "off1bob")
+    }
+
+    /// The token bound is in bytes, as the core's is: a hundred two-byte
+    /// characters is over it, and exactly 128 bytes is on it.
+    func testCapabilityTokensAreBoundedInBytesNotCharacters() {
+        let exact = String(repeating: "a", count: 128)
+        let over = String(repeating: "a", count: 129)
+        let multibyte = String(repeating: "é", count: 100)
+        let kept = GatewayAttachPolicy.capabilityTokens(from: [
+            "tokens": [exact, over, multibyte, "gateway_v1"]
+        ])
+        XCTAssertEqual(kept, [exact, "gateway_v1"])
+    }
+
     // MARK: - Helpers
 
     private func frame(_ json: String?) throws -> [String: Any] {

@@ -11996,7 +11996,8 @@ mod tests {
         //    transport connected and mute.
         assert!(
             swift.contains(
-                "if daemonStatus == \"connected\" { completeAttach(generation: generation) }"
+                "if daemonStatus == \"connected\" { cancelAttachTimeout() \
+                 completeAttach(generation: generation) }"
             ),
             "ReticulumManager.swift must complete the attach on StatusUpdate(connected)"
         );
@@ -12278,6 +12279,50 @@ mod tests {
             "ReticulumManager.swift must not send a retired session's Identify down the \
              successor's socket"
         );
+        assert!(
+            swift.contains(
+                "private func handleConnectionOpened(generation: Int) -> Bool { stateLock.lock() \
+                 guard _sessionGeneration == generation else { stateLock.unlock() return false } \
+                 _isConnected = true _isConnecting = false stateLock.unlock()"
+            ),
+            "ReticulumManager.swift must check the generation and claim the flags as one step \
+             under stateLock, as Android does: checked and then claimed, a stop() between the \
+             two leaves isConnected true on a retired generation and the next start() skips"
+        );
+        assert!(
+            swift.contains(
+                "messageQueue.async { [weak self] in guard let self = self, \
+                 self.sessionGeneration == generation else { return } \
+                 try? self.protocolInstance.reticulumGatewayCapabilities(capabilities: tokens) }"
+            ),
+            "ReticulumManager.swift must inject capabilities from the messageQueue hop that \
+             is FIFO with the announcement, under the generation of the socket that carried them"
+        );
+
+        // The attach timeout is disarmed by StatusUpdate(connected) and by a
+        // teardown, and gated on nothing else. Gated on the bind, a gateway
+        // that bound and then never announced left the transport connected,
+        // bound and never told to the core, with no timeout to end it.
+        assert!(
+            swift.contains(
+                "guard let self = self, self.isConnected else { return } \
+                 self.emitDiagnostic(\"error\", \"Gateway attach timed out before \
+                 StatusUpdate(connected)\") \
+                 self.handleConnectionClosed(error: nil, generation: generation)"
+            ),
+            "ReticulumManager.swift's attach timeout must fire for a session that is bound but \
+             never announced"
+        );
+        assert!(
+            kotlin.contains(
+                "attachTimeoutRunnable = null if (!isConnected.get()) return@Runnable \
+                 emitDiagnostic(\"error\", \"Gateway attach timed out before \
+                 StatusUpdate(connected)\") handleConnectionClosed(generation, -1, \
+                 \"Attach timeout\")"
+            ),
+            "ReticulumManager.kt's attach timeout must fire for a session that is bound but \
+             never announced"
+        );
     }
 
     /// The gateway constants agree across both bridges, and the verdict
@@ -12299,6 +12344,7 @@ mod tests {
         // the same spelling the pin checks, rather than from a second literal
         // that would agree with itself.
         const SWIFT_VERDICT_TIMEOUT_DECL: &str = "VERDICT_TIMEOUT: TimeInterval = 60.0";
+        const KOTLIN_VERDICT_TIMEOUT_DECL: &str = "VERDICT_TIMEOUT_MS = 60_000L";
 
         // (name, swift spelling, kotlin spelling)
         let pairs: [(&str, &str, &str); 7] = [
@@ -12320,7 +12366,7 @@ mod tests {
             (
                 "verdict timeout",
                 SWIFT_VERDICT_TIMEOUT_DECL,
-                "VERDICT_TIMEOUT_MS = 60_000L",
+                KOTLIN_VERDICT_TIMEOUT_DECL,
             ),
             (
                 "line cap",
@@ -12360,20 +12406,37 @@ mod tests {
         // constant, and the bridge's is parsed out of the spelling pinned
         // above. Two test-local literals here would agree with each other
         // whatever either side changed to.
-        let bridge_verdict_timeout_secs = SWIFT_VERDICT_TIMEOUT_DECL
+        let swift_verdict_timeout_secs = SWIFT_VERDICT_TIMEOUT_DECL
             .rsplit('=')
             .next()
             .and_then(|v| v.trim().parse::<f64>().ok())
             .expect("the pinned Swift spelling ends in a number");
+        let kotlin_verdict_timeout_secs = KOTLIN_VERDICT_TIMEOUT_DECL
+            .rsplit('=')
+            .next()
+            .and_then(|v| {
+                v.trim()
+                    .trim_end_matches('L')
+                    .replace('_', "")
+                    .parse::<f64>()
+                    .ok()
+            })
+            .map(|ms| ms / 1000.0)
+            .expect("the pinned Kotlin spelling ends in a millisecond count");
         let core_pending_confirmation_secs =
             offline_protocol_transport::constants::RETICULUM_PENDING_CONFIRMATION_TIMEOUT_SECS
                 as f64;
-        assert!(
-            bridge_verdict_timeout_secs < core_pending_confirmation_secs,
-            "the bridge must give up on a verdict ({bridge_verdict_timeout_secs}s) before the \
-             core gives up on the frame ({core_pending_confirmation_secs}s), or the verdict \
-             settles an id the core has already moved past"
-        );
+        for (name, bridge_secs) in [
+            ("Swift", swift_verdict_timeout_secs),
+            ("Kotlin", kotlin_verdict_timeout_secs),
+        ] {
+            assert!(
+                bridge_secs < core_pending_confirmation_secs,
+                "the {name} bridge must give up on a verdict ({bridge_secs}s) before the core \
+                 gives up on the frame ({core_pending_confirmation_secs}s), or the verdict \
+                 settles an id the core has already moved past"
+            );
+        }
     }
 
     /// The presence-watch defaults agree across both bridges.
@@ -14062,9 +14125,10 @@ mod tests {
                  isBound = true true } else { false } }",
             ),
             (
-                "checking it before a superseded reader injects its capabilities",
-                "val tokens = GatewayAttachPolicy.capabilityTokens(json) \
-                 if (connectGeneration.get() != generation) return",
+                "checking it before a superseded reader's capabilities are injected, on the \
+                 transport thread where the announcement that follows them is ordered",
+                "val tokens = GatewayAttachPolicy.capabilityTokens(json) transportHandler.post { \
+                 if (connectGeneration.get() != generation) return@post",
             ),
             (
                 "sampling the writer and its generation together before the declaration \
@@ -15297,7 +15361,7 @@ mod tests {
                  guard self.isBound else { self.emitDiagnostic(\"error\", \"Gateway reported \
                  connected before binding the session\") \
                  self.handleConnectionClosed(error: nil, generation: generation) \
-                 return } self.cancelAttachTimeout() self.statusFlipLock.lock() \
+                 return } self.statusFlipLock.lock() \
                  let announced = self.isConnected && self.state != .stopping && \
                  self.state != .stopped if announced { try? self.protocolInstance\
                  .reticulumStatusChanged(isConnected: true)",

@@ -136,7 +136,9 @@ whose features it has not been told.
 
 A gateway MAY still send the same two frames on a session that never declared,
 after a grace period, for clients that do not attach; such a session is
-verdict-only.
+verdict-only. That grace SHOULD be no shorter than ten seconds, the attach
+timeout the reference clients use, so a client whose declaration is merely slow
+is not announced out from under it and closed by its own rule above.
 
 **A client SHOULD NOT offer an unbound session to its transport selector.** A
 session whose declaration was refused, or never made, may submit and be told a

@@ -333,4 +333,30 @@ class GatewayAttachPolicyTest {
         assertTrue(GatewayAttachPolicy.VERDICT_TIMEOUT_MS < 120_000L)
         assertTrue(GatewayAttachPolicy.ATTACH_TIMEOUT_MS < 60_000L)
     }
+
+    /**
+     * A refusal that carries no wording is still a refusal, and the recipient
+     * it names still reaches the manager.
+     */
+    @Test
+    fun `a DeliveryError without a reason still settles and carries the recipient`() {
+        val json = JSONObject("""{"type":"DeliveryError","message_id":"m1","recipient":"off1bob"}""")
+        val verdict = GatewayAttachPolicy.parseVerdict(json, "DeliveryError")!!
+        assertFalse(verdict.sent)
+        assertEquals("DeliveryError", verdict.reason)
+        assertEquals("off1bob", verdict.recipient)
+    }
+
+    /**
+     * The token bound is in bytes, as the core's is: a hundred two-byte
+     * characters is over it, and exactly 128 bytes is on it.
+     */
+    @Test
+    fun `capability tokens are bounded in bytes not characters`() {
+        val exact = "a".repeat(128)
+        val over = "a".repeat(129)
+        val multibyte = "é".repeat(100)
+        val json = JSONObject().put("tokens", JSONArray(listOf(exact, over, multibyte, "gateway_v1")))
+        assertEquals(listOf(exact, "gateway_v1"), GatewayAttachPolicy.capabilityTokens(json))
+    }
 }
