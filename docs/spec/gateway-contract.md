@@ -101,6 +101,12 @@ Newline-delimited UTF-8 JSON objects, one per line. Each object MUST carry a
 recognise, and MUST NOT close the connection because of one: that is what allows
 a version to add messages without a flag day.
 
+A client MAY bound the length of a line, because a line that never ends is
+memory it cannot reclaim and a line past its buffer cannot be resynchronised.
+The reference clients abandon the connection past 1 MiB, so a gateway MUST NOT
+emit a longer line; the largest frame a device can be handed is well inside
+that.
+
 ### Versioning
 
 `Identify` carries `protocol_version`, an integer, `1` for this document. The

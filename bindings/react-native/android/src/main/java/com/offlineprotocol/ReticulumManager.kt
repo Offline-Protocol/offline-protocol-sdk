@@ -1213,8 +1213,13 @@ class ReticulumManager(
      */
     private fun handleAddressDeclared(json: org.json.JSONObject, generation: Int) {
         val declared = json.optString("address", "")
-        if (declared.isEmpty()) {
-            emitDiagnostic("warning", "Invalid AddressDeclared: missing address")
+        // Bounded before it reaches the core: the echo is remote-chosen and
+        // the line it arrived on may be a mebibyte, and the core logs and
+        // attributes the security event to whatever it is handed.
+        if (declared.isEmpty() ||
+            declared.toByteArray(Charsets.UTF_8).size > GatewayAttachPolicy.MAX_ADDRESS_BYTES
+        ) {
+            emitDiagnostic("warning", "Invalid AddressDeclared: missing or over-long address")
             return
         }
         try {

@@ -12022,16 +12022,20 @@ mod tests {
                  if (connectGeneration.get() != generation) return@post if (!isBound) { \
                  emitDiagnostic(\"error\", \"Gateway reported connected before binding the \
                  session\") handleConnectionClosed(generation, -1, \"Connected before bound\") \
-                 return@post }"
+                 return@post } cancelAttachTimeout() if (state == TransportState.STOPPING"
             ),
-            "ReticulumManager.kt must refuse to announce a session the gateway did not bind"
+            "ReticulumManager.kt must refuse to announce a session the gateway did not bind, \
+             and disarm the attach timeout once it does announce: without the cancel, a bound \
+             and announced session is torn down ten seconds after open by its own timeout"
         );
 
         // 3. `isBound` is set in exactly one place on each side: the branch
         //    where the echoed address was ours. Anything else setting it is a
         //    session announced on something other than a proven binding.
+        // `isBound = true` matches the backing-field spelling too, and the
+        // property has no setter, so there is no second way to write it.
         assert_eq!(
-            swift.matches("_isBound = true").count(),
+            swift.matches("isBound = true").count(),
             1,
             "ReticulumManager.swift must bind the session only on a matching address echo"
         );
@@ -12144,6 +12148,17 @@ mod tests {
                  the recipient_unreachable token the core parks on"
             );
         }
+
+        // Both managers *classify* on the token the core parks on, to decide
+        // the presence watch and the offline feed: a second classifier,
+        // hand-mirrored, so its spelling is pinned here. The core's is
+        // `SEND_FAIL_REASON_RECIPIENT_UNREACHABLE` in `protocol/types.rs`.
+        assert!(
+            swift.contains("verdict.reason?.hasPrefix(\"recipient_unreachable\") == true")
+                && kotlin.contains("verdict.reason?.startsWith(\"recipient_unreachable\") == true"),
+            "both managers must classify a verdict on the `recipient_unreachable` prefix the \
+             core parks on, and nothing else"
+        );
 
         // The id has to be on the wire or the verdict cannot be correlated:
         // the gateway mints one for a submission that carries none, and
@@ -12274,10 +12289,11 @@ mod tests {
             swift.contains(
                 "messageQueue.async { [weak self] in guard let self = self, \
                  self.sessionGeneration == generation else { return } \
-                 let identity = self.protocolInstance.localAddress()"
+                 let identity = self.protocolInstance.localAddress() ?? self.deviceId \
+                 guard self.sessionGeneration == generation else { return }"
             ),
             "ReticulumManager.swift must not send a retired session's Identify down the \
-             successor's socket"
+             successor's socket, and must check again after the wait on the global mutex"
         );
         assert!(
             swift.contains(
@@ -12305,7 +12321,8 @@ mod tests {
         // bound and never told to the core, with no timeout to end it.
         assert!(
             swift.contains(
-                "guard let self = self, self.isConnected else { return } \
+                "guard let self = self, self.isConnected, \
+                 self.sessionGeneration == generation else { return } \
                  self.emitDiagnostic(\"error\", \"Gateway attach timed out before \
                  StatusUpdate(connected)\") \
                  self.handleConnectionClosed(error: nil, generation: generation)"
@@ -12347,7 +12364,7 @@ mod tests {
         const KOTLIN_VERDICT_TIMEOUT_DECL: &str = "VERDICT_TIMEOUT_MS = 60_000L";
 
         // (name, swift spelling, kotlin spelling)
-        let pairs: [(&str, &str, &str); 7] = [
+        let pairs: [(&str, &str, &str); 8] = [
             (
                 "protocol version",
                 "PROTOCOL_VERSION = 1",
@@ -12373,6 +12390,11 @@ mod tests {
                 "MAX_LINE_BYTES = 1 << 20",
                 "MAX_LINE_BYTES = 1 shl 20",
             ),
+            (
+                "address echo bound",
+                "MAX_ADDRESS_BYTES = 128",
+                "MAX_ADDRESS_BYTES = 128",
+            ),
             ("in flight cap", "MAX_IN_FLIGHT = 8", "MAX_IN_FLIGHT = 8"),
             (
                 "presence peers",
@@ -12391,14 +12413,24 @@ mod tests {
             );
         }
 
-        // The capability bounds are the core's, so they are pinned against it
-        // rather than against each other.
+        // The capability bounds are the core's, so they are pinned against
+        // it rather than against each other: the spellings are formatted from
+        // the constants the core applies, and a core change fails here.
+        let tokens_decl = format!(
+            "MAX_CAPABILITY_TOKENS = {}",
+            offline_protocol::MAX_RELAY_CAPABILITIES
+        );
+        let bytes_decl = format!(
+            "MAX_CAPABILITY_TOKEN_BYTES = {}",
+            offline_protocol::MAX_RELAY_CAPABILITY_TOKEN_BYTES
+        );
         assert!(
-            swift.contains("MAX_CAPABILITY_TOKENS = 64")
-                && swift.contains("MAX_CAPABILITY_TOKEN_BYTES = 128")
-                && kotlin.contains("MAX_CAPABILITY_TOKENS = 64")
-                && kotlin.contains("MAX_CAPABILITY_TOKEN_BYTES = 128"),
-            "both bridges must bound capabilities the way the core does (64 x 128)"
+            swift.contains(&tokens_decl)
+                && swift.contains(&bytes_decl)
+                && kotlin.contains(&tokens_decl)
+                && kotlin.contains(&bytes_decl),
+            "both bridges must bound capabilities the way the core does: expected `{tokens_decl}` \
+             and `{bytes_decl}` in each policy"
         );
 
         // The relationship the numbers exist to hold, read from both ends:
@@ -14318,18 +14350,27 @@ mod tests {
             );
         }
 
-        for (manager, cleanup) in [
-            ("ReticulumManager", "self.disconnect()"),
-            ("NostrManager", "self.disconnectAll(fromDeinit: false)"),
+        for (manager, pinned) in [
+            // Reticulum's block is gated on its session generation first: a
+            // stop() that retired the session already ran disconnect() for
+            // it, and a stale block acting on the state alone would cancel
+            // whatever a later start() has since opened.
+            (
+                "ReticulumManager",
+                "guard let self = self else { return } \
+                 guard self.sessionGeneration == generation else { return } \
+                 guard self.markRunningIfLive() else { self.disconnect() return }",
+            ),
+            (
+                "NostrManager",
+                "guard let self = self else { return } guard self.markRunningIfLive() \
+                 else { self.disconnectAll(fromDeinit: false) return }",
+            ),
         ] {
             let code = rn_source_code_only(&format!("ios/{manager}.swift"));
-            let pinned = format!(
-                "guard let self = self else {{ return }} guard self.markRunningIfLive() \
-                 else {{ {cleanup} return }}"
-            );
 
             assert!(
-                code.contains(&pinned),
+                code.contains(pinned),
                 "ios/{manager}.swift's connected-edge block must open by *claiming* .running \
                  rather than testing the state and then writing it, and must close the \
                  connection it opened when the claim is refused. A separate test-then-write is \

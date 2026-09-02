@@ -171,7 +171,7 @@ The gateway proof commits only this device's own address, so it is built and
 signed in the core and pinned by a conformance vector CI executes; no bridge
 holds a copy of the layout, and there is nothing to mirror. A `GatewayAttachPolicy`
 that grew one would be reintroducing the problem the relay's copy already is,
-which is why the same guard asserts neither bridge contains the domain string.
+which is why a sibling guard asserts neither bridge, nor either policy, contains the domain string.
 
 **The presence-watch defaults** are the eighth, and were unpinned for as long as
 they have existed: `PresenceWatchPolicy`'s idle TTL, per-tick query cap and tick

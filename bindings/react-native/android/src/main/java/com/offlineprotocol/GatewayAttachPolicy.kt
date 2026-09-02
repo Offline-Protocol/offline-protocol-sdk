@@ -80,6 +80,13 @@ object GatewayAttachPolicy {
      */
     const val MAX_LINE_BYTES = 1 shl 20
 
+    /**
+     * Longest `AddressDeclared` echo a manager hands to the core. An address
+     * is 44 characters; the bound is what keeps a hostile echo, which may be
+     * as long as a line, out of the core's log and security event.
+     */
+    const val MAX_ADDRESS_BYTES = 128
+
     // ---- Attach -----------------------------------------------------------
 
     /**

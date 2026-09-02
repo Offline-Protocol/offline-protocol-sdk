@@ -193,8 +193,7 @@ public class ReticulumManager: NSObject, TransportManager {
     /// only refuse.
     private var _isBound = false
     private var isBound: Bool {
-        get { stateLock.lock(); defer { stateLock.unlock() }; return _isBound }
-        set { stateLock.lock(); defer { stateLock.unlock() }; _isBound = newValue }
+        stateLock.lock(); defer { stateLock.unlock() }; return _isBound
     }
 
     // MARK: - Initialization
@@ -493,6 +492,10 @@ public class ReticulumManager: NSObject, TransportManager {
         messageQueue.async { [weak self] in
             guard let self = self, self.sessionGeneration == generation else { return }
             let identity = self.protocolInstance.localAddress() ?? self.deviceId
+            // Checked again after the wait on the global mutex, as the
+            // Challenge hop is after its signature: a retired session's
+            // Identify on the successor's socket is a second challenge.
+            guard self.sessionGeneration == generation else { return }
             if let frame = GatewayAttachPolicy.identifyJson(deviceId: identity) {
                 self.sendRaw(frame + "\n")
             }
@@ -504,6 +507,11 @@ public class ReticulumManager: NSObject, TransportManager {
         // so that any protocol handler querying transport state sees the correct value.
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            // A stop() that retired this session already ran disconnect()
+            // for it; acting here would cancel whatever connect() a later
+            // start() has since opened. Android gates the same post on its
+            // generation first.
+            guard self.sessionGeneration == generation else { return }
 
             // A stop() that landed while this connection was still being
             // established has already told the core we are down and moved to
@@ -617,7 +625,9 @@ public class ReticulumManager: NSObject, TransportManager {
     /// core was never told about.
     private func armAttachTimeout(generation: Int) {
         let item = DispatchWorkItem { [weak self] in
-            guard let self = self, self.isConnected else { return }
+            guard let self = self, self.isConnected, self.sessionGeneration == generation else {
+                return
+            }
             self.emitDiagnostic("error", "Gateway attach timed out before StatusUpdate(connected)")
             self.handleConnectionClosed(error: nil, generation: generation)
         }
@@ -961,7 +971,18 @@ public class ReticulumManager: NSObject, TransportManager {
                     // global mutex, and a proof over a retired challenge
                     // written to the successor's socket is a refusal.
                     guard self.sessionGeneration == generation else { return }
-                    self.sendRaw(frame + "\n")
+                    self.sendRaw(frame + "\n") { [weak self] error in
+                        // A write that fails leaves no frame for the gateway
+                        // to answer, and waiting out the attach timeout to
+                        // learn that is ten seconds of a carrier the selector
+                        // has been told nothing about. Android closes on the
+                        // same failure.
+                        guard let self = self, let error = error else { return }
+                        self.emitDiagnostic("error", "Failed to write the address declaration", context: [
+                            "error": error.localizedDescription
+                        ])
+                        self.handleConnectionClosed(error: error, generation: generation)
+                    }
                 } catch {
                     // No identity yet, or a challenge the core refused to
                     // sign. Either way this connection can only ever be
@@ -982,8 +1003,12 @@ public class ReticulumManager: NSObject, TransportManager {
     /// decided here is narrower and is the bridge's own: whether this carrier
     /// can be offered to the selector at all.
     private func handleAddressDeclared(_ json: [String: Any], generation: Int) {
-        guard let declared = json["address"] as? String, !declared.isEmpty else {
-            emitDiagnostic("warning", "Invalid AddressDeclared: missing address")
+        // Bounded before it reaches the core: the echo is remote-chosen and
+        // the line it arrived on may be a mebibyte, and the core logs and
+        // attributes the security event to whatever it is handed.
+        guard let declared = json["address"] as? String, !declared.isEmpty,
+              declared.utf8.count <= GatewayAttachPolicy.MAX_ADDRESS_BYTES else {
+            emitDiagnostic("warning", "Invalid AddressDeclared: missing or over-long address")
             return
         }
         messageQueue.async { [weak self] in

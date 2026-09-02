@@ -82,6 +82,11 @@ public enum GatewayAttachPolicy {
     /// guarantees silence for the ones past the cap.
     public static let MAX_PRESENCE_PEERS = 64
 
+    /// Longest `AddressDeclared` echo a manager hands to the core. An address
+    /// is 44 characters; the bound is what keeps a hostile echo, which may be
+    /// as long as a line, out of the core's log and security event.
+    public static let MAX_ADDRESS_BYTES = 128
+
     // MARK: - Attach
 
     /// Why a declaration was not attempted. Reported as a diagnostic; the
