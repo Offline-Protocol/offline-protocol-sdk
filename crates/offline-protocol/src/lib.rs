@@ -33,7 +33,10 @@ pub use events::{
     DecryptionFailureCode, DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode, Event,
     EventCallback, GroupInfoMember, PresenceSource, PresenceStatus, UserGroupSummary,
 };
-pub use group_mesh::{GroupRichReadiness, GroupSendOptions, RelaySyncState};
+pub use group_mesh::{
+    GroupRichReadiness, GroupSendOptions, RelaySyncState, MAX_RELAY_CAPABILITIES,
+    MAX_RELAY_CAPABILITY_TOKEN_BYTES,
+};
 /// Replicated-document types.
 ///
 /// Re-exported so callers never name `offline-protocol-data` directly: the

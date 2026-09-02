@@ -137,9 +137,9 @@ pub(crate) const RELAY_CAP_GROUP_DELIVERY_V3: &str = "group_delivery_v3";
 /// Upper bound on stored relay capability tokens, and on the byte length of
 /// each token. The list is wire-supplied by the relay — bounded so a hostile
 /// or broken relay cannot grow resident memory with it.
-pub(super) const MAX_RELAY_CAPABILITIES: usize = 64;
+pub const MAX_RELAY_CAPABILITIES: usize = 64;
 /// See [`MAX_RELAY_CAPABILITIES`].
-pub(super) const MAX_RELAY_CAPABILITY_TOKEN_BYTES: usize = 128;
+pub const MAX_RELAY_CAPABILITY_TOKEN_BYTES: usize = 128;
 /// Maximum number of buffered out-of-order commits per group.
 pub(super) const MAX_PENDING_COMMITS_PER_GROUP: usize = 8;
 /// TTL for buffered pending commits. Must be at least

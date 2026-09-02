@@ -1221,6 +1221,10 @@ impl OfflineProtocol {
     /// persists, for the reason the refusal's is: the bridge closes on a
     /// mismatch and reconnects on its ladder. The `warn!` is not suppressed.
     pub fn on_gateway_address_declared(&mut self, declared: &str) {
+        // Remote-chosen, and the bridges bound it too; the bound here is what
+        // keeps a hostile echo out of the log line and the event's `peer_id`
+        // if a bridge does not.
+        let declared: &str = &declared.chars().take(256).collect::<String>();
         let mismatch = !matches!(
             self.classify_address_binding(declared),
             AddressBinding::Ours

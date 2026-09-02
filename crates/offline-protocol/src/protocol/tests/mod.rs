@@ -14880,16 +14880,27 @@ fn test_a_gateway_attach_resets_the_warning_suppression() {
 fn gateway_capabilities_are_bounded() {
     let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
 
-    let mut tokens: Vec<String> = (0..200).map(|i| format!("cap_{i}")).collect();
-    tokens.push("x".repeat(4096));
-    tokens.push(String::new());
-    protocol.set_gateway_capabilities(tokens);
+    // Sixty-four oversized tokens and an empty one *ahead of* the real one:
+    // filtered after the count was applied, they would evict it.
+    let mut padded: Vec<String> = (0..64)
+        .map(|i| format!("{i}{}", "x".repeat(4096)))
+        .collect();
+    padded.push(String::new());
+    padded.push("gateway_v1".to_string());
+    protocol.set_gateway_capabilities(padded);
+    assert_eq!(
+        protocol.gateway_capabilities(),
+        vec!["gateway_v1".to_string()],
+        "padding must not evict a real token"
+    );
 
+    let tokens: Vec<String> = (0..200).map(|i| format!("cap_{i}")).collect();
+    protocol.set_gateway_capabilities(tokens);
     let stored = protocol.gateway_capabilities();
-    assert!(
-        stored.len() <= 64,
-        "at most 64 tokens are stored, got {}",
-        stored.len()
+    assert_eq!(
+        stored.len(),
+        64,
+        "exactly the first 64 valid tokens are stored"
     );
     assert!(
         stored.iter().all(|t| t.len() <= 128 && !t.is_empty()),
@@ -22330,11 +22341,20 @@ fn a_gateway_presence_answer_is_recorded_against_the_gateway_that_made_it() {
 #[test]
 fn a_reticulum_presence_answer_redrives_over_reticulum() {
     let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+    // Both carriers are mocks kept by clone, so the assertion can look at
+    // where the re-driven frame actually went: the other two substitutions
+    // (the fact and the event) each have their own test, and this is the
+    // one whose revert to `TransportType::Internet` fails nothing else.
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
     let reticulum = MockTransport::new(TransportType::Reticulum);
     reticulum.start().unwrap();
     protocol
         .transport_manager_mut()
-        .add_transport(TransportType::Reticulum, Box::new(reticulum));
+        .add_transport(TransportType::Internet, Box::new(internet.clone()));
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Reticulum, Box::new(reticulum.clone()));
     protocol.start().unwrap();
 
     let sent = protocol
@@ -22353,11 +22373,27 @@ fn a_reticulum_presence_answer_redrives_over_reticulum() {
         "premise: the DM is parked"
     );
 
+    let internet_before = internet.sent_messages().len();
+    let reticulum_before = reticulum.sent_messages().len();
+
     protocol.on_peer_presence_via("bob", true, Some(42), GatewayCarrier::Reticulum);
 
     assert!(
         !protocol.dm_unreachable_parks.contains_key("bob"),
         "the gateway saying the peer is reachable un-parks them"
+    );
+    assert!(
+        reticulum
+            .sent_messages()
+            .iter()
+            .skip(reticulum_before)
+            .any(|m| m.id.as_str() == sent.as_str()),
+        "the re-drive goes out over the carrier that proved it can reach the peer"
+    );
+    assert_eq!(
+        internet.sent_messages().len(),
+        internet_before,
+        "and not over the internet transport, which proved nothing"
     );
     assert_eq!(
         protocol
