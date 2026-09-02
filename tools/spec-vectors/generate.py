@@ -433,6 +433,8 @@ def session_id(a: str, b: str) -> str:
 
 CTRL_DOMAIN_V1 = b"offline-ctrl-v1"
 CTRL_DOMAIN_V2 = b"offline-ctrl-v2"
+GATEWAY_ADDR_DOMAIN = b"offline-gateway-addr-v1"
+RELAY_ADDR_DOMAIN = b"offline-relay-addr-v1"
 
 
 def canonical_payload(domain: bytes, fields: list[bytes]) -> bytes:
@@ -443,6 +445,18 @@ def canonical_payload(domain: bytes, fields: list[bytes]) -> bytes:
         out += len(field).to_bytes(4, "big")
         out += field
     return bytes(out)
+
+
+def address_proof_payload(domain: bytes, address: str, challenge: bytes) -> bytes:
+    """domain || u32be(len(address_utf8)) || address_utf8 || challenge.
+
+    The challenge is appended raw, NOT as a second length-prefixed field. Only
+    the address is a field, and the challenge is the trailing remainder. The
+    parse stays unambiguous because the one length prefix already fixes where
+    the address ends, and this is the layout the gateway contract publishes
+    and the relay's declaration already uses under its own domain.
+    """
+    return canonical_payload(domain, [address.encode("utf-8")]) + challenge
 
 
 def ctrl_payload_v1(sender: str, msg_id: str, recipient: str, content: str) -> bytes:
@@ -1100,8 +1114,9 @@ def build_control_signing_vectors() -> dict:
                 "offline-disc-v1",
                 "offline-invite-v1",
                 "offline-relay-addr-v1",
+                "offline-gateway-addr-v1",
             ],
-            "reserved": ["offline-gateway-addr-v1"],
+            "reserved": [],
         },
         "payloads": cases,
         "v1_is_not_v2_with_a_stamp": {
@@ -1315,11 +1330,113 @@ def build_key_package_vectors() -> dict:
     }
 
 
+def build_gateway_proof_vectors() -> dict:
+    def case(name: str, note: str, address: str, challenge: bytes) -> dict:
+        return {
+            "name": name,
+            "note": note,
+            "address": address,
+            "challenge_hex": challenge.hex(),
+            "payload_hex": address_proof_payload(
+                GATEWAY_ADDR_DOMAIN, address, challenge
+            ).hex(),
+        }
+
+    addr_a = derive_address(bytes.fromhex(RFC8032_TV1_PK))
+    addr_b = derive_address(bytes.fromhex(RFC8032_TV2_PK))
+    counting = bytes(range(32))
+
+    cases = [
+        case(
+            "the ordinary attach",
+            "A 44-character address and a 32-byte challenge. The length "
+            "prefix is 0000002c, big-endian: an implementation writing it "
+            "little-endian produces 2c000000 and fails every declaration at "
+            "runtime while its own round-trip test passes.",
+            addr_a,
+            counting,
+        ),
+        case(
+            "an all-zero challenge",
+            "Thirty-two zero bytes are a challenge like any other. They are "
+            "present in the payload, not omitted, so the payload is the same "
+            "length as any other case.",
+            addr_b,
+            bytes(32),
+        ),
+        case(
+            "an all-ones challenge",
+            "The high bit set in every challenge byte, which is what catches "
+            "a bridge that carried the challenge through a text encoding "
+            "instead of as bytes.",
+            addr_b,
+            b"\xff" * 32,
+        ),
+    ]
+
+    short_a = address_proof_payload(GATEWAY_ADDR_DOMAIN, "ab", b"cX")
+    short_b = address_proof_payload(GATEWAY_ADDR_DOMAIN, "abc", b"X")
+    relay_layout = address_proof_payload(RELAY_ADDR_DOMAIN, addr_a, counting)
+
+    return {
+        "_comment": [
+            "Frozen conformance vectors for the gateway attach proof, from",
+            "docs/spec/gateway-contract.md.",
+            "",
+            "Computed from the construction stated in that chapter, not by",
+            "running the payload builder they pin.",
+            "",
+            "These pin the bytes that go under the signing key, not a",
+            "signature. Ed25519 is specified by RFC 8032 and carries its own",
+            "vectors; what is specific to this protocol is which bytes are",
+            "signed, and that is the half a second implementation gets wrong.",
+            "",
+            "The addresses are derived from the public halves of RFC 8032",
+            "section 7.1 test vectors 1 and 2, so both halves of each case",
+            "trace to a published source rather than to this file.",
+        ],
+        "domain": GATEWAY_ADDR_DOMAIN.decode("ascii"),
+        "layout": "domain || u32be(len(address_utf8)) || address_utf8 || challenge",
+        "layout_note": (
+            "The challenge is appended raw, not as a second length-prefixed "
+            "field. Prefixing it as well produces a payload four bytes longer "
+            "that every conforming verifier rejects, and a round-trip test "
+            "written against the wrong builder never notices."
+        ),
+        "proofs": cases,
+        "the_length_prefix_makes_the_payload_unambiguous": {
+            "note": "Two different (address, challenge) pairs whose "
+            "concatenations are identical. The address length prefix is the "
+            "only thing separating them: drop it and a signature over one "
+            "verifies as a signature over the other, and a device can be "
+            "bound to an address it never named.",
+            "a": {"address": "ab", "challenge_hex": b"cX".hex(), "payload_hex": short_a.hex()},
+            "b": {"address": "abc", "challenge_hex": b"X".hex(), "payload_hex": short_b.hex()},
+        },
+        "the_domain_is_what_stops_a_cross_replay": {
+            "note": "The relay's address proof has this identical layout "
+            "under its own domain. These are the same two fields under each "
+            "domain, and they differ from the first byte, which is what "
+            "keeps a proof harvested by a hostile gateway from replaying "
+            "against the relay and the reverse. An implementation that "
+            "reuses one domain for both attaches produces the same bytes "
+            "twice and loses that separation without failing anything.",
+            "address": addr_a,
+            "challenge_hex": counting.hex(),
+            "gateway_payload_hex": address_proof_payload(
+                GATEWAY_ADDR_DOMAIN, addr_a, counting
+            ).hex(),
+            "same_fields_under_the_relay_domain_hex": relay_layout.hex(),
+        },
+    }
+
+
 FILES = [
     (CORE_DATA / "wire-v1.vectors.json", build_wire_vectors),
     (CORE_DATA / "address-v1.vectors.json", build_address_vectors),
     (SEALED_DATA / "derive-address-v1.vectors.json", build_derive_vectors),
     (SEALED_DATA / "control-signing-v1.vectors.json", build_control_signing_vectors),
+    (SEALED_DATA / "gateway-address-proof-v1.vectors.json", build_gateway_proof_vectors),
     (SEALED_DATA / "mls-envelope-v1.vectors.json", build_envelope_vectors),
     (SEALED_DATA / "key-package-v1.vectors.json", build_key_package_vectors),
 ]

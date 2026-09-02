@@ -45,11 +45,21 @@ def test_state_storage_flushes_the_directory_after_rename_and_unlink(
     # os.replace creates (and unlink removes) lives in the parent directory and
     # needs its own flush, or a crash can lose an acknowledged store or
     # resurrect a deleted outbox entry.
+    # Recorded per-directory and filtered to this test's own tree, because
+    # `_sync_directory` is a module-level function and the patch is
+    # process-wide: an engine another test started can still be draining its
+    # own state writes on a background thread, and those land here as extra
+    # calls about a directory this test has never heard of. Counting every
+    # call in the process made this assertion depend on what the rest of the
+    # suite happened to be doing, which is how it failed in CI while passing
+    # everywhere else.
     synced: list[str] = []
     real_sync = state_storage_module._sync_directory
+    root = str(tmp_path)
 
     def recording_sync(directory) -> None:
-        synced.append(str(directory))
+        if str(directory).startswith(root):
+            synced.append(str(directory))
         real_sync(directory)
 
     monkeypatch.setattr(state_storage_module, "_sync_directory", recording_sync)

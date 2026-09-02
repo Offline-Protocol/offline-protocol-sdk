@@ -998,6 +998,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forw
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level(
@@ -1184,11 +1186,21 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reso
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed(
 ): Short
@@ -1476,6 +1488,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_me
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message_to_group(`ptr`: Long,`originalMessageJson`: RustBuffer.ByValue,`groupId`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_gateway_address_declaration(`ptr`: Long,`challenge`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_active_transports(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_battery_level(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1662,12 +1676,22 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resolve_us
 ): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declaration_refused(`ptr`: Long,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declared(`ptr`: Long,`address`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_confirm_sent(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_gateway_capabilities(`ptr`: Long,`capabilities`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_peer_presence(`ptr`: Long,`peerId`: RustBuffer.ByValue,`online`: Byte,`lastSeenMs`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_presence_watchlist(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed_with_reason(`ptr`: Long,`messageId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2065,6 +2089,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group() != 44359.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration() != 2743.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports() != 5327.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2344,13 +2371,28 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused() != 26875.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared() != 60480.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent() != 38323.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities() != 42139.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message() != 41914.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received() != 11523.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence() != 61011.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist() != 33963.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed() != 40553.toShort()) {
@@ -4106,6 +4148,8 @@ public interface OfflineProtocolInterface {
     
     fun `forwardMessageToGroup`(`originalMessageJson`: kotlin.String, `groupId`: kotlin.String, `priority`: MessagePriority?): List<kotlin.String>
     
+    fun `gatewayAddressDeclaration`(`challenge`: List<kotlin.UByte>): GatewayAddressDeclaration
+    
     fun `getActiveTransports`(): List<kotlin.String>
     
     fun `getBatteryLevel`(): kotlin.UByte?
@@ -4292,11 +4336,21 @@ public interface OfflineProtocolInterface {
     
     fun `resume`()
     
+    fun `reticulumAddressDeclarationRefused`(`reason`: kotlin.String)
+    
+    fun `reticulumAddressDeclared`(`address`: kotlin.String)
+    
     fun `reticulumConfirmSent`(`messageId`: kotlin.String)
+    
+    fun `reticulumGatewayCapabilities`(`capabilities`: List<kotlin.String>)
     
     fun `reticulumGetNextMessage`(): ReticulumMessage?
     
     fun `reticulumMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
+    
+    fun `reticulumPeerPresence`(`peerId`: kotlin.String, `online`: kotlin.Boolean, `lastSeenMs`: kotlin.Long?)
+    
+    fun `reticulumPresenceWatchlist`(): List<kotlin.String>
     
     fun `reticulumSendFailed`(`messageId`: kotlin.String)
     
@@ -4811,6 +4865,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message_to_group(
         it,
         FfiConverterString.lower(`originalMessageJson`),FfiConverterString.lower(`groupId`),FfiConverterOptionalTypeMessagePriority.lower(`priority`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `gatewayAddressDeclaration`(`challenge`: List<kotlin.UByte>): GatewayAddressDeclaration {
+            return FfiConverterTypeGatewayAddressDeclaration.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_gateway_address_declaration(
+        it,
+        FfiConverterSequenceUByte.lower(`challenge`),_status)
 }
     }
     )
@@ -6038,6 +6106,30 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
     
 
+    override fun `reticulumAddressDeclarationRefused`(`reason`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declaration_refused(
+        it,
+        FfiConverterString.lower(`reason`),_status)
+}
+    }
+    
+    
+
+    override fun `reticulumAddressDeclared`(`address`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declared(
+        it,
+        FfiConverterString.lower(`address`),_status)
+}
+    }
+    
+    
+
     override fun `reticulumConfirmSent`(`messageId`: kotlin.String)
         = 
     callWithHandle {
@@ -6045,6 +6137,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_confirm_sent(
         it,
         FfiConverterString.lower(`messageId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `reticulumGatewayCapabilities`(`capabilities`: List<kotlin.String>)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_gateway_capabilities(
+        it,
+        FfiConverterSequenceString.lower(`capabilities`),_status)
 }
     }
     
@@ -6074,6 +6179,31 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
 }
     }
     
+    
+
+    override fun `reticulumPeerPresence`(`peerId`: kotlin.String, `online`: kotlin.Boolean, `lastSeenMs`: kotlin.Long?)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_peer_presence(
+        it,
+        FfiConverterString.lower(`peerId`),FfiConverterBoolean.lower(`online`),FfiConverterOptionalLong.lower(`lastSeenMs`),_status)
+}
+    }
+    
+    
+
+    override fun `reticulumPresenceWatchlist`(): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_presence_watchlist(
+        it,
+        _status)
+}
+    }
+    )
+    }
     
 
     override fun `reticulumSendFailed`(`messageId`: kotlin.String)
@@ -7164,6 +7294,47 @@ public object FfiConverterTypeForwardInfo: FfiConverterRustBuffer<ForwardInfo> {
             FfiConverterString.write(value.`originalMessageId`, buf)
             FfiConverterLong.write(value.`originalTimestamp`, buf)
             FfiConverterUInt.write(value.`forwardCount`, buf)
+    }
+}
+
+
+
+data class GatewayAddressDeclaration (
+    var `address`: kotlin.String
+    , 
+    var `publicKey`: List<kotlin.UByte>
+    , 
+    var `signature`: List<kotlin.UByte>
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeGatewayAddressDeclaration: FfiConverterRustBuffer<GatewayAddressDeclaration> {
+    override fun read(buf: ByteBuffer): GatewayAddressDeclaration {
+        return GatewayAddressDeclaration(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceUByte.read(buf),
+            FfiConverterSequenceUByte.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: GatewayAddressDeclaration) = (
+            FfiConverterString.allocationSize(value.`address`) +
+            FfiConverterSequenceUByte.allocationSize(value.`publicKey`) +
+            FfiConverterSequenceUByte.allocationSize(value.`signature`)
+    )
+
+    override fun write(value: GatewayAddressDeclaration, buf: ByteBuffer) {
+            FfiConverterString.write(value.`address`, buf)
+            FfiConverterSequenceUByte.write(value.`publicKey`, buf)
+            FfiConverterSequenceUByte.write(value.`signature`, buf)
     }
 }
 

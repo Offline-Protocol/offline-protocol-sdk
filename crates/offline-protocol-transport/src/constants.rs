@@ -83,19 +83,10 @@ pub const INTERNET_DEFAULT_SERVER_ADDRESS: &str = "ws://localhost:8080";
 pub const INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS: u64 = 15;
 
 // Reticulum Transport Constants
-/// Connection timeout for reaching the Reticulum daemon (seconds).
-pub const RETICULUM_CONNECTION_TIMEOUT_SECS: u64 = 60;
-
 /// Timeout for pending Reticulum send confirmations (seconds).
 /// Higher than Internet because Reticulum paths can be high-latency
 /// (especially LoRa multi-hop).
 pub const RETICULUM_PENDING_CONFIRMATION_TIMEOUT_SECS: u64 = 120;
-
-/// Default maximum payload size for Reticulum (bytes).
-/// Reticulum's encrypted MDU is 383 bytes per single packet (plain MDU is
-/// 464 bytes). Larger payloads are handled transparently by Reticulum's
-/// Resource mechanism over an established Link.
-pub const RETICULUM_MAX_PAYLOAD_SIZE: usize = 65536;
 
 // Nostr Transport Constants
 /// Connection timeout for Nostr relay WebSocket connections (seconds).

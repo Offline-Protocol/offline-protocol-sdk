@@ -198,6 +198,35 @@ than through message-plane injection — an acknowledgement that could be
 synthesized from a notification payload would assert exactly what the check
 exists to establish.
 
+### Gateway identity: the same shape, one different consequence
+
+A device attaching to a Reticulum gateway does the same thing under a different
+domain: it signs `offline-gateway-addr-v1` over its own address and the
+gateway's per-connection challenge, sends `DeclareAddress`, and checks the
+address the gateway echoes back. The two answers report as
+`GATEWAY_ADDRESS_BINDING_MISMATCH` and `GATEWAY_ADDRESS_DECLARATION_REFUSED`,
+through their own entry points, for the same reasons.
+
+The domains must stay distinct, and not only because every signing domain must:
+the two payloads have an identical layout, so under a shared domain a proof
+harvested by a hostile gateway would replay against the relay. The bytes are
+[published and pinned](spec/conformance.md#the-vectors).
+
+What differs is the consequence of a refusal. A relay connection that fails to
+declare keeps delivering on established sessions, because it still has an
+account-name space to work in. **A gateway has no such space**: a session it has
+not bound may submit and be told a verdict, and is never registered as a
+recipient, so nothing addressed to that device arrives over it. The bridges
+therefore do not report the carrier available at all until the session is bound,
+and a refusal closes the connection. A Reticulum transport that connects and
+never becomes available is that, and the security warning is what says so.
+
+The declaration itself is built in the core rather than in each bridge. The
+relay's has to be bridge-side because it commits the relay-resolved account
+name, which only the bridge knows; the gateway's commits only this device's own
+address, so it exists once, where a conformance vector pins the bytes instead of
+three hand-mirrored copies of a layout.
+
 ## Outbox
 
 The outbox persists messages that require acknowledgment. It serves as the source of truth for "what messages are in flight."

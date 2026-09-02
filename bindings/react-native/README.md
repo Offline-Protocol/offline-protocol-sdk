@@ -973,7 +973,7 @@ interface PresenceUpdatedEvent {
   status: 'online' | 'away' | 'offline';
   timestamp: number;
   last_seen_ms?: number; // relay-sourced only, when the relay knows it
-  source: 'internet' | 'peer';
+  source: 'internet' | 'reticulum' | 'peer';
 }
 ```
 
@@ -986,6 +986,11 @@ interface PresenceUpdatedEvent {
   when the relay knows it (the relay can legitimately not know — e.g. the
   peer hasn't connected since the relay last restarted — so render "Last
   seen" defensively).
+- `source: 'reticulum'`: a gateway's `PresenceStatus` answer over the
+  Reticulum daemon contract, solicited by the SDK's watchlist or pushed when
+  a watched peer's state changes, and the same `offline` on a failed send.
+  Same standing and same decay as `internet`; the two are named apart only
+  so a header can tell which carrier answered.
 - `source: 'peer'` — a peer-sent self-report (`sendPresenceUpdate`),
   arriving over any transport.
 

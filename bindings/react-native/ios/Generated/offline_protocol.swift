@@ -1265,6 +1265,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func forwardMessageToGroup(originalMessageJson: String, groupId: String, priority: MessagePriority?) throws  -> [String]
     
+    func gatewayAddressDeclaration(challenge: [UInt8]) throws  -> GatewayAddressDeclaration
+    
     func getActiveTransports()  -> [String]
     
     func getBatteryLevel()  -> UInt8?
@@ -1451,11 +1453,21 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func resume() throws 
     
+    func reticulumAddressDeclarationRefused(reason: String) 
+    
+    func reticulumAddressDeclared(address: String) 
+    
     func reticulumConfirmSent(messageId: String) 
+    
+    func reticulumGatewayCapabilities(capabilities: [String]) throws 
     
     func reticulumGetNextMessage()  -> ReticulumMessage?
     
     func reticulumMessageReceived(senderId: String, data: [UInt8]) throws 
+    
+    func reticulumPeerPresence(peerId: String, online: Bool, lastSeenMs: Int64?) 
+    
+    func reticulumPresenceWatchlist()  -> [String]
     
     func reticulumSendFailed(messageId: String) 
     
@@ -1808,6 +1820,15 @@ open func forwardMessageToGroup(originalMessageJson: String, groupId: String, pr
         FfiConverterString.lower(originalMessageJson),
         FfiConverterString.lower(groupId),
         FfiConverterOptionTypeMessagePriority.lower(priority),$0
+    )
+})
+}
+    
+open func gatewayAddressDeclaration(challenge: [UInt8])throws  -> GatewayAddressDeclaration  {
+    return try  FfiConverterTypeGatewayAddressDeclaration_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_gateway_address_declaration(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceUInt8.lower(challenge),$0
     )
 })
 }
@@ -2598,10 +2619,34 @@ open func resume()throws   {try rustCallWithError(FfiConverterTypeProtocolError_
 }
 }
     
+open func reticulumAddressDeclarationRefused(reason: String)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declaration_refused(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(reason),$0
+    )
+}
+}
+    
+open func reticulumAddressDeclared(address: String)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declared(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(address),$0
+    )
+}
+}
+    
 open func reticulumConfirmSent(messageId: String)  {try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_confirm_sent(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(messageId),$0
+    )
+}
+}
+    
+open func reticulumGatewayCapabilities(capabilities: [String])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_gateway_capabilities(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(capabilities),$0
     )
 }
 }
@@ -2621,6 +2666,24 @@ open func reticulumMessageReceived(senderId: String, data: [UInt8])throws   {try
         FfiConverterSequenceUInt8.lower(data),$0
     )
 }
+}
+    
+open func reticulumPeerPresence(peerId: String, online: Bool, lastSeenMs: Int64?)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_peer_presence(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(peerId),
+        FfiConverterBool.lower(online),
+        FfiConverterOptionInt64.lower(lastSeenMs),$0
+    )
+}
+}
+    
+open func reticulumPresenceWatchlist() -> [String]  {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_presence_watchlist(
+            self.uniffiCloneHandle(),$0
+    )
+})
 }
     
 open func reticulumSendFailed(messageId: String)  {try! rustCall() {
@@ -3682,6 +3745,62 @@ public func FfiConverterTypeForwardInfo_lift(_ buf: RustBuffer) throws -> Forwar
 #endif
 public func FfiConverterTypeForwardInfo_lower(_ value: ForwardInfo) -> RustBuffer {
     return FfiConverterTypeForwardInfo.lower(value)
+}
+
+
+public struct GatewayAddressDeclaration: Equatable, Hashable {
+    public var address: String
+    public var publicKey: [UInt8]
+    public var signature: [UInt8]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(address: String, publicKey: [UInt8], signature: [UInt8]) {
+        self.address = address
+        self.publicKey = publicKey
+        self.signature = signature
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension GatewayAddressDeclaration: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGatewayAddressDeclaration: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GatewayAddressDeclaration {
+        return
+            try GatewayAddressDeclaration(
+                address: FfiConverterString.read(from: &buf), 
+                publicKey: FfiConverterSequenceUInt8.read(from: &buf), 
+                signature: FfiConverterSequenceUInt8.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GatewayAddressDeclaration, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.address, into: &buf)
+        FfiConverterSequenceUInt8.write(value.publicKey, into: &buf)
+        FfiConverterSequenceUInt8.write(value.signature, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGatewayAddressDeclaration_lift(_ buf: RustBuffer) throws -> GatewayAddressDeclaration {
+    return try FfiConverterTypeGatewayAddressDeclaration.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGatewayAddressDeclaration_lower(_ value: GatewayAddressDeclaration) -> RustBuffer {
+    return FfiConverterTypeGatewayAddressDeclaration.lower(value)
 }
 
 
@@ -10473,6 +10592,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group() != 44359) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration() != 2743) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports() != 5327) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10752,13 +10874,28 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused() != 26875) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared() != 60480) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent() != 38323) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities() != 42139) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message() != 41914) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received() != 11523) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence() != 61011) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist() != 33963) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed() != 40553) {

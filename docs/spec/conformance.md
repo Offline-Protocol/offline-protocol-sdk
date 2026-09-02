@@ -112,6 +112,7 @@ are computed independently of that code.
 | `crates/offline-protocol-core/tests/data/address-v1.vectors.json` | [Identity and addressing](identity.md) | Both |
 | `crates/offline-protocol-sealed/tests/data/derive-address-v1.vectors.json` | [Identity and addressing](identity.md) | Encode |
 | `crates/offline-protocol-sealed/tests/data/control-signing-v1.vectors.json` | [Control messages](control-messages.md) | Encode |
+| `crates/offline-protocol-sealed/tests/data/gateway-address-proof-v1.vectors.json` | [The gateway contract](gateway-contract.md) | Encode |
 | `crates/offline-protocol-sealed/tests/data/mls-envelope-v1.vectors.json` | [Encryption envelopes](encryption-envelopes.md) | Both |
 | `crates/offline-protocol-sealed/tests/data/key-package-v1.vectors.json` | [Capability negotiation](capability-negotiation.md) | Parse |
 | `crates/offline-protocol/tests/data/data-sync-v1.vectors.json` | [Document replication](data-sync.md) | Both |
@@ -122,7 +123,7 @@ are computed independently of that code.
 `tools/spec-vectors/generate.py` is a second implementation of these encodings,
 written from the chapters and forbidden from importing, linking against or
 shelling out to the Rust crates it pins. Running it with `--check` regenerates
-the six files it owns (every row above except document replication and Bluetooth
+the seven files it owns (every row above except document replication and Bluetooth
 LE framing) and fails on any difference, which is what CI does.
 
 Those two remaining files predate the generator and were computed by hand from
@@ -205,15 +206,16 @@ only reviewed.
 
 ## Chapters that are not yet conformance surfaces
 
-Some chapters specify behaviour that has no vector file, and one specifies a
-format nothing emits yet:
+Some chapters specify behaviour that has no vector file:
 
-- [Group protocol](group-protocol.md), [Username discovery and
-  invites](username-discovery.md) and [The gateway
-  contract](gateway-contract.md) are specified in prose and pinned by the
+- [Group protocol](group-protocol.md) and [Username discovery and
+  invites](username-discovery.md) are specified in prose and pinned by the
   reference implementation's own tests.
-- `offline-gateway-addr-v1` is **reserved, not live**. No implementation emits
-  it, so there is nothing to pin. It is registered in advance because
-  non-prefixing is a property of the whole domain set, so a domain cannot be
-  chosen in isolation. See the signing-domain table in
-  [Username discovery](username-discovery.md#signing-domains).
+- [The gateway contract](gateway-contract.md) is pinned only where it is
+  bytes. The attach proof has vectors, because it is the one place in that
+  chapter where a wrong encoding is silent: a payload built with the length
+  little-endian, or with the challenge length-prefixed as though it were a
+  second field, produces a signature that verifies against nothing, which
+  reads as a key problem rather than an encoding one. The rest of the chapter
+  is a JSON message vocabulary whose mistakes surface as a rejected message,
+  and it stays prose.

@@ -79,8 +79,8 @@ would let a record verify against a tag it was never published at.
 
 ## Signing domains
 
-Five domains are live across this protocol, and a sixth is reserved. All of
-them MUST be mutually non-prefixing:
+Six domains are live across this protocol. All of them MUST be mutually
+non-prefixing:
 
 | Domain | Signs | Status |
 |--------|-------|--------|
@@ -89,15 +89,15 @@ them MUST be mutually non-prefixing:
 | `offline-relay-addr-v1` | The relay address-declaration proof | Live |
 | `offline-disc-v1` | Discovery records | Live |
 | `offline-invite-v1` | Invite payloads | Live |
-| `offline-gateway-addr-v1` | The gateway address-declaration proof ([gateway contract](gateway-contract.md#attach)) | Reserved |
+| `offline-gateway-addr-v1` | The gateway address-declaration proof ([gateway contract](gateway-contract.md#attach)) | Live |
 
-The gateway domain is reserved rather than live: the
-[gateway contract](gateway-contract.md) specifies it, and no implementation
-emits it yet. It is registered here in advance precisely because the
-non-prefixing rule is a property of the whole set, so a domain cannot be chosen
-in isolation. Note it MUST stay distinct from `offline-relay-addr-v1` for a
-second reason as well: an identical layout under a shared domain would let a
-signature harvested by one kind of gateway be replayed against the other.
+The gateway domain was registered here before anything signed under it,
+because the non-prefixing rule is a property of the whole set and a domain
+therefore cannot be chosen in isolation. It MUST stay distinct from
+`offline-relay-addr-v1` for a second reason as well: the two proofs have an
+identical layout, so under a shared domain a signature harvested by one kind
+of gateway would replay against the other. Its bytes are pinned by
+[conformance vectors](conformance.md#the-vectors).
 
 Every signature is taken over `domain ‖ Σ(u32be(len) ‖ field_bytes)`. The
 **domain itself is not length-prefixed**, so if one domain were a prefix of

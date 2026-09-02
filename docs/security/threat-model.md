@@ -433,21 +433,30 @@ the acknowledgement ladder. Delivery settles only on the recipient's end-to-end
 acknowledgement or terminal outbox expiry, so no gateway answer settles
 anything.
 
-**Mitigations in place today**, carrying the internet relay as the one shipped
-gateway: the settlement invariant, verdicts-never-close-a-path, MLS end to end
-so a gateway sees ciphertext plus routing metadata, and the recipient-aware
-decay that reverts every gateway claim to "no opinion" on a TTL (ten minutes for
-a verdict, five for a presence answer) rather than letting it stand
-indefinitely. These hold against a hostile relay right now, which is why an A7
-gateway inherits a bounded blast radius rather than a new one.
+**Mitigations in place today**: the settlement invariant,
+verdicts-never-close-a-path, MLS end to end so a gateway sees ciphertext plus
+routing metadata, and the recipient-aware decay that reverts every gateway
+claim to "no opinion" on a TTL (ten minutes for a verdict, five for a presence
+answer) rather than letting it stand indefinitely. These hold against a hostile
+relay right now, which is why an A7 gateway inherits a bounded blast radius
+rather than a new one.
 
-**Mitigations specified but not yet implemented**, and therefore not yet
-protecting anyone: address-bound attach under `offline-gateway-addr-v1` (the
-domain is [reserved, not emitted](../spec/username-discovery.md#signing-domains)),
-and per-device and per-peer token-bucket budgets at the gateway against
-exhaustion. They are listed apart from the others on purpose: a threat model
-that reads as protection when the protection is still prose is the failure this
-document exists to prevent.
+Address-bound attach is now among them. A device attaching over the daemon
+contract signs
+[`offline-gateway-addr-v1`](../spec/username-discovery.md#signing-domains) over
+its own address and the gateway's per-connection challenge, and checks the
+address the gateway echoes back against its own. That is what stops a gateway
+attaching a session under an address the device does not control, and the
+domain separation is what stops a proof harvested here being replayed against
+the relay. It does **not** make any verdict trustworthy, which is the
+enumeration above and is unchanged.
+
+**Mitigations specified but not enforceable from here**: the per-device and
+per-peer token-bucket budgets against backbone exhaustion are the gateway's own
+to apply, so a device cannot verify that its gateway applies them. This is
+listed apart from the others on purpose: a threat model that reads as
+protection when the protection is somebody else's to implement is the failure
+this document exists to prevent.
 
 **What would close it:** nothing closes the lying-gateway case, because the lie
 is about someone else's state. Provisioning is the real control: gateways are

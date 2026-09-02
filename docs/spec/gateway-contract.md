@@ -91,8 +91,8 @@ local IP (venue Wi-Fi, or a hotspot the gateway box provides).
 
 This promotes the protocol both mobile bridges already speak to a configurable
 `daemonAddress` (default `localhost:4242`), rather than designing a fresh one:
-the client side is already implemented twice, and no daemon exists anywhere yet,
-so extending it breaks nobody.
+the client side is already implemented twice, and every field this chapter adds
+to it is additive, so a daemon built to the earlier shape is unaffected.
 
 ### Framing
 
@@ -100,6 +100,12 @@ Newline-delimited UTF-8 JSON objects, one per line. Each object MUST carry a
 `type` field. A receiver MUST ignore an object whose `type` it does not
 recognise, and MUST NOT close the connection because of one: that is what allows
 a version to add messages without a flag day.
+
+A client MAY bound the length of a line, because a line that never ends is
+memory it cannot reclaim and a line past its buffer cannot be resynchronised.
+The reference clients abandon the connection past 1 MiB, so a gateway MUST NOT
+emit a longer line; the largest frame a device can be handed is well inside
+that.
 
 ### Versioning
 
@@ -110,6 +116,42 @@ recognise the daemon's version SHOULD proceed and rely on unknown-type tolerance
 above.
 
 ### Attach
+
+The full sequence, in order. `Capabilities` and `StatusUpdate` are separate
+sections below; they are shown here because the order is what a client
+implements against:
+
+```
+→ Identify
+← Challenge
+→ DeclareAddress
+← AddressDeclared | AddressError
+← Capabilities
+← StatusUpdate(connected)
+```
+
+A gateway MUST send `StatusUpdate(connected)` once it has bound the session,
+MUST send `Capabilities` before it, and MUST NOT send it while a declaration it
+has received is unanswered. A client SHOULD treat `StatusUpdate(connected)` as
+the point at which the carrier becomes usable, and MAY treat one that arrives
+before its own declaration has been answered as a failed attach and close: a
+session announced before it is bound is the verdict-only session described
+below, and a gateway that announces it is not speaking this contract. A client
+that starts submitting earlier is not wrong, but it is submitting into a gateway
+whose features it has not been told.
+
+A gateway MAY still send the same two frames on a session that never declared,
+after a grace period, for clients that do not attach; such a session is
+verdict-only. That grace SHOULD be no shorter than ten seconds, the attach
+timeout the reference clients use, so a client whose declaration is merely slow
+is not announced out from under it and closed by its own rule above.
+
+**A client SHOULD NOT offer an unbound session to its transport selector.** A
+session whose declaration was refused, or never made, may submit and be told a
+verdict and is never registered as a recipient, so nothing addressed to that
+device arrives over it. This differs from the internet relay, where an
+undeclared connection keeps delivering on established sessions in account-name
+space; a gateway has no such space.
 
 ```
 → {"type":"Identify","device_id":"<off1…>","protocol_version":1}
@@ -131,8 +173,26 @@ domain**. The domain MUST be `offline-gateway-addr-v1` and MUST NOT be
 `offline-relay-addr-v1`: a shared domain would let a signature harvested by a
 hostile gateway be replayed against the relay, and vice versa. The domain itself
 is not length-prefixed, so it MUST remain mutually non-prefixing with every
-other domain, live or reserved (see
-[Signing domains](username-discovery.md#signing-domains)).
+other domain (see [Signing domains](username-discovery.md#signing-domains)).
+
+The address is the **only** length-prefixed field: the challenge is appended
+raw, and the one prefix already fixes where the address ends. Prefixing the
+challenge as well is the plausible misreading, and it produces a payload four
+bytes longer that no conforming verifier accepts, while an implementation's own
+round-trip test agrees with itself and reports nothing. For a 44-character
+address and a 32-byte challenge the payload is therefore 103 bytes.
+
+A worked example, which the
+[conformance vectors](conformance.md#the-vectors) carry with two more:
+
+```
+address    off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn
+challenge  000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+payload    6f66666c696e652d676174657761792d616464722d7631   "offline-gateway-addr-v1"
+           0000002c                                         address length, u32be (44)
+           6f6666317179736c7576776c…                        the address, UTF-8
+           000102…1f                                        the 32 challenge bytes
+```
 
 The address is inside the signed bytes deliberately. A signature over a bare
 gateway-chosen challenge would be a signing oracle: the gateway picks challenge
@@ -164,15 +224,33 @@ session to an address this device does not control.
 ### Submit and Verdict
 
 ```
-→ {"type":"SendMessage","recipient":"<off1…>","content":"<base64>","encoding":"base64","reply_to_msg":"<id>"}
-← {"type":"MessageSent","message_id":"<id>"}
+→ {"type":"SendMessage","recipient":"<off1…>","content":"<base64>","encoding":"base64","message_id":"<id>","reply_to_msg":"<id>"}
+← {"type":"MessageSent","message_id":"<id>","recipient":"<off1…>"}
   or
-← {"type":"DeliveryError","message_id":"<id>","reason":"recipient_unreachable: <text>"}
+← {"type":"DeliveryError","message_id":"<id>","recipient":"<off1…>","reason":"recipient_unreachable: <text>"}
 ```
 
 A gateway MUST answer every `SendMessage` with exactly one of these. Silence is
 not permitted: the sender's outbox holds the message either way, but a gateway
 that neither forwards nor refuses converts a routing decision into a timeout.
+
+`message_id` on the request is **optional and client-chosen**. A gateway MUST
+echo a client-supplied id verbatim on the verdict, and MUST mint one when the
+request carries none or carries one it will not accept. It MAY bound what it
+accepts; the shape both implementations use is 1 to 64 characters of
+`[A-Za-z0-9._-]`, which a UUID satisfies.
+
+**A client MUST correlate by id and MUST NOT correlate by order.** A gateway
+answers submissions as their routing resolves, which is not the order they
+arrived: one recipient is attached locally and answers immediately, the next
+needs a backbone query. A client that sends no id therefore cannot correlate at
+all, because the id it is answered under is one the gateway chose. That is the
+reason to send one, and the reason a gateway that silently rewrote an id it
+disliked would be worse than one that rejected the submission outright.
+
+`recipient` on both verdicts is the address the verdict is about. Additive, and
+a client that does not read it is unaffected; a client that does can act on the
+recipient without keeping its own id-to-recipient map.
 
 `reason` MUST begin with `recipient_unreachable` when the recipient is not
 reachable through this gateway. That token is the one the SDK classifier matches
@@ -181,11 +259,22 @@ trailing prose after the token is for human logs and MUST NOT be relied on: the
 SDK discards it at the classification boundary and never carries it into an
 event.
 
+Every other reason is a plain failure to the SDK, which puts the frame back on
+its retry ladder and acts on nothing else in the text. Tokens a gateway may use
+for those, none of which is normative: `attach_required` (the session is not
+bound), `backbone_timeout`, `budget_exceeded`, `frame_too_large`,
+`malformed_request`.
+
 ### Deliver
 
 ```
-← {"type":"MessageReceived","sender":"<off1…>","content":"<base64>","encoding":"base64"}
+← {"type":"MessageReceived","sender":"<off1…>","content":"<base64>","encoding":"base64","message_id":"<id>","reply_to_msg":"<id>"}
 ```
+
+`message_id` and `reply_to_msg` are additive and MAY be absent. They carry the
+sender's own correlation forward so a gateway does not have to be the place
+where it is lost; nothing in delivery depends on either, and the frame
+authenticates itself regardless.
 
 A frame the gateway holds for this device, handed to it over the attach
 connection. `encoding` is optional; absent means UTF-8 text, and every binary
@@ -239,8 +328,9 @@ an attacker who can set them is already the gateway.
 ← {"type":"StatusUpdate","status":"connected"|"degraded"|"disconnected"}
 ```
 
-Advisory. A device MUST NOT treat `StatusUpdate` as a delivery signal for any
-particular frame.
+Advisory for delivery: a device MUST NOT treat `StatusUpdate` as a delivery
+signal for any particular frame. `connected` is also the frame that completes
+an attach, with the obligations [Attach](#attach) places on it.
 
 ### No new zone control prefixes
 

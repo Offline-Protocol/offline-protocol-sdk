@@ -14619,6 +14619,331 @@ fn test_relay_declaration_refusal_does_not_carry_the_relay_reason() {
     );
 }
 
+/// The gateway echoing our own address is the expected outcome.
+#[test]
+fn test_gateway_address_echo_matching_local_address_is_silent() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    let warnings = capture_security_warnings(&mut alice);
+    alice.start().unwrap();
+    let local = alice.local_address().expect("an address").to_string();
+
+    alice.on_gateway_address_declared(&local);
+
+    assert!(
+        warnings.lock().unwrap().is_empty(),
+        "the gateway echoing our own address must not warn (got {:?})",
+        warnings.lock().unwrap()
+    );
+}
+
+/// A gateway acknowledging an address that is not ours is reported, and the
+/// event is attributed to the address it bound rather than to us.
+#[test]
+fn test_gateway_address_echo_naming_another_address_warns() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    let warnings = capture_security_warnings(&mut alice);
+    alice.start().unwrap();
+    let someone_else = id("bob");
+
+    alice.on_gateway_address_declared(&someone_else);
+
+    let seen = warnings.lock().unwrap();
+    assert_eq!(
+        seen.as_slice(),
+        &[(
+            someone_else.clone(),
+            SecurityWarningCode::GatewayAddressBindingMismatch
+        )],
+        "an echo naming another address must warn once, attributed to the address \
+         the gateway bound"
+    );
+}
+
+/// An echo with no local identity is the same finding: it answers a
+/// declaration this node never made.
+#[test]
+fn test_gateway_address_echo_before_identity_warns() {
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    let warnings = capture_security_warnings(&mut alice);
+    assert!(
+        alice.local_address().is_none(),
+        "premise: no identity has been established"
+    );
+
+    alice.on_gateway_address_declared(&id("bob"));
+
+    let seen = warnings.lock().unwrap();
+    assert_eq!(seen.len(), 1, "an unmatched echo must still be reported");
+    assert_eq!(
+        seen[0].1,
+        SecurityWarningCode::GatewayAddressBindingMismatch
+    );
+}
+
+/// A refusal is attributed to this node: the failure is ours and no peer is
+/// involved.
+#[test]
+fn test_gateway_declaration_refusal_warns_against_self() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    let warnings = capture_security_warnings(&mut alice);
+    alice.start().unwrap();
+    let local = alice.local_address().expect("address").to_string();
+
+    alice.on_gateway_address_declaration_refused("address_mismatch: does not derive");
+
+    let seen = warnings.lock().unwrap();
+    assert_eq!(
+        seen.as_slice(),
+        &[(
+            local.clone(),
+            SecurityWarningCode::GatewayAddressDeclarationRefused
+        )],
+        "a refusal must warn once against our own id"
+    );
+}
+
+/// The gateway's own wording never reaches the event, for the reason #350
+/// settled for the relay: `reason` is shipped verbatim to telemetry sinks and
+/// the text is written by a remote party.
+#[test]
+fn test_gateway_declaration_refusal_does_not_carry_the_gateway_reason() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    let reasons: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let h = Arc::clone(&reasons);
+        alice.on_event(move |e| {
+            if let Event::SecurityWarning { reason, .. } = e {
+                h.lock().unwrap().push(reason);
+            }
+        });
+    }
+    alice.start().unwrap();
+
+    alice.on_gateway_address_declaration_refused("bad_signature: did not verify");
+
+    let reasons = reasons.lock().unwrap();
+    assert!(
+        !reasons.is_empty(),
+        "the refusal must still be reported to the app"
+    );
+    assert!(
+        !reasons.iter().any(|r| r.contains("bad_signature")),
+        "the gateway's own wording must not reach the event (got {reasons:?})"
+    );
+}
+
+/// The proof verifies under this device's identity key, and the address in it
+/// is the one the key derives to.
+///
+/// This is the assertion a gateway makes on the other side of the socket, run
+/// here against our own output: if it fails, every attach fails and the only
+/// symptom is a refusal with no local explanation.
+#[test]
+fn a_gateway_declaration_verifies_under_our_own_identity_key() {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    alice.start().unwrap();
+    let challenge: Vec<u8> = (0u8..32).collect();
+
+    let (address, public_key, signature) = alice
+        .gateway_address_declaration(&challenge)
+        .expect("a started, MLS-initialized instance can declare");
+
+    assert_eq!(
+        address,
+        alice.local_address().expect("address"),
+        "the declaration names this device's address"
+    );
+    assert_eq!(
+        address,
+        offline_protocol_sealed::derive_address(&public_key)
+            .expect("derivable")
+            .to_string(),
+        "and that address derives from the key it presents, which is the check \
+         that makes the binding mean anything"
+    );
+
+    let payload = offline_protocol_sealed::gateway_address_proof_payload(&address, &challenge)
+        .expect("payload");
+    let key = VerifyingKey::from_bytes(&public_key.try_into().expect("32 bytes")).expect("key");
+    let sig = Signature::from_bytes(&signature.as_slice().try_into().expect("64 bytes"));
+    key.verify(&payload, &sig).expect("the proof verifies");
+}
+
+/// A challenge that is not 32 bytes is refused rather than signed.
+///
+/// A gateway that mints a short challenge has weakened the replay bound the
+/// challenge exists to provide, and a signing routine that puts this device's
+/// key over whatever bytes a remote party chose is the shape of an oracle.
+#[test]
+fn a_gateway_declaration_refuses_a_wrong_sized_challenge() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    alice.start().unwrap();
+
+    for len in [0usize, 31, 33, 64] {
+        let challenge = vec![7u8; len];
+        assert!(
+            matches!(
+                alice.gateway_address_declaration(&challenge),
+                Err(Error::InvalidArgument(_))
+            ),
+            "a {len}-byte challenge must be refused as an invalid argument, the code the \
+             FFI documents for it"
+        );
+    }
+    assert!(
+        alice.gateway_address_declaration(&vec![7u8; 32]).is_ok(),
+        "premise: the right size is accepted, so the refusals above mean something"
+    );
+}
+
+/// Without an identity there is nothing to declare, and the caller is told so
+/// rather than handed a declaration for an empty address.
+#[test]
+fn a_gateway_declaration_needs_an_identity() {
+    let alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    assert!(alice.local_address().is_none(), "premise: no identity");
+
+    assert!(
+        matches!(
+            alice.gateway_address_declaration(&vec![7u8; 32]),
+            Err(Error::MlsNotInitialized)
+        ),
+        "no identity is MlsNotInitialized, the code the FFI documents for it; a generic \
+         error hides the one condition a caller can wait out"
+    );
+}
+
+/// A gateway that keeps refusing is reported once per suppression interval,
+/// not once per reconnect rung: the bridge closes a refused connection and
+/// climbs its ladder, so the same fact would otherwise reach the app twice
+/// a minute for as long as the transport is enabled.
+#[test]
+fn test_gateway_declaration_refusal_warning_is_suppressed_on_repeat() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    let warnings = capture_security_warnings(&mut alice);
+    alice.start().unwrap();
+
+    alice.on_gateway_address_declaration_refused("bad_signature");
+    alice.on_gateway_address_declaration_refused("bad_signature");
+    alice.on_gateway_address_declaration_refused("address_mismatch");
+
+    assert_eq!(
+        warnings.lock().unwrap().len(),
+        1,
+        "three refusals inside the interval must produce one warning"
+    );
+}
+
+/// The same suppression for a mismatch, for the same reason: the bridge
+/// closes on a mismatch and climbs its ladder.
+#[test]
+fn test_gateway_binding_mismatch_warning_is_suppressed_on_repeat() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    let warnings = capture_security_warnings(&mut alice);
+    alice.start().unwrap();
+    let someone_else = id("bob");
+
+    alice.on_gateway_address_declared(&someone_else);
+    alice.on_gateway_address_declared(&someone_else);
+
+    assert_eq!(
+        warnings.lock().unwrap().len(),
+        1,
+        "a repeated mismatch inside the interval must produce one warning"
+    );
+}
+
+/// A bound session resets the suppression: a refusal after a good session
+/// is news again, and so is one from a different box after a reconfigure.
+#[test]
+fn test_a_gateway_attach_resets_the_warning_suppression() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    let warnings = capture_security_warnings(&mut alice);
+    alice.start().unwrap();
+
+    alice.on_gateway_address_declaration_refused("bad_signature");
+    alice.note_gateway_attached();
+    alice.on_gateway_address_declaration_refused("bad_signature");
+
+    assert_eq!(
+        warnings.lock().unwrap().len(),
+        2,
+        "a refusal after an attach must be reported again"
+    );
+}
+
+/// Gateway capabilities are bounded exactly as the relay's are, and a hostile
+/// advertisement cannot use padding to evict real tokens.
+#[test]
+fn gateway_capabilities_are_bounded() {
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+    // Sixty-four oversized tokens and an empty one *ahead of* the real one:
+    // filtered after the count was applied, they would evict it.
+    let mut padded: Vec<String> = (0..64)
+        .map(|i| format!("{i}{}", "x".repeat(4096)))
+        .collect();
+    padded.push(String::new());
+    padded.push("gateway_v1".to_string());
+    protocol.set_gateway_capabilities(padded);
+    assert_eq!(
+        protocol.gateway_capabilities(),
+        vec!["gateway_v1".to_string()],
+        "padding must not evict a real token"
+    );
+
+    let tokens: Vec<String> = (0..200).map(|i| format!("cap_{i}")).collect();
+    protocol.set_gateway_capabilities(tokens);
+    let stored = protocol.gateway_capabilities();
+    assert_eq!(
+        stored.len(),
+        64,
+        "exactly the first 64 valid tokens are stored"
+    );
+    assert!(
+        stored.iter().all(|t| t.len() <= 128 && !t.is_empty()),
+        "no oversized or empty token is stored"
+    );
+
+    protocol.set_gateway_capabilities(vec!["gateway_v1".to_string()]);
+    assert_eq!(
+        protocol.gateway_capabilities(),
+        vec!["gateway_v1".to_string()],
+        "each attach describes the gateway connected now: wholesale replace"
+    );
+
+    protocol.clear_gateway_capabilities();
+    assert!(
+        protocol.gateway_capabilities().is_empty(),
+        "a stale advertisement must not outlive the gateway that made it"
+    );
+}
+
+/// A gateway's advertisement must never open the relay's group-broadcast gate.
+///
+/// The two sets are both capability tokens from a gateway, which is exactly
+/// why they are kept apart: the relay set gates a delivery path, and whatever
+/// box is plugged into the venue Wi-Fi does not get to open it.
+#[test]
+fn gateway_capabilities_do_not_reach_the_relay_capability_set() {
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+    protocol.set_gateway_capabilities(vec![
+        "gateway_v1".to_string(),
+        crate::group_mesh::RELAY_CAP_GROUP_DELIVERY_V3.to_string(),
+    ]);
+
+    assert!(
+        !protocol
+            .group_mesh
+            .relay_capabilities
+            .contains(crate::group_mesh::RELAY_CAP_GROUP_DELIVERY_V3),
+        "a gateway token must not land in the relay's set"
+    );
+}
+
 /// Every path that drops a pending queue must settle the ids it destroys. The
 /// app was handed those ids by `send_message*` at queue time, so an unsettled
 /// drop leaves it waiting on messages that can never resolve either way — the
@@ -21972,6 +22297,169 @@ fn a_verdict_from_any_carrier_parks_the_message() {
         Some(crate::protocol::reachability::Claim::Unreachable),
         "and be recorded against the carrier that reported it"
     );
+}
+
+/// A gateway's presence answer is recorded against *that* gateway.
+///
+/// The relay's answer and a Reticulum gateway's answer are claims about the
+/// same recipient made by different carriers, and either may be wrong while
+/// the other is right. Recording both against one carrier would let a
+/// Reticulum gateway's "reachable" answer keep the internet transport from
+/// ever being told it cannot reach someone.
+#[test]
+fn a_gateway_presence_answer_is_recorded_against_the_gateway_that_made_it() {
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+    protocol.start().unwrap();
+
+    protocol.on_peer_presence_via("bob", false, None, GatewayCarrier::Reticulum);
+
+    let now = std::time::Instant::now();
+    assert_eq!(
+        protocol
+            .reachability
+            .claim_for("bob", TransportType::Reticulum, now),
+        Some(crate::protocol::reachability::Claim::Unreachable),
+        "the answering carrier holds the fact"
+    );
+    assert_eq!(
+        protocol
+            .reachability
+            .claim_for("bob", TransportType::Internet, now),
+        None,
+        "and no other carrier is made to hold an opinion it never expressed"
+    );
+}
+
+/// The un-park flush is pinned to the carrier that just proved it can reach
+/// the peer, not to the Internet transport.
+///
+/// This is the substitution most likely to be missed and least likely to be
+/// noticed: with the pin left hard-coded, a Reticulum gateway's presence
+/// answer clears the park counter and forces the send over a carrier that
+/// proved nothing, so the message leaves over the wrong transport with its
+/// escalating probe already reset.
+#[test]
+fn a_reticulum_presence_answer_redrives_over_reticulum() {
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+    // Both carriers are mocks kept by clone, so the assertion can look at
+    // where the re-driven frame actually went: the other two substitutions
+    // (the fact and the event) each have their own test, and this is the
+    // one whose revert to `TransportType::Internet` fails nothing else.
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let reticulum = MockTransport::new(TransportType::Reticulum);
+    reticulum.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet.clone()));
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Reticulum, Box::new(reticulum.clone()));
+    protocol.start().unwrap();
+
+    let sent = protocol
+        .send_message("bob", "over the backbone", None, None::<String>)
+        .unwrap();
+    protocol
+        .on_transport_send_failed_via(
+            &sent.as_str(),
+            Some("recipient_unreachable: no path".to_string()),
+            Some(TransportType::Reticulum),
+        )
+        .unwrap();
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&1),
+        "premise: the DM is parked"
+    );
+
+    let internet_before = internet.sent_messages().len();
+    let reticulum_before = reticulum.sent_messages().len();
+
+    protocol.on_peer_presence_via("bob", true, Some(42), GatewayCarrier::Reticulum);
+
+    assert!(
+        !protocol.dm_unreachable_parks.contains_key("bob"),
+        "the gateway saying the peer is reachable un-parks them"
+    );
+    assert!(
+        reticulum
+            .sent_messages()
+            .iter()
+            .skip(reticulum_before)
+            .any(|m| m.id.as_str() == sent.as_str()),
+        "the re-drive goes out over the carrier that proved it can reach the peer"
+    );
+    assert_eq!(
+        internet.sent_messages().len(),
+        internet_before,
+        "and not over the internet transport, which proved nothing"
+    );
+    assert_eq!(
+        protocol
+            .reachability
+            .claim_for("bob", TransportType::Reticulum, std::time::Instant::now()),
+        Some(crate::protocol::reachability::Claim::Reachable),
+        "and the later answer supersedes the verdict for that carrier"
+    );
+}
+
+/// The event names which carrier answered.
+///
+/// Apps are told to filter on `source` so a nearby peer's self-report cannot
+/// flip a header defined as relay-observed. A gateway answer labelled
+/// `internet` would defeat that filter in the other direction, by letting a
+/// box on the venue Wi-Fi write the relay's UI.
+#[test]
+fn a_gateway_presence_event_names_the_answering_carrier() {
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+    let sources: Arc<Mutex<Vec<PresenceSource>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let h = Arc::clone(&sources);
+        protocol.on_event(move |e| {
+            if let Event::PresenceUpdated { source, .. } = e {
+                h.lock().unwrap().push(source);
+            }
+        });
+    }
+    protocol.start().unwrap();
+
+    protocol.on_peer_presence_via("bob", true, None, GatewayCarrier::Reticulum);
+    protocol.on_peer_presence("carol", true, None);
+
+    assert_eq!(
+        sources.lock().unwrap().as_slice(),
+        &[PresenceSource::Reticulum, PresenceSource::Internet],
+        "each answer is labelled with the carrier that gave it"
+    );
+}
+
+/// Nostr is not a gateway, and the type says so.
+///
+/// A broadcast relay reports no per-recipient delivery, so it can never
+/// contradict the blanket "up means reachable" assumption. Recording this in
+/// the classifier is what stops the gap being rediscovered as a bug.
+#[test]
+fn only_the_carriers_that_answer_verdicts_are_gateways() {
+    assert_eq!(
+        GatewayCarrier::from_transport(TransportType::Internet),
+        Some(GatewayCarrier::Internet)
+    );
+    assert_eq!(
+        GatewayCarrier::from_transport(TransportType::Reticulum),
+        Some(GatewayCarrier::Reticulum)
+    );
+    for carrier in [
+        TransportType::BLE,
+        TransportType::WiFiDirect,
+        TransportType::Nostr,
+    ] {
+        assert_eq!(
+            GatewayCarrier::from_transport(carrier),
+            None,
+            "{carrier:?} answers no verdicts and must not be treated as a gateway"
+        );
+    }
 }
 
 #[test]

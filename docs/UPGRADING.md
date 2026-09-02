@@ -1940,6 +1940,45 @@ upgrade rather than fold it into your next feature release.
 
 ---
 
+## 19. The Reticulum transport's inert configuration is gone
+
+**Rust crates only, for the removals below.** No binding and no configuration
+key changes: none of what follows was ever reachable through the FFI, and the
+React Native `transports.reticulum` section (`daemonAddress`, `autoReconnect`,
+`maxReconnectAttempts`) is untouched and still read by the native managers.
+
+**One behaviour change, for anyone running a custom daemon.** The bundled
+managers now attach with [contract v1](spec/gateway-contract.md#attach): they
+expect `Identify` to be answered with `Challenge`, sign and send
+`DeclareAddress`, and announce the carrier only on the `StatusUpdate(connected)`
+that follows a bound session. A daemon that speaks the earlier shape, `Identify`
+answered by nothing in particular and `StatusUpdate` treated as advisory, gets a
+transport that connects and never becomes available: the attach times out after
+ten seconds and the manager reconnects on its ladder. The frames a daemon has to
+send, and the security warnings that explain a refused or mismatched attach, are
+in [docs/reticulum.md](reticulum.md#the-attach-handshake).
+
+| Removed | Surface |
+|---|---|
+| `ReticulumConfig` and its four fields | `offline-protocol-transport` |
+| `ReticulumTransport::with_config`, `config()` | `offline-protocol-transport` |
+| `ReticulumTransport::should_reconnect`, `increment_reconnect_attempts` | `offline-protocol-transport` |
+| `ReticulumTransportBuilder` | `offline-protocol-transport` |
+| `RETICULUM_CONNECTION_TIMEOUT_SECS`, `RETICULUM_MAX_PAYLOAD_SIZE` | `offline_protocol_transport::constants` |
+
+**Replace any construction with `ReticulumTransport::new(device_id)`.** There
+is nothing to carry across, because nothing was reading the values. Reconnection
+belongs to the platform bridge, which holds its own backoff and its own timeout
+and takes them from the app's transport config; `reconnect_delay` had no reader
+in any crate; and `RETICULUM_MAX_PAYLOAD_SIZE` was a declared intent that no
+code path enforced, so treating it as a limit was already wrong.
+
+If you set these fields expecting them to do something, the behaviour you
+wanted was never there, and the values you want live in your app's
+`transports.reticulum` configuration instead.
+
+---
+
 ## Appendix A: limits reference
 
 | Limit | Value | Where enforced |

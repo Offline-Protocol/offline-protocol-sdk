@@ -264,7 +264,10 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 | `transports.ble.enabled` | boolean | true | Enable BLE mesh |
 | `transports.wifiDirect.enabled` | boolean | true | Enable Wi-Fi Direct (Android only) |
 | `transports.internet.enabled` | boolean | true | Enable Internet |
-| `transports.reticulum.enabled` | boolean | false | Enable Reticulum mesh (requires external daemon) |
+| `transports.reticulum.enabled` | boolean | false | Enable Reticulum mesh (requires a gateway daemon speaking [contract v1](spec/gateway-contract.md#gateway-daemon-contract-v1)) |
+| `transports.reticulum.daemonAddress` | string | `localhost:4242` | Host and port of the gateway daemon |
+| `transports.reticulum.autoReconnect` | boolean | true | Reconnect after the connection drops |
+| `transports.reticulum.maxReconnectAttempts` | number | 0 | Attempts before giving up (0 = infinite) |
 | `transports.nostr.enabled` | boolean | false | Enable Nostr relay transport (requires `relayUrls`) |
 | `transports.nostr.relayUrls` | string[] | `[]` | Nostr relay WebSocket URLs (e.g. `["wss://relay.damus.io"]`) |
 | `transports.nostr.connectionTimeout` | number | 30 | Connection timeout in seconds |

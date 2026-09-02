@@ -40,6 +40,8 @@ Pod::Spec.new do |s|
     "ios/LegacyStoreAdoption.swift",
     "ios/ForegroundReconnectPolicy.swift",
     "ios/MonotonicClock.swift",
+    "ios/GatewayAttachPolicy.swift",
+    "ios/GatewayVerdictTracker.swift",
     "ios/PresenceWatchPolicy.swift",
     "ios/RecipientInFlightTracker.swift",
     "ios/RelayTimestamps.swift",

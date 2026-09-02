@@ -2108,12 +2108,17 @@ export type PresenceStatus = 'online' | 'away' | 'offline';
  * - `peer`: a peer-sent `__PRESENCE__` self-report. Transport-agnostic —
  *   it may arrive over BLE, WiFi Direct, or even relay-forwarded frames,
  *   hence "peer", not "mesh".
+ * - `reticulum` — a gateway's `PresenceStatus` answer over the Reticulum
+ *   daemon contract, solicited by the SDK's watchlist or pushed when a
+ *   watched peer's state changes. Same standing and same decay as
+ *   `internet`: the relay is a gateway too, and the two are named apart
+ *   only so an app can tell which carrier answered.
  *
  * Apps rendering relay-style presence UI (a direct-chat header's
  * "Online" / "Last seen …") should filter on `internet` so a nearby
  * peer's self-report can't flip a header defined as relay-observed.
  */
-export type PresenceSource = 'internet' | 'peer';
+export type PresenceSource = 'internet' | 'reticulum' | 'peer';
 
 /**
  * Presence updated event — one unified stream for both sources
@@ -2352,7 +2357,9 @@ export type SecurityWarningCode =
   | 'RELAY_ADDRESS_BINDING_MISMATCH'
   | 'RELAY_ADDRESS_DECLARATION_REFUSED'
   | 'GROUP_LEAF_IDENTITY_UNPROVEN'
-  | 'STALE_CONTROL_FRAME';
+  | 'STALE_CONTROL_FRAME'
+  | 'GATEWAY_ADDRESS_BINDING_MISMATCH'
+  | 'GATEWAY_ADDRESS_DECLARATION_REFUSED';
 
 /**
  * A security-relevant anomaly was detected for a peer.
