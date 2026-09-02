@@ -258,7 +258,19 @@ public class BleManager: NSObject, TransportManager {
     private var scanStateMonitor: DispatchSourceTimer?
     private var lastDiscoveryDate: Date?
     private var scanStartDate: Date?
-    
+
+    // Diagnostic sampling for the BLE receive path — running per-peripheral
+    // tally of `didUpdateValueFor` (i.e. every notify frame that arrives on the
+    // message characteristic), flushed on a 5-second window boundary. Used to
+    // localize fragment loss to either the wire (few notifies arrive between
+    // two subscription cycles) or downstream (many notifies arrive but
+    // reassembly never completes). Guarded by its own lock — this is polled
+    // from CoreBluetooth's delegate queue, but cleared on flush, so it never
+    // holds unbounded state per peer.
+    private let notifyRateLock = NSLock()
+    private var notifyValueCounts: [UUID: Int] = [:]
+    private var notifyRateWindowStart: [UUID: Date] = [:]
+
     // Adaptive scan state
     /// Timestamps of recent peripheral discoveries for density estimation
     private var recentDiscoveryTimestamps: [Date] = []
@@ -1895,7 +1907,32 @@ public class BleManager: NSObject, TransportManager {
                     "senderId": senderId,
                     "fragmentSize": data.count
                 ])
-                
+
+                // Parse the OP fragment header for diagnostic logging.
+                // Wire format (from the Rust core BleTransport, mirrored in
+                // the mesh-node shim's fragmentation): 2-byte magic "OP",
+                // 1-byte version, 1-byte messageId length N, N-byte messageId
+                // (UTF-8), then u16 LE fragmentIndex, u16 LE totalFragments,
+                // u16 LE dataLength. Emit ONE line per notify with the parsed
+                // (msgId, idx, total) so a run-log grep can confirm whether
+                // reassembly ever reaches `idx == total - 1` for a given
+                // messageId, which is the direct symptom of a mid-transfer
+                // subscription drop.
+                var traceMessageId = "?"
+                var traceFragIdx = -1
+                var traceFragTotal = -1
+                if bytes.count >= 10, bytes[0] == 0x4F, bytes[1] == 0x50, bytes[2] == 0x01 {
+                    let idLen = Int(bytes[3])
+                    if bytes.count >= 4 + idLen + 6 {
+                        traceMessageId = String(bytes: bytes[4..<(4 + idLen)], encoding: .utf8) ?? "?"
+                        let idxOff = 4 + idLen
+                        traceFragIdx = Int(bytes[idxOff]) | (Int(bytes[idxOff + 1]) << 8)
+                        traceFragTotal = Int(bytes[idxOff + 2]) | (Int(bytes[idxOff + 3]) << 8)
+                    }
+                }
+                NSLog("[BleManager] FRAG recv msgId=%@ idx=%d/%d senderId=%@ size=%d",
+                      traceMessageId, traceFragIdx, traceFragTotal, senderId, data.count)
+
                 try self.protocolInstance.bleFragmentReceived(senderId: senderId, fragment: bytes)
                 print("[BleManager] ✅ Fragment processed successfully for sender: \(senderId)")
                 
@@ -1904,6 +1941,14 @@ public class BleManager: NSObject, TransportManager {
                 var messageCount = 0
                 while let completedMessage = self.protocolInstance.receiveMessage() {
                     messageCount += 1
+                    // Distinct tag from the pretty-printed lines below so a
+                    // run-log grep can pick out exactly the reassembled JSON
+                    // without emoji chrome. Truncated at 400 chars because
+                    // training_cluster payloads are ~6 KB but the JSON header
+                    // (type/sender/recipient/messageId) is what localizes a
+                    // routing or dispatch failure downstream of reassembly.
+                    let fullPreview = String(completedMessage.prefix(400))
+                    NSLog("[BleManager] FULL_MSG %@", fullPreview)
                     print("[BleManager] 🎉 COMPLETE MESSAGE #\(messageCount) ASSEMBLED FROM FRAGMENTS!")
                     print("[BleManager] 📬 Received message: \(completedMessage)")
                     self.emitDiagnostic("info", "Complete message assembled from fragments", context: [
@@ -2944,6 +2989,33 @@ extension BleManager: CBPeripheralDelegate {
     }
     
     public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        // Diagnostic sample of per-peripheral notify rate on the message
+        // characteristic. Every FRAG log below is one notify; this running
+        // tally catches the case where notifies simply stop arriving (silent
+        // unsubscribe, iOS backpressure, GATT reset) with no other log line
+        // signalling it. Flushed on a 5-second window boundary so the log
+        // lines are read-once-per-window, not per-fragment.
+        if error == nil, characteristic.uuid == MESSAGE_CHAR_UUID {
+            let key = peripheral.identifier
+            let now = Date()
+            var flushed: (count: Int, elapsed: TimeInterval)? = nil
+            notifyRateLock.lock()
+            notifyValueCounts[key, default: 0] += 1
+            if notifyRateWindowStart[key] == nil {
+                notifyRateWindowStart[key] = now
+            }
+            let elapsed = now.timeIntervalSince(notifyRateWindowStart[key] ?? now)
+            if elapsed >= 5.0 {
+                flushed = (notifyValueCounts[key] ?? 0, elapsed)
+                notifyValueCounts[key] = 0
+                notifyRateWindowStart[key] = now
+            }
+            notifyRateLock.unlock()
+            if let f = flushed {
+                NSLog("[BleManager] NOTIFY_RATE peer=%@ count=%d window=%.1fs",
+                      key.uuidString, f.count, f.elapsed)
+            }
+        }
         if let error = error {
             print("[BleManager] Error reading characteristic: \(error)")
             emitDiagnostic("error", "Error reading characteristic", context: ["error": error.localizedDescription])
@@ -3282,6 +3354,28 @@ extension BleManager: CBPeripheralDelegate {
             print("[BleManager] Error writing characteristic: \(error)")
             emitDiagnostic("error", "Error writing characteristic", context: ["error": error.localizedDescription])
         }
+    }
+
+    /// Diagnostic: fires whenever the LOCAL central's subscription state on
+    /// `characteristic` changes — either because this side called
+    /// `setNotifyValue(...)` on a live link, or because the remote peripheral
+    /// reported a change. Pairs with the peripheral-side
+    /// CENTRAL SUBSCRIBED / UNSUBSCRIBED logs on the sender to timestamp
+    /// subscription churn from BOTH ends of the same link, which is how the
+    /// fragment-loss hypothesis (mid-transfer unsubscribe) is confirmed or
+    /// refuted in a single trace.
+    public func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        if let error = error {
+            NSLog("[BleManager] NOTIFY_STATE peer=%@ char=%@ error=%@",
+                  peripheral.identifier.uuidString,
+                  characteristic.uuid.uuidString,
+                  error.localizedDescription)
+            return
+        }
+        NSLog("[BleManager] NOTIFY_STATE peer=%@ char=%@ subscribed=%@",
+              peripheral.identifier.uuidString,
+              characteristic.uuid.uuidString,
+              characteristic.isNotifying ? "YES" : "NO")
     }
     
     /// Flow-control signal: the BLE write buffer has drained for this peripheral.
