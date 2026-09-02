@@ -91,8 +91,10 @@ local IP (venue Wi-Fi, or a hotspot the gateway box provides).
 
 This promotes the protocol both mobile bridges already speak to a configurable
 `daemonAddress` (default `localhost:4242`), rather than designing a fresh one:
-the client side is already implemented twice, and no daemon exists anywhere yet,
-so extending it breaks nobody.
+the client side was already implemented twice, and no daemon existed anywhere
+when this contract was written, so extending it broke nobody. The reference
+daemon (`Offline-Protocol/offline-gateway-daemon`) was then built to this
+document.
 
 ### Framing
 

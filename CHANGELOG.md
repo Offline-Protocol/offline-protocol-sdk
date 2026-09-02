@@ -104,6 +104,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   native layers. See
   [docs/configuration.md](docs/configuration.md#reliability-configuration).
 
+### Documentation
+
+- **The Reticulum transport's counterpart exists.** `docs/reticulum.md` and
+  the gateway contract said no daemon existed anywhere and nothing answered
+  the mobile managers' `daemonAddress`. The reference gateway daemon
+  (`Offline-Protocol/offline-gateway-daemon`) implements contract v1,
+  attaches to `rnsd` as a local client, and is the Python binding's Reticulum
+  transport. Both documents now say so, and still say what has not changed:
+  the mobile managers confirm a send on the socket write and ignore the
+  daemon's verdicts until the transport work that teaches them to settle on
+  its answer.
+
 ## [0.24.1] — 2026-08-26
 
 > **Every fix here is the same defect found four ways: the iOS React Native

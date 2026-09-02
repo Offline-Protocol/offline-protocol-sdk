@@ -6,7 +6,7 @@ The Reticulum transport provides long-range, resilient mesh networking via the [
 
 Reticulum is one of five transports in the Offline Protocol SDK, alongside BLE, Wi-Fi Direct, Internet and Nostr. It is disabled by default because it requires external infrastructure (a running Reticulum instance, an RNode radio, or a gateway).
 
-> **No counterpart daemon ships yet.** The Rust transport opens no Reticulum link of its own: it manages queues, metrics and the send-confirmation loop, and expects the platform to bridge to a real Reticulum stack. Both mobile managers speak the protocol below to a configurable address, and nothing in this repository or any companion repository answers on the other end. Until a daemon exists, enabling Reticulum gives you a transport that queues and never drains. See [the gateway contract](spec/gateway-contract.md), which specifies what that daemon has to be.
+> **The counterpart daemon lives in a sibling repository.** The Rust transport opens no Reticulum link of its own: it manages queues, metrics and the send-confirmation loop, and expects the platform to bridge to a real Reticulum stack. Both mobile managers speak the protocol below to a configurable address. What answers on the other end is the reference gateway daemon, `Offline-Protocol/offline-gateway-daemon`, built to [the gateway contract](spec/gateway-contract.md) and not shipped by this repository. With no daemon at `daemonAddress`, enabling Reticulum gives you a transport that queues and never drains. The Python binding has no Reticulum manager of its own; the daemon repository's `ReticulumBridge` is it.
 
 ## When to Use Reticulum
 
@@ -200,11 +200,13 @@ Regardless of which integration strategy you choose, the platform bridge interac
 > correctly gets no verdict handling from today's bridges. Teaching them to
 > settle on the daemon's answer is part of the transport work, not the daemon's.
 >
-> Note what this section used to imply and does not: **no Reticulum daemon
-> speaks this protocol.** `rnsd`'s own shared-instance IPC is HDLC-framed
-> Reticulum packets over a Unix domain socket (Strategy 3 above), not this. This
-> is a bespoke protocol whose counterpart has never existed, which is why the
-> gateway contract promotes it rather than inventing a third one.
+> Note what this section used to imply and does not: **`rnsd` does not speak
+> this protocol.** Its shared-instance IPC is HDLC-framed Reticulum packets
+> over a Unix domain socket (Strategy 3 above), not this. The counterpart is
+> the reference gateway daemon (`Offline-Protocol/offline-gateway-daemon`),
+> which attaches to `rnsd` as a local client and speaks contract v1 to
+> devices. No daemon existed when the contract was written, which is why it
+> promotes this protocol rather than inventing a third one.
 
 The built-in `ReticulumManager` (iOS and Android) speaks a newline-delimited JSON protocol over TCP to a configurable `daemonAddress` (default `localhost:4242`). Both platforms implement the same message types to stay in sync.
 
