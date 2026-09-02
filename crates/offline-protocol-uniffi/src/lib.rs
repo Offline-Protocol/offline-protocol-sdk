@@ -5099,7 +5099,13 @@ impl OfflineProtocol {
         // precedent: a bridge that crashed between the drop and the clear
         // would otherwise leave a stale advertisement standing for the life
         // of the process.
-        if !is_connected && was_connected {
+        //
+        // On every `false`, not only on the edge from connected: the contract
+        // delivers `Capabilities` before the carrier is announced, so a
+        // session refused after advertising, or one that timed out waiting
+        // for `StatusUpdate(connected)`, has injected tokens the edge would
+        // never clear.
+        if !is_connected {
             let mut protocol = self.lock_inner()?;
             protocol.clear_gateway_capabilities();
         }
@@ -8598,6 +8604,28 @@ mod tests {
         assert!(
             inner.gateway_capabilities().is_empty(),
             "the advertisement must not outlive the connection that made it"
+        );
+    }
+
+    /// The clear runs on every disconnect report, not only on the edge from
+    /// connected: the contract delivers `Capabilities` before the carrier is
+    /// announced, so a session refused after advertising has injected tokens
+    /// that no true-to-false edge would ever clear.
+    #[test]
+    fn test_reticulum_gateway_capabilities_clear_without_an_announce() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        protocol
+            .reticulum_gateway_capabilities(vec!["gateway_v1".to_string()])
+            .unwrap();
+        protocol.reticulum_status_changed(false).unwrap();
+
+        let inner = protocol.lock_inner().unwrap();
+        assert!(
+            inner.gateway_capabilities().is_empty(),
+            "a session that advertised and was never announced must not leave its tokens standing"
         );
     }
 

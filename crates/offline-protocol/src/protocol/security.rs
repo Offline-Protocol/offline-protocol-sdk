@@ -22,12 +22,6 @@ use tracing::{debug, error, info, warn};
 /// persists, so an unsuppressed warning reports one cause many times.
 const PUSH_KEY_PACKAGE_WARNING_SUPPRESS_INTERVAL: Duration = Duration::from_secs(300);
 
-/// What a gateway's address echo says about this device, as a decision
-/// separate from how any one carrier reports it.
-///
-/// Private to this module: the relay and the daemon contract ask the same
-/// question and answer it with different text and different codes, and the
-/// question is the part that must not drift between them.
 /// Bytes of challenge a gateway mints per connection, from the contract.
 ///
 /// A device refuses to sign a proof over anything else: the challenge is the
@@ -35,6 +29,12 @@ const PUSH_KEY_PACKAGE_WARNING_SUPPRESS_INTERVAL: Duration = Duration::from_secs
 /// broken gateway or one trying to pick the bytes that go under our key.
 pub const GATEWAY_CHALLENGE_LEN: usize = 32;
 
+/// What a gateway's address echo says about this device, as a decision
+/// separate from how any one carrier reports it.
+///
+/// Private to this module: the relay and the daemon contract ask the same
+/// question and answer it with different text and different codes, and the
+/// question is the part that must not drift between them.
 enum AddressBinding<'a> {
     /// The echoed address is this device's.
     Ours,
@@ -1132,7 +1132,9 @@ impl OfflineProtocol {
     ///   that out. The check is here rather than in the bridge because a
     ///   signing routine that will put its key over any bytes a remote party
     ///   chose is the shape of a signing oracle.
-    /// - This device has no identity yet, so there is nothing to declare.
+    /// - This device has no identity yet, so there is nothing to declare
+    ///   ([`Error::MlsNotInitialized`], which the FFI maps to the code the
+    ///   bridges are documented to expect).
     pub fn gateway_address_declaration(
         &self,
         challenge: &[u8],
@@ -1143,16 +1145,15 @@ impl OfflineProtocol {
                 challenge.len()
             )));
         }
+        // One variant for both: the address exists once the MLS identity
+        // does, so "no identity yet" and "no MLS" are one condition to a
+        // caller, and a generic error would hide it from the bridge that has
+        // to decide whether to hold the connection open.
         let address = self
             .local_address()
-            .ok_or_else(|| {
-                Error::Other("no established identity to declare to a gateway".to_string())
-            })?
+            .ok_or(Error::MlsNotInitialized)?
             .to_string();
-        let mls = self
-            .mls_manager
-            .as_ref()
-            .ok_or_else(|| Error::Other("MLS is not initialized".to_string()))?;
+        let mls = self.mls_manager.as_ref().ok_or(Error::MlsNotInitialized)?;
         let manager = mls
             .read()
             .map_err(|e| Error::Other(format!("MLS lock poisoned: {e}")))?;
