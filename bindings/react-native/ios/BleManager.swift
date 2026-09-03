@@ -2910,10 +2910,20 @@ extension BleManager: CBPeripheralDelegate {
         // method for why the identity is no longer optional.
         for characteristic in characteristics {
             if characteristic.uuid == MESSAGE_CHAR_UUID {
-                // Enable notifications for message characteristic
-                peripheral.setNotifyValue(true, for: characteristic)
-                print("[BleManager] Enabled notifications for message characteristic")
-                emitDiagnostic("info", "Enabled notifications for message characteristic", context: ["peripheral": peripheral.identifier.uuidString])
+                // The connection monitor re-invokes discoverCharacteristics on
+                // peripherals it does not see in the connection registry, and
+                // characteristic discovery replays from CoreBluetooth's cache
+                // when it does. Both paths land here with a characteristic
+                // that is already subscribed; iOS re-emits
+                // didUpdateNotificationStateFor on every setNotifyValue call
+                // regardless, so a redundant call produces a runaway
+                // subscribed=YES stream on a still-live subscription. Skip
+                // the call entirely when the characteristic already notifies.
+                if BleMessageNotificationPolicy.shouldEnableNotifications(isNotifying: characteristic.isNotifying) {
+                    peripheral.setNotifyValue(true, for: characteristic)
+                    print("[BleManager] Enabled notifications for message characteristic")
+                    emitDiagnostic("info", "Enabled notifications for message characteristic", context: ["peripheral": peripheral.identifier.uuidString])
+                }
             } else if characteristic.uuid == DEVICE_ID_CHAR_UUID {
                 // Read device ID
                 peripheral.readValue(for: characteristic)
