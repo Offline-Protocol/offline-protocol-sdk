@@ -310,6 +310,16 @@ public class BleManager: NSObject, TransportManager {
     private var unknownBootstrapAttempts: [UUID: Date] = [:]
     private let NON_MESH_CACHE_TTL: TimeInterval = 300.0 // 5 minutes
 
+    /// Gates the CBCentralManager state-restoration reconnect fan-out on a
+    /// persisted per-peripheral last-seen timestamp. Without this, the OS
+    /// keeps servicing connect requests to peripheral UUIDs whose owners are
+    /// long gone (e.g. every `node relay.js` restart produces a fresh
+    /// peripheral UUID), and only an app reinstall clears the queue. See
+    /// PeripheralRestorationAgeOutPolicy.swift for the full contract.
+    private let peripheralRestorationPolicy = PeripheralRestorationAgeOutPolicy(
+        store: UserDefaultsPeripheralRestorationStore()
+    )
+
     // MARK: - Thread helpers
     @inline(__always)
     private func performOnMain<T>(_ work: () throws -> T) rethrows -> T {
@@ -2391,34 +2401,73 @@ public class BleManager: NSObject, TransportManager {
 extension BleManager: CBCentralManagerDelegate {
     
     /// State restoration: called before `centralManagerDidUpdateState` when iOS
-    /// relaunches the app after termination. Restores previously connected peripherals
-    /// so the mesh can resume without waiting for new advertisements.
+    /// relaunches the app after termination. iOS hands back every peripheral
+    /// the app had a live or pending connect request on, including UUIDs
+    /// whose owners are long gone — a common dev-loop symptom is that every
+    /// `node relay.js` restart mints a fresh peripheral UUID, and blindly
+    /// re-issuing `connect(...)` on the whole restored list keeps the OS
+    /// burning battery chasing dead UUIDs (visible symptom: the phone will
+    /// not discover a legitimate new peer until the app is reinstalled).
+    ///
+    /// Gate the reconnect on a persisted per-peripheral last-seen timestamp:
+    /// only restore peripherals we observed within the TTL; for the rest,
+    /// call `cancelPeripheralConnection` to clear iOS's queued connect
+    /// request. A peripheral that comes back into range advertises again and
+    /// takes the normal `didDiscover` → `connect` path.
     public func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
         print("[BleManager] Restoring central manager state")
         emitDiagnostic("info", "Central manager restoring state", context: [
             "keys": Array(dict.keys)
         ])
-        
-        if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] {
-            for peripheral in peripherals {
-                peripheral.delegate = self
-                discoveredPeripherals[peripheral.identifier] = peripheral
-                connections.registerPeripheral(peripheral)
-                
-                print("[BleManager] Restored peripheral: \(peripheral.identifier), state: \(peripheral.state.rawValue)")
-                emitDiagnostic("info", "Restored peripheral from state restoration", context: [
-                    "identifier": peripheral.identifier.uuidString,
-                    "state": peripheral.state.rawValue
-                ])
-                
-                // If the peripheral was connected, rediscover services
-                if peripheral.state == .connected {
-                    peripheral.discoverServices([SERVICE_UUID])
-                } else {
-                    // Try to reconnect
-                    central.connect(peripheral, options: nil)
-                }
+
+        guard let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] else {
+            return
+        }
+
+        let indexed: [UUID: CBPeripheral] = Dictionary(
+            uniqueKeysWithValues: peripherals.map { ($0.identifier, $0) }
+        )
+        let partition = peripheralRestorationPolicy.partitionRestored(
+            candidates: Array(indexed.keys),
+            now: Date()
+        )
+
+        emitDiagnostic("info", "Partitioned restored peripherals", context: [
+            "totalCount": peripherals.count,
+            "freshCount": partition.fresh.count,
+            "staleCount": partition.stale.count
+        ])
+
+        for uuid in partition.fresh {
+            guard let peripheral = indexed[uuid] else { continue }
+            peripheral.delegate = self
+            discoveredPeripherals[peripheral.identifier] = peripheral
+            connections.registerPeripheral(peripheral)
+
+            print("[BleManager] Restored peripheral (fresh): \(peripheral.identifier), state: \(peripheral.state.rawValue)")
+            emitDiagnostic("info", "Restored peripheral from state restoration", context: [
+                "identifier": peripheral.identifier.uuidString,
+                "state": peripheral.state.rawValue
+            ])
+
+            if peripheral.state == .connected {
+                peripheral.discoverServices([SERVICE_UUID])
+            } else {
+                central.connect(peripheral, options: nil)
             }
+        }
+
+        for uuid in partition.stale {
+            guard let peripheral = indexed[uuid] else { continue }
+            print("[BleManager] Dropping stale restored peripheral: \(peripheral.identifier), state: \(peripheral.state.rawValue)")
+            emitDiagnostic("info", "Dropped stale restored peripheral", context: [
+                "identifier": peripheral.identifier.uuidString,
+                "state": peripheral.state.rawValue
+            ])
+            // Clears the OS-side connect request so bluetoothd stops chasing
+            // this UUID. Safe on any state, including a peripheral that was
+            // never actually connected — iOS just drops the queued request.
+            central.cancelPeripheralConnection(peripheral)
         }
     }
     
@@ -2616,7 +2665,8 @@ extension BleManager: CBCentralManagerDelegate {
         
         discoveredPeripherals[peripheral.identifier] = peripheral
         peripheralRSSI[peripheral.identifier] = rssiValue
-        
+        peripheralRestorationPolicy.recordSeen(uuid: peripheral.identifier, at: now)
+
         if discoveryLogTimestamps[peripheral.identifier] == nil || (now.timeIntervalSince(discoveryLogTimestamps[peripheral.identifier]!) > 30) {
             discoveryLogTimestamps[peripheral.identifier] = now
             print("[BleManager] Discovered peripheral: \(peripheral.identifier) RSSI=\(rssiValue) (density: \(estimatedVisiblePeerCount))")
@@ -2710,11 +2760,12 @@ extension BleManager: CBCentralManagerDelegate {
     public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         print("[BleManager] Connected to peripheral: \(peripheral.identifier)")
         emitDiagnostic("info", "Connected to BLE peripheral", context: ["identifier": peripheral.identifier.uuidString])
-        
+
         connections.registerPeripheral(peripheral)
         connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
         connectionRetryCount.removeValue(forKey: peripheral.identifier) // Reset retry count on successful connection
-        
+        peripheralRestorationPolicy.recordSeen(uuid: peripheral.identifier, at: Date())
+
         // Discover services
         peripheral.discoverServices([SERVICE_UUID])
     }
