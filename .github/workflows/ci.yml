@@ -635,6 +635,7 @@ jobs:
             BleManager.swift WifiDirectManager.swift ReticulumManager.swift \
             mesh/Mesh.swift ble/MeshConnectionRegistry.swift \
             ble/BleDiscoveryBootstrapPolicy.swift \
+            BleMessageNotificationPolicy.swift \
             Generated/offline_protocol.swift ForcedPresenceCheckQueue.swift \
             AddressDeclarationPolicy.swift \
             GatewayAttachPolicy.swift GatewayVerdictTracker.swift \
