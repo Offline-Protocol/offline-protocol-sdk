@@ -29,11 +29,27 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   The restored list is now partitioned. A peripheral handed back in
   `.connected` state is restored unconditionally: the link is alive at that
   instant, and it is usually the reason iOS relaunched the app. A pending
-  connect is restored only if this device observed that peripheral within the
-  last 60 seconds, tracked in a small last-seen map that survives the
-  relaunch. Everything else is cancelled, which is what clears the OS-side
-  queue. Sightings are recorded from advertisements, from completed
-  connections, and from traffic arriving on a live link.
+  connect is restored only if this device saw that peripheral within 60 seconds
+  of the last thing it saw before it was terminated, tracked in a small
+  last-seen map that survives the relaunch. Everything else is cancelled, which
+  is what clears the OS-side queue. Sightings are recorded from advertisements,
+  from completed connections, and from traffic arriving on a live link.
+
+  That 60 seconds is measured against the newest sighting in the map, not
+  against the relaunch clock. Nothing records a sighting while the app is dead
+  and iOS relaunches it hours later, so measuring against the relaunch clock
+  would cancel every pending connect at every restoration. A pending connect is
+  the only way iOS wakes the app when a known peer reappears, since a
+  background scan with no service filter is ignored by the OS, so that would
+  have traded a visible bug for an invisible one.
+
+  Both halves of the decision are issued once the central reports `.poweredOn`,
+  not where the restored list arrives. `willRestoreState` is delivered before
+  `centralManagerDidUpdateState`, and CoreBluetooth discards a command issued
+  before then, so cancelling on arrival would leave the OS-side queue intact
+  while the diagnostics reported the peripherals as dropped. The failed-connect
+  retry also now skips a peripheral that has been dropped from the discovered
+  map, so a cancelled connect request is not immediately re-armed.
 
   The last-seen map is device-scoped, holds only OS-assigned peripheral UUIDs
   and timestamps, and is not account state, so `wipePersistedState()` does not

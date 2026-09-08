@@ -42,6 +42,24 @@
 // therefore applies only to pending connects, where the connect request is a
 // standing OS-side intention with no evidence behind it.
 //
+// The TTL is measured against the NEWEST sighting in the map, not against the
+// restoration clock. Nothing writes the map while the app is dead, and iOS
+// relaunches the app hours after it was terminated, so a `now - ttl` cutoff
+// would mark every pending connect stale at every restoration and the age-out
+// would stop being an age-out: it would be an unconditional cancel of every
+// pending connect. That matters because a pending connect is the only way iOS
+// wakes this app when a known peer reappears — a background scan with
+// `withServices: nil` is ignored by the OS — so cancelling them all trades a
+// visible bug for an invisible one.
+//
+// Anchoring to the newest record asks the answerable question instead: "was
+// this peripheral seen within a minute of the last thing this app saw before
+// it died?" The dev-loop case the class exists for still ages out, because
+// every `node relay.js` restart mints a UUID that gets discovered and becomes
+// the new anchor, leaving the previous ones behind the cutoff. What survives
+// is at most the handful of peripherals seen in the final minute of the last
+// process, which is exactly the set worth keeping a connect request for.
+//
 // Wall-clock is deliberate: state restoration crosses process boundaries, so a
 // monotonic clock would reset to zero at every relaunch and every entry would
 // read as "just seen." Wall-clock time is the only reading that survives the
@@ -119,11 +137,6 @@ final class UserDefaultsPeripheralRestorationStore: PeripheralRestorationStore {
 struct PeripheralRestorationCandidate: Equatable {
     let uuid: UUID
     let isConnected: Bool
-
-    init(uuid: UUID, isConnected: Bool) {
-        self.uuid = uuid
-        self.isConnected = isConnected
-    }
 }
 
 /// Result of `partitionRestored`. `fresh` UUIDs are the ones the caller should
@@ -135,13 +148,15 @@ struct PeripheralRestorationPartition: Equatable {
 }
 
 final class PeripheralRestorationAgeOutPolicy {
-    /// The observation is considered fresh while `now - lastSeen < ttl`. At or
-    /// past the TTL boundary the entry ages out — a peripheral we haven't
-    /// heard from in a full minute is almost certainly gone by now on a
-    /// consumer BLE stack, and the cost of a false age-out (one wasted
-    /// rediscovery next time it advertises) is trivial next to the cost of a
-    /// false-fresh (indefinite connect requests to a dead UUID). It bounds
-    /// only pending connects; a live link is never judged on the clock.
+    /// The observation is considered fresh while `anchor - lastSeen < ttl`,
+    /// where the anchor is the newest sighting in the map (see the file
+    /// header — it is NOT the restoration clock). At or past the boundary the
+    /// entry ages out: a peripheral we hadn't heard from for a full minute
+    /// while we were still awake and watching is almost certainly gone, and
+    /// the cost of a false age-out (one wasted rediscovery next time it
+    /// advertises) is trivial next to the cost of a false-fresh (indefinite
+    /// connect requests to a dead UUID). It bounds only pending connects; a
+    /// live link is never judged on the clock.
     static let defaultTtlSeconds: TimeInterval = 60
 
     /// Cap on how many entries the persisted map is allowed to grow to. Real
@@ -201,16 +216,28 @@ final class PeripheralRestorationAgeOutPolicy {
     /// A candidate handed back in `.connected` state is fresh unconditionally
     /// and has its record refreshed: the link is alive at the instant of the
     /// call, which is stronger evidence than any timestamp. Everything else is
-    /// a pending connect request, judged on the persisted last-seen map, and a
-    /// candidate with no record at all is stale (this SDK never observed it,
-    /// so the OS-side restore is the only evidence it exists, and that
-    /// evidence is what's untrusted).
+    /// a pending connect request, judged on the persisted last-seen map
+    /// against the newest sighting in that map rather than against `now` (see
+    /// the file header), and a candidate with no record at all is stale (this
+    /// SDK never observed it, so the OS-side restore is the only evidence it
+    /// exists, and that evidence is what's untrusted).
+    ///
+    /// A UUID repeated in `candidates` is decided once, on its first
+    /// appearance, so neither output list can contain it twice.
     ///
     /// As a side effect, stale entries are dropped from the persistent store —
     /// a peripheral the caller is telling us to forget stays forgotten.
     func partitionRestored(candidates: [PeripheralRestorationCandidate], now: Date) -> PeripheralRestorationPartition {
         let nowSeconds = now.timeIntervalSince1970
-        let cutoff = nowSeconds - ttlSeconds
+        // Read the anchor BEFORE the loop. The connected branch below writes
+        // `nowSeconds` into `records`, and anchoring to a map that already
+        // holds it would restore the `now - ttl` cutoff this exists to avoid,
+        // silently, on exactly the restorations that carry a live link.
+        // `min` guards the other direction: a record written before a
+        // backwards clock step sits in the future, and anchoring to it would
+        // age out entries that are current.
+        let anchorSeconds = min(nowSeconds, records.values.max() ?? nowSeconds)
+        let cutoff = anchorSeconds - ttlSeconds
         var fresh: [UUID] = []
         var stale: [UUID] = []
         fresh.reserveCapacity(candidates.count)
@@ -219,7 +246,7 @@ final class PeripheralRestorationAgeOutPolicy {
         var seenKeys = Set<String>()
         for candidate in candidates {
             let key = candidate.uuid.uuidString
-            seenKeys.insert(key)
+            guard seenKeys.insert(key).inserted else { continue }
             if candidate.isConnected {
                 // A live GATT link. Restoration exists to hand these back, and
                 // the app was very likely relaunched because this link

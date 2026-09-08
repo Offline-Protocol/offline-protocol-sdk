@@ -320,6 +320,24 @@ public class BleManager: NSObject, TransportManager {
         store: UserDefaultsPeripheralRestorationStore()
     )
 
+    /// Peripherals iOS handed back through `willRestoreState`, held until the
+    /// central reports `.poweredOn`.
+    ///
+    /// `willRestoreState` is delivered BEFORE `centralManagerDidUpdateState`,
+    /// and CoreBluetooth discards a command issued while the central is not
+    /// `.poweredOn`: it logs "API MISUSE" and no delegate callback ever
+    /// arrives. Both halves of the restoration decision are commands —
+    /// `connect`/`discoverServices` for the fresh peripherals,
+    /// `cancelPeripheralConnection` for the stale ones — and the cancel is the
+    /// only thing that clears the OS-side connect request, so issuing it there
+    /// would leave the queue intact while the logs still read as if the
+    /// age-out had run.
+    ///
+    /// Deciding at apply time rather than at capture time also keeps
+    /// `peripheral.state` present-tense, which is the whole basis of the
+    /// connected short-circuit in PeripheralRestorationAgeOutPolicy.
+    private var pendingRestoredPeripherals: [CBPeripheral] = []
+
     // MARK: - Thread helpers
     @inline(__always)
     private func performOnMain<T>(_ work: () throws -> T) rethrows -> T {
@@ -623,6 +641,8 @@ public class BleManager: NSObject, TransportManager {
         notifyLock.unlock()
         notifyOutbound.removeAll()
 
+        pendingRestoredPeripherals = []
+
         // Clean up managers
         centralManager = nil
         peripheralManager = nil
@@ -889,6 +909,9 @@ public class BleManager: NSObject, TransportManager {
         ])
         centralReady = false
         centralManager?.stopScan()
+        // Peripherals held from the old central's restoration belong to that
+        // instance. The replacement delivers its own `willRestoreState`.
+        pendingRestoredPeripherals = []
         centralManager = CBCentralManager(
             delegate: self,
             queue: nil,
@@ -2434,6 +2457,7 @@ extension BleManager: CBCentralManagerDelegate {
         ])
 
         guard let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] else {
+            pendingRestoredPeripherals = []
             return
         }
 
@@ -2441,12 +2465,41 @@ extension BleManager: CBCentralManagerDelegate {
         // during launch, usually a background relaunch, and the trapping
         // initializer would turn a duplicated identifier from the OS into an
         // abort before the app is up. There is no upside to trapping here.
+        // A connected duplicate wins the tie: the partition treats `.connected`
+        // as decisive, so discarding that instance in favour of a pending one
+        // carrying the same identifier would throw away the evidence.
         let indexed = Dictionary(
             peripherals.map { ($0.identifier, $0) },
-            uniquingKeysWith: { first, _ in first }
+            uniquingKeysWith: { first, second in first.state == .connected ? first : second }
         )
+        pendingRestoredPeripherals = Array(indexed.values)
+
+        print("[BleManager] Holding \(pendingRestoredPeripherals.count) restored peripheral(s) until powered on")
+        emitDiagnostic("info", "Held restored peripherals until central is powered on", context: [
+            "totalCount": peripherals.count,
+            "heldCount": pendingRestoredPeripherals.count
+        ])
+    }
+
+    /// Applies the restoration decision captured by `willRestoreState`.
+    ///
+    /// Called from the `.poweredOn` branch of `centralManagerDidUpdateState`,
+    /// which is the first moment CoreBluetooth will accept the commands this
+    /// issues. See `pendingRestoredPeripherals` for why they cannot be issued
+    /// where the list arrives.
+    private func applyPendingRestoration(_ central: CBCentralManager) {
+        let peripherals = pendingRestoredPeripherals
+        pendingRestoredPeripherals = []
+        guard !peripherals.isEmpty else { return }
+
+        var indexed: [UUID: CBPeripheral] = [:]
+        indexed.reserveCapacity(peripherals.count)
+        for peripheral in peripherals {
+            indexed[peripheral.identifier] = peripheral
+        }
+
         let partition = peripheralRestorationPolicy.partitionRestored(
-            candidates: indexed.values.map {
+            candidates: peripherals.map {
                 PeripheralRestorationCandidate(
                     uuid: $0.identifier,
                     isConnected: $0.state == .connected
@@ -2571,6 +2624,13 @@ extension BleManager: CBCentralManagerDelegate {
             }
             
             centralReady = true
+            // Ahead of the scan, and only here: this is the first point the
+            // central will accept the connects and cancels the restoration
+            // decision is made of. Running it before `startScanning` also
+            // keeps the decision clean, since the scan's
+            // `retrieveConnectedPeripherals` sweep records fresh sightings
+            // that would otherwise re-anchor the age-out mid-flight.
+            applyPendingRestoration(central)
             startScanning(reason: "central_powered_on")
             emitDiagnostic("info", "Central manager powered on and ready")
             
@@ -2825,6 +2885,13 @@ extension BleManager: CBCentralManagerDelegate {
         
         DispatchQueue.main.asyncAfter(deadline: .now() + backoffInterval) { [weak self] in
             guard let self = self, self.state == .running else { return }
+            // Mirrors the disconnect retry below. A peripheral no longer in
+            // `discoveredPeripherals` was dropped deliberately — by `stop()`,
+            // or by the restoration age-out, which cancels the OS-side connect
+            // request precisely so it stops being retried. Reconnecting here
+            // re-arms what the age-out just cleared, and a cancelled pending
+            // connect is a plausible source of this very callback.
+            guard self.discoveredPeripherals[peripheral.identifier] != nil else { return }
             self.attemptConnection(to: peripheral, reason: "retry_fail")
         }
     }

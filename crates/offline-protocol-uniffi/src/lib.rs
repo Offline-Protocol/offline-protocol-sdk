@@ -12681,6 +12681,131 @@ mod tests {
         );
     }
 
+    /// State restoration must not issue CoreBluetooth commands where iOS hands
+    /// it the restored list.
+    ///
+    /// `centralManager(_:willRestoreState:)` is delivered BEFORE
+    /// `centralManagerDidUpdateState`, and CoreBluetooth discards any command
+    /// issued while the central is not `.poweredOn`: it logs "API MISUSE" and
+    /// no delegate callback ever arrives. The entire point of the peripheral
+    /// age-out is the `cancelPeripheralConnection` it issues on stale
+    /// peripherals — the only clear the app controls over iOS's standing
+    /// connect requests, which otherwise survive relaunches, Bluetooth
+    /// toggles and sign-out until the app is uninstalled. A cancel issued from
+    /// `willRestoreState` therefore leaves the OS-side queue fully intact
+    /// while the diagnostics still report the peripheral as dropped: the bug
+    /// looks fixed and is not.
+    ///
+    /// Nothing else catches this. No Swift test can reach `BleManager` (it
+    /// sits behind CoreBluetooth; CI only typechecks it), and a device only
+    /// reproduces it after a *system* termination — relaunching by hand, or
+    /// force-quitting, never enters state restoration at all.
+    ///
+    /// Deferring also keeps `peripheral.state` present-tense at the moment the
+    /// decision is acted on, which is the entire basis of the connected
+    /// short-circuit in `PeripheralRestorationAgeOutPolicy`: a live link is
+    /// judged on the state, never on a persisted timestamp.
+    #[test]
+    fn react_native_ios_restoration_commands_wait_for_powered_on() {
+        let swift = rn_source_code_only("ios/BleManager.swift");
+
+        let capture_start = swift
+            .find(
+                "public func centralManager(_ central: CBCentralManager, \
+                 willRestoreState dict: [String: Any]) {",
+            )
+            .expect("BleManager.swift must implement centralManager(_:willRestoreState:)");
+        let apply_start = swift
+            .find("private func applyPendingRestoration(_ central: CBCentralManager) {")
+            .expect(
+                "BleManager.swift must apply the restoration decision from applyPendingRestoration, \
+                 reached once the central reports .poweredOn — not from willRestoreState",
+            );
+        assert!(
+            capture_start < apply_start,
+            "applyPendingRestoration must be declared immediately after willRestoreState so the \
+             slice below is exactly the delegate body"
+        );
+
+        // --- 1. The delegate captures, and issues nothing --------------------
+        let capture_body = &swift[capture_start..apply_start];
+        assert!(
+            capture_body.contains("pendingRestoredPeripherals = Array(indexed.values)"),
+            "willRestoreState must hand the restored peripherals to pendingRestoredPeripherals \
+             and do nothing else with them"
+        );
+        assert!(
+            !capture_body.contains("central.connect(")
+                && !capture_body.contains("cancelPeripheralConnection(")
+                && !capture_body.contains("discoverServices("),
+            "willRestoreState must issue NO CoreBluetooth command. It runs before \
+             centralManagerDidUpdateState, so a command issued here is discarded outside \
+             .poweredOn with an API MISUSE log and no callback — the cancel that clears iOS's \
+             standing connect requests would silently do nothing while the diagnostics report \
+             the peripheral as dropped"
+        );
+
+        // --- 2. Both commands live in the deferred applier, once each --------
+        assert!(
+            swift
+                .matches("central.connect(peripheral, options: nil)")
+                .count()
+                == 1
+                && swift
+                    .matches("central.cancelPeripheralConnection(peripheral)")
+                    .count()
+                    == 1,
+            "Exactly one restoration reconnect and one restoration cancel may exist. A second \
+             call site is how the pre-.poweredOn path grows back without anyone noticing \
+             (ordinary connects go through centralManager?.connect in performConnectionAttempt, \
+             which is a different spelling and unaffected)"
+        );
+        assert!(
+            swift
+                .find("central.connect(peripheral, options: nil)")
+                .unwrap()
+                > apply_start
+                && swift
+                    .find("central.cancelPeripheralConnection(peripheral)")
+                    .unwrap()
+                    > apply_start,
+            "Both restoration commands must sit inside applyPendingRestoration"
+        );
+
+        // --- 3. The applier is reached from the powered-on branch ------------
+        let apply_call = swift
+            .find("centralReady = true applyPendingRestoration(central)")
+            .expect(
+                "ORDERING INVARIANT: applyPendingRestoration must be called from the .poweredOn \
+                 branch of centralManagerDidUpdateState, immediately after centralReady = true. \
+                 That is the first moment CoreBluetooth accepts the commands it issues; anywhere \
+                 earlier they are dropped, and the age-out becomes a no-op that still logs as a \
+                 success",
+            );
+        let scan_start = swift
+            .find("startScanning(reason: \"central_powered_on\")")
+            .expect("the .poweredOn branch must start scanning");
+        assert!(
+            apply_call < scan_start,
+            "ORDERING INVARIANT: applyPendingRestoration must run BEFORE startScanning. The scan \
+             rehydrates retrieveConnectedPeripherals and records fresh sightings, which would \
+             re-anchor the age-out cutoff mid-decision"
+        );
+
+        // --- 4. A cancelled connect is not re-armed by the retry loop --------
+        assert!(
+            swift.contains(
+                "guard self.discoveredPeripherals[peripheral.identifier] != nil else { return } \
+                 self.attemptConnection(to: peripheral, reason: \"retry_fail\")"
+            ),
+            "The didFailToConnect retry must skip a peripheral that is no longer in \
+             discoveredPeripherals. The age-out drops stale peripherals from that map precisely \
+             so they stop being retried, and a cancelled pending connect is a plausible source \
+             of the didFailToConnect that schedules this retry — without the guard the retry \
+             re-issues the connect the age-out just cleared"
+        );
+    }
+
     /// The relay connection proves its address before it sends anything else.
     ///
     /// The relay attributes each inbound frame by whatever the connection has

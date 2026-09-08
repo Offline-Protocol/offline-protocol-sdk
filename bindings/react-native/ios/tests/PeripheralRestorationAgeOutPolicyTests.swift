@@ -184,6 +184,11 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let policy = makePolicy(store: store)
 
         policy.recordSeen(uuid: a, at: t0)
+        // `b` is the anchor. It is what makes this a real age-out: the app was
+        // still awake and watching 61 s after it last saw `a`, so `a` went
+        // quiet rather than the clock merely running on while the process was
+        // dead.
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(61))
 
         // 61 s later — just past the boundary.
         let partition = policy.partitionRestored(
@@ -195,13 +200,14 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
     }
 
     func testAgeExactlyAtTtlIsStale() {
-        // The rule is `now - lastSeen < ttl` = fresh — exactly at the boundary
-        // (age == ttl) is stale. Nail down the boundary so a future refactor
-        // has to argue with the test, not with a hand-wave.
+        // The rule is `anchor - lastSeen < ttl` = fresh — exactly at the
+        // boundary (age == ttl) is stale. Nail down the boundary so a future
+        // refactor has to argue with the test, not with a hand-wave.
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
         policy.recordSeen(uuid: a, at: t0)
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(ttl)) // the anchor
 
         let partition = policy.partitionRestored(
             candidates: [pending(a)],
@@ -225,6 +231,138 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         )
         XCTAssertEqual(partition.fresh, [a])
         XCTAssertEqual(Set(partition.stale), Set([b, c]))
+    }
+
+    // MARK: - The TTL is anchored to the newest sighting, not to `now`
+
+    func testPendingCandidateSurvivesALongDeadPeriodWhenNothingNewerWasSeen() {
+        // The app was terminated with `a` in view and iOS relaunched it three
+        // hours later. Nothing writes the map while the process is dead, so
+        // measuring `a`'s age against the restoration clock would call it
+        // stale and cancel its connect request — the only way iOS wakes this
+        // app when `a` comes back, since a background scan with no service
+        // filter is ignored by the OS. `a` was the last thing this app saw.
+        let store = InMemoryStore()
+        let policy = makePolicy(store: store)
+
+        policy.recordSeen(uuid: a, at: t0)
+
+        let partition = policy.partitionRestored(
+            candidates: [pending(a)],
+            now: t0.addingTimeInterval(3 * 3600)
+        )
+        XCTAssertEqual(partition.fresh, [a])
+        XCTAssertEqual(partition.stale, [])
+    }
+
+    func testAnchorIsTheNewestRecordNotTheRestorationClock() {
+        // Same three-hour dead period, but the app went on to see `b` two
+        // minutes after it last saw `a`. That is the evidence the clock alone
+        // cannot supply: `a` went quiet while the app was still awake and
+        // watching, so it ages out. `b` was the last thing seen, so it stays.
+        let store = InMemoryStore()
+        let policy = makePolicy(store: store)
+
+        policy.recordSeen(uuid: a, at: t0)
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(120))
+
+        let partition = policy.partitionRestored(
+            candidates: [pending(a), pending(b)],
+            now: t0.addingTimeInterval(3 * 3600)
+        )
+        XCTAssertEqual(partition.fresh, [b])
+        XCTAssertEqual(partition.stale, [a])
+    }
+
+    func testDevLoopUuidChurnStillAgesOutTheDeadUuids() {
+        // The case the class exists for, under the anchored cutoff. Every
+        // relay restart mints a fresh peripheral UUID, and each new UUID
+        // becomes the anchor that pushes its predecessors past the cutoff, so
+        // the OS-side connect queue stays bounded even though no restoration
+        // ever consults the wall clock.
+        let store = InMemoryStore()
+        let policy = makePolicy(store: store)
+
+        policy.recordSeen(uuid: a, at: t0)                         // relay run 1
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(300)) // run 2
+        policy.recordSeen(uuid: c, at: t0.addingTimeInterval(600)) // run 3
+
+        let partition = policy.partitionRestored(
+            candidates: [pending(a), pending(b), pending(c)],
+            now: t0.addingTimeInterval(3 * 3600)
+        )
+        XCTAssertEqual(partition.fresh, [c])
+        XCTAssertEqual(Set(partition.stale), Set([a, b]))
+    }
+
+    func testConnectedRefreshDoesNotTightenTheCutoffForPendingCandidates() {
+        // The connected branch writes `now` into the map. Reading the anchor
+        // after that instead of before would let a live link drag the cutoff
+        // forward to `now - ttl` and age out pending connects the map says
+        // were seen alongside it — reinstating the behaviour the anchor exists
+        // to avoid, on exactly the restorations that carry a live link.
+        let store = InMemoryStore()
+        let policy = makePolicy(store: store)
+
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-100))
+        policy.recordSeen(uuid: c, at: t0.addingTimeInterval(-90))
+
+        let partition = policy.partitionRestored(
+            candidates: [connected(c), pending(a)],
+            now: t0
+        )
+
+        XCTAssertEqual(Set(partition.fresh), Set([a, c]))
+        XCTAssertEqual(partition.stale, [])
+    }
+
+    func testFutureRecordDoesNotAgeOutCurrentEntries() {
+        // A record written before a backwards clock step sits in the future.
+        // Anchoring to it would put the cutoff ahead of every honest entry and
+        // age out the whole map at once, so the anchor is clamped to `now`.
+        let store = InMemoryStore()
+        let policy = makePolicy(store: store)
+
+        policy.recordSeen(uuid: a, at: t0)
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(3600))
+
+        let partition = policy.partitionRestored(candidates: [pending(a)], now: t0)
+
+        XCTAssertEqual(partition.fresh, [a])
+        XCTAssertEqual(partition.stale, [])
+    }
+
+    // MARK: - A repeated candidate is decided once
+
+    func testDuplicateCandidateIsDecidedOnce() {
+        // Neither output list may carry a UUID twice: `stale` drives
+        // `cancelPeripheralConnection`, `fresh` drives `connect`.
+        let store = InMemoryStore()
+        let policy = makePolicy(store: store)
+
+        let partition = policy.partitionRestored(
+            candidates: [pending(a), pending(a)],
+            now: t0
+        )
+
+        XCTAssertEqual(partition.fresh, [])
+        XCTAssertEqual(partition.stale, [a])
+    }
+
+    func testDuplicateCandidateKeepsTheFirstDecision() {
+        // BleManager resolves a duplicated identifier in favour of the
+        // connected instance before it calls in, so first-wins here means the
+        // live link wins there.
+        let store = InMemoryStore()
+        let policy = makePolicy(store: store)
+
+        let partition = policy.partitionRestored(
+            candidates: [connected(a), pending(a)],
+            now: t0
+        )
+
+        XCTAssertEqual(partition.fresh, [a])
+        XCTAssertEqual(partition.stale, [])
     }
 
     // MARK: - Idempotence and overwrite
@@ -313,12 +451,13 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
 
         policy.recordSeen(uuid: a, at: t0)
         policy.recordSeen(uuid: a, at: t0.addingTimeInterval(5)) // throttled
+        // `b` anchors the cutoff at t0. The first sighting alone sits exactly
+        // on it and would age out; the throttled one is 5 s inside it.
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(60))
 
-        // 62 s past t0 the first sighting alone would have aged out; the
-        // throttled one is 57 s old and still inside the TTL.
         let partition = policy.partitionRestored(
             candidates: [pending(a)],
-            now: t0.addingTimeInterval(62)
+            now: t0.addingTimeInterval(60)
         )
         XCTAssertEqual(partition.fresh, [a])
     }
@@ -361,6 +500,7 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let policy = makePolicy(store: store)
 
         policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-3600))
+        policy.recordSeen(uuid: b, at: t0) // the anchor
 
         _ = policy.partitionRestored(candidates: [pending(a)], now: t0)
         XCTAssertNil(store.records[a.uuidString])
@@ -470,6 +610,28 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
 
         let loaded = store.loadRestorationRecords()
         XCTAssertEqual(loaded, map)
+    }
+
+    func testUserDefaultsStoreSkipsNonNumericValues() {
+        // The blob is app-writable and survives upgrades, so a value that is
+        // not a number must be dropped rather than crash the loader or land in
+        // the map as garbage that then anchors the cutoff.
+        let suiteName = "PeripheralRestorationAgeOutPolicyTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        defaults.set(
+            [a.uuidString: 1_700_000_000, b.uuidString: "not a timestamp"] as [String: Any],
+            forKey: "test-key"
+        )
+
+        let store = UserDefaultsPeripheralRestorationStore(
+            userDefaults: defaults,
+            key: "test-key"
+        )
+
+        XCTAssertEqual(store.loadRestorationRecords(), [a.uuidString: 1_700_000_000])
     }
 
     func testUserDefaultsStoreEmptySaveClearsKey() {
