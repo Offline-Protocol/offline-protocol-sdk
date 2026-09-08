@@ -7,9 +7,10 @@
 //
 // iOS remembers every peripheral the app has ever requested a connect on for
 // as long as the restore identifier is stable — the OS keeps trying to
-// service that connect request across process relaunches, and only two things
-// clear it: `cancelPeripheralConnection` on the same peripheral instance the
-// system hands back at restore time, or a full app uninstall.
+// service that connect request across process relaunches. The only clear the
+// app itself controls is `cancelPeripheralConnection` on the same peripheral
+// instance the system hands back at restore time; short of that it takes an
+// app uninstall.
 //
 // In development that "connect target" list is very often full of dead
 // peripheral UUIDs: every `node relay.js` restart yields a fresh
@@ -21,14 +22,25 @@
 //
 // The policy this class captures:
 //
-//   - Every time the app actually observes a peripheral (advertisement seen or
-//     GATT connect completed), record its UUID → wall-clock timestamp in a
-//     small persistent store.
+//   - Every time the app actually observes a peripheral (advertisement seen,
+//     GATT connect completed, or a characteristic value arriving on a live
+//     link), record its UUID -> wall-clock timestamp in a small persistent
+//     store.
 //   - On `willRestoreState`, partition the peripherals iOS hands back into
-//     "fresh" (last observation within the TTL — worth re-issuing connect on
-//     and rediscovering services for) and "stale" (never observed by this
-//     process, or observed too long ago — cancel the connect request and drop
-//     the persisted record).
+//     "fresh" (worth re-issuing connect on and rediscovering services for) and
+//     "stale" (cancel the connect request and drop the persisted record).
+//
+// A peripheral iOS hands back in `.connected` state is ALWAYS fresh, whatever
+// the persisted map says. This is the case state restoration exists for: iOS
+// relaunches the app precisely because a live link produced an event, and the
+// restored list carries connected peripherals alongside pending ones. The
+// timestamp cannot be trusted to prove that link is alive, because nothing
+// refreshes it while the app is suspended and background discovery is
+// throttled — but `.connected` proves it directly, at the instant of the
+// decision. Ageing a live link out would cancel the very link that woke the
+// process, a worse failure than the one this class exists to fix. The age-out
+// therefore applies only to pending connects, where the connect request is a
+// standing OS-side intention with no evidence behind it.
 //
 // Wall-clock is deliberate: state restoration crosses process boundaries, so a
 // monotonic clock would reset to zero at every relaunch and every entry would
@@ -45,7 +57,7 @@
 // `UserDefaultsPeripheralRestorationStore`, tests inject an in-memory dict.
 //
 // Not internally synchronized: the caller confines every method call to the
-// CoreBluetooth delegate queue (BleManager's `nil` queue → main).
+// CoreBluetooth delegate queue (BleManager's `nil` queue -> main).
 //
 
 import Foundation
@@ -101,6 +113,19 @@ final class UserDefaultsPeripheralRestorationStore: PeripheralRestorationStore {
     }
 }
 
+/// One peripheral iOS handed back through `willRestoreState`, paired with the
+/// state it was handed back in. `isConnected` is the decisive input for a live
+/// link: see the file header for why a connected peripheral never ages out.
+struct PeripheralRestorationCandidate: Equatable {
+    let uuid: UUID
+    let isConnected: Bool
+
+    init(uuid: UUID, isConnected: Bool) {
+        self.uuid = uuid
+        self.isConnected = isConnected
+    }
+}
+
 /// Result of `partitionRestored`. `fresh` UUIDs are the ones the caller should
 /// keep and reconnect; `stale` UUIDs are the ones the caller should cancel
 /// the pending connect on and drop from any in-memory registries.
@@ -115,78 +140,113 @@ final class PeripheralRestorationAgeOutPolicy {
     /// heard from in a full minute is almost certainly gone by now on a
     /// consumer BLE stack, and the cost of a false age-out (one wasted
     /// rediscovery next time it advertises) is trivial next to the cost of a
-    /// false-fresh (indefinite connect requests to a dead UUID).
+    /// false-fresh (indefinite connect requests to a dead UUID). It bounds
+    /// only pending connects; a live link is never judged on the clock.
     static let defaultTtlSeconds: TimeInterval = 60
 
     /// Cap on how many entries the persisted map is allowed to grow to. Real
     /// deployments see well under twenty peers in a session; the cap defends
     /// against a pathological dev loop that cycles thousands of peripheral
     /// UUIDs and wants to keep the blob in UserDefaults small either way.
-    /// When the cap is exceeded, the oldest entries are evicted on the next
-    /// `recordSeen`.
+    /// When the cap is exceeded, the oldest entries are evicted.
     static let defaultMaxRecords = 200
+
+    /// Floor on how often an already-known peripheral's timestamp is flushed
+    /// to the store. `recordSeen` runs from the scan callback, which fires on
+    /// the CoreBluetooth delegate queue (main) roughly once a second per
+    /// visible peer, and each flush serialises the whole map through
+    /// `UserDefaults`. Throttling costs at most this much staleness in the
+    /// persisted value, an order of magnitude inside the TTL that reads it,
+    /// and the case where a stale read would actually hurt — a live link — no
+    /// longer consults the clock at all. A first sighting, an eviction and a
+    /// restoration all flush immediately regardless.
+    static let defaultPersistIntervalSeconds: TimeInterval = 10
 
     private let store: PeripheralRestorationStore
     private let ttlSeconds: TimeInterval
     private let maxRecords: Int
+    private let persistIntervalSeconds: TimeInterval
 
     private var records: [String: TimeInterval]
+    private var lastPersistAtSeconds: TimeInterval?
 
     init(store: PeripheralRestorationStore,
          ttlSeconds: TimeInterval = PeripheralRestorationAgeOutPolicy.defaultTtlSeconds,
-         maxRecords: Int = PeripheralRestorationAgeOutPolicy.defaultMaxRecords) {
+         maxRecords: Int = PeripheralRestorationAgeOutPolicy.defaultMaxRecords,
+         persistIntervalSeconds: TimeInterval = PeripheralRestorationAgeOutPolicy.defaultPersistIntervalSeconds) {
         self.store = store
         self.ttlSeconds = ttlSeconds
         self.maxRecords = maxRecords
+        self.persistIntervalSeconds = persistIntervalSeconds
         self.records = store.loadRestorationRecords()
     }
 
     /// Records a live observation of a peripheral — an advertisement seen in
-    /// the scan callback, or a successful GATT connection. Idempotent: the
-    /// latest timestamp always wins.
+    /// the scan callback, a successful GATT connection, or a characteristic
+    /// value arriving on an established link. Idempotent: the latest timestamp
+    /// always wins. The in-memory map is always current; the flush to the
+    /// store is throttled, see `defaultPersistIntervalSeconds`.
     func recordSeen(uuid: UUID, at now: Date) {
         let key = uuid.uuidString
-        records[key] = now.timeIntervalSince1970
-        evictIfOverCapacity(now: now)
-        store.saveRestorationRecords(records)
+        let nowSeconds = now.timeIntervalSince1970
+        let isFirstSighting = records[key] == nil
+        records[key] = nowSeconds
+        let evicted = evictIfOverCapacity()
+        persist(nowSeconds: nowSeconds, force: isFirstSighting || evicted)
     }
 
     /// Partitions the peripherals iOS hands to `willRestoreState` into ones
-    /// still worth reconnecting to and ones the caller should cancel. As a
-    /// side effect, stale entries are dropped from the persistent store —
+    /// still worth reconnecting to and ones the caller should cancel.
+    ///
+    /// A candidate handed back in `.connected` state is fresh unconditionally
+    /// and has its record refreshed: the link is alive at the instant of the
+    /// call, which is stronger evidence than any timestamp. Everything else is
+    /// a pending connect request, judged on the persisted last-seen map, and a
+    /// candidate with no record at all is stale (this SDK never observed it,
+    /// so the OS-side restore is the only evidence it exists, and that
+    /// evidence is what's untrusted).
+    ///
+    /// As a side effect, stale entries are dropped from the persistent store —
     /// a peripheral the caller is telling us to forget stays forgotten.
-    /// Peripherals with no persisted record are treated as stale (the SDK
-    /// never observed them from this process, so the OS-side restore is our
-    /// only evidence they exist, and that evidence is what's untrusted).
-    func partitionRestored(candidates: [UUID], now: Date) -> PeripheralRestorationPartition {
-        let cutoff = now.timeIntervalSince1970 - ttlSeconds
+    func partitionRestored(candidates: [PeripheralRestorationCandidate], now: Date) -> PeripheralRestorationPartition {
+        let nowSeconds = now.timeIntervalSince1970
+        let cutoff = nowSeconds - ttlSeconds
         var fresh: [UUID] = []
         var stale: [UUID] = []
         fresh.reserveCapacity(candidates.count)
         stale.reserveCapacity(candidates.count)
 
         var seenKeys = Set<String>()
-        for uuid in candidates {
-            let key = uuid.uuidString
+        for candidate in candidates {
+            let key = candidate.uuid.uuidString
             seenKeys.insert(key)
-            if let seenAt = records[key], seenAt > cutoff {
-                fresh.append(uuid)
+            if candidate.isConnected {
+                // A live GATT link. Restoration exists to hand these back, and
+                // the app was very likely relaunched because this link
+                // produced an event. Refresh the record so the next
+                // restoration still reads it as fresh even if the link has
+                // dropped by then.
+                records[key] = nowSeconds
+                fresh.append(candidate.uuid)
+            } else if let seenAt = records[key], seenAt > cutoff {
+                fresh.append(candidate.uuid)
             } else {
-                stale.append(uuid)
+                stale.append(candidate.uuid)
                 records.removeValue(forKey: key)
             }
         }
 
         // Also age out anything else in the persistent store that has crossed
         // the TTL — otherwise a peripheral that iOS stops handing back at
-        // restore time (successful cancel, or reboot) never has its record
-        // pruned. Iterating the whole map on every restoration is cheap
-        // (bounded by `maxRecords`), and restoration is a rare event.
+        // restore time never has its record pruned. Iterating the whole map on
+        // every restoration is cheap (bounded by `maxRecords`), and
+        // restoration is a rare event.
         for (key, seenAt) in records where !seenKeys.contains(key) && seenAt <= cutoff {
             records.removeValue(forKey: key)
         }
 
-        store.saveRestorationRecords(records)
+        evictIfOverCapacity()
+        persist(nowSeconds: nowSeconds, force: true)
         return PeripheralRestorationPartition(fresh: fresh, stale: stale)
     }
 
@@ -196,13 +256,35 @@ final class PeripheralRestorationAgeOutPolicy {
         return records.count
     }
 
-    private func evictIfOverCapacity(now: Date) {
-        guard records.count > maxRecords else { return }
+    /// Writes the map through to the store, unless a write happened less than
+    /// `persistIntervalSeconds` ago and the caller did not force one. A clock
+    /// that steps backwards forces the write rather than blocking it: the
+    /// throttle must never be the reason a record goes unpersisted
+    /// indefinitely.
+    private func persist(nowSeconds: TimeInterval, force: Bool) {
+        if !force,
+           let last = lastPersistAtSeconds,
+           nowSeconds >= last,
+           nowSeconds - last < persistIntervalSeconds {
+            return
+        }
+        lastPersistAtSeconds = nowSeconds
+        store.saveRestorationRecords(records)
+    }
+
+    /// Drops the oldest entries until the map is back under the cap. Returns
+    /// whether anything was evicted, so the caller can force a flush: an
+    /// eviction that stayed in memory would be undone by the next launch's
+    /// load.
+    @discardableResult
+    private func evictIfOverCapacity() -> Bool {
+        guard records.count > maxRecords else { return false }
         // Sort by ascending timestamp (oldest first) and drop the overflow.
         let sorted = records.sorted { $0.value < $1.value }
         let overflow = records.count - maxRecords
         for (key, _) in sorted.prefix(overflow) {
             records.removeValue(forKey: key)
         }
+        return true
     }
 }

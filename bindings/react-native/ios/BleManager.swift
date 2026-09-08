@@ -733,8 +733,15 @@ public class BleManager: NSObject, TransportManager {
 
         // Rehydrate previously connected peripherals to avoid waiting for advertisements
         let retainedPeripherals = central.retrieveConnectedPeripherals(withServices: [SERVICE_UUID])
+        let retainedAt = Date()
         for peripheral in retainedPeripherals {
             discoveredPeripherals[peripheral.identifier] = peripheral
+            // These are live links the system already holds, so they are a
+            // sighting even though no `didConnect` will fire for them: the
+            // attempt below short-circuits on an already-connected peripheral.
+            // Without this the restoration map would never learn about a peer
+            // we picked up this way.
+            peripheralRestorationPolicy.recordSeen(uuid: peripheral.identifier, at: retainedAt)
             attemptConnection(to: peripheral, reason: "retrieve_connected")
         }
     }
@@ -2410,10 +2417,16 @@ extension BleManager: CBCentralManagerDelegate {
     /// not discover a legitimate new peer until the app is reinstalled).
     ///
     /// Gate the reconnect on a persisted per-peripheral last-seen timestamp:
-    /// only restore peripherals we observed within the TTL; for the rest,
-    /// call `cancelPeripheralConnection` to clear iOS's queued connect
-    /// request. A peripheral that comes back into range advertises again and
-    /// takes the normal `didDiscover` → `connect` path.
+    /// restore the peripherals still worth reaching, and for the rest call
+    /// `cancelPeripheralConnection` to clear iOS's queued connect request. A
+    /// peripheral that comes back into range advertises again and takes the
+    /// normal `didDiscover` → `connect` path.
+    ///
+    /// A peripheral handed back in `.connected` state is never aged out: the
+    /// link is alive at this instant, and it is very likely the reason iOS
+    /// relaunched us. Only pending connects are judged on the clock, because
+    /// nothing refreshes a timestamp while the app is dead. See
+    /// PeripheralRestorationAgeOutPolicy.swift.
     public func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
         print("[BleManager] Restoring central manager state")
         emitDiagnostic("info", "Central manager restoring state", context: [
@@ -2424,18 +2437,29 @@ extension BleManager: CBCentralManagerDelegate {
             return
         }
 
-        let indexed: [UUID: CBPeripheral] = Dictionary(
-            uniqueKeysWithValues: peripherals.map { ($0.identifier, $0) }
+        // `uniquingKeysWith:` rather than `uniqueKeysWithValues:`. This runs
+        // during launch, usually a background relaunch, and the trapping
+        // initializer would turn a duplicated identifier from the OS into an
+        // abort before the app is up. There is no upside to trapping here.
+        let indexed = Dictionary(
+            peripherals.map { ($0.identifier, $0) },
+            uniquingKeysWith: { first, _ in first }
         )
         let partition = peripheralRestorationPolicy.partitionRestored(
-            candidates: Array(indexed.keys),
+            candidates: indexed.values.map {
+                PeripheralRestorationCandidate(
+                    uuid: $0.identifier,
+                    isConnected: $0.state == .connected
+                )
+            },
             now: Date()
         )
 
         emitDiagnostic("info", "Partitioned restored peripherals", context: [
             "totalCount": peripherals.count,
             "freshCount": partition.fresh.count,
-            "staleCount": partition.stale.count
+            "staleCount": partition.stale.count,
+            "recordedCount": peripheralRestorationPolicy.recordedPeripheralCount()
         ])
 
         for uuid in partition.fresh {
@@ -3020,6 +3044,15 @@ extension BleManager: CBPeripheralDelegate {
         }
 
         guard let data = characteristic.value else { return }
+
+        // A value arriving proves the link is alive. Without this the record
+        // for a long-lived connection would only ever hold its `didConnect`
+        // timestamp, so a link that stayed up for hours and dropped just
+        // before iOS terminated us would age out and have its pending
+        // reconnect cancelled at the next restoration. The write-through to
+        // the store is throttled inside the policy, so this stays cheap on
+        // the message path.
+        peripheralRestorationPolicy.recordSeen(uuid: peripheral.identifier, at: Date())
 
         if characteristic.uuid == DEVICE_ID_CHAR_UUID {
             // Record this half of the handshake. Nothing is announced here —

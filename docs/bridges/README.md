@@ -332,6 +332,19 @@ stays stopped: the peer still holds the documents, so they return when
 replication resumes. The call clears this device, it does not delete
 content.
 
+A platform cache is not account state, and is deliberately outside both
+providers. The iOS bridge keeps one: a last-seen map of CoreBluetooth
+peripheral UUIDs, in `UserDefaults` under
+`mesh.blemanager.peripheralLastSeen.v1`, which is what lets state restoration
+tell a peer worth reconnecting to from a connect request the OS has been
+retrying since the last install. It is device-scoped rather than
+account-scoped, it holds only OS-assigned ephemeral identifiers and
+timestamps, and every entry ages out on its own within a minute of use, so
+`wipePersistedState()` leaves it alone: clearing it on logout would reach
+across into whichever account is currently running, and the most it could buy
+is one rediscovery cycle. Anything that identifies a person or survives past
+its own TTL belongs in a provider, not in a cache like this one.
+
 Reference adapters live in `examples/storage-adapters/`, one per binding,
 each with the conformance suite wired into its own test harness.
 

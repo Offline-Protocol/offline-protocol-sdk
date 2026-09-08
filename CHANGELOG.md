@@ -13,6 +13,33 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ## [Unreleased]
 
+### Fixed
+
+- **iOS state restoration no longer chases peripherals whose owners are gone.**
+  `BleManager.centralManager(_:willRestoreState:)` re-issued `connect(...)` on
+  every peripheral iOS handed back. The OS keeps servicing those connect
+  requests across process relaunches for as long as the restore identifier is
+  stable, and the only clear the app itself controls is
+  `cancelPeripheralConnection` on the instance the system hands back, so a
+  peripheral UUID whose owner had stopped existing was chased until the app was
+  reinstalled. No Bluetooth toggle, sign-out or force quit cleared it. The
+  visible symptom was a phone that would not discover a legitimate new peer,
+  and a device burning battery on connect requests that could never complete.
+
+  The restored list is now partitioned. A peripheral handed back in
+  `.connected` state is restored unconditionally: the link is alive at that
+  instant, and it is usually the reason iOS relaunched the app. A pending
+  connect is restored only if this device observed that peripheral within the
+  last 60 seconds, tracked in a small last-seen map that survives the
+  relaunch. Everything else is cancelled, which is what clears the OS-side
+  queue. Sightings are recorded from advertisements, from completed
+  connections, and from traffic arriving on a live link.
+
+  The last-seen map is device-scoped, holds only OS-assigned peripheral UUIDs
+  and timestamps, and is not account state, so `wipePersistedState()` does not
+  touch it (see [docs/bridges/README.md](docs/bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified)).
+  iOS only. No wire, FFI or configuration change. (#429)
+
 ### Added
 
 - **The Reticulum transport speaks the gateway contract.** Both mobile managers
