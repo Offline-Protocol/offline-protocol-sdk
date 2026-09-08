@@ -12870,14 +12870,60 @@ mod tests {
             "The `.advertisement` sighting must be the one in the didDiscover scan callback. \
              Anywhere else it claims the app was watching when it was not"
         );
-        assert_eq!(
-            swift.matches("source: .linkActivity").count(),
-            3,
+        assert!(
+            swift.matches("source: .linkActivity").count() >= 3,
             "The three link-evidence sightings — didConnect, didUpdateValueFor, and the \
              retrieveConnectedPeripherals sweep in startScanning — must all stay \
-             `.linkActivity`. Adding a fourth is fine; changing one of these to \
-             `.advertisement` is the regression this pins"
+             `.linkActivity`. Adding a fourth is fine, which is why this is a floor and not \
+             an equality; changing one of these to `.advertisement` is the regression this \
+             pins"
         );
+
+        // --- 7. The sighting is recorded before the adaptive filters --------
+        //
+        // A sighting recorded after a filter inherits that filter's semantics,
+        // and neither filter below the `shouldProcess` gate is about whether
+        // the peripheral was observed: both are load shedding, dropping work
+        // rather than observations. `shouldProbabilisticallySkip` keys on
+        // `peripheral.hashValue`, which Swift seeds once per process, so a
+        // sighting recorded after it would miss a FIXED subset of the visible
+        // peers for the whole life of the process, while their neighbours moved
+        // the cutoff forward every second. Those peers read as "went quiet
+        // while we were watching" at the next restoration and lose the pending
+        // connect that is the only way iOS wakes this app when they reappear,
+        // although they were advertising throughout. Same class as anchoring to
+        // the relaunch clock: the premise is violated at the call site rather
+        // than in the policy, so no policy test can see it.
+        let discover_body = &swift[did_discover..did_connect];
+        let sighting_at = discover_body
+            .find("source: .advertisement")
+            .expect("the .advertisement sighting must live in the didDiscover body");
+        let process_gate = discover_body
+            .find("if !shouldProcess { return }")
+            .expect("didDiscover must still gate on shouldProcessDiscoveredPeripheral");
+        assert!(
+            process_gate < sighting_at,
+            "The `.advertisement` sighting must stay BELOW the shouldProcess gate. That gate is \
+             what makes this a mesh peripheral rather than any BLE device in radio range, and \
+             recording above it would spend the record cap on passing headphones"
+        );
+        for filter in [
+            "if shouldFilterByRssi(rssiValue) {",
+            "if shouldProbabilisticallySkip(peripheral.identifier) {",
+        ] {
+            let filter_at = discover_body
+                .find(filter)
+                .unwrap_or_else(|| panic!("didDiscover must still apply `{filter}`"));
+            assert!(
+                sighting_at < filter_at,
+                "ORDERING INVARIANT: the `.advertisement` sighting must be recorded BEFORE \
+                 `{filter}`. That filter sheds load, it does not decide whether the peripheral \
+                 was seen, and the probabilistic one is keyed on a per-process hash seed — so \
+                 recording after it silently hides a fixed subset of peers that were \
+                 advertising the whole time and cancels their pending connects at the next \
+                 restoration"
+            );
+        }
     }
 
     /// The relay connection proves its address before it sends anything else.

@@ -2764,7 +2764,29 @@ extension BleManager: CBCentralManagerDelegate {
         if !shouldProcess {
             return
         }
-        
+
+        // Recorded here, above the two adaptive filters, deliberately.
+        //
+        // This is the observation the restoration age-out is built on: "this
+        // app was scanning, and it saw this peripheral." Both filters below
+        // are load shedding — they drop work, not observations — and
+        // `shouldProbabilisticallySkip` keys on `peripheral.hashValue`, which
+        // Swift seeds once per process. Recording after them would therefore
+        // hide a FIXED subset of the visible peers, up to 80% of them in a
+        // scan that reads as dense, for the whole life of the process, while
+        // their neighbours moved the age-out cutoff forward every second.
+        // Those peers would read as "went quiet while we were watching" at the
+        // next restoration and lose the pending connect that is the only way
+        // iOS wakes this app when one of them reappears — although they had
+        // been advertising the entire time.
+        //
+        // Still below the `shouldProcess` gate, though. That gate is what
+        // makes this a mesh peripheral rather than any BLE device in radio
+        // range, and it admits every peer already known to be one; only the
+        // unknown-bootstrap path below it is rate limited. Recording above it
+        // would spend the 200-entry cap on passing headphones.
+        peripheralRestorationPolicy.recordSeen(uuid: peripheral.identifier, at: now, source: .advertisement)
+
         // Adaptive scanning: early RSSI filtering in dense networks
         if shouldFilterByRssi(rssiValue) {
             if logThrottler.shouldLog(key: "adaptive_rssi_filter", interval: 10) {
@@ -2780,7 +2802,6 @@ extension BleManager: CBCentralManagerDelegate {
         
         discoveredPeripherals[peripheral.identifier] = peripheral
         peripheralRSSI[peripheral.identifier] = rssiValue
-        peripheralRestorationPolicy.recordSeen(uuid: peripheral.identifier, at: now, source: .advertisement)
 
         if discoveryLogTimestamps[peripheral.identifier] == nil || (now.timeIntervalSince(discoveryLogTimestamps[peripheral.identifier]!) > 30) {
             discoveryLogTimestamps[peripheral.identifier] = now

@@ -33,7 +33,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   of the last thing it saw before it was terminated, tracked in a small
   last-seen map that survives the relaunch. Everything else is cancelled, which
   is what clears the OS-side queue. Sightings are recorded from advertisements,
-  from completed connections, and from traffic arriving on a live link.
+  from completed connections, and from traffic arriving on a live link. An
+  advertisement counts as seen before the adaptive filters that shed scanning
+  work in dense environments, so a peer one of those filters skips is not
+  mistaken for a peer that stopped advertising.
 
   That 60 seconds is measured against the newest advertisement the scan
   received, not against the relaunch clock and not against the newest entry in
