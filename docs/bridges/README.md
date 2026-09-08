@@ -334,14 +334,16 @@ content.
 
 A platform cache is not account state, and is deliberately outside both
 providers. The iOS bridge keeps one: a last-seen map of CoreBluetooth
-peripheral UUIDs, in `UserDefaults` under
-`mesh.blemanager.peripheralLastSeen.v1`, which is what lets state restoration
-tell a peer worth reconnecting to from a connect request the OS has been
-retrying since the last install. It is device-scoped rather than
-account-scoped, and it holds only OS-assigned ephemeral identifiers and
-timestamps. An entry stops counting a minute after the newest sighting the map
-holds, and is pruned at the next state restoration or by the 200-entry cap, so
-`wipePersistedState()` leaves it alone: clearing it on logout would reach
+peripheral UUIDs in `UserDefaults` under
+`mesh.blemanager.peripheralLastSeen.v1`, plus the timestamp of the newest
+advertisement the scan has received under
+`mesh.blemanager.lastScanSighting.v1`. Together they are what lets state
+restoration tell a peer worth reconnecting to from a connect request the OS has
+been retrying since the last install. They are device-scoped rather than
+account-scoped, and hold only OS-assigned ephemeral identifiers and timestamps.
+An entry stops counting a minute after that advertisement timestamp, and is
+pruned at the next state restoration or by the 200-entry cap, so
+`wipePersistedState()` leaves both alone: clearing them on logout would reach
 across into whichever account is currently running, and the most it could buy
 is one rediscovery cycle. Anything that identifies a person, or that has to be
 gone the moment an account signs out, belongs in a provider, not in a cache

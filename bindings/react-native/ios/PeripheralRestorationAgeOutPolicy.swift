@@ -42,23 +42,44 @@
 // therefore applies only to pending connects, where the connect request is a
 // standing OS-side intention with no evidence behind it.
 //
-// The TTL is measured against the NEWEST sighting in the map, not against the
-// restoration clock. Nothing writes the map while the app is dead, and iOS
-// relaunches the app hours after it was terminated, so a `now - ttl` cutoff
-// would mark every pending connect stale at every restoration and the age-out
-// would stop being an age-out: it would be an unconditional cancel of every
-// pending connect. That matters because a pending connect is the only way iOS
-// wakes this app when a known peer reappears — a background scan with
-// `withServices: nil` is ignored by the OS — so cancelling them all trades a
-// visible bug for an invisible one.
+// == The cutoff is anchored to the last advertisement, not to the clock ==
 //
-// Anchoring to the newest record asks the answerable question instead: "was
-// this peripheral seen within a minute of the last thing this app saw before
-// it died?" The dev-loop case the class exists for still ages out, because
-// every `node relay.js` restart mints a UUID that gets discovered and becomes
-// the new anchor, leaving the previous ones behind the cutoff. What survives
-// is at most the handful of peripherals seen in the final minute of the last
-// process, which is exactly the set worth keeping a connect request for.
+// The TTL is NOT measured against the restoration clock. Nothing writes the
+// map while the app is dead, and iOS relaunches the app hours after it was
+// terminated, so a `now - ttl` cutoff would mark every pending connect stale
+// at every restoration and the age-out would stop being an age-out: it would
+// be an unconditional cancel of every pending connect. That matters because a
+// pending connect is the only way iOS wakes this app when a known peer
+// reappears — a background scan with `withServices: nil` is ignored by the OS
+// — so cancelling them all trades a visible bug for an invisible one.
+//
+// It is not measured against the newest record in the map either. A record is
+// refreshed by three different kinds of evidence, and only one of them says
+// anything about the peripherals the app did NOT see. Traffic on a live link
+// keeps flowing while the app is backgrounded and scanning is stopped; if
+// that moved the cutoff, then a single chatty peer would age out every other
+// peer's pending connect, because those peers had no way to be re-sighted
+// over the same period. One connected peer would silently cancel the wake-up
+// path for every absent one. That is the same invisible failure as anchoring
+// to the clock, reached by a different route.
+//
+// So the anchor is `lastScanSightingSeconds`: the newest advertisement
+// received in the scan callback, clamped to `now`. An advertisement is the
+// only observation that proves the app was awake AND watching, which is
+// exactly the premise the question needs:
+//
+//     "was this peripheral seen within a minute of the last time this app was
+//      in a position to see anything at all?"
+//
+// A peripheral that went quiet while the scan was running really is gone. A
+// peripheral that went quiet because the scan stopped is not, and must not be
+// judged. The dev-loop case the class exists for still ages out, because every
+// `node relay.js` restart mints a UUID that is DISCOVERED — an advertisement,
+// which moves the anchor — leaving its predecessors behind the cutoff.
+//
+// Records are still refreshed from all three sources. A long-lived link whose
+// traffic keeps its own record current survives a cutoff that other peers'
+// advertisements have pushed forward; it just cannot push that cutoff itself.
 //
 // Wall-clock is deliberate: state restoration crosses process boundaries, so a
 // monotonic clock would reset to zero at every relaunch and every entry would
@@ -72,7 +93,7 @@
 // policy helpers in this directory) so the age-out math is pinned by
 // `swift test` without a running CoreBluetooth stack, and so the persistence
 // layer is dependency-injected: production wires
-// `UserDefaultsPeripheralRestorationStore`, tests inject an in-memory dict.
+// `UserDefaultsPeripheralRestorationStore`, tests inject an in-memory struct.
 //
 // Not internally synchronized: the caller confines every method call to the
 // CoreBluetooth delegate queue (BleManager's `nil` queue -> main).
@@ -80,16 +101,62 @@
 
 import Foundation
 
-/// Persistent key/value store for the peripheral last-seen map. The blob is a
-/// dictionary keyed by peripheral UUID string with values that are seconds
-/// since 1970 (matching `Date().timeIntervalSince1970`). The store returns an
-/// empty dictionary when nothing has ever been persisted.
-protocol PeripheralRestorationStore {
-    func loadRestorationRecords() -> [String: TimeInterval]
-    func saveRestorationRecords(_ records: [String: TimeInterval])
+/// What kind of observation refreshed a peripheral's record.
+///
+/// The distinction is the whole basis of the cutoff: see the file header. It
+/// is a required argument rather than a defaulted one because a call site that
+/// picked the wrong one would silently change which peripherals survive a
+/// restoration, and nothing about the resulting behaviour is visible without a
+/// system termination. The production call sites are additionally pinned by
+/// `react_native_ios_restoration_commands_wait_for_powered_on` in the uniffi
+/// crate, since no Swift test can reach `BleManager`.
+enum PeripheralSightingSource: Equatable {
+    /// An advertisement received in the scan callback. The only observation
+    /// that proves the app was scanning, and therefore the only one allowed to
+    /// move the age-out cutoff forward.
+    case advertisement
+
+    /// Activity on a link the system already holds: a completed GATT connect,
+    /// a characteristic value arriving, or a peripheral handed back by
+    /// `retrieveConnectedPeripherals`. Proves that one link is alive; proves
+    /// nothing about whether any other peripheral was visible, so it refreshes
+    /// the peripheral's own record and leaves the cutoff where it is.
+    case linkActivity
 }
 
-/// The default production store: a namespaced key in `UserDefaults.standard`.
+/// Everything the policy persists, written as one snapshot.
+///
+/// The two fields are read together and must not drift apart: a record map
+/// restored without the anchor that was current when it was written falls back
+/// to a different, more aggressive cutoff (see
+/// `PeripheralRestorationAgeOutPolicy.partitionRestored`). Keeping them in one
+/// value means one load, one save, and one throttle covering both, so the
+/// staleness the write-through throttle allows applies uniformly and cancels
+/// out between a record and the anchor it is compared against.
+struct PeripheralRestorationState: Equatable {
+    /// Peripheral UUID string -> seconds since 1970 of the last observation,
+    /// matching `Date().timeIntervalSince1970`.
+    var records: [String: TimeInterval]
+
+    /// Seconds since 1970 of the newest advertisement seen in the scan
+    /// callback, or nil when this store has never recorded one (a fresh
+    /// install, or a map written by a build that predates the anchor).
+    var lastScanSightingSeconds: TimeInterval?
+
+    init(records: [String: TimeInterval] = [:], lastScanSightingSeconds: TimeInterval? = nil) {
+        self.records = records
+        self.lastScanSightingSeconds = lastScanSightingSeconds
+    }
+}
+
+/// Persistent store for the restoration state. Returns an empty state when
+/// nothing has ever been persisted.
+protocol PeripheralRestorationStore {
+    func loadRestorationState() -> PeripheralRestorationState
+    func saveRestorationState(_ state: PeripheralRestorationState)
+}
+
+/// The default production store: two namespaced keys in `UserDefaults.standard`.
 /// Values persist across app relaunches, which is the whole point of the
 /// policy — see the file header for why wall-clock time is the right clock
 /// here.
@@ -97,36 +164,56 @@ final class UserDefaultsPeripheralRestorationStore: PeripheralRestorationStore {
     /// Namespaced under `mesh.blemanager.*` so a UserDefaults dump from
     /// support tools reads unambiguously. The `.v1` suffix reserves room for
     /// a future schema bump; a v2 rollout should read v1 then delete it.
-    static let defaultKey = "mesh.blemanager.peripheralLastSeen.v1"
+    static let defaultRecordsKey = "mesh.blemanager.peripheralLastSeen.v1"
+
+    /// The age-out anchor. A separate key rather than a reserved entry in the
+    /// record map, which is keyed by peripheral UUID and swept by the TTL and
+    /// the capacity cap — an anchor living in there would be evicted as if it
+    /// were a peripheral.
+    static let defaultScanSightingKey = "mesh.blemanager.lastScanSighting.v1"
 
     private let userDefaults: UserDefaults
-    private let key: String
+    private let recordsKey: String
+    private let scanSightingKey: String
 
     init(userDefaults: UserDefaults = .standard,
-         key: String = UserDefaultsPeripheralRestorationStore.defaultKey) {
+         recordsKey: String = UserDefaultsPeripheralRestorationStore.defaultRecordsKey,
+         scanSightingKey: String = UserDefaultsPeripheralRestorationStore.defaultScanSightingKey) {
         self.userDefaults = userDefaults
-        self.key = key
+        self.recordsKey = recordsKey
+        self.scanSightingKey = scanSightingKey
     }
 
-    func loadRestorationRecords() -> [String: TimeInterval] {
-        guard let raw = userDefaults.dictionary(forKey: key) else { return [:] }
+    func loadRestorationState() -> PeripheralRestorationState {
         var records: [String: TimeInterval] = [:]
-        records.reserveCapacity(raw.count)
-        for (uuid, value) in raw {
-            if let seconds = value as? TimeInterval {
-                records[uuid] = seconds
-            } else if let seconds = (value as? NSNumber)?.doubleValue {
-                records[uuid] = seconds
+        if let raw = userDefaults.dictionary(forKey: recordsKey) {
+            records.reserveCapacity(raw.count)
+            for (uuid, value) in raw {
+                if let seconds = value as? TimeInterval {
+                    records[uuid] = seconds
+                } else if let seconds = (value as? NSNumber)?.doubleValue {
+                    records[uuid] = seconds
+                }
             }
         }
-        return records
+        // `object(forKey:)` rather than `double(forKey:)`: the latter cannot
+        // tell "never written" from a stored 0, and 0 is a real (1970)
+        // timestamp that would anchor the cutoff to the epoch and keep every
+        // record alive forever.
+        let anchor = (userDefaults.object(forKey: scanSightingKey) as? NSNumber)?.doubleValue
+        return PeripheralRestorationState(records: records, lastScanSightingSeconds: anchor)
     }
 
-    func saveRestorationRecords(_ records: [String: TimeInterval]) {
-        if records.isEmpty {
-            userDefaults.removeObject(forKey: key)
+    func saveRestorationState(_ state: PeripheralRestorationState) {
+        if state.records.isEmpty {
+            userDefaults.removeObject(forKey: recordsKey)
         } else {
-            userDefaults.set(records, forKey: key)
+            userDefaults.set(state.records, forKey: recordsKey)
+        }
+        if let anchor = state.lastScanSightingSeconds {
+            userDefaults.set(anchor, forKey: scanSightingKey)
+        } else {
+            userDefaults.removeObject(forKey: scanSightingKey)
         }
     }
 }
@@ -149,14 +236,14 @@ struct PeripheralRestorationPartition: Equatable {
 
 final class PeripheralRestorationAgeOutPolicy {
     /// The observation is considered fresh while `anchor - lastSeen < ttl`,
-    /// where the anchor is the newest sighting in the map (see the file
-    /// header — it is NOT the restoration clock). At or past the boundary the
-    /// entry ages out: a peripheral we hadn't heard from for a full minute
-    /// while we were still awake and watching is almost certainly gone, and
-    /// the cost of a false age-out (one wasted rediscovery next time it
-    /// advertises) is trivial next to the cost of a false-fresh (indefinite
-    /// connect requests to a dead UUID). It bounds only pending connects; a
-    /// live link is never judged on the clock.
+    /// where the anchor is the newest advertisement seen in the scan callback
+    /// (see the file header — it is NOT the restoration clock, and NOT the
+    /// newest record). At or past the boundary the entry ages out: a
+    /// peripheral we hadn't heard from for a full minute while we were still
+    /// scanning is almost certainly gone, and the cost of a false age-out (one
+    /// wasted rediscovery next time it advertises) is trivial next to the cost
+    /// of a false-fresh (indefinite connect requests to a dead UUID). It
+    /// bounds only pending connects; a live link is never judged on the clock.
     static let defaultTtlSeconds: TimeInterval = 60
 
     /// Cap on how many entries the persisted map is allowed to grow to. Real
@@ -172,8 +259,9 @@ final class PeripheralRestorationAgeOutPolicy {
     /// visible peer, and each flush serialises the whole map through
     /// `UserDefaults`. Throttling costs at most this much staleness in the
     /// persisted value, an order of magnitude inside the TTL that reads it,
-    /// and the case where a stale read would actually hurt — a live link — no
-    /// longer consults the clock at all. A first sighting, an eviction and a
+    /// and because the anchor is flushed in the same snapshot as the records
+    /// it is compared against, the lag applies to both sides of that
+    /// comparison and cancels out. A first sighting, an eviction and a
     /// restoration all flush immediately regardless.
     static let defaultPersistIntervalSeconds: TimeInterval = 10
 
@@ -183,6 +271,7 @@ final class PeripheralRestorationAgeOutPolicy {
     private let persistIntervalSeconds: TimeInterval
 
     private var records: [String: TimeInterval]
+    private var lastScanSightingSeconds: TimeInterval?
     private var lastPersistAtSeconds: TimeInterval?
 
     init(store: PeripheralRestorationStore,
@@ -193,19 +282,30 @@ final class PeripheralRestorationAgeOutPolicy {
         self.ttlSeconds = ttlSeconds
         self.maxRecords = maxRecords
         self.persistIntervalSeconds = persistIntervalSeconds
-        self.records = store.loadRestorationRecords()
+        let state = store.loadRestorationState()
+        self.records = state.records
+        self.lastScanSightingSeconds = state.lastScanSightingSeconds
     }
 
-    /// Records a live observation of a peripheral — an advertisement seen in
-    /// the scan callback, a successful GATT connection, or a characteristic
-    /// value arriving on an established link. Idempotent: the latest timestamp
-    /// always wins. The in-memory map is always current; the flush to the
-    /// store is throttled, see `defaultPersistIntervalSeconds`.
-    func recordSeen(uuid: UUID, at now: Date) {
+    /// Records a live observation of a peripheral. Idempotent: the latest
+    /// timestamp always wins. The in-memory state is always current; the flush
+    /// to the store is throttled, see `defaultPersistIntervalSeconds`.
+    ///
+    /// `source` decides whether this observation may also move the age-out
+    /// cutoff forward. Only `.advertisement` may — see the file header.
+    func recordSeen(uuid: UUID, at now: Date, source: PeripheralSightingSource) {
         let key = uuid.uuidString
         let nowSeconds = now.timeIntervalSince1970
         let isFirstSighting = records[key] == nil
         records[key] = nowSeconds
+        if source == .advertisement {
+            // Last write wins rather than `max`: after a backwards clock step
+            // this lowers the anchor, which moves the cutoff EARLIER and lets
+            // more records survive. Taking the maximum would let one
+            // future-dated reading pin the cutoff ahead of every honest entry
+            // until the clock caught up.
+            lastScanSightingSeconds = nowSeconds
+        }
         let evicted = evictIfOverCapacity()
         persist(nowSeconds: nowSeconds, force: isFirstSighting || evicted)
     }
@@ -217,10 +317,10 @@ final class PeripheralRestorationAgeOutPolicy {
     /// and has its record refreshed: the link is alive at the instant of the
     /// call, which is stronger evidence than any timestamp. Everything else is
     /// a pending connect request, judged on the persisted last-seen map
-    /// against the newest sighting in that map rather than against `now` (see
-    /// the file header), and a candidate with no record at all is stale (this
-    /// SDK never observed it, so the OS-side restore is the only evidence it
-    /// exists, and that evidence is what's untrusted).
+    /// against the newest advertisement in that state rather than against
+    /// `now` (see the file header), and a candidate with no record at all is
+    /// stale (this SDK never observed it, so the OS-side restore is the only
+    /// evidence it exists, and that evidence is what's untrusted).
     ///
     /// A UUID repeated in `candidates` is decided once, on its first
     /// appearance, so neither output list can contain it twice.
@@ -229,14 +329,21 @@ final class PeripheralRestorationAgeOutPolicy {
     /// a peripheral the caller is telling us to forget stays forgotten.
     func partitionRestored(candidates: [PeripheralRestorationCandidate], now: Date) -> PeripheralRestorationPartition {
         let nowSeconds = now.timeIntervalSince1970
-        // Read the anchor BEFORE the loop. The connected branch below writes
-        // `nowSeconds` into `records`, and anchoring to a map that already
+        // Read the anchor BEFORE the loop. In the fallback path below the
+        // anchor is derived from `records`, and the connected branch writes
+        // `nowSeconds` into `records`, so anchoring to a map that already
         // holds it would restore the `now - ttl` cutoff this exists to avoid,
         // silently, on exactly the restorations that carry a live link.
-        // `min` guards the other direction: a record written before a
+        //
+        // The fallback only applies when no advertisement has ever been
+        // persisted: a fresh install, or a map written by a build older than
+        // the anchor. It reproduces the previous behaviour for that one
+        // restoration, after which the first advertisement sets a real anchor.
+        //
+        // `min` guards the other direction: an anchor written before a
         // backwards clock step sits in the future, and anchoring to it would
         // age out entries that are current.
-        let anchorSeconds = min(nowSeconds, records.values.max() ?? nowSeconds)
+        let anchorSeconds = min(nowSeconds, lastScanSightingSeconds ?? records.values.max() ?? nowSeconds)
         let cutoff = anchorSeconds - ttlSeconds
         var fresh: [UUID] = []
         var stale: [UUID] = []
@@ -252,7 +359,8 @@ final class PeripheralRestorationAgeOutPolicy {
                 // the app was very likely relaunched because this link
                 // produced an event. Refresh the record so the next
                 // restoration still reads it as fresh even if the link has
-                // dropped by then.
+                // dropped by then. This is link evidence, not a sighting, so
+                // it deliberately does not touch the anchor.
                 records[key] = nowSeconds
                 fresh.append(candidate.uuid)
             } else if let seenAt = records[key], seenAt > cutoff {
@@ -283,10 +391,10 @@ final class PeripheralRestorationAgeOutPolicy {
         return records.count
     }
 
-    /// Writes the map through to the store, unless a write happened less than
-    /// `persistIntervalSeconds` ago and the caller did not force one. A clock
-    /// that steps backwards forces the write rather than blocking it: the
-    /// throttle must never be the reason a record goes unpersisted
+    /// Writes the state through to the store, unless a write happened less
+    /// than `persistIntervalSeconds` ago and the caller did not force one. A
+    /// clock that steps backwards forces the write rather than blocking it:
+    /// the throttle must never be the reason a record goes unpersisted
     /// indefinitely.
     private func persist(nowSeconds: TimeInterval, force: Bool) {
         if !force,
@@ -296,7 +404,12 @@ final class PeripheralRestorationAgeOutPolicy {
             return
         }
         lastPersistAtSeconds = nowSeconds
-        store.saveRestorationRecords(records)
+        store.saveRestorationState(
+            PeripheralRestorationState(
+                records: records,
+                lastScanSightingSeconds: lastScanSightingSeconds
+            )
+        )
     }
 
     /// Drops the oldest entries until the map is back under the cap. Returns

@@ -35,13 +35,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   is what clears the OS-side queue. Sightings are recorded from advertisements,
   from completed connections, and from traffic arriving on a live link.
 
-  That 60 seconds is measured against the newest sighting in the map, not
-  against the relaunch clock. Nothing records a sighting while the app is dead
-  and iOS relaunches it hours later, so measuring against the relaunch clock
-  would cancel every pending connect at every restoration. A pending connect is
-  the only way iOS wakes the app when a known peer reappears, since a
-  background scan with no service filter is ignored by the OS, so that would
-  have traded a visible bug for an invisible one.
+  That 60 seconds is measured against the newest advertisement the scan
+  received, not against the relaunch clock and not against the newest entry in
+  the map. Nothing records a sighting while the app is dead and iOS relaunches
+  it hours later, so measuring against the relaunch clock would cancel every
+  pending connect at every restoration. Measuring against the newest entry has
+  the same effect by a slower route, because traffic on a live link keeps
+  refreshing an entry while the app is backgrounded and the scan is stopped: a
+  single connected peer would push the window past every absent peer's last
+  sighting and cancel all of them. An advertisement is the only observation
+  that proves the app was in a position to see anything at all. A pending
+  connect is the only way iOS wakes the app when a known peer reappears, since
+  a background scan with no service filter is ignored by the OS, so either
+  mistake would have traded a visible bug for an invisible one.
 
   Both halves of the decision are issued once the central reports `.poweredOn`,
   not where the restored list arrives. `willRestoreState` is delivered before
@@ -50,6 +56,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   while the diagnostics reported the peripherals as dropped. The failed-connect
   retry also now skips a peripheral that has been dropped from the discovered
   map, so a cancelled connect request is not immediately re-armed.
+
+  A restored peripheral that is still only connecting is no longer booked as a
+  live connection, so it neither spends a connection slot nor suppresses the
+  retry that is supposed to chase it.
 
   The last-seen map is device-scoped, holds only OS-assigned peripheral UUIDs
   and timestamps, and is not account state, so `wipePersistedState()` does not

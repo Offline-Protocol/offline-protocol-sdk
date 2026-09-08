@@ -6,6 +6,14 @@
 // PeripheralRestorationAgeOutPolicy.swift for the rule the fixtures below
 // exercise.
 //
+// Two axes run through nearly every fixture:
+//
+//   1. `.connected` vs pending. A live link is never judged on a timestamp.
+//   2. `.advertisement` vs `.linkActivity`. Only an advertisement moves the
+//      age-out cutoff, because only an advertisement proves the app was
+//      scanning. Fixtures that need to move the cutoff say `.advertisement`
+//      deliberately; fixtures about a live link say `.linkActivity`.
+//
 
 import XCTest
 @testable import OfflineProtocol
@@ -15,15 +23,18 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
     /// In-memory store for the age-out policy so the tests stay hermetic —
     /// we never touch `UserDefaults.standard`.
     private final class InMemoryStore: PeripheralRestorationStore {
-        private(set) var records: [String: TimeInterval] = [:]
+        private(set) var state = PeripheralRestorationState()
         private(set) var saveCount = 0
 
-        func loadRestorationRecords() -> [String: TimeInterval] {
-            return records
+        var records: [String: TimeInterval] { return state.records }
+        var lastScanSightingSeconds: TimeInterval? { return state.lastScanSightingSeconds }
+
+        func loadRestorationState() -> PeripheralRestorationState {
+            return state
         }
 
-        func saveRestorationRecords(_ records: [String: TimeInterval]) {
-            self.records = records
+        func saveRestorationState(_ state: PeripheralRestorationState) {
+            self.state = state
             saveCount += 1
         }
     }
@@ -112,7 +123,7 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-3600))
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-3600), source: .advertisement)
 
         let partition = policy.partitionRestored(candidates: [connected(a)], now: t0)
 
@@ -127,7 +138,7 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-3600))
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-3600), source: .advertisement)
         _ = policy.partitionRestored(candidates: [connected(a)], now: t0)
 
         XCTAssertEqual(store.records[a.uuidString], t0.timeIntervalSince1970)
@@ -142,6 +153,20 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         XCTAssertEqual(second.fresh, [a])
     }
 
+    func testConnectedRefreshDoesNotMoveTheAnchor() {
+        // The connected branch records a sighting for its own peripheral, but
+        // a live link says nothing about whether the app could see anything
+        // else. If it moved the anchor, the restoration that carries a live
+        // link would age out every pending connect alongside it.
+        let store = InMemoryStore()
+        let policy = makePolicy(store: store)
+
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
+        _ = policy.partitionRestored(candidates: [connected(a)], now: t0.addingTimeInterval(3600))
+
+        XCTAssertEqual(store.lastScanSightingSeconds, t0.timeIntervalSince1970)
+    }
+
     func testConnectedAndPendingCandidatesPartitionIndependently() {
         // a: live link, record long expired  -> fresh (state wins)
         // b: pending connect, record expired -> stale
@@ -149,9 +174,9 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-3600))
-        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(-3600))
-        policy.recordSeen(uuid: c, at: t0)
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-3600), source: .advertisement)
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(-3600), source: .advertisement)
+        policy.recordSeen(uuid: c, at: t0, source: .advertisement)
 
         let partition = policy.partitionRestored(
             candidates: [connected(a), pending(b), pending(c)],
@@ -168,7 +193,7 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0)
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
 
         // 30 s later — still well inside the 60 s TTL.
         let partition = policy.partitionRestored(
@@ -183,12 +208,11 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0)
-        // `b` is the anchor. It is what makes this a real age-out: the app was
-        // still awake and watching 61 s after it last saw `a`, so `a` went
-        // quiet rather than the clock merely running on while the process was
-        // dead.
-        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(61))
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
+        // `b`'s advertisement is the anchor. It is what makes this a real
+        // age-out: the app was still scanning 61 s after it last saw `a`, so
+        // `a` went quiet rather than the scan merely having stopped.
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(61), source: .advertisement)
 
         // 61 s later — just past the boundary.
         let partition = policy.partitionRestored(
@@ -206,8 +230,8 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0)
-        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(ttl)) // the anchor
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(ttl), source: .advertisement) // the anchor
 
         let partition = policy.partitionRestored(
             candidates: [pending(a)],
@@ -221,8 +245,12 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0)
-        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(-120)) // way past TTL
+        // Chronological, because the anchor takes the last advertisement
+        // written rather than the newest timestamp: the scan callback delivers
+        // sightings in order, and a fixture that writes them backwards is
+        // asserting against a clock step, not against an age-out.
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(-120), source: .advertisement) // way past TTL
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
         // c is never recorded — never observed this process.
 
         let partition = policy.partitionRestored(
@@ -233,7 +261,7 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         XCTAssertEqual(Set(partition.stale), Set([b, c]))
     }
 
-    // MARK: - The TTL is anchored to the newest sighting, not to `now`
+    // MARK: - The cutoff is anchored to the last advertisement
 
     func testPendingCandidateSurvivesALongDeadPeriodWhenNothingNewerWasSeen() {
         // The app was terminated with `a` in view and iOS relaunched it three
@@ -245,7 +273,7 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0)
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
 
         let partition = policy.partitionRestored(
             candidates: [pending(a)],
@@ -255,16 +283,17 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         XCTAssertEqual(partition.stale, [])
     }
 
-    func testAnchorIsTheNewestRecordNotTheRestorationClock() {
-        // Same three-hour dead period, but the app went on to see `b` two
-        // minutes after it last saw `a`. That is the evidence the clock alone
-        // cannot supply: `a` went quiet while the app was still awake and
-        // watching, so it ages out. `b` was the last thing seen, so it stays.
+    func testAnchorIsTheNewestAdvertisementNotTheRestorationClock() {
+        // Same three-hour dead period, but the app went on to see `b`
+        // advertise two minutes after it last saw `a`. That is the evidence
+        // the clock alone cannot supply: `a` went quiet while the app was
+        // still scanning, so it ages out. `b` was the last thing seen, so it
+        // stays.
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0)
-        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(120))
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(120), source: .advertisement)
 
         let partition = policy.partitionRestored(
             candidates: [pending(a), pending(b)],
@@ -274,18 +303,88 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         XCTAssertEqual(partition.stale, [a])
     }
 
-    func testDevLoopUuidChurnStillAgesOutTheDeadUuids() {
-        // The case the class exists for, under the anchored cutoff. Every
-        // relay restart mints a fresh peripheral UUID, and each new UUID
-        // becomes the anchor that pushes its predecessors past the cutoff, so
-        // the OS-side connect queue stays bounded even though no restoration
-        // ever consults the wall clock.
+    func testLinkActivityDoesNotAgeOutAPeerTheAppCouldNotHaveSeen() {
+        // The regression this distinction exists for, and the shape of an
+        // ordinary backgrounded session.
+        //
+        // `b` is discovered five seconds in and its connect request is left
+        // pending — it walked out of range before the connect completed. The
+        // app then goes to the background: the scan stops, and a background
+        // scan with no service filter is ignored by the OS anyway, so nothing
+        // can be re-sighted from here on. `a`'s link stays up and keeps
+        // delivering traffic for an hour. iOS terminates the app and relaunches
+        // it later on an event from `a`.
+        //
+        // If link traffic moved the cutoff, `a` alone would push it an hour
+        // past `b`'s sighting and cancel `b`'s connect request — which is the
+        // only way iOS would ever wake this app when `b` reappears. One chatty
+        // peer would silently disable the wake-up path for every absent one.
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0)                         // relay run 1
-        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(300)) // run 2
-        policy.recordSeen(uuid: c, at: t0.addingTimeInterval(600)) // run 3
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(5), source: .advertisement)
+        // Backgrounded from ~t0+30. Only link traffic from here.
+        for offset in stride(from: 60.0, through: 3600.0, by: 60.0) {
+            policy.recordSeen(uuid: a, at: t0.addingTimeInterval(offset), source: .linkActivity)
+        }
+
+        let partition = policy.partitionRestored(
+            candidates: [pending(a), pending(b)],
+            now: t0.addingTimeInterval(2 * 3600)
+        )
+
+        XCTAssertEqual(Set(partition.fresh), Set([a, b]))
+        XCTAssertEqual(partition.stale, [])
+    }
+
+    func testLinkActivityStillRefreshesItsOwnRecord() {
+        // The other half of the same rule: link traffic must keep the chatty
+        // peer's own record current, so it survives a cutoff that other peers'
+        // advertisements have pushed forward. `a` connects at t0 and never
+        // advertises again; `c` advertises 10 minutes later and moves the
+        // cutoff to t0+540. Only the traffic on `a`'s link keeps it alive.
+        let store = InMemoryStore()
+        let policy = makePolicy(store: store)
+
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(590), source: .linkActivity)
+        policy.recordSeen(uuid: c, at: t0.addingTimeInterval(600), source: .advertisement)
+
+        let partition = policy.partitionRestored(
+            candidates: [pending(a)],
+            now: t0.addingTimeInterval(3 * 3600)
+        )
+        XCTAssertEqual(partition.fresh, [a])
+        XCTAssertEqual(partition.stale, [])
+    }
+
+    func testLinkActivityAloneNeverEstablishesAnAnchor() {
+        // A store whose only sightings are link activity has no anchor, so the
+        // cutoff falls back to the newest record. That fallback must not be
+        // reached by way of `.linkActivity` pretending to be a sighting: the
+        // anchor field stays nil.
+        let store = InMemoryStore()
+        let policy = makePolicy(store: store)
+
+        policy.recordSeen(uuid: a, at: t0, source: .linkActivity)
+
+        XCTAssertNil(store.lastScanSightingSeconds)
+        XCTAssertEqual(store.records[a.uuidString], t0.timeIntervalSince1970)
+    }
+
+    func testDevLoopUuidChurnStillAgesOutTheDeadUuids() {
+        // The case the class exists for, under the anchored cutoff. Every
+        // relay restart mints a fresh peripheral UUID that is DISCOVERED —
+        // an advertisement, so it becomes the new anchor and pushes its
+        // predecessors past the cutoff. The OS-side connect queue stays
+        // bounded even though no restoration ever consults the wall clock.
+        let store = InMemoryStore()
+        let policy = makePolicy(store: store)
+
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)                         // relay run 1
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(300), source: .advertisement) // run 2
+        policy.recordSeen(uuid: c, at: t0.addingTimeInterval(600), source: .advertisement) // run 3
 
         let partition = policy.partitionRestored(
             candidates: [pending(a), pending(b), pending(c)],
@@ -295,17 +394,48 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         XCTAssertEqual(Set(partition.stale), Set([a, b]))
     }
 
-    func testConnectedRefreshDoesNotTightenTheCutoffForPendingCandidates() {
-        // The connected branch writes `now` into the map. Reading the anchor
-        // after that instead of before would let a live link drag the cutoff
-        // forward to `now - ttl` and age out pending connects the map says
-        // were seen alongside it — reinstating the behaviour the anchor exists
-        // to avoid, on exactly the restorations that carry a live link.
+    func testAnchorFallsBackToTheNewestRecordWhenNoneWasEverPersisted() {
+        // Migration: a map written by a build that predates the anchor loads
+        // with no anchor at all. The cutoff falls back to the newest record,
+        // which reproduces the previous behaviour for that one restoration
+        // rather than defaulting to `now` and cancelling everything.
         let store = InMemoryStore()
+        store.saveRestorationState(
+            PeripheralRestorationState(
+                records: [
+                    a.uuidString: t0.timeIntervalSince1970,
+                    b.uuidString: t0.addingTimeInterval(120).timeIntervalSince1970
+                ],
+                lastScanSightingSeconds: nil
+            )
+        )
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-100))
-        policy.recordSeen(uuid: c, at: t0.addingTimeInterval(-90))
+        let partition = policy.partitionRestored(
+            candidates: [pending(a), pending(b)],
+            now: t0.addingTimeInterval(3 * 3600)
+        )
+        XCTAssertEqual(partition.fresh, [b])
+        XCTAssertEqual(partition.stale, [a])
+    }
+
+    func testConnectedRefreshDoesNotTightenTheCutoffForPendingCandidates() {
+        // In the no-anchor fallback the cutoff is derived from `records`, and
+        // the connected branch writes `now` into `records`. Reading the anchor
+        // after that instead of before would let a live link drag the cutoff
+        // forward to `now - ttl` and age out pending connects the map says
+        // were seen alongside it.
+        let store = InMemoryStore()
+        store.saveRestorationState(
+            PeripheralRestorationState(
+                records: [
+                    a.uuidString: t0.addingTimeInterval(-100).timeIntervalSince1970,
+                    c.uuidString: t0.addingTimeInterval(-90).timeIntervalSince1970
+                ],
+                lastScanSightingSeconds: nil
+            )
+        )
+        let policy = makePolicy(store: store)
 
         let partition = policy.partitionRestored(
             candidates: [connected(c), pending(a)],
@@ -316,20 +446,34 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         XCTAssertEqual(partition.stale, [])
     }
 
-    func testFutureRecordDoesNotAgeOutCurrentEntries() {
-        // A record written before a backwards clock step sits in the future.
+    func testFutureAnchorDoesNotAgeOutCurrentEntries() {
+        // An anchor written before a backwards clock step sits in the future.
         // Anchoring to it would put the cutoff ahead of every honest entry and
         // age out the whole map at once, so the anchor is clamped to `now`.
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0)
-        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(3600))
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(3600), source: .advertisement)
 
         let partition = policy.partitionRestored(candidates: [pending(a)], now: t0)
 
         XCTAssertEqual(partition.fresh, [a])
         XCTAssertEqual(partition.stale, [])
+    }
+
+    func testBackwardsClockStepLowersTheAnchorRatherThanPinningIt() {
+        // Last-write-wins, not `max`. After a backwards step the anchor moves
+        // back with the clock, which moves the cutoff EARLIER and lets more
+        // records survive. Taking the maximum would leave a future-dated
+        // reading pinning the cutoff until the clock caught up.
+        let store = InMemoryStore()
+        let policy = makePolicy(store: store)
+
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(3600), source: .advertisement)
+        policy.recordSeen(uuid: b, at: t0, source: .advertisement)
+
+        XCTAssertEqual(store.lastScanSightingSeconds, t0.timeIntervalSince1970)
     }
 
     // MARK: - A repeated candidate is decided once
@@ -372,8 +516,8 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-3600)) // stale
-        policy.recordSeen(uuid: a, at: t0)                            // fresh now
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-3600), source: .advertisement) // stale
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)                            // fresh now
 
         let partition = policy.partitionRestored(candidates: [pending(a)], now: t0)
         XCTAssertEqual(partition.fresh, [a])
@@ -385,9 +529,10 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0)
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
 
         XCTAssertEqual(store.records[a.uuidString], t0.timeIntervalSince1970)
+        XCTAssertEqual(store.lastScanSightingSeconds, t0.timeIntervalSince1970)
     }
 
     func testNewPolicyLoadsPersistedRecords() {
@@ -396,7 +541,7 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         // class: state that survives an app relaunch.
         let store = InMemoryStore()
         let policy1 = makePolicy(store: store)
-        policy1.recordSeen(uuid: a, at: t0)
+        policy1.recordSeen(uuid: a, at: t0, source: .advertisement)
 
         let policy2 = makePolicy(store: store)
         let partition = policy2.partitionRestored(
@@ -404,6 +549,26 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
             now: t0.addingTimeInterval(10)
         )
         XCTAssertEqual(partition.fresh, [a])
+    }
+
+    func testNewPolicyInheritsTheAnchorNotJustTheRecords() {
+        // The anchor has to survive the relaunch too. A policy that reloaded
+        // the records but dropped the anchor would fall back to the newest
+        // record, which is the behaviour the anchor exists to replace: here
+        // `a`'s link traffic is newer than `b`'s advertisement, and reading it
+        // as the anchor would age `b` out.
+        let store = InMemoryStore()
+        let policy1 = makePolicy(store: store)
+        policy1.recordSeen(uuid: b, at: t0, source: .advertisement)
+        policy1.recordSeen(uuid: a, at: t0.addingTimeInterval(3600), source: .linkActivity)
+
+        let policy2 = makePolicy(store: store)
+        let partition = policy2.partitionRestored(
+            candidates: [pending(b)],
+            now: t0.addingTimeInterval(4 * 3600)
+        )
+        XCTAssertEqual(partition.fresh, [b])
+        XCTAssertEqual(partition.stale, [])
     }
 
     // MARK: - Write-through throttle
@@ -415,10 +580,10 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store, persistIntervalSeconds: 10)
 
-        policy.recordSeen(uuid: a, at: t0)
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
         XCTAssertEqual(store.saveCount, 1)
 
-        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(1))
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(1), source: .advertisement)
         XCTAssertEqual(store.saveCount, 2)
     }
 
@@ -429,17 +594,34 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store, persistIntervalSeconds: 10)
 
-        policy.recordSeen(uuid: a, at: t0)
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
         XCTAssertEqual(store.saveCount, 1)
 
-        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(1))
-        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(5))
-        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(9))
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(1), source: .advertisement)
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(5), source: .advertisement)
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(9), source: .advertisement)
         XCTAssertEqual(store.saveCount, 1)
 
-        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(10))
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(10), source: .advertisement)
         XCTAssertEqual(store.saveCount, 2)
         XCTAssertEqual(store.records[a.uuidString], t0.addingTimeInterval(10).timeIntervalSince1970)
+    }
+
+    func testThrottledRecordAndAnchorFlushTogether() {
+        // The record and the anchor it will be compared against are written in
+        // one snapshot, so the staleness the throttle allows applies to both
+        // sides of that comparison instead of skewing it.
+        let store = InMemoryStore()
+        let policy = makePolicy(store: store, persistIntervalSeconds: 10)
+
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(5), source: .advertisement) // throttled
+        XCTAssertEqual(store.records[a.uuidString], t0.timeIntervalSince1970)
+        XCTAssertEqual(store.lastScanSightingSeconds, t0.timeIntervalSince1970)
+
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(12), source: .advertisement)
+        XCTAssertEqual(store.records[a.uuidString], t0.addingTimeInterval(12).timeIntervalSince1970)
+        XCTAssertEqual(store.lastScanSightingSeconds, t0.addingTimeInterval(12).timeIntervalSince1970)
     }
 
     func testThrottledSightingIsStillCurrentInMemory() {
@@ -449,11 +631,11 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store, persistIntervalSeconds: 10)
 
-        policy.recordSeen(uuid: a, at: t0)
-        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(5)) // throttled
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(5), source: .advertisement) // throttled
         // `b` anchors the cutoff at t0. The first sighting alone sits exactly
         // on it and would age out; the throttled one is 5 s inside it.
-        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(60))
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(60), source: .advertisement)
 
         let partition = policy.partitionRestored(
             candidates: [pending(a)],
@@ -469,11 +651,11 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store, persistIntervalSeconds: 10)
 
-        policy.recordSeen(uuid: a, at: t0)
-        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(1)) // throttled
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(1), source: .advertisement) // throttled
         XCTAssertEqual(store.saveCount, 1)
 
-        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-100))
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-100), source: .advertisement)
         XCTAssertEqual(store.saveCount, 2)
     }
 
@@ -484,7 +666,7 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store, persistIntervalSeconds: 3600)
 
-        policy.recordSeen(uuid: a, at: t0)
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
         let saves = store.saveCount
 
         _ = policy.partitionRestored(candidates: [connected(a)], now: t0.addingTimeInterval(1))
@@ -499,8 +681,8 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-3600))
-        policy.recordSeen(uuid: b, at: t0) // the anchor
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-3600), source: .advertisement)
+        policy.recordSeen(uuid: b, at: t0, source: .advertisement) // the anchor
 
         _ = policy.partitionRestored(candidates: [pending(a)], now: t0)
         XCTAssertNil(store.records[a.uuidString])
@@ -512,8 +694,8 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-3600)) // stale
-        policy.recordSeen(uuid: b, at: t0)                            // fresh
+        policy.recordSeen(uuid: a, at: t0.addingTimeInterval(-3600), source: .advertisement) // stale
+        policy.recordSeen(uuid: b, at: t0, source: .advertisement)                            // fresh
 
         _ = policy.partitionRestored(candidates: [pending(b)], now: t0)
 
@@ -527,7 +709,7 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store)
 
-        policy.recordSeen(uuid: a, at: t0) // fresh, not in candidate list
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement) // fresh, not in candidate list
 
         _ = policy.partitionRestored(candidates: [], now: t0.addingTimeInterval(10))
 
@@ -542,9 +724,9 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store, maxRecords: 2)
 
-        policy.recordSeen(uuid: a, at: t0)                     // oldest
-        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(1))
-        policy.recordSeen(uuid: c, at: t0.addingTimeInterval(2)) // triggers eviction
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)                     // oldest
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(1), source: .advertisement)
+        policy.recordSeen(uuid: c, at: t0.addingTimeInterval(2), source: .advertisement) // triggers eviction
 
         XCTAssertNil(store.records[a.uuidString])
         XCTAssertNotNil(store.records[b.uuidString])
@@ -558,12 +740,26 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         let store = InMemoryStore()
         let policy = makePolicy(store: store, maxRecords: 2, persistIntervalSeconds: 3600)
 
-        policy.recordSeen(uuid: a, at: t0)
-        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(1))
-        policy.recordSeen(uuid: c, at: t0.addingTimeInterval(2))
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(1), source: .advertisement)
+        policy.recordSeen(uuid: c, at: t0.addingTimeInterval(2), source: .advertisement)
 
         XCTAssertNil(store.records[a.uuidString])
         XCTAssertEqual(store.records.count, 2)
+    }
+
+    func testEvictionNeverDropsTheAnchor() {
+        // The anchor is not a peripheral record and must not be swept with
+        // them: evicting it would drop the cutoff back to the newest surviving
+        // record, which is the behaviour it replaces.
+        let store = InMemoryStore()
+        let policy = makePolicy(store: store, maxRecords: 1)
+
+        policy.recordSeen(uuid: a, at: t0, source: .advertisement)
+        policy.recordSeen(uuid: b, at: t0.addingTimeInterval(1), source: .linkActivity)
+
+        XCTAssertEqual(store.records.count, 1)
+        XCTAssertEqual(store.lastScanSightingSeconds, t0.timeIntervalSince1970)
     }
 
     // MARK: - Defaults
@@ -580,77 +776,99 @@ final class PeripheralRestorationAgeOutPolicyTests: XCTestCase {
         XCTAssertEqual(PeripheralRestorationAgeOutPolicy.defaultPersistIntervalSeconds, 10)
     }
 
-    func testDefaultStoreKeyIsNamespaced() {
+    func testDefaultStoreKeysAreNamespaced() {
         XCTAssertEqual(
-            UserDefaultsPeripheralRestorationStore.defaultKey,
+            UserDefaultsPeripheralRestorationStore.defaultRecordsKey,
             "mesh.blemanager.peripheralLastSeen.v1"
+        )
+        XCTAssertEqual(
+            UserDefaultsPeripheralRestorationStore.defaultScanSightingKey,
+            "mesh.blemanager.lastScanSighting.v1"
         )
     }
 
     // MARK: - UserDefaults-backed store roundtrip
 
-    func testUserDefaultsStoreRoundtripsRecords() {
-        // A suite-scoped UserDefaults keeps this test hermetic (never touches
-        // .standard). Save then load must round-trip the exact map.
+    /// A suite-scoped UserDefaults keeps these tests hermetic — they never
+    /// touch `.standard`.
+    private func withTemporaryDefaults(_ body: (UserDefaults) -> Void) {
         let suiteName = "PeripheralRestorationAgeOutPolicyTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("could not open a suite-scoped UserDefaults")
+            return
         }
-        let store = UserDefaultsPeripheralRestorationStore(
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        body(defaults)
+    }
+
+    private func makeStore(_ defaults: UserDefaults) -> UserDefaultsPeripheralRestorationStore {
+        return UserDefaultsPeripheralRestorationStore(
             userDefaults: defaults,
-            key: "test-key"
+            recordsKey: "test-records",
+            scanSightingKey: "test-anchor"
         )
+    }
 
-        let map: [String: TimeInterval] = [
-            a.uuidString: 1_700_000_000,
-            b.uuidString: 1_700_000_030
-        ]
-        store.saveRestorationRecords(map)
+    func testUserDefaultsStoreRoundtripsState() {
+        withTemporaryDefaults { defaults in
+            let store = makeStore(defaults)
+            let state = PeripheralRestorationState(
+                records: [
+                    a.uuidString: 1_700_000_000,
+                    b.uuidString: 1_700_000_030
+                ],
+                lastScanSightingSeconds: 1_700_000_030
+            )
+            store.saveRestorationState(state)
 
-        let loaded = store.loadRestorationRecords()
-        XCTAssertEqual(loaded, map)
+            XCTAssertEqual(store.loadRestorationState(), state)
+        }
     }
 
     func testUserDefaultsStoreSkipsNonNumericValues() {
         // The blob is app-writable and survives upgrades, so a value that is
         // not a number must be dropped rather than crash the loader or land in
         // the map as garbage that then anchors the cutoff.
-        let suiteName = "PeripheralRestorationAgeOutPolicyTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
+        withTemporaryDefaults { defaults in
+            defaults.set(
+                [a.uuidString: 1_700_000_000, b.uuidString: "not a timestamp"] as [String: Any],
+                forKey: "test-records"
+            )
+
+            let loaded = makeStore(defaults).loadRestorationState()
+            XCTAssertEqual(loaded.records, [a.uuidString: 1_700_000_000])
+            XCTAssertNil(loaded.lastScanSightingSeconds)
         }
-        defaults.set(
-            [a.uuidString: 1_700_000_000, b.uuidString: "not a timestamp"] as [String: Any],
-            forKey: "test-key"
-        )
-
-        let store = UserDefaultsPeripheralRestorationStore(
-            userDefaults: defaults,
-            key: "test-key"
-        )
-
-        XCTAssertEqual(store.loadRestorationRecords(), [a.uuidString: 1_700_000_000])
     }
 
-    func testUserDefaultsStoreEmptySaveClearsKey() {
-        // Saving an empty map must clear the key entirely so the blob doesn't
-        // sit as `{}` in UserDefaults forever.
-        let suiteName = "PeripheralRestorationAgeOutPolicyTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
+    func testUserDefaultsStoreReadsAMissingAnchorAsNilNotZero() {
+        // `double(forKey:)` cannot tell "never written" from a stored 0, and 0
+        // is a real (1970) timestamp: anchoring to it would put the cutoff at
+        // the epoch and keep every record alive forever.
+        withTemporaryDefaults { defaults in
+            defaults.set([a.uuidString: 1_700_000_000], forKey: "test-records")
+
+            XCTAssertNil(makeStore(defaults).loadRestorationState().lastScanSightingSeconds)
         }
-        let store = UserDefaultsPeripheralRestorationStore(
-            userDefaults: defaults,
-            key: "test-key"
-        )
+    }
 
-        store.saveRestorationRecords([a.uuidString: 1_700_000_000])
-        XCTAssertNotNil(defaults.object(forKey: "test-key"))
+    func testUserDefaultsStoreEmptySaveClearsBothKeys() {
+        // Saving an empty state must clear the keys entirely so the blob
+        // doesn't sit as `{}` in UserDefaults forever.
+        withTemporaryDefaults { defaults in
+            let store = makeStore(defaults)
+            store.saveRestorationState(
+                PeripheralRestorationState(
+                    records: [a.uuidString: 1_700_000_000],
+                    lastScanSightingSeconds: 1_700_000_000
+                )
+            )
+            XCTAssertNotNil(defaults.object(forKey: "test-records"))
+            XCTAssertNotNil(defaults.object(forKey: "test-anchor"))
 
-        store.saveRestorationRecords([:])
-        XCTAssertNil(defaults.object(forKey: "test-key"))
+            store.saveRestorationState(PeripheralRestorationState())
+            XCTAssertNil(defaults.object(forKey: "test-records"))
+            XCTAssertNil(defaults.object(forKey: "test-anchor"))
+        }
     }
 }

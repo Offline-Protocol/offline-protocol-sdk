@@ -12730,7 +12730,7 @@ mod tests {
         // --- 1. The delegate captures, and issues nothing --------------------
         let capture_body = &swift[capture_start..apply_start];
         assert!(
-            capture_body.contains("pendingRestoredPeripherals = Array(indexed.values)"),
+            capture_body.contains("pendingRestoredPeripherals = indexed"),
             "willRestoreState must hand the restored peripherals to pendingRestoredPeripherals \
              and do nothing else with them"
         );
@@ -12803,6 +12803,80 @@ mod tests {
              so they stop being retried, and a cancelled pending connect is a plausible source \
              of the didFailToConnect that schedules this retry — without the guard the retry \
              re-issues the connect the age-out just cleared"
+        );
+
+        // --- 5. A restored pending connect is not booked as a live link -----
+        //
+        // `connections` is the set of links that exist, not the set we want:
+        // it feeds `currentConnectionCount()` against MAX_CONNECTIONS_PER_DEVICE,
+        // and `performConnectionAttempt` returns early for anything registered
+        // in it. Registering a peripheral that is only `.connecting` spends a
+        // connection slot on a link that may never form and disables the very
+        // retry path guarded above.
+        let apply_body = &swift[apply_start
+            ..swift
+                .find("public func centralManagerDidUpdateState(_ central: CBCentralManager) {")
+                .expect("BleManager.swift must implement centralManagerDidUpdateState")];
+        assert!(
+            apply_body.contains(
+                "if peripheral.state == .connected { connections.registerPeripheral(peripheral) \
+                 peripheral.discoverServices([SERVICE_UUID]) } else { \
+                 central.connect(peripheral, options: nil) }"
+            ),
+            "The restoration must register a peripheral in `connections` only when it is \
+             already .connected. The pending branch leaves registration to didConnect, like \
+             every other connect this class issues"
+        );
+        assert_eq!(
+            apply_body
+                .matches("connections.registerPeripheral(")
+                .count(),
+            1,
+            "applyPendingRestoration may register exactly one peripheral, inside the .connected \
+             branch. A second call site is how the pending branch books a link that does not \
+             exist yet"
+        );
+
+        // --- 6. Only the scan callback may move the age-out cutoff ----------
+        //
+        // `recordSeen` classifies what was observed, and only `.advertisement`
+        // moves the cutoff forward, because only an advertisement proves the
+        // app was scanning. Traffic on a live link keeps flowing while the app
+        // is backgrounded and the scan is stopped, so a `.advertisement` on a
+        // link path would let one chatty peer age out every absent peer's
+        // pending connect — the only way iOS wakes this app when one of them
+        // reappears. That failure is invisible without a system termination,
+        // and no Swift test can reach these call sites.
+        assert_eq!(
+            swift.matches("source: .advertisement").count(),
+            1,
+            "Exactly one recordSeen call site may claim `.advertisement`. Every other \
+             observation is `.linkActivity`: it refreshes that peripheral's own record and \
+             leaves the age-out cutoff where it is"
+        );
+        let advertisement_at = swift.find("source: .advertisement").unwrap();
+        let did_discover = swift
+            .find(
+                "public func centralManager(_ central: CBCentralManager, didDiscover \
+                 peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: \
+                 NSNumber) {",
+            )
+            .expect("BleManager.swift must implement the didDiscover delegate");
+        let did_connect = swift
+            .find("public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {")
+            .expect("BleManager.swift must implement the didConnect delegate");
+        assert!(
+            advertisement_at > did_discover && advertisement_at < did_connect,
+            "The `.advertisement` sighting must be the one in the didDiscover scan callback. \
+             Anywhere else it claims the app was watching when it was not"
+        );
+        assert_eq!(
+            swift.matches("source: .linkActivity").count(),
+            3,
+            "The three link-evidence sightings — didConnect, didUpdateValueFor, and the \
+             retrieveConnectedPeripherals sweep in startScanning — must all stay \
+             `.linkActivity`. Adding a fourth is fine; changing one of these to \
+             `.advertisement` is the regression this pins"
         );
     }
 
