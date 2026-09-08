@@ -1,14 +1,14 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.24.x` line.
+current `v0.25.x` line.
 
 The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 `initialize_mls` changes shape, three config updaters become fallible, and
 several previously-accepted inputs are now rejected at the boundary. Sections
 1–12 below cover that release and are the ones that can stop your build.
 
-Since `v0.17.0` three releases can break a build. `v0.20.0` enables iOS
+Since `v0.17.0` four releases can break a build. `v0.20.0` enables iOS
 autolinking, so a manual `pod 'MeshSdk'` line left in your `Podfile` now fails
 `pod install` — React Native on iOS only; it is a one-line deletion, and
 [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) has the
@@ -29,7 +29,15 @@ days is now refused, a control frame is judged against the device's clock, and
 rotating a session for post-compromise security became something your
 application schedules rather than something that happens on its own.
 [§17](#17-two-refusals-that-are-new-and-one-rotation-you-now-owe-v0240) covers
-all three.
+all three. `v0.25.0` is the narrowest of the four: it breaks the
+`offline-protocol-transport` **crate** only, where `ReticulumConfig` and
+everything built around it is deleted and `ReticulumTransport::new` is the one
+constructor left
+([§19](#19-the-reticulum-transports-inert-configuration-is-gone-v0250)). No
+binding surface goes with it, though a TypeScript application that exhaustively
+`switch`es on `PresenceSource` or `SecurityWarningCode` gets a compile error
+from that release, because both unions widen, by one member and two
+respectively.
 
 Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
@@ -105,6 +113,24 @@ priority and presence status collapsed to their defaults on every iOS send.
 [§18](#18-settings-you-already-pass-start-applying-on-ios-v0241) covers what
 changes and what to check. Nothing changes shape, and Android was never
 affected in any of it.
+
+`v0.25.0` adds one, and it is the largest of this kind so far, though it
+reaches only deployments that set `transports.reticulum` and
+`reticulum_enabled: true`, since Reticulum is off by default. **A device on
+Reticulum has never been able to receive anything.** Both mobile managers
+attached to a daemon without completing the bind that
+[contract v1](spec/gateway-contract.md#attach) requires, so the daemon never
+registered the device as a recipient: nothing addressed to it arrived, while
+the core settled every outbound frame as sent the instant the socket write
+returned. Delivery over Reticulum starts working on this release, and sends
+settle on the gateway's verdict instead of on the write, which means a send
+that used to report success can now report failure. That is the correction,
+not a regression. The other direction matters if you run your own daemon: one
+speaking the pre-contract shape now yields a transport that connects and never
+becomes available, because the attach times out after ten seconds.
+[§19](#19-the-reticulum-transports-inert-configuration-is-gone-v0250) has both
+halves, the frames a daemon owes, and the two new `SecurityWarningCode` values
+that name a refused or mismatched attach.
 
 Work through it in order. [§0](#0-before-you-ship-downgrade-is-not-a-rollback)
 is a release-engineering decision, not a code change, and it is the one that
@@ -1940,7 +1966,7 @@ upgrade rather than fold it into your next feature release.
 
 ---
 
-## 19. The Reticulum transport's inert configuration is gone
+## 19. The Reticulum transport's inert configuration is gone *(v0.25.0)*
 
 **Rust crates only, for the removals below.** No binding and no configuration
 key changes: none of what follows was ever reachable through the FFI, and the

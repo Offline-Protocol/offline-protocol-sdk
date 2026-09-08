@@ -278,6 +278,16 @@ foot of `CHANGELOG.md`. Relative links move with the text and break silently:
 `./docs/UPGRADING.md` becomes `../UPGRADING.md` and `./CONTRIBUTING.md` becomes
 `../../CONTRIBUTING.md` once the section lives two directories down.
 
+"Silently" is literal, and nothing in CI catches it: the 0.22.0 archive shipped
+eight `](docs/…)` links that had resolved from the repository root and resolve
+from nowhere once the text sits in `docs/changelog/`, and they stayed broken
+across three releases. So check the whole tree rather than the section you
+moved, by resolving every `](path#anchor)` in every tracked markdown file
+against the headings that actually exist. Prove the move itself lossless the
+other way round: re-extract the section from `git show HEAD:CHANGELOG.md`, apply
+the same rewrite, and diff it against what landed in the series file, which
+should differ on exactly the link lines and nothing else.
+
 To rehearse the whole thing, push a `vX.Y.Z-rc.N` tag. Every gate runs, every
 crate is packaged and verify-built, and npm publishes under the `next`
 dist-tag — but crates.io gets nothing, because those versions are immutable and
