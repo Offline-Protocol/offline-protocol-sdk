@@ -15,6 +15,24 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **Re-discovering an established iOS BLE link no longer repeats the work that
+  set it up.** `BleManager`'s characteristic-discovery callback is not a
+  first-contact callback: the connection monitor re-runs characteristic
+  discovery every five seconds on any peripheral missing from the connection
+  registry, and CoreBluetooth replays the callback from its cache when it does,
+  so a live connection reaches it indefinitely. Every arrival re-subscribed to
+  the message characteristic and re-read both halves of the peer handshake.
+
+  The subscribe now runs only when the characteristic reports that it is not
+  already notifying. A redundant one re-emitted the bridge's own subscribe
+  diagnostic, so a link that subscribed once read in the logs as one
+  re-subscribing every sweep, and where the write reached the peer it re-ran
+  that peer's inbound admission decision, which can evict a different peer.
+  The handshake reads now stop once the peer is announced, which also drops a
+  signature verification and an address derivation that ran on the main thread
+  on every sweep and whose result was discarded. A disconnect still resets both
+  gates, so a reconnect re-subscribes and re-proves the peer from scratch.
+
 - **iOS state restoration no longer chases peripherals whose owners are gone.**
   `BleManager.centralManager(_:willRestoreState:)` re-issued `connect(...)` on
   every peripheral iOS handed back. The OS keeps servicing those connect
