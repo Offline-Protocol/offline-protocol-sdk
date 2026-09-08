@@ -13,6 +13,62 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ## [Unreleased]
 
+### Fixed
+
+- **iOS state restoration no longer chases peripherals whose owners are gone.**
+  `BleManager.centralManager(_:willRestoreState:)` re-issued `connect(...)` on
+  every peripheral iOS handed back. The OS keeps servicing those connect
+  requests across process relaunches for as long as the restore identifier is
+  stable, and the only clear the app itself controls is
+  `cancelPeripheralConnection` on the instance the system hands back, so a
+  peripheral UUID whose owner had stopped existing was chased until the app was
+  reinstalled. No Bluetooth toggle, sign-out or force quit cleared it. The
+  visible symptom was a phone that would not discover a legitimate new peer,
+  and a device burning battery on connect requests that could never complete.
+
+  The restored list is now partitioned. A peripheral handed back in
+  `.connected` state is restored unconditionally: the link is alive at that
+  instant, and it is usually the reason iOS relaunched the app. A pending
+  connect is restored only if this device saw that peripheral within 60 seconds
+  of the last thing it saw before it was terminated, tracked in a small
+  last-seen map that survives the relaunch. Everything else is cancelled, which
+  is what clears the OS-side queue. Sightings are recorded from advertisements,
+  from completed connections, and from traffic arriving on a live link. An
+  advertisement counts as seen before the adaptive filters that shed scanning
+  work in dense environments, so a peer one of those filters skips is not
+  mistaken for a peer that stopped advertising.
+
+  That 60 seconds is measured against the newest advertisement the scan
+  received, not against the relaunch clock and not against the newest entry in
+  the map. Nothing records a sighting while the app is dead and iOS relaunches
+  it hours later, so measuring against the relaunch clock would cancel every
+  pending connect at every restoration. Measuring against the newest entry has
+  the same effect by a slower route, because traffic on a live link keeps
+  refreshing an entry while the app is backgrounded and the scan is stopped: a
+  single connected peer would push the window past every absent peer's last
+  sighting and cancel all of them. An advertisement is the only observation
+  that proves the app was in a position to see anything at all. A pending
+  connect is the only way iOS wakes the app when a known peer reappears, since
+  a background scan with no service filter is ignored by the OS, so either
+  mistake would have traded a visible bug for an invisible one.
+
+  Both halves of the decision are issued once the central reports `.poweredOn`,
+  not where the restored list arrives. `willRestoreState` is delivered before
+  `centralManagerDidUpdateState`, and CoreBluetooth discards a command issued
+  before then, so cancelling on arrival would leave the OS-side queue intact
+  while the diagnostics reported the peripherals as dropped. The failed-connect
+  retry also now skips a peripheral that has been dropped from the discovered
+  map, so a cancelled connect request is not immediately re-armed.
+
+  A restored peripheral that is still only connecting is no longer booked as a
+  live connection, so it neither spends a connection slot nor suppresses the
+  retry that is supposed to chase it.
+
+  The last-seen map is device-scoped, holds only OS-assigned peripheral UUIDs
+  and timestamps, and is not account state, so `wipePersistedState()` does not
+  touch it (see [docs/bridges/README.md](docs/bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified)).
+  iOS only. No wire, FFI or configuration change. (#429)
+
 ### Added
 
 - **The Reticulum transport speaks the gateway contract.** Both mobile managers

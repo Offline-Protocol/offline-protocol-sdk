@@ -310,6 +310,41 @@ public class BleManager: NSObject, TransportManager {
     private var unknownBootstrapAttempts: [UUID: Date] = [:]
     private let NON_MESH_CACHE_TTL: TimeInterval = 300.0 // 5 minutes
 
+    /// Gates the CBCentralManager state-restoration reconnect fan-out on a
+    /// persisted per-peripheral last-seen timestamp. Without this, the OS
+    /// keeps servicing connect requests to peripheral UUIDs whose owners are
+    /// long gone (e.g. every `node relay.js` restart produces a fresh
+    /// peripheral UUID), and only an app reinstall clears the queue.
+    ///
+    /// Every `recordSeen` call site must classify what it observed. Only an
+    /// advertisement received in the scan callback may move the age-out cutoff
+    /// forward; link traffic and rehydrated connections refresh their own
+    /// record and leave it alone. Getting that wrong is invisible without a
+    /// system termination, so the call sites are pinned by a source guard in
+    /// the uniffi crate. See PeripheralRestorationAgeOutPolicy.swift for the
+    /// full contract.
+    private let peripheralRestorationPolicy = PeripheralRestorationAgeOutPolicy(
+        store: UserDefaultsPeripheralRestorationStore()
+    )
+
+    /// Peripherals iOS handed back through `willRestoreState`, held until the
+    /// central reports `.poweredOn`.
+    ///
+    /// `willRestoreState` is delivered BEFORE `centralManagerDidUpdateState`,
+    /// and CoreBluetooth discards a command issued while the central is not
+    /// `.poweredOn`: it logs "API MISUSE" and no delegate callback ever
+    /// arrives. Both halves of the restoration decision are commands —
+    /// `connect`/`discoverServices` for the fresh peripherals,
+    /// `cancelPeripheralConnection` for the stale ones — and the cancel is the
+    /// only thing that clears the OS-side connect request, so issuing it there
+    /// would leave the queue intact while the logs still read as if the
+    /// age-out had run.
+    ///
+    /// Deciding at apply time rather than at capture time also keeps
+    /// `peripheral.state` present-tense, which is the whole basis of the
+    /// connected short-circuit in PeripheralRestorationAgeOutPolicy.
+    private var pendingRestoredPeripherals: [UUID: CBPeripheral] = [:]
+
     // MARK: - Thread helpers
     @inline(__always)
     private func performOnMain<T>(_ work: () throws -> T) rethrows -> T {
@@ -613,6 +648,8 @@ public class BleManager: NSObject, TransportManager {
         notifyLock.unlock()
         notifyOutbound.removeAll()
 
+        pendingRestoredPeripherals = [:]
+
         // Clean up managers
         centralManager = nil
         peripheralManager = nil
@@ -723,8 +760,17 @@ public class BleManager: NSObject, TransportManager {
 
         // Rehydrate previously connected peripherals to avoid waiting for advertisements
         let retainedPeripherals = central.retrieveConnectedPeripherals(withServices: [SERVICE_UUID])
+        let retainedAt = Date()
         for peripheral in retainedPeripherals {
             discoveredPeripherals[peripheral.identifier] = peripheral
+            // These are live links the system already holds, so they are a
+            // sighting even though no `didConnect` will fire for them: the
+            // attempt below short-circuits on an already-connected peripheral.
+            // Without this the restoration map would never learn about a peer
+            // we picked up this way. `.linkActivity` for the same reason as
+            // `didConnect`: the system holding a link says nothing about
+            // whether this app was scanning.
+            peripheralRestorationPolicy.recordSeen(uuid: peripheral.identifier, at: retainedAt, source: .linkActivity)
             attemptConnection(to: peripheral, reason: "retrieve_connected")
         }
     }
@@ -872,6 +918,9 @@ public class BleManager: NSObject, TransportManager {
         ])
         centralReady = false
         centralManager?.stopScan()
+        // Peripherals held from the old central's restoration belong to that
+        // instance. The replacement delivers its own `willRestoreState`.
+        pendingRestoredPeripherals = [:]
         centralManager = CBCentralManager(
             delegate: self,
             queue: nil,
@@ -2391,34 +2440,128 @@ public class BleManager: NSObject, TransportManager {
 extension BleManager: CBCentralManagerDelegate {
     
     /// State restoration: called before `centralManagerDidUpdateState` when iOS
-    /// relaunches the app after termination. Restores previously connected peripherals
-    /// so the mesh can resume without waiting for new advertisements.
+    /// relaunches the app after termination. iOS hands back every peripheral
+    /// the app had a live or pending connect request on, including UUIDs
+    /// whose owners are long gone — a common dev-loop symptom is that every
+    /// `node relay.js` restart mints a fresh peripheral UUID, and blindly
+    /// re-issuing `connect(...)` on the whole restored list keeps the OS
+    /// burning battery chasing dead UUIDs (visible symptom: the phone will
+    /// not discover a legitimate new peer until the app is reinstalled).
+    ///
+    /// Gate the reconnect on a persisted per-peripheral last-seen timestamp:
+    /// restore the peripherals still worth reaching, and for the rest call
+    /// `cancelPeripheralConnection` to clear iOS's queued connect request. A
+    /// peripheral that comes back into range advertises again and takes the
+    /// normal `didDiscover` → `connect` path.
+    ///
+    /// A peripheral handed back in `.connected` state is never aged out: the
+    /// link is alive at this instant, and it is very likely the reason iOS
+    /// relaunched us. Only pending connects are judged on the timestamp,
+    /// because nothing refreshes one while the app is dead.
+    ///
+    /// Nor is that timestamp compared against the relaunch clock. The
+    /// comparison is against the last advertisement this app received while it
+    /// was scanning, which is the only observation that proves it was in a
+    /// position to see anything at all. See
+    /// PeripheralRestorationAgeOutPolicy.swift.
     public func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
         print("[BleManager] Restoring central manager state")
         emitDiagnostic("info", "Central manager restoring state", context: [
             "keys": Array(dict.keys)
         ])
-        
-        if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] {
-            for peripheral in peripherals {
-                peripheral.delegate = self
-                discoveredPeripherals[peripheral.identifier] = peripheral
+
+        guard let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] else {
+            pendingRestoredPeripherals = [:]
+            return
+        }
+
+        // `uniquingKeysWith:` rather than `uniqueKeysWithValues:`. This runs
+        // during launch, usually a background relaunch, and the trapping
+        // initializer would turn a duplicated identifier from the OS into an
+        // abort before the app is up. There is no upside to trapping here.
+        // A connected duplicate wins the tie: the partition treats `.connected`
+        // as decisive, so discarding that instance in favour of a pending one
+        // carrying the same identifier would throw away the evidence.
+        let indexed = Dictionary(
+            peripherals.map { ($0.identifier, $0) },
+            uniquingKeysWith: { first, second in first.state == .connected ? first : second }
+        )
+        pendingRestoredPeripherals = indexed
+
+        print("[BleManager] Holding \(pendingRestoredPeripherals.count) restored peripheral(s) until powered on")
+        emitDiagnostic("info", "Held restored peripherals until central is powered on", context: [
+            "totalCount": peripherals.count,
+            "heldCount": pendingRestoredPeripherals.count
+        ])
+    }
+
+    /// Applies the restoration decision captured by `willRestoreState`.
+    ///
+    /// Called from the `.poweredOn` branch of `centralManagerDidUpdateState`,
+    /// which is the first moment CoreBluetooth will accept the commands this
+    /// issues. See `pendingRestoredPeripherals` for why they cannot be issued
+    /// where the list arrives.
+    private func applyPendingRestoration(_ central: CBCentralManager) {
+        let indexed = pendingRestoredPeripherals
+        pendingRestoredPeripherals = [:]
+        guard !indexed.isEmpty else { return }
+
+        let partition = peripheralRestorationPolicy.partitionRestored(
+            candidates: indexed.values.map {
+                PeripheralRestorationCandidate(
+                    uuid: $0.identifier,
+                    isConnected: $0.state == .connected
+                )
+            },
+            now: Date()
+        )
+
+        emitDiagnostic("info", "Partitioned restored peripherals", context: [
+            "totalCount": indexed.count,
+            "freshCount": partition.fresh.count,
+            "staleCount": partition.stale.count,
+            "recordedCount": peripheralRestorationPolicy.recordedPeripheralCount()
+        ])
+
+        for uuid in partition.fresh {
+            guard let peripheral = indexed[uuid] else { continue }
+            peripheral.delegate = self
+            discoveredPeripherals[peripheral.identifier] = peripheral
+
+            print("[BleManager] Restored peripheral (fresh): \(peripheral.identifier), state: \(peripheral.state.rawValue)")
+            emitDiagnostic("info", "Restored peripheral from state restoration", context: [
+                "identifier": peripheral.identifier.uuidString,
+                "state": peripheral.state.rawValue
+            ])
+
+            if peripheral.state == .connected {
+                // `connections` is the set of links that exist, not the set we
+                // want: it feeds `currentConnectionCount()` against
+                // MAX_CONNECTIONS_PER_DEVICE, and `performConnectionAttempt`
+                // returns early for anything registered in it. Registering a
+                // peripheral that is only `.connecting` would spend a
+                // connection slot on a link that may never form and would
+                // disable the retry path that is supposed to chase it, so the
+                // pending branch below leaves registration to `didConnect`,
+                // exactly like every other connect this class issues.
                 connections.registerPeripheral(peripheral)
-                
-                print("[BleManager] Restored peripheral: \(peripheral.identifier), state: \(peripheral.state.rawValue)")
-                emitDiagnostic("info", "Restored peripheral from state restoration", context: [
-                    "identifier": peripheral.identifier.uuidString,
-                    "state": peripheral.state.rawValue
-                ])
-                
-                // If the peripheral was connected, rediscover services
-                if peripheral.state == .connected {
-                    peripheral.discoverServices([SERVICE_UUID])
-                } else {
-                    // Try to reconnect
-                    central.connect(peripheral, options: nil)
-                }
+                peripheral.discoverServices([SERVICE_UUID])
+            } else {
+                central.connect(peripheral, options: nil)
             }
+        }
+
+        for uuid in partition.stale {
+            guard let peripheral = indexed[uuid] else { continue }
+            print("[BleManager] Dropping stale restored peripheral: \(peripheral.identifier), state: \(peripheral.state.rawValue)")
+            emitDiagnostic("info", "Dropped stale restored peripheral", context: [
+                "identifier": peripheral.identifier.uuidString,
+                "state": peripheral.state.rawValue
+            ])
+            // Clears the OS-side connect request so bluetoothd stops chasing
+            // this UUID. Safe on any state, including a peripheral that was
+            // never actually connected — iOS just drops the queued request.
+            central.cancelPeripheralConnection(peripheral)
         }
     }
     
@@ -2476,6 +2619,12 @@ extension BleManager: CBCentralManagerDelegate {
                     print("[BleManager] ⚠️ Bluetooth permission denied or restricted")
                     emitDiagnostic("error", "Bluetooth permission denied", context: ["authorization": authStatus])
                     centralReady = false
+                    // Nothing will ever apply these: without permission the
+                    // central never reaches a state that accepts a command,
+                    // and a later grant restarts the transport. Drop them
+                    // rather than hold CBPeripheral references for the life of
+                    // the process, matching `stop()` and the central reset.
+                    pendingRestoredPeripherals = [:]
                     updateState(.unavailable)
                     notifyBleStatus(false)
                     return
@@ -2498,6 +2647,21 @@ extension BleManager: CBCentralManagerDelegate {
             }
             
             centralReady = true
+            // Ahead of the scan, and only here: this is the first point the
+            // central will accept the connects and cancels the restoration
+            // decision is made of.
+            //
+            // Before `startScanning` so the decision is taken against the
+            // state as it stood at relaunch, before this process's own
+            // activity writes into the last-seen map. Nothing the scan does
+            // today would change the outcome — its
+            // `retrieveConnectedPeripherals` sweep records `.linkActivity`,
+            // which refreshes records without moving the age-out cutoff, and
+            // the peripherals it touches are connected ones the partition
+            // short-circuits anyway. The ordering is the cheap guarantee that
+            // a future sighting added to the scan path cannot quietly decide
+            // a restoration that is already in flight.
+            applyPendingRestoration(central)
             startScanning(reason: "central_powered_on")
             emitDiagnostic("info", "Central manager powered on and ready")
             
@@ -2600,7 +2764,29 @@ extension BleManager: CBCentralManagerDelegate {
         if !shouldProcess {
             return
         }
-        
+
+        // Recorded here, above the two adaptive filters, deliberately.
+        //
+        // This is the observation the restoration age-out is built on: "this
+        // app was scanning, and it saw this peripheral." Both filters below
+        // are load shedding — they drop work, not observations — and
+        // `shouldProbabilisticallySkip` keys on `peripheral.hashValue`, which
+        // Swift seeds once per process. Recording after them would therefore
+        // hide a FIXED subset of the visible peers, up to 80% of them in a
+        // scan that reads as dense, for the whole life of the process, while
+        // their neighbours moved the age-out cutoff forward every second.
+        // Those peers would read as "went quiet while we were watching" at the
+        // next restoration and lose the pending connect that is the only way
+        // iOS wakes this app when one of them reappears — although they had
+        // been advertising the entire time.
+        //
+        // Still below the `shouldProcess` gate, though. That gate is what
+        // makes this a mesh peripheral rather than any BLE device in radio
+        // range, and it admits every peer already known to be one; only the
+        // unknown-bootstrap path below it is rate limited. Recording above it
+        // would spend the 200-entry cap on passing headphones.
+        peripheralRestorationPolicy.recordSeen(uuid: peripheral.identifier, at: now, source: .advertisement)
+
         // Adaptive scanning: early RSSI filtering in dense networks
         if shouldFilterByRssi(rssiValue) {
             if logThrottler.shouldLog(key: "adaptive_rssi_filter", interval: 10) {
@@ -2616,7 +2802,7 @@ extension BleManager: CBCentralManagerDelegate {
         
         discoveredPeripherals[peripheral.identifier] = peripheral
         peripheralRSSI[peripheral.identifier] = rssiValue
-        
+
         if discoveryLogTimestamps[peripheral.identifier] == nil || (now.timeIntervalSince(discoveryLogTimestamps[peripheral.identifier]!) > 30) {
             discoveryLogTimestamps[peripheral.identifier] = now
             print("[BleManager] Discovered peripheral: \(peripheral.identifier) RSSI=\(rssiValue) (density: \(estimatedVisiblePeerCount))")
@@ -2710,11 +2896,16 @@ extension BleManager: CBCentralManagerDelegate {
     public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         print("[BleManager] Connected to peripheral: \(peripheral.identifier)")
         emitDiagnostic("info", "Connected to BLE peripheral", context: ["identifier": peripheral.identifier.uuidString])
-        
+
         connections.registerPeripheral(peripheral)
         connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
         connectionRetryCount.removeValue(forKey: peripheral.identifier) // Reset retry count on successful connection
-        
+        // `.linkActivity`, not `.advertisement`: a completed connect proves
+        // this peer was reachable, not that the app was scanning, so it
+        // refreshes this peripheral's record without moving the age-out cutoff
+        // that every other peripheral is judged against.
+        peripheralRestorationPolicy.recordSeen(uuid: peripheral.identifier, at: Date(), source: .linkActivity)
+
         // Discover services
         peripheral.discoverServices([SERVICE_UUID])
     }
@@ -2750,6 +2941,13 @@ extension BleManager: CBCentralManagerDelegate {
         
         DispatchQueue.main.asyncAfter(deadline: .now() + backoffInterval) { [weak self] in
             guard let self = self, self.state == .running else { return }
+            // Mirrors the disconnect retry below. A peripheral no longer in
+            // `discoveredPeripherals` was dropped deliberately — by `stop()`,
+            // or by the restoration age-out, which cancels the OS-side connect
+            // request precisely so it stops being retried. Reconnecting here
+            // re-arms what the age-out just cleared, and a cancelled pending
+            // connect is a plausible source of this very callback.
+            guard self.discoveredPeripherals[peripheral.identifier] != nil else { return }
             self.attemptConnection(to: peripheral, reason: "retry_fail")
         }
     }
@@ -2969,6 +3167,20 @@ extension BleManager: CBPeripheralDelegate {
         }
 
         guard let data = characteristic.value else { return }
+
+        // A value arriving proves the link is alive. Without this the record
+        // for a long-lived connection would only ever hold its `didConnect`
+        // timestamp, so a link that stayed up for hours and dropped just
+        // before iOS terminated us would age out and have its pending
+        // reconnect cancelled at the next restoration.
+        //
+        // `.linkActivity` is load-bearing here. Traffic keeps flowing on a
+        // live link while the app is backgrounded and the scan is stopped, so
+        // if this moved the age-out cutoff one chatty peer would age out every
+        // absent peer's pending connect — the only way iOS wakes this app when
+        // one of them reappears. The write-through to the store is throttled
+        // inside the policy, so this stays cheap on the message path.
+        peripheralRestorationPolicy.recordSeen(uuid: peripheral.identifier, at: Date(), source: .linkActivity)
 
         if characteristic.uuid == DEVICE_ID_CHAR_UUID {
             // Record this half of the handshake. Nothing is announced here —

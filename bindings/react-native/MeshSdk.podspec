@@ -42,6 +42,7 @@ Pod::Spec.new do |s|
     "ios/MonotonicClock.swift",
     "ios/GatewayAttachPolicy.swift",
     "ios/GatewayVerdictTracker.swift",
+    "ios/PeripheralRestorationAgeOutPolicy.swift",
     "ios/PresenceWatchPolicy.swift",
     "ios/RecipientInFlightTracker.swift",
     "ios/RelayTimestamps.swift",

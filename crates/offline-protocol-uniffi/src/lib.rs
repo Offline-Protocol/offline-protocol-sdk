@@ -12681,6 +12681,251 @@ mod tests {
         );
     }
 
+    /// State restoration must not issue CoreBluetooth commands where iOS hands
+    /// it the restored list.
+    ///
+    /// `centralManager(_:willRestoreState:)` is delivered BEFORE
+    /// `centralManagerDidUpdateState`, and CoreBluetooth discards any command
+    /// issued while the central is not `.poweredOn`: it logs "API MISUSE" and
+    /// no delegate callback ever arrives. The entire point of the peripheral
+    /// age-out is the `cancelPeripheralConnection` it issues on stale
+    /// peripherals — the only clear the app controls over iOS's standing
+    /// connect requests, which otherwise survive relaunches, Bluetooth
+    /// toggles and sign-out until the app is uninstalled. A cancel issued from
+    /// `willRestoreState` therefore leaves the OS-side queue fully intact
+    /// while the diagnostics still report the peripheral as dropped: the bug
+    /// looks fixed and is not.
+    ///
+    /// Nothing else catches this. No Swift test can reach `BleManager` (it
+    /// sits behind CoreBluetooth; CI only typechecks it), and a device only
+    /// reproduces it after a *system* termination — relaunching by hand, or
+    /// force-quitting, never enters state restoration at all.
+    ///
+    /// Deferring also keeps `peripheral.state` present-tense at the moment the
+    /// decision is acted on, which is the entire basis of the connected
+    /// short-circuit in `PeripheralRestorationAgeOutPolicy`: a live link is
+    /// judged on the state, never on a persisted timestamp.
+    #[test]
+    fn react_native_ios_restoration_commands_wait_for_powered_on() {
+        let swift = rn_source_code_only("ios/BleManager.swift");
+
+        let capture_start = swift
+            .find(
+                "public func centralManager(_ central: CBCentralManager, \
+                 willRestoreState dict: [String: Any]) {",
+            )
+            .expect("BleManager.swift must implement centralManager(_:willRestoreState:)");
+        let apply_start = swift
+            .find("private func applyPendingRestoration(_ central: CBCentralManager) {")
+            .expect(
+                "BleManager.swift must apply the restoration decision from applyPendingRestoration, \
+                 reached once the central reports .poweredOn — not from willRestoreState",
+            );
+        assert!(
+            capture_start < apply_start,
+            "applyPendingRestoration must be declared immediately after willRestoreState so the \
+             slice below is exactly the delegate body"
+        );
+
+        // --- 1. The delegate captures, and issues nothing --------------------
+        let capture_body = &swift[capture_start..apply_start];
+        assert!(
+            capture_body.contains("pendingRestoredPeripherals = indexed"),
+            "willRestoreState must hand the restored peripherals to pendingRestoredPeripherals \
+             and do nothing else with them"
+        );
+        assert!(
+            !capture_body.contains("central.connect(")
+                && !capture_body.contains("cancelPeripheralConnection(")
+                && !capture_body.contains("discoverServices("),
+            "willRestoreState must issue NO CoreBluetooth command. It runs before \
+             centralManagerDidUpdateState, so a command issued here is discarded outside \
+             .poweredOn with an API MISUSE log and no callback — the cancel that clears iOS's \
+             standing connect requests would silently do nothing while the diagnostics report \
+             the peripheral as dropped"
+        );
+
+        // --- 2. Both commands live in the deferred applier, once each --------
+        assert!(
+            swift
+                .matches("central.connect(peripheral, options: nil)")
+                .count()
+                == 1
+                && swift
+                    .matches("central.cancelPeripheralConnection(peripheral)")
+                    .count()
+                    == 1,
+            "Exactly one restoration reconnect and one restoration cancel may exist. A second \
+             call site is how the pre-.poweredOn path grows back without anyone noticing \
+             (ordinary connects go through centralManager?.connect in performConnectionAttempt, \
+             which is a different spelling and unaffected)"
+        );
+        assert!(
+            swift
+                .find("central.connect(peripheral, options: nil)")
+                .unwrap()
+                > apply_start
+                && swift
+                    .find("central.cancelPeripheralConnection(peripheral)")
+                    .unwrap()
+                    > apply_start,
+            "Both restoration commands must sit inside applyPendingRestoration"
+        );
+
+        // --- 3. The applier is reached from the powered-on branch ------------
+        let apply_call = swift
+            .find("centralReady = true applyPendingRestoration(central)")
+            .expect(
+                "ORDERING INVARIANT: applyPendingRestoration must be called from the .poweredOn \
+                 branch of centralManagerDidUpdateState, immediately after centralReady = true. \
+                 That is the first moment CoreBluetooth accepts the commands it issues; anywhere \
+                 earlier they are dropped, and the age-out becomes a no-op that still logs as a \
+                 success",
+            );
+        let scan_start = swift
+            .find("startScanning(reason: \"central_powered_on\")")
+            .expect("the .poweredOn branch must start scanning");
+        assert!(
+            apply_call < scan_start,
+            "ORDERING INVARIANT: applyPendingRestoration must run BEFORE startScanning. The scan \
+             rehydrates retrieveConnectedPeripherals and records fresh sightings, which would \
+             re-anchor the age-out cutoff mid-decision"
+        );
+
+        // --- 4. A cancelled connect is not re-armed by the retry loop --------
+        assert!(
+            swift.contains(
+                "guard self.discoveredPeripherals[peripheral.identifier] != nil else { return } \
+                 self.attemptConnection(to: peripheral, reason: \"retry_fail\")"
+            ),
+            "The didFailToConnect retry must skip a peripheral that is no longer in \
+             discoveredPeripherals. The age-out drops stale peripherals from that map precisely \
+             so they stop being retried, and a cancelled pending connect is a plausible source \
+             of the didFailToConnect that schedules this retry — without the guard the retry \
+             re-issues the connect the age-out just cleared"
+        );
+
+        // --- 5. A restored pending connect is not booked as a live link -----
+        //
+        // `connections` is the set of links that exist, not the set we want:
+        // it feeds `currentConnectionCount()` against MAX_CONNECTIONS_PER_DEVICE,
+        // and `performConnectionAttempt` returns early for anything registered
+        // in it. Registering a peripheral that is only `.connecting` spends a
+        // connection slot on a link that may never form and disables the very
+        // retry path guarded above.
+        let apply_body = &swift[apply_start
+            ..swift
+                .find("public func centralManagerDidUpdateState(_ central: CBCentralManager) {")
+                .expect("BleManager.swift must implement centralManagerDidUpdateState")];
+        assert!(
+            apply_body.contains(
+                "if peripheral.state == .connected { connections.registerPeripheral(peripheral) \
+                 peripheral.discoverServices([SERVICE_UUID]) } else { \
+                 central.connect(peripheral, options: nil) }"
+            ),
+            "The restoration must register a peripheral in `connections` only when it is \
+             already .connected. The pending branch leaves registration to didConnect, like \
+             every other connect this class issues"
+        );
+        assert_eq!(
+            apply_body
+                .matches("connections.registerPeripheral(")
+                .count(),
+            1,
+            "applyPendingRestoration may register exactly one peripheral, inside the .connected \
+             branch. A second call site is how the pending branch books a link that does not \
+             exist yet"
+        );
+
+        // --- 6. Only the scan callback may move the age-out cutoff ----------
+        //
+        // `recordSeen` classifies what was observed, and only `.advertisement`
+        // moves the cutoff forward, because only an advertisement proves the
+        // app was scanning. Traffic on a live link keeps flowing while the app
+        // is backgrounded and the scan is stopped, so a `.advertisement` on a
+        // link path would let one chatty peer age out every absent peer's
+        // pending connect — the only way iOS wakes this app when one of them
+        // reappears. That failure is invisible without a system termination,
+        // and no Swift test can reach these call sites.
+        assert_eq!(
+            swift.matches("source: .advertisement").count(),
+            1,
+            "Exactly one recordSeen call site may claim `.advertisement`. Every other \
+             observation is `.linkActivity`: it refreshes that peripheral's own record and \
+             leaves the age-out cutoff where it is"
+        );
+        let advertisement_at = swift.find("source: .advertisement").unwrap();
+        let did_discover = swift
+            .find(
+                "public func centralManager(_ central: CBCentralManager, didDiscover \
+                 peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: \
+                 NSNumber) {",
+            )
+            .expect("BleManager.swift must implement the didDiscover delegate");
+        let did_connect = swift
+            .find("public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {")
+            .expect("BleManager.swift must implement the didConnect delegate");
+        assert!(
+            advertisement_at > did_discover && advertisement_at < did_connect,
+            "The `.advertisement` sighting must be the one in the didDiscover scan callback. \
+             Anywhere else it claims the app was watching when it was not"
+        );
+        assert!(
+            swift.matches("source: .linkActivity").count() >= 3,
+            "The three link-evidence sightings — didConnect, didUpdateValueFor, and the \
+             retrieveConnectedPeripherals sweep in startScanning — must all stay \
+             `.linkActivity`. Adding a fourth is fine, which is why this is a floor and not \
+             an equality; changing one of these to `.advertisement` is the regression this \
+             pins"
+        );
+
+        // --- 7. The sighting is recorded before the adaptive filters --------
+        //
+        // A sighting recorded after a filter inherits that filter's semantics,
+        // and neither filter below the `shouldProcess` gate is about whether
+        // the peripheral was observed: both are load shedding, dropping work
+        // rather than observations. `shouldProbabilisticallySkip` keys on
+        // `peripheral.hashValue`, which Swift seeds once per process, so a
+        // sighting recorded after it would miss a FIXED subset of the visible
+        // peers for the whole life of the process, while their neighbours moved
+        // the cutoff forward every second. Those peers read as "went quiet
+        // while we were watching" at the next restoration and lose the pending
+        // connect that is the only way iOS wakes this app when they reappear,
+        // although they were advertising throughout. Same class as anchoring to
+        // the relaunch clock: the premise is violated at the call site rather
+        // than in the policy, so no policy test can see it.
+        let discover_body = &swift[did_discover..did_connect];
+        let sighting_at = discover_body
+            .find("source: .advertisement")
+            .expect("the .advertisement sighting must live in the didDiscover body");
+        let process_gate = discover_body
+            .find("if !shouldProcess { return }")
+            .expect("didDiscover must still gate on shouldProcessDiscoveredPeripheral");
+        assert!(
+            process_gate < sighting_at,
+            "The `.advertisement` sighting must stay BELOW the shouldProcess gate. That gate is \
+             what makes this a mesh peripheral rather than any BLE device in radio range, and \
+             recording above it would spend the record cap on passing headphones"
+        );
+        for filter in [
+            "if shouldFilterByRssi(rssiValue) {",
+            "if shouldProbabilisticallySkip(peripheral.identifier) {",
+        ] {
+            let filter_at = discover_body
+                .find(filter)
+                .unwrap_or_else(|| panic!("didDiscover must still apply `{filter}`"));
+            assert!(
+                sighting_at < filter_at,
+                "ORDERING INVARIANT: the `.advertisement` sighting must be recorded BEFORE \
+                 `{filter}`. That filter sheds load, it does not decide whether the peripheral \
+                 was seen, and the probabilistic one is keyed on a per-process hash seed — so \
+                 recording after it silently hides a fixed subset of peers that were \
+                 advertising the whole time and cancels their pending connects at the next \
+                 restoration"
+            );
+        }
+    }
+
     /// The relay connection proves its address before it sends anything else.
     ///
     /// The relay attributes each inbound frame by whatever the connection has
