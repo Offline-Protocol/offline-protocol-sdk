@@ -31,6 +31,7 @@ Pod::Spec.new do |s|
     "ios/InboundFragmentBuffer.swift",
     "ios/OutboundFragmentQueue.swift",
     "ios/AddressDeclarationPolicy.swift",
+    "ios/BleMessageNotificationPolicy.swift",
     "ios/PeerIdentityBinding.swift",
     "ios/RelayAnswerPrefixes.swift",
     "ios/RelayControlOpTranslator.swift",

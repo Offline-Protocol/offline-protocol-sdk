@@ -3102,17 +3102,57 @@ extension BleManager: CBPeripheralDelegate {
         
         guard let characteristics = service.characteristics else { return }
 
+        // This callback fires more than once per link without an intervening
+        // disconnect. The connection monitor re-invokes
+        // `discoverCharacteristics` every CONNECTION_MONITOR_INTERVAL on any
+        // peripheral it does not find in the connection registry, and
+        // characteristic discovery replays from CoreBluetooth's cache when it
+        // does, so a still-live link can arrive here indefinitely. Everything
+        // below therefore has to be safe to reach on an established
+        // connection, which is two separate questions: the subscription is
+        // judged on the characteristic, and the join is judged on whether it
+        // already finished.
+        //
+        // Subscribing asks the characteristic, because `isNotifying` is
+        // present-tense evidence about the link. A real disconnect resets it,
+        // and so would a service invalidation handing back fresh
+        // characteristic objects on a peer we still consider announced, so
+        // asking here keeps the subscription self-healing in both cases where
+        // our own bookkeeping would not. There is no
+        // `didUpdateNotificationStateFor` in this file, so the redundant call
+        // was visible from two other places: it re-emitted the diagnostic
+        // below, which made one link that subscribed once read as a link
+        // re-subscribing every sweep, and, if CoreBluetooth forwards the CCCD
+        // write rather than swallowing it, the peer's `didSubscribeTo` re-runs
+        // its whole inbound admission path once per sweep —
+        // `shouldAcceptInboundConnection`, which may evict a *different* peer
+        // as an inbound_swap, and then `maybeHandleRebalance`.
+        if let messageCharacteristic = characteristics.first(where: { $0.uuid == MESSAGE_CHAR_UUID }),
+           BleMessageNotificationPolicy.shouldEnableNotifications(isNotifying: messageCharacteristic.isNotifying) {
+            peripheral.setNotifyValue(true, for: messageCharacteristic)
+            print("[BleManager] Enabled notifications for message characteristic")
+            emitDiagnostic("info", "Enabled notifications for message characteristic", context: ["peripheral": peripheral.identifier.uuidString])
+        }
+
+        // The join below is one-shot per connection, and for an announced peer
+        // it is finished. Re-reading DEVICE_ID and IDENTITY costs a GATT round
+        // trip each, then a signature verification and an address derivation on
+        // the main thread in `handleReceivedIdentity`, and ends at
+        // `completePeerHandshake`'s own `announcedPeripherals` guard having
+        // changed nothing. `didDisconnectPeripheral` clears the set, so a
+        // reconnect still re-reads both halves and re-proves the peer from
+        // scratch; within a single connection an identity that changed under us
+        // is something to refuse, not to adopt. Returning here also keeps the
+        // absence checks below from judging an established link on a cache
+        // replay that came back partial.
+        guard !announcedPeripherals.contains(peripheral.identifier) else { return }
+
         // Both reads are issued here and complete in either order; the peer is
         // announced by whichever one lands second, through
         // `completePeerHandshake`. Neither is sufficient alone — see that
         // method for why the identity is no longer optional.
         for characteristic in characteristics {
-            if characteristic.uuid == MESSAGE_CHAR_UUID {
-                // Enable notifications for message characteristic
-                peripheral.setNotifyValue(true, for: characteristic)
-                print("[BleManager] Enabled notifications for message characteristic")
-                emitDiagnostic("info", "Enabled notifications for message characteristic", context: ["peripheral": peripheral.identifier.uuidString])
-            } else if characteristic.uuid == DEVICE_ID_CHAR_UUID {
+            if characteristic.uuid == DEVICE_ID_CHAR_UUID {
                 // Read device ID
                 peripheral.readValue(for: characteristic)
             } else if characteristic.uuid == IDENTITY_CHAR_UUID {

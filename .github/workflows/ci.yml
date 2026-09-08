@@ -636,6 +636,7 @@ jobs:
             mesh/Mesh.swift ble/MeshConnectionRegistry.swift \
             ble/BleDiscoveryBootstrapPolicy.swift \
             PeripheralRestorationAgeOutPolicy.swift \
+            BleMessageNotificationPolicy.swift \
             Generated/offline_protocol.swift ForcedPresenceCheckQueue.swift \
             AddressDeclarationPolicy.swift \
             GatewayAttachPolicy.swift GatewayVerdictTracker.swift \

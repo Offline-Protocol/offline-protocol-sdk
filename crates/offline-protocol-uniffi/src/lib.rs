@@ -12681,6 +12681,119 @@ mod tests {
         );
     }
 
+    /// Re-discovering the characteristics of a live link changes nothing.
+    ///
+    /// `didDiscoverCharacteristicsFor` is not a first-contact callback. The
+    /// connection monitor re-invokes `discoverCharacteristics` every
+    /// `CONNECTION_MONITOR_INTERVAL` on any peripheral missing from the
+    /// connection registry, and characteristic discovery replays from
+    /// CoreBluetooth's cache when it does, so an established connection can
+    /// arrive there indefinitely. Everything the delegate does on arrival has
+    /// to be safe to repeat, and the two halves are safe for different
+    /// reasons — which is exactly what a later reader is likely to collapse.
+    ///
+    /// 1. **The subscribe is guarded by the characteristic, not by us.**
+    ///    Unconditionally re-issuing `setNotifyValue(true, ...)` on an
+    ///    already-notifying characteristic re-emits the central's own
+    ///    subscribe diagnostic, so one link that subscribed once reads in the
+    ///    logs as a link re-subscribing every sweep; and if CoreBluetooth
+    ///    forwards the CCCD write rather than swallowing it, the peer runs
+    ///    `didSubscribeTo` again, re-entering the inbound admission path that
+    ///    can evict a *different* peer as an inbound_swap and then rebalance.
+    ///    Nothing in the bridge observes the redundancy directly: there is no
+    ///    `didUpdateNotificationStateFor` in `BleManager` to notice it.
+    /// 2. **The subscribe must NOT move behind the announce gate.**
+    ///    `isNotifying` is present-tense evidence about the link. A disconnect
+    ///    resets it, and so does a service invalidation handing back fresh
+    ///    characteristic objects on a peer the bridge still considers
+    ///    announced; in that second case a gate keyed on `announcedPeripherals`
+    ///    would decline forever and leave an announced peer with a dead
+    ///    subscription — a silent one-way link, since egress keeps working.
+    ///    Hence the positional assertion: subscribe first, gate after.
+    /// 3. **The handshake reads sit behind the announce gate.** They are
+    ///    one-shot per connection. Re-reading DEVICE_ID and IDENTITY on an
+    ///    announced peer spends a GATT round trip each and then a signature
+    ///    verification plus an address derivation on the main thread in
+    ///    `handleReceivedIdentity`, only for `completePeerHandshake` to bail at
+    ///    its own `announcedPeripherals` guard. `didDisconnectPeripheral`
+    ///    clears the set, so a reconnect still re-proves the peer.
+    ///
+    /// No Swift test reaches any of this: `BleManager` sits behind
+    /// CoreBluetooth and CI only typechecks it. `BleMessageNotificationPolicy`
+    /// is unit-tested, but a policy nobody calls passes its own tests.
+    #[test]
+    fn react_native_ios_ble_discovery_is_idempotent_on_a_live_link() {
+        let swift = rn_source_code_only("ios/BleManager.swift");
+
+        let body_start = swift
+            .find(
+                "public func peripheral(_ peripheral: CBPeripheral, \
+                 didDiscoverCharacteristicsFor service: CBService, error: Error?) {",
+            )
+            .expect("BleManager.swift must implement didDiscoverCharacteristicsFor");
+        let body_end = swift
+            .find(
+                "public func peripheral(_ peripheral: CBPeripheral, \
+                 didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {",
+            )
+            .expect("BleManager.swift must implement didUpdateValueFor");
+        assert!(
+            body_start < body_end,
+            "didUpdateValueFor must follow didDiscoverCharacteristicsFor so the slice below is \
+             exactly the discovery delegate body"
+        );
+        let body = &swift[body_start..body_end];
+
+        // --- 1. The one subscribe runs only through the policy ---------------
+        assert_eq!(
+            swift.matches("setNotifyValue(").count(),
+            1,
+            "BleManager.swift may contain exactly one setNotifyValue call. A second call site is \
+             how the unconditional re-subscribe grows back while this guard still passes"
+        );
+        assert!(
+            body.contains(
+                "if let messageCharacteristic = characteristics.first(where: { $0.uuid == \
+                 MESSAGE_CHAR_UUID }), \
+                 BleMessageNotificationPolicy.shouldEnableNotifications(isNotifying: \
+                 messageCharacteristic.isNotifying) { \
+                 peripheral.setNotifyValue(true, for: messageCharacteristic)"
+            ),
+            "the message-characteristic subscribe must be gated on \
+             BleMessageNotificationPolicy.shouldEnableNotifications(isNotifying:) reading the \
+             characteristic's own isNotifying. Re-subscribing a live subscription re-emits the \
+             subscribe diagnostic and re-runs the peer's inbound admission path once per sweep"
+        );
+
+        // --- 2 & 3. Subscribe, then gate, then the one-shot reads ------------
+        let subscribe = body
+            .find("peripheral.setNotifyValue(true, for: messageCharacteristic)")
+            .expect("the subscribe must live in the discovery delegate body");
+        let announce_gate = body
+            .find("guard !announcedPeripherals.contains(peripheral.identifier) else { return }")
+            .expect(
+                "the discovery delegate must return early for an already-announced peer, so a \
+                 re-discovery does not re-issue the one-shot handshake reads",
+            );
+        let first_read = body
+            .find("peripheral.readValue(for: characteristic)")
+            .expect("the discovery delegate must issue the DEVICE_ID and IDENTITY reads");
+        assert!(
+            subscribe < announce_gate,
+            "the subscribe must sit ABOVE the announce gate. Behind it, a service invalidation \
+             that hands back fresh characteristic objects on an announced peer would never \
+             re-subscribe, leaving a live connection that can send and never receive — and \
+             nothing resets announcedPeripherals without a disconnect"
+        );
+        assert!(
+            announce_gate < first_read,
+            "the DEVICE_ID and IDENTITY reads must sit BELOW the announce gate. They are one-shot \
+             per connection; repeating them on an announced peer costs two GATT round trips plus \
+             a signature verification and an address derivation on the main thread, and \
+             completePeerHandshake discards the result"
+        );
+    }
+
     /// State restoration must not issue CoreBluetooth commands where iOS hands
     /// it the restored list.
     ///

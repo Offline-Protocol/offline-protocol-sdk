@@ -58,6 +58,7 @@ let package = Package(
             ],
             sources: [
                 "AddressDeclarationPolicy.swift",
+                "BleMessageNotificationPolicy.swift",
                 "EncryptionConfigReader.swift",
                 "ForcedPresenceCheckQueue.swift",
                 "ForegroundReconnectPolicy.swift",
@@ -101,6 +102,7 @@ let package = Package(
             ],
             sources: [
                 "AddressDeclarationPolicyTests.swift",
+                "BleMessageNotificationPolicyTests.swift",
                 "EncryptionConfigReaderTests.swift",
                 "ForcedPresenceCheckQueueTests.swift",
                 "GatewayAttachPolicyTests.swift",
