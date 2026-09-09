@@ -861,6 +861,17 @@ impl OfflineProtocol {
                             .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
                         manager.create_session(recipient)?
                     };
+                    // The handshake starts here, and this is the branch it
+                    // usually starts on: with `auto_key_exchange` the peer's
+                    // key package has normally arrived already, so the `else`
+                    // below never runs and no `session_missing` is raised.
+                    // Without this emit the latency percentile would see only
+                    // the handshakes that had to wait for a key package.
+                    self.emit_mls_session_establishing(
+                        recipient,
+                        welcome.group_id.as_str(),
+                        MlsOperationContext::Welcome,
+                    );
                     self.mark_encryption_capable(recipient);
 
                     // All operations succeeded, now safe to remove the key package

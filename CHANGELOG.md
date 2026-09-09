@@ -72,14 +72,25 @@ the client's answers were wrong on a device rather than merely different:
   `mls.session_ready` on the MLS session id. That id is derived from
   `peer=<id>|group=<id>` and the group is minted during the handshake, while
   `mls.initialized` is emitted once per process for no peer at all, so the
-  pair never formed and the column was always absent. The pipe pairs
-  `mls.session_missing` with `mls.session_ready` on the peer instead, which
-  measures the time from wanting a session to having one.
+  pair never formed and the column was always absent. The pipe pairs a
+  handshake start with `mls.session_ready` on the peer instead, which
+  measures the time from wanting a session to having one. A new
+  `mls.session_establishing` lifecycle event marks that start, emitted where
+  a session is created from a peer's key package; it never reaches the wire.
+  An outbound `mls.session_missing` opens the window too, for the send that
+  found no key package either and had to wait for one, and the earlier of the
+  two wins. Inbound misses do not: a frame that outran its Welcome would
+  otherwise contribute Welcome reordering to a handshake this device never
+  started.
 - `session_duration_s` was reported from the session start while every other
-  field is a delta the ingest sums, so a session that produced two summaries
-  had its seconds counted twice. It is now the span since the previous
-  summary. A boundary that repeats a summary with nothing observed since no
-  longer emits a row at all.
+  field is a delta, so a session that produced two summaries had its seconds
+  counted twice. It is now the span since the previous summary, and summing a
+  session's rows gives its length once. A boundary that repeats a summary
+  with nothing observed since no longer emits a row at all. This is a wire
+  contract change and not a restored one: the ingest stores the column and
+  reads it in neither plane today, so nothing downstream breaks, but a reader
+  added later must treat rows written before this release as totals rather
+  than deltas.
 - **A debug tap.** `debug: true` logs every wire event on the platform log
   (logcat, the unified log) or stderr, which needed a place for the pipe's
   `tracing` output to go on a device; the uniffi crate now installs one. It

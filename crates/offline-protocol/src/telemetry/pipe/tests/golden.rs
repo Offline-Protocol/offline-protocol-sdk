@@ -24,10 +24,11 @@
 //!   derives from `peer=<id>|group=<id>`. The group is minted during the
 //!   handshake and `mls.initialized` is emitted once per process for no peer,
 //!   so on a device that pairing never forms and the column is always absent.
-//!   The pipe pairs `mls.session_missing` with `mls.session_ready` on the
-//!   scrubbed peer instead. This scenario feeds the client's shape, so the
-//!   pipe reports nothing for it; `session_pairer` holds the tests that
-//!   exercise the pairing itself;
+//!   The pipe pairs `mls.session_establishing`, or an outbound
+//!   `mls.session_missing`, with `mls.session_ready` on the scrubbed peer
+//!   instead. This scenario feeds the client's shape, whose records name no
+//!   peer, so the pipe reports nothing for it; `session_pairer` and
+//!   `classify` hold the tests that exercise the pairing itself;
 //! - `session_duration_s`: every other summary field is a delta the ingest
 //!   sums, and the client reported this one from the session start, so a
 //!   session with two summaries had its seconds counted twice. The pipe

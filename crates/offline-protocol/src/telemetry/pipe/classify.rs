@@ -16,7 +16,7 @@
 //! silently forwarded.
 
 use crate::events::Event;
-use crate::mls_observability::MlsLifecycleEvent;
+use crate::mls_observability::{MlsErrorCategory, MlsLifecycleEvent};
 use crate::telemetry::pipe::wire::{
     clamp_u64_i16, clamp_u64_i32, ScoreEntry, TransportKey, WireEvent, WireEventData,
 };
@@ -255,6 +255,22 @@ fn classify_mls(event: &MlsLifecycleEvent) -> Disposition {
         // from `initialize_mls`, for no peer. It is not the start of anything
         // a latency could be measured to. `SessionMissing` is.
         MlsLifecycleEvent::Initialized { .. } => Disposition::Drop,
+        // The start of the handshake span, and the only one that fires on
+        // the path a device usually takes. Never forwarded: the wire event
+        // set is fixed against the ingest, and this record exists to key the
+        // pairer rather than to add a column.
+        MlsLifecycleEvent::SessionEstablishing {
+            timestamp_ms,
+            peer_id,
+            ..
+        } => match peer_id {
+            Some(peer) => Disposition::Session(SessionInput::MlsSessionWanted {
+                peer: peer.clone(),
+                ts_ms: *timestamp_ms,
+            }),
+            // Nothing to key on, so nothing to observe.
+            None => Disposition::Drop,
+        },
         MlsLifecycleEvent::SessionReady {
             timestamp_ms,
             peer_id,
@@ -286,24 +302,46 @@ fn classify_mls(event: &MlsLifecycleEvent) -> Disposition {
             timestamp_ms,
             context,
             peer_id,
+            group_id,
+            error_category,
             ..
         } => {
             let wire = WireEvent {
                 ts_ms: *timestamp_ms,
                 data: WireEventData::MlsSessionMissing { context: *context },
             };
-            // A miss names the peer whose session the engine wanted and did
-            // not have, which is the moment a handshake starts. Forwarded as
-            // before, and additionally opens the pairing window.
+            // A miss opens a pairing window only where it means *this* device
+            // wanted to send and had no session. Two shapes must not:
+            //
+            // - An inbound miss, which every receive-path emit site stamps
+            //   with a `group_id` and every send-path site leaves `None`. It
+            //   is a frame that outran its Welcome, so pairing it would
+            //   measure Welcome reordering on a device that did not start the
+            //   handshake, which `docs/telemetry.md` says contributes
+            //   nothing.
+            // - A `NotInitialized` miss, raised because MLS was never set up.
+            //   The span to a later session is how long the app took to
+            //   configure itself, not how long a handshake took.
+            //
+            // Both are still forwarded: the wire event counts a miss whatever
+            // caused it, and only the pairing is narrowed.
             match peer_id {
-                Some(peer) => Disposition::ForwardAndObserve(
-                    wire,
-                    SessionInput::MlsSessionWanted {
-                        peer: peer.clone(),
-                        ts_ms: *timestamp_ms,
-                    },
-                ),
-                None => Disposition::Forward(wire),
+                Some(peer)
+                    if group_id.is_none()
+                        && matches!(
+                            error_category,
+                            Some(MlsErrorCategory::SessionStateMissing)
+                        ) =>
+                {
+                    Disposition::ForwardAndObserve(
+                        wire,
+                        SessionInput::MlsSessionWanted {
+                            peer: peer.clone(),
+                            ts_ms: *timestamp_ms,
+                        },
+                    )
+                }
+                _ => Disposition::Forward(wire),
             }
         }
     }
@@ -399,6 +437,72 @@ mod tests {
             }),
             Disposition::Drop
         );
+    }
+
+    /// Only a miss this device raised while trying to send may start a
+    /// handshake span. Both excluded shapes are still forwarded: the wire
+    /// event counts every miss, and only the pairing is narrowed.
+    #[test]
+    fn only_an_outbound_state_missing_miss_opens_a_pairing_window() {
+        use crate::mls_observability::{MlsErrorCategory, MlsOperationContext};
+
+        let miss = |group: Option<&str>, category: MlsErrorCategory| {
+            classify_mls(&MlsLifecycleEvent::SessionMissing {
+                timestamp_ms: 10,
+                session_id: "s".into(),
+                group_id: group.map(Into::into),
+                peer_id: Some("peerhash".into()),
+                context: MlsOperationContext::SessionLookup,
+                error_category: Some(category),
+            })
+        };
+
+        // Inbound: a frame that outran its Welcome. Pairing it would measure
+        // Welcome reordering on a device that never started the handshake.
+        assert!(matches!(
+            miss(Some("grouphash"), MlsErrorCategory::SessionStateMissing),
+            Disposition::Forward(_)
+        ));
+        // MLS was never initialized, so the span to a later session is how
+        // long the app took to configure itself.
+        assert!(matches!(
+            miss(None, MlsErrorCategory::NotInitialized),
+            Disposition::Forward(_)
+        ));
+        // A send that found neither session nor key package: the one shape
+        // that is this device waiting for a handshake.
+        assert!(matches!(
+            miss(None, MlsErrorCategory::SessionStateMissing),
+            Disposition::ForwardAndObserve(_, _)
+        ));
+    }
+
+    /// The start of the ordinary handshake. It keys the pairer and must never
+    /// reach the wire, which has no event for it.
+    #[test]
+    fn establishing_opens_a_window_and_is_never_forwarded() {
+        use crate::mls_observability::MlsOperationContext;
+
+        let establishing = |peer: Option<&str>| {
+            classify_mls(&MlsLifecycleEvent::SessionEstablishing {
+                timestamp_ms: 42,
+                session_id: "s".into(),
+                group_id: Some("grouphash".into()),
+                peer_id: peer.map(Into::into),
+                context: MlsOperationContext::Welcome,
+                error_category: None,
+            })
+        };
+
+        assert_eq!(
+            establishing(Some("peerhash")),
+            Disposition::Session(SessionInput::MlsSessionWanted {
+                peer: "peerhash".into(),
+                ts_ms: 42
+            })
+        );
+        // Nothing to key on, so nothing to observe.
+        assert_eq!(establishing(None), Disposition::Drop);
     }
 
     #[test]

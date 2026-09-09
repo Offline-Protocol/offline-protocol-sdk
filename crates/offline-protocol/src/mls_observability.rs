@@ -136,6 +136,25 @@ pub enum MlsLifecycleEvent {
         context: MlsOperationContext,
         error_category: Option<MlsErrorCategory>,
     },
+    /// A handshake with this peer has begun: no session existed, the peer's
+    /// key package was imported and a Welcome was built for them.
+    ///
+    /// This is the *start* of the span `mls_session_ready_latency_p50_ms`
+    /// measures, and the only start that fires on the path a device usually
+    /// takes. [`Self::SessionMissing`] marks a handshake that could not
+    /// begin (no key package on hand, or MLS not initialized); with
+    /// `auto_key_exchange` on, which is the default, a peer's key package
+    /// normally arrives before the first send and the ordinary handshake
+    /// raises no miss at all. Pairing on misses alone samples the slow tail
+    /// and calls it the median.
+    SessionEstablishing {
+        timestamp_ms: i64,
+        session_id: String,
+        group_id: Option<String>,
+        peer_id: Option<String>,
+        context: MlsOperationContext,
+        error_category: Option<MlsErrorCategory>,
+    },
     /// Session lifecycle has reached a ready/usable state.
     SessionReady {
         timestamp_ms: i64,
@@ -158,6 +177,7 @@ impl MlsLifecycleEvent {
             Self::EncryptionUsed { .. } => "mls.encryption_used",
             Self::DecryptionFailed { .. } => "mls.decryption_failed",
             Self::SessionMissing { .. } => "mls.session_missing",
+            Self::SessionEstablishing { .. } => "mls.session_establishing",
             Self::SessionReady { .. } => "mls.session_ready",
         }
     }
