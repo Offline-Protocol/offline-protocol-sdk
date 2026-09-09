@@ -288,6 +288,14 @@ pub struct MlsSessionMissingData {
 /// them (`pipeline.rs` step 3e, `app_plane.rs`). `session_duration_s` is the
 /// eleventh and the exception: stored, but read by neither plane today.
 ///
+/// That exception is load-bearing, because `session_duration_s` changed
+/// meaning in SDK 0.26.0. It was the span since the session opened, restated
+/// by every summary of that session; it is now the span since the previous
+/// summary, so a session's rows have to be summed to recover its length.
+/// Nothing reads the column yet, which is what made the change safe to make
+/// unversioned, and a reader added later must treat rows from before 0.26.0
+/// as totals rather than deltas.
+///
 /// The rest stay nullable and absent by design, not by omission: each has a
 /// second source the job already reads (`mesh_metrics_rollup` or a typed
 /// `raw_*` table), so a value here would duplicate a populated column rather

@@ -2780,6 +2780,15 @@ impl OfflineProtocol {
                         .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
                     manager.create_session(peer_id)?
                 };
+                // The handshake starts here. This is the auto-establish path
+                // taken the moment a peer's key package arrives, which is how
+                // an ordinary session begins and which raises no
+                // `session_missing` at all; see `emit_mls_session_establishing`.
+                self.emit_mls_session_establishing(
+                    peer_id,
+                    welcome.group_id.as_str(),
+                    crate::mls_observability::MlsOperationContext::Welcome,
+                );
                 // We only ever build a session from a key package the peer
                 // published, so reaching here proves they run MLS.
                 self.mark_encryption_capable(peer_id);

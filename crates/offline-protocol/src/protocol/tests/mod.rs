@@ -38318,3 +38318,189 @@ fn a_handshake_seen_through_the_engines_own_emit_sites_yields_a_latency() {
          the engine's own emit sites",
     );
 }
+
+/// The ordinary handshake must produce a latency, and it is the one no
+/// `session_missing` ever names.
+///
+/// This is the gap a helper-driven test cannot see. With `auto_key_exchange`
+/// on, which is the default, a peer's key package normally arrives before the
+/// first send: the session is established the moment it lands, so the engine
+/// raises no miss at all and a pairer that starts only on misses reports
+/// nothing for the common case while quietly sampling the slow tail. The
+/// start therefore has to come from the establishment itself, and this test
+/// drives that establishment rather than the emit helper that reports it.
+#[cfg(feature = "telemetry-pipe")]
+#[test]
+fn the_ordinary_handshake_starts_a_latency_without_any_session_missing() {
+    use crate::mls_observability::MlsOperationContext;
+    use crate::telemetry::pipe::pipeline::Pipeline;
+    use crate::telemetry::pipe::wire::WireEventData;
+
+    let mut alice = protocol_with_mls_storage(Arc::new(InMemoryStorage::new()));
+    let sink = RecordingTelemetrySink::default();
+    alice
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    // A real key package from Bob, delivered the way one arrives on a device.
+    // `auto_key_exchange` establishes the session on receipt.
+    let bob_mgr =
+        crate::test_identity::manager_for("bob", crate::test_identity::seeded_storage("bob"));
+    let bob_kp = bob_mgr.generate_key_package().unwrap();
+    let payload = KeyPackagePayload {
+        user_id: id("bob"),
+        key_package_data: bob_kp.key_package_data.clone(),
+        remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
+        timestamp_ms: 0,
+        session_reset: false,
+        wire_versions: Vec::new(),
+        env_versions: Vec::new(),
+        rich_versions: Vec::new(),
+        data_versions: Vec::new(),
+        ctrl_versions: Vec::new(),
+        nostr_pubkey: None,
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::KEY_PACKAGE,
+        serde_json::to_string(&payload).unwrap()
+    );
+    alice.process_internal_message(&signed_frame(&id("bob"), &id("user123"), &content));
+
+    let group_id = {
+        let mls = alice.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        assert!(
+            manager.has_session(&id("bob")).unwrap(),
+            "the key package did not establish a session, so this test is not \
+             exercising the auto-establish path"
+        );
+        session_slot("user123", "bob")
+    };
+
+    // The Welcome lands, which is what makes the session usable. This is the
+    // engine's own ready emit site, reached the way delivery reaches it.
+    alice.welcome_lifecycles.insert(
+        id("bob"),
+        WelcomeLifecycleRecord {
+            peer_id: id("bob"),
+            group_id: group_id.clone(),
+            state: WelcomeDeliveryState::Sent,
+            attempt: 1,
+            unreachable_parks: 0,
+            welcome_message: signed_frame(&id("user123"), &id("bob"), "__MLS_WELCOME__{}"),
+            next_retry_at: None,
+            last_reason_code: None,
+            last_transport_error: None,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + ChronoDuration::seconds(60),
+        },
+    );
+    alice.maybe_emit_local_session_established(&id("bob"), MlsOperationContext::Welcome);
+
+    let records = sink.take();
+    let mls: Vec<&MlsLifecycleEvent> = records
+        .iter()
+        .filter_map(|r| match r {
+            TelemetryRecord::Mls(event) => Some(event),
+            _ => None,
+        })
+        .collect();
+
+    // The regression this pins: nothing on this path reports a miss, so a
+    // pairer that starts only on `session_missing` has no start to use.
+    assert!(
+        !mls.iter()
+            .any(|e| matches!(e, MlsLifecycleEvent::SessionMissing { .. })),
+        "the ordinary handshake raised a miss, so this test no longer proves \
+         that the start does not depend on one: {mls:?}"
+    );
+    let establishing = mls
+        .iter()
+        .find_map(|e| match e {
+            MlsLifecycleEvent::SessionEstablishing { peer_id, .. } => Some(peer_id.clone()),
+            _ => None,
+        })
+        .expect("establishing a session from a key package marks the handshake start");
+    let ready = mls
+        .iter()
+        .find_map(|e| match e {
+            MlsLifecycleEvent::SessionReady { peer_id, .. } => Some(peer_id.clone()),
+            _ => None,
+        })
+        .expect("the delivered Welcome marks the handshake end");
+    assert!(establishing.is_some() && establishing == ready);
+
+    // Through the real classifier and pairer, as the pipe runs them.
+    let mut pipeline = Pipeline::new(64, 1 << 20, false, 0);
+    for record in &records {
+        pipeline.handle(record, 0);
+    }
+    pipeline.emit_session_summary(1_000);
+    let summary = pipeline
+        .buffer()
+        .iter()
+        .find_map(|b| match &b.event.data {
+            WireEventData::SessionSummary(summary) => Some(summary.clone()),
+            _ => None,
+        })
+        .expect("the boundary pushed a summary");
+    assert!(
+        summary.mls_session_ready_latency_p50_ms.is_some(),
+        "the ordinary handshake produced no latency, so the column samples \
+         only the handshakes that had to wait for a key package",
+    );
+}
+
+/// The other establisher must mark the start too.
+///
+/// With `auto_key_exchange` off the key package is stored and no session is
+/// built until something is sent, so establishment runs on the send path
+/// instead. That path has its own copy of the create-session fork, and a fix
+/// applied to one of the two would leave this half reporting nothing.
+#[cfg(feature = "telemetry-pipe")]
+#[test]
+fn the_send_path_establisher_marks_the_handshake_start_as_well() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.auto_key_exchange = false;
+    let mut alice = OfflineProtocol::new(config).unwrap();
+    alice
+        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+    let sink = RecordingTelemetrySink::default();
+    alice
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    let bob_mgr =
+        crate::test_identity::manager_for("bob", crate::test_identity::seeded_storage("bob"));
+    let bob_kp = bob_mgr.generate_key_package().unwrap();
+    alice.pending_key_packages.insert(
+        id("bob"),
+        ReceivedKeyPackage {
+            key_package_data: bob_kp.key_package_data.clone(),
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+
+    // No session yet, so the send path establishes one. It returns
+    // `SessionNotReady`: the message waits for confirmation, and the
+    // handshake it just started is what this asserts on.
+    let _ = alice.encrypt_bytes_for_recipient(&id("bob"), b"hello");
+
+    let records = sink.take();
+    let started = records.iter().any(|r| {
+        matches!(
+            r,
+            TelemetryRecord::Mls(MlsLifecycleEvent::SessionEstablishing {
+                peer_id: Some(_),
+                ..
+            })
+        )
+    });
+    assert!(
+        started,
+        "the send path created a session without marking the handshake start: {records:?}"
+    );
+}

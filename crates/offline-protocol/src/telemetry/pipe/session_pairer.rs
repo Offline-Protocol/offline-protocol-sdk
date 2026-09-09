@@ -2,10 +2,20 @@
 //!
 //! Two things, both landing inside the single `mesh_session_summary` event:
 //!
-//! - **Pairs** `mls.session_missing` with `mls.session_ready` on the scrubbed
+//! - **Pairs** a handshake start with `mls.session_ready` on the scrubbed
 //!   peer id to derive `mls_session_ready_latency_p50_ms`: the time from the
 //!   engine wanting a session with a peer and not having one, to that
 //!   session being usable.
+//!
+//!   Two records open that window, because a handshake has two beginnings.
+//!   `mls.session_establishing` is the ordinary one: the peer's key package
+//!   was on hand, a session was created and a Welcome went out. It carries
+//!   the common case, since with `auto_key_exchange` on (the default) the key
+//!   package usually arrives before the first send and no miss is ever
+//!   raised. An outbound `mls.session_missing` is the other: a send found no
+//!   session *and* no key package, so the wait for the peer's key package is
+//!   part of what the user experienced. First want wins, so when both fire
+//!   for one peer the earlier and fuller span is the one reported.
 //!
 //!   Not on the MLS `session_id`, and not from `mls.initialized`. That id is
 //!   `hash(peer=<id>|group=<id>)` and the group is minted *during* the
@@ -22,13 +32,21 @@
 //! a cap, the paired sample by a sliding window. Both reset at a session
 //! boundary.
 //!
-//! Every field is a delta, `session_duration_s` included. The ingest sums
-//! summary rows, and one session can legitimately produce more than one
-//! (background, an explicit end, a rotation with unreported records), so a
-//! repeated total would double every counter on the dashboard, and a
-//! duration reported from the session start would count the same seconds
-//! once per summary. `take_summary` drains what it reports and advances the
-//! anchor the next duration is measured from.
+//! Every field is a delta, `session_duration_s` included. One session can
+//! legitimately produce more than one summary (background, an explicit end,
+//! a rotation with unreported records), and a reader that adds the rows up
+//! must get the session, so a repeated total would double every counter on
+//! the dashboard and a duration reported from the session start would count
+//! the same seconds once per summary. `take_summary` drains what it reports
+//! and advances the anchor the next duration is measured from.
+//!
+//! For the ten counters this matches what the ingest already does. For
+//! `session_duration_s` it is a *new* contract rather than a restored one:
+//! the ingest stores that column and reads it in neither plane today (see
+//! `SessionSummaryData` in `offline-protocol-telemetry-wire`), and rows
+//! written by the client this replaces are spans from the session start, not
+//! deltas. A reader that starts summing must therefore know which client
+//! wrote the row. `docs/telemetry.md` states the contract for both sides.
 
 use std::collections::HashMap;
 
@@ -109,11 +127,12 @@ impl SessionPairer {
                 if !self.pending.contains_key(&peer) && self.pending.len() >= MAX_PENDING {
                     self.drop_oldest_pending();
                 }
-                // First want wins. The engine reports a miss on every send
-                // attempt while the session is still being established, so
-                // overwriting would measure from the last attempt before it
-                // succeeded and report a latency near zero for a handshake
-                // that in fact took minutes.
+                // First want wins. A peer can open a window twice: a send
+                // that found neither session nor key package raises a miss,
+                // and the establishment that follows once the key package
+                // lands raises a start of its own. The first is the span the
+                // user actually waited; overwriting would report only the
+                // handshake at the end of it and call a minute a millisecond.
                 self.pending.entry(peer).or_insert(ts_ms);
             }
             SessionInput::MlsSessionReady { peer, ts_ms } => {
@@ -192,12 +211,33 @@ impl SessionPairer {
     }
 
     /// Clears all per-session state and restamps the session start.
+    ///
+    /// `pending` deliberately survives. A telemetry session is a foreground
+    /// period, while a want is a handshake in flight, and the handshakes this
+    /// window was widened to ten minutes for are exactly the ones a
+    /// background cycle interrupts: a peer that is asleep or reachable only
+    /// over a relay answers on its own schedule. Dropping them here would
+    /// discard the slow half of the distribution a second time, in a
+    /// different place. The map stays bounded by `MAX_PENDING` and the
+    /// timeout, both of which are enforced on the observe paths.
     pub(crate) fn reset(&mut self, now_ms: i64) {
-        self.pending.clear();
         self.latencies.clear();
         self.switches = 0;
         self.escalations = [0; 6];
         self.encryption_used = 0;
+        self.since_ms = now_ms;
+    }
+
+    /// Restamps the anchor without reporting anything.
+    ///
+    /// For collection resuming after `set_enabled(false)`. Nothing is
+    /// observed while collection is off, but the anchor keeps ageing, so the
+    /// first summary afterwards would bill a duration covering the whole
+    /// opt-out and possibly several real sessions. Moving it forfeits the
+    /// span between the last summary and the opt-out; reporting that span
+    /// instead would mean emitting a row at `set_enabled(false)`, which is
+    /// collection for a user who just asked for none.
+    pub(crate) fn resume(&mut self, now_ms: i64) {
         self.since_ms = now_ms;
     }
 
@@ -341,6 +381,30 @@ mod tests {
         assert_eq!(p.take_summary(205_000).session_duration_s, 205);
         assert_eq!(p.take_summary(260_000).session_duration_s, 55);
         assert_eq!(p.take_summary(300_000).session_duration_s, 40);
+    }
+
+    /// A telemetry session is a foreground period; a handshake is not. The
+    /// slow handshakes the ten-minute window exists for are exactly the ones
+    /// a background cycle interrupts.
+    #[test]
+    fn a_want_survives_a_session_rotation() {
+        let mut p = SessionPairer::new(0);
+        p.observe(wanted("a", 1_000), 1_000);
+        p.reset(2_000);
+        p.observe(ready("a", 61_000), 61_000);
+        assert_eq!(
+            p.take_summary(61_000).mls_session_ready_latency_p50_ms,
+            Some(60_000)
+        );
+    }
+
+    /// Nothing is observed while collection is off, but the anchor keeps
+    /// ageing, so the first row afterwards would bill the whole opt-out.
+    #[test]
+    fn resuming_collection_restamps_the_anchor() {
+        let mut p = SessionPairer::new(0);
+        p.resume(3_600_000);
+        assert_eq!(p.take_summary(3_610_000).session_duration_s, 10);
     }
 
     #[test]

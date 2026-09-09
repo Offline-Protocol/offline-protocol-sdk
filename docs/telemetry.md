@@ -95,15 +95,20 @@ exactly these `data` fields, and nothing else:
 | `protocol.transport.state_changed` | `transport`, `previous`, `current` | A transport changed status |
 | `protocol.device.capability_changed` | `battery_level`, `is_charging`, `relay_role`, `changed_fields` | Battery, charging or relay role changed |
 | `mls.decryption_failed` | `failure_kind`, `context` | An inbound frame would not decrypt |
-| `mls.session_missing` | `context` | A frame arrived for a session this device does not hold |
+| `mls.session_missing` | `context` | A send found no session, or a frame arrived for one this device does not hold |
 | `mesh_metrics_rollup` | One row per minute: `bucket_start_ms`, `bucket_duration_s`, `neighbor_count_{avg,max,p50}`, `ack_pending_{avg,max}`, `retry_queue_total_{avg,max}`, `retry_queue_critical_count_max`, `transport_time_ms` (`ble`, `wifi_direct`, `internet`, `none`), `is_local_relay_duration_s`, `current_transport_at_bucket_end`, `sends_{attempted,succeeded,failed}_sum`, `bytes_{sent,received}_sum` (always 0) | The periodic metrics frames, folded on the device |
 | `mesh_session_summary` | `session_duration_s`, `routing_switches`, `routing_escalations`, `escalation_reasons` (six buckets), `mls_session_ready_latency_p50_ms` (absent when no handshake paired), `mls_encryption_used_count` | Computed on the device at each session boundary |
 
 `mls_session_ready_latency_p50_ms` is the median time from the engine wanting
 a secure session with a peer and not having one, to that session being
-usable. It is paired per peer, so a handshake this device did not start (a
-Welcome that simply arrived) contributes nothing, and a want whose handshake
-never completes is discarded after ten minutes rather than reported.
+usable. The window opens where a handshake begins: normally when a session is
+created from the peer's key package and a Welcome goes out, or earlier when a
+send found no key package either and had to wait for one. Where both happen
+for a peer the earlier one is kept, so the span covers the whole wait. It is
+paired per peer, so a handshake this device did not start contributes nothing
+(a Welcome that simply arrived, or an encrypted frame that outran one), and a
+want whose handshake never completes is discarded after ten minutes rather
+than reported.
 
 Three things about that table are worth stating plainly.
 
@@ -123,9 +128,10 @@ ingest rather than on the device.
 
 **Some events are counted and never sent.** `protocol.message.sent` carries
 the message content, so only its count survives, folded into the rollup's
-`sends_attempted_sum`. `mls.initialized`, `mls.session_ready` and
+`sends_attempted_sum`. `mls.session_establishing`, `mls.session_ready` and
 `mls.encryption_used` are consumed on the device to compute the session
-summary. `protocol.neighbor.discovered` and `.lost` are read as neighbour
+summary, and `mls.initialized` is dropped outright: it fires once per process
+for no peer, so it starts nothing and counts nothing. `protocol.neighbor.discovered` and `.lost` are read as neighbour
 churn, for which neither the summary nor the rollup has a field today, so
 they currently contribute nothing. Every other event the engine emits,
 sixty-odd of them, is dropped by name before its payload is read.
@@ -177,7 +183,7 @@ event is stamped with the session current when it was buffered, and batches
 are cut on that stamp, so a boundary event always carries the session it
 reports. `endTelemetrySession` is the explicit form, for an app with its own
 notion of a session; calling both is safe, because each summary reports only
-what the previous one did not, and the ingest sums them.
+what the previous one did not, and the ingest sums the counters.
 
 Every field of a summary is a delta, `session_duration_s` included: a summary
 reports the span since the previous one, not the span since the session
@@ -186,6 +192,13 @@ boundary of a session always produces a row, because the duration is what the
 row is for. A later boundary with nothing observed since the last one
 produces none, so backgrounding and then calling `endTelemetrySession` is not
 billed twice.
+
+For the ten counters that is what the ingest already does with them.
+`session_duration_s` is a contract change rather than a restored one: the
+ingest stores that column and reads it in neither plane today, and rows
+written by the client this release replaces carry the span since the session
+opened, repeated in every summary. A reader that starts summing it therefore
+has to know which client wrote the row. The counters beside it are unaffected.
 
 ## Where it goes and how
 

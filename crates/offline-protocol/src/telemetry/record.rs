@@ -186,6 +186,7 @@ pub(crate) mod tests {
         "mls.encryption_used",
         "mls.decryption_failed",
         "mls.session_missing",
+        "mls.session_establishing",
         "mls.session_ready",
         // Non-Event, non-MLS TelemetryRecord variants.
         //
@@ -378,6 +379,7 @@ pub(crate) mod tests {
             | MlsLifecycleEvent::EncryptionUsed { .. }
             | MlsLifecycleEvent::DecryptionFailed { .. }
             | MlsLifecycleEvent::SessionMissing { .. }
+            | MlsLifecycleEvent::SessionEstablishing { .. }
             | MlsLifecycleEvent::SessionReady { .. } => (),
         }
     }
@@ -853,6 +855,14 @@ pub(crate) mod tests {
                 group_id: None,
                 peer_id: None,
                 context: MlsOperationContext::SessionLookup,
+                error_category: None,
+            },
+            MlsLifecycleEvent::SessionEstablishing {
+                timestamp_ms: 0,
+                session_id: String::new(),
+                group_id: None,
+                peer_id: None,
+                context: MlsOperationContext::Welcome,
                 error_category: None,
             },
             MlsLifecycleEvent::SessionReady {

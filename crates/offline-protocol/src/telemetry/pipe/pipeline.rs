@@ -208,6 +208,15 @@ impl Pipeline {
         self.summary_reported = false;
     }
 
+    /// Restamps the summary anchor when collection resumes.
+    ///
+    /// See `SessionPairer::resume`: with collection off nothing is observed
+    /// but the anchor keeps ageing, so without this the first summary after
+    /// re-enabling bills a duration spanning the whole opt-out.
+    pub(crate) fn resume_collection(&mut self, now_ms: i64) {
+        self.pairer.resume(now_ms);
+    }
+
     /// Records an application state without drawing a boundary from it.
     ///
     /// Two callers, one reason: the state is a fact about the app that the

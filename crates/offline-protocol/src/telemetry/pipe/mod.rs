@@ -568,8 +568,19 @@ impl TelemetryPipe {
 
     /// Stops or resumes collection. Off, an emit costs one atomic load and
     /// nothing is buffered; what is already queued still drains.
+    ///
+    /// Resuming restamps the summary anchor. The duration is the one summary
+    /// field derived from a clock rather than accumulated from records, so
+    /// unlike every counter it keeps growing while collection is off, and the
+    /// first row afterwards would otherwise bill the entire opt-out. Only the
+    /// off-to-on edge does this, so repeated `set_enabled(true)` calls on a
+    /// live pipe do not keep resetting the span.
     pub fn set_enabled(&self, enabled: bool) {
-        self.shared.enabled.store(enabled, Ordering::Relaxed);
+        let was = self.shared.enabled.swap(enabled, Ordering::Relaxed);
+        if enabled && !was {
+            let now = (self.shared.clock)();
+            lock(&self.shared.pipeline).resume_collection(now);
+        }
     }
 
     /// Whether collection is on.
