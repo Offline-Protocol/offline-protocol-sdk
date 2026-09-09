@@ -58,14 +58,25 @@ pub(crate) struct FrameSample {
 }
 
 /// One record for the session tracker.
+///
+/// The two handshake ends are keyed on the *peer*, never on the MLS
+/// `session_id`. That id is derived from `peer=<id>|group=<id>`, and the
+/// group is minted during the handshake: the id a handshake ends with is
+/// therefore never the id it started with, so any pairing across it is
+/// structurally impossible. The scrubbed peer id is the one component both
+/// ends agree on. See `SessionPairer`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionInput {
-    MlsInitialized {
-        session_id: String,
+    /// The engine looked for a session with this peer and had none, which is
+    /// what starts a handshake. The peer id is already scrubbed.
+    MlsSessionWanted {
+        peer: String,
         ts_ms: i64,
     },
+    /// A session with this peer became usable. The peer id is already
+    /// scrubbed, by the same scrubber that stamped the want.
     MlsSessionReady {
-        session_id: String,
+        peer: String,
         ts_ms: i64,
     },
     EncryptionUsed,
@@ -84,6 +95,10 @@ pub(crate) enum Disposition {
     Rollup(FrameSample),
     Session(SessionInput),
     Forward(WireEvent),
+    /// Forwarded *and* observed: the wire event carries no identifier, while
+    /// the session input carries the scrubbed peer the pairer keys on. One
+    /// record feeds two columns without putting the peer on the wire.
+    ForwardAndObserve(WireEvent, SessionInput),
 }
 
 /// Ambient facts the classifier needs but does not own.
@@ -236,22 +251,22 @@ pub(crate) fn classify_protocol(event: &Event, now_ms: i64) -> Disposition {
 
 fn classify_mls(event: &MlsLifecycleEvent) -> Disposition {
     match event {
-        MlsLifecycleEvent::Initialized {
-            timestamp_ms,
-            session_id,
-            ..
-        } => Disposition::Session(SessionInput::MlsInitialized {
-            session_id: session_id.clone(),
-            ts_ms: *timestamp_ms,
-        }),
+        // Dropped, and deliberately: the engine emits this once per process,
+        // from `initialize_mls`, for no peer. It is not the start of anything
+        // a latency could be measured to. `SessionMissing` is.
+        MlsLifecycleEvent::Initialized { .. } => Disposition::Drop,
         MlsLifecycleEvent::SessionReady {
             timestamp_ms,
-            session_id,
+            peer_id,
             ..
-        } => Disposition::Session(SessionInput::MlsSessionReady {
-            session_id: session_id.clone(),
-            ts_ms: *timestamp_ms,
-        }),
+        } => match peer_id {
+            Some(peer) => Disposition::Session(SessionInput::MlsSessionReady {
+                peer: peer.clone(),
+                ts_ms: *timestamp_ms,
+            }),
+            // Nothing to pair against, so nothing to observe.
+            None => Disposition::Drop,
+        },
         MlsLifecycleEvent::EncryptionUsed { .. } => {
             Disposition::Session(SessionInput::EncryptionUsed)
         }
@@ -270,11 +285,27 @@ fn classify_mls(event: &MlsLifecycleEvent) -> Disposition {
         MlsLifecycleEvent::SessionMissing {
             timestamp_ms,
             context,
+            peer_id,
             ..
-        } => Disposition::Forward(WireEvent {
-            ts_ms: *timestamp_ms,
-            data: WireEventData::MlsSessionMissing { context: *context },
-        }),
+        } => {
+            let wire = WireEvent {
+                ts_ms: *timestamp_ms,
+                data: WireEventData::MlsSessionMissing { context: *context },
+            };
+            // A miss names the peer whose session the engine wanted and did
+            // not have, which is the moment a handshake starts. Forwarded as
+            // before, and additionally opens the pairing window.
+            match peer_id {
+                Some(peer) => Disposition::ForwardAndObserve(
+                    wire,
+                    SessionInput::MlsSessionWanted {
+                        peer: peer.clone(),
+                        ts_ms: *timestamp_ms,
+                    },
+                ),
+                None => Disposition::Forward(wire),
+            }
+        }
     }
 }
 
@@ -298,6 +329,76 @@ mod tests {
                 PROTOCOL_ALLOWLIST.contains(&name)
             );
         }
+    }
+
+    #[test]
+    fn the_handshake_ends_are_classified_by_peer_and_the_peer_never_reaches_the_wire() {
+        use crate::mls_observability::{MlsErrorCategory, MlsOperationContext};
+
+        // Once per process, for no peer: not the start of a latency.
+        assert_eq!(
+            classify_mls(&MlsLifecycleEvent::Initialized {
+                timestamp_ms: 1,
+                session_id: "s".into(),
+                group_id: None,
+                peer_id: None,
+                context: MlsOperationContext::Initialize,
+                error_category: None,
+            }),
+            Disposition::Drop
+        );
+
+        let missing = classify_mls(&MlsLifecycleEvent::SessionMissing {
+            timestamp_ms: 10,
+            session_id: "s".into(),
+            group_id: None,
+            peer_id: Some("peerhash".into()),
+            context: MlsOperationContext::SessionLookup,
+            error_category: Some(MlsErrorCategory::SessionStateMissing),
+        });
+        let Disposition::ForwardAndObserve(wire, input) = missing else {
+            panic!("a miss naming a peer both forwards and opens a pairing window");
+        };
+        assert_eq!(
+            input,
+            SessionInput::MlsSessionWanted {
+                peer: "peerhash".into(),
+                ts_ms: 10
+            }
+        );
+        // The pairing key stays in memory. The forwarded event is the
+        // context and nothing else.
+        let json = wire.data.to_json();
+        assert_eq!(json.as_object().expect("object").len(), 1);
+        assert!(json.get("context").is_some());
+        assert!(!json.to_string().contains("peerhash"));
+
+        assert_eq!(
+            classify_mls(&MlsLifecycleEvent::SessionReady {
+                timestamp_ms: 20,
+                session_id: "s".into(),
+                group_id: Some("g".into()),
+                peer_id: Some("peerhash".into()),
+                context: MlsOperationContext::Welcome,
+                error_category: None,
+            }),
+            Disposition::Session(SessionInput::MlsSessionReady {
+                peer: "peerhash".into(),
+                ts_ms: 20
+            })
+        );
+        // Nothing to key on, so nothing to observe.
+        assert_eq!(
+            classify_mls(&MlsLifecycleEvent::SessionReady {
+                timestamp_ms: 20,
+                session_id: "s".into(),
+                group_id: None,
+                peer_id: None,
+                context: MlsOperationContext::Welcome,
+                error_category: None,
+            }),
+            Disposition::Drop
+        );
     }
 
     #[test]

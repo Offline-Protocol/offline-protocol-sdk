@@ -41,6 +41,12 @@ pub(crate) struct Pipeline {
     pairer: SessionPairer,
     routing_diagnostic: bool,
     was_backgrounded: bool,
+    /// Whether this session has already had a summary reported for it. The
+    /// first boundary always reports, because the session's duration is the
+    /// point of the row; a second boundary with nothing observed since does
+    /// not, because that row would be billed for repeating what the first
+    /// one said.
+    summary_reported: bool,
     /// Bytes buffered since the last flush, by the cheap per-event estimate.
     buffered_bytes: usize,
     max_batch_bytes: usize,
@@ -62,6 +68,7 @@ impl Pipeline {
             pairer: SessionPairer::new(now_ms),
             routing_diagnostic,
             was_backgrounded: false,
+            summary_reported: false,
             buffered_bytes: 0,
             max_batch_bytes,
         }
@@ -96,6 +103,10 @@ impl Pipeline {
             Disposition::Session(input) => {
                 self.pairer.observe(input, now_ms);
                 false
+            }
+            Disposition::ForwardAndObserve(event, input) => {
+                self.pairer.observe(input, now_ms);
+                self.push(event)
             }
             Disposition::Forward(event) => {
                 // Forwarded events that are also tapped: the per-window send
@@ -143,9 +154,22 @@ impl Pipeline {
 
     /// Pushes a summary for the current session, closing the open rollup
     /// window first so its rollup lands before the summary.
+    ///
+    /// The first boundary of a session always reports: the duration is the
+    /// row's reason for existing, and every session that reached a boundary
+    /// has one. A later boundary in the same session reports only if
+    /// something has been observed since the last summary. Backgrounding and
+    /// then calling `endTelemetrySession` is the sequence `docs/telemetry.md`
+    /// calls safe, and without this it bills a second row carrying nothing.
+    /// The rollup is flushed either way: it is a different event with its own
+    /// contents, and whether a metrics window closes must not depend on what
+    /// the session lane happened to observe.
     pub(crate) fn emit_session_summary(&mut self, now_ms: i64) {
         if let Some(event) = self.rollup.flush() {
             self.push(event);
+        }
+        if self.summary_reported && !self.pairer.has_unreported() {
+            return;
         }
         self.record_summary(now_ms);
     }
@@ -159,6 +183,7 @@ impl Pipeline {
     /// boundaries. The rollup closes on background, and otherwise only by a
     /// later-bucket frame.
     fn record_summary(&mut self, now_ms: i64) {
+        self.summary_reported = true;
         let summary = self.pairer.take_summary(now_ms);
         self.push(WireEvent {
             ts_ms: now_ms,
@@ -180,6 +205,7 @@ impl Pipeline {
         }
         self.pairer.reset(now_ms);
         self.session_id = Uuid::new_v4();
+        self.summary_reported = false;
     }
 
     /// Records an application state without drawing a boundary from it.
@@ -311,29 +337,29 @@ mod tests {
     fn p50_and_neighbor_p50_are_integers_on_the_wire() {
         let mut p = pipeline();
         p.pairer.observe(
-            SessionInput::MlsInitialized {
-                session_id: "a".into(),
+            SessionInput::MlsSessionWanted {
+                peer: "a".into(),
                 ts_ms: 0,
             },
             0,
         );
         p.pairer.observe(
             SessionInput::MlsSessionReady {
-                session_id: "a".into(),
+                peer: "a".into(),
                 ts_ms: 101,
             },
             101,
         );
         p.pairer.observe(
-            SessionInput::MlsInitialized {
-                session_id: "b".into(),
+            SessionInput::MlsSessionWanted {
+                peer: "b".into(),
                 ts_ms: 0,
             },
             0,
         );
         p.pairer.observe(
             SessionInput::MlsSessionReady {
-                session_id: "b".into(),
+                peer: "b".into(),
                 ts_ms: 102,
             },
             102,
@@ -432,11 +458,46 @@ mod tests {
     fn the_ring_drops_oldest_and_counts_it() {
         let mut p = Pipeline::new(2, 1 << 20, false, 0);
         for i in 0..3 {
+            // Something observed between the boundaries, so each one has a
+            // row to report: a repeat boundary with nothing new is
+            // deliberately not one. See `emit_session_summary`.
+            p.pairer.observe(SessionInput::EncryptionUsed, i);
             p.emit_session_summary(i);
         }
         assert_eq!(p.buffered(), 2);
         assert_eq!(p.dropped(), 1);
         assert_eq!(p.buffer()[0].event.ts_ms, 1);
+    }
+
+    /// Backgrounding and then calling `endTelemetrySession` is the sequence
+    /// `docs/telemetry.md` calls safe. Each summary is a row the ingest
+    /// stores and bills, so the second one must not repeat the first.
+    #[test]
+    fn a_repeat_boundary_with_nothing_observed_does_not_bill_a_second_row() {
+        let mut p = pipeline();
+        p.pairer.observe(SessionInput::EncryptionUsed, 0);
+        p.emit_session_summary(1_000);
+        p.emit_session_summary(2_000);
+        assert_eq!(summaries(&p).len(), 1);
+
+        // Anything observed since makes the next boundary a row again, and
+        // its duration covers the whole span the skipped one would have.
+        p.pairer.observe(SessionInput::EncryptionUsed, 0);
+        p.emit_session_summary(4_000);
+        let rows = summaries(&p);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].1.session_duration_s, 3);
+    }
+
+    /// A session that closes without ever reporting is a session the ingest
+    /// never sees, so the first boundary reports whatever it has.
+    #[test]
+    fn the_first_boundary_of_a_session_always_reports() {
+        let mut p = pipeline();
+        p.emit_session_summary(5_000);
+        let rows = summaries(&p);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.session_duration_s, 5);
     }
 
     #[test]

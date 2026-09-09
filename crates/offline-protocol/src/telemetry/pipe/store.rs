@@ -181,7 +181,20 @@ impl BatchStore {
         let in_memory = std::mem::take(&mut self.pending);
         self.bytes = 0;
         self.load();
+        // Identity is the fast path, not the guarantee. `Arc::ptr_eq` above
+        // answers "the same handle", and the engine's two attach sites hand
+        // over the same one; a host that wraps its provider afresh per call
+        // (the FFI mints a new wrapper on every `initialize_mls`) presents a
+        // different pointer to the same underlying store, and re-pushing
+        // there would persist a second copy of every batch already read back
+        // out of it. The batch id is stable across the round trip, so it is
+        // what decides.
+        let already: std::collections::HashSet<Uuid> =
+            self.pending.iter().map(|b| b.batch_id).collect();
         for mut batch in in_memory {
+            if already.contains(&batch.batch_id) {
+                continue;
+            }
             batch.seq = None;
             self.push(batch);
         }
@@ -780,6 +793,66 @@ pub(crate) mod tests {
         let reloaded = test_store(sealed(&storage));
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded.foreign_records(), 0);
+    }
+
+    /// A different `Arc` over the same provider must not duplicate the queue.
+    ///
+    /// The pointer guard cannot see this case: the FFI wraps the host's
+    /// provider in a fresh adapter on every `initialize_mls`, and a Rust
+    /// embedder re-initialising over one store does the same. Without the
+    /// id check the load reads every pending batch back and the in-memory
+    /// copies are then persisted again beside them.
+    #[test]
+    fn re_attaching_an_equivalent_backend_does_not_duplicate_the_queue() {
+        let storage = Arc::new(MemoryStorage::default());
+        let mut store = test_store(sealed(&storage));
+        store.push(batch(2, 1));
+        store.push(batch(3, 2));
+        store.flush_index();
+        let ids: Vec<Uuid> = store.pending.iter().map(|b| b.batch_id).collect();
+        let records = storage.records.lock().unwrap().len();
+
+        // A distinct `Arc<dyn ProtocolStateStorage>` over the same provider,
+        // which is what a re-wrap looks like from in here.
+        let rewrapped: Arc<dyn ProtocolStateStorage> = Arc::new(SameStore {
+            inner: storage.clone(),
+        });
+        store.attach(Backend::Sealed {
+            storage: rewrapped,
+            cipher: cipher(),
+        });
+
+        assert_eq!(store.len(), 2, "the queue was duplicated");
+        assert_eq!(
+            store.pending.iter().map(|b| b.batch_id).collect::<Vec<_>>(),
+            ids
+        );
+        assert_eq!(
+            storage.records.lock().unwrap().len(),
+            records,
+            "no batch was written a second time"
+        );
+    }
+
+    /// A wrapper that forwards to another provider, so two distinct `Arc`s
+    /// address the same records.
+    struct SameStore {
+        inner: Arc<MemoryStorage>,
+    }
+
+    impl ProtocolStateStorage for SameStore {
+        fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> ProtocolStateResult<()> {
+            self.inner.store(key_type, key_id, data)
+        }
+        fn load(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
+            self.inner.load(key_type, key_id)
+        }
+        fn delete(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<()> {
+            self.inner.delete(key_type, key_id)
+        }
+        fn list_keys(&self, key_type: &str) -> ProtocolStateResult<Vec<String>> {
+            self.inner.list_keys(key_type)
+        }
     }
 
     #[test]

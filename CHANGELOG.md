@@ -51,16 +51,35 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   uploader with idempotent retry: 1 s doubling to 15 min with jitter,
   `Retry-After` honoured, a six-day expiry inside the ingest's deduplication
   window, a halt on 401 and 403, deferral below 15% battery unless charging,
-  and one final flush of up to three seconds on disable, background and end
-  of session. The transport-availability edge the tick already computes wakes
-  it when the internet or Nostr transport comes back.
+  and one final flush of up to three seconds on disable and on end of
+  session. A background transition wakes the uploader without blocking; iOS
+  additionally wraps that flush in an OS background task, which Android has
+  no equivalent for. The transport-availability edge the tick already
+  computes wakes it when the internet or Nostr transport comes back.
 - **`offline-protocol-telemetry-wire`**, a new crate holding the batch envelope
   and typed event payloads shared with the ingest, with the canonical wire
   fixture pinned byte for byte and a second fixture pinning the additive raw
   `reason` field.
 - **A golden test against the frozen TypeScript client**: the same scenario
-  replayed through both, compared batch by batch, with the two documented
-  divergences (raw `reason`, the SDK version) normalized.
+  replayed through both, compared batch by batch, with the four documented
+  divergences (raw `reason`, the SDK version, and the two summary fields
+  below) normalized.
+
+Two summary fields deliberately do not match the client this replaces, because
+the client's answers were wrong on a device rather than merely different:
+
+- `mls_session_ready_latency_p50_ms` paired `mls.initialized` with
+  `mls.session_ready` on the MLS session id. That id is derived from
+  `peer=<id>|group=<id>` and the group is minted during the handshake, while
+  `mls.initialized` is emitted once per process for no peer at all, so the
+  pair never formed and the column was always absent. The pipe pairs
+  `mls.session_missing` with `mls.session_ready` on the peer instead, which
+  measures the time from wanting a session to having one.
+- `session_duration_s` was reported from the session start while every other
+  field is a delta the ingest sums, so a session that produced two summaries
+  had its seconds counted twice. It is now the span since the previous
+  summary. A boundary that repeats a summary with nothing observed since no
+  longer emits a row at all.
 - **A debug tap.** `debug: true` logs every wire event on the platform log
   (logcat, the unified log) or stderr, which needed a place for the pipe's
   `tracing` output to go on a device; the uniffi crate now installs one. It

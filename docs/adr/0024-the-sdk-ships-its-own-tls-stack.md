@@ -68,8 +68,15 @@ design this rejects, for three reasons.
 The cost is real and falls on every adopter. Applications that want none of it
 opt out at the Rust level with `default-features = false` on
 `offline-protocol`, which drops the `telemetry-pipe` feature and with it the
-socket, the thread and the TLS stack. That escape hatch does not exist for a
-consumer of the prebuilt mobile artifacts, who pays the bytes regardless.
+socket, the thread and the TLS stack. `data` is a default feature too, so an
+adopter who wants replicated documents asks for it back:
+
+```toml
+offline-protocol = { version = "0.26", default-features = false, features = ["data"] }
+```
+
+That escape hatch does not exist for a consumer of the prebuilt mobile
+artifacts, who pays the bytes regardless.
 
 ### What would undo this
 

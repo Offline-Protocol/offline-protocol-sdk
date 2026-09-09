@@ -108,14 +108,19 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * than counted; see [installProcessLifecycleWatcher] for why, and for
      * why the boundary follows these rather than `onHostPause`.
      *
-     * Main-thread confined: every `ActivityLifecycleCallbacks` method is
-     * delivered there, so neither needs synchronization. Declared here
+     * Written only from the main thread, where every
+     * `ActivityLifecycleCallbacks` method is delivered, but **read from the
+     * native-modules thread**: [enableTelemetry] seeds the pipe's starting
+     * state from these, and [invalidate] tears the watcher down. Neither is
+     * on main, so the set is synchronized and the flag is `@Volatile`;
+     * without that a seed can read a stale set under the Java memory model
+     * and start a session on the wrong side of the boundary. Declared here
      * because the `init` below assigns them, and a property initializer
      * running after that `init` would overwrite the watcher with null and
      * silently unhook the session boundary.
      */
-    private val startedActivities = java.util.Collections.newSetFromMap(
-        java.util.IdentityHashMap<Activity, Boolean>()
+    private val startedActivities: MutableSet<Activity> = java.util.Collections.synchronizedSet(
+        java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Activity, Boolean>())
     )
 
     /**
@@ -126,6 +131,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * activity's `onCreate`, so the first `onStart` can land before the
      * watcher is registered. [seedAppState] uses this to tell the two apart.
      */
+    @Volatile
     private var sawActivityStart = false
     private var processLifecycleWatcher: Application.ActivityLifecycleCallbacks? = null
 
@@ -411,9 +417,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private fun removeProcessLifecycleWatcher() {
         val watcher = processLifecycleWatcher ?: return
         processLifecycleWatcher = null
-        startedActivities.clear()
+        // Unregister first, then clear. The other order lets a callback
+        // already in flight on the main thread mutate the set this thread is
+        // clearing, and leaves an entry behind in the set it just emptied.
         (reactApplicationContext.applicationContext as? Application)
             ?.unregisterActivityLifecycleCallbacks(watcher)
+        startedActivities.clear()
     }
 
     /**
@@ -428,11 +437,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * exactly that race. Losing the boundary is the correct outcome there:
      * the pipe it would have reported to is already stopped, and its final
      * flush ran on the teardown path.
+     *
+     * Every exception, not just that one. The reason for catching is the
+     * consequence of not catching, and taking the process down is the same
+     * consequence whatever the type: UniFFI surfaces a panic in the core as
+     * `InternalException`, which is not an `IllegalStateException`, and a
+     * telemetry lifecycle hint is never worth a crash.
      */
     private fun notifyAppStateQuietly(state: AppState) {
         try {
             protocol?.notifyAppState(state)
-        } catch (e: IllegalStateException) {
+        } catch (e: Exception) {
             Log.d(NAME, "Telemetry lifecycle transition skipped: the protocol handle is gone", e)
         }
     }
