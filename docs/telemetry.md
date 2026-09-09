@@ -145,9 +145,11 @@ A batch the ingest does not acknowledge is kept and retried: 1 s doubling to
 15 min, plus up to a second of jitter, or the `Retry-After` the ingest
 asked for. A batch older than six days is dropped unsent, because the ingest
 deduplicates on `batch_id` for seven and a later replay would count twice.
-A 401 or 403 (a bad key, or a key for another app) drops the batch, records
-the error in the stats, and stops sending until the next `enableTelemetry`;
-any other 4xx drops the batch and continues.
+A 401 or 403 (a bad key, or a key for another app) keeps the batch, records
+the error in the stats, and stops sending until the next `enableTelemetry`:
+the key is a configuration fault you fix and re-enable through, so the queue
+waits rather than losing what it holds. Any other 4xx drops the batch and
+continues.
 
 The queue is bounded at 64 batches and 4 MiB; beyond either the oldest batch
 is dropped and counted. The ring buffer in front of it holds
@@ -226,6 +228,15 @@ under the `offline_protocol::telemetry::pipe` target: logcat on Android
 `com.offlineprotocol.sdk`), stderr on a desktop host. Nothing is delivered to
 application code, and the tap costs nothing while it is off. It is the way
 to see what leaves the device, since the proxy route is closed by design.
+
+**That target is all the SDK ever writes to a device log.** Enabling
+telemetry installs the logger the tap needs, and it passes through the pipe's
+own records and nothing else: the engine's internal logging, which names
+groups, senders and peers, is dropped there whatever its level. A device log
+is readable by anything on the device that can run `logcat`, so the filter is
+a privacy boundary and not a volume setting. An embedder that does want the
+engine's stream installs its own `tracing` or `log` subscriber, which the SDK
+leaves in place.
 
 ## Controlling cost
 

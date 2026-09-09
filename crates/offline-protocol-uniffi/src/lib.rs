@@ -3017,10 +3017,21 @@ impl OfflineProtocol {
         config: TelemetryConfig,
         app_state: AppState,
     ) -> Result<(), ProtocolError> {
-        host_log::install_host_logger();
         let host = CoreTelemetryHost::new(config.os.into(), config.os_major)
             .with_app_state(app_state.into());
         let core_cfg = telemetry_config_into_core(&config);
+        // Validated before anything is torn down or installed. The core
+        // validates too, but it does so after this wrapper has already
+        // stopped the running pipe and installed the host logger — so
+        // without this a mistyped key would take working telemetry down
+        // with it and leave the log tap behind, for a call that then
+        // reports failure. A refusal must leave the process as it found it.
+        core_cfg.validate().map_err(|field| {
+            ProtocolError::from(offline_protocol::Error::TelemetryConfigInvalid(
+                field.to_string(),
+            ))
+        })?;
+        host_log::install_host_logger();
         // A replaced pipe is stopped outside the engine lock, like disable.
         let previous = {
             let mut protocol = self.lock_inner()?;
@@ -9584,6 +9595,40 @@ mod tests {
         offline_protocol::telemetry::pipe::testing::stop_capturing_uploads();
     }
 
+    /// A refused config leaves a running pipe running. The refusal is a typo
+    /// in a call an app may make more than once (a key rotated at runtime,
+    /// a re-enable after a settings change); tearing telemetry down and then
+    /// reporting failure would make a mistyped field cost the session that
+    /// was already collecting.
+    #[test]
+    fn a_refused_config_leaves_the_running_pipe_untouched() {
+        let (_client, _guard) = capture_uploads();
+        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
+        protocol
+            .enable_telemetry(telemetry_config(), AppState::Active)
+            .expect("telemetry enables");
+        let before = protocol.telemetry_stats().expect("enabled").session_id;
+
+        let mut bad = telemetry_config();
+        bad.flush_interval_ms = Some(10);
+        match protocol.enable_telemetry(bad, AppState::Active) {
+            // Named for the field the caller set, not the `Duration` the
+            // core holds.
+            Err(ProtocolError::TelemetryConfigInvalid(field)) => {
+                assert_eq!(field, "flush_interval_ms");
+            }
+            other => panic!("expected TelemetryConfigInvalid, got {other:?}"),
+        }
+
+        let after = protocol
+            .telemetry_stats()
+            .expect("still enabled")
+            .session_id;
+        assert_eq!(after, before, "the running pipe survived the refusal");
+        protocol.disable_telemetry().expect("disable");
+        offline_protocol::telemetry::pipe::testing::stop_capturing_uploads();
+    }
+
     /// The batch an FFI-enabled pipe uploads is one the ingest binds: every
     /// envelope field is what the binding supplied, every event classifies
     /// through the wire crate, and the five headers are present.
@@ -9809,16 +9854,37 @@ mod tests {
             read(rn.join("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"));
         assert!(kotlin.contains("os = TelemetryOs.ANDROID"));
         assert!(kotlin.contains("osMajor = Build.VERSION.SDK_INT.toUShort()"));
-        let pause = kotlin
-            .split_once("override fun onHostPause()")
-            .expect("onHostPause")
+        // The session boundary follows the process, never an activity.
+        // `onHostPause` is `Activity.onPause`, which fires for a runtime
+        // permission dialog (including the Bluetooth one this SDK triggers
+        // itself), the share sheet, and any translucent activity: drawing a
+        // boundary there rotates the session every time a user grants a
+        // permission, and counts one iOS session as several on Android.
+        let watcher = kotlin
+            .split_once("private fun installProcessLifecycleWatcher()")
+            .expect("process lifecycle watcher")
             .1;
-        assert!(pause.contains("notifyAppState(AppState.BACKGROUND)"));
-        let resume = kotlin
-            .split_once("override fun onHostResume()")
-            .expect("onHostResume")
-            .1;
-        assert!(resume.contains("notifyAppState(AppState.ACTIVE)"));
+        assert!(watcher.contains("notifyAppState(AppState.BACKGROUND)"));
+        assert!(watcher.contains("notifyAppState(AppState.ACTIVE)"));
+        assert!(
+            watcher.contains("!activity.isChangingConfigurations"),
+            "a rotation stops and restarts the activity without the app going \
+             anywhere; it must not close a telemetry session"
+        );
+        for host_callback in ["override fun onHostPause()", "override fun onHostResume()"] {
+            let body = kotlin
+                .split_once(host_callback)
+                .expect(host_callback)
+                .1
+                .split_once("\n    }")
+                .expect("callback body ends")
+                .0;
+            assert!(
+                !body.contains("notifyAppState"),
+                "{host_callback} is an activity callback; the telemetry session \
+                 boundary belongs to the process lifecycle watcher"
+            );
+        }
 
         let swift = read(rn.join("ios/OfflineProtocolModule.swift"));
         assert!(swift.contains("os: .ios"));
@@ -9838,11 +9904,47 @@ mod tests {
         assert!(background.contains(
             "beginBackgroundTask(\n            withName: \"OfflineProtocol.telemetryFlush\""
         ));
+        // Not on `processQueue`. That queue carries the 100 ms process tick
+        // that drains inbound BLE and is drained by `destroy`, so a
+        // three-second blocking flush on it stalls delivery for the length of
+        // every backgrounding and puts a foreground return behind it. Only
+        // the Wi-Fi Direct hop belongs there.
+        assert!(background.contains("telemetryQueue.async"));
+        assert_eq!(
+            background.matches("processQueue.async").count(),
+            1,
+            "the telemetry flush must not share the queue the process tick runs on"
+        );
+        assert!(
+            swift.contains("DispatchQueue(label: \"offlineprotocol.telemetry\")"),
+            "serial, so the foreground edge cannot overtake the background one"
+        );
         let foreground = swift
             .split_once("@objc private func applicationWillEnterForeground()")
             .expect("foreground handler")
             .1;
         assert!(foreground.contains("notifyAppState(state: .active)"));
+        assert!(
+            foreground.contains("telemetryQueue.async"),
+            "both lifecycle edges must go through the one serial queue"
+        );
+
+        // `UIApplication.applicationState` is main-thread-only and
+        // `enableTelemetry` runs on the bridge queue; the state comes from
+        // the tracked flag the two main-thread notifications maintain.
+        let enable = swift
+            .split_once("@objc func enableTelemetry(")
+            .expect("enableTelemetry")
+            .1;
+        assert!(
+            enable.contains("isBackgrounded ? .background : .active"),
+            "enableTelemetry must read the tracked flag, not UIApplication"
+        );
+        assert!(
+            !enable.contains("UIApplication.shared.applicationState"),
+            "reading applicationState off the main thread is a Main Thread \
+             Checker violation on every enableTelemetry call"
+        );
 
         let ts = read(rn.join("src/index.ts"));
         for gone in [

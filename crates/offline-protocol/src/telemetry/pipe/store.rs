@@ -214,6 +214,17 @@ impl BatchStore {
         self.pending = loaded;
         self.bytes = bytes;
         self.corrupt_records += corrupt;
+        if corrupt > 0 {
+            // Reported here rather than folded into `dropped_events`: how many
+            // events each of these batches held is exactly what could not be
+            // recovered, so adding a record count to an event count would sum
+            // two units into the number that reconciles an invoice.
+            tracing::warn!(
+                target: "offline_protocol::telemetry::pipe",
+                records = corrupt,
+                "queued telemetry batches could not be opened on load and were discarded"
+            );
+        }
         self.index_dirty = corrupt > 0 || order.len() != self.pending.len();
         self.trim_to_caps();
     }
@@ -322,11 +333,16 @@ impl BatchStore {
         self.bytes
     }
 
-    /// Events lost to the caps plus records that would not open on load.
+    /// Events lost to the caps. Records that would not open on load are
+    /// counted by [`Self::corrupt_records`] instead, in their own unit.
     pub(crate) fn dropped_events(&self) -> u64 {
         self.dropped_events
     }
 
+    /// Records that would not open or parse on load. A count of records, not
+    /// of the events they held, which is why it is never summed with
+    /// [`Self::dropped_events`]; [`load`](Self::load) warns when it moves.
+    #[cfg(test)]
     pub(crate) fn corrupt_records(&self) -> u64 {
         self.corrupt_records
     }

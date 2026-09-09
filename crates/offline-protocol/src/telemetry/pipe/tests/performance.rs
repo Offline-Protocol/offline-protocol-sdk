@@ -132,20 +132,34 @@ fn the_emit_side_never_waits_long_for_the_pipe_lock_while_the_uploader_drains() 
         reason: "Max retries exceeded".into(),
         retry_count: 3,
     };
+    // The budget is tens of microseconds: an emit is a match, a push, and a
+    // mutex the uploader holds only for a `mem::take`. What this pins is that
+    // the emit side never *waits* for the drain, so it is asserted over the
+    // population rather than on the single worst sample. A handful of samples
+    // are always stretched by the OS descheduling this thread mid-push, and a
+    // Windows quantum is ~16 ms, which is what a worst-case bound was really
+    // measuring when it failed on CI at 16.6 ms. A regression that put I/O or
+    // a held lock on the emit path would push most of the population over the
+    // budget, not one sample in a hundred thousand.
+    const BUDGET: Duration = Duration::from_millis(1);
+    const SAMPLES: usize = 100_000;
     let mut worst = Duration::ZERO;
-    for _ in 0..100_000 {
+    let mut over_budget = 0usize;
+    for _ in 0..SAMPLES {
         let started = Instant::now();
         sink.try_emit_protocol_event(&event);
-        worst = worst.max(started.elapsed());
+        let elapsed = started.elapsed();
+        worst = worst.max(elapsed);
+        if elapsed > BUDGET {
+            over_budget += 1;
+        }
     }
     stop.store(true, Ordering::Relaxed);
     drainer.join().expect("drainer exits");
-    // The budget is 50 us on CI hardware; the assertion leaves room for a
-    // preempted core, which is the only thing that can push a `mem::take`
-    // past it.
     assert!(
-        worst < Duration::from_millis(5),
-        "worst emit latency under contention was {worst:?}"
+        over_budget * 100 <= SAMPLES,
+        "{over_budget} of {SAMPLES} emits exceeded {BUDGET:?} (worst {worst:?}); \
+         the emit side is waiting for the uploader"
     );
 }
 

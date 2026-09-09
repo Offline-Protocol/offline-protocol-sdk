@@ -62,8 +62,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   replayed through both, compared batch by batch, with the two documented
   divergences (raw `reason`, the SDK version) normalized.
 - **A debug tap.** `debug: true` logs every wire event on the platform log
-  (logcat, the unified log) or stderr, which needed a place for the core's
-  `tracing` output to go on a device; the uniffi crate now installs one.
+  (logcat, the unified log) or stderr, which needed a place for the pipe's
+  `tracing` output to go on a device; the uniffi crate now installs one. It
+  carries the pipe's own target and nothing else: the engine's internal
+  logging names groups, senders and peers, and a device log is readable by
+  anything that can run `logcat`, so the filter is a privacy boundary rather
+  than a volume setting. An embedder that wants the whole stream installs its
+  own subscriber, which the SDK leaves in place.
 - **An Apple privacy manifest** shipped with the pod, and
   [docs/privacy.md](docs/privacy.md) with the store disclosures.
 - `ProtocolError.TelemetryConfigInvalid`, appended at position 24, naming the
@@ -87,6 +92,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   on 401 and 403 rather than a drop-and-continue, `Retry-After` honoured,
   `Idempotency-Key` and `User-Agent` sent, 15 s request and 10 s connect
   timeouts, and the battery deferral. Each is a named test.
+- **A 401 or 403 keeps its batch.** The halt already stops every later send,
+  so dropping the batch that drew the refusal lost data for nothing: a
+  rejected key is a configuration fault the developer fixes and re-enables
+  through, and the queue now waits for a good one. `telemetryStats().dropped`
+  counts events and only events, so a queued batch that cannot be opened on
+  load is warned about rather than added to it in a different unit.
+- **Telemetry session boundaries follow the process on Android**, through the
+  started-activity count rather than `onHostPause`. `onHostPause` is
+  `Activity.onPause`, which fires for a runtime permission dialog (including
+  the Bluetooth one the SDK triggers itself), the share sheet and any
+  translucent activity, so it counted one iOS session as several on Android.
+  A configuration change no longer closes a session either.
 - The `data` and `telemetry-pipe` cargo features are both on by default; a
   build that wants neither the CRDT engine nor the TLS stack opts out.
 - `LICENSE-COMMERCIAL.md` states the telemetry term every commercial license

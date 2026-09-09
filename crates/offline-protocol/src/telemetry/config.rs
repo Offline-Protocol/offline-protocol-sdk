@@ -358,7 +358,8 @@ impl TelemetryConfig {
     /// would otherwise be retried forever as a network error); an empty
     /// `app_version`; a `max_batch_bytes` of zero or above
     /// [`MAX_BATCH_BYTES_LIMIT`]; a `max_buffered_records` of zero; a
-    /// `flush_interval` below [`MIN_FLUSH_INTERVAL`].
+    /// `flush_interval` below [`MIN_FLUSH_INTERVAL`], which is reported under
+    /// the name every binding gives it, `flush_interval_ms`.
     pub fn validate(&self) -> Result<(), &'static str> {
         fn header_safe(value: Option<&str>) -> bool {
             value.is_some_and(|v| !v.is_empty() && v.bytes().all(|b| (0x20..=0x7e).contains(&b)))
@@ -379,7 +380,12 @@ impl TelemetryConfig {
             return Err("max_buffered_records");
         }
         if self.flush_interval < MIN_FLUSH_INTERVAL {
-            return Err("flush_interval");
+            // Named for the field the caller set, not for the one this struct
+            // holds. The refusal is the only diagnostic an application gets,
+            // and every binding spells this `flushIntervalMs`; a message
+            // naming `flush_interval` sends the reader looking for a field
+            // their SDK does not have.
+            return Err("flush_interval_ms");
         }
         Ok(())
     }
@@ -462,7 +468,7 @@ mod tests {
                 .clone()
                 .with_flush_interval(Duration::from_millis(999))
                 .validate(),
-            Err("flush_interval")
+            Err("flush_interval_ms")
         );
     }
 

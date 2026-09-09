@@ -38162,3 +38162,68 @@ fn test_resend_rate_cap_bounds_retry_drain_to_burst() {
         "the cap must throttle resends relative to the default ({capped} vs {uncapped})"
     );
 }
+
+/// `enable_telemetry` never runs storage I/O on the caller, even when a
+/// protocol-state store is already attached.
+///
+/// That qualifier is the whole test. Adopting a sealed backend loads the
+/// durable queue: an index read, up to `MAX_PENDING_BATCHES` sealed record
+/// reads with a decrypt and a parse each, a `list_keys` and the orphan
+/// sweep. Constructing the pipe's store with that backend ran all of it here,
+/// under `&mut self`, and the ordering that triggers it is the common one
+/// rather than the exotic one — on the mobile bindings `initialize_mls` has
+/// already attached storage by the time an app calls `enableTelemetry`, and
+/// the engine's own doc comment and the threat model's network-egress section
+/// both promise this call does no such thing. The backend is handed over
+/// instead, and the pipe's own thread adopts it.
+#[cfg(feature = "telemetry-pipe")]
+#[test]
+fn enable_telemetry_does_no_storage_io_on_the_caller_even_with_storage_attached() {
+    use crate::protocol::state_crypto::StateRecordCipher;
+    use crate::protocol_state_storage::{ProtocolStateResult, ProtocolStateStorage};
+    use crate::telemetry::{AppState, TelemetryHost, TelemetryOs};
+    use std::time::Instant;
+
+    /// Every read sleeps, as a slow disk would. One reaching the caller is
+    /// worth 100 ms; the load path makes several.
+    struct SlowStateStorage;
+    impl ProtocolStateStorage for SlowStateStorage {
+        fn store(&self, _: &str, _: &str, _: &[u8]) -> ProtocolStateResult<()> {
+            thread::sleep(Duration::from_millis(100));
+            Ok(())
+        }
+        fn load(&self, _: &str, _: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
+            thread::sleep(Duration::from_millis(100));
+            Ok(None)
+        }
+        fn delete(&self, _: &str, _: &str) -> ProtocolStateResult<()> {
+            Ok(())
+        }
+        fn list_keys(&self, _: &str) -> ProtocolStateResult<Vec<String>> {
+            thread::sleep(Duration::from_millis(100));
+            Ok(Vec::new())
+        }
+    }
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    // What `initialize_mls` leaves behind, without paying for its own I/O.
+    protocol.protocol_state_storage = Some(Arc::new(SlowStateStorage));
+    protocol.state_record_cipher = Some(StateRecordCipher::new(&[7u8; 32]));
+
+    let config = TelemetryConfig::default()
+        .with_api_key("mp_test_key")
+        .with_app_id("app_test");
+    let host = TelemetryHost::new(TelemetryOs::Ios, 18).with_app_state(AppState::Active);
+
+    let started = Instant::now();
+    protocol.enable_telemetry(config, host).expect("enables");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(50),
+        "enable_telemetry blocked the caller on storage for {elapsed:?}"
+    );
+
+    // Nothing was emitted, so the worker drains an empty ring and opens no
+    // socket; disabling signals its stop.
+    protocol.disable_telemetry();
+}

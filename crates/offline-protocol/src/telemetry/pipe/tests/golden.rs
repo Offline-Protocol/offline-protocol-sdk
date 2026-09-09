@@ -647,8 +647,13 @@ fn golden_input_fixture_is_current() {
         std::fs::create_dir_all(fixtures_dir()).expect("fixtures dir");
         std::fs::write(&path, &generated).expect("write input fixture");
     }
+    // Compared with the carriage returns removed. `.gitattributes` pins this
+    // file to LF, which is the real fix, but a working tree checked out before
+    // that rule landed still holds CRLF, and every line would then differ for
+    // a reason that has nothing to do with the scenario.
     let committed = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        .replace("\r\n", "\n");
     assert_eq!(
         committed, generated,
         "the golden input fixture no longer matches the scenario; regenerate with \

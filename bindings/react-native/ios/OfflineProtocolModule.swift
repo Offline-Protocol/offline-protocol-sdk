@@ -125,6 +125,18 @@ class OfflineProtocolModule: RCTEventEmitter {
     }
 
     private let processQueue = DispatchQueue(label: "offlineprotocol.processor")
+
+    /// Serial, and deliberately not `processQueue`.
+    ///
+    /// The background transition's `flushTelemetryBlocking` waits up to three
+    /// seconds, and `processQueue` carries the 100 ms process tick (which is
+    /// what drains inbound BLE) and is drained by `destroy`. Sharing it made
+    /// every backgrounding stall inbound delivery for the length of a flush,
+    /// and put a foreground return behind it. Serial rather than concurrent
+    /// for the reason the Wi-Fi pair uses one: both lifecycle edges go
+    /// through here, so `.active` can never overtake the `.background` it
+    /// follows.
+    private let telemetryQueue = DispatchQueue(label: "offlineprotocol.telemetry")
     private var processTimer: DispatchSourceTimer?
     /// The deferred `bleStatusChanged(true)` backup call, held so `destroy` can
     /// cancel it. An uncancelled one re-enters the protocol up to a second after
@@ -138,7 +150,28 @@ class OfflineProtocolModule: RCTEventEmitter {
         print("[OfflineProtocolModule] init() called")
         super.init()
         addBackgroundObservers()
+        seedBackgroundState()
         print("[OfflineProtocolModule] init() completed successfully")
+    }
+
+    /// Reads `applicationState` once, on main, to seed `isBackgrounded`; the
+    /// two notifications maintain it from there.
+    ///
+    /// The case this exists for is a background launch (a BLE wake, a silent
+    /// push): the module is constructed with no lifecycle edge to observe,
+    /// and without this seed a pipe enabled there would believe it was
+    /// foregrounded and never close its first session. `requiresMainQueueSetup`
+    /// is true so this normally runs inline; the hop covers the case where it
+    /// does not, and costs only that a pipe enabled in the same turn as init
+    /// reads the default.
+    private func seedBackgroundState() {
+        if Thread.isMainThread {
+            isBackgrounded = UIApplication.shared.applicationState == .background
+        } else {
+            DispatchQueue.main.async { [self] in
+                isBackgrounded = UIApplication.shared.applicationState == .background
+            }
+        }
     }
     
     deinit {
@@ -191,6 +224,34 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// lifecycle notifications that drive it are delivered on main.
     private let foregroundReconnectPolicy = ForegroundReconnectPolicy()
 
+    /// Whether the app is currently in the background, maintained from the two
+    /// lifecycle notifications rather than read from UIKit on demand.
+    ///
+    /// `UIApplication.applicationState` is a main-thread-only API, and the one
+    /// caller that needs this — `enableTelemetry`, seeding the pipe so a
+    /// background launch closes its first session on the next foreground —
+    /// runs on the bridge queue. Reading it there is a Main Thread Checker
+    /// violation on every call and is not guaranteed coherent, and hopping to
+    /// main with `sync` from the bridge queue invites the deadlock that
+    /// ordering has anywhere React Native can be waiting the other way. The
+    /// notifications are delivered on main and are the same edges the pipe
+    /// draws its sessions from, so tracking them is both cheaper and closer
+    /// to the truth. Written on main, read anywhere, hence the lock.
+    private let backgroundStateLock = NSLock()
+    private var _isBackgrounded = false
+    private var isBackgrounded: Bool {
+        get {
+            backgroundStateLock.lock()
+            defer { backgroundStateLock.unlock() }
+            return _isBackgrounded
+        }
+        set {
+            backgroundStateLock.lock()
+            defer { backgroundStateLock.unlock() }
+            _isBackgrounded = newValue
+        }
+    }
+
     /// Background assertion held while the telemetry pipe closes its session
     /// and flushes on the background transition. Same ownership rule as the
     /// Wi-Fi one below: main-confined, ended exactly once.
@@ -225,6 +286,7 @@ class OfflineProtocolModule: RCTEventEmitter {
 
     @objc private func applicationDidEnterBackground() {
         Self.testLastWifiStatusChangeForTesting = false
+        isBackgrounded = true
         foregroundReconnectPolicy.didEnterBackground(nowMs: MonotonicClock.nowMs())
         guard let proto = protocolInstance else { return }
 
@@ -274,7 +336,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             self.endBackgroundTelemetryTask(self.backgroundTelemetryTaskId)
         }
         backgroundTelemetryTaskId = telemetryTask
-        processQueue.async {
+        telemetryQueue.async {
             proto.notifyAppState(state: .background)
             _ = proto.flushTelemetryBlocking(deadlineMs: 3000)
             DispatchQueue.main.async { self.endBackgroundTelemetryTask(telemetryTask) }
@@ -283,6 +345,7 @@ class OfflineProtocolModule: RCTEventEmitter {
 
     @objc private func applicationWillEnterForeground() {
         Self.testLastWifiStatusChangeForTesting = true
+        isBackgrounded = false
 
         // Proactively heal a socket the OS likely killed during suspension.
         // `isInternetReady()` cannot tell a healthy socket from a zombie (both
@@ -309,6 +372,12 @@ class OfflineProtocolModule: RCTEventEmitter {
         // the app is becoming active, not losing its runtime.
         processQueue.async {
             try? proto.wifiDirectStatusChanged(isConnected: true)
+        }
+        // On `telemetryQueue`, not `processQueue`: it has to be the same queue
+        // the background edge used, or `.active` could be delivered while the
+        // three-second background flush is still running and rotate the
+        // session out from under it.
+        telemetryQueue.async {
             // The first foreground after a background rotates the telemetry
             // session; a foreground with no background before it is not an
             // edge and does nothing.
@@ -1274,7 +1343,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             // The application state right now, so a pipe enabled by a
             // background launch closes its first session on the next
             // foreground rather than after a full round trip.
-            let state: AppState = UIApplication.shared.applicationState == .background ? .background : .active
+            let state: AppState = isBackgrounded ? .background : .active
             try proto.enableTelemetry(config: config, appState: state)
             resolver(nil)
         } catch {
@@ -5359,6 +5428,43 @@ extension OfflineProtocolModule {
 // MARK: - TelemetryConfig parsing
 
 extension OfflineProtocolModule {
+    /// A config number the app supplied, refused if it is negative or not
+    /// finite. Mirrors Kotlin's `readOptionalNonNegativeLong`.
+    ///
+    /// JS numbers are f64, and a negative one arrives here as a negative
+    /// `NSNumber`. `uint64Value` does not clamp it: on arm64 it saturates to
+    /// 0, which the core then refuses by name, but on the x86 simulator it
+    /// wraps to a huge value and an interval flush silently never fires
+    /// again. Returning nil keeps the Rust-side default, which is what
+    /// Android already did and what makes the two platforms agree.
+    ///
+    /// Config-sized numbers fit an f64's 53-bit mantissa comfortably. Do not
+    /// reuse this for counter fields that can exceed 2^53.
+    fileprivate func optionalNonNegativeNumber(_ dict: [String: Any], _ key: String) -> Double? {
+        guard let number = dict[key] as? NSNumber else { return nil }
+        let value = number.doubleValue
+        guard value.isFinite, value >= 0 else {
+            print("[OfflineProtocolModule] telemetry: ignoring value for '\(key)' (\(value)) — expected a non-negative number. Falling back to the Rust default.")
+            return nil
+        }
+        return value
+    }
+
+    /// `Double(UInt64.max)` rounds *above* `UInt64.max`, so converting it back
+    /// traps. Clamping well below that costs nothing: the ceiling here is
+    /// still millions of years expressed in milliseconds.
+    fileprivate func optionalNonNegativeUInt64(_ dict: [String: Any], _ key: String) -> UInt64? {
+        guard let value = optionalNonNegativeNumber(dict, key) else { return nil }
+        return UInt64(min(value, Double(UInt64(1) << 62)))
+    }
+
+    fileprivate func optionalNonNegativeUInt32(_ dict: [String: Any], _ key: String) -> UInt32? {
+        guard let value = optionalNonNegativeNumber(dict, key) else { return nil }
+        return UInt32(min(value, Double(UInt32.max)))
+    }
+}
+
+extension OfflineProtocolModule {
     // The TS `TelemetryConfig` type (bindings/react-native/src/types.ts)
     // only emits camelCase keys — this parser matches that contract.
     //
@@ -5400,13 +5506,13 @@ extension OfflineProtocolModule {
             osMajor: osMajor,
             appVersion: dict["appVersion"] as? String,
             debug: dict["debug"] as? Bool,
-            flushIntervalMs: (dict["flushIntervalMs"] as? NSNumber)?.uint64Value,
-            maxBatchBytes: (dict["maxBatchBytes"] as? NSNumber)?.uint64Value,
-            maxBufferedRecords: (dict["maxBufferedRecords"] as? NSNumber)?.uint32Value,
+            flushIntervalMs: optionalNonNegativeUInt64(dict, "flushIntervalMs"),
+            maxBatchBytes: optionalNonNegativeUInt64(dict, "maxBatchBytes"),
+            maxBufferedRecords: optionalNonNegativeUInt32(dict, "maxBufferedRecords"),
             includeDeviceId: dict["includeDeviceId"] as? Bool,
             scrubIds: dict["scrubIds"] as? Bool,
             mlsVerbosity: verbosity,
-            metricsCadenceMs: (dict["metricsCadenceMs"] as? NSNumber)?.uint64Value,
+            metricsCadenceMs: optionalNonNegativeUInt64(dict, "metricsCadenceMs"),
             routingDiagnostic: dict["routingDiagnostic"] as? Bool,
             mlsSamplingBypass: dict["mlsSamplingBypass"] as? Bool
         )

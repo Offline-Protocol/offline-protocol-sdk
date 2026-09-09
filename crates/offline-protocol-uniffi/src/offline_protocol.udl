@@ -1048,7 +1048,7 @@ interface OfflineProtocol {
     // queued still drains.
     void set_telemetry_enabled(boolean enabled);
 
-    // Stable, opaque per-install telemetry identifier (32 hex chars),    // Stable, opaque per-install telemetry identifier (32 hex chars),
+    // Stable, opaque per-install telemetry identifier (32 hex chars),
     // derived from the SDK-managed persistent scrub secret. The secret
     // itself never crosses the FFI and cannot be recovered from the id.
     //
