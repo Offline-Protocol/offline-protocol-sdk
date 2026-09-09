@@ -38227,3 +38227,94 @@ fn enable_telemetry_does_no_storage_io_on_the_caller_even_with_storage_attached(
     // socket; disabling signals its stop.
     protocol.disable_telemetry();
 }
+
+/// The handshake latency in the session summary must survive the trip from
+/// the engine's own emit sites through the classifier to the pairer.
+///
+/// The pairing key is the thing under test, not the arithmetic. The engine
+/// derives an MLS `session_id` from `peer=<id>|group=<id>`, and the group is
+/// minted *during* a handshake: the id `mls.session_ready` carries is
+/// therefore never the id that any earlier record for the same handshake
+/// carried. A pairer keyed on it reports nothing on any real device, however
+/// well it behaves against hand-built records that share one. This drives the
+/// two real emit sites and asserts a latency comes out the far end.
+#[cfg(feature = "telemetry-pipe")]
+#[test]
+fn a_handshake_seen_through_the_engines_own_emit_sites_yields_a_latency() {
+    use crate::mls_observability::{MlsErrorCategory, MlsOperationContext};
+    use crate::telemetry::pipe::pipeline::Pipeline;
+    use crate::telemetry::pipe::wire::WireEventData;
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    let peer = "off1peerhandshake";
+    let group = "session:off1peerhandshake";
+    // What a send finds when there is no session with a peer yet.
+    protocol.emit_mls_session_missing(
+        Some(peer),
+        None,
+        MlsOperationContext::SessionLookup,
+        MlsErrorCategory::SessionStateMissing,
+    );
+    // What the engine reports once that handshake completes.
+    protocol.emit_mls_session_ready(peer, group, MlsOperationContext::Welcome);
+
+    let records = sink.take();
+    let mls: Vec<&MlsLifecycleEvent> = records
+        .iter()
+        .filter_map(|r| match r {
+            TelemetryRecord::Mls(event) => Some(event),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(mls.len(), 2, "both lifecycle records reached the sink");
+
+    let (missing_session, missing_peer) = match mls[0] {
+        MlsLifecycleEvent::SessionMissing {
+            session_id,
+            peer_id,
+            ..
+        } => (session_id.clone(), peer_id.clone()),
+        other => panic!("expected session_missing, got {other:?}"),
+    };
+    let (ready_session, ready_peer) = match mls[1] {
+        MlsLifecycleEvent::SessionReady {
+            session_id,
+            peer_id,
+            ..
+        } => (session_id.clone(), peer_id.clone()),
+        other => panic!("expected session_ready, got {other:?}"),
+    };
+    // The regression this pins: the group joins the seed only at the end, so
+    // the two ends of one handshake never agree on a session id.
+    assert_ne!(
+        missing_session, ready_session,
+        "if these ever agree, the session id became a usable pairing key and \
+         this test is no longer proving anything",
+    );
+    assert!(missing_peer.is_some() && missing_peer == ready_peer);
+
+    // Through the real classifier and pairer, as the pipe runs them.
+    let mut pipeline = Pipeline::new(64, 1 << 20, false, 0);
+    for record in &records {
+        pipeline.handle(record, 0);
+    }
+    pipeline.emit_session_summary(1_000);
+    let summary = pipeline
+        .buffer()
+        .iter()
+        .find_map(|b| match &b.event.data {
+            WireEventData::SessionSummary(summary) => Some(summary.clone()),
+            _ => None,
+        })
+        .expect("the boundary pushed a summary");
+    assert!(
+        summary.mls_session_ready_latency_p50_ms.is_some(),
+        "the handshake produced no latency: the pairing key does not survive \
+         the engine's own emit sites",
+    );
+}

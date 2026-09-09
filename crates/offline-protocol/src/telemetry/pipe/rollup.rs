@@ -91,7 +91,13 @@ impl RollupAggregator {
                 w.relay_ms += dt;
             }
         }
-        w.last_frame_ts = ts;
+        // Never backwards. A wall-clock correction inside the open bucket
+        // arrives as a frame earlier than the last one; `dt` clamps to zero
+        // for that frame, but moving the mark back would re-credit the
+        // skipped span to the next frame and let a window's dwell exceed the
+        // window itself. An earlier *bucket* is dropped above; this is the
+        // same step landing inside the current one.
+        w.last_frame_ts = w.last_frame_ts.max(ts);
         w.last_transport = transport;
         w.last_is_relay = sample.is_local_relay;
         w.frame_count += 1;

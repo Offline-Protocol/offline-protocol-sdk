@@ -13,11 +13,28 @@
 //!   `mesh-analytics` checkout.
 //!
 //! `pipe_matches_the_typescript_oracle` replays the scenario through the
-//! pipe with the same clock and compares batch by batch. Two documented
-//! divergences are normalized before comparing: the pipe sends the raw
-//! `reason` where the client sent a `reason_class`, and the pipe stamps its
-//! own `sdk_version`. Everything else, including the session cut, the
-//! rollup arithmetic, the summary deltas and the rescue summary, must match.
+//! pipe with the same clock and compares batch by batch. Four documented
+//! divergences are normalized before comparing, each with its own test
+//! elsewhere:
+//!
+//! - the pipe sends the raw `reason` where the client sent a `reason_class`;
+//! - the pipe stamps its own `sdk_version`;
+//! - `mls_session_ready_latency_p50_ms`: the client paired `mls.initialized`
+//!   with `mls.session_ready` on the MLS `session_id`, which the engine
+//!   derives from `peer=<id>|group=<id>`. The group is minted during the
+//!   handshake and `mls.initialized` is emitted once per process for no peer,
+//!   so on a device that pairing never forms and the column is always absent.
+//!   The pipe pairs `mls.session_missing` with `mls.session_ready` on the
+//!   scrubbed peer instead. This scenario feeds the client's shape, so the
+//!   pipe reports nothing for it; `session_pairer` holds the tests that
+//!   exercise the pairing itself;
+//! - `session_duration_s`: every other summary field is a delta the ingest
+//!   sums, and the client reported this one from the session start, so a
+//!   session with two summaries had its seconds counted twice. The pipe
+//!   reports the span since the last summary.
+//!
+//! Everything else, including the session cut, the rollup arithmetic, the
+//! counter deltas and the rescue summary, must match.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -687,7 +704,7 @@ fn replay_through_the_pipe(steps: &[(i64, Step)]) -> Vec<Value> {
 
 /// Ordinal ids, a placeholder SDK version, and the documented `reason`
 /// divergence removed from both sides.
-fn normalize(batches: &[Value], drop_key: &str) -> Vec<Value> {
+fn normalize(batches: &[Value], drop_keys: &[&str]) -> Vec<Value> {
     let mut sessions: HashMap<String, String> = HashMap::new();
     batches
         .iter()
@@ -707,7 +724,9 @@ fn normalize(batches: &[Value], drop_key: &str) -> Vec<Value> {
             if let Some(events) = obj.get_mut("events").and_then(Value::as_array_mut) {
                 for event in events {
                     if let Some(data) = event.get_mut("data").and_then(Value::as_object_mut) {
-                        data.remove(drop_key);
+                        for key in drop_keys {
+                            data.remove(*key);
+                        }
                     }
                 }
             }
@@ -801,8 +820,27 @@ fn pipe_matches_the_typescript_oracle() {
         }
     }
 
-    let ours = normalize(&ours, "reason");
-    let theirs = normalize(oracle, "reason_class");
+    // The two summary fields are dropped from both sides: each is a
+    // deliberate divergence named in this module's header, and comparing
+    // them would pin the client's arithmetic rather than the pipe's.
+    const DIVERGENT_SUMMARY_FIELDS: [&str; 2] =
+        ["mls_session_ready_latency_p50_ms", "session_duration_s"];
+    let ours = normalize(
+        &ours,
+        &[
+            "reason",
+            DIVERGENT_SUMMARY_FIELDS[0],
+            DIVERGENT_SUMMARY_FIELDS[1],
+        ],
+    );
+    let theirs = normalize(
+        oracle,
+        &[
+            "reason_class",
+            DIVERGENT_SUMMARY_FIELDS[0],
+            DIVERGENT_SUMMARY_FIELDS[1],
+        ],
+    );
     for (i, (a, b)) in ours.iter().zip(theirs.iter()).enumerate() {
         assert_close(a, b, &format!("batches[{i}]"));
     }
@@ -854,7 +892,11 @@ fn the_scenario_exercises_every_wire_type_and_both_sessions() {
         "background, rescue on foreground, end_session"
     );
     let first = &summaries[0]["data"];
-    assert_eq!(first["mls_session_ready_latency_p50_ms"], json!(150));
+    // Absent, and correctly so: this scenario carries the shape the frozen
+    // client read, whose `mls.initialized` records name no peer. The pipe
+    // pairs a handshake from `mls.session_missing`, which this scenario only
+    // emits without a peer. See this module's header.
+    assert!(first.get("mls_session_ready_latency_p50_ms").is_none());
     assert_eq!(first["mls_encryption_used_count"], json!(4));
     assert_eq!(first["routing_switches"], json!(2));
     assert_eq!(first["routing_escalations"], json!(2));
@@ -865,6 +907,10 @@ fn the_scenario_exercises_every_wire_type_and_both_sessions() {
     assert_eq!(rescue["mls_encryption_used_count"], json!(1));
     assert_eq!(rescue["routing_switches"], json!(1));
     assert!(rescue.get("mls_session_ready_latency_p50_ms").is_none());
+    // 260 s into the run, 205 s of which the first summary already reported.
+    // Summing the three rows gives the 300 s the scenario actually ran.
+    assert_eq!(rescue["session_duration_s"], json!(55));
+    assert_eq!(summaries[2]["data"]["session_duration_s"], json!(40));
 }
 
 #[allow(dead_code)]

@@ -9910,6 +9910,52 @@ mod tests {
             "an activity destroyed without a stop must leave the set, or it \
              holds the background edge off forever"
         );
+        // The watcher writes these on the main thread and `enableTelemetry`
+        // and `invalidate` read them on the native-modules thread, so the
+        // memory model, not the callback contract, decides what a seed sees.
+        // An unsynchronized read can seed a session on the wrong side of the
+        // boundary.
+        assert!(
+            kotlin.contains("java.util.Collections.synchronizedSet("),
+            "the started-activity set is read off the main thread and must be \
+             synchronized"
+        );
+        assert!(
+            kotlin.contains("@Volatile\n    private var sawActivityStart"),
+            "sawActivityStart is read off the main thread and must be volatile"
+        );
+        // Order, not just presence: clearing first lets a callback already in
+        // flight on main put an activity back into the set being emptied.
+        let remove = kotlin
+            .split_once("private fun removeProcessLifecycleWatcher()")
+            .expect("watcher removal")
+            .1
+            .split_once("\n    }")
+            .expect("watcher removal ends")
+            .0;
+        assert!(
+            remove
+                .find("unregisterActivityLifecycleCallbacks")
+                .zip(remove.find("startedActivities.clear()"))
+                .is_some_and(|(unregister, clear)| unregister < clear),
+            "unregister the watcher before clearing the set it maintains"
+        );
+        // An exception escaping an `ActivityLifecycleCallbacks` method takes
+        // the process down, and a core panic arrives as `InternalException`
+        // rather than `IllegalStateException`. A lifecycle hint is never
+        // worth a crash, whatever the type.
+        let quietly = kotlin
+            .split_once("private fun notifyAppStateQuietly(")
+            .expect("notifyAppStateQuietly")
+            .1
+            .split_once("\n    }")
+            .expect("notifyAppStateQuietly ends")
+            .0;
+        assert!(
+            quietly.contains("catch (e: Exception)"),
+            "notifyAppStateQuietly must not let any throwable escape into an \
+             ActivityLifecycleCallbacks method"
+        );
         // The wiring, not just the bodies. Every assertion above passes on a
         // watcher that is never registered or never removed.
         let init = kotlin

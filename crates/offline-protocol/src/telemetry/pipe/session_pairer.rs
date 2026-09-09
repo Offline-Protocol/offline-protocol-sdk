@@ -2,21 +2,33 @@
 //!
 //! Two things, both landing inside the single `mesh_session_summary` event:
 //!
-//! - **Pairs** `mls.initialized` with `mls.session_ready` on the MLS
-//!   `session_id` to derive `mls_session_ready_latency_p50_ms`.
+//! - **Pairs** `mls.session_missing` with `mls.session_ready` on the scrubbed
+//!   peer id to derive `mls_session_ready_latency_p50_ms`: the time from the
+//!   engine wanting a session with a peer and not having one, to that
+//!   session being usable.
+//!
+//!   Not on the MLS `session_id`, and not from `mls.initialized`. That id is
+//!   `hash(peer=<id>|group=<id>)` and the group is minted *during* the
+//!   handshake, so the id an end carries is never the id the start carried;
+//!   `mls.initialized` is emitted once per process for no peer at all. Keyed
+//!   either of those ways the pair never forms and the column is always
+//!   absent, which is what the frozen TypeScript client shipped.
 //! - **Counts** routing decisions into `routing_switches`,
 //!   `routing_escalations` and `escalation_reasons`, and `mls.encryption_used`
 //!   into `mls_encryption_used_count`.
 //!
-//! The MLS session id is an in-memory pairing key only; it is never emitted.
+//! The peer id is an in-memory pairing key only; it is never emitted.
 //! Memory is bounded on both axes: the unpaired map by a pairing timeout and
 //! a cap, the paired sample by a sliding window. Both reset at a session
 //! boundary.
 //!
-//! Every counter is a delta. The ingest sums summary rows, and one session
-//! can legitimately produce more than one (background, an explicit end, a
-//! rotation with unreported records), so a repeated total would double every
-//! counter on the dashboard. `take_summary` drains what it reports.
+//! Every field is a delta, `session_duration_s` included. The ingest sums
+//! summary rows, and one session can legitimately produce more than one
+//! (background, an explicit end, a rotation with unreported records), so a
+//! repeated total would double every counter on the dashboard, and a
+//! duration reported from the session start would count the same seconds
+//! once per summary. `take_summary` drains what it reports and advances the
+//! anchor the next duration is measured from.
 
 use std::collections::HashMap;
 
@@ -24,10 +36,20 @@ use crate::telemetry::pipe::classify::SessionInput;
 use crate::telemetry::pipe::wire::SessionSummary;
 use crate::telemetry::routing::{RoutingPhase, RoutingReasonCode};
 
-/// Upper bound on simultaneously pending unpaired inits.
+/// Upper bound on simultaneously pending unpaired peers.
 pub(crate) const MAX_PENDING: usize = 256;
-/// A pending init older than this is evicted unpaired.
-pub(crate) const PAIR_TIMEOUT_MS: i64 = 30_000;
+/// A pending want older than this is evicted unpaired.
+///
+/// Ten minutes, not the thirty seconds a local subsystem init would need. A
+/// handshake here waits on the *counterparty*: a key package has to reach a
+/// peer that may be asleep, out of range, or reachable only over a relay, so
+/// a minute-scale establishment is ordinary rather than pathological, and a
+/// window shorter than the thing being measured reports only the fast half
+/// of the distribution. The cost of the longer window is that a want whose
+/// handshake was abandoned can pair with a much later one for the same peer
+/// and overstate that sample; the median absorbs it, and the alternative
+/// discards the samples that matter most.
+pub(crate) const PAIR_TIMEOUT_MS: i64 = 10 * 60_000;
 /// Upper bound on retained paired latencies (a sliding window).
 pub(crate) const MAX_LATENCIES: usize = 1024;
 
@@ -53,11 +75,15 @@ fn escalation_bucket(code: RoutingReasonCode) -> Option<usize> {
 
 #[derive(Debug)]
 pub(crate) struct SessionPairer {
-    /// MLS session id to init timestamp, awaiting its `session_ready`.
+    /// Scrubbed peer id to the instant a session with it was first wanted,
+    /// awaiting its `session_ready`.
     pending: HashMap<String, i64>,
-    /// Paired init-to-ready latencies, most recent last.
+    /// Paired want-to-ready latencies, most recent last.
     latencies: Vec<i64>,
-    start_ms: i64,
+    /// The instant the last summary reported through. Every duration is
+    /// measured from here, not from the session start, so summing the rows
+    /// of a session yields the session's length exactly once.
+    since_ms: i64,
     switches: u32,
     escalations: [u32; 6],
     encryption_used: u32,
@@ -68,7 +94,7 @@ impl SessionPairer {
         Self {
             pending: HashMap::new(),
             latencies: Vec::new(),
-            start_ms: now_ms,
+            since_ms: now_ms,
             switches: 0,
             escalations: [0; 6],
             encryption_used: 0,
@@ -78,19 +104,24 @@ impl SessionPairer {
     /// Folds one session-lane record into the running state.
     pub(crate) fn observe(&mut self, input: SessionInput, now_ms: i64) {
         match input {
-            SessionInput::MlsInitialized { session_id, ts_ms } => {
+            SessionInput::MlsSessionWanted { peer, ts_ms } => {
                 self.evict_stale(now_ms);
-                if !self.pending.contains_key(&session_id) && self.pending.len() >= MAX_PENDING {
+                if !self.pending.contains_key(&peer) && self.pending.len() >= MAX_PENDING {
                     self.drop_oldest_pending();
                 }
-                self.pending.insert(session_id, ts_ms);
+                // First want wins. The engine reports a miss on every send
+                // attempt while the session is still being established, so
+                // overwriting would measure from the last attempt before it
+                // succeeded and report a latency near zero for a handshake
+                // that in fact took minutes.
+                self.pending.entry(peer).or_insert(ts_ms);
             }
-            SessionInput::MlsSessionReady { session_id, ts_ms } => {
+            SessionInput::MlsSessionReady { peer, ts_ms } => {
                 // The timeout holds on this path too: a late `ready` with no
-                // intervening init to trigger a sweep would otherwise pair
-                // with a long-dead init and inject an oversized latency.
+                // intervening want to trigger a sweep would otherwise pair
+                // with a long-dead want and inject an oversized latency.
                 self.evict_stale(now_ms);
-                let Some(init_ts) = self.pending.remove(&session_id) else {
+                let Some(init_ts) = self.pending.remove(&peer) else {
                     return;
                 };
                 if self.latencies.len() >= MAX_LATENCIES {
@@ -133,7 +164,7 @@ impl SessionPairer {
             Some(rounded_median(&sorted))
         };
         let summary = SessionSummary {
-            session_duration_s: ((now_ms - self.start_ms) as f64 / 1000.0).round().max(0.0) as i64,
+            session_duration_s: ((now_ms - self.since_ms) as f64 / 1000.0).round().max(0.0) as i64,
             routing_switches: self.switches,
             routing_escalations: self.escalations.iter().sum(),
             escalation_reasons: self.escalations,
@@ -144,6 +175,10 @@ impl SessionPairer {
         self.escalations = [0; 6];
         self.encryption_used = 0;
         self.latencies.clear();
+        // The anchor moves only when a summary actually reports the span, so
+        // a boundary that emits nothing leaves those seconds to be carried by
+        // the next summary rather than dropping them.
+        self.since_ms = now_ms;
         summary
     }
 
@@ -163,7 +198,7 @@ impl SessionPairer {
         self.switches = 0;
         self.escalations = [0; 6];
         self.encryption_used = 0;
-        self.start_ms = now_ms;
+        self.since_ms = now_ms;
     }
 
     fn evict_stale(&mut self, now_ms: i64) {
@@ -203,26 +238,26 @@ pub(crate) fn rounded_median(sorted: &[i64]) -> i64 {
 mod tests {
     use super::*;
 
-    fn init(sid: &str, ts: i64) -> SessionInput {
-        SessionInput::MlsInitialized {
-            session_id: sid.into(),
+    fn wanted(peer: &str, ts: i64) -> SessionInput {
+        SessionInput::MlsSessionWanted {
+            peer: peer.into(),
             ts_ms: ts,
         }
     }
 
-    fn ready(sid: &str, ts: i64) -> SessionInput {
+    fn ready(peer: &str, ts: i64) -> SessionInput {
         SessionInput::MlsSessionReady {
-            session_id: sid.into(),
+            peer: peer.into(),
             ts_ms: ts,
         }
     }
 
     #[test]
-    fn pairs_init_with_ready_and_reports_the_rounded_median() {
+    fn pairs_want_with_ready_and_reports_the_rounded_median() {
         let mut p = SessionPairer::new(0);
-        p.observe(init("a", 1000), 1000);
+        p.observe(wanted("a", 1000), 1000);
         p.observe(ready("a", 1100), 1100);
-        p.observe(init("b", 2000), 2000);
+        p.observe(wanted("b", 2000), 2000);
         p.observe(ready("b", 2201), 2201);
         let s = p.take_summary(3000);
         // (100 + 201) / 2 = 150.5, rounded half up.
@@ -230,16 +265,47 @@ mod tests {
         assert_eq!(s.session_duration_s, 3);
     }
 
+    /// The engine reports a miss on every send attempt while a handshake is
+    /// still in flight. Measuring from the last one would report a handshake
+    /// that took a minute as having taken a millisecond.
     #[test]
-    fn a_stale_init_never_pairs() {
+    fn repeated_wants_for_one_peer_measure_from_the_first() {
         let mut p = SessionPairer::new(0);
-        p.observe(init("a", 0), 0);
+        p.observe(wanted("a", 1_000), 1_000);
+        p.observe(wanted("a", 30_000), 30_000);
+        p.observe(wanted("a", 60_000), 60_000);
+        p.observe(ready("a", 61_000), 61_000);
+        assert_eq!(
+            p.take_summary(61_000).mls_session_ready_latency_p50_ms,
+            Some(60_000)
+        );
+    }
+
+    #[test]
+    fn a_stale_want_never_pairs() {
+        let mut p = SessionPairer::new(0);
+        p.observe(wanted("a", 0), 0);
         p.observe(ready("a", PAIR_TIMEOUT_MS + 1), PAIR_TIMEOUT_MS + 1);
         assert!(p.take_summary(0).mls_session_ready_latency_p50_ms.is_none());
     }
 
+    /// A mesh handshake waits on the counterparty, so the window has to
+    /// outlast a peer that is asleep or reachable only over a relay.
     #[test]
-    fn a_ready_without_an_init_is_ignored() {
+    fn a_handshake_lasting_minutes_still_pairs() {
+        let mut p = SessionPairer::new(0);
+        let five_minutes = 5 * 60_000;
+        p.observe(wanted("a", 0), 0);
+        p.observe(ready("a", five_minutes), five_minutes);
+        assert_eq!(
+            p.take_summary(five_minutes)
+                .mls_session_ready_latency_p50_ms,
+            Some(five_minutes)
+        );
+    }
+
+    #[test]
+    fn a_ready_without_a_want_is_ignored() {
         let mut p = SessionPairer::new(0);
         p.observe(ready("ghost", 10), 10);
         assert!(!p.has_unreported());
@@ -249,9 +315,9 @@ mod tests {
     fn pending_is_bounded_by_dropping_the_oldest() {
         let mut p = SessionPairer::new(0);
         for i in 0..MAX_PENDING {
-            p.observe(init(&format!("s{i}"), i as i64), 0);
+            p.observe(wanted(&format!("s{i}"), i as i64), 0);
         }
-        p.observe(init("late", 1000), 0);
+        p.observe(wanted("late", 1000), 0);
         assert_eq!(p.pending.len(), MAX_PENDING);
         assert!(!p.pending.contains_key("s0"));
     }
@@ -260,12 +326,21 @@ mod tests {
     fn latencies_are_a_sliding_window() {
         let mut p = SessionPairer::new(0);
         for i in 0..(MAX_LATENCIES + 10) {
-            let sid = format!("s{i}");
-            p.observe(init(&sid, 0), 0);
-            p.observe(ready(&sid, i as i64), 0);
+            let peer = format!("s{i}");
+            p.observe(wanted(&peer, 0), 0);
+            p.observe(ready(&peer, i as i64), 0);
         }
         assert_eq!(p.latencies.len(), MAX_LATENCIES);
         assert_eq!(p.latencies[0], 10);
+    }
+
+    /// Summing a session's rows must yield the session's length, once.
+    #[test]
+    fn the_duration_is_a_delta_so_summing_the_rows_yields_the_session() {
+        let mut p = SessionPairer::new(0);
+        assert_eq!(p.take_summary(205_000).session_duration_s, 205);
+        assert_eq!(p.take_summary(260_000).session_duration_s, 55);
+        assert_eq!(p.take_summary(300_000).session_duration_s, 40);
     }
 
     #[test]

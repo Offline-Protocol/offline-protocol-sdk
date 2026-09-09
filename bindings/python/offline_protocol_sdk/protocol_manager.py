@@ -509,7 +509,13 @@ class ProtocolManager:
 
     def disable_telemetry(self) -> None:
         """Disable telemetry after one final flush of up to three seconds.
-        Idempotent."""
+        Idempotent.
+
+        **Blocks the calling thread** for the length of that flush. This
+        manager is otherwise asyncio-based, so from a coroutine call it as
+        ``await asyncio.to_thread(manager.disable_telemetry)`` rather than
+        directly, the way :meth:`stop` already hands its blocking work off.
+        """
         self._protocol.disable_telemetry()
 
     def flush_telemetry(self) -> None:
@@ -528,7 +534,12 @@ class ProtocolManager:
 
     def end_telemetry_session(self) -> None:
         """Close the current telemetry session: a summary, a flush of up to
-        three seconds, then a fresh session id."""
+        three seconds, then a fresh session id.
+
+        **Blocks the calling thread** for the length of that flush; see
+        :meth:`disable_telemetry`. :meth:`flush_telemetry` is the
+        non-blocking call.
+        """
         self._protocol.end_telemetry_session()
 
     def notify_app_state(self, state: AppState) -> None:

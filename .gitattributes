@@ -13,9 +13,11 @@
 #     Kotlin, TypeScript and UDL sources and match multi-line snippets in
 #     them, which is how the hand-mirrored constants and the lifecycle
 #     wiring are pinned across three languages (docs/bridges/README.md C5).
-#     Twenty-one tests do this; several were only ever exercised on Unix
-#     runners, because `cargo test` stops at the first failing binary and an
-#     earlier crate always failed on Windows first.
+#     Dozens of tests do this, and the count grows with every pinned
+#     invariant, so it is deliberately not stated here as a number that would
+#     go stale unpinned. Several were only ever exercised on Unix runners,
+#     because `cargo test` stops at the first failing binary and an earlier
+#     crate always failed on Windows first.
 #
 # Pinning these to LF makes the bytes on disk the bytes the tests expect on
 # every platform. Nothing in the toolchain (cargo, gradle, node, Xcode) wants

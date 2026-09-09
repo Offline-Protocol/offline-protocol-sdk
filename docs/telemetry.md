@@ -99,6 +99,12 @@ exactly these `data` fields, and nothing else:
 | `mesh_metrics_rollup` | One row per minute: `bucket_start_ms`, `bucket_duration_s`, `neighbor_count_{avg,max,p50}`, `ack_pending_{avg,max}`, `retry_queue_total_{avg,max}`, `retry_queue_critical_count_max`, `transport_time_ms` (`ble`, `wifi_direct`, `internet`, `none`), `is_local_relay_duration_s`, `current_transport_at_bucket_end`, `sends_{attempted,succeeded,failed}_sum`, `bytes_{sent,received}_sum` (always 0) | The periodic metrics frames, folded on the device |
 | `mesh_session_summary` | `session_duration_s`, `routing_switches`, `routing_escalations`, `escalation_reasons` (six buckets), `mls_session_ready_latency_p50_ms` (absent when no handshake paired), `mls_encryption_used_count` | Computed on the device at each session boundary |
 
+`mls_session_ready_latency_p50_ms` is the median time from the engine wanting
+a secure session with a peer and not having one, to that session being
+usable. It is paired per peer, so a handshake this device did not start (a
+Welcome that simply arrived) contributes nothing, and a want whose handshake
+never completes is discarded after ten minutes rather than reported.
+
 Three things about that table are worth stating plainly.
 
 **No identifier has a field to land in.** Message ids, peer addresses, group
@@ -172,6 +178,14 @@ are cut on that stamp, so a boundary event always carries the session it
 reports. `endTelemetrySession` is the explicit form, for an app with its own
 notion of a session; calling both is safe, because each summary reports only
 what the previous one did not, and the ingest sums them.
+
+Every field of a summary is a delta, `session_duration_s` included: a summary
+reports the span since the previous one, not the span since the session
+opened, so summing a session's rows gives its length exactly once. The first
+boundary of a session always produces a row, because the duration is what the
+row is for. A later boundary with nothing observed since the last one
+produces none, so backgrounding and then calling `endTelemetrySession` is not
+billed twice.
 
 ## Where it goes and how
 
@@ -251,7 +265,7 @@ under the `offline_protocol::telemetry::pipe` target: logcat on Android
 application code, and the tap costs nothing while it is off. It is the way
 to see what leaves the device, since the proxy route is closed by design.
 
-**That target is all the SDK ever writes to a device log.** Enabling
+**That target is all the Rust core ever writes to a device log.** Enabling
 telemetry installs the logger the tap needs, and it passes through the pipe's
 own records and nothing else: the engine's internal logging, which names
 groups, senders and peers, is dropped there whatever its level. A device log
@@ -259,6 +273,15 @@ is readable by anything on the device that can run `logcat`, so the filter is
 a privacy boundary and not a volume setting. An embedder that does want the
 engine's stream installs its own `tracing` or `log` subscriber, which the SDK
 leaves in place.
+
+The React Native bridges are not covered by that filter and never have been.
+`OfflineProtocolModule` and the transport managers log through
+`android.util.Log` and `print` directly, and some of those lines name a
+profile or a peer address. That logging predates the pipe and this release
+does not change it: an application that treats its device log as sensitive
+should strip the bridge sources' logging, or ship a release build with
+logging disabled at the platform level. Only the core's stream is filtered
+here.
 
 ## Controlling cost
 
@@ -274,8 +297,9 @@ The service meters accepted events. The controls, from coarsest to finest:
 - `disableTelemetry()` stops everything after a final flush.
 - `metricsCadenceMs` (default 5000) sets how often a metrics frame is
   produced. Frames never leave the device individually, but the minute
-  rollup needs at least two per minute to emit, and a coarser cadence makes
-  the dwell attribution coarser.
+  rollup discards a window holding a single frame and no sends, so a cadence
+  coarser than one frame a minute loses idle windows outright and makes the
+  dwell attribution coarser for the rest.
 - `mlsSamplingBypass` (default false) controls whether high-volume MLS
   failure events are rate-limited on the device before they count. Leave
   it off unless you need exact failure counts.

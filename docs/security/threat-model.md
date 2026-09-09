@@ -598,14 +598,20 @@ is the one exception, and its egress is bounded as follows.
 
 The key that authenticates the stream is R13.
 
-Enabling the pipe also installs the SDK's only writer to the platform log.
-That is a local disclosure rather than an egress one, and it is bounded the
-same way: only records under the pipe's own `tracing` target are passed
-through, so the engine's internal logging, which names groups, senders and
-peers, never reaches logcat or the unified log whatever its level. A device
-log is readable by anything on the device that can run `logcat`, which is why
-the filter is on the target and not on a level. See
+Enabling the pipe also installs the only writer the Rust core has to the
+platform log. That is a local disclosure rather than an egress one, and it is
+bounded the same way: only records under the pipe's own `tracing` target are
+passed through, so the engine's internal logging, which names groups, senders
+and peers, never reaches logcat or the unified log whatever its level. A
+device log is readable by anything on the device that can run `logcat`, which
+is why the filter is on the target and not on a level. See
 [the debug tap](../telemetry.md#the-debug-tap).
+
+The bound is on the core, not on the whole SDK. The React Native bridge
+sources log through `android.util.Log` and `print` on their own account, and
+some of those lines name a profile or a peer address. That is pre-existing
+behaviour outside this filter, and it is the reason a device log is not
+treated as a trust boundary anywhere in this model.
 
 ## The telemetry producer rule
 
