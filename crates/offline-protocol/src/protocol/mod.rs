@@ -649,9 +649,10 @@ pub struct OfflineProtocol {
     /// Rate limiting policy for MLS failure event floods.
     mls_event_rate_limiter: MlsEventRateLimiter,
 
-    /// Pre-install scrubber used by MLS emit sites before
-    /// `install_telemetry_sink` is called. Once a sink is installed, emit
-    /// sites read `self.telemetry.scrubber` instead via `current_scrubber()`.
+    /// Pre-install scrubber used by MLS emit sites before a sink is
+    /// installed (`enable_telemetry`, or `install_sink` beneath it). Once one
+    /// is installed, emit sites read `self.telemetry.scrubber` instead via
+    /// `current_scrubber()`.
     /// Both scrubbers share `telemetry_fallback_secret` so opaque identifiers
     /// observed by the legacy `MlsEventEmitter` stay consistent across the
     /// install boundary.
@@ -659,7 +660,7 @@ pub struct OfflineProtocol {
 
     /// Per-instance fallback secret for identifier scrubbing. Random at
     /// construction. Reused by both the pre-install `telemetry_scrubber`
-    /// and by any scrubber built inside `install_telemetry_sink` (unless the
+    /// and by any scrubber built inside `install_sink` (unless the
     /// installed `TelemetryConfig` carries its own `scrub_secret`). Keeping
     /// the fallback stable across installs means the legacy
     /// `MlsEventEmitter` path observes consistent opaque IDs before and
@@ -689,7 +690,7 @@ pub struct OfflineProtocol {
     nostr_unpersisted_secret: Option<Zeroizing<[u8; 32]>>,
 
     /// Installed telemetry context (sink + config + scrubber). `None` until
-    /// `install_telemetry_sink` is called; thereafter shared with
+    /// `enable_telemetry` installs one; thereafter shared with
     /// `SharedState` via `Arc` clone so both emit paths dispatch through the
     /// same configuration.
     ///
@@ -698,9 +699,10 @@ pub struct OfflineProtocol {
     /// does not hold the shared-state lock, while protocol-event emission
     /// happens inside `SharedState::emit_event` under the lock. Each path
     /// reads the context from whichever side it already has in hand, and
-    /// `install_telemetry_sink` is the single writer that keeps both copies
-    /// in sync (guaranteed atomic from the caller's perspective because
-    /// `&mut self` excludes concurrent calls).
+    /// `install_sink` is the single writer that keeps both copies in sync
+    /// (guaranteed atomic from the caller's perspective because `&mut self`
+    /// excludes concurrent calls), and `detach_telemetry_pipe` the single
+    /// clearer.
     pub(crate) telemetry: Option<Arc<TelemetryContext>>,
 
     /// The running telemetry pipe, when `enable_telemetry` built one. Its
@@ -1710,17 +1712,22 @@ impl OfflineProtocol {
         if let Some(previous) = self.detach_telemetry_pipe() {
             previous.stop(FINAL_FLUSH_BUDGET);
         }
-        let backend = match (&self.protocol_state_storage, &self.state_record_cipher) {
-            (Some(storage), Some(cipher)) => Backend::Sealed {
-                storage: storage.clone(),
-                cipher: cipher.clone(),
-            },
-            _ => Backend::Memory,
-        };
+        // Always started in memory, even when a store is already attached.
+        // Adopting a backend loads the durable queue: an index read, up to
+        // `MAX_PENDING_BATCHES` sealed record reads with a decrypt and a parse
+        // each, a `list_keys` and the orphan sweep. Doing that here would run
+        // it on the caller, holding `&mut self`, which on the mobile bindings
+        // is the common order: `initialize_mls` has already attached storage
+        // by the time an app enables telemetry. `attach_telemetry_storage`
+        // hands the backend over instead, and the pipe's own thread adopts it.
         let device_id = self.telemetry_install_id();
-        let pipe = TelemetryPipe::start(&config, PipeParts::production(host, backend, device_id))?;
+        let pipe = TelemetryPipe::start(
+            &config,
+            PipeParts::production(host, Backend::Memory, device_id),
+        )?;
         self.install_sink(pipe.sink(), config, pipe.enabled_flag())?;
         self.telemetry_pipe = Some(pipe);
+        self.attach_telemetry_storage();
         Ok(())
     }
 

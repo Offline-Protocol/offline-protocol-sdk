@@ -99,7 +99,11 @@ fn a_401_halts_the_uploader_until_telemetry_is_enabled_again() {
         pipe.stats().last_error.as_deref(),
         Some("ingest responded 401")
     );
-    assert_eq!(pipe.stats().dropped, 1);
+    assert_eq!(
+        pipe.stats().dropped,
+        0,
+        "a refused key loses nothing: the batch stays queued for a good one"
+    );
 
     client.status.store(202, Ordering::SeqCst);
     emit_failed(&pipe, 2);
@@ -116,6 +120,41 @@ fn a_401_halts_the_uploader_until_telemetry_is_enabled_again() {
     emit_failed(&again, 3);
     again.flush();
     assert_eq!(client.bodies.lock().unwrap().len(), 2);
+}
+
+/// The point of keeping the batch a 401 refused: with a durable queue it is
+/// still there when the key is fixed.
+///
+/// A rejected key is a configuration fault, not bytes the ingest will never
+/// take, so the events collected before anyone noticed are exactly the ones
+/// worth having. Dropping the head — which is what the uploader used to do —
+/// lost them for nothing, since the halt already stopped every later send.
+#[test]
+fn a_batch_refused_for_a_bad_key_is_still_there_when_the_key_is_fixed() {
+    let clock = FakeClock::at(1_000);
+    let storage = Arc::new(MemoryStorage::default());
+    let client = CapturingClient::accepting();
+    client.status.store(401, Ordering::SeqCst);
+
+    let pipe = inline_pipe(&test_config(), &clock, client.clone(), sealed(&storage));
+    emit_failed(&pipe, 1);
+    pipe.flush();
+    assert_eq!(client.bodies.lock().unwrap().len(), 1, "it was attempted");
+    assert_eq!(pipe.stats().dropped, 0, "and nothing was lost");
+    pipe.stop(FINAL_FLUSH_BUDGET);
+
+    // The developer fixes the key in the portal and calls enableTelemetry
+    // again, which is a fresh pipe over the same protocol-state store.
+    client.status.store(202, Ordering::SeqCst);
+    let again = inline_pipe(&test_config(), &clock, client.clone(), sealed(&storage));
+    again.flush();
+    let bodies = client.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "the refused batch was resent");
+    assert!(
+        bodies[1].contains("protocol.message.failed"),
+        "and it is the same batch, not an empty one: {}",
+        bodies[1]
+    );
 }
 
 #[test]

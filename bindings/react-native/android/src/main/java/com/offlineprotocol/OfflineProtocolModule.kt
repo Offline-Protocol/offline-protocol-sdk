@@ -1,7 +1,10 @@
 package com.offlineprotocol
 
+import android.app.Activity
+import android.app.Application
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.util.Log
 import com.facebook.react.bridge.*
 import com.facebook.react.common.LifecycleState
@@ -100,6 +103,18 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         },
     )
 
+    /**
+     * Started-activity count, which is what tells the process apart from an
+     * activity, and the watcher that maintains it. Main-thread confined:
+     * every `ActivityLifecycleCallbacks` method is delivered there, so
+     * neither needs synchronization. See [installProcessLifecycleWatcher];
+     * declared here because the `init` below assigns them, and a property
+     * initializer running after that `init` would overwrite the watcher with
+     * null and silently unhook the session boundary.
+     */
+    private var startedActivities = 0
+    private var processLifecycleWatcher: Application.ActivityLifecycleCallbacks? = null
+
     init {
         // Drive the foreground relay-heal from the host activity's lifecycle so
         // Android matches iOS: both platforms reconnect automatically on
@@ -114,6 +129,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         // `val` from being read before its initializer is a hazard with no
         // upside. Declaration order costs nothing and makes it structural.
         reactContext.addLifecycleEventListener(this)
+        // Telemetry session boundaries follow the process, not the activity.
+        installProcessLifecycleWatcher()
     }
 
     private var currentConfig: ProtocolConfig? = null
@@ -201,6 +218,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         teardown.step("lifecycle listener") {
             reactApplicationContext.removeLifecycleEventListener(this)
         }
+        teardown.step("process lifecycle watcher") { removeProcessLifecycleWatcher() }
         teardown.step("process scheduler") { stopProcessScheduler() }
 
         // The null-outs sit outside their steps so a transport that throws on
@@ -215,6 +233,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         reticulumManager = null
         teardown.step("Nostr manager") { nostrManager?.stop() }
         nostrManager = null
+        // Same reason as in [destroy]: the handle owns the telemetry pipe's
+        // uploader thread, and invalidate is the last moment this module can
+        // release it deterministically.
+        teardown.step("protocol handle") { protocol?.destroy() }
         protocol = null
 
         teardown.step("mesh foreground service") { stopForegroundService() }
@@ -257,10 +279,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     override fun onHostPause() {
         foregroundReconnectPolicy.didEnterBackground(nowMs = android.os.SystemClock.elapsedRealtime())
-        // The telemetry session boundary. The pipe emits its summary and
-        // wakes the uploader thread; nothing here blocks, and the thread
-        // outlives the pause for as long as the process does.
-        protocol?.notifyAppState(AppState.BACKGROUND)
+        // No telemetry session boundary here. `onHostPause` is
+        // `Activity.onPause`, which fires for a permission dialog or a share
+        // sheet as readily as for the app going away — good enough to arm the
+        // relay heal above, which only measures a stay, and too coarse to end
+        // a session. See [installProcessLifecycleWatcher].
     }
 
     /**
@@ -277,9 +300,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         if (foregroundReconnectPolicy.shouldReconnectOnForeground(nowMs = android.os.SystemClock.elapsedRealtime())) {
             internetManager?.forceReconnect()
         }
-        // The first resume after a pause rotates the telemetry session; a
-        // resume with no pause before it is not an edge and does nothing.
-        protocol?.notifyAppState(AppState.ACTIVE)
+        // No telemetry session boundary here either; its pair lives in
+        // installProcessLifecycleWatcher.
         // The other flush trigger besides [addListener]. An app whose listeners
         // never went away still needs one: a sticky event held because the React
         // instance was briefly down would otherwise wait for a resubscribe that
@@ -290,6 +312,77 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     override fun onHostDestroy() {
         // No-op: teardown is handled by invalidate(); nothing lifecycle-specific
         // to release here.
+    }
+
+    // MARK: - Process lifecycle (telemetry session boundaries)
+
+    /**
+     * Draws the telemetry session boundary on the *process* leaving the
+     * foreground, not on an activity being paused.
+     *
+     * [onHostPause] is `Activity.onPause`, which fires for anything that comes
+     * in front of the host: a runtime permission dialog — including the
+     * Bluetooth one this SDK itself triggers on first launch — the system
+     * share sheet, any translucent activity. A boundary there emits a session
+     * summary and rotates the session id every time a user grants a
+     * permission, so the same user journey would be counted as several
+     * sessions on Android and one on iOS, which uses `didEnterBackground` and
+     * deliberately ignores the transient `Inactive` state. Every activity
+     * being stopped is the signal that actually means "not visible", and is
+     * what `androidx.lifecycle`'s `ProcessLifecycleOwner` is built on;
+     * counting it here keeps that dependency off every consumer of this
+     * package.
+     *
+     * A configuration change (a rotation) stops and restarts the activity
+     * without the app going anywhere, so `isChangingConfigurations` gates the
+     * background edge. The matching `ACTIVE` needs no such gate: the pipe
+     * debounces its own edges, so an `ACTIVE` with no `BACKGROUND` before it
+     * is not an edge and does nothing.
+     */
+    private fun installProcessLifecycleWatcher() {
+        val application = reactApplicationContext.applicationContext as? Application
+        if (application == null) {
+            Log.w(
+                NAME,
+                "No Application context: telemetry sessions will not follow the process lifecycle"
+            )
+            return
+        }
+        val watcher = object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityStarted(activity: Activity) {
+                startedActivities += 1
+                protocol?.notifyAppState(AppState.ACTIVE)
+            }
+
+            override fun onActivityStopped(activity: Activity) {
+                // Clamped at zero: this module can be constructed after the
+                // host activity already started, so the first stop can arrive
+                // without its matching start and would otherwise leave the
+                // count permanently negative and the boundary permanently
+                // armed.
+                startedActivities = max(0, startedActivities - 1)
+                if (startedActivities == 0 && !activity.isChangingConfigurations) {
+                    // The pipe emits its summary and wakes the uploader
+                    // thread; nothing here blocks.
+                    protocol?.notifyAppState(AppState.BACKGROUND)
+                }
+            }
+
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+            override fun onActivityResumed(activity: Activity) {}
+            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+            override fun onActivityDestroyed(activity: Activity) {}
+        }
+        application.registerActivityLifecycleCallbacks(watcher)
+        processLifecycleWatcher = watcher
+    }
+
+    private fun removeProcessLifecycleWatcher() {
+        val watcher = processLifecycleWatcher ?: return
+        processLifecycleWatcher = null
+        (reactApplicationContext.applicationContext as? Application)
+            ?.unregisterActivityLifecycleCallbacks(watcher)
     }
 
     @ReactMethod
@@ -1978,6 +2071,20 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             wifiDirectManager = null
             reticulumManager = null
             nostrManager = null
+            // Frees the Rust object now rather than at some later GC. It
+            // holds the telemetry pipe, whose uploader thread and 30 s timer
+            // live for as long as it does: without this the thread outlives a
+            // logout-and-recreate until a collection happens to run, and two
+            // pipes can be awake at once. Dropping it signals the pipe's
+            // final flush and detaches the worker without blocking here.
+            // Idempotent, and safe at this point because every caller into
+            // the protocol — the process scheduler and all five transports —
+            // has been stopped above.
+            try {
+                protocol?.destroy()
+            } catch (e: Exception) {
+                android.util.Log.w(NAME, "Releasing the protocol handle failed", e)
+            }
             protocol = null
             meshServices = null
             // [listenerCount] is deliberately *not* reset here. React Native

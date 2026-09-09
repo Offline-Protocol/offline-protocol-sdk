@@ -13,7 +13,7 @@
 //! |---|---|
 //! | 2xx | The ingest owns the batch; delete it, reset the backoff |
 //! | 413 | The batch can never fit; drop it, keep going |
-//! | 401, 403 | The key or the app id is wrong; drop, record the error, stop until the next `enable_telemetry` |
+//! | 401, 403 | The key or the app id is wrong; keep the batch, record the error, stop until the next `enable_telemetry` |
 //! | 429 | Wait `Retry-After` when given, else back off |
 //! | 408, 5xx, no answer | Back off: 1 s doubling to 15 min, plus up to a second of jitter |
 //! | any other 4xx | The bytes will never be accepted; drop, keep going |
@@ -200,8 +200,12 @@ impl Uploader {
                     self.reset_backoff();
                 }
                 Outcome::AuthHalt => {
-                    store.pop_front();
-                    report.dropped_events += count;
+                    // The batch stays queued. A 401 or 403 is a configuration
+                    // fault the developer fixes and re-enables through, not
+                    // bytes the ingest will never take, and the halt already
+                    // stops every later send: dropping the head would lose one
+                    // batch and buy nothing. The caps still bound the queue if
+                    // the key is never fixed.
                     self.auth_halted = true;
                     report.halted = true;
                     break;
@@ -510,7 +514,11 @@ pub(crate) mod tests {
             let report = up.drain(&mut store, 0, 8, None);
             assert!(report.halted);
             assert!(up.is_halted());
-            assert_eq!(store.len(), 1, "{status}: the rest waits");
+            assert_eq!(
+                report.dropped_events, 0,
+                "{status}: a rejected key loses nothing; the queue waits for a good one"
+            );
+            assert_eq!(store.len(), 2, "{status}: the refused batch is kept too");
             assert_eq!(
                 requests.lock().unwrap().len(),
                 1,

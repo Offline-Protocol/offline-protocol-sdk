@@ -13,10 +13,22 @@
 //!
 //! The emit side is a bounded amount of work with no I/O: a gate on an
 //! atomic, a match on the record, and a push into a ring buffer under the
-//! pipe's own mutex. The uploader takes that mutex only to take the ring,
-//! and never holds any lock across storage or network I/O. Nothing here
-//! holds a reference to the engine, so a stopped pipe whose final request
-//! is still in flight can be dropped without keeping the engine alive.
+//! pipe's own mutex. The uploader takes that mutex only to take the ring, so
+//! the one lock an engine thread can be holding is never held across storage
+//! or network I/O.
+//!
+//! The store and uploader mutexes *are* held across a drain, and deliberately:
+//! they guard the worker's own state, the alternative is a queue that can be
+//! reordered mid-send, and no engine thread reaches them. That last clause is
+//! load-bearing rather than incidental, so every handle method an engine
+//! thread can call reads an atomic instead ([`TelemetryPipe::stats`] takes
+//! only the pipeline mutex, [`TelemetryPipe::is_durable`] takes none). A
+//! method added here that locks the store would put a caller behind a
+//! fifteen-second request.
+//!
+//! Nothing here holds a reference to the engine, so a stopped pipe whose
+//! final request is still in flight can be dropped without keeping the
+//! engine alive.
 //!
 //! # What leaves the device
 //!
@@ -99,6 +111,14 @@ pub struct TelemetryStats {
     /// 202 body, summed; a replay counts nothing new).
     pub accepted_events: u64,
     /// Events lost: ring overflow, queue caps, TTL expiry, permanent 4xx.
+    ///
+    /// Events, never records. This number is what reconciles an invoice
+    /// against the device, so it counts in the unit the ingest meters. A
+    /// queued batch that will not open or parse on load is therefore absent
+    /// from it: how many events that batch held is precisely what was lost
+    /// with it, and a count of records added here would be two units summed
+    /// into one number. Those are reported by a warning on the pipe's log
+    /// target instead.
     pub dropped: u64,
     /// The current session id.
     pub session_id: String,
@@ -136,6 +156,9 @@ pub(crate) struct PipeShared {
     pending_attach: Mutex<Option<Backend>>,
     device_id: Mutex<Option<String>>,
     include_device_id: bool,
+    /// Mirrors `BatchStore::is_durable`, so a caller can ask without taking
+    /// the store mutex the uploader holds across a request.
+    durable: AtomicBool,
     envelope: Envelope,
     max_batch_bytes: usize,
     flush_interval: Duration,
@@ -193,10 +216,9 @@ impl PipeShared {
             let mut store = lock(&self.store);
             store.attach(backend);
             store.flush_index();
-            self.store_dropped.store(
-                store.dropped_events() + store.corrupt_records(),
-                Ordering::Relaxed,
-            );
+            self.durable.store(store.is_durable(), Ordering::Relaxed);
+            self.store_dropped
+                .store(store.dropped_events(), Ordering::Relaxed);
         }
 
         let drained = lock(&self.pipeline).drain();
@@ -219,10 +241,8 @@ impl PipeShared {
                 store.push(batch);
             }
             store.flush_index();
-            self.store_dropped.store(
-                store.dropped_events() + store.corrupt_records(),
-                Ordering::Relaxed,
-            );
+            self.store_dropped
+                .store(store.dropped_events(), Ordering::Relaxed);
         }
 
         let is_final = reasons & wake::FINAL != 0;
@@ -239,10 +259,8 @@ impl PipeShared {
         let mut store = lock(&self.store);
         let mut uploader = lock(&self.uploader);
         let report = uploader.drain(&mut store, now, MAX_BATCHES_PER_WAKE, deadline);
-        self.store_dropped.store(
-            store.dropped_events() + store.corrupt_records(),
-            Ordering::Relaxed,
-        );
+        self.store_dropped
+            .store(store.dropped_events(), Ordering::Relaxed);
         drop(store);
         self.sent_events
             .fetch_add(report.sent_events, Ordering::Relaxed);
@@ -475,16 +493,19 @@ impl TelemetryPipe {
             user_agent(parts.host.os.user_agent_token(), parts.host.os_major),
             parts.jitter,
         );
+        let store = BatchStore::new(parts.backend);
+        let durable = store.is_durable();
         let shared = Arc::new(PipeShared {
             enabled: Arc::new(AtomicBool::new(true)),
             debug: config.debug(),
             inline: !parts.spawn_thread,
             pipeline: Mutex::new(pipeline),
-            store: Mutex::new(BatchStore::new(parts.backend)),
+            store: Mutex::new(store),
             uploader: Mutex::new(uploader),
             pending_attach: Mutex::new(None),
             device_id: Mutex::new(parts.device_id),
             include_device_id: config.include_device_id(),
+            durable: AtomicBool::new(durable),
             envelope: Envelope {
                 app_version: config.app_version().to_string(),
                 os: parts.host.os,
@@ -679,8 +700,12 @@ impl TelemetryPipe {
     }
 
     /// Whether the batch queue is mirrored to storage.
+    ///
+    /// Reads an atomic rather than the store mutex, which the uploader holds
+    /// across a request: a caller asking a question about configuration must
+    /// not be parked behind a fifteen-second socket timeout.
     pub fn is_durable(&self) -> bool {
-        lock(&self.shared.store).is_durable()
+        self.shared.durable.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -695,7 +720,27 @@ impl TelemetryPipe {
 }
 
 impl Drop for TelemetryPipe {
+    /// Signals the final flush and detaches the worker without waiting for it.
+    ///
+    /// The flush still happens, bounded by [`FINAL_FLUSH_BUDGET`] on the
+    /// worker's own thread; what the dropping thread does not do is block for
+    /// it. A drop lands wherever the last handle happens to be released, and
+    /// on the mobile bindings that is a teardown path: iOS releases native
+    /// modules on the main thread during a bridge reload, so waiting here put
+    /// three seconds inside the scene-update watchdog's window. A caller that
+    /// needs to observe the flush calls [`Self::stop`] with a budget first,
+    /// which is what `disable_telemetry` does.
+    ///
+    /// An inline pipe is the exception, and only because it has to be: with
+    /// no worker there is no other thread to run the flush on, so the
+    /// dropping thread is the only one that can. That configuration is the
+    /// tests and the benches, never a shipped binary.
     fn drop(&mut self) {
-        self.stop(FINAL_FLUSH_BUDGET);
+        let budget = if self.shared.inline {
+            FINAL_FLUSH_BUDGET
+        } else {
+            Duration::ZERO
+        };
+        self.stop(budget);
     }
 }

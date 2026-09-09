@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import platform
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -18,6 +19,7 @@ from .offline_protocol import (
     BleTransportCallback,
     EventCallback,
     MessagePriority,
+    MlsVerbosity,
     NostrTransportCallback,
     OfflineProtocol,
     ProtocolConfig,
@@ -308,7 +310,9 @@ class ProtocolManager:
         # wire rather than in the durable queue. Idempotent on the Rust side.
         teardown_clean = True
         try:
-            self.disable_telemetry()
+            # Off the loop: the final flush blocks for up to three seconds,
+            # and every other awaitable in this teardown would wait behind it.
+            await asyncio.to_thread(self.disable_telemetry)
         except Exception:
             teardown_clean = False
             logger.debug(
@@ -462,7 +466,7 @@ class ProtocolManager:
         max_buffered_records: int | None = None,
         include_device_id: bool | None = None,
         scrub_ids: bool | None = None,
-        mls_verbosity: Any | None = None,
+        mls_verbosity: MlsVerbosity | None = None,
         metrics_cadence_ms: int | None = None,
         routing_diagnostic: bool | None = None,
         mls_sampling_bypass: bool | None = None,
@@ -634,7 +638,15 @@ def _host_platform() -> tuple[TelemetryOs, int]:
     if system == "Linux":
         return TelemetryOs.LINUX, _major(platform.release())
     if system == "Windows":
-        return TelemetryOs.WINDOWS, _major(platform.release())
+        # `platform.release()` answers "10" on Windows 11, so on its own it
+        # would fold two releases into one bucket for the whole life of the
+        # aggregate. The build number is what separates them: 22000 is the
+        # first Windows 11 build, and Microsoft never moved it.
+        try:
+            build = sys.getwindowsversion().build  # type: ignore[attr-defined]
+        except (AttributeError, OSError):
+            build = 0
+        return TelemetryOs.WINDOWS, 11 if build >= 22000 else _major(platform.release())
     return TelemetryOs.OTHER, 0
 
 

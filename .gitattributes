@@ -1,0 +1,10 @@
+# Line endings.
+#
+# The telemetry golden fixtures are compared byte for byte against a string a
+# generator builds with `\n` (`pipe::tests::golden`), and the Node oracle in
+# `crates/offline-protocol/tests/tools/` reads the same files. A Windows
+# checkout under the default `core.autocrlf=true` rewrites them to CRLF, and
+# the comparison then fails on every line for a reason that has nothing to do
+# with the pipe. Pin JSON to LF so the bytes on disk are the bytes the test
+# generates on every platform.
+*.json text eol=lf

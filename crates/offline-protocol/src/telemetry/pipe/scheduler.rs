@@ -184,8 +184,29 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    /// This process's live thread count, from procfs.
+    #[cfg(target_os = "linux")]
+    fn live_thread_count() -> usize {
+        let status = std::fs::read_to_string("/proc/self/status").expect("procfs");
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix("Threads:"))
+            .and_then(|v| v.trim().parse().ok())
+            .expect("Threads: line")
+    }
+
     #[test]
     fn a_thousand_start_stop_cycles_leave_no_thread_behind() {
+        // Measured as a delta against a baseline, never as an absolute count.
+        // The test harness runs this binary's tests in parallel, and siblings
+        // hold threads of their own throughout (the uploader's `tiny_http`
+        // servers, the contention test's drainer), so an absolute bound is a
+        // bound on unrelated work: it failed on CI at 16 threads with nothing
+        // leaked here. The leak this exists to catch is one thread per cycle,
+        // which would show up as a delta in the hundreds, so a small allowance
+        // for concurrent noise costs the test nothing.
+        #[cfg(target_os = "linux")]
+        let baseline = live_thread_count();
         for _ in 0..1_000 {
             let signal = Arc::new(WakeSignal::default());
             let worker_signal = signal.clone();
@@ -203,15 +224,11 @@ mod tests {
         }
         #[cfg(target_os = "linux")]
         {
-            let status = std::fs::read_to_string("/proc/self/status").expect("procfs");
-            let threads: usize = status
-                .lines()
-                .find_map(|l| l.strip_prefix("Threads:"))
-                .and_then(|v| v.trim().parse().ok())
-                .expect("Threads: line");
+            let threads = live_thread_count();
             assert!(
-                threads < 8,
-                "thread count did not return to baseline: {threads}"
+                threads <= baseline + 8,
+                "threads did not return to baseline: {baseline} before the cycles, \
+                 {threads} after"
             );
         }
     }
