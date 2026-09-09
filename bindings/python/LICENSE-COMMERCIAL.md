@@ -30,6 +30,26 @@ supported option for apps distributed through the Apple App Store — the
 reasoning is laid out in the
 [Licensing FAQ](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/licensing-faq.md).
 
+## Telemetry under the Commercial License
+
+The SDK includes a telemetry pipe that, once an application enables it with a
+key issued by Offline Protocol, Inc., uploads accepted events to the Offline
+Protocol telemetry service. The service is a hosted, metered product included
+in commercial plans, and every commercial license carries the following term.
+
+A commercial licensee **may** leave telemetry off, switch it off at runtime,
+and never supply a key; the SDK collects and sends nothing until a key is
+supplied. A commercial licensee **may not** modify the SDK so as to change the
+service endpoint the pipe uploads to, alter the wire format of what it
+uploads, or redirect or duplicate that upload to a service other than Offline
+Protocol's. Receiving the SDK's events through its event API and forwarding
+them to systems of your own is ordinary use of the SDK and is not restricted.
+
+This term applies to the commercial license only. Under the AGPL-3.0 option
+the pipe may be modified, removed or replaced like any other part of the SDK,
+and nothing in the SDK verifies a license or a key at runtime under either
+option.
+
 ## Obtaining a Commercial License
 
 Commercial licenses are offered by **Offline Protocol, Inc.** To request a quote
