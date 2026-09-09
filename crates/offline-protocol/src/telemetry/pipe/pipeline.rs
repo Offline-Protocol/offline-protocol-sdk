@@ -182,6 +182,33 @@ impl Pipeline {
         self.session_id = Uuid::new_v4();
     }
 
+    /// Records an application state without drawing a boundary from it.
+    ///
+    /// Two callers, one reason: the state is a fact about the app that the
+    /// next edge is measured against, and neither caller has a session to
+    /// report.
+    ///
+    /// At enable time there is nothing to close. The pipe was built moments
+    /// ago and the pairer has observed nothing, so running the `Background`
+    /// arm of [`Self::app_state`] there would push an all-zero summary with a
+    /// zero duration and wake the uploader for it: one billed event on every
+    /// background launch (an iOS BLE restoration, an Android headless mesh
+    /// wake). What the seed is actually for is the *next* edge, so that a
+    /// pipe enabled in the background rotates on the first foreground instead
+    /// of ignoring it.
+    ///
+    /// With collection switched off the same holds for a different reason:
+    /// the edge is real but reporting it is collection, so the transition is
+    /// tracked and nothing is emitted. `Inactive` is not an edge on either
+    /// path and leaves the state alone.
+    pub(crate) fn seed_app_state(&mut self, state: AppState) {
+        match state {
+            AppState::Background => self.was_backgrounded = true,
+            AppState::Active => self.was_backgrounded = false,
+            AppState::Inactive => {}
+        }
+    }
+
     /// Applies one application-state observation.
     ///
     /// Edges are debounced: one background-then-foreground cycle produces
@@ -367,6 +394,38 @@ mod tests {
         assert_eq!(p.app_state(AppState::Active, 0), LifecycleAction::Rotated);
         assert_eq!(p.app_state(AppState::Active, 0), LifecycleAction::None);
         assert_eq!(summaries(&p).len(), 1);
+    }
+
+    /// Seeding records the state and reports nothing.
+    ///
+    /// The failure this catches: a pipe enabled by a background launch
+    /// pushing an all-zero summary with a zero duration, which the ingest
+    /// stores and bills as an accepted event. What the seed is for is the
+    /// next edge, and both directions of it are pinned here.
+    #[test]
+    fn seeding_records_the_state_without_reporting_a_session() {
+        let mut p = pipeline();
+        p.seed_app_state(AppState::Background);
+        assert_eq!(p.buffered(), 0, "a seed emits nothing");
+        // The seed armed the boundary: the first foreground rotates.
+        let first = p.session_id();
+        assert_eq!(p.app_state(AppState::Active, 10), LifecycleAction::Rotated);
+        assert_ne!(p.session_id(), first);
+
+        // Seeded active, a foreground is not an edge and a background is.
+        let mut p = pipeline();
+        p.seed_app_state(AppState::Active);
+        assert_eq!(p.app_state(AppState::Active, 10), LifecycleAction::None);
+        assert_eq!(
+            p.app_state(AppState::Background, 20),
+            LifecycleAction::BackgroundFlush
+        );
+
+        // `Inactive` is not a state to seed from.
+        let mut p = pipeline();
+        p.seed_app_state(AppState::Background);
+        p.seed_app_state(AppState::Inactive);
+        assert_eq!(p.app_state(AppState::Active, 10), LifecycleAction::Rotated);
     }
 
     #[test]

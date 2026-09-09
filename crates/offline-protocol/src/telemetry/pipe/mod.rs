@@ -146,7 +146,10 @@ pub(crate) struct PipeShared {
     /// The hot-path gate, read at every emit site before anything else.
     enabled: Arc<AtomicBool>,
     debug: bool,
-    /// Run cycles inline instead of on a thread (tests and a failed spawn).
+    /// Run cycles on the calling thread instead of on a worker. The tests and
+    /// the benches; never a shipped binary, since `PipeParts::production`
+    /// always asks for a thread and a spawn that fails is an error rather
+    /// than a fallback.
     inline: bool,
     pipeline: Mutex<Pipeline>,
     store: Mutex<BatchStore>,
@@ -271,9 +274,12 @@ impl PipeShared {
         if report.batches_sent > 0 {
             self.last_flush_at_ms.store(now, Ordering::Relaxed);
         }
-        if let Some(error) = uploader.last_error() {
-            self.set_last_error(Some(error.to_string()));
-        }
+        // Mirrored, not accumulated: the uploader clears its own error when a
+        // batch is accepted, and a stats reader asking "is telemetry working"
+        // after a recovered outage must not still be shown the outage. A
+        // cycle that sent nothing leaves the uploader's value alone, so this
+        // does not erase an error just because the queue was empty.
+        self.set_last_error(uploader.last_error().map(str::to_string));
         uploader.next_retry_at_ms()
     }
 }
@@ -493,7 +499,10 @@ impl TelemetryPipe {
             user_agent(parts.host.os.user_agent_token(), parts.host.os_major),
             parts.jitter,
         );
-        let store = BatchStore::new(parts.backend);
+        let store = BatchStore::new(
+            parts.backend,
+            config.app_id().unwrap_or_default().to_string(),
+        );
         let durable = store.is_durable();
         let shared = Arc::new(PipeShared {
             enabled: Arc::new(AtomicBool::new(true)),
@@ -523,6 +532,12 @@ impl TelemetryPipe {
             last_flush_at_ms: AtomicI64::new(-1),
             last_error: Mutex::new(None),
         });
+        // The host's state at enable time, recorded rather than reported:
+        // there is no session to close yet, and the seed exists so that a
+        // pipe enabled in the background rotates on the first foreground.
+        // See `Pipeline::seed_app_state`. Done before the worker exists, so
+        // it can never observe an unseeded pipeline.
+        lock(&shared.pipeline).seed_app_state(parts.host.app_state);
         let scheduler = if parts.spawn_thread {
             let worker = shared.clone();
             Some(
@@ -532,16 +547,11 @@ impl TelemetryPipe {
         } else {
             None
         };
-        let pipe = Arc::new(Self {
+        Ok(Arc::new(Self {
             shared,
             scheduler: Mutex::new(scheduler),
             stopped: AtomicBool::new(false),
-        });
-        // Seed the lifecycle from the host's current state, so a pipe
-        // enabled in the background closes its session on the first
-        // foreground rather than after a full round trip.
-        pipe.notify_app_state(parts.host.app_state);
-        Ok(pipe)
+        }))
     }
 
     /// The sink to install on the engine.
@@ -619,7 +629,14 @@ impl TelemetryPipe {
 
     /// Closes the current session: summary, a blocking flush within
     /// [`FINAL_FLUSH_BUDGET`], then a fresh session id.
+    ///
+    /// A no-op while collection is off, for the reason given on
+    /// [`Self::notify_app_state`]. [`Self::flush`] is the call that pushes a
+    /// queued backlog without collecting anything new.
     pub fn end_session(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         let now = (self.shared.clock)();
         lock(&self.shared.pipeline).emit_session_summary(now);
         self.flush_blocking(FINAL_FLUSH_BUDGET);
@@ -628,7 +645,19 @@ impl TelemetryPipe {
     }
 
     /// Reports an application lifecycle transition.
+    ///
+    /// While collection is off the transition is recorded but nothing is
+    /// emitted. A session summary is collection: it is a row the ingest
+    /// stores and bills, carrying the session duration and every counter the
+    /// pairer accumulated, so emitting one for a user who switched telemetry
+    /// off would break the promise `docs/telemetry.md` makes for that switch.
+    /// The edge is still tracked, so the next foreground after collection
+    /// resumes rotates the session rather than being read as a non-edge.
     pub fn notify_app_state(&self, state: AppState) {
+        if !self.is_enabled() {
+            lock(&self.shared.pipeline).seed_app_state(state);
+            return;
+        }
         let now = (self.shared.clock)();
         let action = lock(&self.shared.pipeline).app_state(state, now);
         if action == LifecycleAction::BackgroundFlush {

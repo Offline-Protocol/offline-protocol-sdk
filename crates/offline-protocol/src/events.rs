@@ -88,6 +88,24 @@ impl WelcomeReasonCode {
             Self::RetryExhausted => "RETRY_EXHAUSTED",
         }
     }
+
+    /// The settlement reason for a message dropped because the Welcome that
+    /// would have carried its session never arrived.
+    ///
+    /// Spelled out per variant rather than interpolated into a prefix so the
+    /// result is a `&'static str`: it becomes [`Event::message_failed`]'s
+    /// reason, which the telemetry pipe forwards to the ingest verbatim. See
+    /// that constructor for why the type is the guard.
+    pub fn welcome_failure_reason(&self) -> &'static str {
+        match self {
+            Self::TransportUnavailable => "Welcome delivery failed: TRANSPORT_UNAVAILABLE",
+            Self::PeerUnreachable => "Welcome delivery failed: PEER_UNREACHABLE",
+            Self::PeerDisconnected => "Welcome delivery failed: PEER_DISCONNECTED",
+            Self::Timeout => "Welcome delivery failed: TIMEOUT",
+            Self::InternalError => "Welcome delivery failed: INTERNAL_ERROR",
+            Self::RetryExhausted => "Welcome delivery failed: RETRY_EXHAUSTED",
+        }
+    }
 }
 
 /// Machine-readable taxonomy for [`Event::SecurityWarning`], so consumers can
@@ -1876,10 +1894,23 @@ impl Event {
     }
 
     /// Creates a MessageFailed event.
-    pub fn message_failed(message_id: MessageId, reason: String, retry_count: u32) -> Self {
+    ///
+    /// `reason` is `&'static str` for the same load-bearing reason
+    /// [`Event::message_deferred`] is, and
+    /// `protocol::types::classify_transport_send_error` returns one: the
+    /// telemetry pipe forwards this field to the ingest verbatim, without the
+    /// scrubber, because the classification taxonomy is the ingest's. A
+    /// `String` parameter makes `format!("{err}")` at a call site
+    /// representable, and the transport layer renders the counterparty into
+    /// its own error text, so that one interpolation would ship a peer
+    /// address beside identifiers the same record hashes. A static string
+    /// cannot carry runtime data, which makes the mistake unrepresentable
+    /// rather than merely discouraged. Callers with a classified failure pass
+    /// the token; callers with a fixed condition pass its literal.
+    pub fn message_failed(message_id: MessageId, reason: &'static str, retry_count: u32) -> Self {
         Self::MessageFailed {
             message_id: message_id.as_str(),
-            reason,
+            reason: reason.to_string(),
             retry_count,
         }
     }
@@ -1921,8 +1952,13 @@ impl Event {
     }
 
     /// Creates a RelayDemoted event.
-    pub fn relay_demoted(reason: String) -> Self {
-        Self::RelayDemoted { reason }
+    ///
+    /// `&'static str` for the reason given on [`Event::message_failed`]: the
+    /// telemetry pipe forwards this field raw.
+    pub fn relay_demoted(reason: &'static str) -> Self {
+        Self::RelayDemoted {
+            reason: reason.to_string(),
+        }
     }
 
     /// Creates a NeighborDiscovered event.

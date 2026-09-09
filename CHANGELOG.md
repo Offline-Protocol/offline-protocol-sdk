@@ -89,7 +89,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   compatibility and has no effect on what is uploaded.
 - **Where the mesh-analytics package differed from the task, the task won:**
   a 15 min backoff cap rather than 5, a 413 dropped rather than split, a halt
-  on 401 and 403 rather than a drop-and-continue, `Retry-After` honoured,
+  on 401 and 403 rather than a drop-and-continue, `Retry-After` honoured on a
+  429,
   `Idempotency-Key` and `User-Agent` sent, 15 s request and 10 s connect
   timeouts, and the battery deferral. Each is a named test.
 - **A 401 or 403 keeps its batch.** The halt already stops every later send,
@@ -99,11 +100,53 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   counts events and only events, so a queued batch that cannot be opened on
   load is warned about rather than added to it in a different unit.
 - **Telemetry session boundaries follow the process on Android**, through the
-  started-activity count rather than `onHostPause`. `onHostPause` is
+  set of started activities rather than `onHostPause`. `onHostPause` is
   `Activity.onPause`, which fires for a runtime permission dialog (including
   the Bluetooth one the SDK triggers itself), the share sheet and any
   translucent activity, so it counted one iOS session as several on Android.
-  A configuration change no longer closes a session either.
+  A configuration change no longer closes a session either. Activities are
+  tracked by identity rather than counted, because React Native builds its
+  native modules after the host activity has started: a counter began at zero
+  with an activity already on screen, so opening a second in-process activity
+  (a sign-in hub, an image picker) drew a background edge with the app fully
+  visible. The state seeded at `enableTelemetry` comes from the same watcher
+  for the same reason, rather than from React Native's `lifecycleState`,
+  which is also pause-granularity.
+- **`setTelemetryEnabled(false)` stops the session boundaries too.** A summary
+  is a row the ingest stores and bills, so emitting one per background for a
+  user who switched telemetry off contradicted what that switch promises. The
+  transitions are still tracked, so the first foreground after collection
+  resumes rotates the session as before, and a backlog queued before the
+  switch still drains.
+- **Enabling telemetry in the background no longer reports an empty session.**
+  The host's application state is recorded rather than replayed as an edge; a
+  background launch (an iOS BLE restoration, an Android headless mesh wake)
+  was otherwise billed one all-zero summary with a zero duration, and woke the
+  uploader for it. The seed still arms the boundary, so the first foreground
+  rotates.
+- **A queue cut under one `appId` is discarded rather than uploaded under
+  another.** The app id travels in a request header, not in the batch body, so
+  a queue left behind by a previous `enableTelemetry` would have been counted
+  against whichever key was configured next. The queue survives
+  `disableTelemetry` by design, and is cleared by uninstalling, by
+  `wipePersistedState`, and now by an app-id change.
+- **Re-attaching the same protocol-state storage to the pipe keeps its queue.**
+  Both `enableTelemetry` and `initializeMls` hand the backend over, so the
+  ordinary logout-and-login sequence ran it twice; the second pass reloaded the
+  pending batches and then re-persisted the in-memory copies, queueing every
+  one of them twice and trimming the originals to the byte cap.
+- **`telemetryStats().lastError` clears when a batch is accepted**, so it
+  reports the current state rather than the high-water mark of a recovered
+  outage.
+- **`Event::message_failed` and `Event::relay_demoted` take `&'static str`.**
+  The telemetry pipe forwards these reasons to the ingest verbatim, without
+  the scrubber, because the classification taxonomy is the ingest's. A
+  `String` parameter made `format!("{err}")` representable at a call site, and
+  the transport layer renders the counterparty into its own error text, so one
+  such interpolation would have shipped a peer address beside identifiers the
+  same record hashes. `Event::message_deferred` already took a static string;
+  `WelcomeReasonCode::welcome_failure_reason()` is the static form of the one
+  call site that was interpolating.
 - The `data` and `telemetry-pipe` cargo features are both on by default; a
   build that wants neither the CRDT engine nor the TLS stack opts out.
 - `LICENSE-COMMERCIAL.md` states the telemetry term every commercial license

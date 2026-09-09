@@ -7,7 +7,6 @@ import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import com.facebook.react.bridge.*
-import com.facebook.react.common.LifecycleState
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import org.json.JSONArray
 import org.json.JSONObject
@@ -104,15 +103,30 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     )
 
     /**
-     * Started-activity count, which is what tells the process apart from an
-     * activity, and the watcher that maintains it. Main-thread confined:
-     * every `ActivityLifecycleCallbacks` method is delivered there, so
-     * neither needs synchronization. See [installProcessLifecycleWatcher];
-     * declared here because the `init` below assigns them, and a property
-     * initializer running after that `init` would overwrite the watcher with
-     * null and silently unhook the session boundary.
+     * The started activities, which is what tells the process apart from an
+     * activity, and the watcher that maintains them. Held by identity rather
+     * than counted; see [installProcessLifecycleWatcher] for why, and for
+     * why the boundary follows these rather than `onHostPause`.
+     *
+     * Main-thread confined: every `ActivityLifecycleCallbacks` method is
+     * delivered there, so neither needs synchronization. Declared here
+     * because the `init` below assigns them, and a property initializer
+     * running after that `init` would overwrite the watcher with null and
+     * silently unhook the session boundary.
      */
-    private var startedActivities = 0
+    private val startedActivities = java.util.Collections.newSetFromMap(
+        java.util.IdentityHashMap<Activity, Boolean>()
+    )
+
+    /**
+     * Whether the watcher has ever seen an activity start.
+     *
+     * Until it has, an empty [startedActivities] means "nothing observed
+     * yet", not "nothing running": this module is constructed around the host
+     * activity's `onCreate`, so the first `onStart` can land before the
+     * watcher is registered. [seedAppState] uses this to tell the two apart.
+     */
+    private var sawActivityStart = false
     private var processLifecycleWatcher: Application.ActivityLifecycleCallbacks? = null
 
     init {
@@ -236,8 +250,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         // Same reason as in [destroy]: the handle owns the telemetry pipe's
         // uploader thread, and invalidate is the last moment this module can
         // release it deterministically.
-        teardown.step("protocol handle") { protocol?.destroy() }
+        val protocolHandle = protocol
         protocol = null
+        teardown.step("protocol handle") { protocolHandle?.destroy() }
 
         teardown.step("mesh foreground service") { stopForegroundService() }
         releaseForegroundStopCallback()
@@ -338,6 +353,20 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * background edge. The matching `ACTIVE` needs no such gate: the pipe
      * debounces its own edges, so an `ACTIVE` with no `BACKGROUND` before it
      * is not an edge and does nothing.
+     *
+     * The started activities are held as an identity set rather than counted.
+     * React Native constructs its native modules after the host activity's
+     * `onStart`, so a counter starts at zero while an activity is already
+     * visible, and the first stop it sees is unmatched. Clamping that at zero
+     * hides it only while there is one activity: open a second in-process
+     * activity (a sign-in hub, an image picker, a payment sheet) and the
+     * sequence is start B, stop A, which takes the count to zero and fires a
+     * background edge with the app fully on screen — then start A on the way
+     * back, rotating the session. One journey becomes two sessions on
+     * Android and one on iOS, which is the asymmetry this whole function
+     * exists to avoid. A set is right whether or not the first activity was
+     * ever tracked: an untracked A stopping while B is tracked leaves the set
+     * non-empty, and the edge waits for B.
      */
     private fun installProcessLifecycleWatcher() {
         val application = reactApplicationContext.applicationContext as? Application
@@ -350,21 +379,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
         val watcher = object : Application.ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) {
-                startedActivities += 1
-                protocol?.notifyAppState(AppState.ACTIVE)
+                sawActivityStart = true
+                startedActivities.add(activity)
+                notifyAppStateQuietly(AppState.ACTIVE)
             }
 
             override fun onActivityStopped(activity: Activity) {
-                // Clamped at zero: this module can be constructed after the
-                // host activity already started, so the first stop can arrive
-                // without its matching start and would otherwise leave the
-                // count permanently negative and the boundary permanently
-                // armed.
-                startedActivities = max(0, startedActivities - 1)
-                if (startedActivities == 0 && !activity.isChangingConfigurations) {
+                startedActivities.remove(activity)
+                if (startedActivities.isEmpty() && !activity.isChangingConfigurations) {
                     // The pipe emits its summary and wakes the uploader
                     // thread; nothing here blocks.
-                    protocol?.notifyAppState(AppState.BACKGROUND)
+                    notifyAppStateQuietly(AppState.BACKGROUND)
                 }
             }
 
@@ -372,7 +397,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             override fun onActivityResumed(activity: Activity) {}
             override fun onActivityPaused(activity: Activity) {}
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
-            override fun onActivityDestroyed(activity: Activity) {}
+
+            override fun onActivityDestroyed(activity: Activity) {
+                // An activity destroyed without a matching stop would sit in
+                // the set forever and hold the background edge off.
+                startedActivities.remove(activity)
+            }
         }
         application.registerActivityLifecycleCallbacks(watcher)
         processLifecycleWatcher = watcher
@@ -381,8 +411,67 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private fun removeProcessLifecycleWatcher() {
         val watcher = processLifecycleWatcher ?: return
         processLifecycleWatcher = null
+        startedActivities.clear()
         (reactApplicationContext.applicationContext as? Application)
             ?.unregisterActivityLifecycleCallbacks(watcher)
+    }
+
+    /**
+     * Reports a lifecycle transition to the pipe, absorbing the throw a
+     * concurrently destroyed handle raises.
+     *
+     * This runs on the main thread, from `ActivityLifecycleCallbacks`, while
+     * [destroy] and [invalidate] run on the native-modules thread. UniFFI
+     * throws `IllegalStateException` once a handle's call counter has closed,
+     * and an exception escaping an `ActivityLifecycleCallbacks` method takes
+     * the process down. Logging out while the app is being backgrounded is
+     * exactly that race. Losing the boundary is the correct outcome there:
+     * the pipe it would have reported to is already stopped, and its final
+     * flush ran on the teardown path.
+     */
+    private fun notifyAppStateQuietly(state: AppState) {
+        try {
+            protocol?.notifyAppState(state)
+        } catch (e: IllegalStateException) {
+            Log.d(NAME, "Telemetry lifecycle transition skipped: the protocol handle is gone", e)
+        }
+    }
+
+    /**
+     * The application state to seed a new telemetry pipe with.
+     *
+     * This has to be measured the way the watcher measures its edges, not the
+     * way React Native reports its own lifecycle. `lifecycleState` is
+     * `RESUMED` only between `onResume` and `onPause`, so it reads
+     * `BEFORE_RESUME` while a permission dialog or share sheet sits over a
+     * fully visible app. A pipe seeded `BACKGROUND` there has its boundary
+     * armed with nothing to disarm it, because dismissing a dialog fires
+     * `onActivityResumed` and no `onActivityStarted`: the next real
+     * background is then read as a non-edge and reports nothing at all. The
+     * demo app calls `enableTelemetry` immediately after `start()`, which is
+     * exactly when a first-run permission prompt is on screen.
+     *
+     * Three sources, in falling order of authority:
+     *
+     * 1. The watcher's own set, once it has seen a start. This is the same
+     *    signal the edges use, so a seed from it can never disagree with them.
+     * 2. A live current activity. React Native constructs its native modules
+     *    around the host activity's `onCreate`, so the watcher can miss that
+     *    activity's `onStart` and never see one; `currentActivity` survives a
+     *    pause and is cleared only on host destroy, so a non-null value still
+     *    means the process has a foreground activity.
+     * 3. Otherwise `BACKGROUND`: no activity has ever resumed, which is what
+     *    a headless mesh wake or a service-only launch looks like.
+     *
+     * The order also puts the cheaper error first. Seeding `ACTIVE` while
+     * actually backgrounded costs one missed rotation and no data. Seeding
+     * `BACKGROUND` while actually foregrounded arms the boundary and loses
+     * the next real session summary, which is the bug this replaced.
+     */
+    private fun seedAppState(): AppState = when {
+        sawActivityStart -> if (startedActivities.isEmpty()) AppState.BACKGROUND else AppState.ACTIVE
+        reactApplicationContext.currentActivity != null -> AppState.ACTIVE
+        else -> AppState.BACKGROUND
     }
 
     @ReactMethod
@@ -1026,13 +1115,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
         try {
             val cfg = parseTelemetryConfig(configMap)
-            // The application state right now, so a pipe enabled by a
-            // background-launched task closes its first session on the next
-            // resume rather than after a full pause/resume round trip.
-            val state =
-                if (reactApplicationContext.lifecycleState == LifecycleState.RESUMED) AppState.ACTIVE
-                else AppState.BACKGROUND
-            proto.enableTelemetry(cfg, state)
+            // The application state right now, measured the way the
+            // session boundaries are measured; see [seedAppState].
+            proto.enableTelemetry(cfg, seedAppState())
             promise.resolve(null)
         } catch (e: Exception) {
             val mapped = mapProtocolBridgeError(e)
@@ -1063,27 +1148,45 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun flushTelemetry(promise: Promise) {
-        protocol?.flushTelemetry()
-        promise.resolve(null)
+        try {
+            protocol?.flushTelemetry()
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("TELEMETRY_FLUSH_FAILED", e.message, e)
+        }
     }
 
     @ReactMethod
     fun telemetryStats(promise: Promise) {
-        val stats = protocol?.telemetryStats()
-        promise.resolve(stats?.let { encodeTelemetryStats(it) })
+        try {
+            val stats = protocol?.telemetryStats()
+            promise.resolve(stats?.let { encodeTelemetryStats(it) })
+        } catch (e: Exception) {
+            promise.reject("TELEMETRY_STATS_FAILED", e.message, e)
+        }
     }
 
     @ReactMethod
     fun endTelemetrySession(promise: Promise) {
-        // Blocks for the flush (at most three seconds), off the UI thread.
-        protocol?.endTelemetrySession()
-        promise.resolve(null)
+        try {
+            // Blocks for the flush (at most three seconds), off the UI
+            // thread, but on the single native-modules thread: every other
+            // native call queues behind it for that long.
+            protocol?.endTelemetrySession()
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("TELEMETRY_END_SESSION_FAILED", e.message, e)
+        }
     }
 
     @ReactMethod
     fun setTelemetryEnabled(enabled: Boolean, promise: Promise) {
-        protocol?.setTelemetryEnabled(enabled)
-        promise.resolve(null)
+        try {
+            protocol?.setTelemetryEnabled(enabled)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("TELEMETRY_SET_ENABLED_FAILED", e.message, e)
+        }
     }
 
     @ReactMethod
@@ -1141,7 +1244,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             debug = readOptionalBoolean(m, "debug"),
             flushIntervalMs = readOptionalNonNegativeLong(m, "flushIntervalMs")?.toULong(),
             maxBatchBytes = readOptionalNonNegativeLong(m, "maxBatchBytes")?.toULong(),
-            maxBufferedRecords = readOptionalNonNegativeLong(m, "maxBufferedRecords")?.toUInt(),
+            // Clamped, not truncated: `toUInt()` on a Long wraps, so a
+            // JavaScript number just past `UInt.MAX_VALUE` would silently
+            // become a one-slot ring buffer rather than a large one. Swift
+            // clamps the same field; a value this large is nonsense either
+            // way, and the two bindings should be nonsense in the same
+            // direction.
+            maxBufferedRecords = readOptionalNonNegativeLong(m, "maxBufferedRecords")
+                ?.coerceAtMost(UInt.MAX_VALUE.toLong())
+                ?.toUInt(),
             includeDeviceId = readOptionalBoolean(m, "includeDeviceId"),
             scrubIds = readOptionalBoolean(m, "scrubIds"),
             mlsVerbosity = verbosity,
@@ -2080,12 +2191,19 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // Idempotent, and safe at this point because every caller into
             // the protocol — the process scheduler and all five transports —
             // has been stopped above.
+            // The field is cleared *before* the handle is destroyed, not
+            // after. The process lifecycle watcher reads it on the main
+            // thread while this runs on the native-modules thread, and a
+            // destroyed handle throws; publishing the null first means the
+            // widest that race can be is one already-in-flight call, which
+            // [notifyAppStateQuietly] absorbs.
+            val handle = protocol
+            protocol = null
             try {
-                protocol?.destroy()
+                handle?.destroy()
             } catch (e: Exception) {
                 android.util.Log.w(NAME, "Releasing the protocol handle failed", e)
             }
-            protocol = null
             meshServices = null
             // [listenerCount] is deliberately *not* reset here. React Native
             // owns it through addListener/removeListeners, and this module is a

@@ -12,8 +12,8 @@ software, to see if this is permitted.
 The Offline Protocol SDK implements end-to-end encryption (MLS, RFC 9420) and
 uses cryptographic primitives including ChaCha20-Poly1305, AES-GCM, HPKE, and
 Ed25519. Its telemetry pipe also carries a TLS 1.2 and 1.3 client (rustls over
-ring: AES-GCM, ChaCha20-Poly1305, X25519 and P-256 key exchange, ECDSA and
-RSA signature verification) for its one HTTPS endpoint. Encryption software
+ring: AES-GCM, ChaCha20-Poly1305, X25519, P-256 and P-384 key exchange, and
+ECDSA, RSA and Ed25519 signature verification) for its one HTTPS endpoint. Encryption software
 of this kind falls under Export Control Classification Number (ECCN) 5D002 of
 the U.S. Export Administration Regulations (EAR, 15 CFR parts 730–774).
 

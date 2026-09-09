@@ -3327,9 +3327,7 @@ impl OfflineProtocol {
         // Relaying switched off in configuration.
         if !relay.allow_relay || matches!(relay.relay_priority, RelayPriority::Never) {
             if self.mesh_relay.force_inactive() {
-                self.emit_event(Event::relay_demoted(
-                    "relaying disabled by configuration".to_string(),
-                ));
+                self.emit_event(Event::relay_demoted("relaying disabled by configuration"));
             }
             return;
         }
@@ -3353,7 +3351,7 @@ impl OfflineProtocol {
             }
             Some(RelayActivity::Ceased) => {
                 self.emit_event(Event::relay_demoted(
-                    "no traffic carried for other devices recently".to_string(),
+                    "no traffic carried for other devices recently",
                 ));
             }
             None => {}
@@ -3670,7 +3668,7 @@ impl OfflineProtocol {
         })?;
         state.emit_event(Event::message_failed(
             message_id.clone(),
-            "Max retries exceeded".to_string(),
+            "Max retries exceeded",
             retry_count,
         ));
         if let Some(recipient) = undeliverable_recipient {

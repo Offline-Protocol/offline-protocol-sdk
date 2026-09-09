@@ -1956,7 +1956,9 @@ export class OfflineProtocol {
    * enabled. `acceptedEvents` is what the ingest reported accepting, which
    * is what an invoice is reconciled against; `dropped` counts events lost
    * to the ring buffer, the durable queue's caps, the six-day expiry, or a
-   * permanent rejection; `lastError` is the most recent send failure.
+   * permanent rejection; `lastError` is the most recent send failure, and
+   * clears once a batch is accepted, so it reports the current state rather
+   * than the high-water mark of a recovered outage.
    */
   async telemetryStats(): Promise<TelemetryStats | null> {
     const stats = await OfflineProtocolNativeModule.telemetryStats();
@@ -1967,7 +1969,8 @@ export class OfflineProtocol {
    * Closes the current telemetry session explicitly: a summary, a flush of
    * up to three seconds, then a fresh session id. The lifecycle-driven
    * boundary still applies; calling both is safe because each summary
-   * reports only what the previous one did not.
+   * reports only what the previous one did not. A no-op while collection is
+   * off; use `flushTelemetry` to push a queued backlog without collecting.
    */
   async endTelemetrySession(): Promise<void> {
     await OfflineProtocolNativeModule.endTelemetrySession();
@@ -1975,8 +1978,12 @@ export class OfflineProtocol {
 
   /**
    * Stops or resumes collection without tearing the pipe down. Off, every
-   * emit costs one atomic load and nothing is buffered; what is already
-   * queued still drains. This is the runtime opt-out for a user setting.
+   * emit costs one atomic load and nothing is buffered, and the session
+   * boundaries stop reporting too: a background draws no session summary and
+   * opens no socket. The lifecycle transitions are still tracked, so the
+   * first foreground after collection resumes rotates the session as usual.
+   * What was already queued before the switch still drains. This is the
+   * runtime opt-out for a user setting.
    */
   async setTelemetryEnabled(enabled: boolean): Promise<void> {
     await OfflineProtocolNativeModule.setTelemetryEnabled(enabled);

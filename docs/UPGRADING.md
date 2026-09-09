@@ -2034,6 +2034,7 @@ disclosures.
 | `TelemetryRecord`, `TelemetryListener`, `MetricsFrame`, `TransportStateTelemetryEvent`, `RoutingDecision`, `DeviceCapabilitySnapshot`, `TransportMetricsEntry`, `RetryQueueStatsFrame`, `DeduplicatorStatsFrame`, `RoutingScoreEntry`, `RoutingPhase`, `RoutingReasonCode`, `TransportStatus`, `RelayRole` (TypeScript) | Removed; `TelemetryStats` added, `TelemetryConfig` reshaped |
 | Python `install_telemetry_sink(sink, config)`, `uninstall_telemetry_sink()`, `poll_telemetry_frame()` | `enable_telemetry(api_key, app_id, app_version=…)`, `disable_telemetry()`, `flush_telemetry()`, `telemetry_stats()`, `end_telemetry_session()`, `notify_app_state(state)`, `set_telemetry_enabled(bool)` |
 | Rust `install_telemetry_sink(sink, config)` (public) | Crate-private; `enable_telemetry(config, TelemetryHost)` and the same seven methods. `TelemetrySink` stays a public trait but can no longer be installed from outside the crate |
+| Rust `Event::message_failed(id, String, retries)` and `Event::relay_demoted(String)` | `&'static str` in place of `String`. The pipe forwards these reasons to the ingest unscrubbed, so a `String` made `format!("{err}")` representable at a call site and one such interpolation would ship a peer address. Pass a literal, or a classified token; `WelcomeReasonCode::welcome_failure_reason()` is the static form of the phrase the SDK itself was interpolating |
 | UDL `callback interface TelemetrySink` and the twelve dictionaries and enums that typed it | Removed; `TelemetryOs`, `AppState`, `TelemetryStats` and the reshaped `TelemetryConfig` added; `TelemetryConfigInvalid` appended to `ProtocolError` at position 24 |
 
 **What an app that never installed a sink has to do:** nothing. The emit path
@@ -2108,7 +2109,7 @@ source files and asserts their literals).
 | Document bytes will not decode | `Error::DataCorrupted` | `ProtocolError.DataCorrupted` |
 | Bad space / document / collection name | `Error::InvalidArgument` | `ProtocolError.InvalidArgument` |
 | Single value over the 1 MiB value limit | `Error::InvalidArgument` | `ProtocolError.InvalidArgument` |
-| Telemetry config field refused (`api_key`, `app_id`, `app_version`, `max_batch_bytes`, `max_buffered_records`, `flush_interval`) | `Error::TelemetryConfigInvalid` | `ProtocolError.TelemetryConfigInvalid` |
+| Telemetry config field refused (`api_key`, `app_id`, `app_version`, `max_batch_bytes`, `max_buffered_records`, `flush_interval_ms`) | `Error::TelemetryConfigInvalid` | `ProtocolError.TelemetryConfigInvalid` |
 
 Four `ProtocolError` variants were **appended** in v0.23.0 for the data layer
 (`DataDisabled`, `DataStorageUnavailable`, `DocTooLarge`, `DataCorrupted`), and

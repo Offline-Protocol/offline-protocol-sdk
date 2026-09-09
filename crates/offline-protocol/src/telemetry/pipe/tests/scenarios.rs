@@ -216,6 +216,89 @@ fn disabling_collection_stops_buffering_but_drains_what_was_queued() {
     assert_eq!(pipe.stats().sent_events, 1);
 }
 
+/// Collection off means the session boundaries stop reporting too.
+///
+/// A session summary is not bookkeeping: it is a row the ingest stores and
+/// bills, carrying the session duration and every counter the pairer
+/// accumulated over the window. Emitting one for a user who switched
+/// telemetry off in a settings screen would put a record on the wire per
+/// background for as long as the app runs, which is precisely what the
+/// switch promises not to do. The edge is still tracked, so the next
+/// foreground after collection resumes rotates rather than reading as a
+/// non-edge.
+#[test]
+fn a_lifecycle_boundary_with_collection_off_reports_nothing() {
+    let clock = FakeClock::at(1_000);
+    let client = CapturingClient::accepting();
+    let pipe = inline_pipe(&test_config(), &clock, client.clone(), Backend::Memory);
+    pipe.set_enabled(false);
+
+    clock.set(60_000);
+    pipe.notify_app_state(AppState::Background);
+    pipe.end_session();
+    assert_eq!(
+        pipe.stats().buffered,
+        0,
+        "a summary was buffered with collection off"
+    );
+    assert!(
+        client.bodies.lock().unwrap().is_empty(),
+        "collection is off: nothing may leave the device"
+    );
+
+    // Back on. The tracked background edge means the next foreground is a
+    // real rotation, and the following background reports as usual.
+    let before = pipe.stats().session_id;
+    pipe.set_enabled(true);
+    clock.set(70_000);
+    pipe.notify_app_state(AppState::Active);
+    assert_ne!(pipe.stats().session_id, before, "the edge was tracked");
+    emit_failed(&pipe, 1);
+    clock.set(80_000);
+    pipe.notify_app_state(AppState::Background);
+    assert_eq!(client.bodies.lock().unwrap().len(), 1);
+}
+
+/// Enabling in the background bills nothing for the privilege.
+///
+/// An iOS BLE restoration and an Android headless mesh wake both enable
+/// telemetry with the app in the background. Running the background arm of
+/// the lifecycle there would emit an all-zero summary with a zero duration
+/// and open a socket for it, on every such launch.
+#[test]
+fn enabling_in_the_background_emits_no_summary_and_opens_no_socket() {
+    use crate::telemetry::pipe::host::{TelemetryHost, TelemetryOs};
+    use crate::telemetry::pipe::PipeParts;
+
+    let clock = FakeClock::at(1_000);
+    let client = CapturingClient::accepting();
+    let pipe = TelemetryPipe::start(
+        &test_config(),
+        PipeParts {
+            host: TelemetryHost::new(TelemetryOs::Ios, 18).with_app_state(AppState::Background),
+            backend: Backend::Memory,
+            device_id: None,
+            client: Box::new(client.clone()),
+            clock: clock.clock(),
+            jitter: Box::new(|| 0),
+            spawn_thread: false,
+        },
+    )
+    .expect("pipe starts");
+    assert_eq!(pipe.stats().buffered, 0, "the seed emitted a summary");
+    pipe.flush();
+    assert!(
+        client.bodies.lock().unwrap().is_empty(),
+        "the seed opened a socket"
+    );
+
+    // The seed still arms the boundary: the first foreground rotates.
+    let first = pipe.stats().session_id;
+    clock.set(10_000);
+    pipe.notify_app_state(AppState::Active);
+    assert_ne!(pipe.stats().session_id, first);
+}
+
 #[test]
 fn three_days_offline_never_exceed_the_caps_and_every_batch_arrives_exactly_once() {
     let clock = FakeClock::at(1_000);
