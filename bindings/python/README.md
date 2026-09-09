@@ -204,6 +204,26 @@ Protocol state must live in application data rather than Keychain, Secret
 Service, or Windows Credential Locker. A custom provider shared by multiple
 accounts must apply the same `(app_id, user_id)` isolation itself.
 
+## Telemetry
+
+Opt-in by key. Once `enable_telemetry` has the key and app id the developer
+portal issued, the SDK collects, batches and uploads accepted events to the
+Offline Protocol ingest on its own background thread; the host platform is
+filled in from `platform`, and the batch queue is durable from the first
+batch because `start()` attaches the state store before anything is emitted.
+
+```python
+pm = ProtocolManager(config)
+await pm.start()
+pm.enable_telemetry("mp_…", "app_…", app_version="1.4.2")
+print(pm.telemetry_stats())   # sent, accepted, dropped, buffered, last error
+pm.disable_telemetry()        # final flush, then stop; stop() does this too
+```
+
+`flush_telemetry`, `end_telemetry_session`, `set_telemetry_enabled` and
+`notify_app_state` complete the surface. What leaves the device, when, and how
+to switch it off are in [docs/telemetry.md](../../docs/telemetry.md).
+
 ## Running the Example
 
 ```bash

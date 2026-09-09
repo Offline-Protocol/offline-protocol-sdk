@@ -83,3 +83,15 @@ make.
 See [LICENSE-COMMERCIAL.md](../LICENSE-COMMERCIAL.md) — in short, email
 legal@offlineprotocol.com with a brief description of your product, its
 distribution model, and expected scale.
+
+## Is telemetry part of the license?
+
+Telemetry is a hosted, metered service: opt-in by key, included in commercial
+plans, and priced per accepted event beyond a plan's allotment. The client
+half ships inside the SDK under the same dual license as everything else, so
+a fork may remove or replace it under either license option; the service, the
+dashboards and the reports are Offline Protocol's, and "Offline Protocol
+telemetry" is a name the [trademark policy](../TRADEMARKS.md) protects.
+Nothing in the SDK verifies a license at runtime, under either option: the
+AGPL forbids it, and the commercial license does not need it. What the SDK
+sends, and how to switch it off, is in [docs/telemetry.md](telemetry.md).
