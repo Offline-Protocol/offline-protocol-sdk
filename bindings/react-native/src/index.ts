@@ -56,8 +56,7 @@ import type {
   GroupRelaySyncChangedEvent,
   EstablishmentState,
   TelemetryConfig,
-  TelemetryListener,
-  TelemetryRecord,
+  TelemetryStats,
   TransportMetrics,
   RelayConfig,
   RelayPriority,
@@ -285,8 +284,6 @@ function sanitize<T extends object>(value: T | undefined | null): T | undefined 
 export class OfflineProtocol {
   private eventEmitter: NativeEventEmitter;
   private eventSubscription: EmitterSubscription | null = null;
-  private telemetrySubscription: EmitterSubscription | null = null;
-  private telemetryListeners: Set<TelemetryListener> = new Set();
   private eventListeners: Map<EventType | "all", Set<EventListener>> =
     new Map();
   /**
@@ -327,7 +324,6 @@ export class OfflineProtocol {
     this.config = config;
     this.eventEmitter = new NativeEventEmitter(OfflineProtocolNativeModule);
     this.setupEventSubscription();
-    this.setupTelemetrySubscription();
   }
 
   /**
@@ -715,34 +711,6 @@ export class OfflineProtocol {
         }
       }
     );
-  }
-
-  /**
-   * Sets up the native telemetry subscription. Telemetry events arrive with
-   * a `category` discriminator; this normalizes them to the TelemetryRecord
-   * union and fans them out to registered listeners.
-   */
-  private setupTelemetrySubscription(): void {
-    this.telemetrySubscription = this.eventEmitter.addListener(
-      "OfflineProtocol_Telemetry",
-      (data: unknown) => {
-        try {
-          this.dispatchTelemetry(data as TelemetryRecord);
-        } catch (error) {
-          console.error("Failed to dispatch telemetry record:", error);
-        }
-      }
-    );
-  }
-
-  private dispatchTelemetry(record: TelemetryRecord): void {
-    this.telemetryListeners.forEach((listener) => {
-      try {
-        listener(record);
-      } catch (error) {
-        console.error("Error in telemetry listener:", error);
-      }
-    });
   }
 
   /**
@@ -1939,160 +1907,94 @@ export class OfflineProtocol {
   }
 
   /**
-   * Installs a unified telemetry sink. Replaces any previously installed
-   * sink. Config fields left undefined fall back to the privacy-preserving
-   * defaults on the Rust side (scrubIds=true, mlsVerbosity='lifecycle',
-   * metricsCadenceMs=5000, routingDiagnostic=false, enablePollQueue=true).
+   * Enables telemetry: the SDK collects, batches and uploads accepted
+   * events to the Offline Protocol ingest itself, on a background thread
+   * inside the native library. Nothing crosses the bridge per event and
+   * nothing reaches JavaScript; the only inputs are the `apiKey` and
+   * `appId` the developer portal issued.
    *
-   * Telemetry records are dispatched via `onTelemetry` (push) and buffered
-   * for `pollTelemetry` (pull). The legacy `on(...)` event path is unaffected.
+   * The native module fills in the platform (`os`, `osMajor`) and owns the
+   * application lifecycle: entering the background closes the telemetry
+   * session (a summary, then a flush inside an OS background task on iOS),
+   * and returning to the foreground opens the next one. There is no
+   * lifecycle call for the app to make.
    *
-   * **Listener race**: the bridge call is async, so registering an
-   * `onTelemetry(listener)` *after* `installTelemetrySink(...)` resolves
-   * leaves a window where records emitted in the gap are fanned out to an
-   * empty listener set and dropped on the push channel (they still reach
-   * the pull queue when `enablePollQueue` is true). To close the race,
-   * pass the listener directly to this call — it is registered
-   * synchronously *before* the underlying native install is dispatched,
-   * so no emission can slip through. The returned unsubscribe removes the
-   * listener; further listeners can still be added via `onTelemetry(...)`.
+   * Batches are durable across a restart once `initializeMls` has run
+   * (the queue lives on the protocol-state store); before that they are
+   * held in memory. Calling this again replaces the running pipe after its
+   * final flush.
    *
-   * **Poll queue opt-out**: push-only integrations should pass
-   * `{ enablePollQueue: false }` to skip the per-emit JSON envelope build
-   * inside the Rust adapter. `pollTelemetry()` will return null for any
-   * record emitted while the opt-out is in effect.
+   * Rejects with code `TelemetryConfigInvalid` naming the refused field
+   * when the configuration is unusable (an empty key, a non-ASCII app id,
+   * a zero batch size).
    *
-   * **Queue retention across replacement**: calling this method a second
-   * time replaces the sink but does NOT drain the pull queue. A consumer
-   * polling immediately after replace will see the previous sink's
-   * buffered records first (FIFO). Drain `pollTelemetry()` in a loop
-   * until it returns null before re-installing if you need a clean slate,
-   * or call `uninstallTelemetrySink()` which atomically detaches the
-   * sink and drains the queue in one shot.
-   *
-   * @returns An unsubscribe function for the optional `listener`, or a
-   * no-op when no listener was provided.
+   * What leaves the device, when, and how to switch it off are documented
+   * in `docs/telemetry.md`; `docs/privacy.md` has the store disclosures.
    */
-  async installTelemetrySink(
-    config: TelemetryConfig = {},
-    listener?: TelemetryListener
-  ): Promise<() => void> {
-    // Register the listener synchronously BEFORE awaiting the bridge so
-    // records emitted between native-side install completion and the next
-    // JS microtask cannot slip past an empty listener set.
-    let unsubscribe: () => void = () => {};
-    if (listener) {
-      unsubscribe = this.onTelemetry(listener);
-    }
-    try {
-      await OfflineProtocolNativeModule.installTelemetrySink(config);
-    } catch (err) {
-      // If the install failed, drop the pre-registered listener so a
-      // retrying caller doesn't accumulate dangling listeners.
-      unsubscribe();
-      throw err;
-    }
-    return unsubscribe;
+  async enableTelemetry(config: TelemetryConfig): Promise<void> {
+    await OfflineProtocolNativeModule.enableTelemetry(config);
   }
 
   /**
-   * Detaches the installed telemetry sink. After this resolves, no further
-   * telemetry records reach `onTelemetry` listeners or the pull queue —
-   * the Rust adapter replaces the core sink with a no-op and drains the
-   * pull queue in a single call, so a subsequent
-   * `installTelemetrySink(...)` starts with an empty queue.
-   *
-   * Idempotent — calling without a prior install is a no-op.
-   *
-   * Does NOT remove TS-side listeners registered via `onTelemetry(...)`
-   * or via the optional-listener form of `installTelemetrySink(...)`;
-   * they remain bound but will simply never fire again unless a new sink
-   * is installed. Drop them explicitly via their unsubscribe if that is
-   * the intent.
+   * Disables telemetry after one final flush of up to three seconds. The
+   * emit path goes back to its telemetry-off cost. Idempotent.
    */
-  async uninstallTelemetrySink(): Promise<void> {
-    await OfflineProtocolNativeModule.uninstallTelemetrySink();
+  async disableTelemetry(): Promise<void> {
+    await OfflineProtocolNativeModule.disableTelemetry();
+  }
+
+  /**
+   * Asks the uploader to send what is queued now. Returns immediately; the
+   * upload happens on the native background thread.
+   */
+  async flushTelemetry(): Promise<void> {
+    await OfflineProtocolNativeModule.flushTelemetry();
+  }
+
+  /**
+   * The telemetry pipe's counters, or `null` while telemetry is not
+   * enabled. `acceptedEvents` is what the ingest reported accepting, which
+   * is what an invoice is reconciled against; `dropped` counts events lost
+   * to the ring buffer, the durable queue's caps, the six-day expiry, or a
+   * permanent rejection; `lastError` is the most recent send failure.
+   */
+  async telemetryStats(): Promise<TelemetryStats | null> {
+    const stats = await OfflineProtocolNativeModule.telemetryStats();
+    return (stats as TelemetryStats | null | undefined) ?? null;
+  }
+
+  /**
+   * Closes the current telemetry session explicitly: a summary, a flush of
+   * up to three seconds, then a fresh session id. The lifecycle-driven
+   * boundary still applies; calling both is safe because each summary
+   * reports only what the previous one did not.
+   */
+  async endTelemetrySession(): Promise<void> {
+    await OfflineProtocolNativeModule.endTelemetrySession();
+  }
+
+  /**
+   * Stops or resumes collection without tearing the pipe down. Off, every
+   * emit costs one atomic load and nothing is buffered; what is already
+   * queued still drains. This is the runtime opt-out for a user setting.
+   */
+  async setTelemetryEnabled(enabled: boolean): Promise<void> {
+    await OfflineProtocolNativeModule.setTelemetryEnabled(enabled);
   }
 
   /**
    * Returns a stable, opaque per-install telemetry identifier (32 hex
    * characters), derived from the SDK-managed persistent scrub secret. The
    * secret itself never crosses the bridge and cannot be recovered from
-   * the id, so the id is safe to attach to telemetry as a device-grain
-   * key (e.g. distinct-device counting in analytics backends).
+   * the id.
    *
-   * Resolves `null` until the persistent secret is available — i.e.
-   * before secure storage is wired on the native side (MLS initialization
-   * or message persistence), or when persisting the secret failed this
-   * session. In that state the id would not be stable across launches,
-   * so none is exposed.
-   *
-   * Stable across app restarts and `installTelemetrySink(...)` calls;
-   * unaffected by an app-supplied `scrubIds` / scrub-secret config.
-   *
-   * Note: while the id reveals nothing about the user or device, it is
-   * still a persistent per-install identifier — using it may need to be
-   * declared under your app's privacy disclosures (e.g. Apple privacy
-   * manifest / Google Play data safety, "device or other IDs").
+   * Resolves `null` until the persistent secret is available, which is
+   * after `initializeMls` has wired secure storage. Stamped on telemetry
+   * batches only when `TelemetryConfig.includeDeviceId` is set; see
+   * `docs/privacy.md` for the disclosure that setting carries.
    */
   async telemetryInstallId(): Promise<string | null> {
     return await OfflineProtocolNativeModule.telemetryInstallId();
-  }
-
-  /**
-   * Registers a listener that receives every TelemetryRecord emitted by the
-   * SDK. Requires a prior `installTelemetrySink(...)` — without an installed
-   * sink the Rust side emits nothing on either the push channel or the poll
-   * buffer.
-   *
-   * To close the install→register race window, prefer passing the listener
-   * directly to `installTelemetrySink(config, listener)`; that form
-   * registers synchronously before the native install is dispatched.
-   *
-   * @returns An unsubscribe function.
-   */
-  onTelemetry(listener: TelemetryListener): () => void {
-    this.telemetryListeners.add(listener);
-    return () => {
-      this.telemetryListeners.delete(listener);
-    };
-  }
-
-  /**
-   * Polls the next buffered telemetry record. Returns `null` when the
-   * internal queue is empty. The queue is bounded (1024 slots); overflow
-   * drops the oldest entry.
-   *
-   * Useful when an app prefers polling over push delivery. Requires a
-   * prior `installTelemetrySink(...)` with `enablePollQueue` left at its
-   * default (`true` / omitted). With `enablePollQueue: false` the Rust
-   * adapter never enqueues, so this method always returns null for
-   * records emitted under that config.
-   *
-   * The pull queue survives sink replacement — records enqueued by a
-   * previous sink stay readable until drained. See
-   * `installTelemetrySink` for details.
-   *
-   * Throws if the native layer returns a malformed envelope — callers can
-   * then distinguish "queue empty" (`null`) from "bridge corruption"
-   * (thrown) and surface the latter in their own telemetry.
-   */
-  async pollTelemetry(): Promise<TelemetryRecord | null> {
-    const json: string | null = await OfflineProtocolNativeModule.pollTelemetryFrame();
-    // Null/undefined is "queue empty". Anything else (including the empty
-    // string) would indicate a bridge bug — fall through to JSON.parse,
-    // which will then throw and let the caller distinguish corruption from
-    // "no data".
-    if (json === null || json === undefined) {
-      return null;
-    }
-    try {
-      return JSON.parse(json) as TelemetryRecord;
-    } catch (error) {
-      throw new Error(
-        `pollTelemetry: malformed envelope from native bridge (${(error as Error).message})`
-      );
-    }
   }
 
   /**
@@ -3475,17 +3377,12 @@ export class OfflineProtocol {
   async destroy(): Promise<void> {
     // Remove all event listeners
     this.removeAllListeners();
-    this.telemetryListeners.clear();
     this.droppedEventTypesWarned.clear();
 
     // Remove native event subscription
     if (this.eventSubscription) {
       this.eventSubscription.remove();
       this.eventSubscription = null;
-    }
-    if (this.telemetrySubscription) {
-      this.telemetrySubscription.remove();
-      this.telemetrySubscription = null;
     }
 
     // Destroy native protocol instance

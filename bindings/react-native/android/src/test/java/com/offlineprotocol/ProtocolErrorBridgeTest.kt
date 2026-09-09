@@ -34,7 +34,9 @@ class ProtocolErrorBridgeTest {
             ProtocolException.ServiceException("no provider") to "ServiceError",
             ProtocolException.GroupNotFound("group:missing") to "GroupNotFound",
             ProtocolException.PermissionDenied("only admins can invite") to "PermissionDenied",
-            ProtocolException.InvalidArgument("group name cannot be empty") to "InvalidArgument"
+            ProtocolException.InvalidArgument("group name cannot be empty") to "InvalidArgument",
+            ProtocolException.TelemetryConfigInvalid("telemetry config invalid: api_key")
+                to "TelemetryConfigInvalid"
         )
         for ((error, expectedCode) in cases) {
             val mapped = mapProtocolBridgeError(error)

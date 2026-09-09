@@ -27,11 +27,29 @@ offline-protocol-mls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
+# `log` turns every `tracing` macro in the workspace into a `log` record when
+# no subscriber is installed, which is how the core's output reaches the host
+# logger in `host_log.rs`; see that module for why.
+tracing = { workspace = true, features = ["log"] }
+log = "0.4"
 uniffi = "0.30"
+
+# The platform loggers the host logger writes to. Only the one for the
+# target being built is compiled; a desktop build writes to stderr instead.
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = { version = "0.15", default-features = false }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+oslog = { version = "0.2", default-features = false, features = ["logger"] }
 
 [dev-dependencies]
 offline-protocol-services = { workspace = true }
+# `test-utils` routes every telemetry upload into a capturing client, so the
+# FFI tests see the bytes without a network or a key.
+offline-protocol = { workspace = true, features = ["test-utils"] }
+# The wire types the FFI tests parse captured uploads back into, so a body
+# the pipe sends is checked against what the ingest binds.
+offline-protocol-telemetry-wire = { workspace = true }
 
 [build-dependencies]
 uniffi = { version = "0.30", features = ["build"] }
