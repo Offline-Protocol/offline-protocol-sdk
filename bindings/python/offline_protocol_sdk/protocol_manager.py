@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import platform
 from pathlib import Path
 from typing import Any, Callable
 
@@ -20,9 +21,11 @@ from .offline_protocol import (
     NostrTransportCallback,
     OfflineProtocol,
     ProtocolConfig,
+    AppState,
     ReticulumTransportCallback,
     TelemetryConfig,
-    TelemetrySink,
+    TelemetryOs,
+    TelemetryStats,
     WifiDirectTransportCallback,
 )
 from .ble_manager import BleManager
@@ -299,17 +302,17 @@ class ProtocolManager:
         if self.internet is not None:
             await self.internet.stop()
 
-        # Detach any installed telemetry sink before we drop GC pins.
-        # Rust retains the sink handle until this is called, so skipping
-        # it would leak the sink for the lifetime of the manager.
-        # Idempotent on the Rust side — safe to call without a prior install.
+        # Give the telemetry pipe its final flush while the process is still
+        # ours to block: the pipe would also stop when the protocol is
+        # dropped, but an explicit disable is what puts the last batch on the
+        # wire rather than in the durable queue. Idempotent on the Rust side.
         teardown_clean = True
         try:
-            self.uninstall_telemetry_sink()
+            self.disable_telemetry()
         except Exception:
             teardown_clean = False
             logger.debug(
-                "uninstall_telemetry_sink raised during stop (non-fatal)",
+                "disable_telemetry raised during stop (non-fatal)",
                 exc_info=True,
             )
 
@@ -447,108 +450,105 @@ class ProtocolManager:
 
     # -- telemetry ------------------------------------------------------------
 
-    def install_telemetry_sink(
+    def enable_telemetry(
         self,
-        sink: TelemetrySink,
-        config: TelemetryConfig | None = None,
+        api_key: str,
+        app_id: str,
+        app_version: str | None = None,
+        *,
+        debug: bool | None = None,
+        flush_interval_ms: int | None = None,
+        max_batch_bytes: int | None = None,
+        max_buffered_records: int | None = None,
+        include_device_id: bool | None = None,
+        scrub_ids: bool | None = None,
+        mls_verbosity: Any | None = None,
+        metrics_cadence_ms: int | None = None,
+        routing_diagnostic: bool | None = None,
+        mls_sampling_bypass: bool | None = None,
+        app_state: AppState = AppState.ACTIVE,
     ) -> None:
-        """Install a ``TelemetrySink`` on the underlying protocol.
+        """Enable telemetry: the SDK collects, batches and uploads accepted
+        events to the Offline Protocol ingest itself, on a background thread
+        inside the native library.
 
-        The sink reference is retained in ``_prevent_gc`` so Python's GC
-        cannot collect it while Rust holds a raw callback pointer.
-        Re-installing replaces the previous sink on the Rust side; the
-        prior sink's GC pin is released here so repeated installs do not
-        accumulate references.
+        ``api_key`` and ``app_id`` come from the developer portal. The host
+        platform is filled in from :mod:`platform`, never by the caller.
+        Every keyword argument left ``None`` keeps the Rust default. The
+        batch queue is durable from the first batch, because
+        :meth:`start` attaches the protocol-state store before anything is
+        emitted.
 
-        All ``TelemetryConfig`` fields are optional — passing ``None`` (or
-        a field left as ``None``) uses the Rust-side defaults:
-        ``scrub_ids=True``, ``mls_verbosity=Lifecycle``,
-        ``metrics_cadence_ms=5000``, ``routing_diagnostic=False``,
-        ``enable_poll_queue=True``, ``mls_sampling_bypass=False``.
+        Raises ``ProtocolError.TelemetryConfigInvalid`` naming the refused
+        field. Calling it again replaces the running pipe after its final
+        flush. See ``docs/telemetry.md`` for what leaves the device.
         """
-        effective = config if config is not None else TelemetryConfig(
-            scrub_ids=None,
-            mls_verbosity=None,
-            metrics_cadence_ms=None,
-            routing_diagnostic=None,
-            enable_poll_queue=None,
-            mls_sampling_bypass=None,
+        os_kind, os_major = _host_platform()
+        config = TelemetryConfig(
+            api_key=api_key,
+            app_id=app_id,
+            os=os_kind,
+            os_major=os_major,
+            app_version=app_version,
+            debug=debug,
+            flush_interval_ms=flush_interval_ms,
+            max_batch_bytes=max_batch_bytes,
+            max_buffered_records=max_buffered_records,
+            include_device_id=include_device_id,
+            scrub_ids=scrub_ids,
+            mls_verbosity=mls_verbosity,
+            metrics_cadence_ms=metrics_cadence_ms,
+            routing_diagnostic=routing_diagnostic,
+            mls_sampling_bypass=mls_sampling_bypass,
         )
-        # Pin the new sink BEFORE the FFI call so a successful Rust-side
-        # swap never observes an unpinned new sink. If the FFI call raises
-        # the lock is acquired before the swap on the Rust side
-        # (lib.rs::install_telemetry_sink), so the previous sink is still
-        # the live one — unpin the new sink and let the caller see the
-        # exception with state unchanged.
-        self._prevent_gc.append(sink)
-        try:
-            self._protocol.install_telemetry_sink(sink, effective)
-        except Exception:
-            self._prevent_gc.remove(sink)
-            raise
+        self._protocol.enable_telemetry(config, app_state)
 
-        # Rust has now dropped its handle on the prior sink; release the
-        # corresponding Python pin. ``list.remove`` drops the first match
-        # only, which correctly leaves the new pin in place even when the
-        # caller re-installs the same sink instance.
-        prev = getattr(self, "_telemetry_sink", None)
-        if prev is not None:
-            try:
-                self._prevent_gc.remove(prev)
-            except ValueError:
-                logger.debug(
-                    "prior telemetry sink missing from _prevent_gc",
-                    exc_info=True,
-                )
-        self._telemetry_sink = sink
+    def disable_telemetry(self) -> None:
+        """Disable telemetry after one final flush of up to three seconds.
+        Idempotent."""
+        self._protocol.disable_telemetry()
 
-    def uninstall_telemetry_sink(self) -> None:
-        """Detach the currently-installed telemetry sink, if any.
+    def flush_telemetry(self) -> None:
+        """Ask the uploader to send what is queued now. Returns at once."""
+        self._protocol.flush_telemetry()
 
-        Idempotent — safe to call without a prior install. If the
-        underlying Rust call raises, the Python-side bookkeeping is left
-        untouched so a retry sees the same state.
+    def telemetry_stats(self) -> TelemetryStats | None:
+        """The pipe's counters, or ``None`` while telemetry is not enabled.
+
+        ``accepted_events`` is what the ingest reported accepting, which is
+        what an invoice is reconciled against; ``dropped`` counts events
+        lost to the ring buffer, the queue caps, the six-day expiry or a
+        permanent rejection; ``last_error`` is the most recent send failure.
         """
-        self._protocol.uninstall_telemetry_sink()
-        sink = getattr(self, "_telemetry_sink", None)
-        if sink is not None:
-            try:
-                self._prevent_gc.remove(sink)
-            except ValueError:
-                pass
-            self._telemetry_sink = None
+        return self._protocol.telemetry_stats()
 
-    def poll_telemetry_frame(self) -> str | None:
-        """Pull the next queued telemetry frame as JSON, or ``None`` if the
-        queue is empty.
+    def end_telemetry_session(self) -> None:
+        """Close the current telemetry session: a summary, a flush of up to
+        three seconds, then a fresh session id."""
+        self._protocol.end_telemetry_session()
 
-        New records only enter the queue while a sink is installed with
-        ``TelemetryConfig.enable_poll_queue`` left at its default (or
-        explicitly ``True``); after ``uninstall_telemetry_sink`` or under a
-        push-only sink, fresh emissions do not enqueue. Records queued
-        prior to a re-install remain readable in FIFO order — call
-        ``uninstall_telemetry_sink`` between sinks for a clean slate. The
-        queue is bounded at 1024 slots (drop-oldest on overflow). Pair
-        with the typed ``TelemetrySink`` push callbacks if you need
-        guaranteed delivery.
-        """
-        return self._protocol.poll_telemetry_frame()
+    def notify_app_state(self, state: AppState) -> None:
+        """Report an application lifecycle transition. ``BACKGROUND`` closes
+        the session and requests a flush; the first ``ACTIVE`` after it
+        opens the next one. A desktop host that has no such lifecycle never
+        needs to call this."""
+        self._protocol.notify_app_state(state)
+
+    def set_telemetry_enabled(self, enabled: bool) -> None:
+        """Stop or resume collection without tearing the pipe down. Off,
+        every emit costs one atomic load and nothing is buffered; what is
+        already queued still drains."""
+        self._protocol.set_telemetry_enabled(enabled)
 
     def telemetry_install_id(self) -> str | None:
         """Stable, opaque per-install telemetry identifier (32 hex chars),
         derived from the SDK-managed persistent scrub secret. The secret
-        itself never crosses the FFI and cannot be recovered from the id,
-        so the id is safe to attach to telemetry as a device-grain key.
+        itself never crosses the FFI and cannot be recovered from the id.
 
-        Returns ``None`` until the persistent secret is available — i.e.
-        before :meth:`start` wires secure storage via MLS initialization,
-        or when persisting the secret failed this session (the id would
-        not be stable across launches, so none is exposed). Unaffected by
-        installing a telemetry sink or an app-supplied scrub secret.
-
-        Note: while the id reveals nothing about the user or device, it
-        is still a persistent per-install identifier — using it may need
-        to be declared under your app's privacy disclosures.
+        Returns ``None`` until the persistent secret is available, which is
+        after :meth:`start` has wired secure storage. Stamped on telemetry
+        batches only when ``include_device_id`` was set; that setting is a
+        disclosure decision, see ``docs/privacy.md``.
         """
         return self._protocol.telemetry_install_id()
 
@@ -618,3 +618,30 @@ class ProtocolManager:
                 "Capped receiveMessage drain at %d for this tick",
                 _MAX_MESSAGES_PER_TICK,
             )
+
+
+def _host_platform() -> tuple[TelemetryOs, int]:
+    """The host as the telemetry ingest names it, and its major version.
+
+    Filled here rather than by the caller: the ingest keys its per-platform
+    aggregates on these, and a value the application cannot set is a value
+    it cannot set wrong.
+    """
+    system = platform.system()
+    if system == "Darwin":
+        release = platform.mac_ver()[0] or "0"
+        return TelemetryOs.MACOS, _major(release)
+    if system == "Linux":
+        return TelemetryOs.LINUX, _major(platform.release())
+    if system == "Windows":
+        return TelemetryOs.WINDOWS, _major(platform.release())
+    return TelemetryOs.OTHER, 0
+
+
+def _major(version: str) -> int:
+    head = version.split(".", 1)[0]
+    digits = "".join(ch for ch in head if ch.isdigit())
+    try:
+        return max(0, min(int(digits), 65535)) if digits else 0
+    except ValueError:
+        return 0

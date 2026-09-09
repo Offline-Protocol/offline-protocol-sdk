@@ -115,6 +115,13 @@ internal fun mapProtocolBridgeError(error: Throwable): BridgeProtocolError? {
             code = "DataCorrupted",
             message = error.message ?: "Document data is corrupt"
         )
+        // A refused telemetry configuration. The message names the field,
+        // which is the whole diagnostic: an app that sees this pasted the
+        // wrong value, and no retry fixes it.
+        is ProtocolException.TelemetryConfigInvalid -> BridgeProtocolError(
+            code = "TelemetryConfigInvalid",
+            message = error.message ?: "telemetry config invalid"
+        )
         else -> null
     }
 }

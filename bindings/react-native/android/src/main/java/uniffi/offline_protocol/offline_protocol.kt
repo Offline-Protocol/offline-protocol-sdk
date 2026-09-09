@@ -647,27 +647,6 @@ internal interface UniffiCallbackInterfaceProtocolStateStorageProviderMethod3 : 
 internal interface UniffiCallbackInterfaceReticulumTransportCallbackMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-internal interface UniffiCallbackInterfaceTelemetrySinkMethod0 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`eventJson`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
-}
-internal interface UniffiCallbackInterfaceTelemetrySinkMethod1 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`eventJson`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
-}
-internal interface UniffiCallbackInterfaceTelemetrySinkMethod2 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`frame`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
-}
-internal interface UniffiCallbackInterfaceTelemetrySinkMethod3 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
-}
-internal interface UniffiCallbackInterfaceTelemetrySinkMethod4 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`decision`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
-}
-internal interface UniffiCallbackInterfaceTelemetrySinkMethod5 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`snapshot`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
-}
-internal interface UniffiCallbackInterfaceTelemetrySinkMethod6 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`name`: RustBuffer.ByValue,`payloadJson`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
-}
 internal interface UniffiCallbackInterfaceWifiDirectTransportCallbackMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
@@ -800,43 +779,6 @@ internal open class UniffiVTableCallbackInterfaceReticulumTransportCallback(
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onMessagesAvailable` = other.`onMessagesAvailable`
-    }
-
-}
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "onProtocolEvent", "onMlsEvent", "onMetricsFrame", "onTransportState", "onRoutingDecision", "onDeviceCapability", "onExtension")
-internal open class UniffiVTableCallbackInterfaceTelemetrySink(
-    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
-    @JvmField internal var `onProtocolEvent`: UniffiCallbackInterfaceTelemetrySinkMethod0? = null,
-    @JvmField internal var `onMlsEvent`: UniffiCallbackInterfaceTelemetrySinkMethod1? = null,
-    @JvmField internal var `onMetricsFrame`: UniffiCallbackInterfaceTelemetrySinkMethod2? = null,
-    @JvmField internal var `onTransportState`: UniffiCallbackInterfaceTelemetrySinkMethod3? = null,
-    @JvmField internal var `onRoutingDecision`: UniffiCallbackInterfaceTelemetrySinkMethod4? = null,
-    @JvmField internal var `onDeviceCapability`: UniffiCallbackInterfaceTelemetrySinkMethod5? = null,
-    @JvmField internal var `onExtension`: UniffiCallbackInterfaceTelemetrySinkMethod6? = null,
-) : Structure() {
-    class UniffiByValue(
-        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
-        `onProtocolEvent`: UniffiCallbackInterfaceTelemetrySinkMethod0? = null,
-        `onMlsEvent`: UniffiCallbackInterfaceTelemetrySinkMethod1? = null,
-        `onMetricsFrame`: UniffiCallbackInterfaceTelemetrySinkMethod2? = null,
-        `onTransportState`: UniffiCallbackInterfaceTelemetrySinkMethod3? = null,
-        `onRoutingDecision`: UniffiCallbackInterfaceTelemetrySinkMethod4? = null,
-        `onDeviceCapability`: UniffiCallbackInterfaceTelemetrySinkMethod5? = null,
-        `onExtension`: UniffiCallbackInterfaceTelemetrySinkMethod6? = null,
-    ): UniffiVTableCallbackInterfaceTelemetrySink(`uniffiFree`,`uniffiClone`,`onProtocolEvent`,`onMlsEvent`,`onMetricsFrame`,`onTransportState`,`onRoutingDecision`,`onDeviceCapability`,`onExtension`,), Structure.ByValue
-
-   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceTelemetrySink) {
-        `uniffiFree` = other.`uniffiFree`
-        `uniffiClone` = other.`uniffiClone`
-        `onProtocolEvent` = other.`onProtocolEvent`
-        `onMlsEvent` = other.`onMlsEvent`
-        `onMetricsFrame` = other.`onMetricsFrame`
-        `onTransportState` = other.`onTransportState`
-        `onRoutingDecision` = other.`onRoutingDecision`
-        `onDeviceCapability` = other.`onDeviceCapability`
-        `onExtension` = other.`onExtension`
     }
 
 }
@@ -986,11 +928,21 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_crea
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport(
 ): Short
@@ -1057,8 +1009,6 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_grou
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_install_telemetry_sink(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused(
 ): Short
@@ -1154,11 +1104,11 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nost
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_telemetry_frame(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process(
 ): Short
@@ -1244,6 +1194,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi(
@@ -1256,9 +1208,9 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id(
 ): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user(
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats(
 ): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_uninstall_telemetry_sink(
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config(
 ): Short
@@ -1316,20 +1268,6 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorage
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_reticulumtransportcallback_on_messages_available(
 ): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_protocol_event(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_mls_event(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_metrics_frame(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_transport_state(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_routing_decision(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_device_capability(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_extension(
-): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_wifidirecttransportcallback_on_messages_available(
 ): Short
 external fun ffi_offline_protocol_uniffi_uniffi_contract_version(
@@ -1354,7 +1292,6 @@ internal object UniffiLib {
         uniffiCallbackInterfaceNostrTransportCallback.register(this)
         uniffiCallbackInterfaceProtocolStateStorageProvider.register(this)
         uniffiCallbackInterfaceReticulumTransportCallback.register(this)
-        uniffiCallbackInterfaceTelemetrySink.register(this)
         uniffiCallbackInterfaceWifiDirectTransportCallback.register(this)
         
     }
@@ -1476,12 +1413,22 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_inv
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_derive_user_id_from_public_key(`ptr`: Long,`publicKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_disable_telemetry(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_enable_telemetry(`ptr`: Long,`config`: RustBuffer.ByValue,`appState`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_end_telemetry_session(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_establish_secure_session(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_finalize_file(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry_blocking(`ptr`: Long,`deadlineMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_force_transport(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message(`ptr`: Long,`originalMessageJson`: RustBuffer.ByValue,`newRecipient`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1547,8 +1494,6 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rich
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(`ptr`: Long,`secureStorage`: Long,`protocolStateStorage`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_install_telemetry_sink(`ptr`: Long,`sink`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declaration_refused(`ptr`: Long,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1644,11 +1589,11 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_notify_app_state(`ptr`: Long,`state`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_pause(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_event(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_telemetry_frame(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1734,6 +1679,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_reticulum_transport_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_telemetry_enabled(`ptr`: Long,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_wifi_direct_transport_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_should_escalate_to_wifi(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1746,9 +1693,9 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_stop(`ptr`
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_install_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unblock_user(`ptr`: Long,`userId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_uninstall_telemetry_sink(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_ack_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1785,8 +1732,6 @@ external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_nostrtranspo
 external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_protocolstatestorageprovider(`vtable`: UniffiVTableCallbackInterfaceProtocolStateStorageProvider,
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_reticulumtransportcallback(`vtable`: UniffiVTableCallbackInterfaceReticulumTransportCallback,
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_telemetrysink(`vtable`: UniffiVTableCallbackInterfaceTelemetrySink,
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttransportcallback(`vtable`: UniffiVTableCallbackInterfaceWifiDirectTransportCallback,
 ): Unit
@@ -2071,13 +2016,28 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 23152.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry() != 40509.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 6796.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry() != 23696.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session() != 51941.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session() != 25919.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file() != 55328.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry() != 21794.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking() != 20024.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport() != 28940.toShort()) {
@@ -2177,9 +2137,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 43685.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_install_telemetry_sink() != 18166.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused() != 30965.toShort()) {
@@ -2323,13 +2280,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed() != 10118.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state() != 37727.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause() != 51362.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event() != 28496.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_telemetry_frame() != 41894.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process() != 16160.toShort()) {
@@ -2458,6 +2415,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback() != 27956.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled() != 61336.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback() != 39894.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2476,10 +2436,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id() != 11199.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user() != 7771.toShort()) {
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats() != 7562.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_uninstall_telemetry_sink() != 481.toShort()) {
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user() != 7771.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 52736.toShort()) {
@@ -2564,27 +2524,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_reticulumtransportcallback_on_messages_available() != 48810.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_protocol_event() != 21552.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_mls_event() != 43552.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_metrics_frame() != 1979.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_transport_state() != 17328.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_routing_decision() != 32476.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_device_capability() != 24847.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_extension() != 60536.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_wifidirecttransportcallback_on_messages_available() != 4635.toShort()) {
@@ -2798,6 +2737,29 @@ public object FfiConverterUByte: FfiConverter<UByte, Byte> {
 
     override fun write(value: UByte, buf: ByteBuffer) {
         buf.put(value.toByte())
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterUShort: FfiConverter<UShort, Short> {
+    override fun lift(value: Short): UShort {
+        return value.toUShort()
+    }
+
+    override fun read(buf: ByteBuffer): UShort {
+        return lift(buf.getShort())
+    }
+
+    override fun lower(value: UShort): Short {
+        return value.toShort()
+    }
+
+    override fun allocationSize(value: UShort) = 2UL
+
+    override fun write(value: UShort, buf: ByteBuffer) {
+        buf.putShort(value.toShort())
     }
 }
 
@@ -4136,11 +4098,21 @@ public interface OfflineProtocolInterface {
     
     fun `deriveUserIdFromPublicKey`(`publicKey`: List<kotlin.UByte>): kotlin.String
     
+    fun `disableTelemetry`()
+    
     fun `emitTestEvent`()
+    
+    fun `enableTelemetry`(`config`: TelemetryConfig, `appState`: AppState)
+    
+    fun `endTelemetrySession`()
     
     fun `establishSecureSession`(`peerId`: kotlin.String): MlsWelcomeMessage?
     
     fun `finalizeFile`(`fileId`: kotlin.String)
+    
+    fun `flushTelemetry`()
+    
+    fun `flushTelemetryBlocking`(`deadlineMs`: kotlin.ULong): kotlin.Boolean
     
     fun `forceTransport`(`transportType`: TransportType)
     
@@ -4207,8 +4179,6 @@ public interface OfflineProtocolInterface {
     fun `hasPendingKeyPackage`(`peerId`: kotlin.String): kotlin.Boolean
     
     fun `initializeMls`(`secureStorage`: MlsStorageProvider, `protocolStateStorage`: ProtocolStateStorageProvider)
-    
-    fun `installTelemetrySink`(`sink`: TelemetrySink, `config`: TelemetryConfig)
     
     fun `internetAddressDeclarationRefused`(`reason`: kotlin.String)
     
@@ -4304,11 +4274,11 @@ public interface OfflineProtocolInterface {
     
     fun `nostrStatusChanged`(`isConnected`: kotlin.Boolean)
     
+    fun `notifyAppState`(`state`: AppState)
+    
     fun `pause`()
     
     fun `pollEvent`(): kotlin.String?
-    
-    fun `pollTelemetryFrame`(): kotlin.String?
     
     fun `process`()
     
@@ -4394,6 +4364,8 @@ public interface OfflineProtocolInterface {
     
     fun `setReticulumTransportCallback`(`callback`: ReticulumTransportCallback)
     
+    fun `setTelemetryEnabled`(`enabled`: kotlin.Boolean)
+    
     fun `setWifiDirectTransportCallback`(`callback`: WifiDirectTransportCallback)
     
     fun `shouldEscalateToWifi`(): kotlin.Boolean
@@ -4406,9 +4378,9 @@ public interface OfflineProtocolInterface {
     
     fun `telemetryInstallId`(): kotlin.String?
     
-    fun `unblockUser`(`userId`: kotlin.String)
+    fun `telemetryStats`(): TelemetryStats?
     
-    fun `uninstallTelemetrySink`()
+    fun `unblockUser`(`userId`: kotlin.String)
     
     fun `updateAckConfig`(`config`: AckConfig)
     
@@ -4791,11 +4763,49 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
+    
+    @Throws(ProtocolException::class)override fun `disableTelemetry`()
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_disable_telemetry(
+        it,
+        _status)
+}
+    }
+    
+    
+
     override fun `emitTestEvent`()
         = 
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event(
+        it,
+        _status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `enableTelemetry`(`config`: TelemetryConfig, `appState`: AppState)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_enable_telemetry(
+        it,
+        FfiConverterTypeTelemetryConfig.lower(`config`),FfiConverterTypeAppState.lower(`appState`),_status)
+}
+    }
+    
+    
+
+    override fun `endTelemetrySession`()
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_end_telemetry_session(
         it,
         _status)
 }
@@ -4828,6 +4838,31 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
 }
     }
     
+    
+
+    override fun `flushTelemetry`()
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry(
+        it,
+        _status)
+}
+    }
+    
+    
+
+    override fun `flushTelemetryBlocking`(`deadlineMs`: kotlin.ULong): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry_blocking(
+        it,
+        FfiConverterULong.lower(`deadlineMs`),_status)
+}
+    }
+    )
+    }
     
 
     
@@ -5266,19 +5301,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(
         it,
         FfiConverterTypeMlsStorageProvider.lower(`secureStorage`),FfiConverterTypeProtocolStateStorageProvider.lower(`protocolStateStorage`),_status)
-}
-    }
-    
-    
-
-    
-    @Throws(ProtocolException::class)override fun `installTelemetrySink`(`sink`: TelemetrySink, `config`: TelemetryConfig)
-        = 
-    callWithHandle {
-    uniffiRustCallWithError(ProtocolException) { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_install_telemetry_sink(
-        it,
-        FfiConverterTypeTelemetrySink.lower(`sink`),FfiConverterTypeTelemetryConfig.lower(`config`),_status)
 }
     }
     
@@ -5895,6 +5917,18 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
     
 
+    override fun `notifyAppState`(`state`: AppState)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_notify_app_state(
+        it,
+        FfiConverterTypeAppState.lower(`state`),_status)
+}
+    }
+    
+    
+
     
     @Throws(ProtocolException::class)override fun `pause`()
         = 
@@ -5913,19 +5947,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_event(
-        it,
-        _status)
-}
-    }
-    )
-    }
-    
-
-    override fun `pollTelemetryFrame`(): kotlin.String? {
-            return FfiConverterOptionalString.lift(
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_telemetry_frame(
         it,
         _status)
 }
@@ -6483,6 +6504,18 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
     
 
+    override fun `setTelemetryEnabled`(`enabled`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_telemetry_enabled(
+        it,
+        FfiConverterBoolean.lower(`enabled`),_status)
+}
+    }
+    
+    
+
     override fun `setWifiDirectTransportCallback`(`callback`: WifiDirectTransportCallback)
         = 
     callWithHandle {
@@ -6561,6 +6594,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
+    override fun `telemetryStats`(): TelemetryStats? {
+            return FfiConverterOptionalTypeTelemetryStats.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_stats(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
     
     @Throws(ProtocolException::class)override fun `unblockUser`(`userId`: kotlin.String)
         = 
@@ -6569,19 +6615,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unblock_user(
         it,
         FfiConverterString.lower(`userId`),_status)
-}
-    }
-    
-    
-
-    
-    @Throws(ProtocolException::class)override fun `uninstallTelemetrySink`()
-        = 
-    callWithHandle {
-    uniffiRustCallWithError(ProtocolException) { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_uninstall_telemetry_sink(
-        it,
-        _status)
 }
     }
     
@@ -6933,108 +6966,6 @@ public object FfiConverterTypeDedupStats: FfiConverterRustBuffer<DedupStats> {
             FfiConverterULong.write(value.`recentTracked`, buf)
             FfiConverterUByte.write(value.`capacityUsedPercent`, buf)
             FfiConverterString.write(value.`mode`, buf)
-    }
-}
-
-
-
-data class DeduplicatorStatsFrame (
-    var `totalTracked`: kotlin.ULong
-    , 
-    var `recentTracked`: kotlin.ULong
-    , 
-    var `capacityUsedPercent`: kotlin.UByte
-    , 
-    var `falsePositiveRate`: kotlin.Double?
-    , 
-    var `mode`: kotlin.String
-    
-){
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDeduplicatorStatsFrame: FfiConverterRustBuffer<DeduplicatorStatsFrame> {
-    override fun read(buf: ByteBuffer): DeduplicatorStatsFrame {
-        return DeduplicatorStatsFrame(
-            FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterUByte.read(buf),
-            FfiConverterOptionalDouble.read(buf),
-            FfiConverterString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: DeduplicatorStatsFrame) = (
-            FfiConverterULong.allocationSize(value.`totalTracked`) +
-            FfiConverterULong.allocationSize(value.`recentTracked`) +
-            FfiConverterUByte.allocationSize(value.`capacityUsedPercent`) +
-            FfiConverterOptionalDouble.allocationSize(value.`falsePositiveRate`) +
-            FfiConverterString.allocationSize(value.`mode`)
-    )
-
-    override fun write(value: DeduplicatorStatsFrame, buf: ByteBuffer) {
-            FfiConverterULong.write(value.`totalTracked`, buf)
-            FfiConverterULong.write(value.`recentTracked`, buf)
-            FfiConverterUByte.write(value.`capacityUsedPercent`, buf)
-            FfiConverterOptionalDouble.write(value.`falsePositiveRate`, buf)
-            FfiConverterString.write(value.`mode`, buf)
-    }
-}
-
-
-
-data class DeviceCapabilitySnapshot (
-    var `timestampMs`: kotlin.Long
-    , 
-    var `batteryLevel`: kotlin.UByte?
-    , 
-    var `isCharging`: kotlin.Boolean
-    , 
-    var `relayRole`: RelayRole
-    , 
-    var `changedFields`: kotlin.UByte
-    
-){
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDeviceCapabilitySnapshot: FfiConverterRustBuffer<DeviceCapabilitySnapshot> {
-    override fun read(buf: ByteBuffer): DeviceCapabilitySnapshot {
-        return DeviceCapabilitySnapshot(
-            FfiConverterLong.read(buf),
-            FfiConverterOptionalUByte.read(buf),
-            FfiConverterBoolean.read(buf),
-            FfiConverterTypeRelayRole.read(buf),
-            FfiConverterUByte.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: DeviceCapabilitySnapshot) = (
-            FfiConverterLong.allocationSize(value.`timestampMs`) +
-            FfiConverterOptionalUByte.allocationSize(value.`batteryLevel`) +
-            FfiConverterBoolean.allocationSize(value.`isCharging`) +
-            FfiConverterTypeRelayRole.allocationSize(value.`relayRole`) +
-            FfiConverterUByte.allocationSize(value.`changedFields`)
-    )
-
-    override fun write(value: DeviceCapabilitySnapshot, buf: ByteBuffer) {
-            FfiConverterLong.write(value.`timestampMs`, buf)
-            FfiConverterOptionalUByte.write(value.`batteryLevel`, buf)
-            FfiConverterBoolean.write(value.`isCharging`, buf)
-            FfiConverterTypeRelayRole.write(value.`relayRole`, buf)
-            FfiConverterUByte.write(value.`changedFields`, buf)
     }
 }
 
@@ -7989,72 +7920,6 @@ public object FfiConverterTypeMessageStats: FfiConverterRustBuffer<MessageStats>
             FfiConverterOptionalULong.write(value.`deliveredAtMs`, buf)
             FfiConverterUByte.write(value.`hopCount`, buf)
             FfiConverterString.write(value.`status`, buf)
-    }
-}
-
-
-
-data class MetricsFrame (
-    var `timestampMs`: kotlin.Long
-    , 
-    var `transports`: List<TransportMetricsEntry>
-    , 
-    var `retryQueue`: RetryQueueStats
-    , 
-    var `dedup`: DeduplicatorStatsFrame
-    , 
-    var `ackPending`: kotlin.ULong
-    , 
-    var `neighborCount`: kotlin.ULong
-    , 
-    var `isLocalRelay`: kotlin.Boolean
-    , 
-    var `currentTransport`: TransportType?
-    
-){
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeMetricsFrame: FfiConverterRustBuffer<MetricsFrame> {
-    override fun read(buf: ByteBuffer): MetricsFrame {
-        return MetricsFrame(
-            FfiConverterLong.read(buf),
-            FfiConverterSequenceTypeTransportMetricsEntry.read(buf),
-            FfiConverterTypeRetryQueueStats.read(buf),
-            FfiConverterTypeDeduplicatorStatsFrame.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterBoolean.read(buf),
-            FfiConverterOptionalTypeTransportType.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: MetricsFrame) = (
-            FfiConverterLong.allocationSize(value.`timestampMs`) +
-            FfiConverterSequenceTypeTransportMetricsEntry.allocationSize(value.`transports`) +
-            FfiConverterTypeRetryQueueStats.allocationSize(value.`retryQueue`) +
-            FfiConverterTypeDeduplicatorStatsFrame.allocationSize(value.`dedup`) +
-            FfiConverterULong.allocationSize(value.`ackPending`) +
-            FfiConverterULong.allocationSize(value.`neighborCount`) +
-            FfiConverterBoolean.allocationSize(value.`isLocalRelay`) +
-            FfiConverterOptionalTypeTransportType.allocationSize(value.`currentTransport`)
-    )
-
-    override fun write(value: MetricsFrame, buf: ByteBuffer) {
-            FfiConverterLong.write(value.`timestampMs`, buf)
-            FfiConverterSequenceTypeTransportMetricsEntry.write(value.`transports`, buf)
-            FfiConverterTypeRetryQueueStats.write(value.`retryQueue`, buf)
-            FfiConverterTypeDeduplicatorStatsFrame.write(value.`dedup`, buf)
-            FfiConverterULong.write(value.`ackPending`, buf)
-            FfiConverterULong.write(value.`neighborCount`, buf)
-            FfiConverterBoolean.write(value.`isLocalRelay`, buf)
-            FfiConverterOptionalTypeTransportType.write(value.`currentTransport`, buf)
     }
 }
 
@@ -9104,194 +8969,6 @@ public object FfiConverterTypeRetryConfig: FfiConverterRustBuffer<RetryConfig> {
 
 
 
-data class RetryQueueStats (
-    var `totalCount`: kotlin.ULong
-    , 
-    var `readyCount`: kotlin.ULong
-    , 
-    var `criticalPriorityCount`: kotlin.ULong
-    , 
-    var `highPriorityCount`: kotlin.ULong
-    , 
-    var `mediumPriorityCount`: kotlin.ULong
-    , 
-    var `lowPriorityCount`: kotlin.ULong
-    
-){
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeRetryQueueStats: FfiConverterRustBuffer<RetryQueueStats> {
-    override fun read(buf: ByteBuffer): RetryQueueStats {
-        return RetryQueueStats(
-            FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: RetryQueueStats) = (
-            FfiConverterULong.allocationSize(value.`totalCount`) +
-            FfiConverterULong.allocationSize(value.`readyCount`) +
-            FfiConverterULong.allocationSize(value.`criticalPriorityCount`) +
-            FfiConverterULong.allocationSize(value.`highPriorityCount`) +
-            FfiConverterULong.allocationSize(value.`mediumPriorityCount`) +
-            FfiConverterULong.allocationSize(value.`lowPriorityCount`)
-    )
-
-    override fun write(value: RetryQueueStats, buf: ByteBuffer) {
-            FfiConverterULong.write(value.`totalCount`, buf)
-            FfiConverterULong.write(value.`readyCount`, buf)
-            FfiConverterULong.write(value.`criticalPriorityCount`, buf)
-            FfiConverterULong.write(value.`highPriorityCount`, buf)
-            FfiConverterULong.write(value.`mediumPriorityCount`, buf)
-            FfiConverterULong.write(value.`lowPriorityCount`, buf)
-    }
-}
-
-
-
-data class RoutingDecision (
-    var `timestampMs`: kotlin.Long
-    , 
-    var `phase`: RoutingPhase
-    , 
-    var `from`: TransportType?
-    , 
-    var `to`: TransportType?
-    , 
-    var `winningScore`: kotlin.Float?
-    , 
-    var `reasonCode`: RoutingReasonCode?
-    , 
-    var `scores`: List<RoutingScoreEntry>
-    
-){
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeRoutingDecision: FfiConverterRustBuffer<RoutingDecision> {
-    override fun read(buf: ByteBuffer): RoutingDecision {
-        return RoutingDecision(
-            FfiConverterLong.read(buf),
-            FfiConverterTypeRoutingPhase.read(buf),
-            FfiConverterOptionalTypeTransportType.read(buf),
-            FfiConverterOptionalTypeTransportType.read(buf),
-            FfiConverterOptionalFloat.read(buf),
-            FfiConverterOptionalTypeRoutingReasonCode.read(buf),
-            FfiConverterSequenceTypeRoutingScoreEntry.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: RoutingDecision) = (
-            FfiConverterLong.allocationSize(value.`timestampMs`) +
-            FfiConverterTypeRoutingPhase.allocationSize(value.`phase`) +
-            FfiConverterOptionalTypeTransportType.allocationSize(value.`from`) +
-            FfiConverterOptionalTypeTransportType.allocationSize(value.`to`) +
-            FfiConverterOptionalFloat.allocationSize(value.`winningScore`) +
-            FfiConverterOptionalTypeRoutingReasonCode.allocationSize(value.`reasonCode`) +
-            FfiConverterSequenceTypeRoutingScoreEntry.allocationSize(value.`scores`)
-    )
-
-    override fun write(value: RoutingDecision, buf: ByteBuffer) {
-            FfiConverterLong.write(value.`timestampMs`, buf)
-            FfiConverterTypeRoutingPhase.write(value.`phase`, buf)
-            FfiConverterOptionalTypeTransportType.write(value.`from`, buf)
-            FfiConverterOptionalTypeTransportType.write(value.`to`, buf)
-            FfiConverterOptionalFloat.write(value.`winningScore`, buf)
-            FfiConverterOptionalTypeRoutingReasonCode.write(value.`reasonCode`, buf)
-            FfiConverterSequenceTypeRoutingScoreEntry.write(value.`scores`, buf)
-    }
-}
-
-
-
-data class RoutingScoreEntry (
-    var `transport`: TransportType
-    , 
-    var `signal`: kotlin.Float
-    , 
-    var `proximity`: kotlin.Float
-    , 
-    var `bandwidth`: kotlin.Float
-    , 
-    var `congestion`: kotlin.Float
-    , 
-    var `energy`: kotlin.Float
-    , 
-    var `reliability`: kotlin.Float
-    , 
-    var `load`: kotlin.Float
-    , 
-    var `total`: kotlin.Float
-    
-){
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeRoutingScoreEntry: FfiConverterRustBuffer<RoutingScoreEntry> {
-    override fun read(buf: ByteBuffer): RoutingScoreEntry {
-        return RoutingScoreEntry(
-            FfiConverterTypeTransportType.read(buf),
-            FfiConverterFloat.read(buf),
-            FfiConverterFloat.read(buf),
-            FfiConverterFloat.read(buf),
-            FfiConverterFloat.read(buf),
-            FfiConverterFloat.read(buf),
-            FfiConverterFloat.read(buf),
-            FfiConverterFloat.read(buf),
-            FfiConverterFloat.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: RoutingScoreEntry) = (
-            FfiConverterTypeTransportType.allocationSize(value.`transport`) +
-            FfiConverterFloat.allocationSize(value.`signal`) +
-            FfiConverterFloat.allocationSize(value.`proximity`) +
-            FfiConverterFloat.allocationSize(value.`bandwidth`) +
-            FfiConverterFloat.allocationSize(value.`congestion`) +
-            FfiConverterFloat.allocationSize(value.`energy`) +
-            FfiConverterFloat.allocationSize(value.`reliability`) +
-            FfiConverterFloat.allocationSize(value.`load`) +
-            FfiConverterFloat.allocationSize(value.`total`)
-    )
-
-    override fun write(value: RoutingScoreEntry, buf: ByteBuffer) {
-            FfiConverterTypeTransportType.write(value.`transport`, buf)
-            FfiConverterFloat.write(value.`signal`, buf)
-            FfiConverterFloat.write(value.`proximity`, buf)
-            FfiConverterFloat.write(value.`bandwidth`, buf)
-            FfiConverterFloat.write(value.`congestion`, buf)
-            FfiConverterFloat.write(value.`energy`, buf)
-            FfiConverterFloat.write(value.`reliability`, buf)
-            FfiConverterFloat.write(value.`load`, buf)
-            FfiConverterFloat.write(value.`total`, buf)
-    }
-}
-
-
-
 data class SendMessageOptions (
     var `priority`: MessagePriority? = null 
     , 
@@ -9349,6 +9026,26 @@ public object FfiConverterTypeSendMessageOptions: FfiConverterRustBuffer<SendMes
 
 
 data class TelemetryConfig (
+    var `apiKey`: kotlin.String
+    , 
+    var `appId`: kotlin.String
+    , 
+    var `os`: TelemetryOs
+    , 
+    var `osMajor`: kotlin.UShort
+    , 
+    var `appVersion`: kotlin.String?
+    , 
+    var `debug`: kotlin.Boolean?
+    , 
+    var `flushIntervalMs`: kotlin.ULong?
+    , 
+    var `maxBatchBytes`: kotlin.ULong?
+    , 
+    var `maxBufferedRecords`: kotlin.UInt?
+    , 
+    var `includeDeviceId`: kotlin.Boolean?
+    , 
     var `scrubIds`: kotlin.Boolean?
     , 
     var `mlsVerbosity`: MlsVerbosity?
@@ -9356,8 +9053,6 @@ data class TelemetryConfig (
     var `metricsCadenceMs`: kotlin.ULong?
     , 
     var `routingDiagnostic`: kotlin.Boolean?
-    , 
-    var `enablePollQueue`: kotlin.Boolean?
     , 
     var `mlsSamplingBypass`: kotlin.Boolean?
     
@@ -9374,31 +9069,119 @@ data class TelemetryConfig (
 public object FfiConverterTypeTelemetryConfig: FfiConverterRustBuffer<TelemetryConfig> {
     override fun read(buf: ByteBuffer): TelemetryConfig {
         return TelemetryConfig(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeTelemetryOs.read(buf),
+            FfiConverterUShort.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
             FfiConverterOptionalBoolean.read(buf),
             FfiConverterOptionalTypeMlsVerbosity.read(buf),
             FfiConverterOptionalULong.read(buf),
-            FfiConverterOptionalBoolean.read(buf),
             FfiConverterOptionalBoolean.read(buf),
             FfiConverterOptionalBoolean.read(buf),
         )
     }
 
     override fun allocationSize(value: TelemetryConfig) = (
+            FfiConverterString.allocationSize(value.`apiKey`) +
+            FfiConverterString.allocationSize(value.`appId`) +
+            FfiConverterTypeTelemetryOs.allocationSize(value.`os`) +
+            FfiConverterUShort.allocationSize(value.`osMajor`) +
+            FfiConverterOptionalString.allocationSize(value.`appVersion`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`debug`) +
+            FfiConverterOptionalULong.allocationSize(value.`flushIntervalMs`) +
+            FfiConverterOptionalULong.allocationSize(value.`maxBatchBytes`) +
+            FfiConverterOptionalUInt.allocationSize(value.`maxBufferedRecords`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`includeDeviceId`) +
             FfiConverterOptionalBoolean.allocationSize(value.`scrubIds`) +
             FfiConverterOptionalTypeMlsVerbosity.allocationSize(value.`mlsVerbosity`) +
             FfiConverterOptionalULong.allocationSize(value.`metricsCadenceMs`) +
             FfiConverterOptionalBoolean.allocationSize(value.`routingDiagnostic`) +
-            FfiConverterOptionalBoolean.allocationSize(value.`enablePollQueue`) +
             FfiConverterOptionalBoolean.allocationSize(value.`mlsSamplingBypass`)
     )
 
     override fun write(value: TelemetryConfig, buf: ByteBuffer) {
+            FfiConverterString.write(value.`apiKey`, buf)
+            FfiConverterString.write(value.`appId`, buf)
+            FfiConverterTypeTelemetryOs.write(value.`os`, buf)
+            FfiConverterUShort.write(value.`osMajor`, buf)
+            FfiConverterOptionalString.write(value.`appVersion`, buf)
+            FfiConverterOptionalBoolean.write(value.`debug`, buf)
+            FfiConverterOptionalULong.write(value.`flushIntervalMs`, buf)
+            FfiConverterOptionalULong.write(value.`maxBatchBytes`, buf)
+            FfiConverterOptionalUInt.write(value.`maxBufferedRecords`, buf)
+            FfiConverterOptionalBoolean.write(value.`includeDeviceId`, buf)
             FfiConverterOptionalBoolean.write(value.`scrubIds`, buf)
             FfiConverterOptionalTypeMlsVerbosity.write(value.`mlsVerbosity`, buf)
             FfiConverterOptionalULong.write(value.`metricsCadenceMs`, buf)
             FfiConverterOptionalBoolean.write(value.`routingDiagnostic`, buf)
-            FfiConverterOptionalBoolean.write(value.`enablePollQueue`, buf)
             FfiConverterOptionalBoolean.write(value.`mlsSamplingBypass`, buf)
+    }
+}
+
+
+
+data class TelemetryStats (
+    var `buffered`: kotlin.ULong
+    , 
+    var `sentEvents`: kotlin.ULong
+    , 
+    var `acceptedEvents`: kotlin.ULong
+    , 
+    var `dropped`: kotlin.ULong
+    , 
+    var `sessionId`: kotlin.String
+    , 
+    var `lastError`: kotlin.String?
+    , 
+    var `lastFlushAtMs`: kotlin.Long?
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTelemetryStats: FfiConverterRustBuffer<TelemetryStats> {
+    override fun read(buf: ByteBuffer): TelemetryStats {
+        return TelemetryStats(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalLong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TelemetryStats) = (
+            FfiConverterULong.allocationSize(value.`buffered`) +
+            FfiConverterULong.allocationSize(value.`sentEvents`) +
+            FfiConverterULong.allocationSize(value.`acceptedEvents`) +
+            FfiConverterULong.allocationSize(value.`dropped`) +
+            FfiConverterString.allocationSize(value.`sessionId`) +
+            FfiConverterOptionalString.allocationSize(value.`lastError`) +
+            FfiConverterOptionalLong.allocationSize(value.`lastFlushAtMs`)
+    )
+
+    override fun write(value: TelemetryStats, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`buffered`, buf)
+            FfiConverterULong.write(value.`sentEvents`, buf)
+            FfiConverterULong.write(value.`acceptedEvents`, buf)
+            FfiConverterULong.write(value.`dropped`, buf)
+            FfiConverterString.write(value.`sessionId`, buf)
+            FfiConverterOptionalString.write(value.`lastError`, buf)
+            FfiConverterOptionalLong.write(value.`lastFlushAtMs`, buf)
     }
 }
 
@@ -9586,88 +9369,6 @@ public object FfiConverterTypeTransportMetrics: FfiConverterRustBuffer<Transport
 
 
 
-data class TransportMetricsEntry (
-    var `transport`: TransportType
-    , 
-    var `metrics`: TransportMetrics
-    
-){
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeTransportMetricsEntry: FfiConverterRustBuffer<TransportMetricsEntry> {
-    override fun read(buf: ByteBuffer): TransportMetricsEntry {
-        return TransportMetricsEntry(
-            FfiConverterTypeTransportType.read(buf),
-            FfiConverterTypeTransportMetrics.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: TransportMetricsEntry) = (
-            FfiConverterTypeTransportType.allocationSize(value.`transport`) +
-            FfiConverterTypeTransportMetrics.allocationSize(value.`metrics`)
-    )
-
-    override fun write(value: TransportMetricsEntry, buf: ByteBuffer) {
-            FfiConverterTypeTransportType.write(value.`transport`, buf)
-            FfiConverterTypeTransportMetrics.write(value.`metrics`, buf)
-    }
-}
-
-
-
-data class TransportStateEvent (
-    var `timestampMs`: kotlin.Long
-    , 
-    var `transport`: TransportType
-    , 
-    var `previous`: TransportStatus
-    , 
-    var `current`: TransportStatus
-    
-){
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeTransportStateEvent: FfiConverterRustBuffer<TransportStateEvent> {
-    override fun read(buf: ByteBuffer): TransportStateEvent {
-        return TransportStateEvent(
-            FfiConverterLong.read(buf),
-            FfiConverterTypeTransportType.read(buf),
-            FfiConverterTypeTransportStatus.read(buf),
-            FfiConverterTypeTransportStatus.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: TransportStateEvent) = (
-            FfiConverterLong.allocationSize(value.`timestampMs`) +
-            FfiConverterTypeTransportType.allocationSize(value.`transport`) +
-            FfiConverterTypeTransportStatus.allocationSize(value.`previous`) +
-            FfiConverterTypeTransportStatus.allocationSize(value.`current`)
-    )
-
-    override fun write(value: TransportStateEvent, buf: ByteBuffer) {
-            FfiConverterLong.write(value.`timestampMs`, buf)
-            FfiConverterTypeTransportType.write(value.`transport`, buf)
-            FfiConverterTypeTransportStatus.write(value.`previous`, buf)
-            FfiConverterTypeTransportStatus.write(value.`current`, buf)
-    }
-}
-
-
-
 data class WifiDirectMessage (
     var `recipientId`: kotlin.String
     , 
@@ -9701,6 +9402,37 @@ public object FfiConverterTypeWifiDirectMessage: FfiConverterRustBuffer<WifiDire
             FfiConverterSequenceUByte.write(value.`data`, buf)
     }
 }
+
+
+
+
+enum class AppState {
+    
+    ACTIVE,
+    BACKGROUND,
+    INACTIVE;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeAppState: FfiConverterRustBuffer<AppState> {
+    override fun read(buf: ByteBuffer) = try {
+        AppState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: AppState) = 4UL
+
+    override fun write(value: AppState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
 
 
 
@@ -10019,6 +9751,8 @@ sealed class ProtocolException(message: String): kotlin.Exception(message) {
         
         class DataCorrupted(message: String) : ProtocolException(message)
         
+        class TelemetryConfigInvalid(message: String) : ProtocolException(message)
+        
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<ProtocolException> {
         override fun lift(error_buf: RustBuffer.ByValue): ProtocolException = FfiConverterTypeProtocolError.lift(error_buf)
@@ -10056,6 +9790,7 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
             22 -> ProtocolException.DataStorageUnavailable(FfiConverterString.read(buf))
             23 -> ProtocolException.DocTooLarge(FfiConverterString.read(buf))
             24 -> ProtocolException.DataCorrupted(FfiConverterString.read(buf))
+            25 -> ProtocolException.TelemetryConfigInvalid(FfiConverterString.read(buf))
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
         
@@ -10163,6 +9898,10 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
                 buf.putInt(24)
                 Unit
             }
+            is ProtocolException.TelemetryConfigInvalid -> {
+                buf.putInt(25)
+                Unit
+            }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 
@@ -10233,36 +9972,6 @@ public object FfiConverterTypeRelayPriority: FfiConverterRustBuffer<RelayPriorit
 
 
 
-enum class RelayRole {
-    
-    REGULAR,
-    RELAY;
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeRelayRole: FfiConverterRustBuffer<RelayRole> {
-    override fun read(buf: ByteBuffer) = try {
-        RelayRole.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: RelayRole) = 4UL
-
-    override fun write(value: RelayRole, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-
 enum class RelaySyncState {
     
     SYNCED,
@@ -10294,13 +10003,14 @@ public object FfiConverterTypeRelaySyncState: FfiConverterRustBuffer<RelaySyncSt
 
 
 
-enum class RoutingPhase {
+enum class TelemetryOs {
     
-    SCORE_UPDATED,
-    SELECTED,
-    SWITCHED,
-    ESCALATED,
-    UNKNOWN;
+    IOS,
+    ANDROID,
+    LINUX,
+    MACOS,
+    WINDOWS,
+    OTHER;
     companion object
 }
 
@@ -10308,89 +10018,16 @@ enum class RoutingPhase {
 /**
  * @suppress
  */
-public object FfiConverterTypeRoutingPhase: FfiConverterRustBuffer<RoutingPhase> {
+public object FfiConverterTypeTelemetryOs: FfiConverterRustBuffer<TelemetryOs> {
     override fun read(buf: ByteBuffer) = try {
-        RoutingPhase.values()[buf.getInt() - 1]
+        TelemetryOs.values()[buf.getInt() - 1]
     } catch (e: IndexOutOfBoundsException) {
         throw RuntimeException("invalid enum value, something is very wrong!!", e)
     }
 
-    override fun allocationSize(value: RoutingPhase) = 4UL
+    override fun allocationSize(value: TelemetryOs) = 4UL
 
-    override fun write(value: RoutingPhase, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-
-enum class RoutingReasonCode {
-    
-    INITIAL_SELECTION,
-    PRIMARY_SELECTED,
-    PRIMARY_SUCCESS,
-    FALLBACK_SUCCESS,
-    ESCALATION_APPLIED,
-    CURRENT_UNAVAILABLE,
-    RETRY_THRESHOLD,
-    POOR_SIGNAL,
-    CONGESTION,
-    LOW_TTL,
-    LOW_SUCCESS_RATE,
-    UNKNOWN;
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeRoutingReasonCode: FfiConverterRustBuffer<RoutingReasonCode> {
-    override fun read(buf: ByteBuffer) = try {
-        RoutingReasonCode.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: RoutingReasonCode) = 4UL
-
-    override fun write(value: RoutingReasonCode, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-
-enum class TransportStatus {
-    
-    AVAILABLE,
-    UNAVAILABLE,
-    CONNECTING,
-    DISCONNECTED,
-    ERROR;
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeTransportStatus: FfiConverterRustBuffer<TransportStatus> {
-    override fun read(buf: ByteBuffer) = try {
-        TransportStatus.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: TransportStatus) = 4UL
-
-    override fun write(value: TransportStatus, buf: ByteBuffer) {
+    override fun write(value: TelemetryOs, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -10929,157 +10566,6 @@ public object FfiConverterTypeReticulumTransportCallback: FfiConverterCallbackIn
 
 
 
-public interface TelemetrySink {
-    
-    fun `onProtocolEvent`(`eventJson`: kotlin.String)
-    
-    fun `onMlsEvent`(`eventJson`: kotlin.String)
-    
-    fun `onMetricsFrame`(`frame`: MetricsFrame)
-    
-    fun `onTransportState`(`event`: TransportStateEvent)
-    
-    fun `onRoutingDecision`(`decision`: RoutingDecision)
-    
-    fun `onDeviceCapability`(`snapshot`: DeviceCapabilitySnapshot)
-    
-    fun `onExtension`(`name`: kotlin.String, `payloadJson`: kotlin.String)
-    
-    companion object
-}
-
-
-
-// Put the implementation in an object so we don't pollute the top-level namespace
-internal object uniffiCallbackInterfaceTelemetrySink {
-    internal object `onProtocolEvent`: UniffiCallbackInterfaceTelemetrySinkMethod0 {
-        override fun callback(`uniffiHandle`: Long,`eventJson`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeTelemetrySink.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`onProtocolEvent`(
-                    FfiConverterString.lift(`eventJson`),
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-    internal object `onMlsEvent`: UniffiCallbackInterfaceTelemetrySinkMethod1 {
-        override fun callback(`uniffiHandle`: Long,`eventJson`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeTelemetrySink.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`onMlsEvent`(
-                    FfiConverterString.lift(`eventJson`),
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-    internal object `onMetricsFrame`: UniffiCallbackInterfaceTelemetrySinkMethod2 {
-        override fun callback(`uniffiHandle`: Long,`frame`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeTelemetrySink.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`onMetricsFrame`(
-                    FfiConverterTypeMetricsFrame.lift(`frame`),
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-    internal object `onTransportState`: UniffiCallbackInterfaceTelemetrySinkMethod3 {
-        override fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeTelemetrySink.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`onTransportState`(
-                    FfiConverterTypeTransportStateEvent.lift(`event`),
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-    internal object `onRoutingDecision`: UniffiCallbackInterfaceTelemetrySinkMethod4 {
-        override fun callback(`uniffiHandle`: Long,`decision`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeTelemetrySink.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`onRoutingDecision`(
-                    FfiConverterTypeRoutingDecision.lift(`decision`),
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-    internal object `onDeviceCapability`: UniffiCallbackInterfaceTelemetrySinkMethod5 {
-        override fun callback(`uniffiHandle`: Long,`snapshot`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeTelemetrySink.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`onDeviceCapability`(
-                    FfiConverterTypeDeviceCapabilitySnapshot.lift(`snapshot`),
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-    internal object `onExtension`: UniffiCallbackInterfaceTelemetrySinkMethod6 {
-        override fun callback(`uniffiHandle`: Long,`name`: RustBuffer.ByValue,`payloadJson`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeTelemetrySink.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`onExtension`(
-                    FfiConverterString.lift(`name`),
-                    FfiConverterString.lift(`payloadJson`),
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-
-    internal object uniffiFree: UniffiCallbackInterfaceFree {
-        override fun callback(handle: Long) {
-            FfiConverterTypeTelemetrySink.handleMap.remove(handle)
-        }
-    }
-
-    internal object uniffiClone: UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long {
-            return FfiConverterTypeTelemetrySink.handleMap.clone(handle)
-        }
-    }
-
-    internal var vtable = UniffiVTableCallbackInterfaceTelemetrySink.UniffiByValue(
-        uniffiFree,
-        uniffiClone,
-        `onProtocolEvent`,
-        `onMlsEvent`,
-        `onMetricsFrame`,
-        `onTransportState`,
-        `onRoutingDecision`,
-        `onDeviceCapability`,
-        `onExtension`,
-    )
-
-    // Registers the foreign callback with the Rust side.
-    // This method is generated for each callback interface.
-    internal fun register(lib: UniffiLib) {
-        lib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_telemetrysink(vtable)
-    }
-}
-
-/**
- * The ffiConverter which transforms the Callbacks in to handles to pass to Rust.
- *
- * @suppress
- */
-public object FfiConverterTypeTelemetrySink: FfiConverterCallbackInterface<TelemetrySink>()
-
-
-
-
-
 public interface WifiDirectTransportCallback {
     
     fun `onMessagesAvailable`()
@@ -11323,38 +10809,6 @@ public object FfiConverterOptionalFloat: FfiConverterRustBuffer<kotlin.Float?> {
         } else {
             buf.put(1)
             FfiConverterFloat.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalDouble: FfiConverterRustBuffer<kotlin.Double?> {
-    override fun read(buf: ByteBuffer): kotlin.Double? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterDouble.read(buf)
-    }
-
-    override fun allocationSize(value: kotlin.Double?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterDouble.allocationSize(value)
-        }
-    }
-
-    override fun write(value: kotlin.Double?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterDouble.write(value, buf)
         }
     }
 }
@@ -11845,6 +11299,38 @@ public object FfiConverterOptionalTypeReticulumMessage: FfiConverterRustBuffer<R
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeTelemetryStats: FfiConverterRustBuffer<TelemetryStats?> {
+    override fun read(buf: ByteBuffer): TelemetryStats? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeTelemetryStats.read(buf)
+    }
+
+    override fun allocationSize(value: TelemetryStats?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeTelemetryStats.allocationSize(value)
+        }
+    }
+
+    override fun write(value: TelemetryStats?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeTelemetryStats.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeTransportMetrics: FfiConverterRustBuffer<TransportMetrics?> {
     override fun read(buf: ByteBuffer): TransportMetrics? {
         if (buf.get().toInt() == 0) {
@@ -11995,70 +11481,6 @@ public object FfiConverterOptionalTypeMlsVerbosity: FfiConverterRustBuffer<MlsVe
         } else {
             buf.put(1)
             FfiConverterTypeMlsVerbosity.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalTypeRoutingReasonCode: FfiConverterRustBuffer<RoutingReasonCode?> {
-    override fun read(buf: ByteBuffer): RoutingReasonCode? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterTypeRoutingReasonCode.read(buf)
-    }
-
-    override fun allocationSize(value: RoutingReasonCode?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterTypeRoutingReasonCode.allocationSize(value)
-        }
-    }
-
-    override fun write(value: RoutingReasonCode?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterTypeRoutingReasonCode.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalTypeTransportType: FfiConverterRustBuffer<TransportType?> {
-    override fun read(buf: ByteBuffer): TransportType? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterTypeTransportType.read(buf)
-    }
-
-    override fun allocationSize(value: TransportType?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterTypeTransportType.allocationSize(value)
-        }
-    }
-
-    override fun write(value: TransportType?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterTypeTransportType.write(value, buf)
         }
     }
 }
@@ -12259,62 +11681,6 @@ public object FfiConverterSequenceTypeNetworkNode: FfiConverterRustBuffer<List<N
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeNetworkNode.write(it, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterSequenceTypeRoutingScoreEntry: FfiConverterRustBuffer<List<RoutingScoreEntry>> {
-    override fun read(buf: ByteBuffer): List<RoutingScoreEntry> {
-        val len = buf.getInt()
-        return List<RoutingScoreEntry>(len) {
-            FfiConverterTypeRoutingScoreEntry.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<RoutingScoreEntry>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeRoutingScoreEntry.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<RoutingScoreEntry>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeRoutingScoreEntry.write(it, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterSequenceTypeTransportMetricsEntry: FfiConverterRustBuffer<List<TransportMetricsEntry>> {
-    override fun read(buf: ByteBuffer): List<TransportMetricsEntry> {
-        val len = buf.getInt()
-        return List<TransportMetricsEntry>(len) {
-            FfiConverterTypeTransportMetricsEntry.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<TransportMetricsEntry>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeTransportMetricsEntry.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<TransportMetricsEntry>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeTransportMetricsEntry.write(it, buf)
         }
     }
 }

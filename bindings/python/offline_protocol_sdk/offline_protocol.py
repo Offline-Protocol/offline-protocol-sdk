@@ -621,11 +621,21 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 2562:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry() != 56580:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 6362:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry() != 49121:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session() != 31162:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session() != 56452:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file() != 63518:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry() != 2273:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking() != 9280:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport() != 8362:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -692,8 +702,6 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 498:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 23277:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_install_telemetry_sink() != 38856:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused() != 829:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -789,11 +797,11 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed() != 47097:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state() != 39252:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause() != 43542:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event() != 21984:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_telemetry_frame() != 40338:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process() != 45466:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -879,6 +887,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback() != 31048:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled() != 28422:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback() != 31962:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi() != 7907:
@@ -891,9 +901,9 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id() != 19313:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user() != 14209:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats() != 61949:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_uninstall_telemetry_sink() != 3716:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user() != 14209:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 15033:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1338,47 +1348,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_reticulumtrans
     ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolReticulumTransportCallback),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_reticulumtransportcallback.restype = None
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD1 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD2 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD3 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD4 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD5 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD6 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,_UniffiRustBuffer,ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_TELEMETRY_SINK = ctypes.CFUNCTYPE(ctypes.c_uint64,ctypes.c_uint64,
-)
-_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_TELEMETRY_SINK = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
-)
-class _UniffiVTableCallbackInterfaceOfflineProtocolTelemetrySink(ctypes.Structure):
-    _fields_ = [
-        ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_TELEMETRY_SINK),
-        ("uniffi_clone", _UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_TELEMETRY_SINK),
-        ("on_protocol_event", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD0),
-        ("on_mls_event", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD1),
-        ("on_metrics_frame", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD2),
-        ("on_transport_state", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD3),
-        ("on_routing_decision", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD4),
-        ("on_device_capability", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD5),
-        ("on_extension", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD6),
-    ]
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_telemetrysink.argtypes = (
-    ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolTelemetrySink),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_telemetrysink.restype = None
 _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_WIFI_DIRECT_TRANSPORT_CALLBACK_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
@@ -1778,11 +1747,28 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_derive_user_
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_derive_user_id_from_public_key.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_disable_telemetry.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_disable_telemetry.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_enable_telemetry.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_enable_telemetry.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_end_telemetry_session.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_end_telemetry_session.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_establish_secure_session.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -1795,6 +1781,17 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_finalize_fil
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_finalize_file.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry_blocking.argtypes = (
+    ctypes.c_uint64,
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry_blocking.restype = ctypes.c_int8
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_force_transport.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -1980,13 +1977,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_m
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls.restype = None
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_install_telemetry_sink.argtypes = (
-    ctypes.c_uint64,
-    ctypes.c_uint64,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_install_telemetry_sink.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declaration_refused.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2268,6 +2258,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_status
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_status_changed.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_notify_app_state.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_notify_app_state.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_pause.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2278,11 +2274,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_event.a
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_event.restype = _UniffiRustBuffer
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_telemetry_frame.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_telemetry_frame.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2568,6 +2559,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_reticulu
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_reticulum_transport_callback.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_telemetry_enabled.argtypes = (
+    ctypes.c_uint64,
+    ctypes.c_int8,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_telemetry_enabled.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_wifi_direct_transport_callback.argtypes = (
     ctypes.c_uint64,
     ctypes.c_uint64,
@@ -2600,17 +2597,17 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_in
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_install_id.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_stats.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_stats.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unblock_user.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unblock_user.restype = None
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_uninstall_telemetry_sink.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_uninstall_telemetry_sink.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_ack_config.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2857,15 +2854,30 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport.restype = ctypes.c_uint16
@@ -2965,9 +2977,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pe
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_install_telemetry_sink.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_install_telemetry_sink.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused.restype = ctypes.c_uint16
@@ -3109,15 +3118,15 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_telemetry_frame.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_telemetry_frame.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process.restype = ctypes.c_uint16
@@ -3244,6 +3253,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_re
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback.restype = ctypes.c_uint16
@@ -3262,12 +3274,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop.r
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_uninstall_telemetry_sink.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_uninstall_telemetry_sink.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config.restype = ctypes.c_uint16
@@ -3550,132 +3562,6 @@ class _UniffiFfiConverterTypeDedupStats(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt8.write(value.capacity_used_percent, buf)
         _UniffiFfiConverterString.write(value.mode, buf)
 
-class _UniffiFfiConverterFloat64(_UniffiConverterPrimitiveFloat):
-    @staticmethod
-    def read(buf):
-        return buf.read_double()
-
-    @staticmethod
-    def write(value, buf):
-        buf.write_double(value)
-
-class _UniffiFfiConverterOptionalFloat64(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterFloat64.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterFloat64.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterFloat64.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
-@dataclass
-class DeduplicatorStatsFrame:
-    def __init__(self, *, total_tracked:int, recent_tracked:int, capacity_used_percent:int, false_positive_rate:typing.Optional[float], mode:str):
-        self.total_tracked = total_tracked
-        self.recent_tracked = recent_tracked
-        self.capacity_used_percent = capacity_used_percent
-        self.false_positive_rate = false_positive_rate
-        self.mode = mode
-        
-        
-
-    
-    def __str__(self):
-        return "DeduplicatorStatsFrame(total_tracked={}, recent_tracked={}, capacity_used_percent={}, false_positive_rate={}, mode={})".format(self.total_tracked, self.recent_tracked, self.capacity_used_percent, self.false_positive_rate, self.mode)
-    def __eq__(self, other):
-        if self.total_tracked != other.total_tracked:
-            return False
-        if self.recent_tracked != other.recent_tracked:
-            return False
-        if self.capacity_used_percent != other.capacity_used_percent:
-            return False
-        if self.false_positive_rate != other.false_positive_rate:
-            return False
-        if self.mode != other.mode:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeDeduplicatorStatsFrame(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return DeduplicatorStatsFrame(
-            total_tracked=_UniffiFfiConverterUInt64.read(buf),
-            recent_tracked=_UniffiFfiConverterUInt64.read(buf),
-            capacity_used_percent=_UniffiFfiConverterUInt8.read(buf),
-            false_positive_rate=_UniffiFfiConverterOptionalFloat64.read(buf),
-            mode=_UniffiFfiConverterString.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterUInt64.check_lower(value.total_tracked)
-        _UniffiFfiConverterUInt64.check_lower(value.recent_tracked)
-        _UniffiFfiConverterUInt8.check_lower(value.capacity_used_percent)
-        _UniffiFfiConverterOptionalFloat64.check_lower(value.false_positive_rate)
-        _UniffiFfiConverterString.check_lower(value.mode)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterUInt64.write(value.total_tracked, buf)
-        _UniffiFfiConverterUInt64.write(value.recent_tracked, buf)
-        _UniffiFfiConverterUInt8.write(value.capacity_used_percent, buf)
-        _UniffiFfiConverterOptionalFloat64.write(value.false_positive_rate, buf)
-        _UniffiFfiConverterString.write(value.mode, buf)
-
-class _UniffiFfiConverterInt64(_UniffiConverterPrimitiveInt):
-    CLASS_NAME = "i64"
-    VALUE_MIN = -2**63
-    VALUE_MAX = 2**63
-
-    @staticmethod
-    def read(buf):
-        return buf.read_i64()
-
-    @staticmethod
-    def write(value, buf):
-        buf.write_i64(value)
-
-class _UniffiFfiConverterOptionalUInt8(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterUInt8.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterUInt8.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterUInt8.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
 class _UniffiFfiConverterBoolean:
     @classmethod
     def check_lower(cls, value):
@@ -3696,100 +3582,6 @@ class _UniffiFfiConverterBoolean:
     @classmethod
     def write(cls, value, buf):
         buf.write_u8(value)
-
-
-
-
-
-
-class RelayRole(enum.Enum):
-    
-    REGULAR = 0
-    
-    RELAY = 1
-    
-
-
-class _UniffiFfiConverterTypeRelayRole(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        variant = buf.read_i32()
-        if variant == 1:
-            return RelayRole.REGULAR
-        if variant == 2:
-            return RelayRole.RELAY
-        raise InternalError("Raw enum value doesn't match any cases")
-
-    @staticmethod
-    def check_lower(value):
-        if value == RelayRole.REGULAR:
-            return
-        if value == RelayRole.RELAY:
-            return
-        raise ValueError(value)
-
-    @staticmethod
-    def write(value, buf):
-        if value == RelayRole.REGULAR:
-            buf.write_i32(1)
-        if value == RelayRole.RELAY:
-            buf.write_i32(2)
-
-
-
-@dataclass
-class DeviceCapabilitySnapshot:
-    def __init__(self, *, timestamp_ms:int, battery_level:typing.Optional[int], is_charging:bool, relay_role:RelayRole, changed_fields:int):
-        self.timestamp_ms = timestamp_ms
-        self.battery_level = battery_level
-        self.is_charging = is_charging
-        self.relay_role = relay_role
-        self.changed_fields = changed_fields
-        
-        
-
-    
-    def __str__(self):
-        return "DeviceCapabilitySnapshot(timestamp_ms={}, battery_level={}, is_charging={}, relay_role={}, changed_fields={})".format(self.timestamp_ms, self.battery_level, self.is_charging, self.relay_role, self.changed_fields)
-    def __eq__(self, other):
-        if self.timestamp_ms != other.timestamp_ms:
-            return False
-        if self.battery_level != other.battery_level:
-            return False
-        if self.is_charging != other.is_charging:
-            return False
-        if self.relay_role != other.relay_role:
-            return False
-        if self.changed_fields != other.changed_fields:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeDeviceCapabilitySnapshot(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return DeviceCapabilitySnapshot(
-            timestamp_ms=_UniffiFfiConverterInt64.read(buf),
-            battery_level=_UniffiFfiConverterOptionalUInt8.read(buf),
-            is_charging=_UniffiFfiConverterBoolean.read(buf),
-            relay_role=_UniffiFfiConverterTypeRelayRole.read(buf),
-            changed_fields=_UniffiFfiConverterUInt8.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterInt64.check_lower(value.timestamp_ms)
-        _UniffiFfiConverterOptionalUInt8.check_lower(value.battery_level)
-        _UniffiFfiConverterBoolean.check_lower(value.is_charging)
-        _UniffiFfiConverterTypeRelayRole.check_lower(value.relay_role)
-        _UniffiFfiConverterUInt8.check_lower(value.changed_fields)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterInt64.write(value.timestamp_ms, buf)
-        _UniffiFfiConverterOptionalUInt8.write(value.battery_level, buf)
-        _UniffiFfiConverterBoolean.write(value.is_charging, buf)
-        _UniffiFfiConverterTypeRelayRole.write(value.relay_role, buf)
-        _UniffiFfiConverterUInt8.write(value.changed_fields, buf)
 
 class _UniffiFfiConverterFloat32(_UniffiConverterPrimitiveFloat):
     @staticmethod
@@ -4147,6 +3939,19 @@ class _UniffiFfiConverterTypeFileProgress(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt32.write(value.chunks_sent, buf)
         _UniffiFfiConverterUInt32.write(value.total_chunks, buf)
         _UniffiFfiConverterUInt8.write(value.percentage, buf)
+
+class _UniffiFfiConverterInt64(_UniffiConverterPrimitiveInt):
+    CLASS_NAME = "i64"
+    VALUE_MIN = -2**63
+    VALUE_MAX = 2**63
+
+    @staticmethod
+    def read(buf):
+        return buf.read_i64()
+
+    @staticmethod
+    def write(value, buf):
+        buf.write_i64(value)
 
 @dataclass
 class ForwardInfo:
@@ -4868,6 +4673,31 @@ class _UniffiFfiConverterTypeMediaSendOptions(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeForwardInfo.write(value.forward_info, buf)
         _UniffiFfiConverterOptionalString.write(value.file_id, buf)
 
+class _UniffiFfiConverterOptionalUInt8(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterUInt8.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterUInt8.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterUInt8.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
 class _UniffiFfiConverterOptionalFloat32(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
@@ -5337,468 +5167,6 @@ class _UniffiFfiConverterTypeMessageStats(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt8.write(value.hop_count, buf)
         _UniffiFfiConverterString.write(value.status, buf)
 
-
-
-
-
-
-class TransportType(enum.Enum):
-    
-    INTERNET = 0
-    
-    BLE = 1
-    
-    WI_FI_DIRECT = 2
-    
-    RETICULUM = 3
-    
-    NOSTR = 4
-    
-
-
-class _UniffiFfiConverterTypeTransportType(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        variant = buf.read_i32()
-        if variant == 1:
-            return TransportType.INTERNET
-        if variant == 2:
-            return TransportType.BLE
-        if variant == 3:
-            return TransportType.WI_FI_DIRECT
-        if variant == 4:
-            return TransportType.RETICULUM
-        if variant == 5:
-            return TransportType.NOSTR
-        raise InternalError("Raw enum value doesn't match any cases")
-
-    @staticmethod
-    def check_lower(value):
-        if value == TransportType.INTERNET:
-            return
-        if value == TransportType.BLE:
-            return
-        if value == TransportType.WI_FI_DIRECT:
-            return
-        if value == TransportType.RETICULUM:
-            return
-        if value == TransportType.NOSTR:
-            return
-        raise ValueError(value)
-
-    @staticmethod
-    def write(value, buf):
-        if value == TransportType.INTERNET:
-            buf.write_i32(1)
-        if value == TransportType.BLE:
-            buf.write_i32(2)
-        if value == TransportType.WI_FI_DIRECT:
-            buf.write_i32(3)
-        if value == TransportType.RETICULUM:
-            buf.write_i32(4)
-        if value == TransportType.NOSTR:
-            buf.write_i32(5)
-
-
-
-class _UniffiFfiConverterOptionalInt16(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterInt16.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterInt16.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterInt16.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
-class _UniffiFfiConverterOptionalBoolean(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterBoolean.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterBoolean.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterBoolean.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
-@dataclass
-class TransportMetrics:
-    def __init__(self, *, packets_sent:int, packets_received:int, bytes_sent:int, bytes_received:int, error_rate:float, avg_latency_ms:int, rssi:typing.Optional[int], bandwidth_bps:typing.Optional[int], congestion:typing.Optional[float], queue_depth:typing.Optional[int], battery_level:typing.Optional[int], is_charging:typing.Optional[bool], relay_connection_count:typing.Optional[int], is_active_relay:typing.Optional[bool], delivery_ratio:typing.Optional[float], drop_rate:typing.Optional[float], average_hop_count:typing.Optional[float], energy_cost:typing.Optional[float]):
-        self.packets_sent = packets_sent
-        self.packets_received = packets_received
-        self.bytes_sent = bytes_sent
-        self.bytes_received = bytes_received
-        self.error_rate = error_rate
-        self.avg_latency_ms = avg_latency_ms
-        self.rssi = rssi
-        self.bandwidth_bps = bandwidth_bps
-        self.congestion = congestion
-        self.queue_depth = queue_depth
-        self.battery_level = battery_level
-        self.is_charging = is_charging
-        self.relay_connection_count = relay_connection_count
-        self.is_active_relay = is_active_relay
-        self.delivery_ratio = delivery_ratio
-        self.drop_rate = drop_rate
-        self.average_hop_count = average_hop_count
-        self.energy_cost = energy_cost
-        
-        
-
-    
-    def __str__(self):
-        return "TransportMetrics(packets_sent={}, packets_received={}, bytes_sent={}, bytes_received={}, error_rate={}, avg_latency_ms={}, rssi={}, bandwidth_bps={}, congestion={}, queue_depth={}, battery_level={}, is_charging={}, relay_connection_count={}, is_active_relay={}, delivery_ratio={}, drop_rate={}, average_hop_count={}, energy_cost={})".format(self.packets_sent, self.packets_received, self.bytes_sent, self.bytes_received, self.error_rate, self.avg_latency_ms, self.rssi, self.bandwidth_bps, self.congestion, self.queue_depth, self.battery_level, self.is_charging, self.relay_connection_count, self.is_active_relay, self.delivery_ratio, self.drop_rate, self.average_hop_count, self.energy_cost)
-    def __eq__(self, other):
-        if self.packets_sent != other.packets_sent:
-            return False
-        if self.packets_received != other.packets_received:
-            return False
-        if self.bytes_sent != other.bytes_sent:
-            return False
-        if self.bytes_received != other.bytes_received:
-            return False
-        if self.error_rate != other.error_rate:
-            return False
-        if self.avg_latency_ms != other.avg_latency_ms:
-            return False
-        if self.rssi != other.rssi:
-            return False
-        if self.bandwidth_bps != other.bandwidth_bps:
-            return False
-        if self.congestion != other.congestion:
-            return False
-        if self.queue_depth != other.queue_depth:
-            return False
-        if self.battery_level != other.battery_level:
-            return False
-        if self.is_charging != other.is_charging:
-            return False
-        if self.relay_connection_count != other.relay_connection_count:
-            return False
-        if self.is_active_relay != other.is_active_relay:
-            return False
-        if self.delivery_ratio != other.delivery_ratio:
-            return False
-        if self.drop_rate != other.drop_rate:
-            return False
-        if self.average_hop_count != other.average_hop_count:
-            return False
-        if self.energy_cost != other.energy_cost:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeTransportMetrics(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return TransportMetrics(
-            packets_sent=_UniffiFfiConverterUInt32.read(buf),
-            packets_received=_UniffiFfiConverterUInt32.read(buf),
-            bytes_sent=_UniffiFfiConverterUInt32.read(buf),
-            bytes_received=_UniffiFfiConverterUInt32.read(buf),
-            error_rate=_UniffiFfiConverterFloat32.read(buf),
-            avg_latency_ms=_UniffiFfiConverterUInt32.read(buf),
-            rssi=_UniffiFfiConverterOptionalInt16.read(buf),
-            bandwidth_bps=_UniffiFfiConverterOptionalUInt64.read(buf),
-            congestion=_UniffiFfiConverterOptionalFloat32.read(buf),
-            queue_depth=_UniffiFfiConverterOptionalUInt32.read(buf),
-            battery_level=_UniffiFfiConverterOptionalUInt8.read(buf),
-            is_charging=_UniffiFfiConverterOptionalBoolean.read(buf),
-            relay_connection_count=_UniffiFfiConverterOptionalUInt8.read(buf),
-            is_active_relay=_UniffiFfiConverterOptionalBoolean.read(buf),
-            delivery_ratio=_UniffiFfiConverterOptionalFloat32.read(buf),
-            drop_rate=_UniffiFfiConverterOptionalFloat32.read(buf),
-            average_hop_count=_UniffiFfiConverterOptionalFloat32.read(buf),
-            energy_cost=_UniffiFfiConverterOptionalFloat32.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterUInt32.check_lower(value.packets_sent)
-        _UniffiFfiConverterUInt32.check_lower(value.packets_received)
-        _UniffiFfiConverterUInt32.check_lower(value.bytes_sent)
-        _UniffiFfiConverterUInt32.check_lower(value.bytes_received)
-        _UniffiFfiConverterFloat32.check_lower(value.error_rate)
-        _UniffiFfiConverterUInt32.check_lower(value.avg_latency_ms)
-        _UniffiFfiConverterOptionalInt16.check_lower(value.rssi)
-        _UniffiFfiConverterOptionalUInt64.check_lower(value.bandwidth_bps)
-        _UniffiFfiConverterOptionalFloat32.check_lower(value.congestion)
-        _UniffiFfiConverterOptionalUInt32.check_lower(value.queue_depth)
-        _UniffiFfiConverterOptionalUInt8.check_lower(value.battery_level)
-        _UniffiFfiConverterOptionalBoolean.check_lower(value.is_charging)
-        _UniffiFfiConverterOptionalUInt8.check_lower(value.relay_connection_count)
-        _UniffiFfiConverterOptionalBoolean.check_lower(value.is_active_relay)
-        _UniffiFfiConverterOptionalFloat32.check_lower(value.delivery_ratio)
-        _UniffiFfiConverterOptionalFloat32.check_lower(value.drop_rate)
-        _UniffiFfiConverterOptionalFloat32.check_lower(value.average_hop_count)
-        _UniffiFfiConverterOptionalFloat32.check_lower(value.energy_cost)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterUInt32.write(value.packets_sent, buf)
-        _UniffiFfiConverterUInt32.write(value.packets_received, buf)
-        _UniffiFfiConverterUInt32.write(value.bytes_sent, buf)
-        _UniffiFfiConverterUInt32.write(value.bytes_received, buf)
-        _UniffiFfiConverterFloat32.write(value.error_rate, buf)
-        _UniffiFfiConverterUInt32.write(value.avg_latency_ms, buf)
-        _UniffiFfiConverterOptionalInt16.write(value.rssi, buf)
-        _UniffiFfiConverterOptionalUInt64.write(value.bandwidth_bps, buf)
-        _UniffiFfiConverterOptionalFloat32.write(value.congestion, buf)
-        _UniffiFfiConverterOptionalUInt32.write(value.queue_depth, buf)
-        _UniffiFfiConverterOptionalUInt8.write(value.battery_level, buf)
-        _UniffiFfiConverterOptionalBoolean.write(value.is_charging, buf)
-        _UniffiFfiConverterOptionalUInt8.write(value.relay_connection_count, buf)
-        _UniffiFfiConverterOptionalBoolean.write(value.is_active_relay, buf)
-        _UniffiFfiConverterOptionalFloat32.write(value.delivery_ratio, buf)
-        _UniffiFfiConverterOptionalFloat32.write(value.drop_rate, buf)
-        _UniffiFfiConverterOptionalFloat32.write(value.average_hop_count, buf)
-        _UniffiFfiConverterOptionalFloat32.write(value.energy_cost, buf)
-
-@dataclass
-class TransportMetricsEntry:
-    def __init__(self, *, transport:TransportType, metrics:TransportMetrics):
-        self.transport = transport
-        self.metrics = metrics
-        
-        
-
-    
-    def __str__(self):
-        return "TransportMetricsEntry(transport={}, metrics={})".format(self.transport, self.metrics)
-    def __eq__(self, other):
-        if self.transport != other.transport:
-            return False
-        if self.metrics != other.metrics:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeTransportMetricsEntry(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return TransportMetricsEntry(
-            transport=_UniffiFfiConverterTypeTransportType.read(buf),
-            metrics=_UniffiFfiConverterTypeTransportMetrics.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterTypeTransportType.check_lower(value.transport)
-        _UniffiFfiConverterTypeTransportMetrics.check_lower(value.metrics)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterTypeTransportType.write(value.transport, buf)
-        _UniffiFfiConverterTypeTransportMetrics.write(value.metrics, buf)
-
-class _UniffiFfiConverterSequenceTypeTransportMetricsEntry(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        for item in value:
-            _UniffiFfiConverterTypeTransportMetricsEntry.check_lower(item)
-
-    @classmethod
-    def write(cls, value, buf):
-        items = len(value)
-        buf.write_i32(items)
-        for item in value:
-            _UniffiFfiConverterTypeTransportMetricsEntry.write(item, buf)
-
-    @classmethod
-    def read(cls, buf):
-        count = buf.read_i32()
-        if count < 0:
-            raise InternalError("Unexpected negative sequence length")
-
-        return [
-            _UniffiFfiConverterTypeTransportMetricsEntry.read(buf) for i in range(count)
-        ]
-
-@dataclass
-class RetryQueueStats:
-    def __init__(self, *, total_count:int, ready_count:int, critical_priority_count:int, high_priority_count:int, medium_priority_count:int, low_priority_count:int):
-        self.total_count = total_count
-        self.ready_count = ready_count
-        self.critical_priority_count = critical_priority_count
-        self.high_priority_count = high_priority_count
-        self.medium_priority_count = medium_priority_count
-        self.low_priority_count = low_priority_count
-        
-        
-
-    
-    def __str__(self):
-        return "RetryQueueStats(total_count={}, ready_count={}, critical_priority_count={}, high_priority_count={}, medium_priority_count={}, low_priority_count={})".format(self.total_count, self.ready_count, self.critical_priority_count, self.high_priority_count, self.medium_priority_count, self.low_priority_count)
-    def __eq__(self, other):
-        if self.total_count != other.total_count:
-            return False
-        if self.ready_count != other.ready_count:
-            return False
-        if self.critical_priority_count != other.critical_priority_count:
-            return False
-        if self.high_priority_count != other.high_priority_count:
-            return False
-        if self.medium_priority_count != other.medium_priority_count:
-            return False
-        if self.low_priority_count != other.low_priority_count:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeRetryQueueStats(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return RetryQueueStats(
-            total_count=_UniffiFfiConverterUInt64.read(buf),
-            ready_count=_UniffiFfiConverterUInt64.read(buf),
-            critical_priority_count=_UniffiFfiConverterUInt64.read(buf),
-            high_priority_count=_UniffiFfiConverterUInt64.read(buf),
-            medium_priority_count=_UniffiFfiConverterUInt64.read(buf),
-            low_priority_count=_UniffiFfiConverterUInt64.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterUInt64.check_lower(value.total_count)
-        _UniffiFfiConverterUInt64.check_lower(value.ready_count)
-        _UniffiFfiConverterUInt64.check_lower(value.critical_priority_count)
-        _UniffiFfiConverterUInt64.check_lower(value.high_priority_count)
-        _UniffiFfiConverterUInt64.check_lower(value.medium_priority_count)
-        _UniffiFfiConverterUInt64.check_lower(value.low_priority_count)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterUInt64.write(value.total_count, buf)
-        _UniffiFfiConverterUInt64.write(value.ready_count, buf)
-        _UniffiFfiConverterUInt64.write(value.critical_priority_count, buf)
-        _UniffiFfiConverterUInt64.write(value.high_priority_count, buf)
-        _UniffiFfiConverterUInt64.write(value.medium_priority_count, buf)
-        _UniffiFfiConverterUInt64.write(value.low_priority_count, buf)
-
-class _UniffiFfiConverterOptionalTypeTransportType(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterTypeTransportType.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterTypeTransportType.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterTypeTransportType.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
-@dataclass
-class MetricsFrame:
-    def __init__(self, *, timestamp_ms:int, transports:typing.List[TransportMetricsEntry], retry_queue:RetryQueueStats, dedup:DeduplicatorStatsFrame, ack_pending:int, neighbor_count:int, is_local_relay:bool, current_transport:typing.Optional[TransportType]):
-        self.timestamp_ms = timestamp_ms
-        self.transports = transports
-        self.retry_queue = retry_queue
-        self.dedup = dedup
-        self.ack_pending = ack_pending
-        self.neighbor_count = neighbor_count
-        self.is_local_relay = is_local_relay
-        self.current_transport = current_transport
-        
-        
-
-    
-    def __str__(self):
-        return "MetricsFrame(timestamp_ms={}, transports={}, retry_queue={}, dedup={}, ack_pending={}, neighbor_count={}, is_local_relay={}, current_transport={})".format(self.timestamp_ms, self.transports, self.retry_queue, self.dedup, self.ack_pending, self.neighbor_count, self.is_local_relay, self.current_transport)
-    def __eq__(self, other):
-        if self.timestamp_ms != other.timestamp_ms:
-            return False
-        if self.transports != other.transports:
-            return False
-        if self.retry_queue != other.retry_queue:
-            return False
-        if self.dedup != other.dedup:
-            return False
-        if self.ack_pending != other.ack_pending:
-            return False
-        if self.neighbor_count != other.neighbor_count:
-            return False
-        if self.is_local_relay != other.is_local_relay:
-            return False
-        if self.current_transport != other.current_transport:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeMetricsFrame(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return MetricsFrame(
-            timestamp_ms=_UniffiFfiConverterInt64.read(buf),
-            transports=_UniffiFfiConverterSequenceTypeTransportMetricsEntry.read(buf),
-            retry_queue=_UniffiFfiConverterTypeRetryQueueStats.read(buf),
-            dedup=_UniffiFfiConverterTypeDeduplicatorStatsFrame.read(buf),
-            ack_pending=_UniffiFfiConverterUInt64.read(buf),
-            neighbor_count=_UniffiFfiConverterUInt64.read(buf),
-            is_local_relay=_UniffiFfiConverterBoolean.read(buf),
-            current_transport=_UniffiFfiConverterOptionalTypeTransportType.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterInt64.check_lower(value.timestamp_ms)
-        _UniffiFfiConverterSequenceTypeTransportMetricsEntry.check_lower(value.transports)
-        _UniffiFfiConverterTypeRetryQueueStats.check_lower(value.retry_queue)
-        _UniffiFfiConverterTypeDeduplicatorStatsFrame.check_lower(value.dedup)
-        _UniffiFfiConverterUInt64.check_lower(value.ack_pending)
-        _UniffiFfiConverterUInt64.check_lower(value.neighbor_count)
-        _UniffiFfiConverterBoolean.check_lower(value.is_local_relay)
-        _UniffiFfiConverterOptionalTypeTransportType.check_lower(value.current_transport)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterInt64.write(value.timestamp_ms, buf)
-        _UniffiFfiConverterSequenceTypeTransportMetricsEntry.write(value.transports, buf)
-        _UniffiFfiConverterTypeRetryQueueStats.write(value.retry_queue, buf)
-        _UniffiFfiConverterTypeDeduplicatorStatsFrame.write(value.dedup, buf)
-        _UniffiFfiConverterUInt64.write(value.ack_pending, buf)
-        _UniffiFfiConverterUInt64.write(value.neighbor_count, buf)
-        _UniffiFfiConverterBoolean.write(value.is_local_relay, buf)
-        _UniffiFfiConverterOptionalTypeTransportType.write(value.current_transport, buf)
-
 @dataclass
 class MlsWelcomeMessage:
     def __init__(self, *, group_id:str, welcome_data:typing.List[int], inviter_id:str, group_name:typing.Optional[str], timestamp_ms:int):
@@ -6122,6 +5490,31 @@ class _UniffiFfiConverterTypeNetworkLink(_UniffiConverterRustBuffer):
         _UniffiFfiConverterString.write(value.target_id, buf)
         _UniffiFfiConverterString.write(value.transport, buf)
         _UniffiFfiConverterFloat32.write(value.quality, buf)
+
+class _UniffiFfiConverterOptionalInt16(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterInt16.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterInt16.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterInt16.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
 
 @dataclass
 class NetworkNode:
@@ -6963,382 +6356,6 @@ class _UniffiFfiConverterTypeReticulumMessage(_UniffiConverterRustBuffer):
 
 
 
-class RoutingPhase(enum.Enum):
-    
-    SCORE_UPDATED = 0
-    
-    SELECTED = 1
-    
-    SWITCHED = 2
-    
-    ESCALATED = 3
-    
-    UNKNOWN = 4
-    
-
-
-class _UniffiFfiConverterTypeRoutingPhase(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        variant = buf.read_i32()
-        if variant == 1:
-            return RoutingPhase.SCORE_UPDATED
-        if variant == 2:
-            return RoutingPhase.SELECTED
-        if variant == 3:
-            return RoutingPhase.SWITCHED
-        if variant == 4:
-            return RoutingPhase.ESCALATED
-        if variant == 5:
-            return RoutingPhase.UNKNOWN
-        raise InternalError("Raw enum value doesn't match any cases")
-
-    @staticmethod
-    def check_lower(value):
-        if value == RoutingPhase.SCORE_UPDATED:
-            return
-        if value == RoutingPhase.SELECTED:
-            return
-        if value == RoutingPhase.SWITCHED:
-            return
-        if value == RoutingPhase.ESCALATED:
-            return
-        if value == RoutingPhase.UNKNOWN:
-            return
-        raise ValueError(value)
-
-    @staticmethod
-    def write(value, buf):
-        if value == RoutingPhase.SCORE_UPDATED:
-            buf.write_i32(1)
-        if value == RoutingPhase.SELECTED:
-            buf.write_i32(2)
-        if value == RoutingPhase.SWITCHED:
-            buf.write_i32(3)
-        if value == RoutingPhase.ESCALATED:
-            buf.write_i32(4)
-        if value == RoutingPhase.UNKNOWN:
-            buf.write_i32(5)
-
-
-
-
-
-
-
-
-class RoutingReasonCode(enum.Enum):
-    
-    INITIAL_SELECTION = 0
-    
-    PRIMARY_SELECTED = 1
-    
-    PRIMARY_SUCCESS = 2
-    
-    FALLBACK_SUCCESS = 3
-    
-    ESCALATION_APPLIED = 4
-    
-    CURRENT_UNAVAILABLE = 5
-    
-    RETRY_THRESHOLD = 6
-    
-    POOR_SIGNAL = 7
-    
-    CONGESTION = 8
-    
-    LOW_TTL = 9
-    
-    LOW_SUCCESS_RATE = 10
-    
-    UNKNOWN = 11
-    
-
-
-class _UniffiFfiConverterTypeRoutingReasonCode(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        variant = buf.read_i32()
-        if variant == 1:
-            return RoutingReasonCode.INITIAL_SELECTION
-        if variant == 2:
-            return RoutingReasonCode.PRIMARY_SELECTED
-        if variant == 3:
-            return RoutingReasonCode.PRIMARY_SUCCESS
-        if variant == 4:
-            return RoutingReasonCode.FALLBACK_SUCCESS
-        if variant == 5:
-            return RoutingReasonCode.ESCALATION_APPLIED
-        if variant == 6:
-            return RoutingReasonCode.CURRENT_UNAVAILABLE
-        if variant == 7:
-            return RoutingReasonCode.RETRY_THRESHOLD
-        if variant == 8:
-            return RoutingReasonCode.POOR_SIGNAL
-        if variant == 9:
-            return RoutingReasonCode.CONGESTION
-        if variant == 10:
-            return RoutingReasonCode.LOW_TTL
-        if variant == 11:
-            return RoutingReasonCode.LOW_SUCCESS_RATE
-        if variant == 12:
-            return RoutingReasonCode.UNKNOWN
-        raise InternalError("Raw enum value doesn't match any cases")
-
-    @staticmethod
-    def check_lower(value):
-        if value == RoutingReasonCode.INITIAL_SELECTION:
-            return
-        if value == RoutingReasonCode.PRIMARY_SELECTED:
-            return
-        if value == RoutingReasonCode.PRIMARY_SUCCESS:
-            return
-        if value == RoutingReasonCode.FALLBACK_SUCCESS:
-            return
-        if value == RoutingReasonCode.ESCALATION_APPLIED:
-            return
-        if value == RoutingReasonCode.CURRENT_UNAVAILABLE:
-            return
-        if value == RoutingReasonCode.RETRY_THRESHOLD:
-            return
-        if value == RoutingReasonCode.POOR_SIGNAL:
-            return
-        if value == RoutingReasonCode.CONGESTION:
-            return
-        if value == RoutingReasonCode.LOW_TTL:
-            return
-        if value == RoutingReasonCode.LOW_SUCCESS_RATE:
-            return
-        if value == RoutingReasonCode.UNKNOWN:
-            return
-        raise ValueError(value)
-
-    @staticmethod
-    def write(value, buf):
-        if value == RoutingReasonCode.INITIAL_SELECTION:
-            buf.write_i32(1)
-        if value == RoutingReasonCode.PRIMARY_SELECTED:
-            buf.write_i32(2)
-        if value == RoutingReasonCode.PRIMARY_SUCCESS:
-            buf.write_i32(3)
-        if value == RoutingReasonCode.FALLBACK_SUCCESS:
-            buf.write_i32(4)
-        if value == RoutingReasonCode.ESCALATION_APPLIED:
-            buf.write_i32(5)
-        if value == RoutingReasonCode.CURRENT_UNAVAILABLE:
-            buf.write_i32(6)
-        if value == RoutingReasonCode.RETRY_THRESHOLD:
-            buf.write_i32(7)
-        if value == RoutingReasonCode.POOR_SIGNAL:
-            buf.write_i32(8)
-        if value == RoutingReasonCode.CONGESTION:
-            buf.write_i32(9)
-        if value == RoutingReasonCode.LOW_TTL:
-            buf.write_i32(10)
-        if value == RoutingReasonCode.LOW_SUCCESS_RATE:
-            buf.write_i32(11)
-        if value == RoutingReasonCode.UNKNOWN:
-            buf.write_i32(12)
-
-
-
-class _UniffiFfiConverterOptionalTypeRoutingReasonCode(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterTypeRoutingReasonCode.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterTypeRoutingReasonCode.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterTypeRoutingReasonCode.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
-@dataclass
-class RoutingScoreEntry:
-    def __init__(self, *, transport:TransportType, signal:float, proximity:float, bandwidth:float, congestion:float, energy:float, reliability:float, load:float, total:float):
-        self.transport = transport
-        self.signal = signal
-        self.proximity = proximity
-        self.bandwidth = bandwidth
-        self.congestion = congestion
-        self.energy = energy
-        self.reliability = reliability
-        self.load = load
-        self.total = total
-        
-        
-
-    
-    def __str__(self):
-        return "RoutingScoreEntry(transport={}, signal={}, proximity={}, bandwidth={}, congestion={}, energy={}, reliability={}, load={}, total={})".format(self.transport, self.signal, self.proximity, self.bandwidth, self.congestion, self.energy, self.reliability, self.load, self.total)
-    def __eq__(self, other):
-        if self.transport != other.transport:
-            return False
-        if self.signal != other.signal:
-            return False
-        if self.proximity != other.proximity:
-            return False
-        if self.bandwidth != other.bandwidth:
-            return False
-        if self.congestion != other.congestion:
-            return False
-        if self.energy != other.energy:
-            return False
-        if self.reliability != other.reliability:
-            return False
-        if self.load != other.load:
-            return False
-        if self.total != other.total:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeRoutingScoreEntry(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return RoutingScoreEntry(
-            transport=_UniffiFfiConverterTypeTransportType.read(buf),
-            signal=_UniffiFfiConverterFloat32.read(buf),
-            proximity=_UniffiFfiConverterFloat32.read(buf),
-            bandwidth=_UniffiFfiConverterFloat32.read(buf),
-            congestion=_UniffiFfiConverterFloat32.read(buf),
-            energy=_UniffiFfiConverterFloat32.read(buf),
-            reliability=_UniffiFfiConverterFloat32.read(buf),
-            load=_UniffiFfiConverterFloat32.read(buf),
-            total=_UniffiFfiConverterFloat32.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterTypeTransportType.check_lower(value.transport)
-        _UniffiFfiConverterFloat32.check_lower(value.signal)
-        _UniffiFfiConverterFloat32.check_lower(value.proximity)
-        _UniffiFfiConverterFloat32.check_lower(value.bandwidth)
-        _UniffiFfiConverterFloat32.check_lower(value.congestion)
-        _UniffiFfiConverterFloat32.check_lower(value.energy)
-        _UniffiFfiConverterFloat32.check_lower(value.reliability)
-        _UniffiFfiConverterFloat32.check_lower(value.load)
-        _UniffiFfiConverterFloat32.check_lower(value.total)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterTypeTransportType.write(value.transport, buf)
-        _UniffiFfiConverterFloat32.write(value.signal, buf)
-        _UniffiFfiConverterFloat32.write(value.proximity, buf)
-        _UniffiFfiConverterFloat32.write(value.bandwidth, buf)
-        _UniffiFfiConverterFloat32.write(value.congestion, buf)
-        _UniffiFfiConverterFloat32.write(value.energy, buf)
-        _UniffiFfiConverterFloat32.write(value.reliability, buf)
-        _UniffiFfiConverterFloat32.write(value.load, buf)
-        _UniffiFfiConverterFloat32.write(value.total, buf)
-
-class _UniffiFfiConverterSequenceTypeRoutingScoreEntry(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        for item in value:
-            _UniffiFfiConverterTypeRoutingScoreEntry.check_lower(item)
-
-    @classmethod
-    def write(cls, value, buf):
-        items = len(value)
-        buf.write_i32(items)
-        for item in value:
-            _UniffiFfiConverterTypeRoutingScoreEntry.write(item, buf)
-
-    @classmethod
-    def read(cls, buf):
-        count = buf.read_i32()
-        if count < 0:
-            raise InternalError("Unexpected negative sequence length")
-
-        return [
-            _UniffiFfiConverterTypeRoutingScoreEntry.read(buf) for i in range(count)
-        ]
-
-@dataclass
-class RoutingDecision:
-    def __init__(self, *, timestamp_ms:int, phase:RoutingPhase, _from:typing.Optional[TransportType], to:typing.Optional[TransportType], winning_score:typing.Optional[float], reason_code:typing.Optional[RoutingReasonCode], scores:typing.List[RoutingScoreEntry]):
-        self.timestamp_ms = timestamp_ms
-        self.phase = phase
-        self._from = _from
-        self.to = to
-        self.winning_score = winning_score
-        self.reason_code = reason_code
-        self.scores = scores
-        
-        
-
-    
-    def __str__(self):
-        return "RoutingDecision(timestamp_ms={}, phase={}, _from={}, to={}, winning_score={}, reason_code={}, scores={})".format(self.timestamp_ms, self.phase, self._from, self.to, self.winning_score, self.reason_code, self.scores)
-    def __eq__(self, other):
-        if self.timestamp_ms != other.timestamp_ms:
-            return False
-        if self.phase != other.phase:
-            return False
-        if self._from != other._from:
-            return False
-        if self.to != other.to:
-            return False
-        if self.winning_score != other.winning_score:
-            return False
-        if self.reason_code != other.reason_code:
-            return False
-        if self.scores != other.scores:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeRoutingDecision(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return RoutingDecision(
-            timestamp_ms=_UniffiFfiConverterInt64.read(buf),
-            phase=_UniffiFfiConverterTypeRoutingPhase.read(buf),
-            _from=_UniffiFfiConverterOptionalTypeTransportType.read(buf),
-            to=_UniffiFfiConverterOptionalTypeTransportType.read(buf),
-            winning_score=_UniffiFfiConverterOptionalFloat32.read(buf),
-            reason_code=_UniffiFfiConverterOptionalTypeRoutingReasonCode.read(buf),
-            scores=_UniffiFfiConverterSequenceTypeRoutingScoreEntry.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterInt64.check_lower(value.timestamp_ms)
-        _UniffiFfiConverterTypeRoutingPhase.check_lower(value.phase)
-        _UniffiFfiConverterOptionalTypeTransportType.check_lower(value._from)
-        _UniffiFfiConverterOptionalTypeTransportType.check_lower(value.to)
-        _UniffiFfiConverterOptionalFloat32.check_lower(value.winning_score)
-        _UniffiFfiConverterOptionalTypeRoutingReasonCode.check_lower(value.reason_code)
-        _UniffiFfiConverterSequenceTypeRoutingScoreEntry.check_lower(value.scores)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterInt64.write(value.timestamp_ms, buf)
-        _UniffiFfiConverterTypeRoutingPhase.write(value.phase, buf)
-        _UniffiFfiConverterOptionalTypeTransportType.write(value._from, buf)
-        _UniffiFfiConverterOptionalTypeTransportType.write(value.to, buf)
-        _UniffiFfiConverterOptionalFloat32.write(value.winning_score, buf)
-        _UniffiFfiConverterOptionalTypeRoutingReasonCode.write(value.reason_code, buf)
-        _UniffiFfiConverterSequenceTypeRoutingScoreEntry.write(value.scores, buf)
-
-
-
-
-
-
 class MessagePriority(enum.Enum):
     
     LOW = 0
@@ -7619,6 +6636,116 @@ class _UniffiFfiConverterTypeSendMessageOptions(_UniffiConverterRustBuffer):
 
 
 
+class TelemetryOs(enum.Enum):
+    
+    IOS = 0
+    
+    ANDROID = 1
+    
+    LINUX = 2
+    
+    MACOS = 3
+    
+    WINDOWS = 4
+    
+    OTHER = 5
+    
+
+
+class _UniffiFfiConverterTypeTelemetryOs(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return TelemetryOs.IOS
+        if variant == 2:
+            return TelemetryOs.ANDROID
+        if variant == 3:
+            return TelemetryOs.LINUX
+        if variant == 4:
+            return TelemetryOs.MACOS
+        if variant == 5:
+            return TelemetryOs.WINDOWS
+        if variant == 6:
+            return TelemetryOs.OTHER
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == TelemetryOs.IOS:
+            return
+        if value == TelemetryOs.ANDROID:
+            return
+        if value == TelemetryOs.LINUX:
+            return
+        if value == TelemetryOs.MACOS:
+            return
+        if value == TelemetryOs.WINDOWS:
+            return
+        if value == TelemetryOs.OTHER:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == TelemetryOs.IOS:
+            buf.write_i32(1)
+        if value == TelemetryOs.ANDROID:
+            buf.write_i32(2)
+        if value == TelemetryOs.LINUX:
+            buf.write_i32(3)
+        if value == TelemetryOs.MACOS:
+            buf.write_i32(4)
+        if value == TelemetryOs.WINDOWS:
+            buf.write_i32(5)
+        if value == TelemetryOs.OTHER:
+            buf.write_i32(6)
+
+
+
+class _UniffiFfiConverterUInt16(_UniffiConverterPrimitiveInt):
+    CLASS_NAME = "u16"
+    VALUE_MIN = 0
+    VALUE_MAX = 2**16
+
+    @staticmethod
+    def read(buf):
+        return buf.read_u16()
+
+    @staticmethod
+    def write(value, buf):
+        buf.write_u16(value)
+
+class _UniffiFfiConverterOptionalBoolean(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterBoolean.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterBoolean.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterBoolean.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+
+
+
+
+
 class MlsVerbosity(enum.Enum):
     
     OFF = 0
@@ -7689,20 +6816,49 @@ class _UniffiFfiConverterOptionalTypeMlsVerbosity(_UniffiConverterRustBuffer):
 
 @dataclass
 class TelemetryConfig:
-    def __init__(self, *, scrub_ids:typing.Optional[bool], mls_verbosity:typing.Optional[MlsVerbosity], metrics_cadence_ms:typing.Optional[int], routing_diagnostic:typing.Optional[bool], enable_poll_queue:typing.Optional[bool], mls_sampling_bypass:typing.Optional[bool]):
+    def __init__(self, *, api_key:str, app_id:str, os:TelemetryOs, os_major:int, app_version:typing.Optional[str], debug:typing.Optional[bool], flush_interval_ms:typing.Optional[int], max_batch_bytes:typing.Optional[int], max_buffered_records:typing.Optional[int], include_device_id:typing.Optional[bool], scrub_ids:typing.Optional[bool], mls_verbosity:typing.Optional[MlsVerbosity], metrics_cadence_ms:typing.Optional[int], routing_diagnostic:typing.Optional[bool], mls_sampling_bypass:typing.Optional[bool]):
+        self.api_key = api_key
+        self.app_id = app_id
+        self.os = os
+        self.os_major = os_major
+        self.app_version = app_version
+        self.debug = debug
+        self.flush_interval_ms = flush_interval_ms
+        self.max_batch_bytes = max_batch_bytes
+        self.max_buffered_records = max_buffered_records
+        self.include_device_id = include_device_id
         self.scrub_ids = scrub_ids
         self.mls_verbosity = mls_verbosity
         self.metrics_cadence_ms = metrics_cadence_ms
         self.routing_diagnostic = routing_diagnostic
-        self.enable_poll_queue = enable_poll_queue
         self.mls_sampling_bypass = mls_sampling_bypass
         
         
 
     
     def __str__(self):
-        return "TelemetryConfig(scrub_ids={}, mls_verbosity={}, metrics_cadence_ms={}, routing_diagnostic={}, enable_poll_queue={}, mls_sampling_bypass={})".format(self.scrub_ids, self.mls_verbosity, self.metrics_cadence_ms, self.routing_diagnostic, self.enable_poll_queue, self.mls_sampling_bypass)
+        return "TelemetryConfig(api_key={}, app_id={}, os={}, os_major={}, app_version={}, debug={}, flush_interval_ms={}, max_batch_bytes={}, max_buffered_records={}, include_device_id={}, scrub_ids={}, mls_verbosity={}, metrics_cadence_ms={}, routing_diagnostic={}, mls_sampling_bypass={})".format(self.api_key, self.app_id, self.os, self.os_major, self.app_version, self.debug, self.flush_interval_ms, self.max_batch_bytes, self.max_buffered_records, self.include_device_id, self.scrub_ids, self.mls_verbosity, self.metrics_cadence_ms, self.routing_diagnostic, self.mls_sampling_bypass)
     def __eq__(self, other):
+        if self.api_key != other.api_key:
+            return False
+        if self.app_id != other.app_id:
+            return False
+        if self.os != other.os:
+            return False
+        if self.os_major != other.os_major:
+            return False
+        if self.app_version != other.app_version:
+            return False
+        if self.debug != other.debug:
+            return False
+        if self.flush_interval_ms != other.flush_interval_ms:
+            return False
+        if self.max_batch_bytes != other.max_batch_bytes:
+            return False
+        if self.max_buffered_records != other.max_buffered_records:
+            return False
+        if self.include_device_id != other.include_device_id:
+            return False
         if self.scrub_ids != other.scrub_ids:
             return False
         if self.mls_verbosity != other.mls_verbosity:
@@ -7710,8 +6866,6 @@ class TelemetryConfig:
         if self.metrics_cadence_ms != other.metrics_cadence_ms:
             return False
         if self.routing_diagnostic != other.routing_diagnostic:
-            return False
-        if self.enable_poll_queue != other.enable_poll_queue:
             return False
         if self.mls_sampling_bypass != other.mls_sampling_bypass:
             return False
@@ -7721,31 +6875,124 @@ class _UniffiFfiConverterTypeTelemetryConfig(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
         return TelemetryConfig(
+            api_key=_UniffiFfiConverterString.read(buf),
+            app_id=_UniffiFfiConverterString.read(buf),
+            os=_UniffiFfiConverterTypeTelemetryOs.read(buf),
+            os_major=_UniffiFfiConverterUInt16.read(buf),
+            app_version=_UniffiFfiConverterOptionalString.read(buf),
+            debug=_UniffiFfiConverterOptionalBoolean.read(buf),
+            flush_interval_ms=_UniffiFfiConverterOptionalUInt64.read(buf),
+            max_batch_bytes=_UniffiFfiConverterOptionalUInt64.read(buf),
+            max_buffered_records=_UniffiFfiConverterOptionalUInt32.read(buf),
+            include_device_id=_UniffiFfiConverterOptionalBoolean.read(buf),
             scrub_ids=_UniffiFfiConverterOptionalBoolean.read(buf),
             mls_verbosity=_UniffiFfiConverterOptionalTypeMlsVerbosity.read(buf),
             metrics_cadence_ms=_UniffiFfiConverterOptionalUInt64.read(buf),
             routing_diagnostic=_UniffiFfiConverterOptionalBoolean.read(buf),
-            enable_poll_queue=_UniffiFfiConverterOptionalBoolean.read(buf),
             mls_sampling_bypass=_UniffiFfiConverterOptionalBoolean.read(buf),
         )
 
     @staticmethod
     def check_lower(value):
+        _UniffiFfiConverterString.check_lower(value.api_key)
+        _UniffiFfiConverterString.check_lower(value.app_id)
+        _UniffiFfiConverterTypeTelemetryOs.check_lower(value.os)
+        _UniffiFfiConverterUInt16.check_lower(value.os_major)
+        _UniffiFfiConverterOptionalString.check_lower(value.app_version)
+        _UniffiFfiConverterOptionalBoolean.check_lower(value.debug)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.flush_interval_ms)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.max_batch_bytes)
+        _UniffiFfiConverterOptionalUInt32.check_lower(value.max_buffered_records)
+        _UniffiFfiConverterOptionalBoolean.check_lower(value.include_device_id)
         _UniffiFfiConverterOptionalBoolean.check_lower(value.scrub_ids)
         _UniffiFfiConverterOptionalTypeMlsVerbosity.check_lower(value.mls_verbosity)
         _UniffiFfiConverterOptionalUInt64.check_lower(value.metrics_cadence_ms)
         _UniffiFfiConverterOptionalBoolean.check_lower(value.routing_diagnostic)
-        _UniffiFfiConverterOptionalBoolean.check_lower(value.enable_poll_queue)
         _UniffiFfiConverterOptionalBoolean.check_lower(value.mls_sampling_bypass)
 
     @staticmethod
     def write(value, buf):
+        _UniffiFfiConverterString.write(value.api_key, buf)
+        _UniffiFfiConverterString.write(value.app_id, buf)
+        _UniffiFfiConverterTypeTelemetryOs.write(value.os, buf)
+        _UniffiFfiConverterUInt16.write(value.os_major, buf)
+        _UniffiFfiConverterOptionalString.write(value.app_version, buf)
+        _UniffiFfiConverterOptionalBoolean.write(value.debug, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.flush_interval_ms, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.max_batch_bytes, buf)
+        _UniffiFfiConverterOptionalUInt32.write(value.max_buffered_records, buf)
+        _UniffiFfiConverterOptionalBoolean.write(value.include_device_id, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.scrub_ids, buf)
         _UniffiFfiConverterOptionalTypeMlsVerbosity.write(value.mls_verbosity, buf)
         _UniffiFfiConverterOptionalUInt64.write(value.metrics_cadence_ms, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.routing_diagnostic, buf)
-        _UniffiFfiConverterOptionalBoolean.write(value.enable_poll_queue, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.mls_sampling_bypass, buf)
+
+@dataclass
+class TelemetryStats:
+    def __init__(self, *, buffered:int, sent_events:int, accepted_events:int, dropped:int, session_id:str, last_error:typing.Optional[str], last_flush_at_ms:typing.Optional[int]):
+        self.buffered = buffered
+        self.sent_events = sent_events
+        self.accepted_events = accepted_events
+        self.dropped = dropped
+        self.session_id = session_id
+        self.last_error = last_error
+        self.last_flush_at_ms = last_flush_at_ms
+        
+        
+
+    
+    def __str__(self):
+        return "TelemetryStats(buffered={}, sent_events={}, accepted_events={}, dropped={}, session_id={}, last_error={}, last_flush_at_ms={})".format(self.buffered, self.sent_events, self.accepted_events, self.dropped, self.session_id, self.last_error, self.last_flush_at_ms)
+    def __eq__(self, other):
+        if self.buffered != other.buffered:
+            return False
+        if self.sent_events != other.sent_events:
+            return False
+        if self.accepted_events != other.accepted_events:
+            return False
+        if self.dropped != other.dropped:
+            return False
+        if self.session_id != other.session_id:
+            return False
+        if self.last_error != other.last_error:
+            return False
+        if self.last_flush_at_ms != other.last_flush_at_ms:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeTelemetryStats(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return TelemetryStats(
+            buffered=_UniffiFfiConverterUInt64.read(buf),
+            sent_events=_UniffiFfiConverterUInt64.read(buf),
+            accepted_events=_UniffiFfiConverterUInt64.read(buf),
+            dropped=_UniffiFfiConverterUInt64.read(buf),
+            session_id=_UniffiFfiConverterString.read(buf),
+            last_error=_UniffiFfiConverterOptionalString.read(buf),
+            last_flush_at_ms=_UniffiFfiConverterOptionalInt64.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterUInt64.check_lower(value.buffered)
+        _UniffiFfiConverterUInt64.check_lower(value.sent_events)
+        _UniffiFfiConverterUInt64.check_lower(value.accepted_events)
+        _UniffiFfiConverterUInt64.check_lower(value.dropped)
+        _UniffiFfiConverterString.check_lower(value.session_id)
+        _UniffiFfiConverterOptionalString.check_lower(value.last_error)
+        _UniffiFfiConverterOptionalInt64.check_lower(value.last_flush_at_ms)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterUInt64.write(value.buffered, buf)
+        _UniffiFfiConverterUInt64.write(value.sent_events, buf)
+        _UniffiFfiConverterUInt64.write(value.accepted_events, buf)
+        _UniffiFfiConverterUInt64.write(value.dropped, buf)
+        _UniffiFfiConverterString.write(value.session_id, buf)
+        _UniffiFfiConverterOptionalString.write(value.last_error, buf)
+        _UniffiFfiConverterOptionalInt64.write(value.last_flush_at_ms, buf)
 
 @dataclass
 class TransportConfig:
@@ -7819,117 +7066,137 @@ class _UniffiFfiConverterTypeTransportConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.write(value.nostr_cold_contact_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.nostr_username_discovery_enabled, buf)
 
-
-
-
-
-
-class TransportStatus(enum.Enum):
-    
-    AVAILABLE = 0
-    
-    UNAVAILABLE = 1
-    
-    CONNECTING = 2
-    
-    DISCONNECTED = 3
-    
-    ERROR = 4
-    
-
-
-class _UniffiFfiConverterTypeTransportStatus(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        variant = buf.read_i32()
-        if variant == 1:
-            return TransportStatus.AVAILABLE
-        if variant == 2:
-            return TransportStatus.UNAVAILABLE
-        if variant == 3:
-            return TransportStatus.CONNECTING
-        if variant == 4:
-            return TransportStatus.DISCONNECTED
-        if variant == 5:
-            return TransportStatus.ERROR
-        raise InternalError("Raw enum value doesn't match any cases")
-
-    @staticmethod
-    def check_lower(value):
-        if value == TransportStatus.AVAILABLE:
-            return
-        if value == TransportStatus.UNAVAILABLE:
-            return
-        if value == TransportStatus.CONNECTING:
-            return
-        if value == TransportStatus.DISCONNECTED:
-            return
-        if value == TransportStatus.ERROR:
-            return
-        raise ValueError(value)
-
-    @staticmethod
-    def write(value, buf):
-        if value == TransportStatus.AVAILABLE:
-            buf.write_i32(1)
-        if value == TransportStatus.UNAVAILABLE:
-            buf.write_i32(2)
-        if value == TransportStatus.CONNECTING:
-            buf.write_i32(3)
-        if value == TransportStatus.DISCONNECTED:
-            buf.write_i32(4)
-        if value == TransportStatus.ERROR:
-            buf.write_i32(5)
-
-
-
 @dataclass
-class TransportStateEvent:
-    def __init__(self, *, timestamp_ms:int, transport:TransportType, previous:TransportStatus, current:TransportStatus):
-        self.timestamp_ms = timestamp_ms
-        self.transport = transport
-        self.previous = previous
-        self.current = current
+class TransportMetrics:
+    def __init__(self, *, packets_sent:int, packets_received:int, bytes_sent:int, bytes_received:int, error_rate:float, avg_latency_ms:int, rssi:typing.Optional[int], bandwidth_bps:typing.Optional[int], congestion:typing.Optional[float], queue_depth:typing.Optional[int], battery_level:typing.Optional[int], is_charging:typing.Optional[bool], relay_connection_count:typing.Optional[int], is_active_relay:typing.Optional[bool], delivery_ratio:typing.Optional[float], drop_rate:typing.Optional[float], average_hop_count:typing.Optional[float], energy_cost:typing.Optional[float]):
+        self.packets_sent = packets_sent
+        self.packets_received = packets_received
+        self.bytes_sent = bytes_sent
+        self.bytes_received = bytes_received
+        self.error_rate = error_rate
+        self.avg_latency_ms = avg_latency_ms
+        self.rssi = rssi
+        self.bandwidth_bps = bandwidth_bps
+        self.congestion = congestion
+        self.queue_depth = queue_depth
+        self.battery_level = battery_level
+        self.is_charging = is_charging
+        self.relay_connection_count = relay_connection_count
+        self.is_active_relay = is_active_relay
+        self.delivery_ratio = delivery_ratio
+        self.drop_rate = drop_rate
+        self.average_hop_count = average_hop_count
+        self.energy_cost = energy_cost
         
         
 
     
     def __str__(self):
-        return "TransportStateEvent(timestamp_ms={}, transport={}, previous={}, current={})".format(self.timestamp_ms, self.transport, self.previous, self.current)
+        return "TransportMetrics(packets_sent={}, packets_received={}, bytes_sent={}, bytes_received={}, error_rate={}, avg_latency_ms={}, rssi={}, bandwidth_bps={}, congestion={}, queue_depth={}, battery_level={}, is_charging={}, relay_connection_count={}, is_active_relay={}, delivery_ratio={}, drop_rate={}, average_hop_count={}, energy_cost={})".format(self.packets_sent, self.packets_received, self.bytes_sent, self.bytes_received, self.error_rate, self.avg_latency_ms, self.rssi, self.bandwidth_bps, self.congestion, self.queue_depth, self.battery_level, self.is_charging, self.relay_connection_count, self.is_active_relay, self.delivery_ratio, self.drop_rate, self.average_hop_count, self.energy_cost)
     def __eq__(self, other):
-        if self.timestamp_ms != other.timestamp_ms:
+        if self.packets_sent != other.packets_sent:
             return False
-        if self.transport != other.transport:
+        if self.packets_received != other.packets_received:
             return False
-        if self.previous != other.previous:
+        if self.bytes_sent != other.bytes_sent:
             return False
-        if self.current != other.current:
+        if self.bytes_received != other.bytes_received:
+            return False
+        if self.error_rate != other.error_rate:
+            return False
+        if self.avg_latency_ms != other.avg_latency_ms:
+            return False
+        if self.rssi != other.rssi:
+            return False
+        if self.bandwidth_bps != other.bandwidth_bps:
+            return False
+        if self.congestion != other.congestion:
+            return False
+        if self.queue_depth != other.queue_depth:
+            return False
+        if self.battery_level != other.battery_level:
+            return False
+        if self.is_charging != other.is_charging:
+            return False
+        if self.relay_connection_count != other.relay_connection_count:
+            return False
+        if self.is_active_relay != other.is_active_relay:
+            return False
+        if self.delivery_ratio != other.delivery_ratio:
+            return False
+        if self.drop_rate != other.drop_rate:
+            return False
+        if self.average_hop_count != other.average_hop_count:
+            return False
+        if self.energy_cost != other.energy_cost:
             return False
         return True
 
-class _UniffiFfiConverterTypeTransportStateEvent(_UniffiConverterRustBuffer):
+class _UniffiFfiConverterTypeTransportMetrics(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
-        return TransportStateEvent(
-            timestamp_ms=_UniffiFfiConverterInt64.read(buf),
-            transport=_UniffiFfiConverterTypeTransportType.read(buf),
-            previous=_UniffiFfiConverterTypeTransportStatus.read(buf),
-            current=_UniffiFfiConverterTypeTransportStatus.read(buf),
+        return TransportMetrics(
+            packets_sent=_UniffiFfiConverterUInt32.read(buf),
+            packets_received=_UniffiFfiConverterUInt32.read(buf),
+            bytes_sent=_UniffiFfiConverterUInt32.read(buf),
+            bytes_received=_UniffiFfiConverterUInt32.read(buf),
+            error_rate=_UniffiFfiConverterFloat32.read(buf),
+            avg_latency_ms=_UniffiFfiConverterUInt32.read(buf),
+            rssi=_UniffiFfiConverterOptionalInt16.read(buf),
+            bandwidth_bps=_UniffiFfiConverterOptionalUInt64.read(buf),
+            congestion=_UniffiFfiConverterOptionalFloat32.read(buf),
+            queue_depth=_UniffiFfiConverterOptionalUInt32.read(buf),
+            battery_level=_UniffiFfiConverterOptionalUInt8.read(buf),
+            is_charging=_UniffiFfiConverterOptionalBoolean.read(buf),
+            relay_connection_count=_UniffiFfiConverterOptionalUInt8.read(buf),
+            is_active_relay=_UniffiFfiConverterOptionalBoolean.read(buf),
+            delivery_ratio=_UniffiFfiConverterOptionalFloat32.read(buf),
+            drop_rate=_UniffiFfiConverterOptionalFloat32.read(buf),
+            average_hop_count=_UniffiFfiConverterOptionalFloat32.read(buf),
+            energy_cost=_UniffiFfiConverterOptionalFloat32.read(buf),
         )
 
     @staticmethod
     def check_lower(value):
-        _UniffiFfiConverterInt64.check_lower(value.timestamp_ms)
-        _UniffiFfiConverterTypeTransportType.check_lower(value.transport)
-        _UniffiFfiConverterTypeTransportStatus.check_lower(value.previous)
-        _UniffiFfiConverterTypeTransportStatus.check_lower(value.current)
+        _UniffiFfiConverterUInt32.check_lower(value.packets_sent)
+        _UniffiFfiConverterUInt32.check_lower(value.packets_received)
+        _UniffiFfiConverterUInt32.check_lower(value.bytes_sent)
+        _UniffiFfiConverterUInt32.check_lower(value.bytes_received)
+        _UniffiFfiConverterFloat32.check_lower(value.error_rate)
+        _UniffiFfiConverterUInt32.check_lower(value.avg_latency_ms)
+        _UniffiFfiConverterOptionalInt16.check_lower(value.rssi)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.bandwidth_bps)
+        _UniffiFfiConverterOptionalFloat32.check_lower(value.congestion)
+        _UniffiFfiConverterOptionalUInt32.check_lower(value.queue_depth)
+        _UniffiFfiConverterOptionalUInt8.check_lower(value.battery_level)
+        _UniffiFfiConverterOptionalBoolean.check_lower(value.is_charging)
+        _UniffiFfiConverterOptionalUInt8.check_lower(value.relay_connection_count)
+        _UniffiFfiConverterOptionalBoolean.check_lower(value.is_active_relay)
+        _UniffiFfiConverterOptionalFloat32.check_lower(value.delivery_ratio)
+        _UniffiFfiConverterOptionalFloat32.check_lower(value.drop_rate)
+        _UniffiFfiConverterOptionalFloat32.check_lower(value.average_hop_count)
+        _UniffiFfiConverterOptionalFloat32.check_lower(value.energy_cost)
 
     @staticmethod
     def write(value, buf):
-        _UniffiFfiConverterInt64.write(value.timestamp_ms, buf)
-        _UniffiFfiConverterTypeTransportType.write(value.transport, buf)
-        _UniffiFfiConverterTypeTransportStatus.write(value.previous, buf)
-        _UniffiFfiConverterTypeTransportStatus.write(value.current, buf)
+        _UniffiFfiConverterUInt32.write(value.packets_sent, buf)
+        _UniffiFfiConverterUInt32.write(value.packets_received, buf)
+        _UniffiFfiConverterUInt32.write(value.bytes_sent, buf)
+        _UniffiFfiConverterUInt32.write(value.bytes_received, buf)
+        _UniffiFfiConverterFloat32.write(value.error_rate, buf)
+        _UniffiFfiConverterUInt32.write(value.avg_latency_ms, buf)
+        _UniffiFfiConverterOptionalInt16.write(value.rssi, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.bandwidth_bps, buf)
+        _UniffiFfiConverterOptionalFloat32.write(value.congestion, buf)
+        _UniffiFfiConverterOptionalUInt32.write(value.queue_depth, buf)
+        _UniffiFfiConverterOptionalUInt8.write(value.battery_level, buf)
+        _UniffiFfiConverterOptionalBoolean.write(value.is_charging, buf)
+        _UniffiFfiConverterOptionalUInt8.write(value.relay_connection_count, buf)
+        _UniffiFfiConverterOptionalBoolean.write(value.is_active_relay, buf)
+        _UniffiFfiConverterOptionalFloat32.write(value.delivery_ratio, buf)
+        _UniffiFfiConverterOptionalFloat32.write(value.drop_rate, buf)
+        _UniffiFfiConverterOptionalFloat32.write(value.average_hop_count, buf)
+        _UniffiFfiConverterOptionalFloat32.write(value.energy_cost, buf)
 
 @dataclass
 class WifiDirectMessage:
@@ -7966,6 +7233,54 @@ class _UniffiFfiConverterTypeWifiDirectMessage(_UniffiConverterRustBuffer):
     def write(value, buf):
         _UniffiFfiConverterString.write(value.recipient_id, buf)
         _UniffiFfiConverterSequenceUInt8.write(value.data, buf)
+
+
+
+
+
+
+class AppState(enum.Enum):
+    
+    ACTIVE = 0
+    
+    BACKGROUND = 1
+    
+    INACTIVE = 2
+    
+
+
+class _UniffiFfiConverterTypeAppState(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return AppState.ACTIVE
+        if variant == 2:
+            return AppState.BACKGROUND
+        if variant == 3:
+            return AppState.INACTIVE
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == AppState.ACTIVE:
+            return
+        if value == AppState.BACKGROUND:
+            return
+        if value == AppState.INACTIVE:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == AppState.ACTIVE:
+            buf.write_i32(1)
+        if value == AppState.BACKGROUND:
+            buf.write_i32(2)
+        if value == AppState.INACTIVE:
+            buf.write_i32(3)
+
+
 
 
 
@@ -8274,6 +7589,10 @@ class ProtocolError:  # type: ignore
         def __repr__(self):
             return "ProtocolError.DataCorrupted({})".format(repr(str(self)))
     _UniffiTempProtocolError.DataCorrupted = DataCorrupted # type: ignore
+    class TelemetryConfigInvalid(_UniffiTempProtocolError):
+        def __repr__(self):
+            return "ProtocolError.TelemetryConfigInvalid({})".format(repr(str(self)))
+    _UniffiTempProtocolError.TelemetryConfigInvalid = TelemetryConfigInvalid # type: ignore
 
 ProtocolError = _UniffiTempProtocolError # type: ignore
 del _UniffiTempProtocolError
@@ -8379,6 +7698,10 @@ class _UniffiFfiConverterTypeProtocolError(_UniffiConverterRustBuffer):
             return ProtocolError.DataCorrupted(
                 _UniffiFfiConverterString.read(buf),
             )
+        if variant == 25:
+            return ProtocolError.TelemetryConfigInvalid(
+                _UniffiFfiConverterString.read(buf),
+            )
         raise InternalError("Raw enum value doesn't match any cases")
 
     @staticmethod
@@ -8431,6 +7754,8 @@ class _UniffiFfiConverterTypeProtocolError(_UniffiConverterRustBuffer):
             return
         if isinstance(value, ProtocolError.DataCorrupted):
             return
+        if isinstance(value, ProtocolError.TelemetryConfigInvalid):
+            return
 
     @staticmethod
     def write(value, buf):
@@ -8482,6 +7807,8 @@ class _UniffiFfiConverterTypeProtocolError(_UniffiConverterRustBuffer):
             buf.write_i32(23)
         if isinstance(value, ProtocolError.DataCorrupted):
             buf.write_i32(24)
+        if isinstance(value, ProtocolError.TelemetryConfigInvalid):
+            buf.write_i32(25)
 
 
 
@@ -8579,6 +7906,70 @@ class _UniffiFfiConverterTypeRelaySyncState(_UniffiConverterRustBuffer):
 
 
 
+
+
+
+
+
+class TransportType(enum.Enum):
+    
+    INTERNET = 0
+    
+    BLE = 1
+    
+    WI_FI_DIRECT = 2
+    
+    RETICULUM = 3
+    
+    NOSTR = 4
+    
+
+
+class _UniffiFfiConverterTypeTransportType(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return TransportType.INTERNET
+        if variant == 2:
+            return TransportType.BLE
+        if variant == 3:
+            return TransportType.WI_FI_DIRECT
+        if variant == 4:
+            return TransportType.RETICULUM
+        if variant == 5:
+            return TransportType.NOSTR
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == TransportType.INTERNET:
+            return
+        if value == TransportType.BLE:
+            return
+        if value == TransportType.WI_FI_DIRECT:
+            return
+        if value == TransportType.RETICULUM:
+            return
+        if value == TransportType.NOSTR:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == TransportType.INTERNET:
+            buf.write_i32(1)
+        if value == TransportType.BLE:
+            buf.write_i32(2)
+        if value == TransportType.WI_FI_DIRECT:
+            buf.write_i32(3)
+        if value == TransportType.RETICULUM:
+            buf.write_i32(4)
+        if value == TransportType.NOSTR:
+            buf.write_i32(5)
+
+
+
 class _UniffiFfiConverterBytes(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
@@ -8598,6 +7989,15 @@ class _UniffiFfiConverterBytes(_UniffiConverterRustBuffer):
     def write(value, buf):
         buf.write_i32(len(value))
         buf.write(value)
+
+class _UniffiFfiConverterFloat64(_UniffiConverterPrimitiveFloat):
+    @staticmethod
+    def read(buf):
+        return buf.read_double()
+
+    @staticmethod
+    def write(value, buf):
+        buf.write_double(value)
 
 
 class DataStoreProtocol(typing.Protocol):
@@ -9889,190 +9289,6 @@ class _UniffiTraitImplProtocolStateStorageProviderImpl:
 # The _UniffiConverter which transforms the Callbacks in to Handles to pass to Rust.
 _UniffiFfiConverterTypeProtocolStateStorageProvider = _UniffiCallbackInterfaceFfiConverter()
 
-
-
-
-class TelemetrySink(typing.Protocol):
-    
-    def on_protocol_event(self, event_json: str) -> None:
-        raise NotImplementedError
-    def on_mls_event(self, event_json: str) -> None:
-        raise NotImplementedError
-    def on_metrics_frame(self, frame: MetricsFrame) -> None:
-        raise NotImplementedError
-    def on_transport_state(self, event: TransportStateEvent) -> None:
-        raise NotImplementedError
-    def on_routing_decision(self, decision: RoutingDecision) -> None:
-        raise NotImplementedError
-    def on_device_capability(self, snapshot: DeviceCapabilitySnapshot) -> None:
-        raise NotImplementedError
-    def on_extension(self, name: str,payload_json: str) -> None:
-        raise NotImplementedError
-# Put all the bits inside a class to keep the top-level namespace clean
-class _UniffiTraitImplTelemetrySinkImpl:
-    # For each method, generate a callback function to pass to Rust
-
-    @_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD0
-    def on_protocol_event(
-            uniffi_handle,
-            event_json,
-            uniffi_out_return,
-            uniffi_call_status_ptr,
-        ):
-        uniffi_obj = _UniffiFfiConverterTypeTelemetrySink._handle_map.get(uniffi_handle)
-        def make_call():
-            uniffi_args = (_UniffiFfiConverterString.lift(event_json), )
-            uniffi_method = uniffi_obj.on_protocol_event
-            return uniffi_method(*uniffi_args)
-        write_return_value = lambda v: None
-        _uniffi_trait_interface_call(
-                uniffi_call_status_ptr.contents,
-                make_call,
-                write_return_value,
-        )
-
-    @_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD1
-    def on_mls_event(
-            uniffi_handle,
-            event_json,
-            uniffi_out_return,
-            uniffi_call_status_ptr,
-        ):
-        uniffi_obj = _UniffiFfiConverterTypeTelemetrySink._handle_map.get(uniffi_handle)
-        def make_call():
-            uniffi_args = (_UniffiFfiConverterString.lift(event_json), )
-            uniffi_method = uniffi_obj.on_mls_event
-            return uniffi_method(*uniffi_args)
-        write_return_value = lambda v: None
-        _uniffi_trait_interface_call(
-                uniffi_call_status_ptr.contents,
-                make_call,
-                write_return_value,
-        )
-
-    @_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD2
-    def on_metrics_frame(
-            uniffi_handle,
-            frame,
-            uniffi_out_return,
-            uniffi_call_status_ptr,
-        ):
-        uniffi_obj = _UniffiFfiConverterTypeTelemetrySink._handle_map.get(uniffi_handle)
-        def make_call():
-            uniffi_args = (_UniffiFfiConverterTypeMetricsFrame.lift(frame), )
-            uniffi_method = uniffi_obj.on_metrics_frame
-            return uniffi_method(*uniffi_args)
-        write_return_value = lambda v: None
-        _uniffi_trait_interface_call(
-                uniffi_call_status_ptr.contents,
-                make_call,
-                write_return_value,
-        )
-
-    @_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD3
-    def on_transport_state(
-            uniffi_handle,
-            event,
-            uniffi_out_return,
-            uniffi_call_status_ptr,
-        ):
-        uniffi_obj = _UniffiFfiConverterTypeTelemetrySink._handle_map.get(uniffi_handle)
-        def make_call():
-            uniffi_args = (_UniffiFfiConverterTypeTransportStateEvent.lift(event), )
-            uniffi_method = uniffi_obj.on_transport_state
-            return uniffi_method(*uniffi_args)
-        write_return_value = lambda v: None
-        _uniffi_trait_interface_call(
-                uniffi_call_status_ptr.contents,
-                make_call,
-                write_return_value,
-        )
-
-    @_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD4
-    def on_routing_decision(
-            uniffi_handle,
-            decision,
-            uniffi_out_return,
-            uniffi_call_status_ptr,
-        ):
-        uniffi_obj = _UniffiFfiConverterTypeTelemetrySink._handle_map.get(uniffi_handle)
-        def make_call():
-            uniffi_args = (_UniffiFfiConverterTypeRoutingDecision.lift(decision), )
-            uniffi_method = uniffi_obj.on_routing_decision
-            return uniffi_method(*uniffi_args)
-        write_return_value = lambda v: None
-        _uniffi_trait_interface_call(
-                uniffi_call_status_ptr.contents,
-                make_call,
-                write_return_value,
-        )
-
-    @_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD5
-    def on_device_capability(
-            uniffi_handle,
-            snapshot,
-            uniffi_out_return,
-            uniffi_call_status_ptr,
-        ):
-        uniffi_obj = _UniffiFfiConverterTypeTelemetrySink._handle_map.get(uniffi_handle)
-        def make_call():
-            uniffi_args = (_UniffiFfiConverterTypeDeviceCapabilitySnapshot.lift(snapshot), )
-            uniffi_method = uniffi_obj.on_device_capability
-            return uniffi_method(*uniffi_args)
-        write_return_value = lambda v: None
-        _uniffi_trait_interface_call(
-                uniffi_call_status_ptr.contents,
-                make_call,
-                write_return_value,
-        )
-
-    @_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_TELEMETRY_SINK_METHOD6
-    def on_extension(
-            uniffi_handle,
-            name,
-            payload_json,
-            uniffi_out_return,
-            uniffi_call_status_ptr,
-        ):
-        uniffi_obj = _UniffiFfiConverterTypeTelemetrySink._handle_map.get(uniffi_handle)
-        def make_call():
-            uniffi_args = (_UniffiFfiConverterString.lift(name), _UniffiFfiConverterString.lift(payload_json), )
-            uniffi_method = uniffi_obj.on_extension
-            return uniffi_method(*uniffi_args)
-        write_return_value = lambda v: None
-        _uniffi_trait_interface_call(
-                uniffi_call_status_ptr.contents,
-                make_call,
-                write_return_value,
-        )
-
-    @_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_TELEMETRY_SINK
-    def _uniffi_free(uniffi_handle):
-        _UniffiFfiConverterTypeTelemetrySink._handle_map.remove(uniffi_handle)
-
-    @_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_TELEMETRY_SINK
-    def _uniffi_clone(uniffi_handle):
-        return _UniffiFfiConverterTypeTelemetrySink._handle_map.clone(uniffi_handle)
-
-    # Generate the FFI VTable.  This has a field for each callback interface method.
-    _uniffi_vtable = _UniffiVTableCallbackInterfaceOfflineProtocolTelemetrySink(
-        _uniffi_free,
-        _uniffi_clone,
-        on_protocol_event,
-        on_mls_event,
-        on_metrics_frame,
-        on_transport_state,
-        on_routing_decision,
-        on_device_capability,
-        on_extension,
-    )
-    # Send Rust a pointer to the VTable.  Note: this means we need to keep the struct alive forever,
-    # or else bad things will happen when Rust tries to access it.
-    _UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_telemetrysink(ctypes.byref(_uniffi_vtable))
-
-# The _UniffiConverter which transforms the Callbacks in to Handles to pass to Rust.
-_UniffiFfiConverterTypeTelemetrySink = _UniffiCallbackInterfaceFfiConverter()
-
 class _UniffiFfiConverterOptionalTypeInternetMessage(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
@@ -10447,6 +9663,31 @@ class _UniffiTraitImplWifiDirectTransportCallbackImpl:
 # The _UniffiConverter which transforms the Callbacks in to Handles to pass to Rust.
 _UniffiFfiConverterTypeWifiDirectTransportCallback = _UniffiCallbackInterfaceFfiConverter()
 
+class _UniffiFfiConverterOptionalTypeTelemetryStats(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeTelemetryStats.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeTelemetryStats.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeTelemetryStats.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
 class _UniffiFfiConverterOptionalTypeWifiDirectMessage(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
@@ -10513,11 +9754,21 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def derive_user_id_from_public_key(self, public_key: typing.List[int]) -> str:
         raise NotImplementedError
+    def disable_telemetry(self, ) -> None:
+        raise NotImplementedError
     def emit_test_event(self, ) -> None:
+        raise NotImplementedError
+    def enable_telemetry(self, config: TelemetryConfig,app_state: AppState) -> None:
+        raise NotImplementedError
+    def end_telemetry_session(self, ) -> None:
         raise NotImplementedError
     def establish_secure_session(self, peer_id: str) -> typing.Optional[MlsWelcomeMessage]:
         raise NotImplementedError
     def finalize_file(self, file_id: str) -> None:
+        raise NotImplementedError
+    def flush_telemetry(self, ) -> None:
+        raise NotImplementedError
+    def flush_telemetry_blocking(self, deadline_ms: int) -> bool:
         raise NotImplementedError
     def force_transport(self, transport_type: TransportType) -> None:
         raise NotImplementedError
@@ -10584,8 +9835,6 @@ class OfflineProtocolProtocol(typing.Protocol):
     def has_pending_key_package(self, peer_id: str) -> bool:
         raise NotImplementedError
     def initialize_mls(self, secure_storage: MlsStorageProvider,protocol_state_storage: ProtocolStateStorageProvider) -> None:
-        raise NotImplementedError
-    def install_telemetry_sink(self, sink: TelemetrySink,config: TelemetryConfig) -> None:
         raise NotImplementedError
     def internet_address_declaration_refused(self, reason: str) -> None:
         raise NotImplementedError
@@ -10681,11 +9930,11 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def nostr_status_changed(self, is_connected: bool) -> None:
         raise NotImplementedError
+    def notify_app_state(self, state: AppState) -> None:
+        raise NotImplementedError
     def pause(self, ) -> None:
         raise NotImplementedError
     def poll_event(self, ) -> typing.Optional[str]:
-        raise NotImplementedError
-    def poll_telemetry_frame(self, ) -> typing.Optional[str]:
         raise NotImplementedError
     def process(self, ) -> None:
         raise NotImplementedError
@@ -10771,6 +10020,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def set_reticulum_transport_callback(self, callback: ReticulumTransportCallback) -> None:
         raise NotImplementedError
+    def set_telemetry_enabled(self, enabled: bool) -> None:
+        raise NotImplementedError
     def set_wifi_direct_transport_callback(self, callback: WifiDirectTransportCallback) -> None:
         raise NotImplementedError
     def should_escalate_to_wifi(self, ) -> bool:
@@ -10783,9 +10034,9 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def telemetry_install_id(self, ) -> typing.Optional[str]:
         raise NotImplementedError
-    def unblock_user(self, user_id: str) -> None:
+    def telemetry_stats(self, ) -> typing.Optional[TelemetryStats]:
         raise NotImplementedError
-    def uninstall_telemetry_sink(self, ) -> None:
+    def unblock_user(self, user_id: str) -> None:
         raise NotImplementedError
     def update_ack_config(self, config: AckConfig) -> None:
         raise NotImplementedError
@@ -11132,6 +10383,18 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def disable_telemetry(self, ) -> None:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_disable_telemetry,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def emit_test_event(self, ) -> None:
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -11141,6 +10404,36 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def enable_telemetry(self, config: TelemetryConfig,app_state: AppState) -> None:
+        
+        _UniffiFfiConverterTypeTelemetryConfig.check_lower(config)
+        
+        _UniffiFfiConverterTypeAppState.check_lower(app_state)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterTypeTelemetryConfig.lower(config),
+            _UniffiFfiConverterTypeAppState.lower(app_state),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_enable_telemetry,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def end_telemetry_session(self, ) -> None:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_end_telemetry_session,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -11171,6 +10464,33 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_finalize_file,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def flush_telemetry(self, ) -> None:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def flush_telemetry_blocking(self, deadline_ms: int) -> bool:
+        
+        _UniffiFfiConverterUInt64.check_lower(deadline_ms)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterUInt64.lower(deadline_ms),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterBoolean.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry_blocking,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -11627,24 +10947,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
-    def install_telemetry_sink(self, sink: TelemetrySink,config: TelemetryConfig) -> None:
-        
-        _UniffiFfiConverterTypeTelemetrySink.check_lower(sink)
-        
-        _UniffiFfiConverterTypeTelemetryConfig.check_lower(config)
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-            _UniffiFfiConverterTypeTelemetrySink.lower(sink),
-            _UniffiFfiConverterTypeTelemetryConfig.lower(config),
-        )
-        _uniffi_lift_return = lambda val: None
-        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_install_telemetry_sink,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -12350,6 +11652,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def notify_app_state(self, state: AppState) -> None:
+        
+        _UniffiFfiConverterTypeAppState.check_lower(state)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterTypeAppState.lower(state),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_notify_app_state,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def pause(self, ) -> None:
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12371,18 +11688,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_event,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
-    def poll_telemetry_frame(self, ) -> typing.Optional[str]:
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-        )
-        _uniffi_lift_return = _UniffiFfiConverterOptionalString.lift
-        _uniffi_error_converter = None
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_telemetry_frame,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -13115,6 +12420,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def set_telemetry_enabled(self, enabled: bool) -> None:
+        
+        _UniffiFfiConverterBoolean.check_lower(enabled)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterBoolean.lower(enabled),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_telemetry_enabled,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def set_wifi_direct_transport_callback(self, callback: WifiDirectTransportCallback) -> None:
         
         _UniffiFfiConverterTypeWifiDirectTransportCallback.check_lower(callback)
@@ -13193,6 +12513,18 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def telemetry_stats(self, ) -> typing.Optional[TelemetryStats]:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterOptionalTypeTelemetryStats.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_stats,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def unblock_user(self, user_id: str) -> None:
         
         _UniffiFfiConverterString.check_lower(user_id)
@@ -13205,18 +12537,6 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unblock_user,
-            *_uniffi_lowered_args,
-        )
-        return _uniffi_lift_return(_uniffi_ffi_result)
-    def uninstall_telemetry_sink(self, ) -> None:
-        _uniffi_lowered_args = (
-            self._uniffi_clone_handle(),
-        )
-        _uniffi_lift_return = lambda val: None
-        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
-        _uniffi_ffi_result = _uniffi_rust_call_with_error(
-            _uniffi_error_converter,
-            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_uninstall_telemetry_sink,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -13483,28 +12803,24 @@ def run_storage_conformance(storage: ProtocolStateStorageProvider) -> str:
 
 __all__ = [
     "InternalError",
-    "RelayRole",
     "OverflowPolicy",
-    "TransportType",
     "RelayPriority",
-    "RoutingPhase",
-    "RoutingReasonCode",
     "MessagePriority",
     "ContentType",
+    "TelemetryOs",
     "MlsVerbosity",
-    "TransportStatus",
+    "AppState",
     "EstablishmentState",
     "MlsStorageError",
     "PresenceStatus",
     "ProtocolError",
     "ProtocolState",
     "RelaySyncState",
+    "TransportType",
     "AckConfig",
     "BleFragment",
     "DedupConfig",
     "DedupStats",
-    "DeduplicatorStatsFrame",
-    "DeviceCapabilitySnapshot",
     "DorsConfig",
     "PendingQueueConfig",
     "EncryptionConfig",
@@ -13521,10 +12837,6 @@ __all__ = [
     "MeshRelayStats",
     "MeshRelayTunables",
     "MessageStats",
-    "TransportMetrics",
-    "TransportMetricsEntry",
-    "RetryQueueStats",
-    "MetricsFrame",
     "MlsWelcomeMessage",
     "MlsEncryptedMessage",
     "MlsAddMemberResult",
@@ -13542,12 +12854,11 @@ __all__ = [
     "RetryConfig",
     "ReliabilityConfig",
     "ReticulumMessage",
-    "RoutingScoreEntry",
-    "RoutingDecision",
     "SendMessageOptions",
     "TelemetryConfig",
+    "TelemetryStats",
     "TransportConfig",
-    "TransportStateEvent",
+    "TransportMetrics",
     "WifiDirectMessage",
     "derive_address",
     "parse_invite",
@@ -13560,7 +12871,6 @@ __all__ = [
     "OfflineProtocolProtocol",
     "MlsStorageProvider",
     "ProtocolStateStorageProvider",
-    "TelemetrySink",
     "BleTransportCallback",
     "EventCallback",
     "NostrTransportCallback",

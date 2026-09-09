@@ -191,6 +191,19 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// lifecycle notifications that drive it are delivered on main.
     private let foregroundReconnectPolicy = ForegroundReconnectPolicy()
 
+    /// Background assertion held while the telemetry pipe closes its session
+    /// and flushes on the background transition. Same ownership rule as the
+    /// Wi-Fi one below: main-confined, ended exactly once.
+    private var backgroundTelemetryTaskId: UIBackgroundTaskIdentifier = .invalid
+
+    /// Main-only. Ends the telemetry assertion `id` unless a later transition
+    /// already superseded it.
+    private func endBackgroundTelemetryTask(_ id: UIBackgroundTaskIdentifier) {
+        guard id != .invalid, backgroundTelemetryTaskId == id else { return }
+        UIApplication.shared.endBackgroundTask(id)
+        backgroundTelemetryTaskId = .invalid
+    }
+
     /// Background assertion held while the deferred
     /// `wifiDirectStatusChanged(false)` hop completes. Main-confined: it is
     /// armed from the background notification and ended from either the
@@ -248,6 +261,24 @@ class OfflineProtocolModule: RCTEventEmitter {
             try? proto.wifiDirectStatusChanged(isConnected: false)
             DispatchQueue.main.async { self.endBackgroundWifiTask(armed) }
         }
+
+        // The telemetry session boundary: the pipe emits its summary and the
+        // blocking flush gives it up to three seconds inside a background
+        // assertion, off main. Without the assertion iOS may suspend the
+        // process before the uploader thread gets a turn, and the batch
+        // would wait in the durable queue for the next launch instead.
+        endBackgroundTelemetryTask(backgroundTelemetryTaskId)
+        let telemetryTask = UIApplication.shared.beginBackgroundTask(
+            withName: "OfflineProtocol.telemetryFlush"
+        ) {
+            self.endBackgroundTelemetryTask(self.backgroundTelemetryTaskId)
+        }
+        backgroundTelemetryTaskId = telemetryTask
+        processQueue.async {
+            proto.notifyAppState(state: .background)
+            _ = proto.flushTelemetryBlocking(deadlineMs: 3000)
+            DispatchQueue.main.async { self.endBackgroundTelemetryTask(telemetryTask) }
+        }
     }
 
     @objc private func applicationWillEnterForeground() {
@@ -278,6 +309,10 @@ class OfflineProtocolModule: RCTEventEmitter {
         // the app is becoming active, not losing its runtime.
         processQueue.async {
             try? proto.wifiDirectStatusChanged(isConnected: true)
+            // The first foreground after a background rotates the telemetry
+            // session; a foreground with no background before it is not an
+            // edge and does nothing.
+            proto.notifyAppState(state: .active)
         }
     }
 
@@ -289,7 +324,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     }
     
     override func supportedEvents() -> [String]! {
-        return [Events.onEvent, Events.onTelemetry]
+        return [Events.onEvent]
     }
 
     override func startObserving() {
@@ -1227,43 +1262,73 @@ class OfflineProtocolModule: RCTEventEmitter {
         resolver(nil)
     }
 
-    @objc func installTelemetrySink(_ configDict: NSDictionary?,
-                                    resolver: @escaping RCTPromiseResolveBlock,
-                                    rejecter: @escaping RCTPromiseRejectBlock) {
+    @objc func enableTelemetry(_ configDict: NSDictionary?,
+                               resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {
             rejecter("NOT_STARTED", "Protocol not created", nil)
             return
         }
         do {
             let config = parseTelemetryConfig(configDict as? [String: Any])
-            try proto.installTelemetrySink(sink: TelemetrySinkImpl(emitter: self), config: config)
+            // The application state right now, so a pipe enabled by a
+            // background launch closes its first session on the next
+            // foreground rather than after a full round trip.
+            let state: AppState = UIApplication.shared.applicationState == .background ? .background : .active
+            try proto.enableTelemetry(config: config, appState: state)
             resolver(nil)
         } catch {
-            rejecter("TELEMETRY_INSTALL", "Failed to install telemetry sink: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("TELEMETRY_ENABLE", "Failed to enable telemetry: \(error.localizedDescription)", error)
+            }
         }
     }
 
-    @objc func pollTelemetryFrame(_ resolver: @escaping RCTPromiseResolveBlock,
-                                  rejecter: @escaping RCTPromiseRejectBlock) {
+    @objc func disableTelemetry(_ resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {
             rejecter("NOT_STARTED", "Protocol not created", nil)
             return
         }
-        resolver(proto.pollTelemetryFrame())
-    }
-
-    @objc func uninstallTelemetrySink(_ resolver: @escaping RCTPromiseResolveBlock,
-                                      rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("NOT_STARTED", "Protocol not created", nil)
-            return
-        }
+        // Blocks for the final flush (at most three seconds); React Native
+        // calls bridge methods on its own queue, never on main.
         do {
-            try proto.uninstallTelemetrySink()
+            try proto.disableTelemetry()
             resolver(nil)
         } catch {
-            rejecter("TELEMETRY_UNINSTALL", "Failed to uninstall telemetry sink: \(error.localizedDescription)", error)
+            rejecter("TELEMETRY_DISABLE", "Failed to disable telemetry: \(error.localizedDescription)", error)
         }
+    }
+
+    @objc func flushTelemetry(_ resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        protocolInstance?.flushTelemetry()
+        resolver(nil)
+    }
+
+    @objc func telemetryStats(_ resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let stats = protocolInstance?.telemetryStats() else {
+            resolver(nil)
+            return
+        }
+        resolver(OfflineProtocolModule.encode(stats: stats))
+    }
+
+    @objc func endTelemetrySession(_ resolver: @escaping RCTPromiseResolveBlock,
+                                   rejecter: @escaping RCTPromiseRejectBlock) {
+        // Blocks for the flush (at most three seconds), off main.
+        protocolInstance?.endTelemetrySession()
+        resolver(nil)
+    }
+
+    @objc func setTelemetryEnabled(_ enabled: Bool,
+                                   resolver: @escaping RCTPromiseResolveBlock,
+                                   rejecter: @escaping RCTPromiseRejectBlock) {
+        protocolInstance?.setTelemetryEnabled(enabled: enabled)
+        resolver(nil)
     }
 
     @objc func telemetryInstallId(_ resolver: @escaping RCTPromiseResolveBlock,
@@ -1274,7 +1339,22 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
         resolver(proto.telemetryInstallId())
     }
-    
+
+    // Counters cross as NSNumber-wrapped UInt64, which the bridge renders as
+    // a JS number; values above 2^53 lose precision, which no device reaches.
+    fileprivate static func encode(stats s: TelemetryStats) -> [String: Any] {
+        var d: [String: Any] = [
+            "buffered": s.buffered,
+            "sentEvents": s.sentEvents,
+            "acceptedEvents": s.acceptedEvents,
+            "dropped": s.dropped,
+            "sessionId": s.sessionId,
+        ]
+        if let v = s.lastError { d["lastError"] = v }
+        if let v = s.lastFlushAtMs { d["lastFlushAtMs"] = v }
+        return d
+    }
+
     @objc func stop(_ resolver: @escaping RCTPromiseResolveBlock,
                    rejecter: @escaping RCTPromiseRejectBlock) {
         stopProcessTimer()
@@ -5273,219 +5353,6 @@ class NostrTransportCallbackImpl: NostrTransportCallback, @unchecked Sendable {
 extension OfflineProtocolModule {
     fileprivate struct Events {
         static let onEvent = "OfflineProtocol_Event"
-        static let onTelemetry = "OfflineProtocol_Telemetry"
-    }
-}
-
-// MARK: - TelemetrySink Implementation
-
-class TelemetrySinkImpl: TelemetrySink, @unchecked Sendable {
-    weak var emitter: OfflineProtocolModule?
-
-    init(emitter: OfflineProtocolModule) {
-        self.emitter = emitter
-    }
-
-    // Every callback is invoked synchronously from the Rust emit path; the
-    // encoders are pure Swift dict construction and cannot throw, so the
-    // only failure mode here is `emitter` having been deallocated.
-    private func dispatch(_ body: [String: Any]) {
-        guard let emitter = emitter else { return }
-        let send: () -> Void = {
-            emitter.sendEventToJS(OfflineProtocolModule.Events.onTelemetry, body: body)
-        }
-        if Thread.isMainThread {
-            send()
-        } else {
-            DispatchQueue.main.async(execute: send)
-        }
-    }
-
-    func onProtocolEvent(eventJson: String) {
-        dispatch(["category": "protocol", "eventJson": eventJson])
-    }
-
-    func onMlsEvent(eventJson: String) {
-        dispatch(["category": "mls", "eventJson": eventJson])
-    }
-
-    func onMetricsFrame(frame: MetricsFrame) {
-        dispatch(["category": "metricsFrame", "frame": TelemetrySinkImpl.encode(frame: frame)])
-    }
-
-    func onTransportState(event: TransportStateEvent) {
-        dispatch(["category": "transportState", "event": TelemetrySinkImpl.encode(event: event)])
-    }
-
-    func onRoutingDecision(decision: RoutingDecision) {
-        dispatch(["category": "routingDecision", "decision": TelemetrySinkImpl.encode(decision: decision)])
-    }
-
-    func onDeviceCapability(snapshot: DeviceCapabilitySnapshot) {
-        dispatch(["category": "deviceCapability", "snapshot": TelemetrySinkImpl.encode(snapshot: snapshot)])
-    }
-
-    func onExtension(name: String, payloadJson: String) {
-        dispatch(["category": "extension", "name": name, "payloadJson": payloadJson])
-    }
-
-    // MARK: Encoders (UniFFI structs → JSON-safe dictionaries)
-    //
-    // IMPORTANT: every dict produced below MUST be structurally identical
-    // to the JSON envelope the Rust adapter enqueues on the pull channel.
-    // The canonical contract is pinned by the `shape_parity_*_envelope`
-    // tests in `crates/offline-protocol-uniffi/src/lib.rs`. If those tests
-    // change, update the matching encoder here in lockstep — the TS
-    // `TelemetryRecord` discriminated union expects ONE shape regardless
-    // of whether a record arrived via `onTelemetry` (push) or
-    // `pollTelemetry` (pull).
-
-    fileprivate static func encode(metrics m: TransportMetrics) -> [String: Any] {
-        var d: [String: Any] = [
-            "packetsSent": m.packetsSent,
-            "packetsReceived": m.packetsReceived,
-            "bytesSent": m.bytesSent,
-            "bytesReceived": m.bytesReceived,
-            "errorRate": m.errorRate,
-            "avgLatencyMs": m.avgLatencyMs,
-        ]
-        if let v = m.rssi { d["rssi"] = v }
-        if let v = m.bandwidthBps { d["bandwidthBps"] = v }
-        if let v = m.congestion { d["congestion"] = v }
-        if let v = m.queueDepth { d["queueDepth"] = v }
-        if let v = m.batteryLevel { d["batteryLevel"] = v }
-        if let v = m.isCharging { d["isCharging"] = v }
-        if let v = m.relayConnectionCount { d["relayConnectionCount"] = v }
-        if let v = m.isActiveRelay { d["isActiveRelay"] = v }
-        if let v = m.deliveryRatio { d["deliveryRatio"] = v }
-        if let v = m.dropRate { d["dropRate"] = v }
-        if let v = m.averageHopCount { d["averageHopCount"] = v }
-        if let v = m.energyCost { d["energyCost"] = v }
-        return d
-    }
-
-    fileprivate static func encode(transportType t: TransportType) -> String {
-        switch t {
-        case .internet: return "internet"
-        case .ble: return "ble"
-        case .wiFiDirect: return "wifiDirect"
-        case .reticulum: return "reticulum"
-        case .nostr: return "nostr"
-        }
-    }
-
-    fileprivate static func encode(status s: TransportStatus) -> String {
-        switch s {
-        case .available: return "available"
-        case .unavailable: return "unavailable"
-        case .connecting: return "connecting"
-        case .disconnected: return "disconnected"
-        case .error: return "error"
-        }
-    }
-
-    fileprivate static func encode(frame f: MetricsFrame) -> [String: Any] {
-        var d: [String: Any] = [
-            "timestampMs": f.timestampMs,
-            "transports": f.transports.map { entry -> [String: Any] in
-                [
-                    "transport": encode(transportType: entry.transport),
-                    "metrics": encode(metrics: entry.metrics),
-                ]
-            },
-            "retryQueue": [
-                "totalCount": f.retryQueue.totalCount,
-                "readyCount": f.retryQueue.readyCount,
-                "criticalPriorityCount": f.retryQueue.criticalPriorityCount,
-                "highPriorityCount": f.retryQueue.highPriorityCount,
-                "mediumPriorityCount": f.retryQueue.mediumPriorityCount,
-                "lowPriorityCount": f.retryQueue.lowPriorityCount,
-            ],
-            "dedup": [
-                "totalTracked": f.dedup.totalTracked,
-                "recentTracked": f.dedup.recentTracked,
-                "capacityUsedPercent": f.dedup.capacityUsedPercent,
-                "mode": f.dedup.mode,
-            ],
-            "ackPending": f.ackPending,
-            "neighborCount": f.neighborCount,
-            "isLocalRelay": f.isLocalRelay,
-        ]
-        if let fpr = f.dedup.falsePositiveRate,
-           var dedup = d["dedup"] as? [String: Any] {
-            dedup["falsePositiveRate"] = fpr
-            d["dedup"] = dedup
-        }
-        if let t = f.currentTransport { d["currentTransport"] = encode(transportType: t) }
-        return d
-    }
-
-    fileprivate static func encode(event e: TransportStateEvent) -> [String: Any] {
-        return [
-            "timestampMs": e.timestampMs,
-            "transport": encode(transportType: e.transport),
-            "previous": encode(status: e.previous),
-            "current": encode(status: e.current),
-        ]
-    }
-
-    fileprivate static func encode(decision d: RoutingDecision) -> [String: Any] {
-        var out: [String: Any] = [
-            "timestampMs": d.timestampMs,
-            "phase": encode(phase: d.phase),
-            "scores": d.scores.map { s -> [String: Any] in
-                [
-                    "transport": encode(transportType: s.transport),
-                    "signal": s.signal, "proximity": s.proximity,
-                    "bandwidth": s.bandwidth, "congestion": s.congestion,
-                    "energy": s.energy, "reliability": s.reliability,
-                    "load": s.load, "total": s.total,
-                ]
-            },
-        ]
-        if let v = d.from { out["from"] = encode(transportType: v) }
-        if let v = d.to { out["to"] = encode(transportType: v) }
-        if let v = d.winningScore { out["winningScore"] = v }
-        if let v = d.reasonCode { out["reasonCode"] = encode(reason: v) }
-        return out
-    }
-
-    fileprivate static func encode(phase p: RoutingPhase) -> String {
-        switch p {
-        case .scoreUpdated: return "scoreUpdated"
-        case .selected: return "selected"
-        case .switched: return "switched"
-        case .escalated: return "escalated"
-        case .unknown: return "unknown"
-        }
-    }
-
-    fileprivate static func encode(reason r: RoutingReasonCode) -> String {
-        switch r {
-        case .initialSelection: return "initialSelection"
-        case .primarySelected: return "primarySelected"
-        case .primarySuccess: return "primarySuccess"
-        case .fallbackSuccess: return "fallbackSuccess"
-        case .escalationApplied: return "escalationApplied"
-        case .currentUnavailable: return "currentUnavailable"
-        case .retryThreshold: return "retryThreshold"
-        case .poorSignal: return "poorSignal"
-        case .congestion: return "congestion"
-        case .lowTtl: return "lowTtl"
-        case .lowSuccessRate: return "lowSuccessRate"
-        case .unknown: return "unknown"
-        }
-    }
-
-    fileprivate static func encode(snapshot s: DeviceCapabilitySnapshot) -> [String: Any] {
-        var d: [String: Any] = [
-            "timestampMs": s.timestampMs,
-            "isCharging": s.isCharging,
-            "relayRole": s.relayRole == .relay ? "relay" : "regular",
-            "changedFields": s.changedFields,
-        ]
-        if let v = s.batteryLevel { d["batteryLevel"] = v }
-        return d
     }
 }
 
@@ -5495,18 +5362,21 @@ extension OfflineProtocolModule {
     // The TS `TelemetryConfig` type (bindings/react-native/src/types.ts)
     // only emits camelCase keys — this parser matches that contract.
     //
+    // The two required strings are forwarded as given, an absent one as "":
+    // the core validates and names the refused field, which reaches JS as
+    // the `TelemetryConfigInvalid` code. Restating the check here would be
+    // a second copy of the rule.
+    //
+    // The platform fields are filled here, never read from the dictionary:
+    // the ingest keys its per-platform aggregates on them, and an app
+    // cannot set them wrong if it cannot set them.
+    //
     // On unrecognised `mlsVerbosity` strings we log a warning and fall back
     // to `nil` (Rust default). Silent fallback would have hid integrator
     // typos behind "it just applies Lifecycle", which is indistinguishable
     // from "my config took effect".
     fileprivate func parseTelemetryConfig(_ dict: [String: Any]?) -> TelemetryConfig {
-        guard let dict = dict else {
-            return TelemetryConfig(
-                scrubIds: nil, mlsVerbosity: nil,
-                metricsCadenceMs: nil, routingDiagnostic: nil,
-                enablePollQueue: nil, mlsSamplingBypass: nil
-            )
-        }
+        let dict = dict ?? [:]
         let verbosity: MlsVerbosity?
         if let raw = dict["mlsVerbosity"] as? String {
             switch raw.lowercased() {
@@ -5520,21 +5390,25 @@ extension OfflineProtocolModule {
         } else {
             verbosity = nil
         }
-        let scrubIds = dict["scrubIds"] as? Bool
-        // `metricsCadenceMs` is config-sized (cadence in ms fits comfortably
-        // in an f64's 53-bit mantissa). Don't reuse this cast for counter
-        // fields that can exceed 2^53.
-        let cadence = (dict["metricsCadenceMs"] as? NSNumber)?.uint64Value
-        let routingDiag = dict["routingDiagnostic"] as? Bool
-        let enablePollQueue = dict["enablePollQueue"] as? Bool
-        let mlsSamplingBypass = dict["mlsSamplingBypass"] as? Bool
+        // Config-sized numbers fit an f64's 53-bit mantissa comfortably.
+        // Don't reuse these casts for counter fields that can exceed 2^53.
+        let osMajor = UInt16(clamping: Int(UIDevice.current.systemVersion.split(separator: ".").first ?? "0") ?? 0)
         return TelemetryConfig(
-            scrubIds: scrubIds,
+            apiKey: dict["apiKey"] as? String ?? "",
+            appId: dict["appId"] as? String ?? "",
+            os: .ios,
+            osMajor: osMajor,
+            appVersion: dict["appVersion"] as? String,
+            debug: dict["debug"] as? Bool,
+            flushIntervalMs: (dict["flushIntervalMs"] as? NSNumber)?.uint64Value,
+            maxBatchBytes: (dict["maxBatchBytes"] as? NSNumber)?.uint64Value,
+            maxBufferedRecords: (dict["maxBufferedRecords"] as? NSNumber)?.uint32Value,
+            includeDeviceId: dict["includeDeviceId"] as? Bool,
+            scrubIds: dict["scrubIds"] as? Bool,
             mlsVerbosity: verbosity,
-            metricsCadenceMs: cadence,
-            routingDiagnostic: routingDiag,
-            enablePollQueue: enablePollQueue,
-            mlsSamplingBypass: mlsSamplingBypass
+            metricsCadenceMs: (dict["metricsCadenceMs"] as? NSNumber)?.uint64Value,
+            routingDiagnostic: dict["routingDiagnostic"] as? Bool,
+            mlsSamplingBypass: dict["mlsSamplingBypass"] as? Bool
         )
     }
 }

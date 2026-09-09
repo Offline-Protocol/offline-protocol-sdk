@@ -11,21 +11,20 @@
 #![allow(unsafe_code)] // Required for UniFFI generated scaffolding
 #![allow(missing_docs)] // Types are documented in offline_protocol.udl
 
+mod host_log;
+
 use offline_protocol::{
-    DeduplicatorMode as CoreDeduplicatorMode, DeviceCapabilitySnapshot as CoreDeviceSnapshot,
-    EstablishmentState as CoreEstablishmentState, Event as CoreEvent, GatewayCarrier,
-    MediaSendOptions as CoreMediaSendOptions, MeshRelayConfig as CoreMeshRelayConfig,
-    MeshRelayStats as CoreMeshRelayStats, MetricsFrame as CoreMetricsFrame,
-    MlsVerbosity as CoreMlsVerbosity, NetworkVisualizer,
-    NoopTelemetrySink as CoreNoopTelemetrySink, OfflineProtocol as CoreProtocol,
+    AppState as CoreAppState, EstablishmentState as CoreEstablishmentState, Event as CoreEvent,
+    GatewayCarrier, MediaSendOptions as CoreMediaSendOptions,
+    MeshRelayConfig as CoreMeshRelayConfig, MeshRelayStats as CoreMeshRelayStats,
+    MlsVerbosity as CoreMlsVerbosity, NetworkVisualizer, OfflineProtocol as CoreProtocol,
     OverflowPolicy as CoreOverflowPolicy, PendingQueueConfig as CorePendingQueueConfig,
     PresenceStatus as CorePresenceStatus, ProtocolConfig as CoreConfig,
     ProtocolStateError as CoreProtocolStateError, ProtocolStateResult as CoreProtocolStateResult,
-    ProtocolStateStorage as CoreProtocolStateStorage, RoutingDecision as CoreRoutingDecision,
-    RoutingPhase as CoreRoutingPhase, RoutingReasonCode as CoreRoutingReasonCode,
-    SendMessageOptions as CoreSendMessageOptions, TelemetryConfig as CoreTelemetryConfig,
-    TelemetryRecord as CoreTelemetryRecord, TelemetrySink as CoreTelemetrySink,
-    TransportStateEvent as CoreTransportStateEvent, DEFAULT_PENDING_TTL_MS,
+    ProtocolStateStorage as CoreProtocolStateStorage, SendMessageOptions as CoreSendMessageOptions,
+    TelemetryConfig as CoreTelemetryConfig, TelemetryHost as CoreTelemetryHost,
+    TelemetryOs as CoreTelemetryOs, TelemetryPipe as CoreTelemetryPipe,
+    TelemetryStats as CoreTelemetryStats, DEFAULT_PENDING_TTL_MS,
 };
 use offline_protocol_core::{
     ContentType as CoreContentType, ForwardInfo as CoreForwardInfo,
@@ -39,7 +38,6 @@ use offline_protocol_mls::{
     MlsStorage as CoreMlsStorage, StorageError as CoreStorageError,
     WelcomeMessage as CoreWelcomeMessage,
 };
-use offline_protocol_router::RelayRole as CoreRelayRole;
 use offline_protocol_router::{
     DorsConfig as CoreDorsConfig, RelayConfig as CoreRelayConfig,
     RelayPriority as CoreRelayPriority,
@@ -47,7 +45,7 @@ use offline_protocol_router::{
 use offline_protocol_transport::{
     ble::BleTransport, internet::InternetTransport, nostr::NostrTransport, nostr::ResolvedRecord,
     reticulum::ReticulumTransport, Transport, TransportMetrics as CoreTransportMetrics,
-    TransportStatus as CoreTransportStatus, TransportType as CoreTransportType,
+    TransportType as CoreTransportType,
 };
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -406,6 +404,11 @@ pub enum ProtocolError {
     /// Document data could not be decoded. Permanent, not worth retrying.
     #[error("Document data is corrupt: {0}")]
     DataCorrupted(String),
+
+    /// A `TelemetryConfig` field was refused by `enable_telemetry`; the
+    /// message names it. Appended for the telemetry pipe.
+    #[error("telemetry config invalid: {0}")]
+    TelemetryConfigInvalid(String),
 }
 
 /// Error types for MLS storage operations
@@ -687,6 +690,7 @@ impl From<offline_protocol::Error> for ProtocolError {
                 "document is {actual} bytes compacted, over the {limit} byte cap"
             )),
             E::DataCorrupted(detail) => ProtocolError::DataCorrupted(detail),
+            E::TelemetryConfigInvalid(field) => ProtocolError::TelemetryConfigInvalid(field),
             E::Core(err) => match err {
                 CoreErr::SerializationError(msg) | CoreErr::DeserializationError(msg) => {
                     ProtocolError::SerializationError(msg)
@@ -969,187 +973,82 @@ pub enum MlsVerbosity {
     Diagnostic,
 }
 
-/// Underlying connection status of a single transport.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum TransportStatus {
-    Available,
-    Unavailable,
-    Connecting,
-    Disconnected,
-    Error,
+/// The host operating system, as the telemetry ingest names it. Filled in
+/// by the binding, never by the application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetryOs {
+    Ios,
+    Android,
+    Linux,
+    Macos,
+    Windows,
+    Other,
 }
 
-/// Local relay role reported by `DeviceCapabilitySnapshot`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum RelayRole {
-    Regular,
-    Relay,
+/// Application lifecycle states the telemetry pipe draws session
+/// boundaries from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppState {
+    Active,
+    Background,
+    Inactive,
 }
 
-/// Which kind of routing decision a `RoutingDecision` record describes.
-///
-/// `Unknown` is emitted when the core crate reports a variant this FFI build
-/// does not recognise (new-core / old-FFI skew). Consumers should surface it
-/// as "unrecognised decision" rather than folding it into an existing phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum RoutingPhase {
-    ScoreUpdated,
-    Selected,
-    Switched,
-    Escalated,
-    Unknown,
-}
-
-/// Flat reason space for routing decisions (unifies the legacy
-/// `DorsReasonCode` / `DorsEscalationReasonCode` enums).
-///
-/// `Unknown` is emitted when the core crate reports a variant this FFI build
-/// does not recognise — see [`RoutingPhase::Unknown`] for rationale.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum RoutingReasonCode {
-    InitialSelection,
-    PrimarySelected,
-    PrimarySuccess,
-    FallbackSuccess,
-    EscalationApplied,
-    CurrentUnavailable,
-    RetryThreshold,
-    PoorSignal,
-    Congestion,
-    LowTtl,
-    LowSuccessRate,
-    Unknown,
-}
-
-/// Per-transport entry inside a `MetricsFrame`.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TransportMetricsEntry {
-    pub transport: TransportType,
-    pub metrics: TransportMetrics,
-}
-
-/// Retry-queue statistics, mirror of `offline_protocol_reliability::RetryQueueStats`.
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RetryQueueStats {
-    pub total_count: u64,
-    pub ready_count: u64,
-    pub critical_priority_count: u64,
-    pub high_priority_count: u64,
-    pub medium_priority_count: u64,
-    pub low_priority_count: u64,
-}
-
-/// Deduplicator statistics, mirror of `offline_protocol_reliability::DeduplicatorStats`.
-///
-/// UDL-level name is `DeduplicatorStatsFrame` to avoid colliding with the
-/// `DedupStats` dict already exposed by the legacy `get_dedup_stats` pull
-/// API (which has a different field shape).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeduplicatorStatsFrame {
-    pub total_tracked: u64,
-    pub recent_tracked: u64,
-    pub capacity_used_percent: u8,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub false_positive_rate: Option<f64>,
-    pub mode: String,
-}
-
-/// Periodic snapshot of protocol-wide counters and per-transport metrics.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MetricsFrame {
-    pub timestamp_ms: i64,
-    pub transports: Vec<TransportMetricsEntry>,
-    pub retry_queue: RetryQueueStats,
-    pub dedup: DeduplicatorStatsFrame,
-    pub ack_pending: u64,
-    pub neighbor_count: u64,
-    pub is_local_relay: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub current_transport: Option<TransportType>,
-}
-
-/// A single `TransportStatus` transition observed by the protocol engine.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TransportStateEvent {
-    pub timestamp_ms: i64,
-    pub transport: TransportType,
-    pub previous: TransportStatus,
-    pub current: TransportStatus,
-}
-
-/// Per-transport score breakdown carried by `RoutingDecision` at the
-/// diagnostic verbosity tier.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RoutingScoreEntry {
-    pub transport: TransportType,
-    pub signal: f32,
-    pub proximity: f32,
-    pub bandwidth: f32,
-    pub congestion: f32,
-    pub energy: f32,
-    pub reliability: f32,
-    pub load: f32,
-    pub total: f32,
-}
-
-/// A structured routing decision (superset of legacy `Event::Dors*` events).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RoutingDecision {
-    pub timestamp_ms: i64,
-    pub phase: RoutingPhase,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub from: Option<TransportType>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub to: Option<TransportType>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub winning_score: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason_code: Option<RoutingReasonCode>,
-    pub scores: Vec<RoutingScoreEntry>,
-}
-
-/// Snapshot of local device capability at the moment of emission.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeviceCapabilitySnapshot {
-    pub timestamp_ms: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub battery_level: Option<u8>,
-    pub is_charging: bool,
-    pub relay_role: RelayRole,
-    pub changed_fields: u8,
-}
-
-/// Runtime configuration for the telemetry subsystem. All fields are
-/// optional on the foreign side; the Rust adapter fills in the
-/// privacy-preserving defaults from `TelemetryConfig::default()` when a
-/// field is `None`.
-///
-/// `enable_poll_queue` is FFI-local (not forwarded to `CoreTelemetryConfig`)
-/// and controls whether the adapter builds the pull-channel JSON envelope on
-/// every emit. Push-only consumers should pass `Some(false)` to skip the
-/// per-emit `serde_json` serialization; default (`None` → `true`) preserves
-/// the original behaviour so `poll_telemetry_frame` keeps working without
-/// the caller opting in.
-#[derive(Debug, Clone, Default)]
+/// Configuration for `enable_telemetry`, mirror of the UDL dictionary.
+/// `api_key` and `app_id` are required and `os`/`os_major` are filled by
+/// the binding; every optional field falls back to the core default.
+#[derive(Clone)]
 pub struct TelemetryConfig {
+    pub api_key: String,
+    pub app_id: String,
+    pub os: TelemetryOs,
+    pub os_major: u16,
+    pub app_version: Option<String>,
+    pub debug: Option<bool>,
+    pub flush_interval_ms: Option<u64>,
+    pub max_batch_bytes: Option<u64>,
+    pub max_buffered_records: Option<u32>,
+    pub include_device_id: Option<bool>,
     pub scrub_ids: Option<bool>,
     pub mls_verbosity: Option<MlsVerbosity>,
     pub metrics_cadence_ms: Option<u64>,
     pub routing_diagnostic: Option<bool>,
-    pub enable_poll_queue: Option<bool>,
     pub mls_sampling_bypass: Option<bool>,
+}
+
+impl std::fmt::Debug for TelemetryConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelemetryConfig")
+            .field("api_key", &"<redacted>")
+            .field("app_id", &self.app_id)
+            .field("os", &self.os)
+            .field("os_major", &self.os_major)
+            .field("app_version", &self.app_version)
+            .field("debug", &self.debug)
+            .field("flush_interval_ms", &self.flush_interval_ms)
+            .field("max_batch_bytes", &self.max_batch_bytes)
+            .field("max_buffered_records", &self.max_buffered_records)
+            .field("include_device_id", &self.include_device_id)
+            .field("scrub_ids", &self.scrub_ids)
+            .field("mls_verbosity", &self.mls_verbosity)
+            .field("metrics_cadence_ms", &self.metrics_cadence_ms)
+            .field("routing_diagnostic", &self.routing_diagnostic)
+            .field("mls_sampling_bypass", &self.mls_sampling_bypass)
+            .finish()
+    }
+}
+
+/// A snapshot of the telemetry pipe's counters, mirror of the UDL
+/// dictionary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelemetryStats {
+    pub buffered: u64,
+    pub sent_events: u64,
+    pub accepted_events: u64,
+    pub dropped: u64,
+    pub session_id: String,
+    pub last_error: Option<String>,
+    pub last_flush_at_ms: Option<i64>,
 }
 
 // ---- Conversions: core telemetry types → FFI dicts ----
@@ -1188,84 +1087,88 @@ impl From<TransportType> for CoreTransportType {
     }
 }
 
-impl From<CoreTransportStatus> for TransportStatus {
-    fn from(s: CoreTransportStatus) -> Self {
-        match s {
-            CoreTransportStatus::Available => TransportStatus::Available,
-            CoreTransportStatus::Unavailable => TransportStatus::Unavailable,
-            CoreTransportStatus::Connecting => TransportStatus::Connecting,
-            CoreTransportStatus::Disconnected => TransportStatus::Disconnected,
-            CoreTransportStatus::Error => TransportStatus::Error,
+impl From<TelemetryOs> for CoreTelemetryOs {
+    fn from(os: TelemetryOs) -> Self {
+        match os {
+            TelemetryOs::Ios => CoreTelemetryOs::Ios,
+            TelemetryOs::Android => CoreTelemetryOs::Android,
+            TelemetryOs::Linux => CoreTelemetryOs::Linux,
+            TelemetryOs::Macos => CoreTelemetryOs::Macos,
+            TelemetryOs::Windows => CoreTelemetryOs::Windows,
+            TelemetryOs::Other => CoreTelemetryOs::Other,
         }
     }
 }
 
-impl From<CoreRelayRole> for RelayRole {
-    fn from(r: CoreRelayRole) -> Self {
-        match r {
-            CoreRelayRole::Regular => RelayRole::Regular,
-            CoreRelayRole::Relay => RelayRole::Relay,
+impl From<AppState> for CoreAppState {
+    fn from(state: AppState) -> Self {
+        match state {
+            AppState::Active => CoreAppState::Active,
+            AppState::Background => CoreAppState::Background,
+            AppState::Inactive => CoreAppState::Inactive,
         }
     }
 }
 
-impl From<CoreRoutingPhase> for RoutingPhase {
-    fn from(p: CoreRoutingPhase) -> Self {
-        match p {
-            CoreRoutingPhase::ScoreUpdated => RoutingPhase::ScoreUpdated,
-            CoreRoutingPhase::Selected => RoutingPhase::Selected,
-            CoreRoutingPhase::Switched => RoutingPhase::Switched,
-            CoreRoutingPhase::Escalated => RoutingPhase::Escalated,
-            // `RoutingPhase` is `#[non_exhaustive]` on the core side. Map
-            // unrecognised variants to a dedicated `Unknown` so consumers
-            // see the drift instead of a plausible-looking existing phase.
-            // Warn once per process so operators notice a new-core /
-            // old-FFI skew without spamming logs if the unknown variant
-            // sits on a hot path (routing decisions fire on every send).
-            other => {
-                static WARN_ONCE: std::sync::Once = std::sync::Once::new();
-                WARN_ONCE.call_once(|| {
-                    tracing::warn!(
-                        variant = ?other,
-                        "telemetry: unknown CoreRoutingPhase variant; mapping to Unknown — FFI crate likely out of date (further occurrences suppressed)",
-                    );
-                });
-                RoutingPhase::Unknown
-            }
+impl From<CoreTelemetryStats> for TelemetryStats {
+    fn from(stats: CoreTelemetryStats) -> Self {
+        TelemetryStats {
+            buffered: stats.buffered,
+            sent_events: stats.sent_events,
+            accepted_events: stats.accepted_events,
+            dropped: stats.dropped,
+            session_id: stats.session_id,
+            last_error: stats.last_error,
+            last_flush_at_ms: stats.last_flush_at_ms,
         }
     }
 }
 
-impl From<CoreRoutingReasonCode> for RoutingReasonCode {
-    fn from(r: CoreRoutingReasonCode) -> Self {
-        match r {
-            CoreRoutingReasonCode::InitialSelection => RoutingReasonCode::InitialSelection,
-            CoreRoutingReasonCode::PrimarySelected => RoutingReasonCode::PrimarySelected,
-            CoreRoutingReasonCode::PrimarySuccess => RoutingReasonCode::PrimarySuccess,
-            CoreRoutingReasonCode::FallbackSuccess => RoutingReasonCode::FallbackSuccess,
-            CoreRoutingReasonCode::EscalationApplied => RoutingReasonCode::EscalationApplied,
-            CoreRoutingReasonCode::CurrentUnavailable => RoutingReasonCode::CurrentUnavailable,
-            CoreRoutingReasonCode::RetryThreshold => RoutingReasonCode::RetryThreshold,
-            CoreRoutingReasonCode::PoorSignal => RoutingReasonCode::PoorSignal,
-            CoreRoutingReasonCode::Congestion => RoutingReasonCode::Congestion,
-            CoreRoutingReasonCode::LowTtl => RoutingReasonCode::LowTtl,
-            CoreRoutingReasonCode::LowSuccessRate => RoutingReasonCode::LowSuccessRate,
-            // Warn once per process — same rationale as `RoutingPhase`
-            // above: reason codes ride along with every routing decision,
-            // so a hot-path variant added to the core would otherwise
-            // drown the tracing layer.
-            other => {
-                static WARN_ONCE: std::sync::Once = std::sync::Once::new();
-                WARN_ONCE.call_once(|| {
-                    tracing::warn!(
-                        variant = ?other,
-                        "telemetry: unknown CoreRoutingReasonCode variant; mapping to Unknown — FFI crate likely out of date (further occurrences suppressed)",
-                    );
-                });
-                RoutingReasonCode::Unknown
-            }
-        }
+/// Maps the FFI dictionary onto the core builder. Absent optionals leave
+/// the core default in place; the core validates the result, so an
+/// out-of-range value comes back as `TelemetryConfigInvalid` rather than
+/// being clamped here.
+fn telemetry_config_into_core(cfg: &TelemetryConfig) -> CoreTelemetryConfig {
+    let mut core = CoreTelemetryConfig::default()
+        .with_api_key(cfg.api_key.clone())
+        .with_app_id(cfg.app_id.clone());
+    if let Some(v) = &cfg.app_version {
+        core = core.with_app_version(v.clone());
     }
+    if let Some(v) = cfg.debug {
+        core = core.with_debug(v);
+    }
+    if let Some(ms) = cfg.flush_interval_ms {
+        core = core.with_flush_interval(Duration::from_millis(ms));
+    }
+    if let Some(v) = cfg.max_batch_bytes {
+        core = core.with_max_batch_bytes(usize::try_from(v).unwrap_or(usize::MAX));
+    }
+    if let Some(v) = cfg.max_buffered_records {
+        core = core.with_max_buffered_records(v as usize);
+    }
+    if let Some(v) = cfg.include_device_id {
+        core = core.with_include_device_id(v);
+    }
+    if let Some(v) = cfg.scrub_ids {
+        core = core.with_scrub_ids(v);
+    }
+    if let Some(v) = cfg.mls_verbosity {
+        core = core.with_mls_verbosity(v.into());
+    }
+    // The foreign side passes `metrics_cadence_ms = None` to mean "accept
+    // the default". Disabling periodic emission is a distinct wire value we
+    // cannot currently express through the single `Option<u64>` field.
+    if let Some(ms) = cfg.metrics_cadence_ms {
+        core = core.with_metrics_cadence(Some(Duration::from_millis(ms)));
+    }
+    if let Some(v) = cfg.routing_diagnostic {
+        core = core.with_routing_diagnostic(v);
+    }
+    if let Some(v) = cfg.mls_sampling_bypass {
+        core = core.with_mls_sampling_bypass(v);
+    }
+    core
 }
 
 impl From<&CoreTransportMetrics> for TransportMetrics {
@@ -1300,383 +1203,6 @@ impl From<&CoreTransportMetrics> for TransportMetrics {
             drop_rate: m.drop_rate,
             average_hop_count: m.average_hop_count,
             energy_cost: m.energy_cost,
-        }
-    }
-}
-
-impl From<&CoreMetricsFrame> for MetricsFrame {
-    fn from(f: &CoreMetricsFrame) -> Self {
-        let transports = f
-            .transports
-            .iter()
-            .map(|(t, m)| TransportMetricsEntry {
-                transport: (*t).into(),
-                metrics: TransportMetrics::from(m),
-            })
-            .collect();
-        MetricsFrame {
-            timestamp_ms: f.timestamp_ms,
-            transports,
-            retry_queue: RetryQueueStats {
-                total_count: f.retry_queue.total_count as u64,
-                ready_count: f.retry_queue.ready_count as u64,
-                critical_priority_count: f.retry_queue.critical_priority_count as u64,
-                high_priority_count: f.retry_queue.high_priority_count as u64,
-                medium_priority_count: f.retry_queue.medium_priority_count as u64,
-                low_priority_count: f.retry_queue.low_priority_count as u64,
-            },
-            dedup: DeduplicatorStatsFrame {
-                total_tracked: f.dedup.total_tracked as u64,
-                recent_tracked: f.dedup.recent_tracked as u64,
-                capacity_used_percent: f.dedup.capacity_used_percent,
-                false_positive_rate: f.dedup.false_positive_rate,
-                // Explicit stable-string mapping. Do NOT switch to
-                // `format!("{:?}", ...)` — that would tie the public FFI
-                // wire format to the Rust `Debug` impl of
-                // `DeduplicatorMode`, which is not a stability guarantee.
-                mode: match f.dedup.mode {
-                    CoreDeduplicatorMode::HashMap => "hashMap".to_string(),
-                    CoreDeduplicatorMode::BloomFilter => "bloomFilter".to_string(),
-                },
-            },
-            ack_pending: f.ack_pending as u64,
-            neighbor_count: f.neighbor_count as u64,
-            is_local_relay: f.is_local_relay,
-            current_transport: f.current_transport.map(Into::into),
-        }
-    }
-}
-
-impl From<&CoreTransportStateEvent> for TransportStateEvent {
-    fn from(e: &CoreTransportStateEvent) -> Self {
-        TransportStateEvent {
-            timestamp_ms: e.timestamp_ms,
-            transport: e.transport.into(),
-            previous: e.previous.into(),
-            current: e.current.into(),
-        }
-    }
-}
-
-impl From<&CoreRoutingDecision> for RoutingDecision {
-    fn from(d: &CoreRoutingDecision) -> Self {
-        let scores = d
-            .scores
-            .iter()
-            .map(|(t, s)| RoutingScoreEntry {
-                transport: (*t).into(),
-                signal: s.signal,
-                proximity: s.proximity,
-                bandwidth: s.bandwidth,
-                congestion: s.congestion,
-                energy: s.energy,
-                reliability: s.reliability,
-                load: s.load,
-                total: s.total,
-            })
-            .collect();
-        RoutingDecision {
-            timestamp_ms: d.timestamp_ms,
-            phase: d.phase.into(),
-            from: d.from.map(Into::into),
-            to: d.to.map(Into::into),
-            winning_score: d.winning_score,
-            reason_code: d.reason_code.map(Into::into),
-            scores,
-        }
-    }
-}
-
-impl From<&CoreDeviceSnapshot> for DeviceCapabilitySnapshot {
-    fn from(s: &CoreDeviceSnapshot) -> Self {
-        DeviceCapabilitySnapshot {
-            timestamp_ms: s.timestamp_ms,
-            battery_level: s.battery_level,
-            is_charging: s.is_charging,
-            relay_role: s.relay_role.into(),
-            changed_fields: s.changed_fields,
-        }
-    }
-}
-
-fn telemetry_config_into_core(cfg: TelemetryConfig) -> CoreTelemetryConfig {
-    let mut core = CoreTelemetryConfig::default();
-    if let Some(v) = cfg.scrub_ids {
-        core = core.with_scrub_ids(v);
-    }
-    if let Some(v) = cfg.mls_verbosity {
-        core = core.with_mls_verbosity(v.into());
-    }
-    // The foreign side passes `metrics_cadence_ms = None` to mean "accept
-    // the default". Disabling periodic emission is a distinct wire value we
-    // cannot currently express through the single `Option<u64>` field — if
-    // that becomes needed, extend the UDL dict with a dedicated flag. For
-    // now, any explicit value overrides the default; absence leaves it.
-    if let Some(ms) = cfg.metrics_cadence_ms {
-        core = core.with_metrics_cadence(Some(Duration::from_millis(ms)));
-    }
-    if let Some(v) = cfg.routing_diagnostic {
-        core = core.with_routing_diagnostic(v);
-    }
-    if let Some(v) = cfg.mls_sampling_bypass {
-        core = core.with_mls_sampling_bypass(v);
-    }
-    core
-}
-
-/// Bounded capacity for the telemetry poll queue. Sized for bursty emission
-/// (per-send routing decisions + 5 s metrics snapshots + event stream);
-/// overflow drops oldest.
-const TELEMETRY_POLL_QUEUE_CAP: usize = 1024;
-
-/// Adapts the foreign `TelemetrySink` trait to the core `TelemetrySink`
-/// trait, and incidentally populates a bounded poll queue so apps that
-/// prefer polling can pull records too.
-///
-/// Pull envelopes are the `TelemetryRecord` discriminated-union shape the
-/// TypeScript layer expects: exactly one typed payload field next to
-/// `category`. Each `push_*` helper builds the matching envelope, enqueues
-/// it, and fires the typed foreign callback in one place so the two
-/// channels cannot drift.
-///
-/// `poll_queue_enabled` is set from `TelemetryConfig::enable_poll_queue` at
-/// install time. When `false`, the adapter short-circuits every pull-queue
-/// code path *before* the `serde_json` serialization so push-only consumers
-/// pay only the typed-callback cost.
-struct TelemetrySinkAdapter {
-    callback: Arc<dyn TelemetrySink>,
-    queue: Arc<Mutex<VecDeque<String>>>,
-    poll_queue_enabled: bool,
-}
-
-impl TelemetrySinkAdapter {
-    fn enqueue(&self, envelope: String) {
-        if !self.poll_queue_enabled {
-            return;
-        }
-        let mut q = recover_mutex(&self.queue, "telemetry_queue");
-        if q.len() >= TELEMETRY_POLL_QUEUE_CAP {
-            q.pop_front();
-        }
-        q.push_back(envelope);
-    }
-
-    /// Serializes an envelope built from `(category, payload_key, payload)`
-    /// pairs. Uses a `BTreeMap<&'static str, serde_json::Value>` so the
-    /// caller picks the payload field name (`frame`, `event`, `decision`,
-    /// etc.) that matches the TS `TelemetryRecord` union.
-    fn envelope(category: &str, fields: &[(&str, serde_json::Value)]) -> String {
-        let mut obj = serde_json::Map::with_capacity(fields.len() + 1);
-        obj.insert(
-            "category".to_string(),
-            serde_json::Value::String(category.to_string()),
-        );
-        for (k, v) in fields {
-            obj.insert((*k).to_string(), v.clone());
-        }
-        // `serde_json::to_string` on a `Value::Object` cannot fail for owned,
-        // finite values — an `.expect` here would only fire on OOM, which we
-        // cannot meaningfully recover from inside the telemetry path.
-        serde_json::to_string(&serde_json::Value::Object(obj))
-            .unwrap_or_else(|_| format!(r#"{{"category":"{}"}}"#, category))
-    }
-
-    /// Builds the extension-error envelope + the `payloadJson` string that
-    /// the two failure helpers below share. Kept separate so the pull-queue
-    /// envelope and the push-callback payload stay bit-identical.
-    fn serialization_failure_parts(name: &str, err: &dyn std::fmt::Display) -> (String, String) {
-        let payload_json = serde_json::json!({
-            "telemetry_error": "serialization_failed",
-            "record": name,
-            "message": format!("{}", err),
-        })
-        .to_string();
-        let envelope = Self::envelope(
-            "extension",
-            &[
-                (
-                    "name",
-                    serde_json::Value::String(format!("telemetry.error.{name}")),
-                ),
-                (
-                    "payloadJson",
-                    serde_json::Value::String(payload_json.clone()),
-                ),
-            ],
-        );
-        (envelope, payload_json)
-    }
-
-    /// Pull-channel-only failure path. Used for the four typed-DTO
-    /// variants (metrics frame, transport state, routing decision, device
-    /// capability) where the push callback still fires with the owned
-    /// DTO — we must not re-dispatch through `on_extension` or the
-    /// consumer sees two records for one emit.
-    fn enqueue_serialization_failure(&self, name: &str, err: &dyn std::fmt::Display) {
-        tracing::warn!(
-            record = name,
-            error = %err,
-            "telemetry: pull-queue serialization failed; enqueueing extension-error envelope (typed push already fired)",
-        );
-        // Callers already bail out of this helper when the pull queue is
-        // disabled, so no flag check here. Keep that invariant — a future
-        // caller that drops the guard would silently allocate.
-        let (envelope, _payload_json) = Self::serialization_failure_parts(name, err);
-        self.enqueue(envelope);
-    }
-
-    /// Last-resort path for the two JSON-string variants (`Protocol`,
-    /// `Mls`) whose typed callback takes a pre-serialized string — if
-    /// serialization fails there is no DTO to hand the typed callback.
-    /// Enqueue the extension-error envelope AND fire `on_extension` so
-    /// downstream observers still see exactly one record. When the pull
-    /// queue is disabled, only the `on_extension` callback fires.
-    fn emit_serialization_failure(&self, name: &str, err: &dyn std::fmt::Display) {
-        tracing::warn!(
-            record = name,
-            error = %err,
-            "telemetry: record serialization failed; dispatching via on_extension",
-        );
-        let payload_json = Self::serialization_failure_payload_json(name, err);
-        if self.poll_queue_enabled {
-            let envelope = Self::envelope(
-                "extension",
-                &[
-                    (
-                        "name",
-                        serde_json::Value::String(format!("telemetry.error.{name}")),
-                    ),
-                    (
-                        "payloadJson",
-                        serde_json::Value::String(payload_json.clone()),
-                    ),
-                ],
-            );
-            self.enqueue(envelope);
-        }
-        self.callback
-            .on_extension(format!("telemetry.error.{name}"), payload_json);
-    }
-
-    /// Just the `payloadJson` string for a serialization failure, split out
-    /// from `serialization_failure_parts` so the push-only path can avoid
-    /// building the full envelope when the pull queue is off.
-    fn serialization_failure_payload_json(name: &str, err: &dyn std::fmt::Display) -> String {
-        serde_json::json!({
-            "telemetry_error": "serialization_failed",
-            "record": name,
-            "message": format!("{}", err),
-        })
-        .to_string()
-    }
-
-    /// Build-and-enqueue a rich-DTO envelope. No-op when the pull queue is
-    /// disabled — avoids the `serde_json::to_value` + envelope allocation
-    /// for push-only consumers. On serialization failure falls through to
-    /// `enqueue_serialization_failure`, which is the pull-channel-only
-    /// failure path (the typed push callback still fires in the caller).
-    fn maybe_enqueue_rich<T: Serialize>(&self, category: &'static str, key: &'static str, dto: &T) {
-        if !self.poll_queue_enabled {
-            return;
-        }
-        match serde_json::to_value(dto) {
-            Ok(value) => self.enqueue(Self::envelope(category, &[(key, value)])),
-            Err(err) => self.enqueue_serialization_failure(category, &err),
-        }
-    }
-
-    /// Build-and-enqueue a string-payload envelope (Protocol / Mls variants).
-    /// No-op when the pull queue is disabled.
-    fn maybe_enqueue_string_payload(&self, category: &'static str, key: &'static str, value: &str) {
-        if !self.poll_queue_enabled {
-            return;
-        }
-        self.enqueue(Self::envelope(
-            category,
-            &[(key, serde_json::Value::String(value.to_string()))],
-        ));
-    }
-
-    /// Build-and-enqueue the forward-compat `extension` envelope.
-    /// No-op when the pull queue is disabled.
-    fn maybe_enqueue_extension(&self, name: &str, payload_json: &str) {
-        if !self.poll_queue_enabled {
-            return;
-        }
-        self.enqueue(Self::envelope(
-            "extension",
-            &[
-                ("name", serde_json::Value::String(name.to_string())),
-                (
-                    "payloadJson",
-                    serde_json::Value::String(payload_json.to_string()),
-                ),
-            ],
-        ));
-    }
-}
-
-impl CoreTelemetrySink for TelemetrySinkAdapter {
-    fn emit(&self, record: &CoreTelemetryRecord) {
-        match record {
-            CoreTelemetryRecord::Protocol(ev) => match ev.to_json() {
-                Ok(json) => {
-                    self.maybe_enqueue_string_payload("protocol", "eventJson", &json);
-                    self.callback.on_protocol_event(json);
-                }
-                Err(err) => self.emit_serialization_failure("protocol", &err),
-            },
-            CoreTelemetryRecord::Mls(ev) => match serde_json::to_string(ev) {
-                Ok(json) => {
-                    self.maybe_enqueue_string_payload("mls", "eventJson", &json);
-                    self.callback.on_mls_event(json);
-                }
-                Err(err) => self.emit_serialization_failure("mls", &err),
-            },
-            // Rich-variant arms: the typed push callback takes an owned
-            // Rust DTO that cannot fail to cross the FFI boundary, so it
-            // fires unconditionally. Pull-queue JSON serialization is the
-            // only thing that can fail (e.g. NaN floats); on failure the
-            // queue gets an extension-error envelope under the variant's
-            // `telemetry.error.<name>` key and the push callback is NOT
-            // re-fired through `on_extension`. When the pull queue is
-            // disabled (opt-in via `enable_poll_queue=false`), the
-            // `maybe_enqueue_rich` helper short-circuits *before* the
-            // `serde_json::to_value` call, so push-only consumers pay no
-            // serialization cost.
-            CoreTelemetryRecord::MetricsSnapshot(frame) => {
-                let dto = MetricsFrame::from(frame.as_ref());
-                self.maybe_enqueue_rich("metricsFrame", "frame", &dto);
-                self.callback.on_metrics_frame(dto);
-            }
-            CoreTelemetryRecord::TransportState(event) => {
-                let dto = TransportStateEvent::from(event);
-                self.maybe_enqueue_rich("transportState", "event", &dto);
-                self.callback.on_transport_state(dto);
-            }
-            CoreTelemetryRecord::Routing(decision) => {
-                let dto = RoutingDecision::from(decision.as_ref());
-                self.maybe_enqueue_rich("routingDecision", "decision", &dto);
-                self.callback.on_routing_decision(dto);
-            }
-            CoreTelemetryRecord::Device(snapshot) => {
-                let dto = DeviceCapabilitySnapshot::from(snapshot);
-                self.maybe_enqueue_rich("deviceCapability", "snapshot", &dto);
-                self.callback.on_device_capability(dto);
-            }
-            // Forward-compat: any variant added to CoreTelemetryRecord after
-            // this code was written lands here with its stable name. The
-            // inner payload is not `Serialize` (`TelemetryRecord` docstring),
-            // so today we emit `{}`. New variants should be given their own
-            // arm in a follow-up before they ship to avoid losing data here;
-            // the `forward_compat_extension_coverage` test pins the set of
-            // known variants so drift fails fast.
-            other => {
-                let name = other.name().to_string();
-                let payload_json = "{}".to_string();
-                self.maybe_enqueue_extension(&name, &payload_json);
-                self.callback.on_extension(name, payload_json);
-            }
         }
     }
 }
@@ -2664,37 +2190,6 @@ pub trait EventCallback: Send + Sync {
     fn on_event(&self, event_json: String);
 }
 
-/// Unified telemetry sink — foreign counterpart of
-/// `offline_protocol::TelemetrySink`. Dispatches are synchronous; see the
-/// UDL-level comment on `callback interface TelemetrySink` for the thread
-/// and locking contract.
-///
-/// # Failure semantics
-///
-/// The four typed-DTO variants (`on_metrics_frame`, `on_transport_state`,
-/// `on_routing_decision`, `on_device_capability`) always fire — the DTOs
-/// are plain Rust structs crossing the FFI boundary and nothing between
-/// `emit` and the foreign call site can fail. If the pull-queue JSON
-/// envelope fails to serialize (e.g. a NaN float slipped through), the
-/// queue receives an `extension` envelope named
-/// `telemetry.error.<variant>`; the typed push callback is NOT re-fired
-/// through `on_extension`.
-///
-/// The two JSON-string variants (`on_protocol_event`, `on_mls_event`) can
-/// only fire when the inner event serializes. On serialization failure
-/// the typed callback is skipped *and* `on_extension` fires with
-/// `telemetry.error.<variant>` so consumers see exactly one record per
-/// emit regardless of outcome.
-pub trait TelemetrySink: Send + Sync {
-    fn on_protocol_event(&self, event_json: String);
-    fn on_mls_event(&self, event_json: String);
-    fn on_metrics_frame(&self, frame: MetricsFrame);
-    fn on_transport_state(&self, event: TransportStateEvent);
-    fn on_routing_decision(&self, decision: RoutingDecision);
-    fn on_device_capability(&self, snapshot: DeviceCapabilitySnapshot);
-    fn on_extension(&self, name: String, payload_json: String);
-}
-
 /// BLE transport callback trait — notifies platform when outgoing fragments are available.
 /// Replaces timer-based polling with event-driven sending.
 pub trait BleTransportCallback: Send + Sync {
@@ -2880,7 +2375,9 @@ pub struct OfflineProtocol {
     state: RwLock<ProtocolState>,
     event_callback: Arc<RwLock<Option<Arc<dyn EventCallback>>>>,
     event_queue: Arc<Mutex<VecDeque<String>>>,
-    telemetry_queue: Arc<Mutex<VecDeque<String>>>,
+    /// The running telemetry pipe, mirrored from the core so the flush,
+    /// stats and lifecycle calls never take the engine lock.
+    telemetry_pipe: RwLock<Option<Arc<CoreTelemetryPipe>>>,
     ble_state: Mutex<BleState>,
     internet_state: Mutex<InternetState>,
     wifi_direct_state: Mutex<WifiDirectState>,
@@ -3032,7 +2529,7 @@ impl OfflineProtocol {
             state: RwLock::new(ProtocolState::Stopped),
             event_callback,
             event_queue,
-            telemetry_queue: Arc::new(Mutex::new(VecDeque::new())),
+            telemetry_pipe: RwLock::new(None),
             ble_state: Mutex::new(BleState {
                 fragments: VecDeque::new(),
                 peer_count: 0,
@@ -3510,70 +3007,97 @@ impl OfflineProtocol {
         self.emit_event(event);
     }
 
-    /// Installs a unified telemetry sink. Replaces any previously installed
-    /// sink; a single adapter fans every `TelemetryRecord` out to the
-    /// foreign callback and, concurrently, into the bounded poll queue
-    /// backing `poll_telemetry_frame` (unless the caller disables it via
-    /// `TelemetryConfig::enable_poll_queue = false`).
-    pub fn install_telemetry_sink(
+    /// Enables telemetry: the SDK collects, batches and uploads accepted
+    /// events to the ingest itself. See `OfflineProtocol::enable_telemetry`
+    /// in the core for the contract; this wrapper adds the host logger the
+    /// debug tap writes to and keeps its own handle on the pipe so the
+    /// flush, stats and lifecycle calls below never take the engine lock.
+    pub fn enable_telemetry(
         &self,
-        sink: Box<dyn TelemetrySink>,
         config: TelemetryConfig,
+        app_state: AppState,
     ) -> Result<(), ProtocolError> {
-        // `None` defaults to enabled to preserve the shipped behaviour of
-        // `poll_telemetry_frame` returning queued records when the caller
-        // does not opt out. Push-only consumers pass `Some(false)` to skip
-        // the per-emit JSON envelope construction on the routing hot path.
-        let poll_queue_enabled = config.enable_poll_queue.unwrap_or(true);
-        let adapter = Arc::new(TelemetrySinkAdapter {
-            callback: Arc::from(sink),
-            queue: self.telemetry_queue.clone(),
-            poll_queue_enabled,
-        });
-        let core_cfg = telemetry_config_into_core(config);
-        let mut protocol = self.lock_inner()?;
-        protocol
-            .install_telemetry_sink(adapter as Arc<dyn CoreTelemetrySink>, core_cfg)
-            .map_err(ProtocolError::from)
-    }
-
-    /// Polls the next buffered telemetry record as a JSON envelope. Every
-    /// envelope carries a `category` discriminator plus variant-specific
-    /// fields:
-    ///
-    /// | category           | extra fields                     |
-    /// |--------------------|----------------------------------|
-    /// | `protocol`         | `eventJson: string`              |
-    /// | `mls`              | `eventJson: string`              |
-    /// | `metricsFrame`     | `frame: MetricsFrame`            |
-    /// | `transportState`   | `event: TransportStateEvent`     |
-    /// | `routingDecision`  | `decision: RoutingDecision`      |
-    /// | `deviceCapability` | `snapshot: DeviceCapabilitySnapshot` |
-    /// | `extension`        | `name: string, payloadJson: string` |
-    ///
-    /// Returns `None` when empty. The queue is bounded
-    /// (`TELEMETRY_POLL_QUEUE_CAP`, drop-oldest on overflow) and is only
-    /// populated while a sink is installed.
-    pub fn poll_telemetry_frame(&self) -> Option<String> {
-        recover_mutex(&self.telemetry_queue, "telemetry_queue").pop_front()
-    }
-
-    /// Detaches the installed telemetry sink. Subsequent emissions drop on
-    /// the core side (a `NoopTelemetrySink` replaces the current sink), and
-    /// any records still sitting in the pull queue are drained so a
-    /// subsequent `install_telemetry_sink` starts with a clean slate.
-    ///
-    /// Idempotent — calling this without a prior install still produces a
-    /// noop-sink install and drains the (empty) queue.
-    pub fn uninstall_telemetry_sink(&self) -> Result<(), ProtocolError> {
-        let noop: Arc<dyn CoreTelemetrySink> = Arc::new(CoreNoopTelemetrySink);
-        let mut protocol = self.lock_inner()?;
-        protocol
-            .install_telemetry_sink(noop, CoreTelemetryConfig::default())
-            .map_err(ProtocolError::from)?;
-        drop(protocol);
-        recover_mutex(&self.telemetry_queue, "telemetry_queue").clear();
+        host_log::install_host_logger();
+        let host = CoreTelemetryHost::new(config.os.into(), config.os_major)
+            .with_app_state(app_state.into());
+        let core_cfg = telemetry_config_into_core(&config);
+        // A replaced pipe is stopped outside the engine lock, like disable.
+        let previous = {
+            let mut protocol = self.lock_inner()?;
+            protocol.detach_telemetry_pipe()
+        };
+        if let Some(previous) = previous {
+            previous.stop(offline_protocol::telemetry::pipe::FINAL_FLUSH_BUDGET);
+        }
+        let pipe = {
+            let mut protocol = self.lock_inner()?;
+            protocol
+                .enable_telemetry(core_cfg, host)
+                .map_err(ProtocolError::from)?;
+            protocol.telemetry_pipe()
+        };
+        host_log::set_pipe_debug(config.debug.unwrap_or(false));
+        *recover_rwlock_write(&self.telemetry_pipe, "telemetry_pipe") = pipe;
         Ok(())
+    }
+
+    /// Disables telemetry after one final flush. The pipe is detached under
+    /// the engine lock and stopped outside it, because the final flush may
+    /// block for up to three seconds and the engine must not.
+    pub fn disable_telemetry(&self) -> Result<(), ProtocolError> {
+        let pipe = {
+            let mut protocol = self.lock_inner()?;
+            protocol.detach_telemetry_pipe()
+        };
+        *recover_rwlock_write(&self.telemetry_pipe, "telemetry_pipe") = None;
+        host_log::set_pipe_debug(false);
+        if let Some(pipe) = pipe {
+            pipe.stop(offline_protocol::telemetry::pipe::FINAL_FLUSH_BUDGET);
+        }
+        Ok(())
+    }
+
+    fn telemetry_pipe(&self) -> Option<Arc<CoreTelemetryPipe>> {
+        recover_rwlock_read(&self.telemetry_pipe, "telemetry_pipe").clone()
+    }
+
+    /// Asks the uploader to flush now. Returns immediately.
+    pub fn flush_telemetry(&self) {
+        if let Some(pipe) = self.telemetry_pipe() {
+            pipe.flush();
+        }
+    }
+
+    /// Flushes and waits up to `deadline_ms` for the uploader to finish.
+    pub fn flush_telemetry_blocking(&self, deadline_ms: u64) -> bool {
+        self.telemetry_pipe()
+            .is_some_and(|pipe| pipe.flush_blocking(Duration::from_millis(deadline_ms)))
+    }
+
+    /// The pipe's counters, or `None` while telemetry is not enabled.
+    pub fn telemetry_stats(&self) -> Option<TelemetryStats> {
+        self.telemetry_pipe().map(|pipe| pipe.stats().into())
+    }
+
+    /// Closes the current telemetry session: summary, blocking flush, new id.
+    pub fn end_telemetry_session(&self) {
+        if let Some(pipe) = self.telemetry_pipe() {
+            pipe.end_session();
+        }
+    }
+
+    /// Reports an application lifecycle transition to the pipe.
+    pub fn notify_app_state(&self, state: AppState) {
+        if let Some(pipe) = self.telemetry_pipe() {
+            pipe.notify_app_state(state.into());
+        }
+    }
+
+    /// Stops or resumes collection without tearing the pipe down.
+    pub fn set_telemetry_enabled(&self, enabled: bool) {
+        if let Some(pipe) = self.telemetry_pipe() {
+            pipe.set_enabled(enabled);
+        }
     }
 
     /// Stable, opaque per-install telemetry identifier (32 hex chars),
@@ -3582,8 +3106,8 @@ impl OfflineProtocol {
     ///
     /// Returns `None` until the persistent secret is available — i.e. before
     /// secure storage is wired via `initialize_mls`, or when persisting the
-    /// secret failed this session. Unaffected by installing a telemetry sink
-    /// or by an app-supplied scrub secret.
+    /// secret failed this session. Unaffected by enabling telemetry or by an
+    /// app-supplied scrub secret.
     pub fn telemetry_install_id(&self) -> Option<String> {
         self.lock_inner_recovering().telemetry_install_id()
     }
@@ -7705,7 +7229,7 @@ mod error_mapping_tests {
         // fails you either reordered/removed a variant (never do that) or
         // appended one — extend this list and regenerate every committed
         // binding.
-        const EXPECTED: [&str; 24] = [
+        const EXPECTED: [&str; 25] = [
             "NotStarted",
             "AlreadyStarted",
             "InvalidConfiguration",
@@ -7733,6 +7257,8 @@ mod error_mapping_tests {
             "DataStorageUnavailable",
             "DocTooLarge",
             "DataCorrupted",
+            // Appended for the telemetry pipe. Position 24.
+            "TelemetryConfigInvalid",
         ];
         let udl = include_str!("offline_protocol.udl");
         let enum_body = udl
@@ -9997,1091 +9523,349 @@ mod tests {
         );
     }
 
-    // ---- Telemetry sink adapter end-to-end wiring (step 7) ----
+    // ---- Telemetry pipe through the FFI surface ----
 
-    #[derive(Default)]
-    struct TestTelemetrySink {
-        protocol_events: Mutex<Vec<String>>,
-        metrics_frames: Mutex<Vec<MetricsFrame>>,
-        transport_states: Mutex<Vec<TransportStateEvent>>,
-        routing_decisions: Mutex<Vec<RoutingDecision>>,
-        device_snapshots: Mutex<Vec<DeviceCapabilitySnapshot>>,
-        extensions: Mutex<Vec<(String, String)>>,
-    }
-
-    impl TelemetrySink for TestTelemetrySink {
-        fn on_protocol_event(&self, event_json: String) {
-            self.protocol_events.lock().unwrap().push(event_json);
-        }
-        fn on_mls_event(&self, _event_json: String) {}
-        fn on_metrics_frame(&self, frame: MetricsFrame) {
-            self.metrics_frames.lock().unwrap().push(frame);
-        }
-        fn on_transport_state(&self, event: TransportStateEvent) {
-            self.transport_states.lock().unwrap().push(event);
-        }
-        fn on_routing_decision(&self, decision: RoutingDecision) {
-            self.routing_decisions.lock().unwrap().push(decision);
-        }
-        fn on_device_capability(&self, snapshot: DeviceCapabilitySnapshot) {
-            self.device_snapshots.lock().unwrap().push(snapshot);
-        }
-        fn on_extension(&self, name: String, payload_json: String) {
-            self.extensions.lock().unwrap().push((name, payload_json));
+    fn telemetry_config() -> TelemetryConfig {
+        TelemetryConfig {
+            api_key: "mp_test_key".to_string(),
+            app_id: "app_test".to_string(),
+            os: TelemetryOs::Android,
+            os_major: 34,
+            app_version: Some("1.4.2".to_string()),
+            debug: None,
+            flush_interval_ms: Some(3_600_000),
+            max_batch_bytes: None,
+            max_buffered_records: None,
+            include_device_id: None,
+            scrub_ids: None,
+            mls_verbosity: None,
+            metrics_cadence_ms: None,
+            routing_diagnostic: None,
+            mls_sampling_bypass: None,
         }
     }
 
-    /// Exercise the adapter directly: build a `CoreTelemetryRecord`, feed it
-    /// through the adapter's `emit`, and assert both the typed foreign
-    /// callback fires *and* the poll queue captures a matching envelope.
-    /// This is a unit test of the adapter; end-to-end coverage (that the
-    /// core protocol's event emit path reaches the adapter) lives in the
-    /// `offline-protocol` crate's sink tests.
-    fn install_sink_via_adapter(
-        protocol: &OfflineProtocol,
-        sink: Arc<TestTelemetrySink>,
-    ) -> Arc<TelemetrySinkAdapter> {
-        struct Forward(Arc<TestTelemetrySink>);
-        impl TelemetrySink for Forward {
-            fn on_protocol_event(&self, j: String) {
-                self.0.on_protocol_event(j)
-            }
-            fn on_mls_event(&self, j: String) {
-                self.0.on_mls_event(j)
-            }
-            fn on_metrics_frame(&self, f: MetricsFrame) {
-                self.0.on_metrics_frame(f)
-            }
-            fn on_transport_state(&self, e: TransportStateEvent) {
-                self.0.on_transport_state(e)
-            }
-            fn on_routing_decision(&self, d: RoutingDecision) {
-                self.0.on_routing_decision(d)
-            }
-            fn on_device_capability(&self, s: DeviceCapabilitySnapshot) {
-                self.0.on_device_capability(s)
-            }
-            fn on_extension(&self, n: String, p: String) {
-                self.0.on_extension(n, p)
-            }
-        }
-        Arc::new(TelemetrySinkAdapter {
-            callback: Arc::new(Forward(sink)),
-            queue: protocol.telemetry_queue.clone(),
-            poll_queue_enabled: true,
-        })
-    }
-
-    /// Variant of `install_sink_via_adapter` with `poll_queue_enabled=false`
-    /// so push-only tests can assert the pull queue is skipped.
-    fn install_sink_via_adapter_push_only(
-        protocol: &OfflineProtocol,
-        sink: Arc<TestTelemetrySink>,
-    ) -> Arc<TelemetrySinkAdapter> {
-        struct Forward(Arc<TestTelemetrySink>);
-        impl TelemetrySink for Forward {
-            fn on_protocol_event(&self, j: String) {
-                self.0.on_protocol_event(j)
-            }
-            fn on_mls_event(&self, j: String) {
-                self.0.on_mls_event(j)
-            }
-            fn on_metrics_frame(&self, f: MetricsFrame) {
-                self.0.on_metrics_frame(f)
-            }
-            fn on_transport_state(&self, e: TransportStateEvent) {
-                self.0.on_transport_state(e)
-            }
-            fn on_routing_decision(&self, d: RoutingDecision) {
-                self.0.on_routing_decision(d)
-            }
-            fn on_device_capability(&self, s: DeviceCapabilitySnapshot) {
-                self.0.on_device_capability(s)
-            }
-            fn on_extension(&self, n: String, p: String) {
-                self.0.on_extension(n, p)
-            }
-        }
-        Arc::new(TelemetrySinkAdapter {
-            callback: Arc::new(Forward(sink)),
-            queue: protocol.telemetry_queue.clone(),
-            poll_queue_enabled: false,
-        })
+    /// The uploads of every pipe started while the returned guard lives go
+    /// to the capturing client, never to the network. Tests that enable
+    /// telemetry take it first; the capture is process-wide, which is why
+    /// the tests below serialize on a lock.
+    fn capture_uploads() -> (
+        offline_protocol::telemetry::pipe::testing::CapturingHttpClient,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
+        static SERIAL: Mutex<()> = Mutex::new(());
+        let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let client = offline_protocol::telemetry::pipe::testing::capture_uploads();
+        (client, guard)
     }
 
     #[test]
-    fn adapter_forwards_protocol_event_to_typed_method_and_queue() {
+    fn enable_telemetry_refuses_an_unusable_config_with_the_named_field() {
+        let (_client, _guard) = capture_uploads();
         let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter(&protocol, sink.clone());
-
-        let record = CoreTelemetryRecord::Protocol(Box::new(CoreEvent::NetworkMetrics {
-            neighbor_count: 1,
-            relay_count: 0,
-            delivery_ratio: 0.5,
-            avg_latency_ms: 42,
-        }));
-        adapter.emit(&record);
-
-        let events = sink.protocol_events.lock().unwrap();
-        assert_eq!(events.len(), 1);
+        let mut config = telemetry_config();
+        config.api_key = String::new();
+        match protocol.enable_telemetry(config, AppState::Active) {
+            Err(ProtocolError::TelemetryConfigInvalid(field)) => assert_eq!(field, "api_key"),
+            other => panic!("expected TelemetryConfigInvalid, got {other:?}"),
+        }
+        let mut config = telemetry_config();
+        config.max_batch_bytes = Some(0);
+        match protocol.enable_telemetry(config, AppState::Active) {
+            Err(ProtocolError::TelemetryConfigInvalid(field)) => {
+                assert_eq!(field, "max_batch_bytes");
+            }
+            other => panic!("expected TelemetryConfigInvalid, got {other:?}"),
+        }
         assert!(
-            events[0].contains("\"type\":\"network_metrics\""),
-            "got {:?}",
-            events[0]
+            protocol.telemetry_stats().is_none(),
+            "a refused config starts nothing"
         );
-
-        let envelope = protocol
-            .poll_telemetry_frame()
-            .expect("poll should return the queued envelope");
-        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
-        assert_eq!(parsed["category"], "protocol");
-        // Envelope shape matches the TS `TelemetryRecord` union: protocol
-        // variants carry an `eventJson` string field, not a nested payload.
-        let event_json = parsed["eventJson"]
-            .as_str()
-            .expect("eventJson must be a string");
-        let event_parsed: serde_json::Value = serde_json::from_str(event_json).unwrap();
-        assert_eq!(event_parsed["type"], "network_metrics");
+        offline_protocol::telemetry::pipe::testing::stop_capturing_uploads();
     }
 
+    /// The batch an FFI-enabled pipe uploads is one the ingest binds: every
+    /// envelope field is what the binding supplied, every event classifies
+    /// through the wire crate, and the five headers are present.
     #[test]
-    fn install_telemetry_sink_with_default_config_succeeds() {
+    fn enable_telemetry_uploads_batches_the_ingest_binds() {
+        let (client, _guard) = capture_uploads();
         let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        #[allow(dead_code)]
-        struct Forward(Arc<TestTelemetrySink>);
-        impl TelemetrySink for Forward {
-            fn on_protocol_event(&self, _: String) {}
-            fn on_mls_event(&self, _: String) {}
-            fn on_metrics_frame(&self, _: MetricsFrame) {}
-            fn on_transport_state(&self, _: TransportStateEvent) {}
-            fn on_routing_decision(&self, _: RoutingDecision) {}
-            fn on_device_capability(&self, _: DeviceCapabilitySnapshot) {}
-            fn on_extension(&self, _: String, _: String) {}
-        }
         protocol
-            .install_telemetry_sink(Box::new(Forward(sink)), TelemetryConfig::default())
-            .expect("install must succeed with defaults");
-        // A fresh install enqueues a bootstrap metrics snapshot on the
-        // next tick — we do not call process() here, so the queue is empty.
-        assert!(protocol.poll_telemetry_frame().is_none());
-    }
-
-    #[test]
-    fn get_transport_metrics_returns_real_data_not_mock() {
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
+            .enable_telemetry(telemetry_config(), AppState::Active)
+            .expect("telemetry enables");
         protocol.start().unwrap();
-        // BLE is enabled — pull metrics must succeed and return a
-        // real-data shape (is_charging is non-optional on the Rust side and
-        // the BLE transport always reports a concrete boolean).
-        let metrics = protocol
-            .get_transport_metrics(TransportType::Ble)
-            .expect("BLE transport is enabled");
-        assert!(
-            metrics.is_charging.is_some(),
-            "is_charging should be populated from Rust TransportMetrics, got {:?}",
-            metrics
-        );
-    }
+        let stats = protocol.telemetry_stats().expect("enabled");
+        assert_eq!(stats.sent_events, 0);
+        assert!(!stats.session_id.is_empty());
 
-    // ---- Poll-envelope payload-shape coverage ----
-    //
-    // These tests pin the wire contract between the Rust adapter and the
-    // TypeScript `TelemetryRecord` discriminated union (see
-    // `bindings/react-native/src/types.ts`). Each typed variant must enqueue
-    // the full payload under its variant-specific key (`frame`, `event`,
-    // `decision`, `snapshot`, `eventJson`) — not a truncated timestamp.
+        // An explicit session end always produces a summary and flushes it.
+        protocol.end_telemetry_session();
+        let uploads = client.uploads();
+        assert!(!uploads.is_empty(), "the session summary was uploaded");
 
-    use offline_protocol::{DeduplicatorMode, DeduplicatorStats, RetryQueueStats};
-    use offline_protocol_router::{TransportScore, TransportScoreFactors};
-
-    fn sample_core_metrics_frame() -> CoreMetricsFrame {
-        CoreMetricsFrame {
-            timestamp_ms: 1_700_000_000_000,
-            transports: vec![(
-                CoreTransportType::BLE,
-                CoreTransportMetrics {
-                    rssi: Some(-60),
-                    latency_ms: Some(50),
-                    success_count: 10,
-                    failure_count: 1,
-                    battery_level: Some(80),
-                    is_charging: true,
-                    is_active_relay: false,
-                    ..Default::default()
-                },
-            )],
-            retry_queue: RetryQueueStats {
-                total_count: 3,
-                ready_count: 1,
-                critical_priority_count: 0,
-                high_priority_count: 1,
-                medium_priority_count: 1,
-                low_priority_count: 1,
-            },
-            dedup: DeduplicatorStats {
-                total_tracked: 100,
-                recent_tracked: 25,
-                capacity_used_percent: 12,
-                false_positive_rate: None,
-                mode: DeduplicatorMode::HashMap,
-            },
-            ack_pending: 2,
-            neighbor_count: 5,
-            is_local_relay: false,
-            current_transport: Some(CoreTransportType::BLE),
-        }
-    }
-
-    #[test]
-    fn adapter_metrics_frame_envelope_carries_full_frame() {
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter(&protocol, sink.clone());
-
-        let record = CoreTelemetryRecord::MetricsSnapshot(Box::new(sample_core_metrics_frame()));
-        adapter.emit(&record);
-
-        // Push channel got a typed frame.
-        let frames = sink.metrics_frames.lock().unwrap();
-        assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].timestamp_ms, 1_700_000_000_000);
-        assert_eq!(frames[0].transports.len(), 1);
-
-        // Pull channel got the same frame, under the `frame` key, with full
-        // nested content — not just a timestamp.
-        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
-        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
-        assert_eq!(parsed["category"], "metricsFrame");
-        let frame = &parsed["frame"];
-        assert!(
-            frame.is_object(),
-            "frame must be an object, got {:?}",
-            frame
-        );
-        assert_eq!(frame["timestampMs"], 1_700_000_000_000_i64);
-        assert_eq!(frame["ackPending"], 2);
-        assert_eq!(frame["neighborCount"], 5);
-        assert_eq!(frame["isLocalRelay"], false);
-        assert_eq!(frame["currentTransport"], "ble");
-        let transports = frame["transports"].as_array().expect("transports array");
-        assert_eq!(transports.len(), 1);
-        assert_eq!(transports[0]["transport"], "ble");
-        assert_eq!(transports[0]["metrics"]["rssi"], -60);
-        assert_eq!(transports[0]["metrics"]["batteryLevel"], 80);
-    }
-
-    #[test]
-    fn adapter_transport_state_envelope_carries_full_event() {
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter(&protocol, sink.clone());
-
-        let record = CoreTelemetryRecord::TransportState(CoreTransportStateEvent {
-            timestamp_ms: 1_700_000_001_000,
-            transport: CoreTransportType::WiFiDirect,
-            previous: CoreTransportStatus::Available,
-            current: CoreTransportStatus::Connecting,
-        });
-        adapter.emit(&record);
-
-        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
-        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
-        assert_eq!(parsed["category"], "transportState");
-        let event = &parsed["event"];
-        assert_eq!(event["timestampMs"], 1_700_000_001_000_i64);
-        assert_eq!(event["transport"], "wifiDirect");
-        assert_eq!(event["previous"], "available");
-        assert_eq!(event["current"], "connecting");
-    }
-
-    #[test]
-    fn adapter_routing_decision_envelope_carries_full_decision() {
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter(&protocol, sink.clone());
-
-        let score = TransportScore::from_factors(TransportScoreFactors {
-            signal: 0.9,
-            proximity: 0.8,
-            bandwidth: 0.7,
-            congestion: 0.6,
-            energy: 0.5,
-            reliability: 0.95,
-            load: 0.4,
-            total: 0.82,
-        });
-        let decision = CoreRoutingDecision {
-            timestamp_ms: 1_700_000_002_000,
-            phase: CoreRoutingPhase::Switched,
-            from: Some(CoreTransportType::BLE),
-            to: Some(CoreTransportType::WiFiDirect),
-            winning_score: Some(0.82),
-            reason_code: Some(CoreRoutingReasonCode::PoorSignal),
-            scores: vec![(CoreTransportType::WiFiDirect, score)],
-        };
-        adapter.emit(&CoreTelemetryRecord::Routing(Box::new(decision)));
-
-        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
-        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
-        assert_eq!(parsed["category"], "routingDecision");
-        let d = &parsed["decision"];
-        assert_eq!(d["timestampMs"], 1_700_000_002_000_i64);
-        assert_eq!(d["phase"], "switched");
-        assert_eq!(d["from"], "ble");
-        assert_eq!(d["to"], "wifiDirect");
-        assert_eq!(d["reasonCode"], "poorSignal");
-        let scores = d["scores"].as_array().expect("scores array");
-        assert_eq!(scores.len(), 1);
-        assert_eq!(scores[0]["transport"], "wifiDirect");
-        // Scores are f32 on the wire; compare with tolerance to avoid
-        // spurious failures from the f32→f64 JSON widen.
-        let signal = scores[0]["signal"].as_f64().unwrap();
-        let total = scores[0]["total"].as_f64().unwrap();
-        assert!((signal - 0.9).abs() < 1e-4, "signal={signal}");
-        assert!((total - 0.82).abs() < 1e-4, "total={total}");
-    }
-
-    #[test]
-    fn adapter_device_capability_envelope_carries_full_snapshot() {
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter(&protocol, sink.clone());
-
-        let snapshot = CoreDeviceSnapshot {
-            timestamp_ms: 1_700_000_003_000,
-            battery_level: Some(42),
-            is_charging: true,
-            relay_role: CoreRelayRole::Relay,
-            changed_fields: 0b111,
-        };
-        adapter.emit(&CoreTelemetryRecord::Device(snapshot));
-
-        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
-        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
-        assert_eq!(parsed["category"], "deviceCapability");
-        let s = &parsed["snapshot"];
-        assert_eq!(s["timestampMs"], 1_700_000_003_000_i64);
-        assert_eq!(s["batteryLevel"], 42);
-        assert_eq!(s["isCharging"], true);
-        assert_eq!(s["relayRole"], "relay");
-        assert_eq!(s["changedFields"], 0b111);
-    }
-
-    #[test]
-    fn adapter_protocol_event_envelope_has_event_json_string_field() {
-        // Complements the existing `adapter_forwards_protocol_event_...` test
-        // by pinning the field name the TS `TelemetryRecord` union expects
-        // (`eventJson`), so a future rename on either side fails loudly here.
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter(&protocol, sink.clone());
-
-        let record = CoreTelemetryRecord::Protocol(Box::new(CoreEvent::NetworkMetrics {
-            neighbor_count: 3,
-            relay_count: 1,
-            delivery_ratio: 0.75,
-            avg_latency_ms: 10,
-        }));
-        adapter.emit(&record);
-
-        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
-        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
-        assert_eq!(parsed["category"], "protocol");
-        assert!(
-            parsed.get("eventJson").and_then(|v| v.as_str()).is_some(),
-            "envelope must carry eventJson string (matches TS TelemetryRecord)"
-        );
-        // Must NOT carry the pre-fix `payload` key.
-        assert!(
-            parsed.get("payload").is_none(),
-            "legacy `payload` key must not appear: {envelope}"
-        );
-    }
-
-    #[test]
-    fn adapter_poll_queue_drops_oldest_at_capacity() {
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter(&protocol, sink.clone());
-
-        // Push TELEMETRY_POLL_QUEUE_CAP + 5 records of two distinct shapes
-        // (device + transport-state) so we can identify which end was dropped.
-        for _ in 0..TELEMETRY_POLL_QUEUE_CAP {
-            adapter.emit(&CoreTelemetryRecord::Device(CoreDeviceSnapshot {
-                timestamp_ms: 0,
-                battery_level: Some(1),
-                is_charging: false,
-                relay_role: CoreRelayRole::Regular,
-                changed_fields: 0,
-            }));
-        }
-        for _ in 0..5 {
-            adapter.emit(&CoreTelemetryRecord::TransportState(
-                CoreTransportStateEvent {
-                    timestamp_ms: 0,
-                    transport: CoreTransportType::BLE,
-                    previous: CoreTransportStatus::Available,
-                    current: CoreTransportStatus::Disconnected,
-                },
-            ));
-        }
-
-        // Queue is capped, so the 5 newest (transportState) must be present
-        // and 5 oldest (device) must have been dropped.
-        let mut first_five_categories = Vec::with_capacity(5);
-        for _ in 0..5 {
-            let env = protocol.poll_telemetry_frame().expect("non-empty");
-            let parsed: serde_json::Value = serde_json::from_str(&env).unwrap();
-            first_five_categories.push(parsed["category"].as_str().unwrap().to_string());
-        }
-        // After popping 5, the last 5 remaining should be transportState.
-        for _ in 0..(TELEMETRY_POLL_QUEUE_CAP - 5 - 5) {
-            protocol.poll_telemetry_frame().expect("non-empty mid");
-        }
-        for _ in 0..5 {
-            let env = protocol.poll_telemetry_frame().expect("tail");
-            let parsed: serde_json::Value = serde_json::from_str(&env).unwrap();
+        for upload in &uploads {
+            let names: Vec<&str> = upload.headers.iter().map(|(k, _)| k.as_str()).collect();
             assert_eq!(
-                parsed["category"], "transportState",
-                "tail must be the newly-pushed transportState records (drop-oldest semantics)"
+                names,
+                [
+                    "Authorization",
+                    "X-Mesh-Analytics-App-Id",
+                    "Content-Type",
+                    "Idempotency-Key",
+                    "User-Agent"
+                ]
             );
-        }
-        assert!(protocol.poll_telemetry_frame().is_none(), "queue drained");
-    }
+            assert_eq!(upload.headers[0].1, "Bearer mp_test_key");
+            assert_eq!(upload.headers[1].1, "app_test");
+            assert!(upload.headers[4].1.ends_with("(android/34)"));
 
-    #[test]
-    fn adapter_protocol_serialization_failure_emits_extension_fallback() {
-        // Exercise `emit_serialization_failure` directly. The real Protocol
-        // and Mls arms only fall through when `to_json` / `to_string` fails,
-        // which is effectively unreachable for the stable `Event` shape; the
-        // fallback itself is still worth pinning to prove we no longer drop
-        // silently.
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter(&protocol, sink.clone());
-
-        struct FakeErr;
-        impl std::fmt::Display for FakeErr {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "synthetic")
+            let batch: offline_protocol_telemetry_wire::Batch =
+                serde_json::from_str(&upload.body).expect("the body is a wire batch");
+            assert_eq!(batch.wire_version, 1);
+            assert_eq!(batch.app_version, "1.4.2");
+            assert_eq!(batch.os_major, 34);
+            assert!(matches!(
+                batch.os,
+                offline_protocol_telemetry_wire::OsKind::Android
+            ));
+            assert!(batch.device_id.is_none(), "not opted in");
+            assert_eq!(batch.batch_id.0.to_string(), upload.headers[3].1);
+            for event in &batch.events {
+                let typed =
+                    offline_protocol_telemetry_wire::classify(&event.event_type, &event.data)
+                        .unwrap_or_else(|e| panic!("{} must classify: {e}", event.event_type));
+                assert!(
+                    !matches!(
+                        typed,
+                        offline_protocol_telemetry_wire::Event::Extension { .. }
+                    ),
+                    "{} is not a typed wire event",
+                    event.event_type
+                );
             }
         }
-        adapter.emit_serialization_failure("protocol", &FakeErr);
+        let summary = uploads
+            .iter()
+            .any(|u| u.body.contains("mesh_session_summary"));
+        assert!(summary);
 
-        let extensions = sink.extensions.lock().unwrap();
-        assert_eq!(extensions.len(), 1);
-        let (name, payload_json) = &extensions[0];
-        assert_eq!(name, "telemetry.error.protocol");
-        let parsed_payload: serde_json::Value =
-            serde_json::from_str(payload_json).expect("payload_json must parse");
-        assert_eq!(parsed_payload["telemetry_error"], "serialization_failed");
-        assert_eq!(parsed_payload["record"], "protocol");
+        let stats = protocol.telemetry_stats().expect("enabled");
+        assert!(stats.sent_events >= 1);
+        assert_eq!(stats.sent_events, stats.accepted_events);
+        assert!(stats.last_flush_at_ms.is_some());
+        assert!(stats.last_error.is_none());
 
-        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
-        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
-        assert_eq!(parsed["category"], "extension");
-        assert_eq!(parsed["name"], "telemetry.error.protocol");
-        assert!(parsed["payloadJson"].is_string());
+        protocol.disable_telemetry().expect("disable");
+        assert!(protocol.telemetry_stats().is_none());
+        protocol.disable_telemetry().expect("idempotent");
+        offline_protocol::telemetry::pipe::testing::stop_capturing_uploads();
     }
 
     #[test]
-    fn get_transport_metrics_returns_none_for_disabled_transport() {
+    fn set_telemetry_enabled_and_flush_are_no_ops_without_a_pipe_and_gate_with_one() {
+        let (client, _guard) = capture_uploads();
         let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        protocol.start().unwrap();
-        // `create_ble_only_config` only registers BLE with the transport
-        // manager. The new implementation of `get_transport_metrics` pulls
-        // from `TransportManager::get_transport(...)` — disabled transports
-        // return `None`. This is the breaking contract change called out
-        // in CHANGELOG (prior behaviour: always Some(zeroed_struct)).
-        assert!(
-            protocol
-                .get_transport_metrics(TransportType::WiFiDirect)
-                .is_none(),
-            "disabled transport must return None, not a zeroed stub"
-        );
-        assert!(
-            protocol
-                .get_transport_metrics(TransportType::Nostr)
-                .is_none(),
-            "disabled transport must return None, not a zeroed stub"
-        );
+        protocol.set_telemetry_enabled(false);
+        protocol.flush_telemetry();
+        assert!(!protocol.flush_telemetry_blocking(10));
+        protocol.notify_app_state(AppState::Background);
+        protocol.end_telemetry_session();
+
+        protocol
+            .enable_telemetry(telemetry_config(), AppState::Active)
+            .expect("enables");
+        protocol.set_telemetry_enabled(false);
+        // A background transition with collection off still closes the
+        // session: the boundary is a fact about the app, not an event.
+        protocol.notify_app_state(AppState::Background);
+        assert!(protocol.flush_telemetry_blocking(5_000));
+        assert!(!client.uploads().is_empty());
+        protocol.disable_telemetry().expect("disable");
+        offline_protocol::telemetry::pipe::testing::stop_capturing_uploads();
     }
 
+    /// The telemetry config section must be read by every bridge that
+    /// parses it, field for field, and the two platform fields must be
+    /// filled by the bridge rather than read from the app.
+    ///
+    /// The failure this catches: a field the UDL declares, TypeScript types
+    /// and a native parser never reads. The value then sits at its default
+    /// forever while the app believes it set it.
     #[test]
-    fn adapter_sink_replacement_shares_poll_queue_but_isolates_push() {
-        // Installing a second sink replaces the first on the core side, but
-        // both adapters share the same `protocol.telemetry_queue`. This
-        // test pins both halves of that contract: (a) sink A only sees the
-        // records emitted while it was installed, sink B only sees its
-        // own, and (b) the pull queue accumulates both in order regardless
-        // of which sink is currently live.
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-
-        let sink_a = Arc::new(TestTelemetrySink::default());
-        let adapter_a = install_sink_via_adapter(&protocol, sink_a.clone());
-        adapter_a.emit(&CoreTelemetryRecord::Device(CoreDeviceSnapshot {
-            timestamp_ms: 1,
-            battery_level: None,
-            is_charging: false,
-            relay_role: CoreRelayRole::Regular,
-            changed_fields: 0,
-        }));
-
-        let sink_b = Arc::new(TestTelemetrySink::default());
-        let adapter_b = install_sink_via_adapter(&protocol, sink_b.clone());
-        adapter_b.emit(&CoreTelemetryRecord::Device(CoreDeviceSnapshot {
-            timestamp_ms: 2,
-            battery_level: None,
-            is_charging: false,
-            relay_role: CoreRelayRole::Regular,
-            changed_fields: 0,
-        }));
-
-        assert_eq!(sink_a.device_snapshots.lock().unwrap().len(), 1);
-        assert_eq!(sink_b.device_snapshots.lock().unwrap().len(), 1);
-
-        let e1 = protocol.poll_telemetry_frame().expect("first envelope");
-        let e2 = protocol.poll_telemetry_frame().expect("second envelope");
-        let p1: serde_json::Value = serde_json::from_str(&e1).unwrap();
-        let p2: serde_json::Value = serde_json::from_str(&e2).unwrap();
-        assert_eq!(p1["snapshot"]["timestampMs"], 1);
-        assert_eq!(p2["snapshot"]["timestampMs"], 2);
-        assert!(
-            protocol.poll_telemetry_frame().is_none(),
-            "queue drained cleanly"
-        );
-    }
-
-    #[test]
-    fn enqueue_serialization_failure_rich_variant_does_not_fire_extension_callback() {
-        // Rich-variant failure contract: the pull queue gets an
-        // extension-error envelope under `telemetry.error.<variant>`, and
-        // `on_extension` does NOT fire (the typed push already carried
-        // the DTO — double-firing would deliver the same emit twice).
-        //
-        // Serde-level failure is effectively unreachable in practice for
-        // rich variants (`serde_json::to_value` maps NaN/Inf to `null`
-        // rather than erroring), so we exercise the helper directly. This
-        // test pins the contract of `enqueue_serialization_failure` so a
-        // future refactor that accidentally re-routes rich-variant
-        // failures through `emit_serialization_failure` (which also fires
-        // the callback) trips the assertion below.
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter(&protocol, sink.clone());
-
-        struct FakeErr;
-        impl std::fmt::Display for FakeErr {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "synthetic")
-            }
-        }
-        adapter.enqueue_serialization_failure("metricsFrame", &FakeErr);
-
-        assert!(
-            sink.extensions.lock().unwrap().is_empty(),
-            "on_extension must not fire — rich-variant typed push already delivered",
-        );
-
-        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
-        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
-        assert_eq!(parsed["category"], "extension");
-        assert_eq!(parsed["name"], "telemetry.error.metricsFrame");
-        assert!(
-            parsed.get("frame").is_none(),
-            "pull channel must not leak a null-valued frame on serialization failure"
-        );
-    }
-
-    // ---- Shape-parity snapshot tests ----
-    //
-    // These tests pin the EXACT JSON envelope shape for every `category` the
-    // adapter produces. They are the canonical contract that the
-    // handwritten iOS (`bindings/react-native/ios/OfflineProtocolModule.swift`
-    // `TelemetrySinkImpl.encode(...)`) and Android
-    // (`bindings/react-native/android/.../OfflineProtocolModule.kt`
-    // `encodeFrame` / `encodeRouting` / ...) encoders must reproduce bit-for-
-    // bit when dispatching push events to React Native. If these tests change
-    // shape (new field, renamed key, different casing), the iOS and Android
-    // encoders MUST be updated in the same PR — the TS `TelemetryRecord`
-    // discriminated union (`bindings/react-native/src/types.ts`) flows from
-    // this shape.
-    //
-    // We assert `parsed == json!({...})` rather than checking individual
-    // fields so the tests fail on unexpected additions too.
-
-    /// Fixture with clean float values so the snapshot comparison is not
-    /// sensitive to f32 precision drift. `success_count=0, failure_count=0`
-    /// makes `effective_drop_ratio()` return None → error_rate = 0.0.
-    fn shape_parity_metrics_fixture() -> CoreMetricsFrame {
-        CoreMetricsFrame {
-            timestamp_ms: 1_700_000_000_000,
-            transports: vec![(
-                CoreTransportType::BLE,
-                CoreTransportMetrics {
-                    rssi: Some(-60),
-                    latency_ms: Some(50),
-                    success_count: 0,
-                    failure_count: 0,
-                    battery_level: Some(80),
-                    is_charging: true,
-                    is_active_relay: false,
-                    ..Default::default()
-                },
-            )],
-            retry_queue: RetryQueueStats {
-                total_count: 3,
-                ready_count: 1,
-                critical_priority_count: 0,
-                high_priority_count: 1,
-                medium_priority_count: 1,
-                low_priority_count: 1,
-            },
-            dedup: DeduplicatorStats {
-                total_tracked: 100,
-                recent_tracked: 25,
-                capacity_used_percent: 12,
-                false_positive_rate: None,
-                mode: DeduplicatorMode::HashMap,
-            },
-            ack_pending: 2,
-            neighbor_count: 5,
-            is_local_relay: false,
-            current_transport: Some(CoreTransportType::BLE),
-        }
-    }
-
-    #[test]
-    fn shape_parity_metrics_frame_envelope() {
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter(&protocol, sink.clone());
-
-        let record = CoreTelemetryRecord::MetricsSnapshot(Box::new(shape_parity_metrics_fixture()));
-        adapter.emit(&record);
-
-        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
-        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
-        assert_eq!(
-            parsed,
-            serde_json::json!({
-                "category": "metricsFrame",
-                "frame": {
-                    "timestampMs": 1_700_000_000_000_i64,
-                    "transports": [{
-                        "transport": "ble",
-                        "metrics": {
-                            "errorRate": 0.0,
-                            "avgLatencyMs": 50,
-                            "packetsSent": 0,
-                            "packetsReceived": 0,
-                            "bytesSent": 0,
-                            "bytesReceived": 0,
-                            "rssi": -60,
-                            "batteryLevel": 80,
-                            "isCharging": true,
-                            "congestion": 0.0,
-                            "queueDepth": 0,
-                            "relayConnectionCount": 0,
-                            "isActiveRelay": false,
-                        }
-                    }],
-                    "retryQueue": {
-                        "totalCount": 3,
-                        "readyCount": 1,
-                        "criticalPriorityCount": 0,
-                        "highPriorityCount": 1,
-                        "mediumPriorityCount": 1,
-                        "lowPriorityCount": 1,
-                    },
-                    "dedup": {
-                        "totalTracked": 100,
-                        "recentTracked": 25,
-                        "capacityUsedPercent": 12,
-                        "mode": "hashMap",
-                    },
-                    "ackPending": 2,
-                    "neighborCount": 5,
-                    "isLocalRelay": false,
-                    "currentTransport": "ble",
-                }
-            }),
-            "metricsFrame envelope shape changed — update iOS encode(frame:) and Android encodeFrame() in lockstep, then update this snapshot",
-        );
-    }
-
-    #[test]
-    fn shape_parity_transport_state_envelope() {
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter(&protocol, sink.clone());
-
-        adapter.emit(&CoreTelemetryRecord::TransportState(
-            CoreTransportStateEvent {
-                timestamp_ms: 1_700_000_001_000,
-                transport: CoreTransportType::WiFiDirect,
-                previous: CoreTransportStatus::Available,
-                current: CoreTransportStatus::Connecting,
-            },
-        ));
-
-        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
-        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
-        assert_eq!(
-            parsed,
-            serde_json::json!({
-                "category": "transportState",
-                "event": {
-                    "timestampMs": 1_700_000_001_000_i64,
-                    "transport": "wifiDirect",
-                    "previous": "available",
-                    "current": "connecting",
-                }
-            }),
-            "transportState envelope shape changed — update iOS encode(event:) and Android encodeTransportState() in lockstep",
-        );
-    }
-
-    #[test]
-    fn shape_parity_routing_decision_envelope() {
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter(&protocol, sink.clone());
-
-        // Hand-built score with tidy rational values — f32 serde yields
-        // exact round-trip for these, so the snapshot stays stable across
-        // platforms.
-        let score = TransportScore::from_factors(TransportScoreFactors {
-            signal: 0.5,
-            proximity: 0.25,
-            bandwidth: 0.125,
-            congestion: 0.0625,
-            energy: 0.125,
-            reliability: 0.5,
-            load: 0.25,
-            total: 0.5,
-        });
-        let decision = CoreRoutingDecision {
-            timestamp_ms: 1_700_000_002_000,
-            phase: CoreRoutingPhase::Switched,
-            from: Some(CoreTransportType::BLE),
-            to: Some(CoreTransportType::WiFiDirect),
-            winning_score: Some(0.5),
-            reason_code: Some(CoreRoutingReasonCode::PoorSignal),
-            scores: vec![(CoreTransportType::WiFiDirect, score)],
+    fn every_bridge_reads_the_telemetry_config_section() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rn = manifest.join("../../bindings/react-native");
+        let read = |rel: std::path::PathBuf| -> String {
+            std::fs::read_to_string(&rel)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", rel.display()))
         };
-        adapter.emit(&CoreTelemetryRecord::Routing(Box::new(decision)));
-
-        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
-        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
-        assert_eq!(
-            parsed,
-            serde_json::json!({
-                "category": "routingDecision",
-                "decision": {
-                    "timestampMs": 1_700_000_002_000_i64,
-                    "phase": "switched",
-                    "from": "ble",
-                    "to": "wifiDirect",
-                    "winningScore": 0.5,
-                    "reasonCode": "poorSignal",
-                    "scores": [{
-                        "transport": "wifiDirect",
-                        "signal": 0.5,
-                        "proximity": 0.25,
-                        "bandwidth": 0.125,
-                        "congestion": 0.0625,
-                        "energy": 0.125,
-                        "reliability": 0.5,
-                        "load": 0.25,
-                        "total": 0.5,
-                    }]
-                }
-            }),
-            "routingDecision envelope shape changed — update iOS encode(decision:) and Android encodeRouting() in lockstep",
-        );
-    }
-
-    #[test]
-    fn shape_parity_device_capability_envelope() {
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter(&protocol, sink.clone());
-
-        adapter.emit(&CoreTelemetryRecord::Device(CoreDeviceSnapshot {
-            timestamp_ms: 1_700_000_003_000,
-            battery_level: Some(42),
-            is_charging: true,
-            relay_role: CoreRelayRole::Relay,
-            changed_fields: 0b111,
-        }));
-
-        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
-        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
-        assert_eq!(
-            parsed,
-            serde_json::json!({
-                "category": "deviceCapability",
-                "snapshot": {
-                    "timestampMs": 1_700_000_003_000_i64,
-                    "batteryLevel": 42,
-                    "isCharging": true,
-                    "relayRole": "relay",
-                    "changedFields": 7,
-                }
-            }),
-            "deviceCapability envelope shape changed — update iOS encode(snapshot:) and Android encodeDevice() in lockstep",
-        );
-    }
-
-    #[test]
-    fn shape_parity_protocol_envelope_is_eventjson_string() {
-        // Protocol and Mls variants carry a pre-serialized event JSON
-        // string. The envelope wraps it as `eventJson: string`; the inner
-        // event shape is owned by the core `Event` enum, not this FFI crate.
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter(&protocol, sink.clone());
-
-        adapter.emit(&CoreTelemetryRecord::Protocol(Box::new(
-            CoreEvent::NetworkMetrics {
-                neighbor_count: 3,
-                relay_count: 1,
-                delivery_ratio: 0.75,
-                avg_latency_ms: 10,
-            },
-        )));
-
-        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
-        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
-        assert_eq!(parsed["category"], "protocol");
-        let keys: Vec<&str> = parsed
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(|k| k.as_str())
+        let udl = read(manifest.join("src/offline_protocol.udl"));
+        let dict = udl
+            .split_once("dictionary TelemetryConfig {")
+            .expect("TelemetryConfig dictionary")
+            .1
+            .split_once("};")
+            .expect("terminated")
+            .0;
+        let fields: Vec<&str> = dict
+            .lines()
+            .filter_map(|l| l.trim().strip_suffix(';'))
+            .filter_map(|l| l.rsplit(' ').next())
             .collect();
-        assert_eq!(
-            keys,
-            vec!["category", "eventJson"],
-            "protocol envelope MUST have exactly two keys — update iOS/Android onProtocolEvent dispatch if this changes",
-        );
-        assert!(
-            parsed["eventJson"].is_string(),
-            "eventJson must be a string"
-        );
-    }
+        assert!(fields.len() >= 15, "{fields:?}");
+        let camel = |snake: &str| -> String {
+            let mut out = String::new();
+            let mut upper = false;
+            for c in snake.chars() {
+                if c == '_' {
+                    upper = true;
+                } else if upper {
+                    out.extend(c.to_uppercase());
+                    upper = false;
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        };
 
-    // ---- Forward-compat coverage: pin the known variant set ----
+        let kotlin =
+            read(rn.join("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"));
+        let swift = read(rn.join("ios/OfflineProtocolModule.swift"));
+        let ts = read(rn.join("src/types.ts"));
+        let ts_config = ts
+            .split_once("export interface TelemetryConfig {")
+            .expect("TS TelemetryConfig")
+            .1
+            .split_once('}')
+            .expect("terminated")
+            .0;
+        let python =
+            read(manifest.join("../../bindings/python/offline_protocol_sdk/protocol_manager.py"));
+        let kotlin_parser = kotlin
+            .split_once("private fun parseTelemetryConfig(")
+            .expect("Kotlin parser")
+            .1;
+        let swift_parser = swift
+            .split_once("fileprivate func parseTelemetryConfig(")
+            .expect("Swift parser")
+            .1;
 
-    #[test]
-    fn forward_compat_extension_coverage() {
-        // Every TelemetryRecord variant this FFI build knows how to type
-        // MUST route to its dedicated `on_*` callback. If a new variant is
-        // added to `CoreTelemetryRecord` without a matching arm in
-        // `TelemetrySinkAdapter::emit`, it falls through to the `other =>`
-        // extension arm. This test pins the known set so the drift is
-        // noticed the moment the new variant ships.
-        //
-        // We cannot rely on Rust exhaustiveness here — `CoreTelemetryRecord`
-        // is `#[non_exhaustive]` in the core crate, so the match must keep
-        // a catchall arm. This test is the compile-time-adjacent safety net.
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter(&protocol, sink.clone());
-
-        let records: Vec<CoreTelemetryRecord> = vec![
-            CoreTelemetryRecord::Protocol(Box::new(CoreEvent::NetworkMetrics {
-                neighbor_count: 0,
-                relay_count: 0,
-                delivery_ratio: 0.0,
-                avg_latency_ms: 0,
-            })),
-            CoreTelemetryRecord::MetricsSnapshot(Box::new(sample_core_metrics_frame())),
-            CoreTelemetryRecord::TransportState(CoreTransportStateEvent {
-                timestamp_ms: 0,
-                transport: CoreTransportType::BLE,
-                previous: CoreTransportStatus::Available,
-                current: CoreTransportStatus::Available,
-            }),
-            CoreTelemetryRecord::Routing(Box::new(CoreRoutingDecision {
-                timestamp_ms: 0,
-                phase: CoreRoutingPhase::Selected,
-                from: None,
-                to: None,
-                winning_score: None,
-                reason_code: None,
-                scores: vec![],
-            })),
-            CoreTelemetryRecord::Device(CoreDeviceSnapshot {
-                timestamp_ms: 0,
-                battery_level: None,
-                is_charging: false,
-                relay_role: CoreRelayRole::Regular,
-                changed_fields: 0,
-            }),
-            CoreTelemetryRecord::Mls(offline_protocol::MlsLifecycleEvent::Initialized {
-                timestamp_ms: 0,
-                session_id: "s".into(),
-                group_id: None,
-                peer_id: None,
-                context: offline_protocol::MlsOperationContext::Initialize,
-                error_category: None,
-            }),
-        ];
-
-        for rec in &records {
-            adapter.emit(rec);
-        }
-
-        while let Some(envelope) = protocol.poll_telemetry_frame() {
-            let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
-            let category = parsed["category"].as_str().unwrap();
-            assert_ne!(
-                category,
-                "extension",
-                "record `{}` fell through to the forward-compat extension arm — \
-                 add a typed match arm in `TelemetrySinkAdapter::emit` and a \
-                 matching foreign-side dispatch before shipping the new variant",
-                parsed
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("<unknown>"),
+        for field in &fields {
+            let key = camel(field);
+            if *field == "os" || *field == "os_major" {
+                assert!(
+                    !kotlin_parser.contains(&format!("\"{key}\"")),
+                    "Kotlin must fill {field} from the platform, not read it from the app"
+                );
+                assert!(
+                    !swift_parser.contains(&format!("\"{key}\"")),
+                    "Swift must fill {field} from the platform, not read it from the app"
+                );
+                assert!(
+                    !ts_config.contains(&format!("{key}?"))
+                        && !ts_config.contains(&format!("{key}:")),
+                    "the TS TelemetryConfig must not expose {field}"
+                );
+                continue;
+            }
+            assert!(
+                kotlin_parser.contains(&format!("\"{key}\"")),
+                "the Kotlin parser must read `{key}`"
+            );
+            assert!(
+                swift_parser.contains(&format!("\"{key}\"")),
+                "the Swift parser must read `{key}`"
+            );
+            assert!(
+                ts_config.contains(&format!("{key}?")) || ts_config.contains(&format!("{key}:")),
+                "the TS TelemetryConfig must declare `{key}`"
+            );
+            assert!(
+                python.contains(&format!("{field}=")),
+                "the Python manager must forward `{field}`"
             );
         }
-    }
 
-    // ---- enable_poll_queue opt-in ----
-
-    #[test]
-    fn push_only_sink_skips_pull_queue() {
-        // With `poll_queue_enabled = false`, the adapter fires typed
-        // callbacks but does NOT enqueue envelopes. Protects the routing
-        // hot path from per-send JSON serialization for push-only apps.
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter_push_only(&protocol, sink.clone());
-
-        adapter.emit(&CoreTelemetryRecord::MetricsSnapshot(Box::new(
-            sample_core_metrics_frame(),
-        )));
-        adapter.emit(&CoreTelemetryRecord::Device(CoreDeviceSnapshot {
-            timestamp_ms: 42,
-            battery_level: Some(10),
-            is_charging: false,
-            relay_role: CoreRelayRole::Regular,
-            changed_fields: 1,
-        }));
-        adapter.emit(&CoreTelemetryRecord::TransportState(
-            CoreTransportStateEvent {
-                timestamp_ms: 43,
-                transport: CoreTransportType::BLE,
-                previous: CoreTransportStatus::Available,
-                current: CoreTransportStatus::Disconnected,
-            },
-        ));
-
-        // Typed push callbacks still fire.
-        assert_eq!(sink.metrics_frames.lock().unwrap().len(), 1);
-        assert_eq!(sink.device_snapshots.lock().unwrap().len(), 1);
-        assert_eq!(sink.transport_states.lock().unwrap().len(), 1);
-
-        // Pull queue stays empty — no envelope was built or enqueued.
+        let package = read(rn.join("package.json"));
         assert!(
-            protocol.poll_telemetry_frame().is_none(),
-            "pull queue must be empty when enable_poll_queue=false",
+            package.contains("js-ci-harness/telemetry-config.test.js"),
+            "the JS harness test for the section must run under test:js"
         );
     }
 
+    /// The platform fields come from the platform, on every binding, and
+    /// the bridges own the lifecycle: the app calls nothing on background.
     #[test]
-    fn push_only_sink_protocol_event_string_variant_skips_pull_queue() {
-        // Protocol / Mls variants take a different path (pre-serialized
-        // JSON string). Make sure that path also respects the flag.
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter_push_only(&protocol, sink.clone());
-
-        adapter.emit(&CoreTelemetryRecord::Protocol(Box::new(
-            CoreEvent::NetworkMetrics {
-                neighbor_count: 1,
-                relay_count: 0,
-                delivery_ratio: 0.5,
-                avg_latency_ms: 42,
-            },
-        )));
-
-        assert_eq!(sink.protocol_events.lock().unwrap().len(), 1);
-        assert!(
-            protocol.poll_telemetry_frame().is_none(),
-            "pull queue must be empty when enable_poll_queue=false",
-        );
-    }
-
-    #[test]
-    fn install_telemetry_sink_enable_poll_queue_false_routes_through() {
-        // End-to-end: install_telemetry_sink reads config.enable_poll_queue
-        // and forwards it to the adapter. We do not call process(), so the
-        // bootstrap metrics snapshot never fires; after install the queue
-        // must remain empty whether or not the flag was set, but this test
-        // pins that the public install path honours the opt-out.
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-
-        #[allow(dead_code)]
-        struct Forward;
-        impl TelemetrySink for Forward {
-            fn on_protocol_event(&self, _: String) {}
-            fn on_mls_event(&self, _: String) {}
-            fn on_metrics_frame(&self, _: MetricsFrame) {}
-            fn on_transport_state(&self, _: TransportStateEvent) {}
-            fn on_routing_decision(&self, _: RoutingDecision) {}
-            fn on_device_capability(&self, _: DeviceCapabilitySnapshot) {}
-            fn on_extension(&self, _: String, _: String) {}
-        }
-
-        let cfg = TelemetryConfig {
-            enable_poll_queue: Some(false),
-            ..Default::default()
+    fn react_native_bridges_pass_platform_info_at_enable_and_own_the_lifecycle() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rn = manifest.join("../../bindings/react-native");
+        let read = |rel: std::path::PathBuf| -> String {
+            std::fs::read_to_string(&rel)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", rel.display()))
         };
-        protocol
-            .install_telemetry_sink(Box::new(Forward), cfg)
-            .expect("install must succeed");
-        assert!(protocol.poll_telemetry_frame().is_none());
-    }
+        let kotlin =
+            read(rn.join("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"));
+        assert!(kotlin.contains("os = TelemetryOs.ANDROID"));
+        assert!(kotlin.contains("osMajor = Build.VERSION.SDK_INT.toUShort()"));
+        let pause = kotlin
+            .split_once("override fun onHostPause()")
+            .expect("onHostPause")
+            .1;
+        assert!(pause.contains("notifyAppState(AppState.BACKGROUND)"));
+        let resume = kotlin
+            .split_once("override fun onHostResume()")
+            .expect("onHostResume")
+            .1;
+        assert!(resume.contains("notifyAppState(AppState.ACTIVE)"));
 
-    #[test]
-    fn uninstall_telemetry_sink_drains_queue_and_detaches() {
-        // Pin the uninstall contract: after calling it (a) the pull queue
-        // is drained, so subsequent `poll_telemetry_frame` returns None,
-        // and (b) future emissions through a freshly-built adapter do NOT
-        // land in the queue because the core-side sink is now a NoopTS.
-        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
-        let sink = Arc::new(TestTelemetrySink::default());
-        let adapter = install_sink_via_adapter(&protocol, sink);
+        let swift = read(rn.join("ios/OfflineProtocolModule.swift"));
+        assert!(swift.contains("os: .ios"));
+        assert!(swift.contains("UIDevice.current.systemVersion"));
+        let background = swift
+            .split_once("@objc private func applicationDidEnterBackground()")
+            .expect("background handler")
+            .1
+            .split_once("@objc private func applicationWillEnterForeground()")
+            .expect("foreground handler")
+            .0;
+        assert!(background.contains("notifyAppState(state: .background)"));
+        assert!(
+            background.contains("flushTelemetryBlocking(deadlineMs: 3000)"),
+            "the background flush must be the blocking form, inside a background task"
+        );
+        assert!(background.contains(
+            "beginBackgroundTask(\n            withName: \"OfflineProtocol.telemetryFlush\""
+        ));
+        let foreground = swift
+            .split_once("@objc private func applicationWillEnterForeground()")
+            .expect("foreground handler")
+            .1;
+        assert!(foreground.contains("notifyAppState(state: .active)"));
 
-        // Prime the queue with a couple of records via the adapter.
-        let record = CoreTelemetryRecord::Protocol(Box::new(CoreEvent::NetworkMetrics {
-            neighbor_count: 1,
-            relay_count: 0,
-            delivery_ratio: 0.5,
-            avg_latency_ms: 42,
-        }));
-        adapter.emit(&record);
-        adapter.emit(&record);
-        assert!(protocol.poll_telemetry_frame().is_some());
+        let ts = read(rn.join("src/index.ts"));
+        for gone in [
+            "installTelemetrySink",
+            "uninstallTelemetrySink",
+            "pollTelemetryFrame",
+            "OfflineProtocol_Telemetry",
+        ] {
+            assert!(!ts.contains(gone), "src/index.ts still mentions {gone}");
+        }
+        assert!(ts.contains("async enableTelemetry(config: TelemetryConfig)"));
 
-        // Uninstall drains the queue AND replaces the core sink.
-        protocol
-            .uninstall_telemetry_sink()
-            .expect("uninstall must succeed");
-        assert!(protocol.poll_telemetry_frame().is_none());
-
-        // Idempotent: second call is a no-op and still succeeds.
-        protocol
-            .uninstall_telemetry_sink()
-            .expect("uninstall must be idempotent");
-        assert!(protocol.poll_telemetry_frame().is_none());
+        let python =
+            read(manifest.join("../../bindings/python/offline_protocol_sdk/protocol_manager.py"));
+        assert!(python.contains("platform.system()"));
+        for os in [
+            "TelemetryOs.MACOS",
+            "TelemetryOs.LINUX",
+            "TelemetryOs.WINDOWS",
+            "TelemetryOs.OTHER",
+        ] {
+            assert!(python.contains(os), "{os}");
+        }
     }
 
     #[test]
