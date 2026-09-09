@@ -88,10 +88,16 @@ distribution model, and expected scale.
 
 Telemetry is a hosted, metered service: opt-in by key, included in commercial
 plans, and priced per accepted event beyond a plan's allotment. The client
-half ships inside the SDK under the same dual license as everything else, so
-a fork may remove or replace it under either license option; the service, the
-dashboards and the reports are Offline Protocol's, and "Offline Protocol
-telemetry" is a name the [trademark policy](../TRADEMARKS.md) protects.
-Nothing in the SDK verifies a license at runtime, under either option: the
-AGPL forbids it, and the commercial license does not need it. What the SDK
-sends, and how to switch it off, is in [docs/telemetry.md](telemetry.md).
+half ships inside the SDK under the same dual license as everything else.
+Under the AGPL option a fork may remove or replace it like any other part of
+the SDK. The commercial license lets you leave it off, switch it off, or never
+supply a key, and asks one thing in return: that the pipe, when it runs, is not
+repointed at another service or reshaped on the wire; the exact term is in
+[LICENSE-COMMERCIAL.md](../LICENSE-COMMERCIAL.md#telemetry-under-the-commercial-license).
+Forwarding the events you receive through the event API to your own systems
+is ordinary use under both options. The service, the dashboards and the
+reports are Offline Protocol's, and "Offline Protocol telemetry" is a name the
+[trademark policy](../TRADEMARKS.md) protects. Nothing in the SDK verifies a
+license at runtime, under either option: the AGPL forbids it, and the
+commercial license does not need it. What the SDK sends, and how to switch it
+off, is in [docs/telemetry.md](telemetry.md).

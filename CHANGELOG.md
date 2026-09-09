@@ -89,6 +89,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   timeouts, and the battery deferral. Each is a named test.
 - The `data` and `telemetry-pipe` cargo features are both on by default; a
   build that wants neither the CRDT engine nor the TLS stack opts out.
+- `LICENSE-COMMERCIAL.md` states the telemetry term every commercial license
+  carries: switching the pipe off or never supplying a key is permitted;
+  repointing it at another service or reshaping what it uploads is not. The
+  AGPL option is unchanged, and the event API is ordinary use under both.
 
 ### Removed
 
