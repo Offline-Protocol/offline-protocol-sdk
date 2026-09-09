@@ -7,6 +7,7 @@
 //! Emit wiring lives in follow-up work; this module ships the types only.
 
 use super::record::TelemetryRecord;
+use crate::events::Event;
 
 /// Sink for structured telemetry records.
 ///
@@ -47,6 +48,20 @@ use super::record::TelemetryRecord;
 pub trait TelemetrySink: Send + Sync {
     /// Dispatches a single telemetry record to the sink.
     fn emit(&self, record: &TelemetryRecord);
+
+    /// Offers a protocol event by reference, before it is scrubbed or
+    /// cloned into a [`TelemetryRecord`].
+    ///
+    /// A sink that returns `true` has consumed the event and the owned,
+    /// scrubbed record is never built; one that returns `false` (the
+    /// default) receives it through [`Self::emit`] as before. The telemetry
+    /// pipe takes this path: it collects ten of the engine's events, reads
+    /// no identifier from any of them, and would otherwise pay a clone of
+    /// every event it drops. A sink that takes this path must do its own
+    /// scrubbing, because the engine's has not run yet.
+    fn try_emit_protocol_event(&self, _event: &Event) -> bool {
+        false
+    }
 }
 
 /// Default sink that discards every record.

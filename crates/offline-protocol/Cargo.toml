@@ -19,12 +19,24 @@ description = "Main protocol engine for the Offline Protocol SDK"
 workspace = true
 
 [features]
-default = ["data"]
+default = ["data", "telemetry-pipe"]
 # Replicated documents. Gates the engine dependency and the store, never the
 # configuration section, the storage categories, or the events: those are
 # inert without the engine and gating them would fork the config surface and
 # the events guard test for no binary saving.
 data = ["dep:offline-protocol-data"]
+# The telemetry pipe: classification, the durable batch queue, and the HTTPS
+# uploader that ships accepted events to the ingest. Gates the only network
+# egress, the only background thread and the only TLS stack in the workspace,
+# so a build that wants none of those (a bench, a bare embedder) opts out with
+# `default-features = false`. Default on for the same reason `data` is: the
+# mobile bindings ship one FFI artifact, and a feature-gated UDL method would
+# be a runtime checksum mismatch rather than a build error.
+telemetry-pipe = ["dep:ureq", "dep:offline-protocol-telemetry-wire"]
+# Test seams: a capturing stand-in for the telemetry pipe's HTTPS client, so
+# a test in another crate can see every upload without a network. Enabled by
+# dev-dependencies only; a shipped binary never carries it.
+test-utils = []
 
 [dependencies]
 offline-protocol-core = { workspace = true }
@@ -44,6 +56,13 @@ offline-protocol-services = { workspace = true }
 # only want messaging opt out with `default-features = false` and pay none of
 # the engine's bytes.
 offline-protocol-data = { workspace = true, optional = true }
+# Optional: the telemetry pipe's wire types and its HTTPS client. `ureq` with
+# exactly the `rustls` feature is rustls + ring + the bundled Mozilla roots and
+# nothing else (no gzip, no proxy support, no charset), which is the smallest
+# TLS stack that still trusts a public CA without consulting the device's
+# store; see docs/telemetry.md for why the device store is not consulted.
+offline-protocol-telemetry-wire = { workspace = true, optional = true }
+ureq = { version = "3.4", default-features = false, features = ["rustls"], optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -61,6 +80,9 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 offline-protocol-leaf = { workspace = true }
+# A local HTTP server for the uploader's status-matrix tests: every status the
+# ingest can answer, plus a server that never answers, without a network.
+tiny_http = "0.12"
 offline-protocol-transport = { workspace = true, features = ["test-utils"] }
 # Forging a leaf that lies about its identity needs raw OpenMLS, which this
 # crate deliberately does not depend on. The fixture lives with the code it

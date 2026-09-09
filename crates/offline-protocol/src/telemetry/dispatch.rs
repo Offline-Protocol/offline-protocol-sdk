@@ -43,6 +43,27 @@ pub(crate) fn dispatch_record(sink: &Arc<dyn TelemetrySink>, record: &TelemetryR
     }
 }
 
+/// Offers `event` to `sink` by reference, isolating any panic the sink
+/// raises. Returns whether the sink consumed it; a panicking sink is treated
+/// as having consumed it, since the record is already lost.
+pub(crate) fn dispatch_protocol_event(
+    sink: &Arc<dyn TelemetrySink>,
+    event: &crate::events::Event,
+) -> bool {
+    match catch_unwind(AssertUnwindSafe(|| sink.try_emit_protocol_event(event))) {
+        Ok(consumed) => consumed,
+        Err(payload) => {
+            let message = panic_message(&*payload);
+            tracing::error!(
+                telemetry_record = event.telemetry_name(),
+                panic = %message,
+                "TelemetrySink panicked; record dropped. Sinks must not panic — see the TelemetrySink docstring.",
+            );
+            true
+        }
+    }
+}
+
 /// Best-effort extraction of a human-readable message from a panic payload.
 ///
 /// Standard library `panic!()` payloads are either `&'static str` or `String`;
