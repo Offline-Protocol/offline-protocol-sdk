@@ -161,7 +161,7 @@ let config = ProtocolConfig(
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| Connection timeout | 60s | Enforced by the native managers, which each hold their own constant. Rust holds none: it opens no socket. |
+| Connection timeout | 60s | Enforced by the native managers, which each hold their own constant. Rust holds none: it opens no transport socket. |
 | Pending confirmation timeout | 120s | Time before treating an unconfirmed send as failed (vs 15s for Internet). Enforced in Rust. |
 | Max frame size | gateway-set | The gateway refuses an oversized frame with a `frame_too_large` verdict, so the limit is the one your gateway is configured with rather than an SDK constant. Rust enforces only the transport-wide `DEFAULT_MAX_MESSAGE_SIZE` on inbound bytes. |
 | Reticulum encrypted MDU | 383 bytes | Single-packet maximum for encrypted data; plain MDU is 465 bytes |

@@ -541,6 +541,61 @@ identity key turns one extraction into every unit's identity, and the address
 that names one device names all of them. See
 [Leaf node provisioning](../spec/leaf-provisioning.md#identity-and-key-storage).
 
+### R13. A telemetry key can be extracted and abused
+
+The telemetry pipe authenticates with a bearer key that lives in the app
+binary. Anyone who extracts it can post accepted events against it, and the
+application is billed for them.
+
+**Why it stands:** the key is the only credential a device can hold, and a
+device is not a trusted party (A6). Signing each batch with the identity key
+would name the device to the ingest, which the telemetry design deliberately
+avoids.
+
+**What bounds it:** the ingest rate-limits per key and a key can be revoked
+from the portal, which is the response to a leaked one. Rotation is a portal
+feature; the SDK carries whatever key the application passes.
+
+### R14. The bundled root set ages with the SDK
+
+The pipe trusts the Mozilla root set compiled into the SDK release, never the
+device's trust store. If the ingest's certificate chain ever moves to a root
+absent from a shipped SDK, that SDK's telemetry stops: a network error,
+backoff, and `last_error` in the stats.
+
+**Why it stands:** consulting the device store would make a proxy certificate
+installed on the device a trusted one, and redirection by a compromised device
+is exactly what the fixed endpoint and bundled roots exist to close.
+
+**What bounds it:** the ingest stays on a mainstream authority, a change of
+authority is treated as an SDK release event, and the failure is loud in the
+stats rather than silent.
+
+## Network egress
+
+Until 0.26 the Rust crates opened no socket: every byte that left a device
+went through a platform bridge the application could see. The telemetry pipe
+is the one exception, and its egress is bounded as follows.
+
+- **One endpoint, fixed at build time.** There is no runtime endpoint
+  setting and no host callback that could repoint the stream. A build for a
+  different ingest says so in its environment, and only `https://` is
+  accepted.
+- **TLS 1.2 or 1.3 through rustls**, with the Mozilla root set compiled in.
+  The device's trust store is not consulted (R14).
+- **What crosses** is the inventory in [docs/telemetry.md](../telemetry.md#what-leaves-the-device):
+  typed projections with no identifier field, the engine's own fixed reason
+  tokens, and two aggregates computed on the device. Message content,
+  addresses, group ids, usernames and message ids have no field to land in;
+  the golden fixture pins the bytes.
+- **When it crosses** is a bounded set of wakes on one background thread,
+  never the caller's, and never while the engine holds a lock.
+- **Off means off.** Nothing leaves the device before `enable_telemetry` or
+  after `disable_telemetry`; `set_telemetry_enabled(false)` stops collection
+  at the emit site.
+
+The key that authenticates the stream is R13.
+
 ## The telemetry producer rule
 
 Telemetry ships some string fields verbatim by design. The scrubber hashes

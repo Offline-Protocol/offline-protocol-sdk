@@ -11,6 +11,101 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+> **The SDK ships its own telemetry.** Until now the SDK handed every telemetry
+> record to application code through a sink callback, and a separate React
+> Native package classified, batched and uploaded them. That package was never
+> published, Python and native hosts had no upload path at all, and every
+> record crossed the bridge twice. The whole pipeline now lives in the core:
+> `enableTelemetry({apiKey, appId, appVersion})` and the SDK collects, folds,
+> queues and uploads accepted events to the ingest on its own background
+> thread. Nothing reaches JavaScript per event, the emit path does less work
+> than the 0.25 sink path, and a device with telemetry off pays what it paid
+> before. **Breaking on every binding:** the sink API is gone and
+> `TelemetryConfig` is reshaped; [§20](docs/UPGRADING.md#20-the-sdk-uploads-its-own-telemetry-v0260)
+> is the migration table.
+>
+> **The Rust crates now open one socket.** The README's "never open a socket"
+> claim held until this release; it is now true of the protocol and false of
+> the telemetry pipe, which posts to one endpoint fixed at build time over TLS
+> with a bundled root set. The threat model gains a network-egress section and
+> two residual risks for it.
+
+### Added
+
+- **`enableTelemetry` / `enable_telemetry` on every binding.** Takes the API key
+  and app id the developer portal issued; the binding fills in the platform
+  and owns the application lifecycle, so there is no per-event or per-lifecycle
+  call for the app to make. `disableTelemetry`, `flushTelemetry`,
+  `telemetryStats`, `endTelemetrySession` and `setTelemetryEnabled` complete
+  the surface; the Rust and Python surfaces add `notify_app_state` for hosts
+  with a lifecycle of their own. `telemetryStats` reports `sentEvents` and
+  `acceptedEvents` separately, the latter being what the service meters, so an
+  invoice can be reconciled against the device.
+- **The pipe itself** (`offline_protocol::telemetry::pipe`): classification by
+  name with no allocation for the sixty-odd events it drops, the 60 s metrics
+  rollup, the session summary with delta counters, a session-stamped ring
+  buffer, a durable batch queue on the protocol-state storage seam (sealed
+  records, one per batch, bounded at 64 batches and 4 MiB), and an HTTPS
+  uploader with idempotent retry: 1 s doubling to 15 min with jitter,
+  `Retry-After` honoured, a six-day expiry inside the ingest's deduplication
+  window, a halt on 401 and 403, deferral below 15% battery unless charging,
+  and one final flush of up to three seconds on disable, background and end
+  of session. The transport-availability edge the tick already computes wakes
+  it when the internet or Nostr transport comes back.
+- **`offline-protocol-telemetry-wire`**, a new crate holding the batch envelope
+  and typed event payloads shared with the ingest, with the canonical wire
+  fixture pinned byte for byte and a second fixture pinning the additive raw
+  `reason` field.
+- **A golden test against the frozen TypeScript client**: the same scenario
+  replayed through both, compared batch by batch, with the two documented
+  divergences (raw `reason`, the SDK version) normalized.
+- **A debug tap.** `debug: true` logs every wire event on the platform log
+  (logcat, the unified log) or stderr, which needed a place for the core's
+  `tracing` output to go on a device; the uniffi crate now installs one.
+- **An Apple privacy manifest** shipped with the pod, and
+  [docs/privacy.md](docs/privacy.md) with the store disclosures.
+- `ProtocolError.TelemetryConfigInvalid`, appended at position 24, naming the
+  refused field.
+
+### Changed
+
+- **`TelemetryConfig` is reshaped** on every binding: `apiKey` and `appId` are
+  required, `appVersion`, `debug`, `flushIntervalMs`, `maxBatchBytes`,
+  `maxBufferedRecords` and `includeDeviceId` are new, `enablePollQueue` is
+  gone, and the five earlier knobs keep their names and defaults.
+- **`reason` goes up raw.** The earlier client classified the engine's failure
+  reasons into a fixed family on the device; the pipe sends the engine's own
+  token or literal and the classification happens on the ingest. Every reason
+  the engine produces is locally chosen, per the threat model's producer rule.
+- **`scrubIds` is moot for the pipe.** The engine still scrubs identifiers for
+  the free event API; the pipe never reads one, so the option is accepted for
+  compatibility and has no effect on what is uploaded.
+- **Where the mesh-analytics package differed from the task, the task won:**
+  a 15 min backoff cap rather than 5, a 413 dropped rather than split, a halt
+  on 401 and 403 rather than a drop-and-continue, `Retry-After` honoured,
+  `Idempotency-Key` and `User-Agent` sent, 15 s request and 10 s connect
+  timeouts, and the battery deferral. Each is a named test.
+- The `data` and `telemetry-pipe` cargo features are both on by default; a
+  build that wants neither the CRDT engine nor the TLS stack opts out.
+
+### Removed
+
+- **The telemetry sink surface**: `installTelemetrySink`, `onTelemetry`,
+  `pollTelemetry`, `uninstallTelemetrySink` and the `TelemetryRecord`,
+  `TelemetryListener`, `MetricsFrame`, `TransportStateTelemetryEvent`,
+  `RoutingDecision`, `DeviceCapabilitySnapshot`, `TransportMetricsEntry`,
+  `RetryQueueStatsFrame`, `DeduplicatorStatsFrame`, `RoutingScoreEntry`,
+  `RoutingPhase`, `RoutingReasonCode`, `TransportStatus` and `RelayRole`
+  TypeScript types; the UDL `TelemetrySink` callback interface and the
+  dictionaries and enums that existed only to type it; the Python
+  `install_telemetry_sink`, `uninstall_telemetry_sink` and
+  `poll_telemetry_frame` methods. The Rust `install_telemetry_sink` is
+  crate-private. The free event API (`onEvent`, `on_event`) is unchanged and
+  stays per-event and unaggregated by design; the rollup and session summary
+  exist only inside the pipe, and a test pins that neither is ever an event.
+
 ## [0.25.0] — 2026-09-08
 
 > **A device on Reticulum could never receive anything. It can now.** Both
