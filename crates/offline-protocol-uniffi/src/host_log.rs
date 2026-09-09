@@ -137,6 +137,17 @@ impl Log for StderrLogger {
 mod tests {
     use super::*;
 
+    /// `PIPE_DEBUG` is process-global and the harness runs these in
+    /// parallel, so the tests that move it take this first. Without it one
+    /// test turns the tap on while another is asserting it is off, which
+    /// fails or passes purely on thread scheduling: it survived Linux and
+    /// macOS and went red on Windows.
+    static PIPE_DEBUG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn serialized() -> std::sync::MutexGuard<'static, ()> {
+        PIPE_DEBUG_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// A sink that accepts everything, so what these tests measure is
     /// [`HostLogger::enabled`] and nothing beneath it.
     struct Silent;
@@ -154,6 +165,7 @@ mod tests {
     /// peers — into logcat lines that no application setting can stop.
     #[test]
     fn nothing_outside_the_pipes_target_ever_reaches_the_host_log() {
+        let _serial = serialized();
         let logger = HostLogger {
             inner: Box::new(Silent),
         };
@@ -188,6 +200,7 @@ mod tests {
     /// see, and it fires whether or not `debug` was asked for.
     #[test]
     fn the_pipes_own_warnings_pass_without_the_tap() {
+        let _serial = serialized();
         let logger = HostLogger {
             inner: Box::new(Silent),
         };
@@ -203,6 +216,7 @@ mod tests {
 
     #[test]
     fn the_pipe_target_is_debug_only_while_a_pipe_asks_for_it() {
+        let _serial = serialized();
         let logger = HostLogger {
             inner: Box::new(Silent),
         };
