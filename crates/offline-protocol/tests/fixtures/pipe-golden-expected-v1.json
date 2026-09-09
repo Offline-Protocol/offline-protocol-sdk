@@ -1,0 +1,503 @@
+{
+  "batches": [
+    {
+      "batch_id": "batch-1",
+      "session_id": "session-1",
+      "app_version": "1.4.2",
+      "os": "ios",
+      "os_major": 18,
+      "sdk_version": "<sdk>",
+      "wire_version": 1,
+      "events": [
+        {
+          "type": "protocol.transport.state_changed",
+          "ts_ms": 1747000021000,
+          "data": {
+            "transport": "ble",
+            "previous": "disconnected",
+            "current": "available"
+          }
+        },
+        {
+          "type": "protocol.device.capability_changed",
+          "ts_ms": 1747000021000,
+          "data": {
+            "battery_level": 80,
+            "is_charging": false,
+            "relay_role": "regular",
+            "changed_fields": 7
+          }
+        },
+        {
+          "type": "protocol.routing.decision",
+          "ts_ms": 1747000022000,
+          "data": {
+            "phase": "selected",
+            "to": "ble",
+            "winning_score": 84.5,
+            "reason_code": "initial_selection"
+          }
+        },
+        {
+          "type": "protocol.message.delivered",
+          "ts_ms": 1747000027000,
+          "data": {
+            "latency_ms": 240,
+            "hop_count": 1,
+            "transport": "ble"
+          }
+        },
+        {
+          "type": "protocol.message.delivered",
+          "ts_ms": 1747000032000,
+          "data": {
+            "latency_ms": 310,
+            "hop_count": 2,
+            "transport": "ble"
+          }
+        }
+      ]
+    },
+    {
+      "batch_id": "batch-2",
+      "session_id": "session-1",
+      "app_version": "1.4.2",
+      "os": "ios",
+      "os_major": 18,
+      "sdk_version": "<sdk>",
+      "wire_version": 1,
+      "events": [
+        {
+          "type": "protocol.message.delivered",
+          "ts_ms": 1747000053000,
+          "data": {
+            "latency_ms": 180,
+            "hop_count": 1,
+            "transport": "wifi_direct"
+          }
+        },
+        {
+          "type": "protocol.message.failed",
+          "ts_ms": 1747000060000,
+          "data": {
+            "reason_class": "retries_exhausted",
+            "retry_count": 5
+          }
+        },
+        {
+          "type": "protocol.transport.state_changed",
+          "ts_ms": 1747000064000,
+          "data": {
+            "transport": "wifi_direct",
+            "previous": "unavailable",
+            "current": "available"
+          }
+        },
+        {
+          "type": "protocol.routing.decision",
+          "ts_ms": 1747000065000,
+          "data": {
+            "phase": "escalated",
+            "from": "ble",
+            "to": "wifi_direct",
+            "reason_code": "poor_signal"
+          }
+        },
+        {
+          "type": "protocol.routing.decision",
+          "ts_ms": 1747000066000,
+          "data": {
+            "phase": "switched",
+            "from": "ble",
+            "to": "wifi_direct",
+            "winning_score": 72.25,
+            "reason_code": "escalation_applied"
+          }
+        },
+        {
+          "type": "protocol.routing.decision",
+          "ts_ms": 1747000067000,
+          "data": {
+            "phase": "escalated",
+            "from": "ble",
+            "to": "wifi_direct",
+            "reason_code": "fallback_success"
+          }
+        },
+        {
+          "type": "protocol.message.relayed",
+          "ts_ms": 1747000070000,
+          "data": {
+            "hop_count": 2,
+            "remaining_ttl": 6
+          }
+        },
+        {
+          "type": "mesh_metrics_rollup",
+          "ts_ms": 1747000020000,
+          "data": {
+            "bucket_start_ms": 1747000020000,
+            "bucket_duration_s": 60,
+            "neighbor_count_avg": 2.75,
+            "neighbor_count_max": 5,
+            "neighbor_count_p50": 3,
+            "ack_pending_avg": 1,
+            "ack_pending_max": 2,
+            "retry_queue_total_avg": 1.5,
+            "retry_queue_total_max": 3,
+            "retry_queue_critical_count_max": 1,
+            "transport_time_ms": {
+              "ble": 60000,
+              "wifi_direct": 0,
+              "internet": 0,
+              "none": 0
+            },
+            "is_local_relay_duration_s": 0,
+            "current_transport_at_bucket_end": "ble",
+            "sends_attempted_sum": 4,
+            "sends_succeeded_sum": 3,
+            "sends_failed_sum": 1,
+            "bytes_sent_sum": 0,
+            "bytes_received_sum": 0
+          }
+        },
+        {
+          "type": "protocol.message.delivered",
+          "ts_ms": 1747000081000,
+          "data": {
+            "latency_ms": 90,
+            "hop_count": 1,
+            "transport": "wifi_direct"
+          }
+        },
+        {
+          "type": "mls.decryption_failed",
+          "ts_ms": 1747000095000,
+          "data": {
+            "failure_kind": "invalid_ciphertext",
+            "context": "receive"
+          }
+        },
+        {
+          "type": "mls.session_missing",
+          "ts_ms": 1747000096000,
+          "data": {
+            "context": "send"
+          }
+        },
+        {
+          "type": "protocol.relay.promoted",
+          "ts_ms": 1747000100000,
+          "data": {
+            "connection_count": 3,
+            "battery_level": 77
+          }
+        },
+        {
+          "type": "protocol.message.delivered",
+          "ts_ms": 1747000110000,
+          "data": {
+            "latency_ms": 400,
+            "hop_count": 3,
+            "transport": "ble"
+          }
+        }
+      ]
+    },
+    {
+      "batch_id": "batch-3",
+      "session_id": "session-1",
+      "app_version": "1.4.2",
+      "os": "ios",
+      "os_major": 18,
+      "sdk_version": "<sdk>",
+      "wire_version": 1,
+      "events": [
+        {
+          "type": "protocol.message.deferred",
+          "ts_ms": 1747000120000,
+          "data": {
+            "reason_class": "peer_unreachable",
+            "retry_count": 1
+          }
+        },
+        {
+          "type": "protocol.transport.state_changed",
+          "ts_ms": 1747000128000,
+          "data": {
+            "transport": "internet",
+            "previous": "disconnected",
+            "current": "available"
+          }
+        },
+        {
+          "type": "protocol.routing.decision",
+          "ts_ms": 1747000130000,
+          "data": {
+            "phase": "switched",
+            "from": "wifi_direct",
+            "to": "internet",
+            "winning_score": 91,
+            "reason_code": "primary_success"
+          }
+        },
+        {
+          "type": "mesh_metrics_rollup",
+          "ts_ms": 1747000080000,
+          "data": {
+            "bucket_start_ms": 1747000080000,
+            "bucket_duration_s": 60,
+            "neighbor_count_avg": 3.0833333333333335,
+            "neighbor_count_max": 5,
+            "neighbor_count_p50": 3,
+            "ack_pending_avg": 1,
+            "ack_pending_max": 2,
+            "retry_queue_total_avg": 1.5,
+            "retry_queue_total_max": 3,
+            "retry_queue_critical_count_max": 1,
+            "transport_time_ms": {
+              "ble": 20000,
+              "wifi_direct": 40000,
+              "internet": 0,
+              "none": 0
+            },
+            "is_local_relay_duration_s": 40,
+            "current_transport_at_bucket_end": "wifi_direct",
+            "sends_attempted_sum": 3,
+            "sends_succeeded_sum": 2,
+            "sends_failed_sum": 0,
+            "bytes_sent_sum": 0,
+            "bytes_received_sum": 0
+          }
+        },
+        {
+          "type": "protocol.message.delivered",
+          "ts_ms": 1747000142000,
+          "data": {
+            "latency_ms": 75,
+            "hop_count": 1,
+            "transport": "internet"
+          }
+        },
+        {
+          "type": "protocol.relay.demoted",
+          "ts_ms": 1747000160000,
+          "data": {
+            "reason_class": "relay_idle"
+          }
+        },
+        {
+          "type": "protocol.message.delivered",
+          "ts_ms": 1747000170000,
+          "data": {
+            "latency_ms": 220,
+            "hop_count": 2,
+            "transport": "ble"
+          }
+        },
+        {
+          "type": "protocol.routing.decision",
+          "ts_ms": 1747000180000,
+          "data": {
+            "phase": "escalated",
+            "from": "internet",
+            "to": "ble",
+            "reason_code": "retry_threshold"
+          }
+        },
+        {
+          "type": "protocol.routing.decision",
+          "ts_ms": 1747000185000,
+          "data": {
+            "phase": "score_updated",
+            "winning_score": 66.5
+          }
+        },
+        {
+          "type": "protocol.relay.demoted_battery",
+          "ts_ms": 1747000190000,
+          "data": {
+            "battery_level": 12,
+            "min_required": 20
+          }
+        },
+        {
+          "type": "protocol.device.capability_changed",
+          "ts_ms": 1747000190000,
+          "data": {
+            "battery_level": 12,
+            "is_charging": false,
+            "relay_role": "regular",
+            "changed_fields": 1
+          }
+        }
+      ]
+    },
+    {
+      "batch_id": "batch-4",
+      "session_id": "session-1",
+      "app_version": "1.4.2",
+      "os": "ios",
+      "os_major": 18,
+      "sdk_version": "<sdk>",
+      "wire_version": 1,
+      "events": [
+        {
+          "type": "mesh_metrics_rollup",
+          "ts_ms": 1747000140000,
+          "data": {
+            "bucket_start_ms": 1747000140000,
+            "bucket_duration_s": 55,
+            "neighbor_count_avg": 3,
+            "neighbor_count_max": 5,
+            "neighbor_count_p50": 3,
+            "ack_pending_avg": 1,
+            "ack_pending_max": 2,
+            "retry_queue_total_avg": 1.5,
+            "retry_queue_total_max": 3,
+            "retry_queue_critical_count_max": 1,
+            "transport_time_ms": {
+              "ble": 0,
+              "wifi_direct": 0,
+              "internet": 40000,
+              "none": 15000
+            },
+            "is_local_relay_duration_s": 0,
+            "current_transport_at_bucket_end": "none",
+            "sends_attempted_sum": 2,
+            "sends_succeeded_sum": 2,
+            "sends_failed_sum": 0,
+            "bytes_sent_sum": 0,
+            "bytes_received_sum": 0
+          }
+        },
+        {
+          "type": "mesh_session_summary",
+          "ts_ms": 1747000225000,
+          "data": {
+            "session_duration_s": 205,
+            "routing_switches": 2,
+            "routing_escalations": 2,
+            "escalation_reasons": {
+              "poor_signal": 1,
+              "low_success_rate": 0,
+              "retry_threshold": 1,
+              "congestion": 0,
+              "low_ttl": 0,
+              "current_unavailable": 0
+            },
+            "mls_session_ready_latency_p50_ms": 150,
+            "mls_encryption_used_count": 4
+          }
+        }
+      ]
+    },
+    {
+      "batch_id": "batch-5",
+      "session_id": "session-1",
+      "app_version": "1.4.2",
+      "os": "ios",
+      "os_major": 18,
+      "sdk_version": "<sdk>",
+      "wire_version": 1,
+      "events": [
+        {
+          "type": "protocol.routing.decision",
+          "ts_ms": 1747000235000,
+          "data": {
+            "phase": "switched",
+            "from": "internet",
+            "to": "ble",
+            "winning_score": 60,
+            "reason_code": "current_unavailable"
+          }
+        },
+        {
+          "type": "mesh_session_summary",
+          "ts_ms": 1747000280000,
+          "data": {
+            "session_duration_s": 260,
+            "routing_switches": 1,
+            "routing_escalations": 0,
+            "escalation_reasons": {
+              "poor_signal": 0,
+              "low_success_rate": 0,
+              "retry_threshold": 0,
+              "congestion": 0,
+              "low_ttl": 0,
+              "current_unavailable": 0
+            },
+            "mls_encryption_used_count": 1
+          }
+        }
+      ]
+    },
+    {
+      "batch_id": "batch-6",
+      "session_id": "session-2",
+      "app_version": "1.4.2",
+      "os": "ios",
+      "os_major": 18,
+      "sdk_version": "<sdk>",
+      "wire_version": 1,
+      "events": [
+        {
+          "type": "protocol.message.delivered",
+          "ts_ms": 1747000287000,
+          "data": {
+            "latency_ms": 130,
+            "hop_count": 1,
+            "transport": "ble"
+          }
+        },
+        {
+          "type": "mesh_metrics_rollup",
+          "ts_ms": 1747000260000,
+          "data": {
+            "bucket_start_ms": 1747000260000,
+            "bucket_duration_s": 40,
+            "neighbor_count_avg": 3.5,
+            "neighbor_count_max": 5,
+            "neighbor_count_p50": 4,
+            "ack_pending_avg": 0.75,
+            "ack_pending_max": 2,
+            "retry_queue_total_avg": 1.5,
+            "retry_queue_total_max": 3,
+            "retry_queue_critical_count_max": 0,
+            "transport_time_ms": {
+              "ble": 0,
+              "wifi_direct": 0,
+              "internet": 0,
+              "none": 15000
+            },
+            "is_local_relay_duration_s": 0,
+            "current_transport_at_bucket_end": "none",
+            "sends_attempted_sum": 1,
+            "sends_succeeded_sum": 1,
+            "sends_failed_sum": 0,
+            "bytes_sent_sum": 0,
+            "bytes_received_sum": 0
+          }
+        },
+        {
+          "type": "mesh_session_summary",
+          "ts_ms": 1747000320000,
+          "data": {
+            "session_duration_s": 40,
+            "routing_switches": 0,
+            "routing_escalations": 0,
+            "escalation_reasons": {
+              "poor_signal": 0,
+              "low_success_rate": 0,
+              "retry_threshold": 0,
+              "congestion": 0,
+              "low_ttl": 0,
+              "current_unavailable": 0
+            },
+            "mls_encryption_used_count": 0
+          }
+        }
+      ]
+    }
+  ]
+}

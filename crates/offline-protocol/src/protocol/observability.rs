@@ -107,11 +107,12 @@ impl OfflineProtocol {
         // Legacy emitter consumes a value-typed event (its existing
         // signature), so we clone when a sink is also installed. The clone
         // is cheap — `MlsLifecycleEvent` is small and lives on the stack.
-        if let Some(ctx) = &self.telemetry {
-            self.mls_event_emitter.emit(event.clone());
-            dispatch_record(&ctx.sink, &TelemetryRecord::Mls(event));
-        } else {
-            self.mls_event_emitter.emit(event);
+        match &self.telemetry {
+            Some(ctx) if ctx.enabled() => {
+                self.mls_event_emitter.emit(event.clone());
+                dispatch_record(&ctx.sink, &TelemetryRecord::Mls(event));
+            }
+            _ => self.mls_event_emitter.emit(event),
         }
     }
 

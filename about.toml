@@ -17,6 +17,9 @@ accepted = [
     # the notices file lists it anyway, because listing costs nothing and a
     # missing entry is the expensive direction.
     "BSL-1.0",
+    # CDLA-Permissive-2.0 arrives with `webpki-roots`, the CA bundle the
+    # telemetry pipe trusts; a permissive data license, attribution only.
+    "CDLA-Permissive-2.0",
 ]
 
 # Attribution covers what we redistribute: the compiled cdylib/staticlib

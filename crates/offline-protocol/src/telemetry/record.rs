@@ -76,7 +76,7 @@ impl TelemetryRecord {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::events::{
         DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode, PresenceSource,
@@ -105,7 +105,7 @@ mod tests {
     ///    (`impl_telemetry_names_match_catalogue`).
     /// 4. Every name conforms to the documented `snake.dot.case` grammar
     ///    (`all_telemetry_names_match_grammar`).
-    const ALL_TELEMETRY_NAMES: &[&str] = &[
+    pub(crate) const ALL_TELEMETRY_NAMES: &[&str] = &[
         // Event::*
         "protocol.message.sent",
         "protocol.message.received",
@@ -385,7 +385,7 @@ mod tests {
     /// Constructs one exemplar per [`Event`] variant, in the same order as
     /// the match arms of [`Event::telemetry_name`]. Field values are
     /// placeholders — the tests only read the telemetry name.
-    fn event_exemplars() -> Vec<Event> {
+    pub(crate) fn event_exemplars() -> Vec<Event> {
         vec![
             Event::MessageSent {
                 message_id: String::new(),

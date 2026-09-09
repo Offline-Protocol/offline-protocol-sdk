@@ -77,6 +77,8 @@ pub use mls_observability::{
     DecryptionFailureKind, MlsErrorCategory, MlsEventEmitter, MlsLifecycleEvent,
     MlsOperationContext, NoopMlsEventEmitter,
 };
+#[cfg(feature = "telemetry-pipe")]
+pub use telemetry::{AppState, TelemetryHost, TelemetryOs, TelemetryPipe, TelemetryStats};
 pub use telemetry::{
     DeviceCapabilitySnapshot, MetricsFrame, MlsVerbosity, NoopTelemetrySink, RoutingDecision,
     RoutingPhase, RoutingReasonCode, TelemetryConfig, TelemetryRecord, TelemetrySink,

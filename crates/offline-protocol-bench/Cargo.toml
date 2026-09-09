@@ -49,7 +49,9 @@ offline-protocol-core = { workspace = true }
 offline-protocol-transport = { workspace = true }
 offline-protocol-router = { workspace = true }
 offline-protocol-reliability = { workspace = true }
-offline-protocol = { workspace = true }
+# `test-utils` routes the telemetry pipe's uploads into a capturing client,
+# so the emission bench measures the pipe without a network or a key.
+offline-protocol = { workspace = true, features = ["test-utils"] }
 serde_json = { workspace = true }
 
 [dev-dependencies]

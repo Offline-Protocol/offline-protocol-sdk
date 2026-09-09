@@ -14,9 +14,11 @@ use std::sync::Arc;
 use criterion::{criterion_group, criterion_main, Criterion};
 use offline_protocol::telemetry::device::{DeviceCapabilitySnapshot, CHANGED_BATTERY};
 use offline_protocol::telemetry::metrics_snapshot::MetricsFrame;
+use offline_protocol::telemetry::pipe::testing::start_pipe_for_bench;
+use offline_protocol::telemetry::pipe::{TelemetryHost, TelemetryOs};
 use offline_protocol::telemetry::routing::{RoutingDecision, RoutingPhase, RoutingReasonCode};
 use offline_protocol::telemetry::transport_state::TransportStateEvent;
-use offline_protocol::{NoopTelemetrySink, TelemetryRecord, TelemetrySink};
+use offline_protocol::{Event, NoopTelemetrySink, TelemetryConfig, TelemetryRecord, TelemetrySink};
 use offline_protocol_reliability::{DeduplicatorMode, DeduplicatorStats, RetryQueueStats};
 use offline_protocol_router::RelayRole;
 use offline_protocol_transport::{TransportStatus, TransportType};
@@ -162,6 +164,71 @@ fn bench_emit_noop_sink_diagnostic(c: &mut Criterion) {
     });
 }
 
+/// The same records through the telemetry pipe's sink, plus the two
+/// protocol-event cases the pipe classifies by name: one it drops (the
+/// common case, sixty-odd of the engine's events) and one it forwards. The
+/// budgets from the plan: a dropped protocol event under 2 us, a forwarded
+/// one under 5 us, and every typed record within 1.5x the no-op sink.
+fn bench_emit_pipe_sink(c: &mut Criterion) {
+    let config = TelemetryConfig::default()
+        .with_api_key("mp_bench")
+        .with_app_id("app_bench")
+        // Long enough that no flush happens inside a measurement.
+        .with_flush_interval(std::time::Duration::from_secs(3_600));
+    let (pipe, sink) = start_pipe_for_bench(&config, TelemetryHost::new(TelemetryOs::Linux, 0));
+    let mut group = c.benchmark_group("telemetry_emit_pipe");
+
+    group.bench_function("metrics_snapshot", |b| {
+        b.iter(|| {
+            let record = TelemetryRecord::MetricsSnapshot(Box::new(sample_metrics_frame()));
+            sink.emit(black_box(&record));
+        });
+    });
+    group.bench_function("transport_state", |b| {
+        b.iter(|| {
+            let record = TelemetryRecord::TransportState(sample_transport_state());
+            sink.emit(black_box(&record));
+        });
+    });
+    group.bench_function("routing_decision_lifecycle", |b| {
+        b.iter(|| {
+            let record = TelemetryRecord::Routing(Box::new(sample_routing_decision()));
+            sink.emit(black_box(&record));
+        });
+    });
+    group.bench_function("device_snapshot", |b| {
+        b.iter(|| {
+            let record = TelemetryRecord::Device(sample_device_snapshot());
+            sink.emit(black_box(&record));
+        });
+    });
+
+    let dropped = Event::NetworkMetrics {
+        neighbor_count: 3,
+        relay_count: 1,
+        delivery_ratio: 0.9,
+        avg_latency_ms: 40,
+    };
+    group.bench_function("protocol_dropped", |b| {
+        b.iter(|| {
+            black_box(sink.try_emit_protocol_event(black_box(&dropped)));
+        });
+    });
+    let forwarded = Event::MessageDelivered {
+        message_id: "m".into(),
+        latency_ms: 240,
+        hop_count: 1,
+        transport: "ble".into(),
+    };
+    group.bench_function("protocol_forwarded", |b| {
+        b.iter(|| {
+            black_box(sink.try_emit_protocol_event(black_box(&forwarded)));
+        });
+    });
+    group.finish();
+    pipe.stop(std::time::Duration::from_secs(1));
+}
+
 fn bench_build_metrics_frame(c: &mut Criterion) {
     // Construction cost alone — isolates the cost of building the frame
     // from the emission cost above. This is what the `process()` tick
@@ -178,6 +245,7 @@ criterion_group!(
     benches,
     bench_emit_noop_sink,
     bench_emit_noop_sink_diagnostic,
+    bench_emit_pipe_sink,
     bench_build_metrics_frame,
 );
 criterion_main!(benches);

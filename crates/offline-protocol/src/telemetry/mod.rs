@@ -12,6 +12,8 @@ pub(crate) mod context;
 pub mod device;
 pub(crate) mod dispatch;
 pub mod metrics_snapshot;
+#[cfg(feature = "telemetry-pipe")]
+pub mod pipe;
 pub mod record;
 pub mod routing;
 pub mod sampling;
@@ -23,8 +25,10 @@ pub mod transport_state;
 pub use config::{MlsVerbosity, TelemetryConfig};
 pub(crate) use context::TelemetryContext;
 pub use device::{DeviceCapabilitySnapshot, CHANGED_BATTERY, CHANGED_CHARGING, CHANGED_RELAY_ROLE};
-pub(crate) use dispatch::dispatch_record;
+pub(crate) use dispatch::{dispatch_protocol_event, dispatch_record};
 pub use metrics_snapshot::MetricsFrame;
+#[cfg(feature = "telemetry-pipe")]
+pub use pipe::{AppState, TelemetryHost, TelemetryOs, TelemetryPipe, TelemetryStats};
 pub use record::TelemetryRecord;
 pub use routing::{RoutingDecision, RoutingPhase, RoutingReasonCode};
 pub use sampling::CategorySampler;
