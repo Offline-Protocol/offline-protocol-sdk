@@ -10,6 +10,7 @@ members = [
     "crates/offline-protocol-mls",
     "crates/offline-protocol-services",
     "crates/offline-protocol-data",
+    "crates/offline-protocol-telemetry-wire",
     "crates/offline-protocol",
     "crates/offline-protocol-uniffi",
     "crates/offline-protocol-bench",
@@ -133,7 +134,7 @@ chacha20poly1305 = "0.10"
 #   "all dependencies must have a version requirement specified when packaging"
 # Keep these in lockstep with `workspace.package.version` above — a crate can
 # only be published once its dependencies exist on the registry at the named
-# version, so all ten move together.
+# version, so all eleven move together.
 offline-protocol-core = { path = "crates/offline-protocol-core", version = "0.25.0" }
 offline-protocol-sealed = { path = "crates/offline-protocol-sealed", version = "0.25.0" }
 offline-protocol-leaf = { path = "crates/offline-protocol-leaf", version = "0.25.0" }
@@ -143,6 +144,7 @@ offline-protocol-reliability = { path = "crates/offline-protocol-reliability", v
 offline-protocol-mls = { path = "crates/offline-protocol-mls", version = "0.25.0" }
 offline-protocol-services = { path = "crates/offline-protocol-services", version = "0.25.0" }
 offline-protocol-data = { path = "crates/offline-protocol-data", version = "0.25.0" }
+offline-protocol-telemetry-wire = { path = "crates/offline-protocol-telemetry-wire", version = "0.25.0" }
 offline-protocol = { path = "crates/offline-protocol", version = "0.25.0" }
 
 [workspace.lints.clippy]
