@@ -17,6 +17,8 @@
 	<array/>
 	<key>NSPrivacyAccessedAPITypes</key>
 	<array>
+		<!-- CA92.1: BleManager's restoration store, which keeps the peripheral
+		     sighting timestamps the age-out policy reads. App-internal only. -->
 		<dict>
 			<key>NSPrivacyAccessedAPIType</key>
 			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
@@ -25,6 +27,11 @@
 				<string>CA92.1</string>
 			</array>
 		</dict>
+		<!-- C617.1: ProtocolStateStorage calls FileManager.attributesOfItem
+		     on files inside the app container, to read their size. That
+		     selector is on Apple's file-timestamp list whichever attribute is
+		     read, so the declaration is required even though no timestamp is
+		     used. Do not remove it without removing that call. -->
 		<dict>
 			<key>NSPrivacyAccessedAPIType</key>
 			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>

@@ -34,6 +34,7 @@ silently undo it. Decisions that follow from the obvious default do not need one
 | [0021](0021-a-leaf-node-speaks-mls.md) | A leaf node speaks MLS, through a second implementation | Accepted |
 | [0022](0022-one-sealed-layer-shared-with-the-leaf.md) | One sealed layer, shared with the leaf | Accepted |
 | [0023](0023-a-control-frame-states-when-it-was-made.md) | A control frame states when it was made | Accepted |
+| [0024](0024-the-sdk-ships-its-own-tls-stack.md) | The SDK ships its own TLS stack for telemetry | Accepted |
 
 ## Format
 

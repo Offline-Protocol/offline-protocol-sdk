@@ -3040,6 +3040,13 @@ impl OfflineProtocol {
         if let Some(previous) = previous {
             previous.stop(offline_protocol::telemetry::pipe::FINAL_FLUSH_BUDGET);
         }
+        // Cleared before the fallible call rather than overwritten after it.
+        // The previous pipe is detached and stopped by this point, so a
+        // failure below would otherwise leave this handle pointing at a dead
+        // one: `telemetryStats` would report a stopped pipe's counters as
+        // live, and `notifyAppState` would push into a pipeline with no
+        // worker draining it.
+        *recover_rwlock_write(&self.telemetry_pipe, "telemetry_pipe") = None;
         let pipe = {
             let mut protocol = self.lock_inner()?;
             protocol
@@ -9721,8 +9728,22 @@ mod tests {
             .enable_telemetry(telemetry_config(), AppState::Active)
             .expect("enables");
         protocol.set_telemetry_enabled(false);
-        // A background transition with collection off still closes the
-        // session: the boundary is a fact about the app, not an event.
+        // Off is off, through the lifecycle calls too. A session summary is
+        // a row the ingest stores and bills, so emitting one per background
+        // for a user who switched telemetry off would break exactly the
+        // promise this switch makes. The edge is still tracked, which is why
+        // the foreground below rotates.
+        protocol.notify_app_state(AppState::Background);
+        protocol.end_telemetry_session();
+        assert!(protocol.flush_telemetry_blocking(5_000));
+        assert!(
+            client.uploads().is_empty(),
+            "collection is off: nothing may leave the device"
+        );
+
+        // Back on, the boundary reports as usual.
+        protocol.set_telemetry_enabled(true);
+        protocol.notify_app_state(AppState::Active);
         protocol.notify_app_state(AppState::Background);
         assert!(protocol.flush_telemetry_blocking(5_000));
         assert!(!client.uploads().is_empty());
@@ -9864,12 +9885,82 @@ mod tests {
             .split_once("private fun installProcessLifecycleWatcher()")
             .expect("process lifecycle watcher")
             .1;
-        assert!(watcher.contains("notifyAppState(AppState.BACKGROUND)"));
-        assert!(watcher.contains("notifyAppState(AppState.ACTIVE)"));
+        assert!(watcher.contains("notifyAppStateQuietly(AppState.BACKGROUND)"));
+        assert!(watcher.contains("notifyAppStateQuietly(AppState.ACTIVE)"));
         assert!(
             watcher.contains("!activity.isChangingConfigurations"),
             "a rotation stops and restarts the activity without the app going \
              anywhere; it must not close a telemetry session"
+        );
+        // Started activities are tracked by identity, not counted. React
+        // Native builds its native modules around the host activity's
+        // `onCreate`, so a counter can start at zero with an activity already
+        // visible; the first stop is then unmatched, and with a second
+        // in-process activity (a sign-in hub, an image picker) the sequence
+        // start B, stop A takes it to zero and fires a background edge with
+        // the app on screen.
+        assert!(
+            watcher.contains("startedActivities.add(activity)")
+                && watcher.contains("startedActivities.remove(activity)")
+                && watcher.contains("startedActivities.isEmpty()"),
+            "the background edge must be \"no activity is started\", by identity"
+        );
+        assert!(
+            watcher.contains("override fun onActivityDestroyed(activity: Activity) {\n                // An activity destroyed"),
+            "an activity destroyed without a stop must leave the set, or it \
+             holds the background edge off forever"
+        );
+        // The wiring, not just the bodies. Every assertion above passes on a
+        // watcher that is never registered or never removed.
+        let init = kotlin
+            .split_once("\n    init {")
+            .expect("init block")
+            .1
+            .split_once("\n    }")
+            .expect("init block ends")
+            .0;
+        assert!(
+            init.contains("installProcessLifecycleWatcher()"),
+            "the watcher must be installed from init, or there is no Android \
+             session boundary at all"
+        );
+        assert!(
+            watcher.contains("application.registerActivityLifecycleCallbacks(watcher)"),
+            "the watcher must be registered on the Application"
+        );
+        let invalidate = kotlin
+            .split_once("override fun invalidate()")
+            .expect("invalidate")
+            .1
+            .split_once("\n    }")
+            .expect("invalidate ends")
+            .0;
+        assert!(
+            invalidate.contains("removeProcessLifecycleWatcher()"),
+            "the watcher outlives the module unless invalidate removes it"
+        );
+        // The state seeded at enable has to be measured the way the edges
+        // are. `lifecycleState` is `RESUMED` only between `onResume` and
+        // `onPause`, so it reads `BEFORE_RESUME` under a permission dialog on
+        // a fully visible app: a pipe seeded `BACKGROUND` there arms the
+        // boundary with no `ACTIVE` to disarm it (dismissing a dialog fires
+        // `onActivityResumed`, not `onActivityStarted`) and the next real
+        // background reports nothing.
+        let enable_kotlin = kotlin
+            .split_once("fun enableTelemetry(")
+            .expect("enableTelemetry")
+            .1
+            .split_once("\n    }")
+            .expect("enableTelemetry ends")
+            .0;
+        assert!(
+            enable_kotlin.contains("seedAppState()"),
+            "enableTelemetry must seed from the watcher's own signal"
+        );
+        assert!(
+            !kotlin.contains("LifecycleState.RESUMED"),
+            "LifecycleState is pause-granularity; the session boundary is \
+             start/stop-granularity, and mixing them strands the boundary"
         );
         for host_callback in ["override fun onHostPause()", "override fun onHostResume()"] {
             let body = kotlin
@@ -9904,6 +9995,14 @@ mod tests {
         assert!(background.contains(
             "beginBackgroundTask(\n            withName: \"OfflineProtocol.telemetryFlush\""
         ));
+        // Three ends for one begin: the superseded assertion, the expiration
+        // handler, and the completion. An assertion iOS expires but the app
+        // never ends is a watchdog termination, not a dropped flush.
+        assert!(
+            background.matches("endBackgroundTelemetryTask(").count() >= 3,
+            "every path out of the background flush must end its assertion: \
+             superseded, expired, and completed"
+        );
         // Not on `processQueue`. That queue carries the 100 ms process tick
         // that drains inbound BLE and is drained by `destroy`, so a
         // three-second blocking flush on it stalls delivery for the length of

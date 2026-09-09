@@ -69,7 +69,9 @@ linked to identity, not used for tracking, purpose analytics:
 - `NSPrivacyCollectedDataTypePerformanceData` (delivery latency, transport
   dwell, queue depths, handshake latency)
 - `NSPrivacyCollectedDataTypeOtherDiagnosticData` (failure reasons,
-  decryption failures, transport status changes)
+  decryption failures, transport status changes, battery level and charging
+  state, relay role, and the OS major, app version and SDK version stamped on
+  every batch)
 
 It also declares the required-reason APIs the SDK's iOS code already uses
 (`UserDefaults` under CA92.1, file timestamps under C617.1), and declares no
@@ -93,7 +95,7 @@ country counts as "coarse location" for your app.
 |---|---|---|---|---|
 | App activity, App interactions | Yes | No | Analytics | Message and routing events, session summaries |
 | App info and performance, Other app performance data | Yes | No | Analytics | Latencies, dwell, queue depth, handshake timing |
-| App info and performance, Diagnostics | Yes | No | Analytics | Failure reasons, decryption failures, transport status |
+| App info and performance, Diagnostics | Yes | No | Analytics | Failure reasons, decryption failures, transport status, battery level and charging state, relay role, OS major, app and SDK version |
 | Device or other IDs | Only with `includeDeviceId` | No | Analytics | See above |
 | Location | No | No | | The ingest derives a country from the address; declare per your counsel's reading |
 | Personal info, Messages, Photos, Contacts, Files | No | No | | Never collected by the SDK |
@@ -104,7 +106,11 @@ that relationship. Data is encrypted in transit (TLS through the SDK's bundled
 roots). Users can request deletion through you, and you can stop collection
 at any time with `setTelemetryEnabled(false)` or `disableTelemetry()`; there
 is no in-SDK deletion request because the SDK holds nothing to delete beyond
-the pending queue, which it drops with the key.
+the pending queue. That queue is bounded (64 batches, 4 MiB) and sealed with
+the install's record key, and it outlives `disableTelemetry()`: it is cleared
+by uninstalling the app, by `wipePersistedState()`, and by enabling telemetry
+under a different `appId`, which discards it rather than uploading another
+application's batches under your key.
 
 ## What is never collected
 

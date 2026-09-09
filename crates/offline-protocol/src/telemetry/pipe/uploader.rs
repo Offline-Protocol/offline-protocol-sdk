@@ -178,7 +178,7 @@ impl Uploader {
             }
             let count = u64::from(head.event_count);
             let batch_id = head.batch_id.to_string();
-            let outcome = self.send(&batch_id, &head.body);
+            let outcome = self.send(&batch_id, &head.body, now_ms);
             tracing::debug!(
                 target: "offline_protocol::telemetry::pipe",
                 batch_id = %batch_id,
@@ -192,6 +192,12 @@ impl Uploader {
                     report.sent_events += count;
                     report.accepted_events += accepted.unwrap_or(count);
                     report.batches_sent += 1;
+                    // Cleared only here. `last_error` is what the stats
+                    // surface as "the most recent send failure", and an
+                    // accepted batch is the one event that makes an earlier
+                    // one no longer current. A drop also resets the backoff
+                    // but keeps its error, because the drop is the error.
+                    self.last_error = None;
                     self.reset_backoff();
                 }
                 Outcome::Drop => {
@@ -220,7 +226,7 @@ impl Uploader {
         report
     }
 
-    fn send(&mut self, batch_id: &str, body: &str) -> Outcome {
+    fn send(&mut self, batch_id: &str, body: &str, now_ms: i64) -> Outcome {
         let request = Request {
             url: TELEMETRY_INGEST_URL,
             headers: vec![
@@ -239,7 +245,7 @@ impl Uploader {
                 return Outcome::Retry { after_ms: None };
             }
         };
-        classify_response(&response, &mut self.last_error)
+        classify_response(&response, now_ms, &mut self.last_error)
     }
 
     fn reset_backoff(&mut self) {
@@ -264,7 +270,15 @@ impl Uploader {
 
 /// Classifies one answer. Public to the module so the status matrix can be
 /// tested without a client.
-pub(crate) fn classify_response(response: &Response, last_error: &mut Option<String>) -> Outcome {
+///
+/// `now_ms` is the pipe's clock rather than the wall clock, because a
+/// `Retry-After` given as an HTTP date is a delay only relative to the same
+/// clock the backoff is scheduled against.
+pub(crate) fn classify_response(
+    response: &Response,
+    now_ms: i64,
+    last_error: &mut Option<String>,
+) -> Outcome {
     let status = response.status;
     if (200..300).contains(&status) {
         return Outcome::Ok {
@@ -279,7 +293,7 @@ pub(crate) fn classify_response(response: &Response, last_error: &mut Option<Str
             after_ms: response
                 .retry_after
                 .as_deref()
-                .and_then(|value| parse_retry_after(value, chrono::Utc::now().timestamp_millis())),
+                .and_then(|value| parse_retry_after(value, now_ms)),
         },
         // 413 included: the ingest's body limit is far above the largest
         // batch the pipe cuts, so an oversized batch is a pathological
@@ -395,7 +409,7 @@ pub(crate) const MAX_BATCHES_PER_WAKE: u32 = 8;
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::telemetry::pipe::store::tests::batch;
+    use crate::telemetry::pipe::store::tests::{batch, test_store};
     use crate::telemetry::pipe::store::Backend;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -454,7 +468,7 @@ pub(crate) mod tests {
     #[test]
     fn every_request_carries_the_five_headers() {
         let (mut up, requests) = uploader(vec![answer(202, r#"{"accepted":1,"rejected":0}"#)]);
-        let mut store = BatchStore::new(Backend::Memory);
+        let mut store = test_store(Backend::Memory);
         store.push(batch(1, 0));
         up.drain(&mut store, 0, 8, None);
         let (headers, _) = &requests.lock().unwrap()[0];
@@ -482,7 +496,7 @@ pub(crate) mod tests {
             answer(200, r#"{"deduplicated":true}"#),
             answer(204, ""),
         ]);
-        let mut store = BatchStore::new(Backend::Memory);
+        let mut store = test_store(Backend::Memory);
         store.push(batch(3, 0));
         store.push(batch(4, 0));
         store.push(batch(5, 0));
@@ -497,7 +511,7 @@ pub(crate) mod tests {
     fn a_4xx_drops_and_continues_and_401_403_halt() {
         for status in [400, 413, 422] {
             let (mut up, _) = uploader(vec![answer(status, ""), answer(202, r#"{"accepted":1}"#)]);
-            let mut store = BatchStore::new(Backend::Memory);
+            let mut store = test_store(Backend::Memory);
             store.push(batch(1, 0));
             store.push(batch(1, 0));
             let report = up.drain(&mut store, 0, 8, None);
@@ -508,7 +522,7 @@ pub(crate) mod tests {
         }
         for status in [401, 403] {
             let (mut up, requests) = uploader(vec![answer(status, ""), answer(202, "")]);
-            let mut store = BatchStore::new(Backend::Memory);
+            let mut store = test_store(Backend::Memory);
             store.push(batch(1, 0));
             store.push(batch(1, 0));
             let report = up.drain(&mut store, 0, 8, None);
@@ -547,7 +561,7 @@ pub(crate) mod tests {
             String::new(),
             Box::new(|| 7),
         );
-        let mut store = BatchStore::new(Backend::Memory);
+        let mut store = test_store(Backend::Memory);
         store.push(batch(1, 0));
         let mut now = 0;
         let mut delays = Vec::new();
@@ -569,7 +583,7 @@ pub(crate) mod tests {
     #[test]
     fn a_408_and_a_network_error_are_retryable_and_the_backoff_window_is_honoured() {
         let (mut up, requests) = uploader(vec![answer(408, ""), Err("connection refused".into())]);
-        let mut store = BatchStore::new(Backend::Memory);
+        let mut store = test_store(Backend::Memory);
         store.push(batch(1, 0));
         up.drain(&mut store, 0, 8, None);
         assert_eq!(requests.lock().unwrap().len(), 1);
@@ -594,7 +608,7 @@ pub(crate) mod tests {
             body: String::new(),
         };
         assert_eq!(
-            classify_response(&seconds, &mut last),
+            classify_response(&seconds, 0, &mut last),
             Outcome::Retry {
                 after_ms: Some(120_000)
             }
@@ -605,7 +619,7 @@ pub(crate) mod tests {
             body: String::new(),
         };
         assert_eq!(
-            classify_response(&bare, &mut last),
+            classify_response(&bare, 0, &mut last),
             Outcome::Retry { after_ms: None }
         );
         let now = chrono::Utc::now().timestamp_millis();
@@ -622,7 +636,7 @@ pub(crate) mod tests {
     #[test]
     fn a_batch_past_the_ttl_is_dropped_unsent() {
         let (mut up, requests) = uploader(vec![answer(202, "")]);
-        let mut store = BatchStore::new(Backend::Memory);
+        let mut store = test_store(Backend::Memory);
         store.push(batch(3, 0));
         store.push(batch(1, MAX_BATCH_AGE_MS));
         let report = up.drain(&mut store, MAX_BATCH_AGE_MS + 1, 8, None);
@@ -634,7 +648,7 @@ pub(crate) mod tests {
     #[test]
     fn a_drain_sends_at_most_max_batches_per_wake() {
         let (mut up, requests) = uploader((0..10).map(|_| answer(202, "")).collect());
-        let mut store = BatchStore::new(Backend::Memory);
+        let mut store = test_store(Backend::Memory);
         for _ in 0..10 {
             store.push(batch(1, 0));
         }

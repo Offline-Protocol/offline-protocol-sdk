@@ -591,8 +591,10 @@ is the one exception, and its egress is bounded as follows.
 - **When it crosses** is a bounded set of wakes on one background thread,
   never the caller's, and never while the engine holds a lock.
 - **Off means off.** Nothing leaves the device before `enable_telemetry` or
-  after `disable_telemetry`; `set_telemetry_enabled(false)` stops collection
-  at the emit site.
+  after `disable_telemetry`. `set_telemetry_enabled(false)` stops collection
+  at the emit site and at the session boundaries both, so a backgrounded app
+  with collection off emits no summary and opens no socket; only a backlog
+  queued before the switch still drains.
 
 The key that authenticates the stream is R13.
 

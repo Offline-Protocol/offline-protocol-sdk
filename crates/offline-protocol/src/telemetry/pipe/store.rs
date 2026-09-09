@@ -71,6 +71,16 @@ impl PendingBatch {
 struct Index {
     next_seq: u64,
     order: Vec<u64>,
+    /// The app id the queued batches were cut under.
+    ///
+    /// The app id travels in a header, not in the batch body, so a queue
+    /// adopted by a pipe configured for a different application would be
+    /// uploaded under that application's key and counted against it. Stored
+    /// here so the mismatch is visible before anything is sent. Optional so
+    /// an index written before this field existed still parses; absent is
+    /// read as "ours", which is what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    app_id: Option<String>,
 }
 
 /// Where the queue is mirrored.
@@ -101,13 +111,17 @@ pub(crate) struct BatchStore {
     dropped_events: u64,
     /// Records that would not open or parse on load.
     corrupt_records: u64,
+    /// Records discarded because they were cut for another app id.
+    foreign_records: u64,
     index_dirty: bool,
     max_batches: usize,
     max_bytes: usize,
+    /// The app id this store's batches are cut under; see [`Index::app_id`].
+    app_id: String,
 }
 
 impl BatchStore {
-    pub(crate) fn new(backend: Backend) -> Self {
+    pub(crate) fn new(backend: Backend, app_id: String) -> Self {
         let mut store = Self {
             backend: Backend::Memory,
             pending: VecDeque::new(),
@@ -115,9 +129,11 @@ impl BatchStore {
             bytes: 0,
             dropped_events: 0,
             corrupt_records: 0,
+            foreign_records: 0,
             index_dirty: false,
             max_batches: MAX_PENDING_BATCHES,
             max_bytes: MAX_PENDING_BYTES,
+            app_id,
         };
         store.attach(backend);
         store
@@ -135,7 +151,25 @@ impl BatchStore {
     /// Adopts a backend. Anything persisted there is loaded ahead of what is
     /// pending in memory (it is older), and the in-memory pending list is
     /// then persisted.
+    ///
+    /// Re-adopting the storage already in use keeps the queue as it stands.
+    /// Reloading there would be actively wrong rather than merely wasteful:
+    /// what is pending in memory is what is on disk, so the load would read
+    /// those batches back and the loop below would then push the in-memory
+    /// copies as fresh records, queueing and persisting every pending batch
+    /// twice and trimming the originals to the byte cap to make room for
+    /// their own duplicates. Two engine paths attach (`enable_telemetry` and
+    /// `initialize_mls`), so the ordinary logout-and-login sequence runs this
+    /// twice over one store.
     pub(crate) fn attach(&mut self, backend: Backend) {
+        if self.is_same_storage(&backend) {
+            // The cipher may be new even when the storage is not: a
+            // re-`initialize_mls` that found an unusable record key installs
+            // a fresh one. Taking it means later writes are sealed with the
+            // key the next launch will load.
+            self.backend = backend;
+            return;
+        }
         self.backend = backend;
         if matches!(self.backend, Backend::Memory) {
             for batch in &mut self.pending {
@@ -159,6 +193,19 @@ impl BatchStore {
         matches!(self.backend, Backend::Sealed { .. })
     }
 
+    /// Whether `backend` names the same provider this store already writes to.
+    fn is_same_storage(&self, backend: &Backend) -> bool {
+        match (&self.backend, backend) {
+            (
+                Backend::Sealed {
+                    storage: current, ..
+                },
+                Backend::Sealed { storage: next, .. },
+            ) => Arc::ptr_eq(current, next),
+            _ => false,
+        }
+    }
+
     fn load(&mut self) {
         let Backend::Sealed { storage, cipher } = &self.backend else {
             return;
@@ -169,7 +216,19 @@ impl BatchStore {
             .flatten()
             .and_then(|sealed| cipher.open(INDEX_KEY_TYPE, INDEX_KEY_ID, &sealed))
             .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        let mut foreign = 0u64;
         let (next_seq, order) = match index {
+            // Cut for another application. The app id rides in a header, so
+            // these bodies would go up under whichever key is configured now
+            // and be counted against that app. The sequence counter is kept
+            // so a stale record can never collide with a fresh one.
+            Some(index) if index.app_id.as_deref().is_some_and(|id| id != self.app_id) => {
+                foreign = index.order.len() as u64;
+                for seq in &index.order {
+                    let _ = storage.delete(BATCH_KEY_TYPE, &key_id(*seq));
+                }
+                (index.next_seq, Vec::new())
+            }
             Some(index) => (index.next_seq, index.order),
             None => (0, Vec::new()),
         };
@@ -225,7 +284,22 @@ impl BatchStore {
                 "queued telemetry batches could not be opened on load and were discarded"
             );
         }
-        self.index_dirty = corrupt > 0 || order.len() != self.pending.len();
+        self.foreign_records += foreign;
+        if foreign > 0 {
+            // Counted in records like `corrupt_records` and for the same
+            // reason: the events these batches held are exactly what was not
+            // read, so their count is not knowable in the unit
+            // `dropped_events` reconciles.
+            tracing::warn!(
+                target: "offline_protocol::telemetry::pipe",
+                records = foreign,
+                "queued telemetry batches were cut under a different app id and were discarded"
+            );
+        }
+        // `foreign` is a reason on its own: the index still names the app id
+        // the batches were discarded for, and nothing else here would rewrite
+        // it while the queue is empty.
+        self.index_dirty = corrupt > 0 || foreign > 0 || order.len() != self.pending.len();
         self.trim_to_caps();
     }
 
@@ -279,6 +353,7 @@ impl BatchStore {
         let index = Index {
             next_seq: self.next_seq,
             order: self.pending.iter().filter_map(|b| b.seq).collect(),
+            app_id: Some(self.app_id.clone()),
         };
         let Ok(bytes) = serde_json::to_vec(&index) else {
             return;
@@ -345,6 +420,14 @@ impl BatchStore {
     #[cfg(test)]
     pub(crate) fn corrupt_records(&self) -> u64 {
         self.corrupt_records
+    }
+
+    /// Records discarded on load for naming another app id. In records for
+    /// the same reason as [`Self::corrupt_records`]: nothing read them, so
+    /// the events they held were never counted.
+    #[cfg(test)]
+    pub(crate) fn foreign_records(&self) -> u64 {
+        self.foreign_records
     }
 }
 
@@ -434,6 +517,14 @@ pub(crate) mod tests {
         }
     }
 
+    /// The app id every test store is built under.
+    pub(crate) const TEST_APP_ID: &str = "app_test";
+
+    /// A store for `TEST_APP_ID`, which is what all but the app-id tests want.
+    pub(crate) fn test_store(backend: Backend) -> BatchStore {
+        BatchStore::new(backend, TEST_APP_ID.to_string())
+    }
+
     pub(crate) fn cipher() -> StateRecordCipher {
         StateRecordCipher::new(&[9u8; 32])
     }
@@ -470,7 +561,7 @@ pub(crate) mod tests {
     #[test]
     fn a_durable_store_survives_a_reload_in_fifo_order() {
         let storage = Arc::new(MemoryStorage::default());
-        let mut store = BatchStore::new(sealed(&storage));
+        let mut store = test_store(sealed(&storage));
         let first = batch(2, 1);
         let second = batch(3, 2);
         let ids = [first.batch_id, second.batch_id];
@@ -478,7 +569,7 @@ pub(crate) mod tests {
         store.push(second);
         store.flush_index();
 
-        let reloaded = BatchStore::new(sealed(&storage));
+        let reloaded = test_store(sealed(&storage));
         let order: Vec<Uuid> = reloaded.pending.iter().map(|b| b.batch_id).collect();
         assert_eq!(order, ids);
         assert_eq!(reloaded.pending[0].created_ms, 1);
@@ -487,7 +578,7 @@ pub(crate) mod tests {
     #[test]
     fn a_crash_between_batch_write_and_index_write_leaves_an_orphan_that_is_swept() {
         let storage = Arc::new(MemoryStorage::default());
-        let mut store = BatchStore::new(sealed(&storage));
+        let mut store = test_store(sealed(&storage));
         store.push(batch(1, 1));
         store.flush_index();
         // The next batch's record write succeeds (store call 3) and the index
@@ -501,7 +592,7 @@ pub(crate) mod tests {
             "two batches + index"
         );
 
-        let reloaded = BatchStore::new(sealed(&storage));
+        let reloaded = test_store(sealed(&storage));
         assert_eq!(reloaded.len(), 1, "only the indexed batch is adopted");
         assert_eq!(
             storage
@@ -519,7 +610,7 @@ pub(crate) mod tests {
     #[test]
     fn a_corrupt_record_is_dropped_and_counted() {
         let storage = Arc::new(MemoryStorage::default());
-        let mut store = BatchStore::new(sealed(&storage));
+        let mut store = test_store(sealed(&storage));
         store.push(batch(1, 1));
         store.push(batch(1, 2));
         store.flush_index();
@@ -528,14 +619,14 @@ pub(crate) mod tests {
             .lock()
             .unwrap()
             .insert((BATCH_KEY_TYPE.into(), key_id(0)), vec![1, 2, 3]);
-        let reloaded = BatchStore::new(sealed(&storage));
+        let reloaded = test_store(sealed(&storage));
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded.corrupt_records(), 1);
     }
 
     #[test]
     fn the_caps_drop_oldest_first_and_count_events() {
-        let mut store = BatchStore::new(Backend::Memory).with_caps(2, usize::MAX);
+        let mut store = test_store(Backend::Memory).with_caps(2, usize::MAX);
         store.push(batch(5, 1));
         store.push(batch(6, 2));
         store.push(batch(7, 3));
@@ -543,7 +634,7 @@ pub(crate) mod tests {
         assert_eq!(store.dropped_events(), 5);
         assert_eq!(store.front().map(|b| b.created_ms), Some(2));
 
-        let mut store = BatchStore::new(Backend::Memory).with_caps(usize::MAX, 400);
+        let mut store = test_store(Backend::Memory).with_caps(usize::MAX, 400);
         store.push(batch(1, 1));
         store.push(batch(1, 2));
         assert!(store.bytes() <= 400);
@@ -553,13 +644,13 @@ pub(crate) mod tests {
     #[test]
     fn attaching_storage_persists_what_was_pending_in_memory_behind_what_was_stored() {
         let storage = Arc::new(MemoryStorage::default());
-        let mut earlier = BatchStore::new(sealed(&storage));
+        let mut earlier = test_store(sealed(&storage));
         let stored = batch(1, 1);
         let stored_id = stored.batch_id;
         earlier.push(stored);
         earlier.flush_index();
 
-        let mut store = BatchStore::new(Backend::Memory);
+        let mut store = test_store(Backend::Memory);
         let in_memory = batch(2, 5);
         let in_memory_id = in_memory.batch_id;
         store.push(in_memory);
@@ -569,7 +660,7 @@ pub(crate) mod tests {
         let order: Vec<Uuid> = store.pending.iter().map(|b| b.batch_id).collect();
         assert_eq!(order, [stored_id, in_memory_id]);
 
-        let reloaded = BatchStore::new(sealed(&storage));
+        let reloaded = test_store(sealed(&storage));
         assert_eq!(
             reloaded.len(),
             2,
@@ -580,7 +671,7 @@ pub(crate) mod tests {
     #[test]
     fn records_are_sealed_so_the_container_never_sees_a_plaintext_batch() {
         let storage = Arc::new(MemoryStorage::default());
-        let mut store = BatchStore::new(sealed(&storage));
+        let mut store = test_store(sealed(&storage));
         store.push(batch(1, 1));
         store.flush_index();
         for bytes in storage.records.lock().unwrap().values() {
@@ -589,16 +680,118 @@ pub(crate) mod tests {
         }
     }
 
+    /// Re-attaching the storage already in use is a no-op, not a reload.
+    ///
+    /// The engine attaches twice over one store in the ordinary order:
+    /// `enable_telemetry` hands the backend over, and a later
+    /// `initialize_mls` hands the same one over again. Reloading there would
+    /// read the pending batches back off disk and then re-push the in-memory
+    /// copies as fresh records, so every pending batch would be queued and
+    /// persisted twice and the byte cap would trim the originals.
+    #[test]
+    fn re_attaching_the_same_storage_keeps_the_queue_as_it_is() {
+        let storage = Arc::new(MemoryStorage::default());
+        let mut store = test_store(sealed(&storage));
+        store.push(batch(2, 1));
+        store.push(batch(3, 2));
+        store.flush_index();
+        let ids: Vec<Uuid> = store.pending.iter().map(|b| b.batch_id).collect();
+        let records = storage.records.lock().unwrap().len();
+
+        store.attach(sealed(&storage));
+
+        assert_eq!(store.len(), 2, "the queue was reloaded on top of itself");
+        assert_eq!(
+            store.pending.iter().map(|b| b.batch_id).collect::<Vec<_>>(),
+            ids
+        );
+        assert_eq!(
+            storage.records.lock().unwrap().len(),
+            records,
+            "no batch was written a second time"
+        );
+        let reloaded = test_store(sealed(&storage));
+        assert_eq!(reloaded.len(), 2);
+    }
+
+    /// A queue cut under one app id is never uploaded under another.
+    ///
+    /// The app id rides in a header, not in the batch body, so a batch
+    /// adopted by a pipe configured for a different application would be
+    /// counted against that application. Discarded on load instead, in
+    /// records rather than events because nothing read them.
+    #[test]
+    fn a_queue_cut_under_another_app_id_is_discarded_on_load() {
+        let storage = Arc::new(MemoryStorage::default());
+        let mut theirs = BatchStore::new(sealed(&storage), "app_theirs".to_string());
+        theirs.push(batch(4, 1));
+        theirs.push(batch(5, 2));
+        theirs.flush_index();
+
+        let mut ours = BatchStore::new(sealed(&storage), "app_ours".to_string());
+        assert!(ours.is_empty(), "another app's queue must not be adopted");
+        assert_eq!(ours.foreign_records(), 2);
+        assert_eq!(
+            ours.dropped_events(),
+            0,
+            "records, not events: nothing opened them to count"
+        );
+        assert!(
+            !storage
+                .records
+                .lock()
+                .unwrap()
+                .keys()
+                .any(|(t, _)| t == BATCH_KEY_TYPE),
+            "the foreign records were deleted"
+        );
+
+        // The index is rewritten under our own id, so the next load adopts
+        // what we queue from here on.
+        ours.push(batch(1, 3));
+        ours.flush_index();
+        let reloaded = BatchStore::new(sealed(&storage), "app_ours".to_string());
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded.foreign_records(), 0);
+    }
+
+    /// An index written before the app id was recorded is ours by default.
+    #[test]
+    fn an_index_without_an_app_id_is_adopted() {
+        let storage = Arc::new(MemoryStorage::default());
+        let mut store = test_store(sealed(&storage));
+        store.push(batch(1, 1));
+        store.flush_index();
+        // Rewrite the index in the shape that predates `Index::app_id`.
+        let legacy = serde_json::to_vec(&serde_json::json!({
+            "next_seq": 1,
+            "order": [0],
+        }))
+        .expect("serializes");
+        let sealed_index = cipher()
+            .seal(INDEX_KEY_TYPE, INDEX_KEY_ID, &legacy)
+            .expect("seals");
+        storage
+            .records
+            .lock()
+            .unwrap()
+            .insert((INDEX_KEY_TYPE.into(), INDEX_KEY_ID.into()), sealed_index);
+
+        let reloaded = test_store(sealed(&storage));
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded.foreign_records(), 0);
+    }
+
     #[test]
     fn pop_front_deletes_the_record_and_the_index_follows() {
         let storage = Arc::new(MemoryStorage::default());
-        let mut store = BatchStore::new(sealed(&storage));
+        let mut store = test_store(sealed(&storage));
         store.push(batch(1, 1));
         store.push(batch(1, 2));
         store.flush_index();
         store.pop_front();
         store.flush_index();
-        let reloaded = BatchStore::new(sealed(&storage));
+        let reloaded = test_store(sealed(&storage));
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded.front().map(|b| b.created_ms), Some(2));
     }

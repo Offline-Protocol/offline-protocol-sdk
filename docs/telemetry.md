@@ -32,9 +32,11 @@ await protocol.enableTelemetry({
 ```
 
 The native module fills in the platform and owns the application lifecycle:
-entering the background closes the telemetry session and flushes it inside an
-OS background task, returning to the foreground opens the next one. There is
-no lifecycle call for the app to make.
+entering the background closes the telemetry session and flushes it, and
+returning to the foreground opens the next one. On iOS that flush runs inside
+a `UIApplication` background task, so the send is not cut short by the process
+being suspended; on Android it wakes the uploader thread and relies on the
+process staying scheduled. There is no lifecycle call for the app to make.
 
 Python:
 
@@ -58,9 +60,9 @@ proto.enable_telemetry(
 )?;
 ```
 
-A refused configuration (an empty key, a non-ASCII app id, a zero batch size,
-a flush interval under a second) is `TelemetryConfigInvalid` naming the field,
-and nothing starts. Calling `enableTelemetry` again replaces the running pipe
+A refused configuration (an empty key, an app id that is not printable
+ASCII, a zero batch size, a flush interval under a second) is
+`TelemetryConfigInvalid` naming the field, and nothing starts. Calling `enableTelemetry` again replaces the running pipe
 after its final flush.
 
 ## What leaves the device
@@ -115,10 +117,12 @@ ingest rather than on the device.
 
 **Some events are counted and never sent.** `protocol.message.sent` carries
 the message content, so only its count survives, folded into the rollup's
-`sends_attempted_sum`. `mls.initialized`, `mls.session_ready`,
-`mls.encryption_used`, `protocol.neighbor.discovered` and `.lost` are consumed
-on the device to compute the session summary. Every other event the engine
-emits, sixty-odd of them, is dropped by name before its payload is read.
+`sends_attempted_sum`. `mls.initialized`, `mls.session_ready` and
+`mls.encryption_used` are consumed on the device to compute the session
+summary. `protocol.neighbor.discovered` and `.lost` are read as neighbour
+churn, for which neither the summary nor the rollup has a field today, so
+they currently contribute nothing. Every other event the engine emits,
+sixty-odd of them, is dropped by name before its payload is read.
 
 The `routingDiagnostic` option adds a `scores` array to routing decisions
 (the seven scoring factors per transport). The ingest has no column for it;
@@ -126,24 +130,27 @@ it exists for local debugging with the tap below.
 
 ## When it leaves the device
 
-The uploader runs on one background thread and wakes for exactly these
-reasons:
+The uploader runs on one background thread and wakes for these reasons:
 
 - every `flushIntervalMs` (default 30 s), when there is something to send;
 - when the buffered estimate passes `maxBatchBytes` (default 256 KiB);
 - when the app enters the background, after the session summary;
 - when the internet or Nostr transport becomes available after being down;
-- on `flushTelemetry`, `endTelemetrySession` and `disableTelemetry`.
+- on `flushTelemetry`, `endTelemetrySession` and `disableTelemetry`;
+- when the protocol-state store attaches, to persist what is pending;
+- when a backoff from a failed send expires.
 
 Per wake it drains the ring buffer into batches, cuts them on session and then
 on size, persists them, and sends at most eight before sleeping again. An
-empty buffer opens no socket. Below 15% battery and not charging, the
-interval and transport wakes are deferred; the background, explicit and
-disable flushes never are.
+empty buffer opens no socket. Below 15% battery and not charging, every wake
+is deferred except the background, explicit and disable flushes, which never
+are. A deferred wake still cuts and persists batches; only the send waits.
 
 A batch the ingest does not acknowledge is kept and retried: 1 s doubling to
-15 min, plus up to a second of jitter, or the `Retry-After` the ingest
-asked for. A batch older than six days is dropped unsent, because the ingest
+15 min, plus up to a second of jitter. A 429 is the one answer whose
+`Retry-After` is honoured, in seconds or as an HTTP date, capped at the same
+15 min; a 408 or 5xx uses the doubling schedule whether or not it carries the
+header. A batch older than six days is dropped unsent, because the ingest
 deduplicates on `batch_id` for seven and a later replay would count twice.
 A 401 or 403 (a bad key, or a key for another app) keeps the batch, records
 the error in the stats, and stops sending until the next `enableTelemetry`:
@@ -203,6 +210,21 @@ enabling telemetry are durable from the first batch. Batches persisted by
 this release are ignored by an earlier SDK, so a downgrade costs at most
 4 MiB of stale records.
 
+A queued batch is deleted rather than sent in three cases, each reported as a
+warning on the pipe's log target rather than in `dropped`, because a record
+nothing could open is a record whose event count is exactly what was lost:
+
+- it will not open or parse on load, which after a record-key loss means the
+  whole queue;
+- it is an orphan, written before a crash that stopped the index naming it;
+- it names a different `appId` than the one telemetry is now enabled with.
+  The app id travels in a request header, not in the batch body, so uploading
+  such a batch would count another application's events against your key.
+
+The queue outlives `disableTelemetry()`, so a re-enable resends what an
+offline stretch collected. It is cleared by uninstalling the app, by
+`wipePersistedState()`, and by the app-id rule above.
+
 ## The stats call
 
 `telemetryStats()` returns `null` until telemetry is enabled, then:
@@ -212,7 +234,7 @@ this release are ignored by an earlier SDK, so a downgrade costs at most
 | `buffered` | Events in the ring buffer, not yet cut into a batch |
 | `sentEvents` | Events in batches the ingest answered 2xx |
 | `acceptedEvents` | The `accepted` count the ingest reported, summed; a deduplicated replay adds nothing |
-| `dropped` | Events lost: ring overflow, queue caps, the six-day expiry, or a permanent rejection |
+| `dropped` | Events lost: ring overflow, queue caps, the six-day expiry, or a permanent rejection. Counted in events, so it excludes records that would not open, which are counted in records and logged |
 | `sessionId` | The current session id |
 | `lastError` | The most recent send failure, or the configuration problem that halted sending |
 | `lastFlushAtMs` | When a batch was last accepted |
@@ -242,9 +264,13 @@ leaves in place.
 
 The service meters accepted events. The controls, from coarsest to finest:
 
-- `setTelemetryEnabled(false)` stops collection at the emit site (one atomic
-  load per event, nothing buffered) without tearing the pipe down; what is
-  already queued still drains. This is the right hook for a user setting.
+- `setTelemetryEnabled(false)` stops collection without tearing the pipe
+  down: one atomic load per event and nothing buffered, and the session
+  boundaries stop reporting too, so a background draws no session summary
+  and opens no socket. The lifecycle transitions are still tracked, so the
+  first foreground after you switch collection back on rotates the session
+  as usual. What was already queued before you switched it off still drains.
+  This is the right hook for a user setting.
 - `disableTelemetry()` stops everything after a final flush.
 - `metricsCadenceMs` (default 5000) sets how often a metrics frame is
   produced. Frames never leave the device individually, but the minute
@@ -289,7 +315,7 @@ is a portal feature, not an SDK one. The threat model records this as
 
 | Situation | What you see |
 |---|---|
-| Empty or non-ASCII `apiKey` or `appId`, empty `appVersion`, zero or over-1 MiB `maxBatchBytes`, zero `maxBufferedRecords`, `flushIntervalMs` under 1000 | `enableTelemetry` rejects with `TelemetryConfigInvalid` naming the field |
+| `apiKey` or `appId` empty or not printable ASCII, empty `appVersion`, zero or over-1 MiB `maxBatchBytes`, zero `maxBufferedRecords`, `flushIntervalMs` under 1000 | `enableTelemetry` rejects with `TelemetryConfigInvalid` naming the field |
 | Wrong key, or a key for another app | `lastError: "ingest responded 401"` (or 403); sending halts until the next `enableTelemetry` |
 | No network | `lastError` names the transport failure; batches wait, bounded by the caps and the six-day expiry |
 | Calling `flushTelemetry` or `telemetryStats` before `enableTelemetry` | A no-op, and `null` |
