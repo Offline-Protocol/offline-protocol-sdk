@@ -2,7 +2,8 @@
 
 What the SDK's telemetry collects, and what that means for the two app-store
 privacy declarations. Everything here applies only once an app calls
-`enableTelemetry`; before that the SDK collects nothing and sends nothing.
+`enableTelemetry`; before that call succeeds, the hosted telemetry client does
+not collect, buffer, persist, or upload telemetry.
 [docs/telemetry.md](telemetry.md) is the complete data inventory this page
 summarises.
 
@@ -101,14 +102,22 @@ country counts as "coarse location" for your app.
 | Personal info, Messages, Photos, Contacts, Files | No | No | | Never collected by the SDK |
 
 "Shared" is No because the data goes to Offline Protocol's ingest as your
-processor, not to a third party; confirm how your own agreements describe
-that relationship. Data is encrypted in transit (TLS through the SDK's bundled
-roots). Users can request deletion through you, and you can stop collection
-at any time with `setTelemetryEnabled(false)` or `disableTelemetry()`; there
-is no in-SDK deletion request because the SDK holds nothing to delete beyond
-the pending queue. That queue is bounded (64 batches, 4 MiB) and sealed with
-the install's record key, and it outlives `disableTelemetry()`: it is cleared
-by uninstalling the app, by `wipePersistedState()`, and by enabling telemetry
+processor, not to a third party; confirm how your own agreements describe that
+relationship. Data is encrypted in transit (TLS through the SDK's bundled
+roots).
+
+Users can request deletion through you. You can stop new collection at any
+time with `setTelemetryEnabled(false)` or `disableTelemetry()`, but neither
+deletes anything or stops network activity at once: after
+`setTelemetryEnabled(false)`, records already queued continue to drain, and
+`disableTelemetry()` starts a final flush, waits up to three seconds for
+shutdown, and may leave an in-flight request to complete after it returns.
+There is no in-SDK deletion request, because the SDK holds nothing to delete
+beyond the pending queue. That queue is bounded (64 batches, 4 MiB) and sealed
+with the install's record key, and it outlives `disableTelemetry()`: remaining
+batches may upload when telemetry is enabled again under the same `appId`,
+subject to the queue limits and the six-day expiry. It is cleared by
+uninstalling the app, by `wipePersistedState()`, and by enabling telemetry
 under a different `appId`, which discards it rather than uploading another
 application's batches under your key.
 

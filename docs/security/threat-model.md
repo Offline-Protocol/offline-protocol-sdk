@@ -600,11 +600,14 @@ is the one exception, and its egress is bounded as follows.
   the golden fixture pins the bytes.
 - **When it crosses** is a bounded set of wakes on one background thread,
   never the caller's, and never while the engine holds a lock.
-- **Off means off.** Nothing leaves the device before `enable_telemetry` or
-  after `disable_telemetry`. `set_telemetry_enabled(false)` stops collection
-  at the emit site and at the session boundaries both, so a backgrounded app
-  with collection off emits no summary and opens no socket; only a backlog
-  queued before the switch still drains.
+- **Explicit enablement and shutdown semantics.** The hosted telemetry client
+  performs no collection, buffering, persistence, or uploads before explicit
+  enablement. `set_telemetry_enabled(false)` stops new collection while
+  previously queued records continue to drain. `disable_telemetry()` stops new
+  collection and initiates a final flush, waiting up to three seconds for
+  shutdown. An in-flight request may complete afterward. Remaining persisted
+  batches are retained for a later enablement, subject to queue limits and
+  expiry.
 
 The key that authenticates the stream is R13.
 

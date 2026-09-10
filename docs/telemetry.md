@@ -7,11 +7,12 @@ accepted events to the Offline Protocol ingest itself, on a background thread
 inside the native library, and the developer portal turns them into
 dashboards, cross-app benchmarks and a privacy-preserving public report.
 
-Telemetry is **off until you enable it with a key**. Nothing leaves the device
-before `enableTelemetry` and nothing leaves it after `disableTelemetry`. The
-key and the app id come from the developer portal; the ingest cross-checks the
-two and refuses a mismatch, so a key pasted into the wrong app is a loud
-failure rather than misattributed data.
+Hosted telemetry is inactive until the application calls `enableTelemetry`
+with a telemetry API key and application identifier. Before that call
+succeeds, the hosted telemetry client does not collect, buffer, persist, or
+upload telemetry. The SDK's ordinary application traffic and public event APIs
+operate independently of hosted telemetry. The hosted service authenticates
+the supplied credentials.
 
 This page is the complete inventory of what leaves the device, when, and how
 to control it. [docs/privacy.md](privacy.md) has the app-store disclosures.
@@ -114,8 +115,11 @@ Three things about that table are worth stating plainly.
 
 **No identifier has a field to land in.** Message ids, peer addresses, group
 ids, usernames, message content, file names: none of them appear in any row
-above. The engine's identifier scrubbing still runs for the free event API;
-the pipe never needs it, because it never reads an identifier.
+above. The pipe does read one identifier, the peer id on MLS lifecycle records
+(hashed unless `scrubIds` is false), and only to pair a handshake's start with
+its end for `mls_session_ready_latency_p50_ms`. It never reaches a batch, and
+the golden fixture pins the bytes that do. See
+[Identifier scrubbing](#identifier-scrubbing) for what `scrubIds` changes.
 
 **`reason` is the engine's own fixed token.** `protocol.message.failed`,
 `.deferred` and `protocol.relay.demoted` carry the reason verbatim, and every
@@ -316,14 +320,15 @@ here.
 
 The service meters accepted events. The controls, from coarsest to finest:
 
-- `setTelemetryEnabled(false)` stops collection without tearing the pipe
-  down: one atomic load per event and nothing buffered, and the session
-  boundaries stop reporting too, so a background draws no session summary
-  and opens no socket. The lifecycle transitions are still tracked, so the
-  first foreground after you switch collection back on rotates the session
-  as usual. What was already queued before you switched it off still drains.
-  This is the right hook for a user setting.
-- `disableTelemetry()` stops everything after a final flush.
+- `setTelemetryEnabled(false)` stops new telemetry collection, including
+  session-summary emission, without shutting down the uploader. Previously
+  queued records continue to drain. This is a collection control, not an
+  immediate network-stop or deletion operation.
+- `disableTelemetry()` stops new collection and initiates a final flush. The
+  call waits up to three seconds for shutdown; an in-flight HTTP request may
+  complete after the call returns. Remaining persisted batches survive
+  disabling and may upload when telemetry is enabled again under the same
+  application identifier, subject to queue limits and expiry.
 - `metricsCadenceMs` (default 5000) sets how often a metrics frame is
   produced. Frames never leave the device individually, but the minute
   rollup discards a window holding a single frame and no sends, so a cadence
@@ -375,7 +380,12 @@ is a portal feature, not an SDK one. The threat model records this as
 
 ## Identifier scrubbing
 
-The `scrubIds` option (default true) still governs the free event API: the
-engine hashes long-lived identifiers before an event reaches `onEvent`. The
-pipe accepts the option for compatibility and is unaffected by it, because no
-identifier reaches the pipe in the first place.
+The `scrubIds` option (default true) decides whether the engine hashes the
+identifiers it stamps on MLS lifecycle records before they reach the pipe. It
+does not apply to `onEvent`, which delivers every event with its identifiers
+as they are. The pipe reads one of those identifiers, the peer id, and only to
+pair a handshake's start with its end for `mls_session_ready_latency_p50_ms`.
+No identifier has a wire field to land in, and the golden fixture pins the
+uploaded bytes, so `scrubIds` changes what the pairer holds in memory (a
+hashed peer id, or with `scrubIds: false` the raw one) and never what is
+uploaded.

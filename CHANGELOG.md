@@ -115,9 +115,11 @@ the client's answers were wrong on a device rather than merely different:
   reasons into a fixed family on the device; the pipe sends the engine's own
   token or literal and the classification happens on the ingest. Every reason
   the engine produces is locally chosen, per the threat model's producer rule.
-- **`scrubIds` is moot for the pipe.** The engine still scrubs identifiers for
-  the free event API; the pipe never reads one, so the option is accepted for
-  compatibility and has no effect on what is uploaded.
+- **`scrubIds` never changes what the pipe uploads.** The pipe reads the peer id
+  on MLS lifecycle records, hashed unless `scrubIds` is false, only to pair a
+  handshake's start with its end. No identifier has a wire field to land in, and
+  the golden fixture pins the uploaded bytes, so the option changes what the
+  pairer holds in memory and never what is uploaded.
 - **Where the mesh-analytics package differed from the task, the task won:**
   a 15 min backoff cap rather than 5, a 413 dropped rather than split, a halt
   on 401 and 403 rather than a drop-and-continue, `Retry-After` honoured on a
