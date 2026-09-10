@@ -204,7 +204,7 @@ impl OfflineProtocol {
                         continue;
                     }
 
-                    self.deduplicator.mark_seen(message.id.clone());
+                    self.mark_seen_persisted(message.id.clone());
 
                     // Handle internal MLS messages
                     let mut was_decrypted = false;
@@ -240,7 +240,7 @@ impl OfflineProtocol {
                                 // duplicate re-ACK path above and leak that presence
                                 // anyway; reprocessing a replay costs no more than a
                                 // fresh forged message.
-                                self.deduplicator.unmark_seen(&message.id);
+                                self.unmark_seen_persisted(&message.id);
                                 continue;
                             }
                             InternalMessageResult::Deferred => {
@@ -264,7 +264,7 @@ impl OfflineProtocol {
                                 // re-ACKed. For the other two, recovery is that
                                 // resend itself — re-sealed against a live
                                 // generation by Tier 2.
-                                self.deduplicator.unmark_seen(&message.id);
+                                self.unmark_seen_persisted(&message.id);
                                 continue;
                             }
                             InternalMessageResult::Decrypted(plaintext) => {
@@ -300,7 +300,7 @@ impl OfflineProtocol {
                             message.sender.as_str(),
                             "Inbound plaintext message rejected by encryption policy",
                         );
-                        self.deduplicator.unmark_seen(&message.id);
+                        self.unmark_seen_persisted(&message.id);
                         continue;
                     }
 
@@ -320,7 +320,7 @@ impl OfflineProtocol {
                     if message.content_type == ContentType::FileChunk {
                         match self.handle_incoming_file_chunk_via(&message, Some(transport_used)) {
                             ChunkOutcome::Deferred => {
-                                self.deduplicator.unmark_seen(&message.id);
+                                self.unmark_seen_persisted(&message.id);
                             }
                             // Plaintext chunk rejected by encryption policy:
                             // withhold the ACK and unmark the id, exactly like
@@ -330,7 +330,7 @@ impl OfflineProtocol {
                             // replay re-enter the gate rather than hit the
                             // duplicate re-ACK path.
                             ChunkOutcome::Rejected => {
-                                self.deduplicator.unmark_seen(&message.id);
+                                self.unmark_seen_persisted(&message.id);
                             }
                             ChunkOutcome::Handled => {
                                 if message.requires_ack {

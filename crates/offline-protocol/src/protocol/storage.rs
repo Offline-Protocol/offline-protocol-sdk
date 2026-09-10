@@ -12,6 +12,10 @@ use super::{
     MAX_PROTOCOL_STATE_RECORD_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_DECRYPT_RECORD_VERSION,
     RICH_PAYLOAD_V1, WELCOME_LIFECYCLE_TTL_SECS,
 };
+use super::{
+    DedupSeenRecord, DEDUP_PERSIST_DIRTY_THRESHOLD, DEDUP_PERSIST_INTERVAL,
+    DEDUP_SEEN_RECORD_VERSION, MAX_PERSISTED_DEDUP_IDS,
+};
 use crate::constants::{MAX_MEDIA_DESCRIPTORS, MAX_OUTBOX_ENTRIES};
 use crate::events::DecryptionFailureCode;
 use crate::{Error, Event, ProtocolStateError, ProtocolStateResult, ProtocolStateStorage, Result};
@@ -22,6 +26,7 @@ use offline_protocol_transport::{NostrKeypair, NostrTransport, TransportType};
 use serde::de::DeserializeOwned;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
@@ -61,6 +66,10 @@ pub(crate) enum StateCategory {
     BlockedUsers,
     BothCreateAwaitingDecrypt,
     LamportClock,
+    /// The deduplicator's seen set. Post-split only, like
+    /// [`Self::NostrWatermark`], and absent from
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] for the same reason.
+    DedupSeenIds,
     /// The Nostr receive watermark. Post-split only, like [`Self::StateAdoption`]
     /// — deliberately absent from [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`],
     /// which has no pre-split data to inherit for it.
@@ -115,6 +124,7 @@ impl StateCategory {
             storage_keys::BLOCKED_USERS => Self::BlockedUsers,
             storage_keys::BOTH_CREATE_AWAITING_DECRYPT => Self::BothCreateAwaitingDecrypt,
             storage_keys::LAMPORT_CLOCK => Self::LamportClock,
+            storage_keys::DEDUP_SEEN_IDS => Self::DedupSeenIds,
             storage_keys::NOSTR_WATERMARK => Self::NostrWatermark,
             storage_keys::NOSTR_KEY_PACKAGE_SLOTS => Self::NostrKeyPackageSlots,
             storage_keys::NOSTR_DISCOVERY_CLAIM => Self::NostrDiscoveryClaim,
@@ -151,6 +161,7 @@ impl StateCategory {
         Self::BlockedUsers,
         Self::BothCreateAwaitingDecrypt,
         Self::LamportClock,
+        Self::DedupSeenIds,
         Self::NostrWatermark,
         Self::NostrKeyPackageSlots,
         Self::NostrDiscoveryClaim,
@@ -180,6 +191,7 @@ impl StateCategory {
             Self::BlockedUsers => storage_keys::BLOCKED_USERS,
             Self::BothCreateAwaitingDecrypt => storage_keys::BOTH_CREATE_AWAITING_DECRYPT,
             Self::LamportClock => storage_keys::LAMPORT_CLOCK,
+            Self::DedupSeenIds => storage_keys::DEDUP_SEEN_IDS,
             Self::NostrWatermark => storage_keys::NOSTR_WATERMARK,
             Self::NostrKeyPackageSlots => storage_keys::NOSTR_KEY_PACKAGE_SLOTS,
             Self::NostrDiscoveryClaim => storage_keys::NOSTR_DISCOVERY_CLAIM,
@@ -265,6 +277,14 @@ impl StateCategory {
     /// and moving it backwards only widens a replay window that
     /// `NOSTR_INITIAL_QUERY_LIMIT` already bounds.
     ///
+    /// [`storage_keys::DEDUP_SEEN_IDS`] is there too: message ids and receipt
+    /// times, both of which every frame already carries in the clear on the
+    /// wire and every delivery ACK repeats. Integrity buys little — the
+    /// damaging edit is *adding* an id, which suppresses one future message
+    /// with that id, but a writer who can edit the record can also delete it,
+    /// which sealing cannot detect, and can inject the id on the wire, which
+    /// the receive path dedups just the same.
+    ///
     /// Note what sealing does **not** provide, for any category: it authenticates
     /// bytes that are present, so it cannot detect a record that was deleted or
     /// rolled back to an earlier version. Controls that must survive a deletion
@@ -289,6 +309,7 @@ impl StateCategory {
             | Self::BlockedUsers
             | Self::BothCreateAwaitingDecrypt
             | Self::LamportClock
+            | Self::DedupSeenIds
             | Self::NostrWatermark
             | Self::StateAdoption => false,
         }
@@ -5168,6 +5189,156 @@ impl OfflineProtocol {
                 );
             }
         }
+    }
+}
+
+impl OfflineProtocol {
+    // ========================================================================
+    // DEDUPLICATOR SEEN-SET PERSISTENCE
+    // ========================================================================
+
+    /// Records one change to the deduplicator's seen set — a mark or an
+    /// unmark on the receive path — for the batched write below.
+    ///
+    /// Only receive-side changes are counted. The ids a sender marks for its
+    /// own outgoing frames are not persisted: they exist to stop a relayed
+    /// echo of our own message being re-processed, which a restart does not
+    /// change, and persisting them would spend the record's cap on ids no
+    /// peer will ever push at us.
+    pub(crate) fn note_dedup_change(&mut self) {
+        self.dedup_dirty = self.dedup_dirty.saturating_add(1);
+    }
+
+    /// Marks an inbound id as seen and counts the change for persistence.
+    pub(crate) fn mark_seen_persisted(&mut self, message_id: MessageId) -> bool {
+        let fresh = self.deduplicator.mark_seen(message_id);
+        if fresh {
+            self.note_dedup_change();
+        }
+        fresh
+    }
+
+    /// Forgets an inbound id and counts the change for persistence, so a
+    /// record written later does not resurrect an id the receive path
+    /// deliberately released (a deferred or rejected frame whose resend must
+    /// re-enter processing).
+    pub(crate) fn unmark_seen_persisted(&mut self, message_id: &MessageId) -> bool {
+        let removed = self.deduplicator.unmark_seen(message_id);
+        if removed {
+            self.note_dedup_change();
+        }
+        removed
+    }
+
+    /// Batched seen-set persistence, called from every `process()` tick.
+    ///
+    /// Writes when [`DEDUP_PERSIST_DIRTY_THRESHOLD`] changes have accumulated,
+    /// or when any change is at least [`DEDUP_PERSIST_INTERVAL`] old — so a
+    /// burst reaches disk quickly and a trickle reaches it within seconds,
+    /// while a quiet node writes nothing. The unconditional counterpart is
+    /// [`Self::flush_dedup_seen`].
+    pub(crate) fn persist_dedup_seen_if_due(&mut self) {
+        if self.dedup_dirty == 0 {
+            return;
+        }
+        let due = self.dedup_dirty >= DEDUP_PERSIST_DIRTY_THRESHOLD
+            || self.dedup_last_persist.elapsed() >= DEDUP_PERSIST_INTERVAL;
+        if due {
+            self.write_dedup_seen_to_storage();
+        }
+    }
+
+    /// Writes the seen set regardless of the batching state. Called on
+    /// `stop()` and on drop so a shutdown loses nothing to the debounce.
+    pub(crate) fn flush_dedup_seen(&mut self) {
+        if self.dedup_dirty == 0 {
+            return;
+        }
+        self.write_dedup_seen_to_storage();
+    }
+
+    fn write_dedup_seen_to_storage(&mut self) {
+        let Some(storage) = self.protocol_state_storage.clone() else {
+            return;
+        };
+        let record = DedupSeenRecord {
+            version: DEDUP_SEEN_RECORD_VERSION,
+            entries: self.deduplicator.export_seen(MAX_PERSISTED_DEDUP_IDS),
+        };
+        let data = match serde_json::to_vec(&record) {
+            Ok(data) => data,
+            Err(e) => {
+                warn!(error = %e, "Failed to serialize deduplicator seen set");
+                return;
+            }
+        };
+        if let Err(e) = self.write_state_record(
+            storage.as_ref(),
+            storage_keys::DEDUP_SEEN_IDS,
+            storage_keys::DEDUP_SEEN_IDS_ID,
+            &data,
+        ) {
+            warn!(error = %e, "Failed to persist deduplicator seen set");
+            return;
+        }
+        // Reset only on success: a failed write leaves the changes dirty so
+        // the next tick retries rather than declaring them durable.
+        self.dedup_dirty = 0;
+        self.dedup_last_persist = Instant::now();
+    }
+
+    /// Restores the seen set from storage, next to the Lamport clock.
+    ///
+    /// Ids already tracked in memory win, ids past the retention window as
+    /// of now are skipped, and the configured cap is respected — all inside
+    /// `Deduplicator::import_seen`. A record that does not parse, or carries a
+    /// version this build does not know, is deleted and the set starts empty:
+    /// nothing is owed to anyone for it, since the worst case is the one
+    /// restart-time duplicate this record exists to prevent.
+    pub(crate) fn restore_dedup_seen(&mut self) {
+        let Some(storage) = self.protocol_state_storage.clone() else {
+            return;
+        };
+        let Ok(Some(data)) = self.read_state_record(
+            storage.as_ref(),
+            storage_keys::DEDUP_SEEN_IDS,
+            storage_keys::DEDUP_SEEN_IDS_ID,
+        ) else {
+            return;
+        };
+        let record = match serde_json::from_slice::<DedupSeenRecord>(&data) {
+            Ok(record) if record.version == DEDUP_SEEN_RECORD_VERSION => record,
+            Ok(record) => {
+                warn!(
+                    version = record.version,
+                    "Dropping deduplicator seen set with an unknown record version"
+                );
+                let _ = storage.delete(
+                    storage_keys::DEDUP_SEEN_IDS,
+                    storage_keys::DEDUP_SEEN_IDS_ID,
+                );
+                return;
+            }
+            Err(e) => {
+                warn!(error = %e, "Dropping corrupted deduplicator seen set");
+                let _ = storage.delete(
+                    storage_keys::DEDUP_SEEN_IDS,
+                    storage_keys::DEDUP_SEEN_IDS_ID,
+                );
+                return;
+            }
+        };
+        let listed = record.entries.len();
+        let imported = self.deduplicator.import_seen(record.entries, Utc::now());
+        if imported > 0 {
+            debug!(
+                imported,
+                listed, "Restored deduplicator seen set from storage"
+            );
+        }
+        // What is in memory now matches disk (or is a subset disk already
+        // holds), so nothing is dirty until the next receive.
+        self.dedup_last_persist = Instant::now();
     }
 }
 

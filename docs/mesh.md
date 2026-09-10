@@ -648,8 +648,8 @@ const config = {
     },
     dedup: {
       useBloomFilter: false,     // HashMap mode (default); set true for bloom filter
-      maxTrackedMessages: 1000,  // HashMap mode capacity
-      retentionTimeSecs: 3600,   // 1 hour retention
+      maxTrackedMessages: 2000,  // HashMap mode capacity (persisted across restarts)
+      retentionTimeSecs: 86400,  // 24 hour retention
     },
   },
 };

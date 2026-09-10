@@ -17885,6 +17885,177 @@ fn test_pending_decrypt_records_are_deleted_when_peer_queue_is_discarded() {
     assert!(bob.pending_queue.contains_peer(&id("carol")));
 }
 
+// ---------------------------------------------------------------------------
+// Deduplicator seen-set persistence (`dedup_seen_ids`)
+// ---------------------------------------------------------------------------
+
+/// A protocol-state store that counts writes to one category, for pinning
+/// the seen-set batching rule.
+struct DedupWriteCountingStorage {
+    inner: Arc<InMemoryStorage>,
+    dedup_writes: Mutex<usize>,
+}
+
+impl crate::ProtocolStateStorage for DedupWriteCountingStorage {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> crate::ProtocolStateResult<()> {
+        if key_type == storage_keys::DEDUP_SEEN_IDS {
+            *self.dedup_writes.lock().unwrap() += 1;
+        }
+        self.inner
+            .store(key_type, key_id, data)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+
+    fn load(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+        self.inner
+            .load(key_type, key_id)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+
+    fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+        self.inner
+            .delete(key_type, key_id)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+
+    fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+        self.inner
+            .list_keys(key_type)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+}
+
+/// The restart case the record exists for: an id marked on the receive path
+/// is still a duplicate on the next launch, so the socket copy of a message
+/// the app already consumed from a push injection is deduped rather than
+/// sent to a ratchet whose generation it already spent.
+#[test]
+fn test_dedup_seen_set_survives_stop_and_restart() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut bob = pending_decrypt_bob(storage.clone());
+    bob.start().unwrap();
+    let seen = MessageId::new();
+    let released = MessageId::new();
+    assert!(bob.mark_seen_persisted(seen.clone()));
+    assert!(bob.mark_seen_persisted(released.clone()));
+    assert!(bob.unmark_seen_persisted(&released));
+    // Nothing has been written yet: the write is batched, and `stop()` is
+    // what flushes it.
+    let state_storage = bob.protocol_state_storage.clone().unwrap();
+    assert!(bob
+        .read_state_record(
+            state_storage.as_ref(),
+            storage_keys::DEDUP_SEEN_IDS,
+            storage_keys::DEDUP_SEEN_IDS_ID,
+        )
+        .unwrap()
+        .is_none());
+    bob.stop().unwrap();
+    drop(bob);
+
+    let bob = pending_decrypt_bob(storage);
+    assert!(
+        bob.deduplicator.is_duplicate(&seen),
+        "an id marked before the restart must still read as a duplicate"
+    );
+    assert!(
+        !bob.deduplicator.is_duplicate(&released),
+        "an id the receive path released must not be resurrected by the record"
+    );
+    assert_eq!(bob.dedup_dirty, 0, "a restore is not a change to persist");
+}
+
+/// The batching rule: nothing per message, one write once 32 changes have
+/// accumulated, and one write for any smaller batch once the interval has
+/// elapsed on a `process()` tick.
+#[test]
+fn test_dedup_seen_set_persistence_is_batched() {
+    use super::{DEDUP_PERSIST_DIRTY_THRESHOLD, DEDUP_PERSIST_INTERVAL};
+
+    let storage = Arc::new(DedupWriteCountingStorage {
+        inner: Arc::new(InMemoryStorage::new()),
+        dedup_writes: Mutex::new(0),
+    });
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.protocol_state_storage = Some(storage.clone());
+    protocol.start().unwrap();
+    let writes = || *storage.dedup_writes.lock().unwrap();
+
+    // 31 marks: under the threshold and inside the interval, so the tick
+    // writes nothing.
+    for _ in 0..(DEDUP_PERSIST_DIRTY_THRESHOLD - 1) {
+        protocol.mark_seen_persisted(MessageId::new());
+    }
+    protocol.process().unwrap();
+    assert_eq!(
+        writes(),
+        0,
+        "a batch under the threshold waits for the interval"
+    );
+    assert_eq!(protocol.dedup_dirty, DEDUP_PERSIST_DIRTY_THRESHOLD - 1);
+
+    // The interval elapses: the next tick writes the batch, once.
+    protocol.dedup_last_persist = Instant::now() - DEDUP_PERSIST_INTERVAL - Duration::from_secs(1);
+    protocol.process().unwrap();
+    assert_eq!(
+        writes(),
+        1,
+        "the tick after the interval writes exactly once"
+    );
+    assert_eq!(protocol.dedup_dirty, 0);
+    protocol.process().unwrap();
+    assert_eq!(writes(), 1, "a clean set is not rewritten");
+
+    // The threshold: 32 changes write on the very next tick with no wait.
+    for _ in 0..DEDUP_PERSIST_DIRTY_THRESHOLD {
+        protocol.mark_seen_persisted(MessageId::new());
+    }
+    protocol.process().unwrap();
+    assert_eq!(writes(), 2, "reaching the threshold writes without waiting");
+
+    // A re-mark of a tracked id is not a change.
+    let tracked = MessageId::new();
+    protocol.mark_seen_persisted(tracked.clone());
+    let dirty = protocol.dedup_dirty;
+    assert!(!protocol.mark_seen_persisted(tracked));
+    assert_eq!(protocol.dedup_dirty, dirty);
+
+    // stop() flushes whatever is dirty, unconditionally.
+    protocol.stop().unwrap();
+    assert_eq!(writes(), 3, "stop flushes the remaining batch");
+}
+
+/// A record this build cannot read is dropped and the set starts empty; the
+/// restore never fails `initialize_mls` over it.
+#[test]
+fn test_dedup_seen_set_corrupt_record_is_dropped() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let bob = pending_decrypt_bob(storage.clone());
+    let state_storage = bob.protocol_state_storage.clone().unwrap();
+    bob.write_state_record(
+        state_storage.as_ref(),
+        storage_keys::DEDUP_SEEN_IDS,
+        storage_keys::DEDUP_SEEN_IDS_ID,
+        b"{\"version\":1,\"entries\":[",
+    )
+    .unwrap();
+    drop(bob);
+
+    let bob = pending_decrypt_bob(storage);
+    assert_eq!(bob.deduplicator.tracked_count(), 0);
+    let state_storage = bob.protocol_state_storage.clone().unwrap();
+    assert!(
+        bob.read_state_record(
+            state_storage.as_ref(),
+            storage_keys::DEDUP_SEEN_IDS,
+            storage_keys::DEDUP_SEEN_IDS_ID,
+        )
+        .unwrap()
+        .is_none(),
+        "the unreadable record is deleted rather than re-examined every launch"
+    );
+}
+
 #[test]
 fn test_pending_queue_global_limit_fail_closed_when_global_index_corrupted() {
     let mut config = create_test_config();
@@ -26669,7 +26840,7 @@ fn nostr_watermark_is_a_noop_without_a_nostr_transport() {
 }
 
 #[test]
-fn nostr_replay_overlap_exceeds_dedup_retention() {
+fn nostr_replay_overlap_fits_inside_dedup_retention() {
     // Drift guard between two constants that live in different crates and are
     // only related here, in the crate that owns both the Nostr transport and
     // the deduplicator.
@@ -26678,17 +26849,17 @@ fn nostr_replay_overlap_exceeds_dedup_retention() {
     // is mandatory — the sender writes `created_at`, so an event published now
     // can be stamped a jitter window in the past, and a `since` sitting at the
     // mark would filter out the very events the query exists to fetch. Dedup is
-    // what would otherwise make the resulting duplicates free, and it does not
-    // reach far enough: ids are retained for `retention_time_secs`, which is
-    // *shorter* than the overlap, so a reconnect after longer than the
-    // retention window re-processes rather than absorbs it.
+    // what makes the resulting duplicates free, and since the seen set became
+    // persistent (24 h retention, restored across restarts) it reaches far
+    // enough: ids outlive the overlap, so a reconnect inside the retention
+    // window — an app reopened the next day included — absorbs it.
     //
-    // That residual is documented in `docs/nostr.md`, the CHANGELOG, and
-    // `create_subscription_message`. This test exists so those notes cannot go
-    // stale: if someone raises dedup retention past the overlap (or shrinks the
-    // overlap below retention), the residual is gone and this fails — at which
-    // point the fix is to update those three notes to claim full absorption,
-    // not to weaken this assertion.
+    // That absorption is documented in `docs/nostr.md`, the 0.26.0 CHANGELOG
+    // entry, and `create_subscription_message`. This test exists so those notes
+    // cannot go stale: if someone shrinks dedup retention below the overlap (or
+    // widens the overlap past retention), the residual is back and this fails —
+    // at which point the fix is to update those three notes to state the
+    // residual again, not to weaken this assertion.
     let overlap_secs = offline_protocol_transport::constants::NOSTR_CREATED_AT_JITTER_SECS
         + offline_protocol_transport::constants::NOSTR_CLOCK_SKEW_MARGIN_SECS;
 
@@ -26701,12 +26872,12 @@ fn nostr_replay_overlap_exceeds_dedup_retention() {
         .retention_time_secs as i64;
 
     assert!(
-        overlap_secs > retention_secs,
-        "the documented replay residual is gone: the {overlap_secs}s Nostr replay \
-         overlap now fits inside the {retention_secs}s dedup retention window, so \
-         duplicates ARE fully absorbed. Update docs/nostr.md, the CHANGELOG entry, \
-         and the create_subscription_message doc comment, which all state the \
-         opposite."
+        retention_secs >= overlap_secs,
+        "the replay residual is back: the {overlap_secs}s Nostr replay overlap no \
+         longer fits inside the {retention_secs}s dedup retention window, so a \
+         reconnect after longer than retention re-processes its overlap. Update \
+         docs/nostr.md, the CHANGELOG entry, and the create_subscription_message \
+         doc comment, which all claim absorption."
     );
 }
 

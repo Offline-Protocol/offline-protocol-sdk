@@ -756,6 +756,16 @@ pub struct OfflineProtocol {
     /// next merge with any peer).
     last_persisted_lamport: u64,
 
+    /// Receive-side changes to the deduplicator's seen set since it was last
+    /// written. Drives the batched write in `persist_dedup_seen_if_due`;
+    /// see `DedupSeenRecord` for why the set is persisted at all.
+    dedup_dirty: u32,
+
+    /// When the seen set was last written (or restored), for the time half of
+    /// the batching rule. Starts at construction so the first write waits for
+    /// either the interval or the dirty threshold like every later one.
+    dedup_last_persist: Instant,
+
     /// The Nostr receive watermark last written to storage, or `None` if this
     /// session has neither written nor restored one. Debounces
     /// `persist_nostr_watermark()` the same way `last_persisted_lamport`
@@ -869,6 +879,10 @@ impl Drop for OfflineProtocol {
         // protocol is dropped without an explicit stop() call.
         self.flush_lamport_clock();
         self.flush_nostr_watermark();
+        // And the deduplicator's seen set, whose write is batched the same
+        // way: a copy of a message received in the last few seconds before
+        // the drop would otherwise be re-processed by the next launch.
+        self.flush_dedup_seen();
         // Same reason: edits batch before they reach a record, so without a
         // flush here the debounce window between an edit and its delta is a
         // window in which work is lost.
@@ -1054,6 +1068,8 @@ impl OfflineProtocol {
             transport_status_snapshot: HashMap::new(),
             device_capability_snapshot: None,
             last_persisted_lamport: 0,
+            dedup_dirty: 0,
+            dedup_last_persist: Instant::now(),
             last_persisted_nostr_watermark: None,
             nostr_publication_slots: Vec::new(),
             nostr_published_slots: HashSet::new(),
@@ -1289,6 +1305,7 @@ impl OfflineProtocol {
             self.restore_pending_messages(&mut pending_prunes)?;
             self.restore_pending_decrypt_entries(&mut pending_decrypt_prunes);
             self.restore_lamport_clock();
+            self.restore_dedup_seen();
             self.restore_encryption_capable_peers();
             self.restore_blocked_users()?;
             self.restore_session_states_from_manager(manager.clone(), &mut advisory_prunes)?;
@@ -1419,6 +1436,7 @@ impl OfflineProtocol {
         self.restore_pending_messages(&mut pending_prunes)?;
         self.restore_pending_decrypt_entries(&mut pending_decrypt_prunes);
         self.restore_lamport_clock();
+        self.restore_dedup_seen();
         self.restore_encryption_capable_peers();
         self.restore_blocked_users()?;
         self.restore_outbox(&mut outbox_prunes)?;
@@ -1833,6 +1851,9 @@ impl OfflineProtocol {
         // Same for the Nostr receive watermark: an un-flushed tail costs the
         // next launch a wider replay window.
         self.flush_nostr_watermark();
+        // And the deduplicator's seen set: an un-flushed tail is a message
+        // whose second copy the next launch fails to recognise.
+        self.flush_dedup_seen();
         // Answer any lookup still in flight while the transport is still up to
         // take the cancellations. Nothing pumps relays or sweeps deadlines once
         // stopped, so a resolution left here is an event that never comes.
@@ -3109,6 +3130,9 @@ impl OfflineProtocol {
         self.run_throttled_reconciliation("process_tick");
 
         let _ = self.prune_expired_pending_global_front(Instant::now(), 256);
+        // Batched like the Lamport clock: the seen set reaches disk on a
+        // change threshold or a time cadence, never per message.
+        self.persist_dedup_seen_if_due();
         self.pump_media_transfers();
         self.refresh_nostr_key_package_slots();
         self.refresh_nostr_discovery_claim();

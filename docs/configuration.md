@@ -568,8 +568,14 @@ per-member delivery path.
 **Dedup Config**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `maxTrackedMessages` | number | 1000 | Max message IDs to track (must be > 0) |
-| `retentionTimeSecs` | number | 3600 | Retention time (1 hour; must be > 0) |
+| `maxTrackedMessages` | number | 2000 | Max message IDs to track (must be > 0) |
+| `retentionTimeSecs` | number | 86400 | Retention time (24 hours; must be > 0) |
+
+The seen set is persisted (up to 2000 ids, newest first) and restored on the
+next launch, so a message that reaches the device twice on two paths — a push
+injection and the relay socket after a reconnect — is still recognised as a
+duplicate across an app restart. The retention window is applied again on
+import.
 
 Both fields are now **rejected at `0`**. Neither failed safe: at
 `maxTrackedMessages: 0` the exact-match tracker evicts on every insert, so it

@@ -9,6 +9,7 @@
 
 use chrono::{DateTime, Utc};
 use offline_protocol_core::MessageId;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Configuration for deduplication.
@@ -40,8 +41,17 @@ impl Default for DeduplicatorConfig {
     fn default() -> Self {
         Self {
             // Exact-match mode by default: no false positives (Bloom can drop ~1% of legitimate messages).
-            max_tracked_messages: 1000,
-            retention_time_secs: 3600, // 1 hour
+            //
+            // Sized for the seen set to be persisted across restarts
+            // (`export_seen`/`import_seen`): a message can reach a receiver
+            // twice on two paths — a push-injected copy and the relay socket
+            // copy after a reconnect, hours apart if the app was closed in
+            // between — and the second copy is only recognisable as a
+            // duplicate while its id is still tracked. An hour did not cover
+            // "reopened the next day"; a day does, and 2000 ids at ~50 bytes
+            // each is a 100 KB ceiling.
+            max_tracked_messages: 2000,
+            retention_time_secs: 86_400, // 24 hours
             use_bloom_filter: false,
             bloom_filter_bits: 1 << 20, // ~1MB per filter (1,048,576 bits)
             bloom_hash_count: 7,        // ~1% false positive rate when Bloom is enabled
@@ -214,6 +224,17 @@ impl RotatingBloomFilter {
         }
         rates.iter().sum::<f64>() / rates.len() as f64
     }
+}
+
+/// One id of the exact-mode seen set, as exported for persistence and
+/// imported on the next launch. `seen_at_ms` is wall-clock milliseconds so
+/// the retention window can be re-applied on import.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeenId {
+    /// The message id.
+    pub id: String,
+    /// When the id was first seen, unix milliseconds.
+    pub seen_at_ms: i64,
 }
 
 /// Entry for a seen message (used in HashMap mode).
@@ -399,6 +420,72 @@ impl Deduplicator {
         self.seen_messages.remove(&message_id.as_str()).is_some()
     }
 
+    /// Exports up to `max` tracked ids, newest first, for persistence.
+    ///
+    /// Exact (HashMap) mode only: a bloom filter has no ids to export, so
+    /// bloom mode returns an empty vector and the persisted set simply stays
+    /// empty. Newest first so that a cap smaller than the tracked set keeps
+    /// the ids most likely to be replayed — the recent ones.
+    pub fn export_seen(&self, max: usize) -> Vec<SeenId> {
+        if self.bloom_filter.is_some() {
+            return Vec::new();
+        }
+        let mut entries: Vec<SeenId> = self
+            .seen_messages
+            .iter()
+            .map(|(id, entry)| SeenId {
+                id: id.clone(),
+                seen_at_ms: entry.seen_at.timestamp_millis(),
+            })
+            .collect();
+        entries.sort_by(|left, right| {
+            right
+                .seen_at_ms
+                .cmp(&left.seen_at_ms)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        entries.truncate(max);
+        entries
+    }
+
+    /// Re-admits ids exported by [`Self::export_seen`] on a previous run.
+    ///
+    /// Skips ids already tracked (the live set wins), ids whose retention
+    /// window has closed as of `now`, and stops at `max_tracked_messages` so
+    /// a restore can never push the set over its cap or evict live entries.
+    /// Entries are admitted in the order given, so a caller that wants the
+    /// newest to survive a tight cap passes them newest first — which is the
+    /// order `export_seen` produces. Returns how many were admitted. A no-op
+    /// in bloom mode, which has nothing to import into.
+    pub fn import_seen(&mut self, entries: Vec<SeenId>, now: DateTime<Utc>) -> usize {
+        if self.bloom_filter.is_some() {
+            return 0;
+        }
+        let retention = chrono::Duration::seconds(self.config.retention_time_secs as i64);
+        let cutoff = now - retention;
+        let mut imported = 0;
+        for entry in entries {
+            if self.seen_messages.len() >= self.config.max_tracked_messages {
+                break;
+            }
+            let Some(seen_at) = DateTime::<Utc>::from_timestamp_millis(entry.seen_at_ms) else {
+                continue;
+            };
+            if seen_at <= cutoff || self.seen_messages.contains_key(&entry.id) {
+                continue;
+            }
+            self.seen_messages.insert(
+                entry.id,
+                SeenEntry {
+                    seen_at,
+                    last_accessed: seen_at,
+                },
+            );
+            imported += 1;
+        }
+        imported
+    }
+
     /// Removes expired entries that exceed the retention time.
     ///
     /// # Returns
@@ -547,13 +634,14 @@ mod tests {
     }
 
     #[test]
-    fn test_default_config_is_hashmap_and_capacity_1000() {
+    fn test_default_config_is_hashmap_and_capacity_2000() {
         let config = DeduplicatorConfig::default();
         assert!(
             !config.use_bloom_filter,
             "default should be exact-match HashMap to avoid false positives"
         );
-        assert_eq!(config.max_tracked_messages, 1000);
+        assert_eq!(config.max_tracked_messages, 2000);
+        assert_eq!(config.retention_time_secs, 86_400);
 
         let dedup = Deduplicator::new();
         assert!(!dedup.is_bloom_filter_mode());
@@ -938,5 +1026,97 @@ mod tests {
         );
         assert!(dedup.is_duplicate(&msg_c), "C should survive");
         assert!(dedup.is_duplicate(&msg_d), "D was just inserted");
+    }
+    #[test]
+    fn test_export_import_round_trip_newest_first() {
+        let mut dedup = Deduplicator::new();
+        let ids: Vec<MessageId> = (0..5).map(|_| MessageId::new()).collect();
+        for id in &ids {
+            dedup.mark_seen(id.clone());
+        }
+        let exported = dedup.export_seen(usize::MAX);
+        assert_eq!(exported.len(), 5);
+        assert!(
+            exported
+                .windows(2)
+                .all(|pair| pair[0].seen_at_ms >= pair[1].seen_at_ms),
+            "export is newest first"
+        );
+        // A cap keeps the newest, not an arbitrary subset.
+        let capped = dedup.export_seen(2);
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped, exported[..2].to_vec());
+
+        let mut restored = Deduplicator::new();
+        assert_eq!(restored.import_seen(exported.clone(), Utc::now()), 5);
+        for id in &ids {
+            assert!(restored.is_duplicate(id));
+        }
+        // The seen_at survives the trip, so a later export agrees.
+        let mut again = restored.export_seen(usize::MAX);
+        let mut original = exported;
+        again.sort_by(|a, b| a.id.cmp(&b.id));
+        original.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(again, original);
+    }
+
+    #[test]
+    fn test_import_ignores_expired_existing_and_respects_cap() {
+        let config = DeduplicatorConfig {
+            max_tracked_messages: 3,
+            retention_time_secs: 3600,
+            ..Default::default()
+        };
+        let mut dedup = Deduplicator::with_config(config);
+        let now = Utc::now();
+        let live = MessageId::new();
+        let expired = MessageId::new();
+        let fresh: Vec<MessageId> = (0..3).map(|_| MessageId::new()).collect();
+        dedup.mark_seen(live.clone());
+
+        let seen = |id: &MessageId, secs_ago: i64| SeenId {
+            id: id.as_str(),
+            seen_at_ms: (now - chrono::Duration::seconds(secs_ago)).timestamp_millis(),
+        };
+        let entries = vec![
+            // Expired: past the retention window as of `now`.
+            seen(&expired, 3601),
+            // Already tracked: the live entry wins and this does not count.
+            seen(&live, 10),
+            seen(&fresh[0], 5),
+            seen(&fresh[1], 4),
+            // Over the cap once the two above are in: refused.
+            seen(&fresh[2], 3),
+        ];
+        assert_eq!(dedup.import_seen(entries, now), 2);
+        assert_eq!(dedup.tracked_count(), 3);
+        assert!(!dedup.is_duplicate(&expired));
+        assert!(dedup.is_duplicate(&live));
+        assert!(dedup.is_duplicate(&fresh[0]));
+        assert!(dedup.is_duplicate(&fresh[1]));
+        assert!(!dedup.is_duplicate(&fresh[2]));
+    }
+
+    #[test]
+    fn test_export_import_are_noops_in_bloom_mode() {
+        let config = DeduplicatorConfig {
+            use_bloom_filter: true,
+            ..Default::default()
+        };
+        let mut dedup = Deduplicator::with_config(config);
+        dedup.mark_seen(MessageId::new());
+        assert!(dedup.export_seen(usize::MAX).is_empty());
+        let imported = MessageId::new();
+        assert_eq!(
+            dedup.import_seen(
+                vec![SeenId {
+                    id: imported.as_str(),
+                    seen_at_ms: Utc::now().timestamp_millis(),
+                }],
+                Utc::now()
+            ),
+            0
+        );
+        assert!(!dedup.is_duplicate(&imported));
     }
 }

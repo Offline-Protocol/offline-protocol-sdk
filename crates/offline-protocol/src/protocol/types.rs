@@ -355,6 +355,48 @@ pub(crate) const RECONCILIATION_THROTTLE_MS: u64 = 2_000;
 /// is only used for causal ordering and the gap is absorbed on the next
 /// merge with any peer.
 pub(crate) const LAMPORT_PERSIST_INTERVAL: u64 = 64;
+
+/// Most seen ids one `DedupSeenRecord` carries. Matches the default
+/// `max_tracked_messages`; a larger configured tracker persists its newest
+/// ids only, which are the ones a replay is most likely to repeat.
+pub(crate) const MAX_PERSISTED_DEDUP_IDS: usize = 2000;
+
+/// Seen-set changes that force a write before the time cadence elapses. A
+/// burst of inbound traffic is exactly when the set is worth having on disk,
+/// and 32 changes at ~60 bytes each is well under the cost of one write.
+pub(crate) const DEDUP_PERSIST_DIRTY_THRESHOLD: u32 = 32;
+
+/// How long a dirty seen set may wait for the next `process()` tick before it
+/// is written. Bounds what a crash loses to a few seconds of receipts.
+pub(crate) const DEDUP_PERSIST_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The deduplicator's seen set as persisted under
+/// [`storage_keys::DEDUP_SEEN_IDS`].
+///
+/// The deduplicator was in-memory only, so after a restart the socket copy of
+/// a message the app had already consumed from a push injection was not
+/// recognised as a duplicate: it went to the ratchet, whose generation for
+/// that message was already spent, and surfaced as a decryption failure — a
+/// spurious signal the app counts toward its split-brain breaker, which then
+/// tears down a healthy session. Persisting the ids makes the second copy
+/// recognisable across the restart. Ids and timestamps only; nothing here is
+/// content.
+///
+/// `version` is the forward-compatibility hinge: an unknown version is dropped
+/// rather than guessed at, and the set simply starts empty.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct DedupSeenRecord {
+    #[serde(default = "dedup_seen_record_version")]
+    pub(crate) version: u8,
+    pub(crate) entries: Vec<offline_protocol_reliability::SeenId>,
+}
+
+/// The only record version this build writes or reads.
+pub(crate) const DEDUP_SEEN_RECORD_VERSION: u8 = 1;
+
+fn dedup_seen_record_version() -> u8 {
+    DEDUP_SEEN_RECORD_VERSION
+}
 /// Seconds the Nostr receive watermark must advance before it is written back
 /// to protocol-state storage. Same debounce role as
 /// [`LAMPORT_PERSIST_INTERVAL`]: every inbound relay event moves the mark, and
@@ -1771,6 +1813,11 @@ pub(crate) mod storage_keys {
     pub const LAMPORT_CLOCK: &str = "lamport_clock";
     /// Key ID for the single Lamport clock entry.
     pub const LAMPORT_CLOCK_ID: &str = "current";
+    /// The deduplicator's exact-mode seen set, one record for the whole set.
+    /// See `DedupSeenRecord`.
+    pub const DEDUP_SEEN_IDS: &str = "dedup_seen_ids";
+    /// Key ID for the single seen-set record.
+    pub const DEDUP_SEEN_IDS_ID: &str = "current";
     /// Key type for the durable record that a peer has proved it runs MLS.
     ///
     /// Successor to the `tofu_keys` category, which stored a pinned public key

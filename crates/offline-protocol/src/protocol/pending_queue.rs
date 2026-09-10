@@ -259,7 +259,7 @@ impl OfflineProtocol {
                     // now on its arrival transport so the sender can stop
                     // retrying without a further resend.
                     ChunkOutcome::Handled => {
-                        self.deduplicator.mark_seen(msg.id.clone());
+                        self.mark_seen_persisted(msg.id.clone());
                         self.ack_drained_message(&msg, received_via);
                     }
                     // Not delivered, recoverable by a resend. Two shapes, both
@@ -343,7 +343,7 @@ impl OfflineProtocol {
                         // delivery) or re-decrypted (an MLS replay the ratchet
                         // would reject). This is the counterpart to the unmark
                         // in the receive loop's `Deferred` arm.
-                        self.deduplicator.mark_seen(msg.id.clone());
+                        self.mark_seen_persisted(msg.id.clone());
 
                         // ACK on drain: the message is delivered locally now, so
                         // send the deferred delivery ACK directly on its arrival
@@ -361,7 +361,7 @@ impl OfflineProtocol {
                         // path; re-mark so a resend is deduped rather than
                         // reprocessed, and ACK it (control messages are
                         // delivery-sensitive, exactly like the live path).
-                        self.deduplicator.mark_seen(msg.id.clone());
+                        self.mark_seen_persisted(msg.id.clone());
                         self.ack_drained_message(&msg, received_via);
                         debug!(message_id = %msg.id, "Delayed message was consumed internally");
                     }
