@@ -17475,6 +17475,63 @@ fn test_pending_queue_drop_newest_policy_enforced_for_per_peer_limit() {
 }
 
 #[test]
+fn test_pending_queue_overflow_emits_pending_queue_dropped_for_text() {
+    // Text frames evicted from the pending-decryption queue used to be
+    // metrics-only; only media chunks surfaced `PendingQueueDropped`. With a
+    // relay that pushes ciphertext without store-and-forward there is no
+    // second copy, so a silent text eviction was a lost message with no
+    // signal to the app. Overflowing the per-peer cap must now surface the
+    // evicted text frame's id under the same code, attributed to its sender.
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.pending_queue.max_pending_per_peer = 1;
+    config.encryption.pending_queue.max_pending_global = 10;
+    config.encryption.pending_queue.pending_ttl_ms = 60_000;
+    config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropOldest;
+
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let dropped: Arc<Mutex<Vec<(String, String, DecryptionFailureCode, String)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let dropped_clone = dropped.clone();
+    protocol.on_event(move |event| {
+        if let Event::MessageDecryptionFailed {
+            message_id,
+            sender,
+            code,
+            reason,
+        } = event
+        {
+            dropped_clone
+                .lock()
+                .unwrap()
+                .push((message_id, sender, code, reason));
+        }
+    });
+
+    let first = pending_test_message(&id("peer-a"), "first");
+    let second = pending_test_message(&id("peer-a"), "second");
+    assert_ne!(first.content_type, ContentType::FileChunk);
+    protocol.enqueue_pending_decryption("peer-a", &first);
+    assert!(dropped.lock().unwrap().is_empty());
+    protocol.enqueue_pending_decryption("peer-a", &second);
+
+    let events = dropped.lock().unwrap();
+    assert_eq!(events.len(), 1, "exactly the evicted frame is reported");
+    let (message_id, sender, code, reason) = &events[0];
+    assert_eq!(*message_id, first.id.as_str());
+    assert_eq!(sender, &id("peer-a"));
+    assert_eq!(*code, DecryptionFailureCode::PendingQueueDropped);
+    assert!(
+        reason.contains("overflow_drop_oldest") && reason.contains("sender resends"),
+        "reason must carry the machine-readable drop cause, got {reason:?}"
+    );
+    assert!(
+        !reason.contains("media chunk"),
+        "text evictions must not be described as media, got {reason:?}"
+    );
+}
+
+#[test]
 fn test_pending_queue_global_limit_fail_closed_when_global_index_corrupted() {
     let mut config = create_test_config();
     config.encryption.enabled = true;

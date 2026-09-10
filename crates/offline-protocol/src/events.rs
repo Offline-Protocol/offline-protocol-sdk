@@ -438,19 +438,24 @@ pub enum DecryptionFailureCode {
     IdentityMismatch,
     /// Cryptographic operation failed.
     CryptoFailure,
-    /// A media chunk was evicted from the pending-decryption queue (overflow or
-    /// TTL expiry) before the sender's session became ready, so the file
-    /// transfer it belongs to is currently stalled.
+    /// An encrypted message — a text frame or a media chunk — was evicted from
+    /// the pending-decryption queue (overflow or TTL expiry, or it aged out of
+    /// the persisted queue across restarts) before the sender's session became
+    /// ready. For a media chunk the file transfer it belongs to is currently
+    /// stalled; for a text message the message itself is gone locally.
     ///
     /// Under the deferred-ACK model this is **advisory, not terminal**: the
-    /// evicted chunk was never ACKed, so the sender keeps retransmitting and a
-    /// later resend re-enters the queue and can still complete the transfer once
-    /// the session confirms. Treat this as "the transfer is stalled and may need
-    /// a resend", not "the transfer has permanently failed" — the terminal
-    /// failure signal for media is `FileReceiveFailed`. The same is true of a
-    /// hard decrypt failure while `crypto_recovery_enabled`, which surfaces
-    /// under its own code but is equally un-ACKed and equally recoverable by a
-    /// resend; see the `MessageDecryptionFailed` docs.
+    /// evicted frame was never ACKed, so a sender still retrying resends it and
+    /// a later resend re-enters the queue and can still complete once the
+    /// session confirms. Treat this as "at risk, may need a resend", not
+    /// "permanently failed" — the terminal failure signal for media is
+    /// `FileReceiveFailed`. It is emitted for text as well as for chunks: a
+    /// relay that pushes ciphertext without store-and-forward has no second
+    /// copy, so a silent text eviction was a lost message with no signal to the
+    /// app. The same is true of a hard decrypt failure while
+    /// `crypto_recovery_enabled`, which surfaces under its own code but is
+    /// equally un-ACKed and equally recoverable by a resend; see the
+    /// `MessageDecryptionFailed` docs.
     PendingQueueDropped,
     /// Failure class is unknown.
     Unknown,
