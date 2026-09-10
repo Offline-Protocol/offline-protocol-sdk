@@ -13039,6 +13039,81 @@ mod tests {
         }
     }
 
+    /// A `MessageSent { pushed: true }` parks the frame on both bridges.
+    ///
+    /// The relay has no store-and-forward: when the recipient is not on it,
+    /// the ciphertext goes out in a push notification and the sender is told
+    /// `MessageSent` — which, without this, resolved the frame as accepted
+    /// and left it awaiting an ACK from a peer who may never receive the
+    /// push. Both managers must read `pushed` right where they resolve the
+    /// relay acceptance and, when it is set, fail that one id into the core
+    /// under the `recipient_unreachable` prefix (which the core prefix-matches
+    /// to park a DM: `classify_transport_send_error`) and watch the recipient,
+    /// mirroring `handleRecipientUnreachable`. Neither platform can test the
+    /// call site itself (see the ordering guard below for why), so the source
+    /// is pinned here.
+    #[test]
+    fn react_native_relay_parks_a_pushed_message_sent() {
+        let swift = rn_source_code_only("ios/InternetManager.swift");
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/InternetManager.kt");
+
+        for (label, code) in [("ios", &swift), ("android", &kotlin)] {
+            let resolve = code
+                .find("resolveOnRelayAccepted(")
+                .unwrap_or_else(|| panic!("{label} InternetManager must resolve relay acceptance"));
+            let pushed = code
+                .find("\"pushed\"")
+                .unwrap_or_else(|| panic!("{label} InternetManager must read MessageSent.pushed"));
+            let park = code
+                .find("parkPushedMessage(")
+                .unwrap_or_else(|| panic!("{label} InternetManager must park a pushed message"));
+            assert!(
+                resolve < pushed && pushed < park,
+                "{label} InternetManager must read `pushed` next to resolveOnRelayAccepted and \
+                 park through parkPushedMessage right after it — the frame is out of the \
+                 in-flight tracker either way, so the park is the only thing left that \
+                 stops its ACK budget burning against an offline peer"
+            );
+            assert!(
+                code.contains("\"recipient_unreachable: relay_pushed\""),
+                "{label} parkPushedMessage must fail the id under the recipient_unreachable \
+                 prefix, which is what the core prefix-matches to park a DM"
+            );
+            // The definition is the last occurrence (both managers define it
+            // below the call site, next to handleRecipientUnreachable); the
+            // body checks below start there so they read the park, not the
+            // DeliveryError handler above it.
+            let definition = code
+                .rfind("parkPushedMessage(")
+                .expect("parkPushedMessage definition");
+            assert!(
+                definition > park,
+                "{label} parkPushedMessage must be defined below its call site"
+            );
+            let park_body = &code[definition..];
+            let fail = park_body
+                .find("internetSendFailedWithReason(")
+                .expect("parkPushedMessage must fail the id into the core");
+            let watch = park_body
+                .find("presenceWatch.watch(")
+                .expect("parkPushedMessage must presence-watch the recipient");
+            let presence = park_body
+                .find("internetPeerPresence(")
+                .expect("parkPushedMessage must feed an offline presence to the core");
+            assert!(
+                fail < watch && watch < presence,
+                "{label} parkPushedMessage must park first, then watch, then feed presence — \
+                 the order handleRecipientUnreachable uses"
+            );
+            assert!(
+                !park_body[..fail].contains("drainRecipient("),
+                "{label} parkPushedMessage must fail only the pushed id, never drain the \
+                 recipient's other in-flight frames"
+            );
+        }
+    }
+
     /// The relay connection proves its address before it sends anything else.
     ///
     /// The relay attributes each inbound frame by whatever the connection has

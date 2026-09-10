@@ -8713,6 +8713,58 @@ fn test_unreachable_dm_internet_only_parks_with_probe() {
     assert!(protocol.outbox.contains_key(&message_id));
 }
 
+/// The relay's `MessageSent { pushed: true }` reaches the core as the bridge's
+/// `recipient_unreachable: relay_pushed` on the Internet carrier. It must take
+/// the same park as a DeliveryError — pending ACK dropped, outbox entry kept,
+/// probe scheduled — and put the recipient on the presence watch list, because
+/// a relay without store-and-forward has just said the only copy in flight is
+/// a push notification.
+#[test]
+fn test_relay_pushed_verdict_parks_dm_and_watches_recipient() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    assert!(protocol.ack_manager.is_waiting_for_ack(&message_id));
+    assert!(
+        !protocol.presence_watch_peers().contains(&"bob".to_string()),
+        "an in-flight (ACK-pending) recipient is not watched"
+    );
+
+    protocol
+        .on_transport_send_failed_via(
+            &message_id.as_str(),
+            Some("recipient_unreachable: relay_pushed".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+
+    assert!(
+        protocol.outbox.contains_key(&message_id),
+        "a pushed DM must stay in the outbox"
+    );
+    assert!(
+        !protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "the park must drop the pending ACK so no budget burns against an offline peer"
+    );
+    assert!(
+        protocol.retry_queue.contains(&message_id.as_str()),
+        "the park must schedule a reachability probe"
+    );
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&1));
+    assert!(
+        protocol.presence_watch_peers().contains(&"bob".to_string()),
+        "the pushed DM's recipient must be presence-watched"
+    );
+}
+
 #[test]
 fn test_unreachable_dm_internet_only_probe_escalates_and_resets_on_edge() {
     // The internet-only probe shares the mesh ladder: each consecutive

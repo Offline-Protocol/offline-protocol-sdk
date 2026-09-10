@@ -1643,6 +1643,21 @@ public class InternetManager: NSObject, TransportManager {
                 )
             }
 
+            // `pushed: true` is the relay saying it had no live socket for the
+            // recipient and handed the ciphertext to a push notification
+            // instead. The relay does not store-and-forward, so this is the
+            // same fact a DeliveryError carries — the recipient is not on the
+            // relay right now — with the message *possibly* arriving through
+            // the push. Park this one id exactly as the unreachable path
+            // would (no ACK budget burnt against an offline peer, a
+            // reachability probe scheduled, the recipient watched) so that if
+            // the push is lost the presence edge re-drives it. Absent on
+            // older relays, which reads as `false`.
+            let pushed = json["pushed"] as? Bool ?? false
+            if pushed, let messageId = sentMessageId, !messageId.isEmpty {
+                parkPushedMessage(recipient: sentRecipient, messageId: messageId)
+            }
+
             if let messageId = sentMessageId, !messageId.isEmpty {
                 let timestamp = json["timestamp"] as? String ?? ""
 
@@ -1652,7 +1667,8 @@ public class InternetManager: NSObject, TransportManager {
                 emitDiagnostic("debug", "MessageSent from relay server", context: [
                     "messageId": messageId,
                     "recipient": sentRecipient,
-                    "timestamp": timestamp
+                    "timestamp": timestamp,
+                    "pushed": pushed
                 ])
                 // Note: The protocol SDK will handle the message_sent event internally
                 // The frontend will receive it via the normal event stream
@@ -2718,6 +2734,37 @@ public class InternetManager: NSObject, TransportManager {
             "reason": reason,
             "source": source,
             "failedInFlight": failedIds.count
+        ])
+    }
+
+    /// Parks one message the relay reports as `MessageSent { pushed: true }`.
+    ///
+    /// The narrower sibling of `handleRecipientUnreachable`: the relay named
+    /// exactly one frame, so only that id is failed into the core (with the
+    /// `recipient_unreachable` prefix the core prefix-matches to park a DM
+    /// without burning its ACK budget) and the recipient's other in-flight
+    /// frames are left alone — a later `MessageSent` for each of them says
+    /// what became of it. The recipient is presence-watched and an offline
+    /// presence is fed to the core exactly as the DeliveryError path does, so
+    /// the presence-online edge is what re-drives the parked message if the
+    /// push never reaches the device.
+    private func parkPushedMessage(recipient: String, messageId: String) {
+        // Sentinel entries track app-authored raw SendMessage frames; their
+        // outcomes belong to the app, not the core (see handleRecipientUnreachable).
+        if messageId.isEmpty || messageId.hasPrefix(Self.rawSendSentinelPrefix) { return }
+        protocolInstance.internetSendFailedWithReason(
+            messageId: messageId,
+            reason: "recipient_unreachable: relay_pushed"
+        )
+        // Same self guard as handleRecipientUnreachable: never watch self and
+        // never feed "self is offline" into the core.
+        if !recipient.isEmpty && !isSelfPeer(recipient) {
+            presenceWatch.watch(recipient, nowMs: monotonicNowMs())
+            protocolInstance.internetPeerPresence(peerId: recipient, online: false, lastSeenMs: nil)
+        }
+        emitDiagnostic("info", "Relay pushed message to offline recipient; parked", context: [
+            "recipient": recipient,
+            "messageId": messageId
         ])
     }
 
