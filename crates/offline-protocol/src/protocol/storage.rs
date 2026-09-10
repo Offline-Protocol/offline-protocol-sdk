@@ -225,7 +225,14 @@ impl StateCategory {
     /// - [`storage_keys::OUTBOX`]: the outgoing `Message` — ciphertext for
     ///   encrypted sends, but plaintext when the app opted out of encryption,
     ///   and its outer `media_metadata` carries the cloud-media secrets on the
-    ///   forward path.
+    ///   forward path. **Security note:** since the re-seal provenance
+    ///   (`OutboxEntry::reseal`) became persistent, an encrypted DM's record
+    ///   also carries its *plaintext* for as long as the message is sent but
+    ///   unACKed — the same plaintext `pending_message_entries` holds for the
+    ///   same message before its session exists, under the same record key,
+    ///   and erased with the entry on ACK or expiry. That is what lets a
+    ///   resend after a restart-plus-re-key be re-sealed to the live epoch
+    ///   instead of replaying ciphertext the recipient can never open.
     /// - [`storage_keys::MEDIA_DESCRIPTORS`]: file names and recipients of
     ///   in-flight transfers.
     /// - [`storage_keys::PEER_KEY_PACKAGES`]: the odd one out, sealed for
