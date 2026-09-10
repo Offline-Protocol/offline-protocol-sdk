@@ -48,14 +48,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   rollup, the session summary with delta counters, a session-stamped ring
   buffer, a durable batch queue on the protocol-state storage seam (sealed
   records, one per batch, bounded at 64 batches and 4 MiB), and an HTTPS
-  uploader with idempotent retry: 1 s doubling to 15 min with jitter,
-  `Retry-After` honoured, a six-day expiry inside the ingest's deduplication
-  window, a halt on 401 and 403, deferral below 15% battery unless charging,
-  and one final flush of up to three seconds on disable and on end of
-  session. A background transition wakes the uploader without blocking; iOS
-  additionally wraps that flush in an OS background task, which Android has
-  no equivalent for. The transport-availability edge the tick already
-  computes wakes it when the internet or Nostr transport comes back.
+  uploader that follows no redirect (a 3xx drops the batch) and can use an HTTP
+  CONNECT proxy the environment names, with idempotent retry: 1 s doubling to
+  15 min with jitter, `Retry-After` honoured, a six-day expiry inside the
+  ingest's deduplication window, a halt on 401 and 403, deferral below 15%
+  battery unless charging, and one final flush of up to three seconds on disable
+  and on end of session. A background transition wakes the uploader without
+  blocking; iOS additionally wraps that flush in an OS background task, which
+  Android has no equivalent for. The transport-availability edge the tick
+  already computes wakes it when the internet or Nostr transport comes back.
 - **`offline-protocol-telemetry-wire`**, a new crate holding the batch envelope
   and typed event payloads shared with the ingest, with the canonical wire
   fixture pinned byte for byte and a second fixture pinning the additive raw

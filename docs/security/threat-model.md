@@ -563,9 +563,10 @@ device's trust store. If the ingest's certificate chain ever moves to a root
 absent from a shipped SDK, that SDK's telemetry stops: a network error,
 backoff, and `last_error` in the stats.
 
-**Why it stands:** consulting the device store would make a proxy certificate
-installed on the device a trusted one, and redirection by a compromised device
-is exactly what the fixed endpoint and bundled roots exist to close.
+**Why it stands:** consulting the device store would make an interception
+certificate installed on the device a trusted one, and redirection by a
+compromised device is exactly what the fixed endpoint and bundled roots exist
+to close.
 
 **What bounds it:** the ingest stays on a mainstream authority, a change of
 authority is treated as an SDK release event, and the failure is loud in the
@@ -577,12 +578,21 @@ Until 0.26 the Rust crates opened no socket: every byte that left a device
 went through a platform bridge the application could see. The telemetry pipe
 is the one exception, and its egress is bounded as follows.
 
-- **One endpoint, fixed at build time.** There is no runtime endpoint
-  setting and no host callback that could repoint the stream. A build for a
-  different ingest says so in its environment, and only `https://` is
-  accepted.
+- **One endpoint, fixed at build time.** There is no runtime endpoint setting,
+  no host callback that could repoint the stream, and no redirect the uploader
+  follows. A build for a different ingest says so in its environment, and only
+  `https://` is accepted.
 - **TLS 1.2 or 1.3 through rustls**, with the Mozilla root set compiled in.
   The device's trust store is not consulted (R14).
+- **An HTTP CONNECT proxy, when the environment names one.** The telemetry
+  uploader can use an HTTP CONNECT proxy selected through the HTTP client's
+  supported environment configuration, read when telemetry is enabled. TLS
+  remains between the SDK and the destination server and is validated against
+  the bundled Mozilla root certificates. Installing an interception
+  certificate only in the device trust store does not make that certificate
+  trusted by the SDK. Such an interception attempt fails certificate
+  validation; queued telemetry remains subject to retry, capacity, and expiry
+  limits.
 - **What crosses** is the inventory in [docs/telemetry.md](../telemetry.md#what-leaves-the-device):
   typed projections with no identifier field, the engine's own fixed reason
   tokens, and two aggregates computed on the device. Message content,

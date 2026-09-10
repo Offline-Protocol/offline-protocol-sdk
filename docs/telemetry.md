@@ -168,7 +168,9 @@ A 401 or 403 (a bad key, or a key for another app) keeps the batch, records
 the error in the stats, and stops sending until the next `enableTelemetry`:
 the key is a configuration fault you fix and re-enable through, so the queue
 waits rather than losing what it holds. Any other 4xx drops the batch and
-continues.
+continues, and so does any 3xx, because the uploader follows no redirect. A
+followed 301, 302 or 303 would turn the `POST` into a `GET` at another
+location, where a 2xx would delete the batch unsent and count it as accepted.
 
 The queue is bounded at 64 batches and 4 MiB; beyond either the oldest batch
 is dropped and counted. The ring buffer in front of it holds
@@ -204,13 +206,25 @@ has to know which client wrote the row. The counters beside it are unaffected.
 
 Every batch is `POST`ed to one endpoint, fixed at build time, over TLS 1.2 or
 1.3 through `rustls` with the Mozilla root set compiled into the SDK. The
-device's own trust store is not consulted, which means a proxy certificate
-installed on the device is not trusted either: that is what keeps a
-compromised device from redirecting the stream, and it is also why you cannot
-watch your own app's telemetry with a proxy. The debug tap below is the
-inspection path.
+device's own trust store is not consulted, and the uploader follows no
+redirect, so that endpoint is the only destination a batch is sent to.
 
-It also means the root set ages with the SDK release. The ingest stays on a
+The telemetry uploader can use an HTTP CONNECT proxy selected through the HTTP
+client's supported environment configuration, read when telemetry is enabled.
+TLS remains between the SDK and the destination server and is validated
+against the bundled Mozilla root certificates. Installing an interception
+certificate only in the device trust store does not make that certificate
+trusted by the SDK. Such an interception attempt fails certificate validation;
+queued telemetry remains subject to retry, capacity, and expiry limits.
+
+Only HTTP CONNECT proxies are used. The client reads `ALL_PROXY`,
+`HTTPS_PROXY` or `HTTP_PROXY` from the process environment, in that order and
+in either case, and skips any host `NO_PROXY` names. A SOCKS proxy named there
+is not used, and a system proxy setting that never reaches the process
+environment is not read. The debug tap below is the way to inspect what is
+sent.
+
+The bundled root set also ages with the SDK release. The ingest stays on a
 mainstream certificate authority; a change of CA is an SDK release event, and
 an SDK too old to trust the ingest's chain reports it as a network error in
 `telemetryStats().lastError` and backs off, sending nothing.
@@ -275,8 +289,10 @@ invoice can be checked against it.
 under the `offline_protocol::telemetry::pipe` target: logcat on Android
 (tag `OfflineProtocol`), the unified log on iOS (subsystem
 `com.offlineprotocol.sdk`), stderr on a desktop host. Nothing is delivered to
-application code, and the tap costs nothing while it is off. It is the way
-to see what leaves the device, since the proxy route is closed by design.
+application code, and the tap costs nothing while it is off. The debug tap
+exposes serialized telemetry locally for inspection. A CONNECT proxy tunnels
+the encrypted connection and does not expose its payload; an interception
+certificate trusted only by the device is not trusted by the SDK.
 
 **That target is all the Rust core ever writes to a device log.** Enabling
 telemetry installs the logger the tap needs, and it passes through the pipe's
