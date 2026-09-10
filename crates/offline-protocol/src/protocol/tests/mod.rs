@@ -8765,6 +8765,57 @@ fn test_relay_pushed_verdict_parks_dm_and_watches_recipient() {
     );
 }
 
+/// The watch list is the SDK's own "who am I waiting to hear about": a parked
+/// DM's recipient appears on it, and disappears once a presence-online answer
+/// re-drives the message — the re-driven send registers a fresh pending ACK,
+/// which is what takes the recipient back off the list.
+#[test]
+fn test_parked_dm_recipient_is_watched_until_presence_online_redrives_it() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    let handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .on_transport_send_failed_via(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+    assert!(
+        protocol.presence_watch_peers().contains(&"bob".to_string()),
+        "a parked DM's recipient is watched"
+    );
+    handle.clear_sent_messages();
+
+    protocol.on_peer_presence("bob", true, None);
+
+    assert!(
+        handle.sent_messages().iter().any(|m| m.id == message_id),
+        "presence-online must re-drive the parked DM over the carrier that answered"
+    );
+    assert!(
+        protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "the re-driven send registers a fresh pending ACK"
+    );
+    assert!(
+        !protocol.presence_watch_peers().contains(&"bob".to_string()),
+        "a recipient with only ACK-pending traffic is no longer watched"
+    );
+    assert!(
+        !protocol.dm_unreachable_parks.contains_key("bob"),
+        "the reachability edge clears the park counter"
+    );
+}
+
 #[test]
 fn test_unreachable_dm_internet_only_probe_escalates_and_resets_on_edge() {
     // The internet-only probe shares the mesh ladder: each consecutive
