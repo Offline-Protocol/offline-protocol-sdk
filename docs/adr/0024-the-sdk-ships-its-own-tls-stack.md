@@ -35,9 +35,24 @@ Keep the TLS stack in the SDK. Do not move the upload to a host-supplied HTTP
 callback.
 
 `ureq` is taken with exactly its `rustls` feature: rustls, ring and the bundled
-roots, with no gzip, no proxy support and no charset handling. That feature
-hard-requires rustls's `tls12` and `logging`, so there is no cheaper trim short
-of forking the feature set.
+roots, with no gzip, no SOCKS proxy support and no charset handling. That
+feature hard-requires rustls's `tls12` and `logging`, so there is no cheaper
+trim short of forking the feature set.
+
+HTTP CONNECT proxy support is part of ureq itself rather than a feature, and
+the uploader keeps it. The telemetry uploader can use an HTTP CONNECT proxy
+selected through the HTTP client's supported environment configuration, read
+when telemetry is enabled. TLS remains between the SDK and the destination
+server and is validated against the bundled Mozilla root certificates.
+Installing an interception certificate only in the device trust store does not
+make that certificate trusted by the SDK. Such an interception attempt fails
+certificate validation; queued telemetry remains subject to retry, capacity,
+and expiry limits.
+
+The agent follows no redirect, and every setting these properties rest on (the
+proxy source, the redirect limit, the root store and verification) is named in
+the uploader's agent configuration rather than inherited from ureq's defaults,
+with tests pinning them, so a ureq upgrade cannot change them silently.
 
 ## Consequences
 
@@ -54,11 +69,13 @@ design this rejects, for three reasons.
   audits. [ADR 0014](0014-dedicated-ffi-entry-points.md) made the same call for
   relay answers.
 - **The device trust store is deliberately not consulted.** The compiled-in
-  Mozilla roots are why a proxy certificate installed on a device does not let
-  the stream be redirected or read. A host HTTP client uses the device store by
-  construction, so the callback design does not merely cost the property, it
-  cannot express it. This is the anchor for the network-egress section of the
-  threat model.
+  Mozilla roots are why an interception certificate installed on a device does
+  not let the stream be redirected or read: an interception certificate trusted
+  only by the device is not trusted by the SDK, and a CONNECT proxy tunnels the
+  encrypted connection without exposing its payload. A host HTTP client uses
+  the device store by construction, so the callback design does not merely cost
+  the property, it cannot express it. This is the anchor for the network-egress
+  section of the threat model.
 - **One implementation, four bindings.** A callback puts the retry schedule,
   the idempotency key, the status matrix and the `Retry-After` handling into
   Swift, Kotlin, TypeScript and Python, four times, each with its own bugs.
@@ -81,8 +98,8 @@ artifacts, who pays the bytes regardless.
 ### What would undo this
 
 A measured demand from adopters that the mobile binary shrink, weighed against
-losing pinned roots. If that arrives, the answer is a second prebuilt artifact
-without the `telemetry-pipe` feature rather than a host callback: it keeps the
-egress property intact for everyone who does enable telemetry, and gives the
-size back to everyone who does not. Splitting the artifact means a second UDL
-surface and a second checksum, which is the work that decision buys.
+losing the bundled roots. If that arrives, the answer is a second prebuilt
+artifact without the `telemetry-pipe` feature rather than a host callback: it
+keeps the egress property intact for everyone who does enable telemetry, and
+gives the size back to everyone who does not. Splitting the artifact means a
+second UDL surface and a second checksum, which is the work that decision buys.

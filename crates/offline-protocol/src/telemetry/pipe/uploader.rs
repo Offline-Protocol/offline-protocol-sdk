@@ -12,6 +12,7 @@
 //! | Answer | Action |
 //! |---|---|
 //! | 2xx | The ingest owns the batch; delete it, reset the backoff |
+//! | 3xx | Never followed, so it arrives as an answer; drop it, keep going |
 //! | 413 | The batch can never fit; drop it, keep going |
 //! | 401, 403 | The key or the app id is wrong; keep the batch, record the error, stop until the next `enable_telemetry` |
 //! | 429 | Wait `Retry-After` when given, else back off |
@@ -298,6 +299,11 @@ pub(crate) fn classify_response(
         // 413 included: the ingest's body limit is far above the largest
         // batch the pipe cuts, so an oversized batch is a pathological
         // event, and splitting it would only send the pathology twice.
+        //
+        // A 3xx lands here too. The agent follows no redirect (see
+        // `UreqClient::with_timeouts`), so a redirect arrives as an answer,
+        // and resending to the endpoint fixed at build time would only draw
+        // the same answer again.
         _ => Outcome::Drop,
     }
 }
@@ -340,8 +346,10 @@ pub(crate) fn user_agent(os_token: &str, os_major: u16) -> String {
 }
 
 /// The production client: TLS through rustls with the bundled Mozilla roots,
-/// a connection pool that outlives the flush cadence, and bounded timeouts
-/// so a stalled socket cannot hold the uploader thread past its deadline.
+/// no redirect followed, an HTTP CONNECT proxy when the environment names
+/// one, a connection pool that outlives the flush cadence, and bounded
+/// timeouts so a stalled socket cannot hold the uploader thread past its
+/// deadline.
 pub(crate) struct UreqClient {
     agent: ureq::Agent,
 }
@@ -360,9 +368,35 @@ impl UreqClient {
         Self::with_timeouts(Self::GLOBAL_TIMEOUT, Self::CONNECT_TIMEOUT)
     }
 
+    /// Every setting the egress properties in `docs/telemetry.md` rest on is
+    /// named here rather than inherited, because a ureq upgrade that moved a
+    /// default would otherwise change how the SDK sends with no diff in this
+    /// crate. Each one is pinned by a test below.
     pub(crate) fn with_timeouts(global: Duration, connect: Duration) -> Self {
         let config = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            // An ordinary HTTP CONNECT proxy when the process environment
+            // names one (`ALL_PROXY`, `HTTPS_PROXY` or `HTTP_PROXY`, with
+            // `NO_PROXY` exempting hosts), read here, which is when telemetry
+            // is enabled. The tunnel carries a TLS session that terminates at
+            // the ingest, so the proxy forwards the payload without reading
+            // it.
+            .proxy(ureq::Proxy::try_from_env())
+            // No redirect is followed. Followed, a 301, 302 or 303 turned the
+            // POST into a GET at the new location, a 2xx there was classified
+            // as success, and the batch was deleted unsent and counted as
+            // accepted. At zero every 3xx comes back as an answer, and
+            // `classify_response` drops it.
+            .max_redirects(0)
+            // The Mozilla roots compiled into the SDK, never the device's
+            // trust store, so an interception certificate installed only on
+            // the device fails validation.
+            .tls_config(
+                ureq::tls::TlsConfig::builder()
+                    .root_certs(ureq::tls::RootCerts::WebPki)
+                    .disable_verification(false)
+                    .build(),
+            )
             .timeout_global(Some(global))
             .timeout_connect(Some(connect))
             .max_idle_age(Self::IDLE_AGE)
@@ -780,6 +814,204 @@ pub(crate) mod tests {
             body: "{}",
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_3xx_drops_the_batch_and_continues() {
+        for status in [300, 301, 302, 303, 307, 308] {
+            let (mut up, _) = uploader(vec![answer(status, ""), answer(202, r#"{"accepted":1}"#)]);
+            let mut store = test_store(Backend::Memory);
+            store.push(batch(1, 0));
+            store.push(batch(1, 0));
+            let report = up.drain(&mut store, 0, 8, None);
+            assert!(store.is_empty(), "{status}");
+            assert_eq!(report.dropped_events, 1, "{status}");
+            assert_eq!(report.sent_events, 1, "{status}");
+            assert_eq!(
+                report.accepted_events, 1,
+                "{status}: a redirect is never counted as accepted"
+            );
+            assert!(!report.halted, "{status}");
+        }
+    }
+
+    /// A redirect comes back as an answer rather than being followed, so it
+    /// reaches the status matrix instead of a location the build never named.
+    #[test]
+    fn the_ureq_client_returns_a_redirect_rather_than_following_it() {
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("local server");
+        let addr = server.server_addr().to_ip().expect("tcp listener");
+        let url: &'static str = Box::leak(format!("http://{addr}/v1/events").into_boxed_str());
+        let location = format!("http://{addr}/moved");
+        let served = std::thread::spawn(move || {
+            let mut paths = Vec::new();
+            for status in [301, 308] {
+                let request = server.recv().expect("request");
+                paths.push(request.url().to_string());
+                let response = tiny_http::Response::from_string("")
+                    .with_status_code(status)
+                    .with_header(
+                        tiny_http::Header::from_bytes(&b"Location"[..], location.as_bytes())
+                            .expect("header"),
+                    );
+                request.respond(response).expect("respond");
+            }
+            // A followed redirect would arrive here as one more request.
+            if let Some(request) = server
+                .recv_timeout(Duration::from_millis(500))
+                .expect("server")
+            {
+                paths.push(request.url().to_string());
+            }
+            paths
+        });
+
+        let mut client = UreqClient::new();
+        for expected in [301, 308] {
+            let response = client
+                .post(&Request {
+                    url,
+                    headers: vec![("Content-Type", "application/json")],
+                    body: r#"{"events":[]}"#,
+                })
+                .expect("answered");
+            assert_eq!(response.status, expected);
+        }
+        assert_eq!(
+            served.join().expect("server thread"),
+            ["/v1/events", "/v1/events"],
+            "nothing followed the Location header"
+        );
+    }
+
+    /// Set only on the child process the proxy test spawns, so the child
+    /// half is a no-op in an ordinary run and never posts anywhere.
+    const PROXY_PROBE_ENV: &str = "OFFLINE_TELEMETRY_PROXY_PROBE";
+
+    /// The production constructor tunnels through the CONNECT proxy the
+    /// environment names, and TLS runs through that tunnel to the
+    /// destination rather than terminating at the proxy.
+    ///
+    /// The proxy variable is set on a child process that runs only
+    /// `proxy_probe_child`, never on this one: the environment is
+    /// process-wide, and every other `UreqClient` test in the binary would
+    /// route through the stand-in while it was set.
+    #[test]
+    fn the_ureq_client_tunnels_through_the_connect_proxy_the_environment_names() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let proxy = format!("http://{}", listener.local_addr().expect("addr"));
+        let (_, module) = module_path!()
+            .split_once("::")
+            .expect("crate-qualified path");
+        let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
+        command.args(["--exact", &format!("{module}::proxy_probe_child")]);
+        // Cleared before the one that is set: ureq takes the first of these
+        // it can parse, a developer's shell may export any of them, and on
+        // Windows the names are case-insensitive, so clearing `https_proxy`
+        // after setting `HTTPS_PROXY` would clear the stand-in.
+        for name in [
+            "ALL_PROXY",
+            "all_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        ] {
+            command.env_remove(name);
+        }
+        let mut child = command
+            .env("HTTPS_PROXY", &proxy)
+            .env(PROXY_PROBE_ENV, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("child test process");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut tunnel = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    if let Some(status) = child.try_wait().expect("child status") {
+                        panic!("the client never reached the proxy (child exited: {status})");
+                    }
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        panic!("the client never reached the proxy");
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("accept: {err}"),
+            }
+        };
+        tunnel.set_nonblocking(false).expect("blocking tunnel");
+        tunnel
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout");
+
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            tunnel.read_exact(&mut byte).expect("CONNECT request");
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).expect("ASCII request head");
+        assert!(
+            head.starts_with("CONNECT ingest.invalid:443 HTTP/1.1\r\n"),
+            "{head:?}"
+        );
+        tunnel
+            .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            .expect("open the tunnel");
+
+        // What follows is a TLS handshake naming the destination, not an
+        // HTTP request: the proxy forwards the session and reads none of it.
+        let mut record = [0u8; 5];
+        tunnel.read_exact(&mut record).expect("TLS record header");
+        assert_eq!(record[0], 0x16, "a TLS handshake record, not plaintext");
+        let mut hello = vec![0u8; usize::from(u16::from_be_bytes([record[3], record[4]]))];
+        tunnel.read_exact(&mut hello).expect("ClientHello");
+        let sni = b"ingest.invalid";
+        assert!(
+            hello.windows(sni.len()).any(|w| w == sni),
+            "the ClientHello names the destination"
+        );
+
+        drop(tunnel);
+        let status = child.wait().expect("child exits");
+        assert!(status.success(), "child test failed: {status}");
+    }
+
+    /// The child half of the proxy test: one post through the production
+    /// constructor, to a host that cannot resolve, so a client that skipped
+    /// the proxy fails at DNS instead of reaching anything real.
+    #[test]
+    fn proxy_probe_child() {
+        if std::env::var_os(PROXY_PROBE_ENV).is_none() {
+            return;
+        }
+        let _ = UreqClient::new().post(&Request {
+            url: "https://ingest.invalid/v1/events",
+            headers: Vec::new(),
+            body: "{}",
+        });
+    }
+
+    /// The trust anchor has no cheap behaviour test (it would need a
+    /// certificate authority of its own), so the setting itself is pinned.
+    #[test]
+    fn the_agent_validates_against_the_bundled_roots_only() {
+        let client = UreqClient::new();
+        let tls = client.agent.config().tls_config();
+        assert!(matches!(tls.root_certs(), ureq::tls::RootCerts::WebPki));
+        assert!(!tls.disable_verification());
     }
 
     #[test]

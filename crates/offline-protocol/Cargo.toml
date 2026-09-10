@@ -58,9 +58,14 @@ offline-protocol-services = { workspace = true }
 offline-protocol-data = { workspace = true, optional = true }
 # Optional: the telemetry pipe's wire types and its HTTPS client. `ureq` with
 # exactly the `rustls` feature is rustls + ring + the bundled Mozilla roots and
-# nothing else (no gzip, no proxy support, no charset), which is the smallest
-# TLS stack that still trusts a public CA without consulting the device's
-# store; see docs/telemetry.md for why the device store is not consulted.
+# no optional extra (no gzip, no SOCKS, no charset), which is the smallest TLS
+# stack that still trusts a public CA without consulting the device's store.
+# HTTP CONNECT proxy support is part of ureq's core rather than a feature: the
+# uploader can use an HTTP CONNECT proxy selected through the environment, read
+# when telemetry is enabled, and TLS still runs end to end to the ingest,
+# validated against the bundled roots. The uploader names that proxy source,
+# the redirect limit and the root store in its agent configuration rather than
+# inheriting ureq's defaults; see docs/telemetry.md.
 offline-protocol-telemetry-wire = { workspace = true, optional = true }
 ureq = { version = "3.4", default-features = false, features = ["rustls"], optional = true }
 serde = { workspace = true }
