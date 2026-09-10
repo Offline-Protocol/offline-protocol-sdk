@@ -147,13 +147,11 @@ impl OfflineProtocol {
 
         // 4. Drain any inbound messages sitting in the pending decryption
         //    queue (encrypted messages received before the session was ready).
-        let drained = self
-            .pending_queue
-            .drain_for_peer(&self.config.encryption.pending_queue, user_id);
-        if !drained.is_empty() {
+        let drained = self.discard_pending_decryption_for_peer(user_id);
+        if drained > 0 {
             debug!(
                 user_id = %user_id,
-                count = drained.len(),
+                count = drained,
                 "Drained pending decryption queue for unblocked user"
             );
         }

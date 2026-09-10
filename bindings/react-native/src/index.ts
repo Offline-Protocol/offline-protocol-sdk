@@ -411,7 +411,7 @@ export class OfflineProtocol {
       pendingQueue: {
         maxPendingPerPeer: encryptionSource?.pendingQueue?.maxPendingPerPeer ?? 64,
         maxPendingGlobal: encryptionSource?.pendingQueue?.maxPendingGlobal ?? 4096,
-        pendingTtlMs: encryptionSource?.pendingQueue?.pendingTtlMs ?? 1800000,
+        pendingTtlMs: encryptionSource?.pendingQueue?.pendingTtlMs ?? 86400000,
         overflowPolicy:
           encryptionSource?.pendingQueue?.overflowPolicy ?? 'drop_oldest',
       },

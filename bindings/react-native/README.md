@@ -569,7 +569,7 @@ interface EncryptionConfig {
 interface PendingQueueConfig {
   maxPendingPerPeer?: number;  // default: 64
   maxPendingGlobal?: number;   // default: 4096
-  pendingTtlMs?: number;       // default: 1800000 (30 min)
+  pendingTtlMs?: number;       // default: 86400000 (24 h)
   overflowPolicy?: 'drop_oldest' | 'drop_newest';  // default: drop_oldest
 }
 ```

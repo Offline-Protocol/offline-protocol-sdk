@@ -50,6 +50,19 @@ pub(crate) struct DroppedPendingMessage {
     pub(crate) reason: &'static str,
 }
 
+/// What [`PendingDecryptionQueue::enqueue_via`] did with the incoming frame,
+/// plus every frame it dropped along the way.
+///
+/// `admitted` is what the persistence hook keys on: only a frame the queue now
+/// holds has a record worth writing. It is `false` both when the frame was
+/// refused (it then also appears in `dropped`) and when the id was already
+/// queued — the resend case, where the original copy stays authoritative and
+/// nothing changed in memory or on disk.
+pub(crate) struct EnqueueOutcome {
+    pub(crate) admitted: bool,
+    pub(crate) dropped: Vec<DroppedPendingMessage>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueueLimit {
     PerPeer,
@@ -646,23 +659,40 @@ impl PendingDecryptionQueue {
         sender: &str,
         message: &Message,
     ) -> Vec<DroppedPendingMessage> {
-        self.enqueue_via(config, sender, message, None)
+        self.enqueue_via(config, sender, message, None).dropped
     }
 
     /// Enqueues an encrypted message that arrived before the MLS session was
     /// ready, recording the transport it arrived on so the drain can ACK it
     /// directly.
     ///
-    /// Returns every message dropped in the process — TTL-expired entries,
-    /// entries evicted to make room, or the incoming message itself when it
-    /// could not be admitted — so the protocol layer can surface the loss.
+    /// Returns whether the frame was admitted, plus every message dropped in
+    /// the process — TTL-expired entries, entries evicted to make room, or the
+    /// incoming message itself when it could not be admitted — so the protocol
+    /// layer can surface the loss and keep the persisted copy in step.
     pub(crate) fn enqueue_via(
         &mut self,
         config: &PendingQueueConfig,
         sender: &str,
         message: &Message,
         arrival_transport: Option<TransportType>,
-    ) -> Vec<DroppedPendingMessage> {
+    ) -> EnqueueOutcome {
+        let mut dropped = Vec::new();
+        let admitted =
+            self.enqueue_via_inner(config, sender, message, arrival_transport, &mut dropped);
+        EnqueueOutcome { admitted, dropped }
+    }
+
+    /// The body of [`Self::enqueue_via`], returning `true` only when the queue
+    /// now holds the incoming frame.
+    fn enqueue_via_inner(
+        &mut self,
+        config: &PendingQueueConfig,
+        sender: &str,
+        message: &Message,
+        arrival_transport: Option<TransportType>,
+        dropped: &mut Vec<DroppedPendingMessage>,
+    ) -> bool {
         self.metrics.pending_messages_received_total = self
             .metrics
             .pending_messages_received_total
@@ -670,7 +700,7 @@ impl PendingDecryptionQueue {
         let incoming_message_id = message.id.as_str();
 
         let now = Instant::now();
-        let mut dropped = self.prune_expired_for_peer(config, sender, now);
+        dropped.extend(self.prune_expired_for_peer(config, sender, now));
         dropped.extend(self.prune_expired_global_front(config, now, 64));
 
         // Idempotent by message id: under the deferred-ACK model the sender
@@ -685,7 +715,7 @@ impl PendingDecryptionQueue {
                 .iter()
                 .any(|entry| entry.message_id == incoming_message_id)
         }) {
-            return dropped;
+            return false;
         }
 
         let per_peer_limit = config.max_pending_per_peer;
@@ -715,7 +745,7 @@ impl PendingDecryptionQueue {
                 message: message.clone(),
                 reason: DropReason::OverflowDropNewest.as_str(),
             });
-            return dropped;
+            return false;
         }
 
         let peer_len = self.queues.get(sender).map(VecDeque::len).unwrap_or(0);
@@ -734,7 +764,7 @@ impl PendingDecryptionQueue {
                         message: message.clone(),
                         reason: DropReason::OverflowDropNewest.as_str(),
                     });
-                    return dropped;
+                    return false;
                 }
                 OverflowPolicy::DropOldest => {
                     let evicted_sequence = self
@@ -776,7 +806,7 @@ impl PendingDecryptionQueue {
                             message: message.clone(),
                             reason: DropReason::OverflowDropNewest.as_str(),
                         });
-                        return dropped;
+                        return false;
                     }
                 }
             }
@@ -800,7 +830,7 @@ impl PendingDecryptionQueue {
                 message: message.clone(),
                 reason: DropReason::OverflowDropNewest.as_str(),
             });
-            return dropped;
+            return false;
         }
 
         if self.peer_bytes_for(sender) + incoming_bytes > per_peer_bytes_limit {
@@ -817,7 +847,7 @@ impl PendingDecryptionQueue {
                     message: message.clone(),
                     reason: DropReason::OverflowDropNewest.as_str(),
                 });
-                return dropped;
+                return false;
             }
             // DropOldest: evict from the peer's front until the incoming
             // message fits. Terminates: each eviction shrinks the peer's byte
@@ -862,7 +892,7 @@ impl PendingDecryptionQueue {
                             message: message.clone(),
                             reason: DropReason::OverflowDropNewest.as_str(),
                         });
-                        return dropped;
+                        return false;
                     }
                 }
             }
@@ -886,7 +916,7 @@ impl PendingDecryptionQueue {
                         message: message.clone(),
                         reason: DropReason::OverflowDropNewest.as_str(),
                     });
-                    return dropped;
+                    return false;
                 }
                 OverflowPolicy::DropOldest => {
                     while self.total >= global_limit {
@@ -925,7 +955,7 @@ impl PendingDecryptionQueue {
                 message: message.clone(),
                 reason: DropReason::OverflowDropNewest.as_str(),
             });
-            return dropped;
+            return false;
         }
 
         if self.total_bytes + incoming_bytes > global_bytes_limit {
@@ -945,7 +975,7 @@ impl PendingDecryptionQueue {
                     message: message.clone(),
                     reason: DropReason::OverflowDropNewest.as_str(),
                 });
-                return dropped;
+                return false;
             }
             while self.total_bytes + incoming_bytes > global_bytes_limit {
                 match self.evict_global_oldest(
@@ -980,7 +1010,7 @@ impl PendingDecryptionQueue {
                     message: message.clone(),
                     reason: DropReason::OverflowDropNewest.as_str(),
                 });
-                return dropped;
+                return false;
             }
         }
 
@@ -1041,9 +1071,10 @@ impl PendingDecryptionQueue {
                 message: message.clone(),
                 reason: DropReason::OverflowDropNewest.as_str(),
             });
+            return false;
         }
 
-        dropped
+        true
     }
 
     /// Drains all pending messages for a peer, updating bookkeeping.

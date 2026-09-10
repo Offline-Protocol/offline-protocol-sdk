@@ -1271,16 +1271,23 @@ impl OfflineProtocol {
         //   settlement-paired walks, because being starved there defers a
         //   diagnostic or a *delivery* rather than a cache eviction, and
         //   neither may be held hostage to a key-package flood in a category it
-        //   has nothing to do with.
+        //   has nothing to do with. `pending_decrypt_prunes` below is private
+        //   for the same reason.
         //
         // See `storage::MAX_RESTORE_PRUNE_DELETES`.
         let mut advisory_prunes = PruneAllowance::pool();
         let mut pending_prunes = PruneAllowance::pool();
         let mut outbox_prunes = PruneAllowance::pool();
+        // The inbound pending-decryption walk gets its own pool for the same
+        // reason the outbound pending walk does: it holds ciphertext the app
+        // is told about when lost, and must not be starved by a flood in an
+        // advisory category. See `restore_pending_decrypt_entries`.
+        let mut pending_decrypt_prunes = PruneAllowance::pool();
 
         // Restore state from previous session
         let restore_result = (|| {
             self.restore_pending_messages(&mut pending_prunes)?;
+            self.restore_pending_decrypt_entries(&mut pending_decrypt_prunes);
             self.restore_lamport_clock();
             self.restore_encryption_capable_peers();
             self.restore_blocked_users()?;
@@ -1306,6 +1313,11 @@ impl OfflineProtocol {
             self.state_record_cipher = previous_state_record_cipher;
             self.pending_encrypted_messages = previous_pending_messages;
             self.next_pending_message_expiry = previous_pending_message_expiry;
+            // The inbound queue is rebuilt from storage on the next successful
+            // init, so emptying it here loses nothing durable: every frame it
+            // held before this call was persisted when it was admitted, and
+            // every frame the restore just re-admitted still has its record.
+            self.pending_queue = PendingDecryptionQueue::default();
             // `deferred_restore_settlements` is deliberately left alone — see
             // the comment where the other baselines are captured.
             self.pending_key_packages = previous_pending_key_packages;
@@ -1403,7 +1415,9 @@ impl OfflineProtocol {
         let mut advisory_prunes = PruneAllowance::pool();
         let mut pending_prunes = PruneAllowance::pool();
         let mut outbox_prunes = PruneAllowance::pool();
+        let mut pending_decrypt_prunes = PruneAllowance::pool();
         self.restore_pending_messages(&mut pending_prunes)?;
+        self.restore_pending_decrypt_entries(&mut pending_decrypt_prunes);
         self.restore_lamport_clock();
         self.restore_encryption_capable_peers();
         self.restore_blocked_users()?;

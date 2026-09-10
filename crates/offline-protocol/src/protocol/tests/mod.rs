@@ -17531,6 +17531,360 @@ fn test_pending_queue_overflow_emits_pending_queue_dropped_for_text() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Pending-decryption queue persistence (`pending_decrypt_entries`)
+// ---------------------------------------------------------------------------
+
+/// A bob whose protocol-state storage is `storage`, so a second call with the
+/// same handle is a restart against the same on-disk state.
+fn pending_decrypt_bob(storage: Arc<InMemoryStorage>) -> OfflineProtocol {
+    let mut config = create_test_config_for_user("bob");
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+    let mut bob = OfflineProtocol::new(config).unwrap();
+    bob.initialize_mls_for_test(storage).unwrap();
+    bob
+}
+
+/// Alice's side of a handshake with `bob`: a Welcome for bob and one message
+/// encrypted to him, both as wire frames, with the Welcome deliberately held
+/// back so the message is queued as session-not-ready.
+fn pending_decrypt_alice_frames(bob: &OfflineProtocol) -> (Message, Message) {
+    let alice_manager =
+        crate::test_identity::manager_for("alice", Arc::new(crate::mls::InMemoryStorage::new()));
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    alice_manager
+        .import_key_package(&id("bob"), &bob_key_package.key_package_data)
+        .unwrap();
+    let welcome = alice_manager.create_session(&id("bob")).unwrap();
+    let encrypted = alice_manager
+        .encrypt_for_user(&id("bob"), b"survived-the-restart")
+        .unwrap();
+    let encrypted_wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
+        &format!(
+            "{}{}",
+            internal_prefixes::ENCRYPTED,
+            serde_json::to_string(&encrypted).unwrap()
+        ),
+    );
+    let welcome_wire = signed_frame(
+        &id("alice"),
+        &id("bob"),
+        &format!(
+            "{}{}",
+            internal_prefixes::WELCOME,
+            serde_json::to_string(&welcome).unwrap()
+        ),
+    );
+    (encrypted_wire, welcome_wire)
+}
+
+/// The headline case: a frame parked before its Welcome arrives survives an
+/// app restart, and the Welcome that arrives *after* the restart still drains
+/// and delivers it — the message a push-only relay would otherwise have lost.
+#[test]
+fn test_pending_decrypt_entry_survives_restart_and_drains_on_welcome() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut bob = pending_decrypt_bob(storage.clone());
+    let (encrypted_wire, welcome_wire) = pending_decrypt_alice_frames(&bob);
+    let message_id = encrypted_wire.id.clone();
+
+    let result = bob.process_internal_message_via(&encrypted_wire, Some(TransportType::BLE));
+    assert!(matches!(result, Some(InternalMessageResult::Deferred)));
+    assert!(bob.pending_queue.contains_peer(&id("alice")));
+    assert_eq!(
+        bob.persisted_pending_decrypt_ids(),
+        vec![message_id.as_str()],
+        "an admitted frame is persisted under its own id"
+    );
+    drop(bob);
+
+    let mut bob = pending_decrypt_bob(storage.clone());
+    assert_eq!(
+        bob.pending_queue.peer_queue_len(&id("alice")),
+        1,
+        "the parked frame must be restored on the next launch"
+    );
+    let restored = bob.pending_queue.peek_entry(&id("alice"), 0).unwrap();
+    assert_eq!(restored.message.id, message_id);
+    assert_eq!(
+        restored.received_via,
+        Some(TransportType::BLE),
+        "the arrival transport rides in the record so the drain can still ACK directly"
+    );
+    assert!(
+        !bob.deduplicator.is_duplicate(&message_id),
+        "a restored id is not dedup-marked: the sender's resend must still re-enter the queue"
+    );
+    assert_eq!(
+        bob.persisted_pending_decrypt_ids(),
+        vec![message_id.as_str()],
+        "restore must not rewrite (or delete) a record it re-admitted"
+    );
+
+    let welcome_result = bob.process_internal_message(&welcome_wire);
+    assert!(matches!(
+        welcome_result,
+        Some(InternalMessageResult::Consumed)
+    ));
+    assert!(!bob.pending_queue.contains_peer(&id("alice")));
+    let delivered = bob
+        .receive_message()
+        .expect("the restored frame must surface once the session confirms");
+    assert_eq!(delivered.content, "survived-the-restart");
+    assert_eq!(
+        delivered
+            .metadata
+            .get("delayed_decrypt")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert!(
+        bob.persisted_pending_decrypt_ids().is_empty(),
+        "a drained frame's record is deleted"
+    );
+    assert!(
+        bob.deduplicator.is_duplicate(&message_id),
+        "delivery re-marks the id like the live drain does"
+    );
+}
+
+/// The drain deletes the record whatever it does with the frame — here a
+/// frame that decrypts nowhere (no session, plain content) and is simply
+/// dropped by the drain must still not come back on the next launch.
+#[test]
+fn test_pending_decrypt_drained_entry_is_deleted_even_when_undeliverable() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut bob = pending_decrypt_bob(storage.clone());
+    let frame = pending_test_message(&id("alice"), "opaque");
+    bob.enqueue_pending_decryption(&id("alice"), &frame);
+    assert_eq!(bob.persisted_pending_decrypt_ids().len(), 1);
+
+    bob.process_pending_decryption(&id("alice"));
+    assert!(!bob.pending_queue.contains_peer(&id("alice")));
+    assert!(bob.persisted_pending_decrypt_ids().is_empty());
+    drop(bob);
+
+    let bob = pending_decrypt_bob(storage);
+    assert!(
+        !bob.pending_queue.contains_peer(&id("alice")),
+        "a drained frame must not be restored"
+    );
+}
+
+#[test]
+fn test_pending_decrypt_overflow_dropped_entry_is_deleted() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut config = create_test_config_for_user("bob");
+    config.encryption.enabled = true;
+    config.encryption.pending_queue.max_pending_per_peer = 1;
+    config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropOldest;
+    let mut bob = OfflineProtocol::new(config).unwrap();
+    bob.initialize_mls_for_test(storage.clone()).unwrap();
+
+    let first = pending_test_message(&id("alice"), "first");
+    let second = pending_test_message(&id("alice"), "second");
+    bob.enqueue_pending_decryption(&id("alice"), &first);
+    assert_eq!(bob.persisted_pending_decrypt_ids(), vec![first.id.as_str()]);
+    bob.enqueue_pending_decryption(&id("alice"), &second);
+
+    assert_eq!(bob.pending_queue.peer_queue_len(&id("alice")), 1);
+    assert_eq!(
+        bob.persisted_pending_decrypt_ids(),
+        vec![second.id.as_str()],
+        "the evicted frame's record goes with it; the survivor's stays"
+    );
+
+    // A refused frame (DropNewest) never had a record and must not gain one.
+    bob.config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropNewest;
+    let third = pending_test_message(&id("alice"), "third");
+    bob.enqueue_pending_decryption(&id("alice"), &third);
+    assert_eq!(
+        bob.persisted_pending_decrypt_ids(),
+        vec![second.id.as_str()]
+    );
+}
+
+/// The in-memory TTL restarts with the process, so the persisted copy needs
+/// its own bound: a record past `PENDING_DECRYPT_PERSISTED_MAX_AGE_MS` is
+/// dropped on restore, its record deleted, and the app told under the same
+/// code an in-memory eviction uses.
+#[test]
+fn test_pending_decrypt_record_past_persisted_max_age_is_dropped_with_event() {
+    use super::storage::PENDING_DECRYPT_PERSISTED_MAX_AGE_MS;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let bob = pending_decrypt_bob(storage.clone());
+    let stale = pending_test_message(&id("alice"), "stale");
+    let fresh = pending_test_message(&id("alice"), "fresh");
+    let now_ms = Utc::now().timestamp_millis();
+    let eight_days = PENDING_DECRYPT_PERSISTED_MAX_AGE_MS + 24 * 60 * 60 * 1000;
+    bob.persist_pending_decrypt_entry(&id("alice"), &stale, now_ms - eight_days, None);
+    bob.persist_pending_decrypt_entry(&id("alice"), &fresh, now_ms - 1_000, None);
+    assert_eq!(bob.persisted_pending_decrypt_ids().len(), 2);
+    drop(bob);
+
+    let bob = pending_decrypt_bob(storage);
+    assert_eq!(
+        bob.pending_queue.peer_queue_len(&id("alice")),
+        1,
+        "only the fresh record is restored"
+    );
+    assert_eq!(
+        bob.pending_queue
+            .peek_entry(&id("alice"), 0)
+            .unwrap()
+            .message
+            .id,
+        fresh.id
+    );
+    assert_eq!(
+        bob.persisted_pending_decrypt_ids(),
+        vec![fresh.id.as_str()],
+        "the aged-out record is deleted"
+    );
+    // Restore runs before the event pipeline is live, so the settlement is
+    // parked for start() like every other restore-time terminal event.
+    let expired: Vec<_> = bob
+        .deferred_restore_settlements
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageDecryptionFailed {
+                message_id,
+                sender,
+                code,
+                reason,
+            } => Some((message_id.clone(), sender.clone(), *code, reason.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(expired.len(), 1, "exactly the aged-out frame is reported");
+    let (message_id, sender, code, reason) = &expired[0];
+    assert_eq!(*message_id, stale.id.as_str());
+    assert_eq!(sender, &id("alice"));
+    assert_eq!(*code, DecryptionFailureCode::PendingQueueDropped);
+    assert!(
+        reason.contains("expired_persisted"),
+        "the reason names the persisted-age bound, got {reason:?}"
+    );
+}
+
+#[test]
+fn test_pending_decrypt_corrupt_record_is_deleted_on_restore() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let bob = pending_decrypt_bob(storage.clone());
+    let good = pending_test_message(&id("alice"), "good");
+    bob.persist_pending_decrypt_entry(&id("alice"), &good, Utc::now().timestamp_millis(), None);
+    // Sealed like a real record (so it opens) but not a record.
+    let state_storage = bob.protocol_state_storage.clone().unwrap();
+    bob.write_state_record(
+        state_storage.as_ref(),
+        storage_keys::PENDING_DECRYPT_ENTRIES,
+        "not-a-record",
+        b"{\"version\":1,\"peer_id\":",
+    )
+    .unwrap();
+    // A well-formed record filed under a key that is not its message id is
+    // not one this SDK wrote either.
+    let mislabeled = pending_test_message(&id("alice"), "mislabeled");
+    let record = serde_json::to_vec(&PendingDecryptRecord {
+        version: PENDING_DECRYPT_RECORD_VERSION,
+        peer_id: id("alice"),
+        message: mislabeled,
+        first_received_at_ms: Utc::now().timestamp_millis(),
+        received_via: None,
+    })
+    .unwrap();
+    bob.write_state_record(
+        state_storage.as_ref(),
+        storage_keys::PENDING_DECRYPT_ENTRIES,
+        "wrong-key",
+        &record,
+    )
+    .unwrap();
+    assert_eq!(bob.persisted_pending_decrypt_ids().len(), 3);
+    drop(bob);
+
+    let bob = pending_decrypt_bob(storage);
+    assert_eq!(bob.pending_queue.peer_queue_len(&id("alice")), 1);
+    assert_eq!(
+        bob.persisted_pending_decrypt_ids(),
+        vec![good.id.as_str()],
+        "records that do not parse, or lie about their key, are deleted"
+    );
+    assert!(
+        bob.deferred_restore_settlements.is_empty(),
+        "a corrupt record names no message, so there is nothing to settle"
+    );
+}
+
+/// The sender's resend after the receiver restarted: the restored copy is
+/// authoritative, so the resend is a no-op in memory and on disk — one entry,
+/// one record, and the record keeps its first-receipt timestamp.
+#[test]
+fn test_pending_decrypt_reenqueue_after_restore_keeps_a_single_copy() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut bob = pending_decrypt_bob(storage.clone());
+    let frame = pending_test_message(&id("alice"), "resent");
+    bob.enqueue_pending_decryption(&id("alice"), &frame);
+    let state_storage = bob.protocol_state_storage.clone().unwrap();
+    let original_record = bob
+        .read_state_record(
+            state_storage.as_ref(),
+            storage_keys::PENDING_DECRYPT_ENTRIES,
+            &frame.id.as_str(),
+        )
+        .unwrap()
+        .unwrap();
+    drop(bob);
+
+    let mut bob = pending_decrypt_bob(storage);
+    assert_eq!(bob.pending_queue.peer_queue_len(&id("alice")), 1);
+    bob.enqueue_pending_decryption_via(&id("alice"), &frame, Some(TransportType::Internet));
+
+    assert_eq!(bob.pending_queue.peer_queue_len(&id("alice")), 1);
+    assert_eq!(bob.pending_queue.total(), 1);
+    assert_eq!(bob.persisted_pending_decrypt_ids(), vec![frame.id.as_str()]);
+    let state_storage = bob.protocol_state_storage.clone().unwrap();
+    let record_after = bob
+        .read_state_record(
+            state_storage.as_ref(),
+            storage_keys::PENDING_DECRYPT_ENTRIES,
+            &frame.id.as_str(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record_after, original_record,
+        "a resend of a queued id must not rewrite its record"
+    );
+}
+
+/// Unblocking a peer resets their session and discards what they had parked;
+/// the records go too, so the discarded frames do not come back on restart.
+#[test]
+fn test_pending_decrypt_records_are_deleted_when_peer_queue_is_discarded() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut bob = pending_decrypt_bob(storage.clone());
+    bob.enqueue_pending_decryption(&id("alice"), &pending_test_message(&id("alice"), "a"));
+    bob.enqueue_pending_decryption(&id("carol"), &pending_test_message(&id("carol"), "c"));
+    assert_eq!(bob.persisted_pending_decrypt_ids().len(), 2);
+
+    assert_eq!(bob.discard_pending_decryption_for_peer(&id("alice")), 1);
+    assert!(!bob.pending_queue.contains_peer(&id("alice")));
+    assert_eq!(bob.persisted_pending_decrypt_ids().len(), 1);
+    drop(bob);
+
+    let bob = pending_decrypt_bob(storage);
+    assert!(!bob.pending_queue.contains_peer(&id("alice")));
+    assert!(bob.pending_queue.contains_peer(&id("carol")));
+}
+
 #[test]
 fn test_pending_queue_global_limit_fail_closed_when_global_index_corrupted() {
     let mut config = create_test_config();

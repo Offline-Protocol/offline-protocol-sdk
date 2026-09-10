@@ -146,11 +146,11 @@ class ProtocolConfigParserTest {
 
     @Test
     fun pendingTtlFallsBackToTheRustDefault() {
-        // Mirrors DEFAULT_PENDING_TTL_MS (30 min); the iOS reader asserts the
+        // Mirrors DEFAULT_PENDING_TTL_MS (24 h); the iOS reader asserts the
         // same, and `rn_bridge_pending_ttl_fallbacks_match_rust_default` pins
         // all three bridge literals to the Rust constant.
         val config = parse("""{"appId":"app","userId":"alice"}""")
-        assertEquals(1_800_000L, config.pendingTtlMs.toLong())
+        assertEquals(86_400_000L, config.pendingTtlMs.toLong())
     }
 
     @Test

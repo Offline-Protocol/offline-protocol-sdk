@@ -2,7 +2,7 @@
 //! need access to the broader [`OfflineProtocol`] state (shared state, MLS
 //! decryption, lamport clock).
 
-use super::decryption_queue::DroppedPendingMessage;
+use super::decryption_queue::{DroppedPendingMessage, PendingDecryptMessage};
 use super::{lock_shared_state, ChunkOutcome, InternalMessageResult, OfflineProtocol};
 use crate::events::{DecryptionFailureCode, Event};
 use chrono::Utc;
@@ -29,17 +29,57 @@ impl OfflineProtocol {
     /// entry so the drain can send the deferred delivery ACK directly instead of
     /// relying on the sender's next resend (see the deferred-acknowledgement
     /// atom in `docs/state-machines/delivery-and-acks.md`).
+    ///
+    /// An admitted frame is also written to protocol-state storage
+    /// (`PendingDecryptRecord`), stamped with its first receipt, so it survives
+    /// a restart; see [`Self::enqueue_restored_pending_decryption`] for the
+    /// way back in.
     pub(super) fn enqueue_pending_decryption_via(
         &mut self,
         sender: &str,
         message: &offline_protocol_core::Message,
         arrival_transport: Option<TransportType>,
     ) {
+        if self.enqueue_pending_decryption_in_memory(sender, message, arrival_transport) {
+            self.persist_pending_decrypt_entry(
+                sender,
+                message,
+                Utc::now().timestamp_millis(),
+                arrival_transport,
+            );
+        }
+    }
+
+    /// Re-admits a frame read back from storage: the in-memory enqueue with
+    /// the same overflow handling as the live path, but **no** write — the
+    /// record on disk is already the durable copy and keeps its first-receipt
+    /// timestamp. A restored frame the queue refuses (its cap was lowered, or
+    /// the store holds more than memory admits) has its record deleted like
+    /// any other overflow drop.
+    pub(crate) fn enqueue_restored_pending_decryption(
+        &mut self,
+        sender: &str,
+        message: &offline_protocol_core::Message,
+        received_via: Option<TransportType>,
+    ) {
+        self.enqueue_pending_decryption_in_memory(sender, message, received_via);
+    }
+
+    /// The shared half of the two enqueue paths: admits into the in-memory
+    /// queue, reports every drop and deletes each dropped frame's record.
+    /// Returns whether the incoming frame was admitted.
+    fn enqueue_pending_decryption_in_memory(
+        &mut self,
+        sender: &str,
+        message: &offline_protocol_core::Message,
+        arrival_transport: Option<TransportType>,
+    ) -> bool {
         let config = &self.config.encryption.pending_queue;
-        let dropped = self
+        let outcome = self
             .pending_queue
             .enqueue_via(config, sender, message, arrival_transport);
-        self.report_dropped_pending(dropped);
+        self.report_dropped_pending(outcome.dropped);
+        outcome.admitted
     }
 
     pub(super) fn prune_expired_pending_global_front(
@@ -54,6 +94,33 @@ impl OfflineProtocol {
         let count = expired.len();
         self.report_dropped_pending(expired);
         count
+    }
+
+    /// Drains a peer's parked frames without processing them, deleting each
+    /// one's persisted record. For the paths where every queued frame from a
+    /// peer is being discarded at once — today, the session reset on unblock.
+    /// Returns how many were discarded.
+    pub(super) fn discard_pending_decryption_for_peer(&mut self, peer_id: &str) -> usize {
+        let config = self.config.encryption.pending_queue.clone();
+        let drained = self.pending_queue.drain_for_peer(&config, peer_id);
+        self.delete_pending_decrypt_entries_from_storage(drained.iter().map(|e| &e.message.id));
+        drained.len()
+    }
+
+    /// Takes a peer's parked frames out of the queue for processing, deleting
+    /// their persisted records first: whatever the drain does with a frame —
+    /// surface it, consume it, or drop it as undecryptable — the queue no
+    /// longer holds it, and a record that outlived its entry would be
+    /// restored and re-drained on the next launch, where a frame whose ratchet
+    /// generation was spent by this drain surfaces as a spurious decrypt
+    /// failure. A frame the handler re-queues during the drain (still
+    /// session-not-ready) goes through the live enqueue and is re-persisted
+    /// there.
+    fn take_pending_decryption_for_drain(&mut self, sender: &str) -> Vec<PendingDecryptMessage> {
+        let config = self.config.encryption.pending_queue.clone();
+        let drained = self.pending_queue.drain_for_peer(&config, sender);
+        self.delete_pending_decrypt_entries_from_storage(drained.iter().map(|e| &e.message.id));
+        drained
     }
 
     /// Surfaces every pending-queue eviction as a `PendingQueueDropped`
@@ -73,6 +140,12 @@ impl OfflineProtocol {
     /// pushes ciphertext without store-and-forward has no second copy to fall
     /// back on, so silence there was a lost message.
     fn report_dropped_pending(&mut self, dropped: Vec<DroppedPendingMessage>) {
+        // A dropped frame's record goes with it: the on-disk copy exists only
+        // to mirror what the queue holds, and a record that outlived its entry
+        // would be restored — and re-dropped, and re-reported — on the next
+        // launch. Deleting a record that was never written (a refused frame)
+        // is a no-op.
+        self.delete_pending_decrypt_entries_from_storage(dropped.iter().map(|e| &e.message.id));
         for entry in dropped {
             let is_media_chunk = entry.message.content_type == ContentType::FileChunk;
             let reason = if is_media_chunk {
@@ -143,7 +216,7 @@ impl OfflineProtocol {
             .pending_queue
             .prune_expired_for_peer(&config, sender, Instant::now());
         self.report_dropped_pending(expired);
-        let drained = self.pending_queue.drain_for_peer(&config, sender);
+        let drained = self.take_pending_decryption_for_drain(sender);
 
         if drained.is_empty() {
             return;

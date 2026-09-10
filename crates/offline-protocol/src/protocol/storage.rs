@@ -3,18 +3,20 @@
 use super::state_crypto::{StateRecordCipher, SEALED_RECORD_OVERHEAD, STATE_RECORD_KEY_BYTES};
 use super::{
     lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
-    PeerCapabilities, PendingMessage, PendingMessageRecord, ReceivedKeyPackage, SessionState,
-    WelcomeDeliveryState, WelcomeLifecycleRecord, DATA_GROUP_V1, DATA_MEDIA_V1, DATA_SYNC_V1,
-    MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO, MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH,
-    MAX_PENDING_KEY_PACKAGES, MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER,
-    MAX_PENDING_MESSAGE_BYTES_GLOBAL, MAX_PENDING_MESSAGE_BYTES_PER_PEER,
-    MAX_PERSISTED_CAPABILITY_VERSIONS, MAX_PROTOCOL_STATE_RECORD_BYTES, MLS_ENVELOPE_COMPACT_V1,
+    PeerCapabilities, PendingDecryptRecord, PendingMessage, PendingMessageRecord,
+    ReceivedKeyPackage, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord, DATA_GROUP_V1,
+    DATA_MEDIA_V1, DATA_SYNC_V1, MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO,
+    MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH, MAX_PENDING_KEY_PACKAGES, MAX_PENDING_MESSAGES_GLOBAL,
+    MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
+    MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_PERSISTED_CAPABILITY_VERSIONS,
+    MAX_PROTOCOL_STATE_RECORD_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_DECRYPT_RECORD_VERSION,
     RICH_PAYLOAD_V1, WELCOME_LIFECYCLE_TTL_SECS,
 };
 use crate::constants::{MAX_MEDIA_DESCRIPTORS, MAX_OUTBOX_ENTRIES};
+use crate::events::DecryptionFailureCode;
 use crate::{Error, Event, ProtocolStateError, ProtocolStateResult, ProtocolStateStorage, Result};
 use chrono::{Duration as ChronoDuration, Utc};
-use offline_protocol_core::{LamportClock, MessageId};
+use offline_protocol_core::{LamportClock, Message, MessageId};
 use offline_protocol_mls::{MlsManager, MlsStorage};
 use offline_protocol_transport::{NostrKeypair, NostrTransport, TransportType};
 use serde::de::DeserializeOwned;
@@ -45,6 +47,11 @@ pub(crate) enum StateCategory {
     /// because reading it means decrypting it.
     PendingMessages,
     PendingMessageEntries,
+    /// Inbound ciphertext parked before its session was ready. Post-split
+    /// only, like [`Self::StateAdoption`] — deliberately absent from
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split
+    /// data to inherit for it.
+    PendingDecryptEntries,
     Outbox,
     MediaDescriptors,
     PeerKeyPackages,
@@ -98,6 +105,7 @@ impl StateCategory {
         Some(match key_type {
             storage_keys::PENDING_MESSAGES => Self::PendingMessages,
             storage_keys::PENDING_MESSAGE_ENTRIES => Self::PendingMessageEntries,
+            storage_keys::PENDING_DECRYPT_ENTRIES => Self::PendingDecryptEntries,
             storage_keys::OUTBOX => Self::Outbox,
             storage_keys::MEDIA_DESCRIPTORS => Self::MediaDescriptors,
             storage_keys::PEER_KEY_PACKAGES => Self::PeerKeyPackages,
@@ -133,6 +141,7 @@ impl StateCategory {
     pub(crate) const ALL: &'static [Self] = &[
         Self::PendingMessages,
         Self::PendingMessageEntries,
+        Self::PendingDecryptEntries,
         Self::Outbox,
         Self::MediaDescriptors,
         Self::PeerKeyPackages,
@@ -161,6 +170,7 @@ impl StateCategory {
         match self {
             Self::PendingMessages => storage_keys::PENDING_MESSAGES,
             Self::PendingMessageEntries => storage_keys::PENDING_MESSAGE_ENTRIES,
+            Self::PendingDecryptEntries => storage_keys::PENDING_DECRYPT_ENTRIES,
             Self::Outbox => storage_keys::OUTBOX,
             Self::MediaDescriptors => storage_keys::MEDIA_DESCRIPTORS,
             Self::PeerKeyPackages => storage_keys::PEER_KEY_PACKAGES,
@@ -193,6 +203,13 @@ impl StateCategory {
     ///   per-recipient predecessor [`storage_keys::PENDING_MESSAGES`]: original
     ///   plaintext, plus rich extras that can include
     ///   `MediaMetadata::encryption_key`/`iv`.
+    /// - [`storage_keys::PENDING_DECRYPT_ENTRIES`]: inbound frames parked
+    ///   before their session was ready. The body is MLS ciphertext, but the
+    ///   envelope around it is not: sender, recipient, app id, metadata and
+    ///   any outer `media_metadata` are in the clear, and a sealed record is
+    ///   also the only thing stopping a container write from *substituting*
+    ///   a frame — an AEAD makes an edited record unopenable, and unopenable
+    ///   is dropped.
     /// - [`storage_keys::OUTBOX`]: the outgoing `Message` — ciphertext for
     ///   encrypted sends, but plaintext when the app opted out of encryption,
     ///   and its outer `media_metadata` carries the cloud-media secrets on the
@@ -256,6 +273,7 @@ impl StateCategory {
         match self {
             Self::PendingMessages
             | Self::PendingMessageEntries
+            | Self::PendingDecryptEntries
             | Self::Outbox
             | Self::MediaDescriptors
             | Self::PeerKeyPackages
@@ -417,6 +435,17 @@ pub(crate) enum RestorableRecord<T> {
 /// record there re-opens the plaintext gate for that peer, so stranding the
 /// overflow is the safer failure. See the rationale there.
 pub(super) const MAX_RESTORE_KEYS_PER_CATEGORY: usize = 4 * MAX_PENDING_MESSAGES_GLOBAL;
+
+/// How long a parked inbound frame may sit on disk, measured from its first
+/// receipt, before restore drops it instead of re-queuing it.
+///
+/// The in-memory TTL (`PendingQueueConfig::pending_ttl_ms`) restarts with every
+/// process, because it is measured on an `Instant`; without a second bound a
+/// frame whose session never confirms would be restored on every launch
+/// forever. Seven days is well past any handshake that is still going to
+/// succeed, and past the sender's own retry budget, so a record older than
+/// this is one nobody is still trying to deliver.
+pub(crate) const PENDING_DECRYPT_PERSISTED_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 /// Restore-walk bound for the outbox.
 ///
@@ -4356,6 +4385,278 @@ impl OfflineProtocol {
                 count = self.both_create_awaiting_decrypt.len(),
                 "Restored both-create owner gate from storage"
             );
+        }
+    }
+
+    // ========================================================================
+    // PENDING DECRYPTION QUEUE PERSISTENCE
+    // ========================================================================
+
+    /// Writes one parked inbound frame under its own message id.
+    ///
+    /// Best-effort, like [`Self::persist_pending_message`]: a failed write is
+    /// logged and the entry still lives in the in-memory queue, it just will
+    /// not survive a restart. Called only for a frame the queue *admitted* —
+    /// a frame it refused (overflow, oversized) has nothing to persist, and
+    /// a resend of an id already queued is a no-op in memory and on disk
+    /// (the original record is authoritative and keeps its first-receipt
+    /// timestamp).
+    pub(crate) fn persist_pending_decrypt_entry(
+        &self,
+        peer_id: &str,
+        message: &Message,
+        first_received_at_ms: i64,
+        received_via: Option<TransportType>,
+    ) {
+        let Some(storage) = &self.protocol_state_storage else {
+            return;
+        };
+        let record = PendingDecryptRecord {
+            version: PENDING_DECRYPT_RECORD_VERSION,
+            peer_id: peer_id.to_string(),
+            message: message.clone(),
+            first_received_at_ms,
+            received_via,
+        };
+        let data = match serde_json::to_vec(&record) {
+            Ok(data) => data,
+            Err(e) => {
+                warn!(
+                    peer_id = %peer_id,
+                    message_id = %message.id,
+                    error = %e,
+                    "Failed to serialize pending decryption entry"
+                );
+                return;
+            }
+        };
+        if let Err(e) = self.write_state_record(
+            storage.as_ref(),
+            storage_keys::PENDING_DECRYPT_ENTRIES,
+            &message.id.as_str(),
+            &data,
+        ) {
+            warn!(
+                peer_id = %peer_id,
+                message_id = %message.id,
+                error = %e,
+                "Failed to persist pending decryption entry"
+            );
+        }
+    }
+
+    /// Removes one persisted parked frame. Logged rather than swallowed for
+    /// the reason [`Self::delete_pending_message_from_storage`] is: a delete
+    /// that silently failed is a record the next launch restores and drains
+    /// again, and a re-drain of a frame whose ratchet generation was already
+    /// spent surfaces as a spurious decrypt failure.
+    pub(crate) fn delete_pending_decrypt_entry_from_storage(&self, message_id: &MessageId) {
+        let Some(storage) = &self.protocol_state_storage else {
+            return;
+        };
+        if let Err(e) = storage.delete(storage_keys::PENDING_DECRYPT_ENTRIES, &message_id.as_str())
+        {
+            warn!(
+                message_id = %message_id,
+                error = %e,
+                "Failed to clear persisted pending decryption entry"
+            );
+        }
+    }
+
+    /// Removes the persisted copies of a batch of parked frames.
+    pub(crate) fn delete_pending_decrypt_entries_from_storage<'a>(
+        &self,
+        message_ids: impl IntoIterator<Item = &'a MessageId>,
+    ) {
+        for message_id in message_ids {
+            self.delete_pending_decrypt_entry_from_storage(message_id);
+        }
+    }
+
+    /// Test-only: the ids currently persisted for the pending-decryption
+    /// queue, in store order.
+    #[cfg(test)]
+    pub(crate) fn persisted_pending_decrypt_ids(&self) -> Vec<String> {
+        let Some(storage) = self.protocol_state_storage.as_ref() else {
+            return Vec::new();
+        };
+        Self::list_state_keys(storage.as_ref(), storage_keys::PENDING_DECRYPT_ENTRIES)
+            .unwrap_or_default()
+    }
+
+    /// Restores the pending-decryption queue from its per-message records.
+    ///
+    /// Each record that opens, parses, and is younger than
+    /// [`PENDING_DECRYPT_PERSISTED_MAX_AGE_MS`] is pushed back through the
+    /// in-memory enqueue — oldest first by `first_received_at_ms`, so the
+    /// per-peer FIFO and the overflow policy see the same order they would
+    /// have on the live path — **without** being re-persisted: the record on
+    /// disk is already the durable copy and keeps its first-receipt timestamp.
+    /// A restored entry gets a fresh `Instant::now()` as its in-memory
+    /// `received_at`, so its TTL restarts with the process; the 7-day age
+    /// bound is what keeps a frame from being restored forever.
+    ///
+    /// Restored ids are deliberately **not** dedup-marked. The live path
+    /// unmarks a deferred frame on receipt so the sender's resend re-enters
+    /// the queue (idempotent by id) instead of hitting the duplicate re-ACK
+    /// path, and a restore must leave that invariant where it found it.
+    ///
+    /// Every delete the walk causes — unreadable, corrupt, unknown version,
+    /// expired — is advisory: a record left on disk one launch longer is
+    /// re-walked and dropped then. So the walk draws on a pool of its own with
+    /// refusing semantics rather than the shared advisory pool: it holds
+    /// inbound ciphertext the app is told about when lost, and that must not
+    /// be held hostage to a key-package flood in a category it has nothing to
+    /// do with — the same argument the outbound pending walk makes.
+    ///
+    /// An expired record is settled with a `PendingQueueDropped` decryption
+    /// failure carrying the reason `expired_persisted`, through the deferred
+    /// settlement path so it reaches the app once the event pipeline is live.
+    /// Infallible by design: this queue holds nothing the rest of `initialize_mls`
+    /// depends on, so a listing failure is logged and the queue simply starts
+    /// empty this session.
+    pub(crate) fn restore_pending_decrypt_entries(&mut self, allowance: &mut PruneAllowance) {
+        let Some(storage) = self.protocol_state_storage.clone() else {
+            return;
+        };
+        let key_ids =
+            match Self::list_state_keys(storage.as_ref(), storage_keys::PENDING_DECRYPT_ENTRIES) {
+                Ok(keys) => keys,
+                Err(e) => {
+                    warn!(error = %e, "Failed to list pending decryption entries from storage");
+                    return;
+                }
+            };
+        let listed = key_ids.len();
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Pending decryption entries listed more records than any legitimate run can produce; ignoring the tail"
+            );
+        }
+
+        let now_ms = Utc::now().timestamp_millis();
+        let mut budget = allowance.refusing();
+        let mut restored: Vec<PendingDecryptRecord> = Vec::new();
+        let mut expired_settlements: Vec<Event> = Vec::new();
+        for key_id in key_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
+            let data = match self.read_state_record_detailed_budgeted(
+                storage.as_ref(),
+                storage_keys::PENDING_DECRYPT_ENTRIES,
+                &key_id,
+                Some(&mut budget),
+            ) {
+                Ok(StateRecord::Present(data)) => data,
+                Ok(StateRecord::Missing | StateRecord::Unreadable | StateRecord::Unavailable)
+                | Err(_) => continue,
+            };
+
+            let record = match serde_json::from_slice::<PendingDecryptRecord>(&data) {
+                Ok(record) if record.version == PENDING_DECRYPT_RECORD_VERSION => record,
+                Ok(record) => {
+                    warn!(
+                        key_id = %key_id,
+                        version = record.version,
+                        "Dropping pending decryption entry with an unknown record version"
+                    );
+                    if budget.claim() {
+                        self.delete_pending_decrypt_key(&key_id);
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    warn!(
+                        key_id = %key_id,
+                        error = %e,
+                        "Dropping corrupted pending decryption entry"
+                    );
+                    if budget.claim() {
+                        self.delete_pending_decrypt_key(&key_id);
+                    }
+                    continue;
+                }
+            };
+
+            // The record is keyed by the message id it holds; a record filed
+            // under some other id is not one this SDK wrote.
+            if record.message.id.as_str() != key_id {
+                warn!(
+                    key_id = %key_id,
+                    message_id = %record.message.id,
+                    "Dropping pending decryption entry whose key does not match its message id"
+                );
+                if budget.claim() {
+                    self.delete_pending_decrypt_key(&key_id);
+                }
+                continue;
+            }
+
+            if now_ms.saturating_sub(record.first_received_at_ms)
+                >= PENDING_DECRYPT_PERSISTED_MAX_AGE_MS
+            {
+                debug!(
+                    key_id = %key_id,
+                    peer_id = %record.peer_id,
+                    "Dropping pending decryption entry that aged out on disk"
+                );
+                if budget.claim() {
+                    self.delete_pending_decrypt_key(&key_id);
+                }
+                expired_settlements.push(Event::message_decryption_failed(
+                    record.message.id.clone(),
+                    record.message.sender.as_str().to_string(),
+                    DecryptionFailureCode::PendingQueueDropped,
+                    "encrypted message evicted from pending queue (expired_persisted); \
+                     recoverable only if the sender resends"
+                        .to_string(),
+                ));
+                continue;
+            }
+
+            restored.push(record);
+        }
+
+        if budget.exhausted {
+            warn!(
+                deleted = budget.spent,
+                budget = MAX_RESTORE_PRUNE_DELETES,
+                "Pending decryption prune hit its share of the launch delete budget; the rest is left on disk for a later launch"
+            );
+        }
+
+        // Oldest first, so the in-memory FIFO and the overflow policy see the
+        // order the live path would have produced. Ties (same millisecond)
+        // fall back to the id so the order is stable across launches.
+        restored.sort_by(|left, right| {
+            left.first_received_at_ms
+                .cmp(&right.first_received_at_ms)
+                .then_with(|| left.message.id.as_str().cmp(&right.message.id.as_str()))
+        });
+
+        let count = restored.len();
+        for record in restored {
+            self.enqueue_restored_pending_decryption(
+                &record.peer_id,
+                &record.message,
+                record.received_via,
+            );
+        }
+        self.settle_restored_message_failures(expired_settlements);
+
+        if count > 0 {
+            info!(count, "Restored pending decryption entries from storage");
+        }
+    }
+
+    /// Deletes a pending-decryption record by key (restore-internal, mirrors
+    /// [`Self::delete_media_descriptor_key`]).
+    fn delete_pending_decrypt_key(&self, key_id: &str) {
+        if let Some(storage) = &self.protocol_state_storage {
+            if let Err(e) = storage.delete(storage_keys::PENDING_DECRYPT_ENTRIES, key_id) {
+                warn!(key_id = %key_id, error = %e, "Failed to delete pending decryption entry");
+            }
         }
     }
 

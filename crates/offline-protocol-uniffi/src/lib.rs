@@ -2291,7 +2291,7 @@ impl Default for PendingQueueConfig {
         Self {
             max_pending_per_peer: 64,
             max_pending_global: 4096,
-            // Mirrors the core default (30 min); see DEFAULT_PENDING_TTL_MS in
+            // Mirrors the core default (24 h); see DEFAULT_PENDING_TTL_MS in
             // offline-protocol/src/config.rs for the deferred-ACK rationale.
             pending_ttl_ms: DEFAULT_PENDING_TTL_MS,
             overflow_policy: OverflowPolicy::DropOldest,

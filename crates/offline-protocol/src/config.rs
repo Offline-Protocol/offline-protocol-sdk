@@ -46,18 +46,25 @@ pub struct PendingQueueConfig {
     pub overflow_policy: OverflowPolicy,
 }
 
-/// Default TTL for the pending-decryption queue (30 minutes, in ms).
+/// Default TTL for the pending-decryption queue (24 hours, in ms).
 ///
 /// Under the deferred-ACK model an undecryptable message is no longer ACKed on
 /// receipt, so this queue is the primary recovery window before the session
 /// confirms — a 2-minute window was too short for a peer whose Welcome is slow
-/// to arrive/adopt. Memory stays bounded by the per-peer/global byte caps plus
-/// the `DropOldest` overflow policy; a longer TTL only lets entries linger
-/// within those caps, it does not raise the ceiling.
+/// to arrive/adopt, and 30 minutes was too short once the queue became
+/// durable: with a relay that pushes ciphertext without store-and-forward
+/// there is no second copy, so a frame that arrives while the recipient's
+/// session is still being set up has to outlive the handshake, which for a
+/// phone that is opened once a day means a day. Memory stays bounded by the
+/// per-peer/global byte caps plus the `DropOldest` overflow policy; a longer
+/// TTL only lets entries linger within those caps, it does not raise the
+/// ceiling. The TTL is measured on an `Instant` and so restarts with the
+/// process; the persisted copy is bounded separately by
+/// `PENDING_DECRYPT_PERSISTED_MAX_AGE_MS` (7 days).
 ///
 /// The UniFFI `PendingQueueConfig` default mirrors this value — reference this
 /// constant there rather than re-hardcoding it.
-pub const DEFAULT_PENDING_TTL_MS: u64 = 1_800_000;
+pub const DEFAULT_PENDING_TTL_MS: u64 = 86_400_000;
 
 fn default_max_pending_bytes_per_peer() -> usize {
     4 * 1024 * 1024
@@ -74,7 +81,7 @@ impl Default for PendingQueueConfig {
             max_pending_global: 4096,
             max_pending_bytes_per_peer: default_max_pending_bytes_per_peer(),
             max_pending_bytes_global: default_max_pending_bytes_global(),
-            // 30 minutes; see DEFAULT_PENDING_TTL_MS for the deferred-ACK
+            // 24 hours; see DEFAULT_PENDING_TTL_MS for the deferred-ACK
             // rationale and the FFI-mirror contract.
             pending_ttl_ms: DEFAULT_PENDING_TTL_MS,
             overflow_policy: OverflowPolicy::DropOldest,
@@ -2020,7 +2027,7 @@ mod tests {
         }
     }
 
-    /// Renders `1800000` as `1_800_000`, the form Kotlin and Swift use.
+    /// Renders `86400000` as `86_400_000`, the form Kotlin and Swift use.
     fn format_underscored(value: u64) -> String {
         let digits = value.to_string();
         let mut out = String::new();

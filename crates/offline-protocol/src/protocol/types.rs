@@ -1555,6 +1555,48 @@ pub(crate) struct PendingMessageRecord {
     pub(crate) message: PendingMessage,
 }
 
+/// One inbound encrypted frame parked in the pending-decryption queue, as
+/// persisted under [`storage_keys::PENDING_DECRYPT_ENTRIES`].
+///
+/// The queue itself is in-memory only (`PendingDecryptionQueue`); this record
+/// is what lets an entry survive an app restart. Without it a frame that
+/// arrived before its session was ready was lost the moment the process died
+/// — and with a relay that pushes ciphertext without store-and-forward there
+/// is no second copy to ask for, so a restart during a slow handshake was a
+/// silently lost message.
+///
+/// Keyed by message id, like [`PendingMessageRecord`], so a drain, a prune or
+/// an overflow drop deletes exactly the record it settled. `peer_id` rides
+/// inside the record because the in-memory queue is a per-peer map rebuilt
+/// from records the store enumerates in no particular order.
+///
+/// `first_received_at_ms` is wall-clock, not the `Instant` the in-memory entry
+/// carries: an `Instant` does not survive a restart, so on restore the entry is
+/// re-stamped with a fresh `Instant::now()` (its in-memory TTL restarts) and
+/// this field bounds the *total* time on disk instead —
+/// `PENDING_DECRYPT_PERSISTED_MAX_AGE_MS`.
+///
+/// `version` is a forward-compatibility hinge: a reader that sees a version it
+/// does not know treats the record as corrupt and drops it rather than
+/// guessing at fields. Records written before the field existed default to 1.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PendingDecryptRecord {
+    #[serde(default = "pending_decrypt_record_version")]
+    pub(crate) version: u8,
+    pub(crate) peer_id: String,
+    pub(crate) message: Message,
+    pub(crate) first_received_at_ms: i64,
+    #[serde(default)]
+    pub(crate) received_via: Option<TransportType>,
+}
+
+/// The only record version this build writes or reads.
+pub(crate) const PENDING_DECRYPT_RECORD_VERSION: u8 = 1;
+
+fn pending_decrypt_record_version() -> u8 {
+    PENDING_DECRYPT_RECORD_VERSION
+}
+
 impl PendingMessage {
     /// Recomputes [`Self::serialized_bytes`] from the current field values.
     ///
@@ -1699,6 +1741,10 @@ pub(crate) mod storage_keys {
     /// per-recipient layout could only report the loss per peer, because every
     /// id was inside the record that would not open.
     pub const PENDING_MESSAGE_ENTRIES: &str = "pending_message_entries";
+    /// Inbound ciphertext parked in the pending-decryption queue, one record
+    /// per message keyed by message id — the receive-side mirror of
+    /// [`PENDING_MESSAGE_ENTRIES`]. See `PendingDecryptRecord`.
+    pub const PENDING_DECRYPT_ENTRIES: &str = "pending_decrypt_entries";
     /// Key type for persisted per-peer MLS session confirmation state.
     pub const SESSION_STATES: &str = "session_states";
     /// Key type for persisted per-peer received key packages (survives restart).
