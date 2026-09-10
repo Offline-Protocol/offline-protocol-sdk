@@ -35,6 +35,44 @@ class StickyEventBufferTest {
     }
 
     @Test
+    fun twoInboundMessagesWithDifferentIdsBothSurvive() {
+        // The inbound use: every message_received is its own message, keyed
+        // `type:message_id`, so two of them must not collapse into one the
+        // way two copies of a one-shot event do. Sized as the module sizes
+        // its inbound buffer.
+        val buffer = StickyEventBuffer(maxEntries = 256)
+        assertTrue(buffer.holdNow("message_received:m1", """{"type":"message_received","message_id":"m1"}"""))
+        assertTrue(buffer.holdNow("message_received:m2", """{"type":"message_received","message_id":"m2"}"""))
+
+        assertEquals(2, buffer.size)
+        val drained = buffer.drain()
+        assertEquals(listOf("message_received:m1", "message_received:m2"), drained.map { it.key })
+        assertEquals(
+            listOf(
+                """{"type":"message_received","message_id":"m1"}""",
+                """{"type":"message_received","message_id":"m2"}""",
+            ),
+            drained.map { it.eventJson },
+        )
+    }
+
+    @Test
+    fun inboundBufferDropsTheOldestPastItsCapacity() {
+        // 256 is a real capacity for the inbound buffer, not a backstop: past
+        // it the oldest message goes, never the newest.
+        val buffer = StickyEventBuffer(maxEntries = 256)
+        for (i in 0 until 257) {
+            buffer.holdNow("message_received:m$i", "{}")
+        }
+
+        assertEquals(256, buffer.size)
+        val keys = buffer.drain().map { it.key }
+        assertFalse(keys.contains("message_received:m0"))
+        assertEquals("message_received:m1", keys.first())
+        assertEquals("message_received:m256", keys.last())
+    }
+
+    @Test
     fun holdReportsThatItTookTheEvent() {
         // The caller flushes on a true return, so a false one here would be a
         // held event with nothing scheduled to collect it.

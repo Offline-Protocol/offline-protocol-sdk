@@ -13039,6 +13039,168 @@ mod tests {
         }
     }
 
+    /// The buffered-inbound event set agrees across TypeScript, Kotlin and
+    /// Swift, and each layer's hold is wired to a flush.
+    ///
+    /// `message_received`, `file_received` and `message_decryption_failed`
+    /// each report one message the core has already ACKed, dedup-marked and
+    /// dropped its queued copy of, so nothing will ever restate them and a
+    /// drop between the core and the app's handler is a lost message. Three
+    /// definitions and three holds have to agree for that not to happen —
+    /// the native buffers (Kotlin `BUFFERED_INBOUND_EVENT_TYPES`, Swift
+    /// `InboundEventBuffer.bufferedEventTypes`) cover the native→JS gap and
+    /// `BUFFERED_INBOUND_EVENT_TYPES` in `src/constants.ts` the
+    /// JS→app-listener gap — and every half fails silently, so they are
+    /// pinned here the way [`react_native_one_shot_event_set_matches_native`]
+    /// pins the one-shot set. The set is asserted exactly: enrolling a
+    /// periodic event here would replay stale state.
+    #[test]
+    fn react_native_buffered_inbound_event_set_matches_native() {
+        const INBOUND_TAGS: [&str; 3] = [
+            "message_received",
+            "file_received",
+            "message_decryption_failed",
+        ];
+
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            let path = rn_dir.join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+        fn declared_between(source: &str, start: &str, end: &str) -> Vec<String> {
+            let region = source
+                .split_once(start)
+                .unwrap_or_else(|| panic!("expected {start:?} in source"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("expected {end:?} after {start:?}"))
+                .0;
+            region
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with("//"))
+                .map(|l| {
+                    l.trim_end_matches(',')
+                        .trim_matches(|c| c == '\'' || c == '"')
+                        .to_string()
+                })
+                .collect()
+        }
+
+        // --- TypeScript: exactly these tags, in this order ------------------
+        let constants_ts = read("src/constants.ts");
+        assert_eq!(
+            declared_between(
+                &constants_ts,
+                "export const BUFFERED_INBOUND_EVENT_TYPES = [",
+                "] as const;"
+            ),
+            INBOUND_TAGS.to_vec(),
+            "src/constants.ts BUFFERED_INBOUND_EVENT_TYPES must hold exactly the inbound tags"
+        );
+        assert!(
+            constants_ts.contains("export const MAX_PENDING_INBOUND_EVENTS = 256;"),
+            "the JS-side inbound hold must be capped at 256 like the native buffers"
+        );
+
+        // --- Kotlin ---------------------------------------------------------
+        let kotlin = read("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt");
+        assert_eq!(
+            declared_between(
+                &kotlin,
+                "private val BUFFERED_INBOUND_EVENT_TYPES: Set<String> = setOf(",
+                ")"
+            ),
+            INBOUND_TAGS.to_vec(),
+            "OfflineProtocolModule.kt BUFFERED_INBOUND_EVENT_TYPES must match src/constants.ts"
+        );
+        let kotlin_code = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        );
+        assert!(
+            kotlin_code.contains("INBOUND_EVENT_BUFFER_CAPACITY = 256")
+                && kotlin_code
+                    .contains("StickyEventBuffer(maxEntries = INBOUND_EVENT_BUFFER_CAPACITY)"),
+            "the Android inbound buffer must be a 256-entry StickyEventBuffer of its own"
+        );
+        assert!(
+            kotlin_code.contains("if (!canEmitToJs() && holdInboundEventIfBuffered(eventJson))"),
+            "the Android core event callback must route a buffered inbound event to the hold \
+             when the JS gate is shut"
+        );
+        assert!(
+            kotlin_code.contains("inboundEvents.send(\"$type:$id\", eventJson)"),
+            "Android must key held inbound events type:message_id so every message survives"
+        );
+        for call in [
+            "inboundEvents.flush()",
+            "inboundEvents.beginSession()",
+            "inboundEvents.endSession()",
+        ] {
+            assert!(
+                kotlin_code.contains(call),
+                "OfflineProtocolModule.kt must drive {call} alongside the one-shot buffer"
+            );
+        }
+
+        // --- Swift ----------------------------------------------------------
+        let swift_buffer = read("ios/InboundEventBuffer.swift");
+        assert_eq!(
+            declared_between(
+                &swift_buffer,
+                "static let bufferedEventTypes: Set<String> = [",
+                "]"
+            ),
+            INBOUND_TAGS.to_vec(),
+            "ios/InboundEventBuffer.swift bufferedEventTypes must match src/constants.ts"
+        );
+        assert!(
+            swift_buffer.contains("static let defaultMaxEntries = 256"),
+            "the iOS inbound buffer must be capped at 256"
+        );
+        let swift_module = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        assert!(
+            swift_module.contains("emitter.holdInboundEventIfBuffered(eventJson, generation: generation)"),
+            "EventCallbackImpl.onEvent must hold a buffered inbound event when sendEventToJS refuses it"
+        );
+        for site in [
+            "override func startObserving() { hasListeners = true DispatchQueue.main.async { [weak self] in self?.flushInboundEvents() } }",
+            "super.addListener(eventName) DispatchQueue.main.async { [weak self] in self?.flushInboundEvents() }",
+            "@objc private func applicationDidBecomeActive() { flushInboundEvents() }",
+        ] {
+            assert!(
+                swift_module.contains(site),
+                "OfflineProtocolModule.swift must flush held inbound events from every trigger; \
+                 missing: {site}"
+            );
+        }
+        assert_eq!(
+            swift_module.matches("inboundEvents.bumpGeneration()").count(),
+            2,
+            "OfflineProtocolModule.swift must bump the inbound generation on create() and destroy()"
+        );
+        assert!(
+            read("MeshSdk.podspec").contains("\"ios/InboundEventBuffer.swift\","),
+            "MeshSdk.podspec must ship ios/InboundEventBuffer.swift — the pod lists sources \
+             explicitly, so a missing entry is a link error in every consuming app"
+        );
+
+        // --- The JS hold and replay ----------------------------------------
+        let index_ts = rn_source_code_only("src/index.ts");
+        assert!(
+            index_ts.contains("BUFFERED_INBOUND_EVENT_TYPE_SET.has(event.type)")
+                && index_ts.contains("this.pendingInboundEvents.push(event)"),
+            "src/index.ts emitEvent must hold an inbound event it could not deliver to any app \
+             listener"
+        );
+        assert!(
+            index_ts.contains("this.replayHeldInboundEvents(eventType);"),
+            "src/index.ts on() must replay held inbound events to a new listener"
+        );
+    }
+
     /// A `MessageSent { pushed: true }` parks the frame on both bridges.
     ///
     /// The relay has no store-and-forward: when the recipient is not on it,
