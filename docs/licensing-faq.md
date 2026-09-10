@@ -86,18 +86,30 @@ distribution model, and expected scale.
 
 ## Is telemetry part of the license?
 
-Telemetry is a hosted, metered service: opt-in by key, included in commercial
-plans, and priced per accepted event beyond a plan's allotment. The client
-half ships inside the SDK under the same dual license as everything else.
-Under the AGPL option a fork may remove or replace it like any other part of
-the SDK. The commercial license lets you leave it off, switch it off, or never
-supply a key, and asks one thing in return: that the pipe, when it runs, is not
-repointed at another service or reshaped on the wire; the exact term is in
-[LICENSE-COMMERCIAL.md](../LICENSE-COMMERCIAL.md#telemetry-under-the-commercial-license).
-Forwarding the events you receive through the event API to your own systems
-is ordinary use under both options. The service, the dashboards and the
-reports are Offline Protocol's, and "Offline Protocol telemetry" is a name the
-[trademark policy](../TRADEMARKS.md) protects. Nothing in the SDK verifies a
-license at runtime, under either option: the AGPL forbids it, and the
-commercial license does not need it. What the SDK sends, and how to switch it
-off, is in [docs/telemetry.md](telemetry.md).
+Hosted telemetry is optional and metered. Its client ships inside the SDK;
+service access, usage allowances, and charges are set out in the applicable
+commercial agreement.
+
+Under the Commercial License, you may leave hosted telemetry disabled, omit
+its credentials, or stop new collection using the documented controls. Unless
+Offline Protocol authorizes otherwise in writing, the bundled telemetry client
+must use an authorized endpoint and preserve its event schema and serialized
+payload format. Ordinary forwarding proxies and local test captures are
+permitted. The exact restriction and exceptions are in
+[Telemetry under the Commercial License](../LICENSE-COMMERCIAL.md#telemetry-under-the-commercial-license).
+
+You may receive events and diagnostics through the SDK's public APIs and
+independently collect, store, analyze, or forward that information, including
+to third-party observability providers. These permissions do not imply that
+every internal telemetry record or hosted aggregate is exposed through those
+APIs. The service, the dashboards, and the reports are Offline Protocol's, and
+"Offline Protocol telemetry" is a name the
+[trademark policy](../TRADEMARKS.md) protects.
+
+Under the AGPL-3.0 option, the telemetry client may be modified, removed, or
+replaced in accordance with that license. Under either option, the SDK
+performs no commercial-license entitlement checks, and core SDK functionality
+does not require hosted telemetry.
+
+See [Telemetry](telemetry.md) for the data inventory and the handling of
+collection, queued records, and in-flight uploads.

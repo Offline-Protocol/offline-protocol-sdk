@@ -19,7 +19,8 @@ following licenses, at your option:
    application, embedding it in closed-source firmware, or operating a SaaS without
    releasing source). A separate commercial license from **Offline Protocol, Inc.**
    grants the right to use, modify, and distribute the SDK without the AGPL-3.0
-   obligations.
+   obligations, subject to the applicable commercial agreement, including the
+   telemetry term below.
 
 You only need **one** of the two licenses, not both.
 
@@ -32,23 +33,42 @@ reasoning is laid out in the
 
 ## Telemetry under the Commercial License
 
-The SDK includes a telemetry pipe that, once an application enables it with a
-key issued by Offline Protocol, Inc., uploads accepted events to the Offline
-Protocol telemetry service. The service is a hosted, metered product included
-in commercial plans, and every commercial license carries the following term.
+The SDK includes an optional telemetry client that, once an application
+enables it with a telemetry API key and application identifier issued by
+Offline Protocol, Inc., collects, batches, and uploads supported operational
+events to Offline Protocol's hosted telemetry service. Service access, usage
+allowances, and metered charges are set out in the applicable commercial
+agreement. The following telemetry term applies to every commercial license,
+as set out in that agreement.
 
-A commercial licensee **may** leave telemetry off, switch it off at runtime,
-and never supply a key; the SDK collects and sends nothing until a key is
-supplied. A commercial licensee **may not** modify the SDK so as to change the
-service endpoint the pipe uploads to, alter the wire format of what it
-uploads, or redirect or duplicate that upload to a service other than Offline
-Protocol's. Receiving the SDK's events through its event API and forwarding
-them to systems of your own is ordinary use of the SDK and is not restricted.
+A commercial licensee may leave hosted telemetry off, never supply telemetry
+credentials, or switch it off using the SDK's documented controls. Until it is
+explicitly enabled, the hosted telemetry client does not collect, buffer,
+persist, or upload telemetry. The controls stop new collection; handling of
+previously queued records, final flushes, and in-flight uploads is described
+in the telemetry documentation.
 
-This term applies to the commercial license only. Under the AGPL-3.0 option
-the pipe may be modified, removed or replaced like any other part of the SDK,
-and nothing in the SDK verifies a license or a key at runtime under either
-option.
+Except as expressly authorized in writing by Offline Protocol, Inc., a
+commercial licensee may not modify, configure, or build the SDK so that its
+bundled telemetry client uploads to an unauthorized endpoint, redirects or
+duplicates its uploads to another telemetry service, or alters the event
+schema or serialized payload format it uploads. Security updates that preserve
+the authorized destination and payload format are permitted. Network proxies
+and gateways that forward uploads unaltered to an authorized endpoint, and
+local test captures in builds that are not shipped, are permitted.
+
+These telemetry restrictions do not limit the licensee's use of information
+received through the SDK's public APIs. Receiving events and diagnostics,
+storing or analyzing them, and forwarding them to the licensee's own systems
+or third-party observability providers are ordinary uses of the SDK.
+Independently implementing telemetry collection and export using those APIs is
+also permitted.
+
+This term applies to the Commercial License only. It does not modify or impose
+additional restrictions on the AGPL-3.0 option, under which the telemetry
+client may be modified, removed, or replaced in accordance with that license.
+Under either option, the SDK performs no commercial-license entitlement
+checks, and core SDK functionality does not require hosted telemetry.
 
 ## Obtaining a Commercial License
 
