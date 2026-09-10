@@ -1977,13 +1977,13 @@ export class OfflineProtocol {
   }
 
   /**
-   * Stops or resumes collection without tearing the pipe down. Off, every
-   * emit costs one atomic load and nothing is buffered, and the session
-   * boundaries stop reporting too: a background draws no session summary and
-   * opens no socket. The lifecycle transitions are still tracked, so the
+   * Stops or resumes new collection without tearing the pipe down. Off,
+   * every emit costs one atomic load and nothing is buffered, and no session
+   * summary is emitted. The lifecycle transitions are still tracked, so the
    * first foreground after collection resumes rotates the session as usual.
-   * What was already queued before the switch still drains. This is the
-   * runtime opt-out for a user setting.
+   * Records queued before the switch continue to drain: this is a collection
+   * control, not an immediate network stop or a deletion. It is the runtime
+   * opt-out for a user setting.
    */
   async setTelemetryEnabled(enabled: boolean): Promise<void> {
     await OfflineProtocolNativeModule.setTelemetryEnabled(enabled);
