@@ -180,9 +180,12 @@ the client's answers were wrong on a device rather than merely different:
 - The `data` and `telemetry-pipe` cargo features are both on by default; a
   build that wants neither the CRDT engine nor the TLS stack opts out.
 - `LICENSE-COMMERCIAL.md` states the telemetry term every commercial license
-  carries: switching the pipe off or never supplying a key is permitted;
-  repointing it at another service or reshaping what it uploads is not. The
-  AGPL option is unchanged, and the event API is ordinary use under both.
+  carries, as set out in the applicable commercial agreement. Hosted telemetry
+  remains optional. Without written authorization, the bundled client may not be
+  redirected to an unauthorized endpoint or another telemetry service, or have
+  its event schema or serialized payload format changed. Ordinary forwarding
+  proxies, local test captures, and independent observability built on public
+  APIs remain permitted. The AGPL-3.0 option is unchanged.
 
 ### Removed
 
