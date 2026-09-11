@@ -244,6 +244,11 @@ struct SeenEntry {
     seen_at: DateTime<Utc>,
     /// When this entry was last accessed (for LRU eviction).
     last_accessed: DateTime<Utc>,
+    /// Whether [`Deduplicator::export_seen`] includes this id. `false` for
+    /// an id tracked with [`Deduplicator::mark_seen_local`]: a sender's own
+    /// outgoing frame, which dedup only has to recognise while this process
+    /// lives.
+    exportable: bool,
 }
 
 /// Deduplicator for tracking seen messages and preventing duplicates.
@@ -352,6 +357,29 @@ impl Deduplicator {
     ///
     /// Returns `true` if this is a new message, `false` if it was already seen.
     pub fn mark_seen(&mut self, message_id: MessageId) -> bool {
+        self.mark_seen_with(message_id, true)
+    }
+
+    /// Marks a message as seen for the life of this process only.
+    ///
+    /// Identical to [`Self::mark_seen`] for [`Self::is_duplicate`], eviction
+    /// and retention, but the id is left out of [`Self::export_seen`]. For a
+    /// sender marking its own outgoing frame: the mark exists to stop a
+    /// relayed echo of that frame re-entering the receive path, which a
+    /// restart does not change, and exporting it would spend the persisted
+    /// record's cap on ids no peer will ever push at this node. A later
+    /// [`Self::mark_seen`] of an id already tracked here is a no-op and does
+    /// not make it exportable.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the message was newly marked, `false` if it was
+    /// already tracked.
+    pub fn mark_seen_local(&mut self, message_id: MessageId) -> bool {
+        self.mark_seen_with(message_id, false)
+    }
+
+    fn mark_seen_with(&mut self, message_id: MessageId, exportable: bool) -> bool {
         let msg_id_str = message_id.as_str();
 
         if let Some(ref mut bloom) = self.bloom_filter {
@@ -391,6 +419,7 @@ impl Deduplicator {
                 SeenEntry {
                     seen_at: now,
                     last_accessed: now,
+                    exportable,
                 },
             );
 
@@ -425,7 +454,8 @@ impl Deduplicator {
     /// Exact (HashMap) mode only: a bloom filter has no ids to export, so
     /// bloom mode returns an empty vector and the persisted set simply stays
     /// empty. Newest first so that a cap smaller than the tracked set keeps
-    /// the ids most likely to be replayed — the recent ones.
+    /// the ids most likely to be replayed — the recent ones. Ids tracked with
+    /// [`Self::mark_seen_local`] are left out.
     pub fn export_seen(&self, max: usize) -> Vec<SeenId> {
         if self.bloom_filter.is_some() {
             return Vec::new();
@@ -433,6 +463,7 @@ impl Deduplicator {
         let mut entries: Vec<SeenId> = self
             .seen_messages
             .iter()
+            .filter(|(_, entry)| entry.exportable)
             .map(|(id, entry)| SeenId {
                 id: id.clone(),
                 seen_at_ms: entry.seen_at.timestamp_millis(),
@@ -479,6 +510,7 @@ impl Deduplicator {
                 SeenEntry {
                     seen_at,
                     last_accessed: seen_at,
+                    exportable: true,
                 },
             );
             imported += 1;
@@ -1095,6 +1127,28 @@ mod tests {
         assert!(dedup.is_duplicate(&fresh[0]));
         assert!(dedup.is_duplicate(&fresh[1]));
         assert!(!dedup.is_duplicate(&fresh[2]));
+    }
+
+    #[test]
+    fn test_local_marks_dedup_but_are_not_exported() {
+        let mut dedup = Deduplicator::new();
+        let inbound = MessageId::new();
+        let own = MessageId::new();
+        assert!(dedup.mark_seen(inbound.clone()));
+        assert!(dedup.mark_seen_local(own.clone()));
+        // Both dedup in memory alike.
+        assert!(dedup.is_duplicate(&inbound));
+        assert!(dedup.is_duplicate(&own));
+        assert!(!dedup.mark_seen_local(own.clone()), "already tracked");
+        // A later plain mark of a local id is a no-op and does not promote it.
+        assert!(!dedup.mark_seen(own.clone()));
+        // Only the inbound id reaches the export.
+        let exported = dedup.export_seen(usize::MAX);
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].id, inbound.as_str());
+        // A local id can still be released like any other.
+        assert!(dedup.unmark_seen(&own));
+        assert!(!dedup.is_duplicate(&own));
     }
 
     #[test]

@@ -18276,6 +18276,52 @@ fn test_dedup_seen_set_survives_stop_and_restart() {
     assert_eq!(bob.dedup_dirty, 0, "a restore is not a change to persist");
 }
 
+/// A sender's own outgoing ids dedup a relayed echo in memory but never
+/// reach the persisted record: the send paths mark through
+/// `mark_seen_local`, so the record's cap is spent on inbound ids only. A
+/// send-side `mark_seen` would put the id in the next write and fail this.
+#[test]
+fn test_dedup_seen_set_excludes_own_outgoing_ids() {
+    let mut config = create_test_config();
+    config.encryption.enabled = false;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let storage = Arc::new(TestProtocolStateStorage {
+        storage: Arc::new(InMemoryStorage::new()),
+    });
+    protocol.protocol_state_storage = Some(storage.clone());
+    protocol.start().unwrap();
+
+    let own = protocol
+        .send_message(&id("bob"), "outgoing", None, None::<String>)
+        .unwrap();
+    let inbound = MessageId::new();
+    assert!(protocol.mark_seen_persisted(inbound.clone()));
+    assert!(
+        protocol.deduplicator.is_duplicate(&own),
+        "the sender still recognises its own id while the process lives"
+    );
+    protocol.stop().unwrap();
+
+    let data = protocol
+        .read_state_record(
+            storage.as_ref(),
+            storage_keys::DEDUP_SEEN_IDS,
+            storage_keys::DEDUP_SEEN_IDS_ID,
+        )
+        .unwrap()
+        .expect("stop() flushes the seen set");
+    let record: super::DedupSeenRecord = serde_json::from_slice(&data).unwrap();
+    let ids: Vec<&str> = record.entries.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        ids.contains(&inbound.as_str().as_str()),
+        "the inbound id is persisted"
+    );
+    assert!(
+        !ids.contains(&own.as_str().as_str()),
+        "an outgoing id must not be persisted: {ids:?}"
+    );
+}
+
 /// The batching rule: nothing per message, one write once 32 changes have
 /// accumulated, and one write for any smaller batch once the interval has
 /// elapsed on a `process()` tick.

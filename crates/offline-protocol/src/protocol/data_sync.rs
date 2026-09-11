@@ -761,7 +761,7 @@ impl OfflineProtocol {
         if self.deduplicator.is_duplicate(&message.id) {
             return;
         }
-        self.deduplicator.mark_seen(message.id.clone());
+        self.deduplicator.mark_seen_local(message.id.clone());
 
         // Tier 2: keep the plaintext so a resend after a re-key seals against
         // the peer's current epoch instead of replaying ciphertext they can

@@ -5223,7 +5223,11 @@ impl OfflineProtocol {
     /// own outgoing frames are not persisted: they exist to stop a relayed
     /// echo of our own message being re-processed, which a restart does not
     /// change, and persisting them would spend the record's cap on ids no
-    /// peer will ever push at us.
+    /// peer will ever push at us. That holds because the send paths mark
+    /// through `Deduplicator::mark_seen_local`, which `export_seen` leaves
+    /// out; a send-side `mark_seen` would put the id in the next record and
+    /// is pinned against by
+    /// `test_dedup_seen_set_excludes_own_outgoing_ids`.
     pub(crate) fn note_dedup_change(&mut self) {
         self.dedup_dirty = self.dedup_dirty.saturating_add(1);
     }

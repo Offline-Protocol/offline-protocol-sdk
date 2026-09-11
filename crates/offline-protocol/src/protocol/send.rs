@@ -364,7 +364,7 @@ impl OfflineProtocol {
             return Err(crate::Error::Other("Duplicate message".to_string()));
         }
 
-        self.deduplicator.mark_seen(message_id.clone());
+        self.deduplicator.mark_seen_local(message_id.clone());
 
         let previous_transport = self.transport_manager.current_transport();
 
@@ -454,7 +454,7 @@ impl OfflineProtocol {
             return Err(crate::Error::Other("Duplicate message".to_string()));
         }
 
-        self.deduplicator.mark_seen(message_id.clone());
+        self.deduplicator.mark_seen_local(message_id.clone());
 
         let previous_transport = self.transport_manager.current_transport();
         let send_result = self
@@ -522,7 +522,7 @@ impl OfflineProtocol {
             return Err(crate::Error::Other("Duplicate message".to_string()));
         }
 
-        self.deduplicator.mark_seen(message_id.clone());
+        self.deduplicator.mark_seen_local(message_id.clone());
 
         let previous_transport = self.transport_manager.current_transport();
         let send_result = self.transport_manager.send(&message);
@@ -616,7 +616,7 @@ impl OfflineProtocol {
         // Mark seen so a bridge that passes the frame through verbatim (an
         // adapter without a translator) cannot have the relay echo it back
         // into our own receive path.
-        self.deduplicator.mark_seen(message_id.clone());
+        self.deduplicator.mark_seen_local(message_id.clone());
 
         self.transport_manager
             .send_via_transport(&message, TransportType::Internet)?;
@@ -666,7 +666,7 @@ impl OfflineProtocol {
         if self.deduplicator.is_duplicate(&message.id) {
             return;
         }
-        self.deduplicator.mark_seen(message.id.clone());
+        self.deduplicator.mark_seen_local(message.id.clone());
 
         let previous_transport = self.transport_manager.current_transport();
         match self.transport_manager.send(&message) {
