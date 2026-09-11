@@ -2099,22 +2099,14 @@ pub(crate) fn lock_shared_state(
 /// (non-media) encrypted DMs; absent (`None`) means verbatim replay — the
 /// fallback for plaintext sends and media chunks.
 ///
-/// **Security note: this is plaintext at rest.** It is persisted with its
-/// [`OutboxEntry`] (see the field doc there), so every sent-but-unACKed
-/// encrypted DM keeps its plaintext on disk for the lifetime of its outbox
-/// entry — sealed under the per-install credential-store record key exactly
-/// like the pre-session pending queue (`pending_message_entries`), which has
-/// always held the same plaintext for the same messages one step earlier in
-/// their life, and erased with the entry on ACK, expiry, eviction or removal.
-/// The trade was made deliberately: an entry restored without provenance can
-/// only replay its old ciphertext, and after a restart-plus-re-key (the
-/// ordinary shape of a recovered desync, and of a recipient reinstalling) that
-/// ciphertext is sealed to a dead epoch and can never decrypt — the resend
-/// loop then burns its budget delivering nothing. The narrow forward-secrecy
-/// cost (a plaintext the credential-store key already protects, for messages
-/// the outbox already holds as ciphertext) buys delivery of exactly the
-/// messages that were being lost.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// **Memory-only by design.** This holds the message *plaintext*, so it is never
+/// persisted (see the `#[serde(skip)]` on [`OutboxEntry::reseal`]): persisting it
+/// would broaden plaintext-at-rest to every sent-but-unACKed encrypted DM for the
+/// full outbox lifetime, weakening forward secrecy in exchange for only a narrow
+/// cross-restart reseal benefit. After a restart the restored entry replays
+/// verbatim; if that resend hits a desync, Tier 1 (un-ACK + re-key) still keeps
+/// delivery honest rather than silently losing the message.
+#[derive(Debug, Clone)]
 pub(crate) struct OutboxReseal {
     /// Original plaintext content.
     pub(crate) content: String,
@@ -2141,16 +2133,11 @@ pub(crate) struct OutboxEntry {
     pub(crate) last_sent_at: DateTime<Utc>,
     pub(crate) last_transport: Option<TransportType>,
     /// Re-seal provenance; `None` for verbatim-replay entries (plaintext or
-    /// media).
-    ///
-    /// **Security note.** Persisted, and it carries the message plaintext:
-    /// for a sent-but-unACKed encrypted DM the plaintext is at rest for the
-    /// outbox lifetime, sealed under the credential-store record key like
-    /// every `outbox` and `pending_message_entries` record, and erased with
-    /// the entry on ACK or expiry. See [`OutboxReseal`] for the trade. A record
-    /// written before this field was persisted (or by a plaintext/media send)
-    /// deserializes with `reseal: None` and replays verbatim, as before.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// media). **Memory-only** (`#[serde(skip)]`): it carries the message
+    /// plaintext, which must never be persisted (see [`OutboxReseal`]). A
+    /// restored entry deserializes with `reseal: None` and therefore replays
+    /// verbatim.
+    #[serde(skip)]
     pub(crate) reseal: Option<OutboxReseal>,
 }
 
