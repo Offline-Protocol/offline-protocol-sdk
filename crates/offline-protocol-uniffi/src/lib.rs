@@ -924,8 +924,8 @@ pub struct PeerDevice {
 }
 
 /// Transport metrics — legacy 6-field counters plus the ~12 optional fields
-/// from the richer Rust `TransportMetrics`. Same dict flows through the pull
-/// path (`get_transport_metrics`) and the push path (`MetricsFrame.transports`).
+/// from the richer Rust `TransportMetrics`, as `get_transport_metrics` returns
+/// them. There is no push path for this dictionary on the bindings.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransportMetrics {
@@ -5361,9 +5361,9 @@ impl OfflineProtocol {
     /// never written anywhere the SDK reads from, and the 12 extended
     /// optional fields introduced in the telemetry workstream are
     /// **also discarded**. Use `get_transport_metrics(transport_type)` to
-    /// read live metrics, or install a `TelemetrySink` to observe the
-    /// push stream (`MetricsFrame`). Do not build new integrations around
-    /// this method; **it is scheduled for removal in the v1.0 release.**
+    /// read live metrics; the bindings have no push stream for them. Do not
+    /// build new integrations around this method; **it is scheduled for
+    /// removal in the v1.0 release.**
     pub fn update_transport_metrics(
         &self,
         _transport_type: TransportType,
@@ -5378,8 +5378,7 @@ impl OfflineProtocol {
             tracing::warn!(
                 "update_transport_metrics is a no-op retained for source/ABI compat \
                  and discards every field (including the 12 extended optional ones). \
-                 Read live metrics via `get_transport_metrics(...)` or install a \
-                 TelemetrySink to observe `MetricsFrame` push updates. This method \
+                 Read live metrics via `get_transport_metrics(...)`. This method \
                  is scheduled for removal in the v1.0 release.",
             );
         });
@@ -5765,8 +5764,7 @@ impl OfflineProtocol {
     // ========================================================================
 
     /// Gets detailed metrics for a specific transport. Pulls directly from
-    /// the underlying `Transport::metrics()`; the same `TransportMetrics`
-    /// shape also flows through the push path inside `MetricsFrame`.
+    /// the underlying `Transport::metrics()`.
     ///
     /// Reads the transport's **own** reading, so `battery_level` stays `None`
     /// for every transport that reports none — the host feed from

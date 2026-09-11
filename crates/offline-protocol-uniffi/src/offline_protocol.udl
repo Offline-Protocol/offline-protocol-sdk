@@ -291,8 +291,8 @@ dictionary PeerDevice {
 // for source-compatibility with existing iOS/Android/RN consumers of
 // `getTransportMetrics`; the remaining fields (all optional) mirror the
 // richer Rust `TransportMetrics` struct and populate whenever a transport
-// reports them. Same dictionary flows through both the pull path
-// (`get_transport_metrics`) and the push path (`MetricsFrame.transports`).
+// reports them. Returned by `get_transport_metrics`; the bindings have no
+// push path for it.
 dictionary TransportMetrics {
     u32 packets_sent;
     u32 packets_received;
@@ -1398,8 +1398,7 @@ interface OfflineProtocol {
     
     // Legacy no-op retained only for source/ABI compat. Every field of
     // `metrics` (including the 12 extended optional fields) is discarded.
-    // Read live data via `get_transport_metrics(...)` or install a
-    // `TelemetrySink` to observe push `MetricsFrame`s instead. Scheduled
+    // Read live data via `get_transport_metrics(...)` instead. Scheduled
     // for removal in the v1.0 release.
     [Throws=ProtocolError]
     void update_transport_metrics(TransportType transport_type, TransportMetrics metrics);

@@ -224,27 +224,22 @@ impl TelemetryConfig {
         self.routing_diagnostic
     }
 
-    /// Opts the installed sink out of MLS lifecycle event rate limiting.
+    /// Opts MLS lifecycle telemetry out of rate limiting.
     ///
     /// By default (`false`), high-volume MLS lifecycle events
     /// (`mls.decryption_failed`, `mls.session_missing`) pass through a
     /// best-effort fixed-window limiter that caps emission per peer+kind. The
-    /// cap protects naïve sinks from event floods, but it also clips genuine
+    /// cap bounds what an event flood costs, but it also clips genuine
     /// failure spikes to the per-window ceiling — an aggregating backend
     /// cannot tell a real burst of N failures apart from the cap.
     ///
-    /// Setting this to `true` disables that limiter so a **telemetry-grade**
-    /// sink receives every MLS lifecycle event un-sampled, and aggregate
-    /// counts reflect reality. Only enable it for sinks that apply their own
-    /// backpressure (for example, pushing onto a bounded channel and draining
-    /// on a background task per the [`TelemetrySink`] contract) — an
-    /// unbuffered sink that does real work inline can be overwhelmed by an
-    /// un-capped failure spike.
+    /// Setting this to `true` disables that limiter, so every MLS lifecycle
+    /// event reaches the telemetry pipe un-sampled and aggregate counts
+    /// reflect reality, at the cost of everything an un-capped failure spike
+    /// puts through it. Leave it off unless exact failure counts are needed.
     ///
     /// This knob only affects MLS-event rate limiting; it does not change
     /// identifier scrubbing, verbosity, or any other field.
-    ///
-    /// [`TelemetrySink`]: crate::telemetry::TelemetrySink
     pub fn with_mls_sampling_bypass(mut self, mls_sampling_bypass: bool) -> Self {
         self.mls_sampling_bypass = mls_sampling_bypass;
         self
