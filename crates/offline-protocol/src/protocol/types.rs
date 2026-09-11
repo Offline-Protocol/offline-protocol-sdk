@@ -1973,12 +1973,13 @@ impl SharedState {
                 );
             }
         }
-        // Sink fan-out runs after, gated on an installed context. Identifier
-        // fields are scrubbed per the installed config before crossing the
-        // sink boundary so long-lived pseudonyms don't leak to third-party
-        // sinks by default. When scrubbing is disabled
-        // (`TelemetryConfig::with_scrub_ids(false)`), `scrub_event` returns
-        // a borrowed reference and the sink sees the raw event.
+        // Sink fan-out runs after, gated on an installed context. The pipe,
+        // the one production sink, consumes every event by reference in
+        // `dispatch_protocol_event` and reads no identifier from it, so it
+        // never reaches the scrub below. Only a sink that declines that
+        // borrowed offer does: `scrub_event` hashes its identifier fields per
+        // the installed config, or with
+        // `TelemetryConfig::with_scrub_ids(false)` borrows the event as is.
         //
         // Dispatch goes through `dispatch_record` so a panicking sink is
         // caught and logged rather than unwinding through the caller's live

@@ -150,8 +150,10 @@ offline-protocol-leaf          A constrained device as a never-committing MLS me
   the one production sink; `install_telemetry_sink` is crate-private. The
   emit path never allocates for an event the pipe drops (`classify.rs`), and
   the uploader never holds a lock across I/O. `TelemetryConfig::mls_verbosity`
-  gates MLS lifecycle emission at runtime; identifier scrubbing is on by
-  default for the free event API and moot for the pipe.
+  gates MLS lifecycle emission at runtime. `scrub_ids` (default on) hashes the
+  peer and group ids on MLS lifecycle records, which the pipe reads only to
+  pair a handshake's start with its end; it never changes what `on_event`
+  delivers or what is uploaded.
 - **`EventCallback`**: the engine emits events (MessageReceived,
   NeighborDiscovered, TransportSwitched, and so on). Events cross UniFFI as
   opaque JSON.

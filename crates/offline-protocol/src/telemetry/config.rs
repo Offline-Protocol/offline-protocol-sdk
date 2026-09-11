@@ -132,10 +132,13 @@ impl Default for TelemetryConfig {
 impl TelemetryConfig {
     /// Sets the identifier-scrubbing flag.
     ///
-    /// When `true` (the default), long-lived pseudonymous identifiers
-    /// (`peer_id`, `user_id`, `app_id`, `group_id`) are hashed before
-    /// crossing the telemetry sink boundary — third-party sinks (analytics,
-    /// crash reporters) must not receive raw identifiers by default.
+    /// When `true` (the default), the engine hashes the peer and group ids it
+    /// stamps on MLS lifecycle records with the scrub secret (see
+    /// [`Self::with_scrub_secret`]). The telemetry pipe reads the peer id only
+    /// to pair a handshake's start with its end, and no identifier has a wire
+    /// field, so the flag changes what the pipe holds in memory and never what
+    /// is uploaded. It does not apply to `on_event`, which delivers every
+    /// event with its identifiers as they are.
     pub fn with_scrub_ids(mut self, scrub_ids: bool) -> Self {
         self.scrub_ids = scrub_ids;
         self
