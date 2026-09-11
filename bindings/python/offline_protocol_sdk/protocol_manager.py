@@ -527,8 +527,10 @@ class ProtocolManager:
 
         ``accepted_events`` is what the ingest reported accepting, which is
         what an invoice is reconciled against; ``dropped`` counts events
-        lost to the ring buffer, the queue caps, the six-day expiry or a
-        permanent rejection; ``last_error`` is the most recent send failure.
+        lost to the ring buffer, the queue caps, the six-day expiry, a
+        permanent rejection, or everything queued or collected after the
+        ingest reported the application's telemetry toggle off;
+        ``last_error`` is the most recent send failure.
         """
         return self._protocol.telemetry_stats()
 

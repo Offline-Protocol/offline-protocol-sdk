@@ -3081,8 +3081,10 @@ export interface TelemetryConfig {
  * `sentEvents` counts events in batches the ingest answered 2xx;
  * `acceptedEvents` sums the `accepted` count the ingest reported, which is
  * what an invoice is reconciled against. `dropped` counts events lost to
- * the ring buffer, the durable queue's caps, the six-day expiry, or a
- * permanent rejection. `lastFlushAtMs` is when a batch was last accepted.
+ * the ring buffer, the durable queue's caps, the six-day expiry, a
+ * permanent rejection, or everything queued or collected after the ingest
+ * reported the application's telemetry toggle off. `lastFlushAtMs` is when
+ * a batch was last accepted.
  */
 export interface TelemetryStats {
   buffered: number;
