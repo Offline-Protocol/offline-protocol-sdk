@@ -10,7 +10,7 @@
 
 use std::env;
 
-const DEFAULT_ENDPOINT: &str = "https://analytics.offlineprotocol.io/v1/events";
+const DEFAULT_ENDPOINT: &str = "https://analytics.offlineprotocol.com/v1/events";
 
 fn main() {
     println!("cargo:rerun-if-env-changed=OFFLINE_TELEMETRY_ENDPOINT");
