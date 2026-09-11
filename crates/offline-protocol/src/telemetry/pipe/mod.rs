@@ -193,11 +193,12 @@ pub(crate) struct PipeShared {
     /// Set once the ingest has answered `telemetry_disabled`: the
     /// application's toggle is off in the developer portal. From then on the
     /// ring is emptied into nothing at every cycle rather than cut into
-    /// batches, so nothing collected while the toggle is off is persisted or
-    /// sent, and the gap the toggle promises holds at the device. Read on the
-    /// cycle, never on the emit path, which keeps its one atomic load.
-    /// Cleared only by a fresh pipe, which is what the next `enable_telemetry`
-    /// builds.
+    /// batches, and a durable queue adopted afterwards is emptied as it is
+    /// adopted, so nothing the pipe holds or adopts is left on disk for a
+    /// later pipe to send, and the gap the toggle promises holds at the
+    /// device. Read on the cycle and at adoption, never on the emit path,
+    /// which keeps its one atomic load. Cleared only by a fresh pipe, which is
+    /// what the next `enable_telemetry` builds.
     server_disabled: AtomicBool,
 }
 
@@ -331,6 +332,20 @@ impl PipeShared {
             Attach::Busy(backend) => Some((backend, true)),
             Attach::Failed(backend) => Some((backend, false)),
         };
+        if refused.is_none() && self.server_disabled.load(Ordering::Relaxed) {
+            // The toggle is off, and adoption is the one way a batch can still
+            // enter the store: the cycle no longer cuts any, but adopting
+            // loads whatever the queue on that storage already holds, an
+            // earlier launch's batches included. The halted uploader returns
+            // before it reads the queue, so a batch kept here would sit on
+            // disk until the next `enable_telemetry` resent it, which is the
+            // backfill the toggle promises not to make.
+            let mut dropped = 0u64;
+            while let Some(batch) = store.pop_front() {
+                dropped += u64::from(batch.event_count);
+            }
+            self.uploader_dropped.fetch_add(dropped, Ordering::Relaxed);
+        }
         store.flush_index();
         self.durable.store(store.is_durable(), Ordering::Relaxed);
         self.store_dropped

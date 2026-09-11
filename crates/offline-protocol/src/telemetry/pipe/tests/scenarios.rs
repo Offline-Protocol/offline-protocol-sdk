@@ -632,3 +632,67 @@ fn a_403_telemetry_disabled_drops_the_queue_and_discards_what_follows() {
         bodies[1]
     );
 }
+
+/// A queue adopted after the refusal is emptied as it is adopted. The engine
+/// starts every pipe in memory and hands the protocol-state store over once
+/// `initialize_mls` has it, so a flush can reach the ingest first. The halted
+/// uploader never reads the queue again, so without the sweep at adoption the
+/// batches an earlier launch left on disk would stay there until the next
+/// `enable_telemetry` resent them.
+#[test]
+fn a_queue_adopted_after_a_telemetry_disabled_refusal_is_dropped_too() {
+    let clock = FakeClock::at(1_000);
+    let storage = Arc::new(MemoryStorage::default());
+    let client = CapturingClient::accepting();
+
+    // An earlier launch, offline throughout, leaves one batch on disk.
+    client.status.store(0, Ordering::SeqCst);
+    let earlier = inline_pipe(&test_config(), &clock, client.clone(), sealed(&storage));
+    emit_failed(&earlier, 1);
+    earlier.flush();
+    earlier.stop(FINAL_FLUSH_BUDGET);
+    assert!(client.bodies.lock().unwrap().is_empty());
+
+    // This launch starts in memory, as `enable_telemetry` does, and reaches
+    // the ingest before storage attaches. The toggle is off.
+    client.status.store(403, Ordering::SeqCst);
+    *client.error_code.lock().unwrap() = Some("telemetry_disabled".into());
+    let pipe = inline_pipe(&test_config(), &clock, client.clone(), Backend::Memory);
+    emit_failed(&pipe, 2);
+    pipe.flush();
+    assert_eq!(client.bodies.lock().unwrap().len(), 1, "one attempt");
+    assert_eq!(pipe.stats().dropped, 1);
+
+    // `initialize_mls` attaches the store, and the pipe adopts the queue the
+    // earlier launch left there.
+    let Backend::Sealed {
+        storage: backing,
+        cipher,
+    } = sealed(&storage)
+    else {
+        unreachable!("sealed() builds a sealed backend");
+    };
+    pipe.attach_storage(backing, cipher);
+    // Without this, an adoption that never happened would leave the store
+    // empty too, and the assertions below would hold with nothing proven.
+    assert!(pipe.is_durable(), "the queue on disk was adopted");
+    let queued = crate::telemetry::pipe::lock(&pipe.shared().store).len();
+    assert_eq!(queued, 0, "and emptied as it was adopted");
+    assert_eq!(
+        pipe.stats().dropped,
+        2,
+        "the adopted batch counts as dropped"
+    );
+    pipe.stop(FINAL_FLUSH_BUDGET);
+
+    // The toggle comes back on: the next launch has nothing to resend.
+    client.status.store(202, Ordering::SeqCst);
+    *client.error_code.lock().unwrap() = None;
+    let again = inline_pipe(&test_config(), &clock, client.clone(), sealed(&storage));
+    assert!(
+        again.is_durable(),
+        "the fresh pipe adopted the durable queue"
+    );
+    again.flush();
+    assert_eq!(client.bodies.lock().unwrap().len(), 1, "no backfill");
+}
