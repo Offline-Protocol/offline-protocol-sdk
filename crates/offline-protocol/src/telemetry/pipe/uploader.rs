@@ -51,7 +51,7 @@ pub(crate) const HEADER_IDEMPOTENCY: &str = "Idempotency-Key";
 
 /// One HTTP request, as the client sees it.
 pub(crate) struct Request<'a> {
-    pub(crate) url: &'static str,
+    pub(crate) url: &'a str,
     pub(crate) headers: Vec<(&'static str, &'a str)>,
     pub(crate) body: &'a str,
 }
@@ -697,7 +697,7 @@ pub(crate) mod tests {
     fn the_ureq_client_posts_headers_and_body_and_reads_status_and_retry_after() {
         let server = tiny_http::Server::http("127.0.0.1:0").expect("local server");
         let addr = server.server_addr().to_ip().expect("tcp listener");
-        let url: &'static str = Box::leak(format!("http://{addr}/v1/events").into_boxed_str());
+        let url = format!("http://{addr}/v1/events");
         let served = std::thread::spawn(move || {
             let mut seen = Vec::new();
             for n in 0..3 {
@@ -732,7 +732,7 @@ pub(crate) mod tests {
         let mut client = UreqClient::new();
         let post = |client: &mut UreqClient| {
             client.post(&Request {
-                url,
+                url: &url,
                 headers: vec![
                     ("Authorization", "Bearer mp_key"),
                     (HEADER_APP_ID, "app_1"),
@@ -777,7 +777,7 @@ pub(crate) mod tests {
     fn the_ureq_client_gives_up_on_a_server_that_never_answers() {
         let server = tiny_http::Server::http("127.0.0.1:0").expect("local server");
         let addr = server.server_addr().to_ip().expect("tcp listener");
-        let url: &'static str = Box::leak(format!("http://{addr}/v1/events").into_boxed_str());
+        let url = format!("http://{addr}/v1/events");
         let hold = std::thread::spawn(move || {
             let request = server.recv().expect("request");
             std::thread::sleep(Duration::from_millis(1_500));
@@ -787,7 +787,7 @@ pub(crate) mod tests {
             UreqClient::with_timeouts(Duration::from_millis(400), Duration::from_millis(400));
         let started = Instant::now();
         let result = client.post(&Request {
-            url,
+            url: &url,
             headers: Vec::new(),
             body: "{}",
         });
@@ -806,10 +806,10 @@ pub(crate) mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         drop(listener);
-        let url: &'static str = Box::leak(format!("http://{addr}/v1/events").into_boxed_str());
+        let url = format!("http://{addr}/v1/events");
         let mut client = UreqClient::with_timeouts(Duration::from_secs(2), Duration::from_secs(2));
         let result = client.post(&Request {
-            url,
+            url: &url,
             headers: Vec::new(),
             body: "{}",
         });
@@ -841,7 +841,7 @@ pub(crate) mod tests {
     fn the_ureq_client_returns_a_redirect_rather_than_following_it() {
         let server = tiny_http::Server::http("127.0.0.1:0").expect("local server");
         let addr = server.server_addr().to_ip().expect("tcp listener");
-        let url: &'static str = Box::leak(format!("http://{addr}/v1/events").into_boxed_str());
+        let url = format!("http://{addr}/v1/events");
         let location = format!("http://{addr}/moved");
         let served = std::thread::spawn(move || {
             let mut paths = Vec::new();
@@ -870,7 +870,7 @@ pub(crate) mod tests {
         for expected in [301, 308] {
             let response = client
                 .post(&Request {
-                    url,
+                    url: &url,
                     headers: vec![("Content-Type", "application/json")],
                     body: r#"{"events":[]}"#,
                 })
