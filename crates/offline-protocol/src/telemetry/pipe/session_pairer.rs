@@ -87,7 +87,13 @@ fn escalation_bucket(code: RoutingReasonCode) -> Option<usize> {
         RoutingReasonCode::Congestion => Some(3),
         RoutingReasonCode::LowTtl => Some(4),
         RoutingReasonCode::CurrentUnavailable => Some(5),
-        _ => None,
+        // Named rather than caught by a wildcard (ADR 0013): a trigger added
+        // to the enum must fail to compile here, not vanish from the counts.
+        RoutingReasonCode::InitialSelection
+        | RoutingReasonCode::PrimarySelected
+        | RoutingReasonCode::PrimarySuccess
+        | RoutingReasonCode::FallbackSuccess
+        | RoutingReasonCode::EscalationApplied => None,
     }
 }
 
