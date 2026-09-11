@@ -6,7 +6,9 @@
 //! polls the join handle until the deadline, after which the thread is
 //! detached to finish on the HTTP client's own timeout. A detached thread
 //! holds only the pipe's shared state, never the engine, so it can outlive
-//! `disable_telemetry` without keeping anything else alive.
+//! `disable_telemetry` without keeping anything else alive. It does keep the
+//! pipe's durable queue until it exits, and a pipe started over the same
+//! storage in the meantime waits for it; `store.rs` gives the reason.
 
 use std::sync::{Condvar, Mutex};
 use std::thread::JoinHandle;

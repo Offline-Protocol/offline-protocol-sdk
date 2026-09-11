@@ -28,7 +28,10 @@
 //!
 //! Nothing here holds a reference to the engine, so a stopped pipe whose
 //! final request is still in flight can be dropped without keeping the
-//! engine alive.
+//! engine alive. Such a pipe does keep its durable queue until its worker
+//! exits, and a pipe started meanwhile over the same storage holds its
+//! batches in memory until then: one writer per queue, for the reason
+//! `store.rs` gives.
 //!
 //! # What leaves the device
 //!
@@ -80,7 +83,7 @@ use crate::protocol_state_storage::ProtocolStateStorage;
 use crate::telemetry::config::TelemetryConfig;
 use crate::telemetry::pipe::pipeline::{LifecycleAction, Pipeline};
 use crate::telemetry::pipe::scheduler::{wake, Scheduler, WakeSignal};
-use crate::telemetry::pipe::store::{Backend, BatchStore, PendingBatch};
+use crate::telemetry::pipe::store::{Attach, Backend, BatchStore, PendingBatch};
 use crate::telemetry::pipe::uploader::{
     battery_defers, user_agent, HttpClient, Uploader, UreqClient, MAX_BATCHES_PER_WAKE, SDK_VERSION,
 };
@@ -95,6 +98,11 @@ pub const PIPE_LOG_TARGET: &str = "offline_protocol::telemetry::pipe";
 
 /// How long a final flush (disable, end of session, drop) may block.
 pub const FINAL_FLUSH_BUDGET: Duration = Duration::from_secs(3);
+
+/// How soon a worker waiting for another pipe's queue asks for it again. The
+/// other pipe lets go when its worker exits, after the drain it was in and
+/// its final flush.
+const ADOPTION_RETRY: Duration = Duration::from_millis(500);
 
 /// Rough per-batch envelope overhead, for cutting batches on size.
 const ENVELOPE_OVERHEAD_BYTES: usize = 256;
@@ -157,6 +165,9 @@ pub(crate) struct PipeShared {
     /// A backend handed over by the engine, adopted by the worker so the
     /// engine never waits behind an in-flight request.
     pending_attach: Mutex<Option<Backend>>,
+    /// Set while that backend waits for another pipe in this process to let
+    /// go of the queue there; the worker asks again on a short timer.
+    adoption_blocked: AtomicBool,
     device_id: Mutex<Option<String>>,
     include_device_id: bool,
     /// Mirrors `BatchStore::is_durable`, so a caller can ask without taking
@@ -215,14 +226,7 @@ impl PipeShared {
     /// backoff is in force, so the worker can wake for it.
     fn cycle(&self, reasons: u8, deadline: Option<Instant>) -> Option<i64> {
         let now = (self.clock)();
-        if let Some(backend) = lock(&self.pending_attach).take() {
-            let mut store = lock(&self.store);
-            store.attach(backend);
-            store.flush_index();
-            self.durable.store(store.is_durable(), Ordering::Relaxed);
-            self.store_dropped
-                .store(store.dropped_events(), Ordering::Relaxed);
-        }
+        self.adopt_pending_backend();
 
         let drained = lock(&self.pipeline).drain();
         if !drained.is_empty() {
@@ -244,6 +248,7 @@ impl PipeShared {
                 store.push(batch);
             }
             store.flush_index();
+            self.durable.store(store.is_durable(), Ordering::Relaxed);
             self.store_dropped
                 .store(store.dropped_events(), Ordering::Relaxed);
         }
@@ -262,6 +267,7 @@ impl PipeShared {
         let mut store = lock(&self.store);
         let mut uploader = lock(&self.uploader);
         let report = uploader.drain(&mut store, now, MAX_BATCHES_PER_WAKE, deadline);
+        self.durable.store(store.is_durable(), Ordering::Relaxed);
         self.store_dropped
             .store(store.dropped_events(), Ordering::Relaxed);
         drop(store);
@@ -282,14 +288,77 @@ impl PipeShared {
         self.set_last_error(uploader.last_error().map(str::to_string));
         uploader.next_retry_at_ms()
     }
+
+    /// Offers the store the backend the engine handed over, if any. One that
+    /// is refused is kept for the next attempt unless a newer one arrived in
+    /// the meantime.
+    fn adopt_pending_backend(&self) {
+        // Taken and released before the store mutex, never held with it: the
+        // engine's `attach_storage` takes this one, and the store mutex is
+        // held across a request.
+        let Some(backend) = lock(&self.pending_attach).take() else {
+            return;
+        };
+        let mut store = lock(&self.store);
+        let refused = match store.attach(backend) {
+            Attach::Adopted => None,
+            Attach::Busy(backend) => Some((backend, true)),
+            Attach::Failed(backend) => Some((backend, false)),
+        };
+        store.flush_index();
+        self.durable.store(store.is_durable(), Ordering::Relaxed);
+        self.store_dropped
+            .store(store.dropped_events(), Ordering::Relaxed);
+        drop(store);
+        self.adoption_blocked.store(
+            refused.as_ref().is_some_and(|(_, busy)| *busy),
+            Ordering::Relaxed,
+        );
+        if let Some((backend, _)) = refused {
+            lock(&self.pending_attach).get_or_insert(backend);
+        }
+    }
+
+    /// Lets go of the durable queue so another pipe over the same storage can
+    /// adopt it. Called once no further cycle will run.
+    fn release_queue(&self) {
+        lock(&self.store).release();
+        self.durable.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Releases the pipe's durable queue when dropped. See [`run_worker`].
+struct ReleaseQueue<'a>(&'a PipeShared);
+
+impl Drop for ReleaseQueue<'_> {
+    fn drop(&mut self) {
+        self.0.release_queue();
+    }
 }
 
 /// The worker loop: wait for a reason or the interval, run one cycle,
-/// publish the flush generation, stop after the final flush.
+/// publish the flush generation, stop after the final flush, and let go of
+/// the durable queue on the way out.
 fn run_worker(shared: Arc<PipeShared>) {
+    // Declared first so it drops last, after the final flush, and on every
+    // way out of this function including an unwinding panic. A queue left
+    // claimed would keep every later pipe over the same storage in memory for
+    // the rest of the process.
+    let _release = ReleaseQueue(&shared);
     let mut next_interval = Instant::now() + shared.flush_interval;
     loop {
-        let (reasons, generation) = shared.signal.wait(next_interval);
+        let wake_at = if shared.adoption_blocked.load(Ordering::Relaxed) {
+            next_interval.min(Instant::now() + ADOPTION_RETRY)
+        } else {
+            next_interval
+        };
+        let (reasons, generation) = shared.signal.wait(wake_at);
+        if reasons == wake::INTERVAL && Instant::now() < next_interval {
+            // Only the adoption retry came due. Nothing was asked for and the
+            // interval has not elapsed, so no batch is cut and no socket opens.
+            shared.adopt_pending_backend();
+            continue;
+        }
         let stopping = reasons & wake::STOP != 0;
         let deadline = stopping.then(|| Instant::now() + FINAL_FLUSH_BUDGET);
         let retry_at = shared.cycle(reasons, deadline);
@@ -499,10 +568,15 @@ impl TelemetryPipe {
             user_agent(parts.host.os.user_agent_token(), parts.host.os_major),
             parts.jitter,
         );
-        let store = BatchStore::new(
-            parts.backend,
+        let mut store = BatchStore::new(
+            Backend::Memory,
             config.app_id().unwrap_or_default().to_string(),
         );
+        let (pending_attach, adoption_blocked) = match store.attach(parts.backend) {
+            Attach::Adopted => (None, false),
+            Attach::Busy(backend) => (Some(backend), true),
+            Attach::Failed(backend) => (Some(backend), false),
+        };
         let durable = store.is_durable();
         let shared = Arc::new(PipeShared {
             enabled: Arc::new(AtomicBool::new(true)),
@@ -511,7 +585,8 @@ impl TelemetryPipe {
             pipeline: Mutex::new(pipeline),
             store: Mutex::new(store),
             uploader: Mutex::new(uploader),
-            pending_attach: Mutex::new(None),
+            pending_attach: Mutex::new(pending_attach),
+            adoption_blocked: AtomicBool::new(adoption_blocked),
             device_id: Mutex::new(parts.device_id),
             include_device_id: config.include_device_id(),
             durable: AtomicBool::new(durable),
@@ -697,7 +772,8 @@ impl TelemetryPipe {
 
     /// Hands the pipe a durable backend. Adopted by the uploader on its next
     /// cycle, which persists whatever is pending, so the caller never waits
-    /// behind a request.
+    /// behind a request. While another pipe in this process still owns the
+    /// queue on that storage, adoption waits for it to let go.
     pub(crate) fn attach_storage(
         &self,
         storage: Arc<dyn ProtocolStateStorage>,
@@ -729,6 +805,7 @@ impl TelemetryPipe {
             Some(scheduler) => scheduler.join_until(Instant::now() + budget),
             None => {
                 self.shared.cycle(wake::STOP, Some(Instant::now() + budget));
+                self.shared.release_queue();
                 true
             }
         }

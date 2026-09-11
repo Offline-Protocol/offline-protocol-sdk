@@ -242,7 +242,8 @@ kept for a minute, so the 30 s cadence reuses its TLS session.
 
 Batches are persisted on the protocol-state storage seam, each as its own
 sealed record under the key type `telemetry_batch`, with an index record
-under `telemetry_batch_index`. Sealing uses the same per-install key as the
+under `telemetry_batch_index` and an owner record under
+`telemetry_batch_owner`. Sealing uses the same per-install key as the
 outbox, so no plaintext batch ever sits in the app container. A batch is
 written before the index names it, so a crash between the two leaves an
 orphan the next launch sweeps rather than a phantom entry.
@@ -255,6 +256,17 @@ enabling telemetry are durable from the first batch. Batches persisted by
 this release are ignored by an earlier SDK, so a downgrade costs at most
 4 MiB of stale records.
 
+One pipe writes a queue at a time. Two writers would lose batches rather
+than duplicate them: each rewrites the index from its own memory, and the
+next launch sweeps any batch the index does not name. A pipe that
+`enableTelemetry` replaced, or that is still finishing after
+`disableTelemetry` or a teardown, keeps the queue until its uploader thread
+exits, which is after the drain it was in and its final flush. A pipe started
+over the same storage in the meantime holds its batches in memory, then
+adopts the queue behind what the previous pipe left once that pipe lets go.
+If it is itself stopped first, it sends what it can in its own final flush
+and nothing it held is persisted.
+
 A queued batch is deleted rather than sent in three cases, each reported as a
 warning on the pipe's log target rather than in `dropped`, because a record
 nothing could open is a record whose event count is exactly what was lost:
@@ -265,6 +277,11 @@ nothing could open is a record whose event count is exactly what was lost:
 - it names a different `appId` than the one telemetry is now enabled with.
   The app id travels in a request header, not in the batch body, so uploading
   such a batch would count another application's events against your key.
+
+An index entry whose record is already gone is not one of these and is not
+reported. The index is written once per drain, so a crash mid-drain can
+leave it naming batches that were accepted, expired or trimmed before the
+crash, each counted when it went.
 
 The queue outlives `disableTelemetry()`, so a re-enable resends what an
 offline stretch collected. It is cleared by uninstalling the app, by
