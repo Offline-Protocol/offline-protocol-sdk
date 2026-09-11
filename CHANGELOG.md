@@ -179,6 +179,12 @@ the client's answers were wrong on a device rather than merely different:
   a pipe that finds its queue owned by another pipe, or cleared, stops writing
   to it. An index entry whose record was already deleted before a crash is no
   longer logged as a discarded batch.
+- **`enableTelemetry` and `disableTelemetry` no longer interleave.** A disable
+  that landed inside an enable stopped the new pipe after the enable had
+  installed it, and the flush, stats and lifecycle calls then ran against
+  that stopped pipe. On Android the lifecycle watcher also reads the protocol
+  handle as a volatile field, so a background edge cannot be skipped on a
+  stale null.
 - **`telemetryStats().lastError` clears when a batch is accepted**, so it
   reports the current state rather than the high-water mark of a recovered
   outage.

@@ -2378,6 +2378,17 @@ pub struct OfflineProtocol {
     /// The running telemetry pipe, mirrored from the core so the flush,
     /// stats and lifecycle calls never take the engine lock.
     telemetry_pipe: RwLock<Option<Arc<CoreTelemetryPipe>>>,
+    /// Serializes `enable_telemetry` and `disable_telemetry`.
+    ///
+    /// Each spans two engine-lock sections and a publish of the handle above,
+    /// and nothing else keeps the two calls apart. A disable that landed
+    /// between an enable's install and its publish detached and stopped the
+    /// new pipe, and the enable then published it: `telemetryStats` reported a
+    /// stopped pipe's counters as live and `notifyAppState` pushed into a
+    /// pipeline no worker drained. Held across a final flush, so only another
+    /// enable or disable ever waits on it; the calls that read the handle
+    /// never take it.
+    telemetry_lifecycle: Mutex<()>,
     ble_state: Mutex<BleState>,
     internet_state: Mutex<InternetState>,
     wifi_direct_state: Mutex<WifiDirectState>,
@@ -2530,6 +2541,7 @@ impl OfflineProtocol {
             event_callback,
             event_queue,
             telemetry_pipe: RwLock::new(None),
+            telemetry_lifecycle: Mutex::new(()),
             ble_state: Mutex::new(BleState {
                 fragments: VecDeque::new(),
                 peer_count: 0,
@@ -3031,6 +3043,7 @@ impl OfflineProtocol {
                 field.to_string(),
             ))
         })?;
+        let _lifecycle = recover_mutex(&self.telemetry_lifecycle, "telemetry_lifecycle");
         host_log::install_host_logger();
         // A replaced pipe is stopped outside the engine lock, like disable.
         let previous = {
@@ -3063,6 +3076,7 @@ impl OfflineProtocol {
     /// the engine lock and stopped outside it, because the final flush may
     /// block for up to three seconds and the engine must not.
     pub fn disable_telemetry(&self) -> Result<(), ProtocolError> {
+        let _lifecycle = recover_mutex(&self.telemetry_lifecycle, "telemetry_lifecycle");
         let pipe = {
             let mut protocol = self.lock_inner()?;
             protocol.detach_telemetry_pipe()
@@ -9747,6 +9761,70 @@ mod tests {
         protocol.notify_app_state(AppState::Background);
         assert!(protocol.flush_telemetry_blocking(5_000));
         assert!(!client.uploads().is_empty());
+        protocol.disable_telemetry().expect("disable");
+        offline_protocol::telemetry::pipe::testing::stop_capturing_uploads();
+    }
+
+    /// `enable_telemetry` and `disable_telemetry` wait for each other.
+    ///
+    /// Each spans two engine-lock sections and a publish of the mirrored
+    /// handle. A disable that landed between an enable's install and its
+    /// publish stopped the new pipe, and the enable then published it, so
+    /// `telemetryStats` and `notifyAppState` ran against a stopped pipe. That
+    /// window is microseconds wide and no amount of hammering reliably finds
+    /// it, so this pins the exclusion itself: while one call is in progress,
+    /// the other does not run.
+    #[test]
+    fn enable_and_disable_telemetry_wait_for_each_other() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (_client, _guard) = capture_uploads();
+        let protocol = Arc::new(OfflineProtocol::new(create_ble_only_config()).unwrap());
+        // Stands in for an enable or a disable already in progress.
+        let in_progress = recover_mutex(&protocol.telemetry_lifecycle, "telemetry_lifecycle");
+        let finished = Arc::new(AtomicUsize::new(0));
+        let calls: Vec<_> = [true, false]
+            .into_iter()
+            .map(|enable| {
+                let protocol = protocol.clone();
+                let finished = finished.clone();
+                std::thread::spawn(move || {
+                    if enable {
+                        protocol
+                            .enable_telemetry(telemetry_config(), AppState::Active)
+                            .expect("enables");
+                    } else {
+                        protocol.disable_telemetry().expect("disables");
+                    }
+                    finished.fetch_add(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            finished.load(Ordering::SeqCst),
+            0,
+            "a telemetry lifecycle call ran while another was in progress"
+        );
+        drop(in_progress);
+        for call in calls {
+            call.join().expect("call thread");
+        }
+
+        // Whichever ran last, the handle agrees with the engine.
+        let engine = protocol.lock_inner_recovering().telemetry_pipe();
+        match (engine, protocol.telemetry_pipe()) {
+            (Some(engine), Some(mirrored)) => {
+                assert!(Arc::ptr_eq(&engine, &mirrored));
+                assert!(!mirrored.is_stopped());
+            }
+            (None, None) => {}
+            (engine, mirrored) => panic!(
+                "the handle and the engine disagree: engine {}, handle {}",
+                engine.is_some(),
+                mirrored.is_some()
+            ),
+        }
         protocol.disable_telemetry().expect("disable");
         offline_protocol::telemetry::pipe::testing::stop_capturing_uploads();
     }

@@ -37,6 +37,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     private val foregroundReconnectPolicy = ForegroundReconnectPolicy()
 
+    /**
+     * The protocol handle.
+     *
+     * Written on the native-modules thread (`create`, [destroy], [invalidate])
+     * and read on the main thread by the process lifecycle watcher through
+     * [notifyAppStateQuietly]. Volatile for the reason [sawActivityStart] is:
+     * without it the main thread can go on reading the null it saw before
+     * `create`, skip the background notification, and leave open the
+     * telemetry session that notification would have closed.
+     */
+    @Volatile
     private var protocol: OfflineProtocol? = null
     private var meshServices: MeshServices? = null
     private var dataStore: DataStore? = null
