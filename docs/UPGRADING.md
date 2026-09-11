@@ -37,7 +37,11 @@ constructor left
 binding surface goes with it, though a TypeScript application that exhaustively
 `switch`es on `PresenceSource` or `SecurityWarningCode` gets a compile error
 from that release, because both unions widen, by one member and two
-respectively.
+respectively. `v0.26.0` is breaking on **every** binding again, in one area:
+the telemetry sink API is gone, and the SDK uploads its own telemetry once
+`enableTelemetry` is given a portal key.
+[§20](#20-the-sdk-uploads-its-own-telemetry-v0260) is the migration table,
+and it is short: the replacement is one call with two strings.
 
 Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
@@ -2005,6 +2009,72 @@ wanted was never there, and the values you want live in your app's
 
 ---
 
+## 20. The SDK uploads its own telemetry *(v0.26.0)*
+
+**Every binding.** The sink surface, where the SDK handed each telemetry
+record to application code as JSON and a separate package (`mesh-analytics`,
+never published) classified and uploaded it, is deleted. The SDK now does the
+whole thing itself: `enableTelemetry` with the key and app id the developer
+portal issued, and nothing else. [docs/telemetry.md](telemetry.md) is the
+data inventory and the controls; [docs/privacy.md](privacy.md) the store
+disclosures.
+
+| 0.25 | 0.26 |
+|---|---|
+| `installTelemetrySink(config, listener)`, `onTelemetry(listener)`, `pollTelemetry()`, `uninstallTelemetrySink()` | `enableTelemetry({ apiKey, appId, appVersion })`, `disableTelemetry()` |
+| `MeshAnalytics.listener(config)` handed to `installTelemetrySink(MeshAnalytics.recommendedTelemetryConfig(), listener)` | `enableTelemetry({ apiKey: sameKey, appId: sameAppId, appVersion })` |
+| `MeshAnalytics.flushNow()` | `flushTelemetry()` |
+| `MeshAnalytics.stats()` (`buffered`, `sent`, `dropped`, `sessionId`, `lastError`) | `telemetryStats()` (`buffered`, `sentEvents`, `acceptedEvents`, `dropped`, `sessionId`, `lastError`, `lastFlushAtMs`), `null` until enabled |
+| `MeshAnalytics.endSession()` | `endTelemetrySession()` |
+| `enabled: () => boolean` in the analytics config | `setTelemetryEnabled(false)` |
+| `deviceId: () => protocol.telemetryInstallId()` in the analytics config | `includeDeviceId: true` in `TelemetryConfig` (the same disclosure decision, see [privacy](privacy.md#if-you-set-includedeviceid)) |
+| `endpoint` in the analytics config | Gone: the endpoint is fixed at build time |
+| `AppState` subscription in the analytics package | Gone: the native module owns the lifecycle |
+| `TelemetryConfig.enablePollQueue` | Gone |
+| `TelemetryRecord`, `TelemetryListener`, `MetricsFrame`, `TransportStateTelemetryEvent`, `RoutingDecision`, `DeviceCapabilitySnapshot`, `TransportMetricsEntry`, `RetryQueueStatsFrame`, `DeduplicatorStatsFrame`, `RoutingScoreEntry`, `RoutingPhase`, `RoutingReasonCode`, `TransportStatus`, `RelayRole` (TypeScript) | Removed; `TelemetryStats` added, `TelemetryConfig` reshaped |
+| Python `install_telemetry_sink(sink, config)`, `uninstall_telemetry_sink()`, `poll_telemetry_frame()` | `enable_telemetry(api_key, app_id, app_version=…)`, `disable_telemetry()`, `flush_telemetry()`, `telemetry_stats()`, `end_telemetry_session()`, `notify_app_state(state)`, `set_telemetry_enabled(bool)` |
+| Rust `install_telemetry_sink(sink, config)` (public) | Crate-private; `enable_telemetry(config, TelemetryHost)` and the companion calls. `TelemetrySink` stays a public trait but can no longer be installed from outside the crate |
+| Rust `MlsLifecycleEvent` | A `SessionEstablishing` variant added, naming the peer a handshake is starting with. It is what the session summary's handshake latency measures from, and it never reaches the wire. A downstream `match` on this enum with no wildcard arm stops compiling |
+| Rust `Event::message_failed(id, String, retries)` and `Event::relay_demoted(String)` | `&'static str` in place of `String`. The pipe forwards these reasons to the ingest unscrubbed, so a `String` made `format!("{err}")` representable at a call site and one such interpolation would ship a peer address. Pass a literal, or a classified token; `WelcomeReasonCode::welcome_failure_reason()` is the static form of the phrase the SDK itself was interpolating |
+| UDL `callback interface TelemetrySink` and the twelve dictionaries and enums that typed it | Removed; `TelemetryOs`, `AppState`, `TelemetryStats` and the reshaped `TelemetryConfig` added; `TelemetryConfigInvalid` appended to `ProtocolError` at position 24 |
+
+**What an app that never installed a sink has to do:** nothing. The emit path
+costs what it cost before.
+
+**What an app that read the sink for its own dashboards has to do:** the
+free event API is unchanged. `onEvent` (`on_event`) still delivers every
+protocol event, `getTransportMetrics` and `getBleDiagnostics` still answer,
+and both are per-event and unaggregated by design. They do not replace every
+record the sink delivered. The MLS lifecycle records, the `MetricsFrame`
+snapshots every few seconds, the per-transport state transitions, the
+structured routing decisions and the device capability snapshots have no
+replacement on the bridge, even where an event such as `transport_switched`
+or `dors_transport_selected` covers part of the same ground; the demo's
+Diagnostics screen shows what the free API can drive instead.
+
+**What the pipe does differently from the analytics package**, each a named
+test: the backoff caps at 15 min rather than 5; a 413 is dropped rather than
+split; a 401 or 403 halts sending until the next `enableTelemetry` rather than
+dropping the batch and continuing, except a 403 `telemetry_disabled`, which
+drops the queue because the portal toggle is off; `Retry-After` is honoured; `Idempotency-Key`
+and `User-Agent` headers are sent; requests time out at 15 s (10 s to
+connect); flushes are deferred below 15% battery unless charging; and
+`reason` goes up as the engine's raw token rather than a classification made
+on the device. Everything else, from the session cut to the summary deltas,
+matches the package byte for byte in the golden test.
+
+**Durability.** On iOS and Android the batch queue becomes durable when
+`initializeMls` runs, which attaches the protocol-state store; a pipe enabled
+before that holds batches in memory until then. This is the same in-memory
+degradation the analytics package had without async-storage.
+
+**Store disclosures.** The pod now ships a privacy manifest. If your app
+declared the analytics package's manifest entries, they are the same three
+data types; if you set `includeDeviceId`, add the device-identifier
+declaration on both stores, as before.
+
+---
+
 ## Appendix A: limits reference
 
 | Limit | Value | Where enforced |
@@ -2044,9 +2114,11 @@ source files and asserts their literals).
 | Document bytes will not decode | `Error::DataCorrupted` | `ProtocolError.DataCorrupted` |
 | Bad space / document / collection name | `Error::InvalidArgument` | `ProtocolError.InvalidArgument` |
 | Single value over the 1 MiB value limit | `Error::InvalidArgument` | `ProtocolError.InvalidArgument` |
+| Telemetry config field refused (`api_key`, `app_id`, `app_version`, `max_batch_bytes`, `max_buffered_records`, `flush_interval_ms`) | `Error::TelemetryConfigInvalid` | `ProtocolError.TelemetryConfigInvalid` |
 
-Four `ProtocolError` variants were **appended** this release for the data layer
-(`DataDisabled`, `DataStorageUnavailable`, `DocTooLarge`, `DataCorrupted`). The
+Four `ProtocolError` variants were **appended** in v0.23.0 for the data layer
+(`DataDisabled`, `DataStorageUnavailable`, `DocTooLarge`, `DataCorrupted`), and
+one in v0.26.0 for telemetry (`TelemetryConfigInvalid`, position 24). The
 taxonomy is append-only, so every code that existed before keeps the
 discriminant it shipped with and no existing mapping changes.
 

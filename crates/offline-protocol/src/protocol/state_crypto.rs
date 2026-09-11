@@ -53,6 +53,7 @@ pub(crate) const SEALED_RECORD_OVERHEAD: usize = RECORD_MAGIC.len() + NONCE_BYTE
 const AAD_SEPARATOR: u8 = 0x1f;
 
 /// Seals and opens protocol-state record values with the per-install key.
+#[derive(Clone)]
 pub(crate) struct StateRecordCipher {
     cipher: ChaCha20Poly1305,
 }

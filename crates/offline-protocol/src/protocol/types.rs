@@ -1,7 +1,9 @@
 //! Type definitions, constants, and shared state for the protocol engine.
 
 use crate::events::{Event, EventCallback, PresenceStatus};
-use crate::telemetry::{dispatch_record, scrub_event, TelemetryContext, TelemetryRecord};
+use crate::telemetry::{
+    dispatch_protocol_event, dispatch_record, scrub_event, TelemetryContext, TelemetryRecord,
+};
 use crate::Error;
 use chrono::{DateTime, Utc};
 use offline_protocol_core::{
@@ -340,9 +342,10 @@ pub(crate) fn send_failure_token(err: &crate::Error) -> &'static str {
             _ => SEND_FAIL_REASON_TRANSPORT,
         },
         E::NotStarted | E::AlreadyStarted | E::InvalidState(_) => "protocol_state_invalid",
-        E::InvalidConfiguration(_) | E::InvalidArgument(_) | E::PermissionDenied(_) => {
-            "invalid_request"
-        }
+        E::InvalidConfiguration(_)
+        | E::InvalidArgument(_)
+        | E::PermissionDenied(_)
+        | E::TelemetryConfigInvalid(_) => "invalid_request",
         E::Core(_) | E::Serialization(_) => "serialization_failed",
         E::Router(_) | E::Reliability(_) | E::Service(_) => SEND_FAIL_REASON_TRANSPORT,
         E::Mls(_) | E::EncryptFailed(_) => "crypto_failed",
@@ -2081,17 +2084,24 @@ impl SharedState {
                 );
             }
         }
-        // Sink fan-out runs after, gated on an installed context. Identifier
-        // fields are scrubbed per the installed config before crossing the
-        // sink boundary so long-lived pseudonyms don't leak to third-party
-        // sinks by default. When scrubbing is disabled
-        // (`TelemetryConfig::with_scrub_ids(false)`), `scrub_event` returns
-        // a borrowed reference and the sink sees the raw event.
+        // Sink fan-out runs after, gated on an installed context. The pipe,
+        // the one production sink, consumes every event by reference in
+        // `dispatch_protocol_event` and reads no identifier from it, so it
+        // never reaches the scrub below. Only a sink that declines that
+        // borrowed offer does: `scrub_event` hashes its identifier fields per
+        // the installed config, or with
+        // `TelemetryConfig::with_scrub_ids(false)` borrows the event as is.
         //
         // Dispatch goes through `dispatch_record` so a panicking sink is
         // caught and logged rather than unwinding through the caller's live
         // `MutexGuard<SharedState>` — see the helper's docstring.
         if let Some(ctx) = &self.telemetry {
+            // The gate comes first so a disabled pipe stops the clone too,
+            // and the borrowed offer comes next so a sink that collects by
+            // name never pays for an event it drops.
+            if !ctx.enabled() || dispatch_protocol_event(&ctx.sink, &event) {
+                return;
+            }
             let scrubbed = scrub_event::scrub_event(&event, &ctx.scrubber);
             let record = TelemetryRecord::Protocol(Box::new(scrubbed.into_owned()));
             dispatch_record(&ctx.sink, &record);

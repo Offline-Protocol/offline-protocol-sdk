@@ -288,6 +288,11 @@ pub enum Error {
     #[error("Document data is corrupt: {0}")]
     DataCorrupted(String),
 
+    /// A telemetry configuration field failed validation; the payload names
+    /// the field. Raised by `enable_telemetry` before anything is built.
+    #[error("telemetry config invalid: {0}")]
+    TelemetryConfigInvalid(String),
+
     /// Generic error.
     #[error("{0}")]
     Other(String),

@@ -1,0 +1,21 @@
+[package]
+name = "offline-protocol-telemetry-wire"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+# AGPL-3.0-only requires the license text to accompany the program, and a
+# published crate ships on its own, so this crate carries its own byte-identical
+# LICENSE copy like every other publishable crate in the workspace;
+# scripts/check-license-consistency.sh asserts the copies never drift.
+repository.workspace = true
+rust-version.workspace = true
+description = "Wire types for the Offline Protocol telemetry ingest: the batch envelope and its events"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }

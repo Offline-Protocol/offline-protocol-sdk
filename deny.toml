@@ -92,6 +92,11 @@ allow = [
     # the notices file lists it anyway, because listing costs nothing and a
     # missing entry is the expensive direction.
     "BSL-1.0",
+    # CDLA-Permissive-2.0 arrives with `webpki-roots`, the Mozilla CA bundle
+    # the telemetry pipe trusts for its one HTTPS endpoint. It is a permissive
+    # data license (the crate is a list of certificates, not code) whose only
+    # obligation is attribution, which the notices file carries.
+    "CDLA-Permissive-2.0",
 ]
 
 [bans]

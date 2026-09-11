@@ -1,6 +1,10 @@
 package com.offlineprotocol
 
+import android.app.Activity
+import android.app.Application
 import android.net.Uri
+import android.os.Build
+import android.os.Bundle
 import android.util.Log
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
@@ -8,7 +12,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.max
 import kotlin.math.min
-import java.lang.ref.WeakReference
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -34,6 +37,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     private val foregroundReconnectPolicy = ForegroundReconnectPolicy()
 
+    /**
+     * The protocol handle.
+     *
+     * Written on the native-modules thread (`create`, [destroy], [invalidate])
+     * and read on the main thread by the process lifecycle watcher through
+     * [notifyAppStateQuietly]. Volatile for the reason [sawActivityStart] is:
+     * without it the main thread can go on reading the null it saw before
+     * `create`, skip the background notification, and leave open the
+     * telemetry session that notification would have closed.
+     */
+    @Volatile
     private var protocol: OfflineProtocol? = null
     private var meshServices: MeshServices? = null
     private var dataStore: DataStore? = null
@@ -126,6 +140,39 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         },
     )
 
+    /**
+     * The started activities, which is what tells the process apart from an
+     * activity, and the watcher that maintains them. Held by identity rather
+     * than counted; see [installProcessLifecycleWatcher] for why, and for
+     * why the boundary follows these rather than `onHostPause`.
+     *
+     * Written only from the main thread, where every
+     * `ActivityLifecycleCallbacks` method is delivered, but **read from the
+     * native-modules thread**: [enableTelemetry] seeds the pipe's starting
+     * state from these, and [invalidate] tears the watcher down. Neither is
+     * on main, so the set is synchronized and the flag is `@Volatile`;
+     * without that a seed can read a stale set under the Java memory model
+     * and start a session on the wrong side of the boundary. Declared here
+     * because the `init` below assigns them, and a property initializer
+     * running after that `init` would overwrite the watcher with null and
+     * silently unhook the session boundary.
+     */
+    private val startedActivities: MutableSet<Activity> = java.util.Collections.synchronizedSet(
+        java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Activity, Boolean>())
+    )
+
+    /**
+     * Whether the watcher has ever seen an activity start.
+     *
+     * Until it has, an empty [startedActivities] means "nothing observed
+     * yet", not "nothing running": this module is constructed around the host
+     * activity's `onCreate`, so the first `onStart` can land before the
+     * watcher is registered. [seedAppState] uses this to tell the two apart.
+     */
+    @Volatile
+    private var sawActivityStart = false
+    private var processLifecycleWatcher: Application.ActivityLifecycleCallbacks? = null
+
     init {
         // Drive the foreground relay-heal from the host activity's lifecycle so
         // Android matches iOS: both platforms reconnect automatically on
@@ -140,6 +187,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         // `val` from being read before its initializer is a hazard with no
         // upside. Declaration order costs nothing and makes it structural.
         reactContext.addLifecycleEventListener(this)
+        // Telemetry session boundaries follow the process, not the activity.
+        installProcessLifecycleWatcher()
     }
 
     private var currentConfig: ProtocolConfig? = null
@@ -147,7 +196,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     companion object {
         const val NAME = "OfflineProtocolModule"
         const val EVENT_NAME = "OfflineProtocol_Event"
-        const val TELEMETRY_EVENT_NAME = "OfflineProtocol_Telemetry"
 
         /**
          * The two *one-shot* event tags, which double as their
@@ -248,6 +296,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         teardown.step("lifecycle listener") {
             reactApplicationContext.removeLifecycleEventListener(this)
         }
+        teardown.step("process lifecycle watcher") { removeProcessLifecycleWatcher() }
         teardown.step("process scheduler") { stopProcessScheduler() }
 
         // The null-outs sit outside their steps so a transport that throws on
@@ -262,7 +311,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         reticulumManager = null
         teardown.step("Nostr manager") { nostrManager?.stop() }
         nostrManager = null
+        // Same reason as in [destroy]: the handle owns the telemetry pipe's
+        // uploader thread, and invalidate is the last moment this module can
+        // release it deterministically.
+        val protocolHandle = protocol
         protocol = null
+        teardown.step("protocol handle") { protocolHandle?.destroy() }
 
         teardown.step("mesh foreground service") { stopForegroundService() }
         releaseForegroundStopCallback()
@@ -304,6 +358,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     override fun onHostPause() {
         foregroundReconnectPolicy.didEnterBackground(nowMs = android.os.SystemClock.elapsedRealtime())
+        // No telemetry session boundary here. `onHostPause` is
+        // `Activity.onPause`, which fires for a permission dialog or a share
+        // sheet as readily as for the app going away — good enough to arm the
+        // relay heal above, which only measures a stay, and too coarse to end
+        // a session. See [installProcessLifecycleWatcher].
     }
 
     /**
@@ -320,6 +379,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         if (foregroundReconnectPolicy.shouldReconnectOnForeground(nowMs = android.os.SystemClock.elapsedRealtime())) {
             internetManager?.forceReconnect()
         }
+        // No telemetry session boundary here either; its pair lives in
+        // installProcessLifecycleWatcher.
         // The other flush trigger besides [addListener]. An app whose listeners
         // never went away still needs one: a sticky event held because the React
         // instance was briefly down would otherwise wait for a resubscribe that
@@ -330,6 +391,160 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     override fun onHostDestroy() {
         // No-op: teardown is handled by invalidate(); nothing lifecycle-specific
         // to release here.
+    }
+
+    // MARK: - Process lifecycle (telemetry session boundaries)
+
+    /**
+     * Draws the telemetry session boundary on the *process* leaving the
+     * foreground, not on an activity being paused.
+     *
+     * [onHostPause] is `Activity.onPause`, which fires for anything that comes
+     * in front of the host: a runtime permission dialog — including the
+     * Bluetooth one this SDK itself triggers on first launch — the system
+     * share sheet, any translucent activity. A boundary there emits a session
+     * summary and rotates the session id every time a user grants a
+     * permission, so the same user journey would be counted as several
+     * sessions on Android and one on iOS, which uses `didEnterBackground` and
+     * deliberately ignores the transient `Inactive` state. Every activity
+     * being stopped is the signal that actually means "not visible", and is
+     * what `androidx.lifecycle`'s `ProcessLifecycleOwner` is built on;
+     * counting it here keeps that dependency off every consumer of this
+     * package.
+     *
+     * A configuration change (a rotation) stops and restarts the activity
+     * without the app going anywhere, so `isChangingConfigurations` gates the
+     * background edge. The matching `ACTIVE` needs no such gate: the pipe
+     * debounces its own edges, so an `ACTIVE` with no `BACKGROUND` before it
+     * is not an edge and does nothing.
+     *
+     * The started activities are held as an identity set rather than counted.
+     * React Native constructs its native modules after the host activity's
+     * `onStart`, so a counter starts at zero while an activity is already
+     * visible, and the first stop it sees is unmatched. Clamping that at zero
+     * hides it only while there is one activity: open a second in-process
+     * activity (a sign-in hub, an image picker, a payment sheet) and the
+     * sequence is start B, stop A, which takes the count to zero and fires a
+     * background edge with the app fully on screen — then start A on the way
+     * back, rotating the session. One journey becomes two sessions on
+     * Android and one on iOS, which is the asymmetry this whole function
+     * exists to avoid. A set is right whether or not the first activity was
+     * ever tracked: an untracked A stopping while B is tracked leaves the set
+     * non-empty, and the edge waits for B.
+     */
+    private fun installProcessLifecycleWatcher() {
+        val application = reactApplicationContext.applicationContext as? Application
+        if (application == null) {
+            Log.w(
+                NAME,
+                "No Application context: telemetry sessions will not follow the process lifecycle"
+            )
+            return
+        }
+        val watcher = object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityStarted(activity: Activity) {
+                sawActivityStart = true
+                startedActivities.add(activity)
+                notifyAppStateQuietly(AppState.ACTIVE)
+            }
+
+            override fun onActivityStopped(activity: Activity) {
+                startedActivities.remove(activity)
+                if (startedActivities.isEmpty() && !activity.isChangingConfigurations) {
+                    // The pipe emits its summary and wakes the uploader
+                    // thread; nothing here blocks.
+                    notifyAppStateQuietly(AppState.BACKGROUND)
+                }
+            }
+
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+            override fun onActivityResumed(activity: Activity) {}
+            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+
+            override fun onActivityDestroyed(activity: Activity) {
+                // An activity destroyed without a matching stop would sit in
+                // the set forever and hold the background edge off.
+                startedActivities.remove(activity)
+            }
+        }
+        application.registerActivityLifecycleCallbacks(watcher)
+        processLifecycleWatcher = watcher
+    }
+
+    private fun removeProcessLifecycleWatcher() {
+        val watcher = processLifecycleWatcher ?: return
+        processLifecycleWatcher = null
+        // Unregister first, then clear. The other order lets a callback
+        // already in flight on the main thread mutate the set this thread is
+        // clearing, and leaves an entry behind in the set it just emptied.
+        (reactApplicationContext.applicationContext as? Application)
+            ?.unregisterActivityLifecycleCallbacks(watcher)
+        startedActivities.clear()
+    }
+
+    /**
+     * Reports a lifecycle transition to the pipe, absorbing the throw a
+     * concurrently destroyed handle raises.
+     *
+     * This runs on the main thread, from `ActivityLifecycleCallbacks`, while
+     * [destroy] and [invalidate] run on the native-modules thread. UniFFI
+     * throws `IllegalStateException` once a handle's call counter has closed,
+     * and an exception escaping an `ActivityLifecycleCallbacks` method takes
+     * the process down. Logging out while the app is being backgrounded is
+     * exactly that race. Losing the boundary is the correct outcome there:
+     * the pipe it would have reported to is already stopped, and its final
+     * flush ran on the teardown path.
+     *
+     * Every exception, not just that one. The reason for catching is the
+     * consequence of not catching, and taking the process down is the same
+     * consequence whatever the type: UniFFI surfaces a panic in the core as
+     * `InternalException`, which is not an `IllegalStateException`, and a
+     * telemetry lifecycle hint is never worth a crash.
+     */
+    private fun notifyAppStateQuietly(state: AppState) {
+        try {
+            protocol?.notifyAppState(state)
+        } catch (e: Exception) {
+            Log.d(NAME, "Telemetry lifecycle transition skipped: the protocol handle is gone", e)
+        }
+    }
+
+    /**
+     * The application state to seed a new telemetry pipe with.
+     *
+     * This has to be measured the way the watcher measures its edges, not the
+     * way React Native reports its own lifecycle. `lifecycleState` is
+     * `RESUMED` only between `onResume` and `onPause`, so it reads
+     * `BEFORE_RESUME` while a permission dialog or share sheet sits over a
+     * fully visible app. A pipe seeded `BACKGROUND` there has its boundary
+     * armed with nothing to disarm it, because dismissing a dialog fires
+     * `onActivityResumed` and no `onActivityStarted`: the next real
+     * background is then read as a non-edge and reports nothing at all. The
+     * demo app calls `enableTelemetry` immediately after `start()`, which is
+     * exactly when a first-run permission prompt is on screen.
+     *
+     * Three sources, in falling order of authority:
+     *
+     * 1. The watcher's own set, once it has seen a start. This is the same
+     *    signal the edges use, so a seed from it can never disagree with them.
+     * 2. A live current activity. React Native constructs its native modules
+     *    around the host activity's `onCreate`, so the watcher can miss that
+     *    activity's `onStart` and never see one; `currentActivity` survives a
+     *    pause and is cleared only on host destroy, so a non-null value still
+     *    means the process has a foreground activity.
+     * 3. Otherwise `BACKGROUND`: no activity has ever resumed, which is what
+     *    a headless mesh wake or a service-only launch looks like.
+     *
+     * The order also puts the cheaper error first. Seeding `ACTIVE` while
+     * actually backgrounded costs one missed rotation and no data. Seeding
+     * `BACKGROUND` while actually foregrounded arms the boundary and loses
+     * the next real session summary, which is the bug this replaced.
+     */
+    private fun seedAppState(): AppState = when {
+        sawActivityStart -> if (startedActivities.isEmpty()) AppState.BACKGROUND else AppState.ACTIVE
+        reactApplicationContext.currentActivity != null -> AppState.ACTIVE
+        else -> AppState.BACKGROUND
     }
 
     @ReactMethod
@@ -1007,7 +1222,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun installTelemetrySink(configMap: ReadableMap?, promise: Promise) {
+    fun enableTelemetry(configMap: ReadableMap?, promise: Promise) {
         val proto = protocol
         if (proto == null) {
             promise.reject("NOT_STARTED", "Protocol not created", null)
@@ -1015,39 +1230,77 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
         try {
             val cfg = parseTelemetryConfig(configMap)
-            proto.installTelemetrySink(TelemetrySinkImpl(this), cfg)
+            // The application state right now, measured the way the
+            // session boundaries are measured; see [seedAppState].
+            proto.enableTelemetry(cfg, seedAppState())
             promise.resolve(null)
         } catch (e: Exception) {
-            promise.reject("TELEMETRY_INSTALL", "Failed to install telemetry sink: ${e.message}", e)
+            val mapped = mapProtocolBridgeError(e)
+            if (mapped != null) {
+                promise.reject(mapped.code, mapped.message, e)
+            } else {
+                promise.reject("TELEMETRY_ENABLE", "Failed to enable telemetry: ${e.message}", e)
+            }
         }
     }
 
     @ReactMethod
-    fun pollTelemetryFrame(promise: Promise) {
+    fun disableTelemetry(promise: Promise) {
         val proto = protocol
         if (proto == null) {
             promise.reject("NOT_STARTED", "Protocol not created", null)
             return
         }
         try {
-            promise.resolve(proto.pollTelemetryFrame())
+            // Blocks for the final flush (at most three seconds); React
+            // Native runs this on its native-modules thread, never the UI.
+            proto.disableTelemetry()
+            promise.resolve(null)
         } catch (e: Exception) {
-            promise.reject("TELEMETRY_POLL", "Failed to poll telemetry frame: ${e.message}", e)
+            promise.reject("TELEMETRY_DISABLE", "Failed to disable telemetry: ${e.message}", e)
         }
     }
 
     @ReactMethod
-    fun uninstallTelemetrySink(promise: Promise) {
-        val proto = protocol
-        if (proto == null) {
-            promise.reject("NOT_STARTED", "Protocol not created", null)
-            return
-        }
+    fun flushTelemetry(promise: Promise) {
         try {
-            proto.uninstallTelemetrySink()
+            protocol?.flushTelemetry()
             promise.resolve(null)
         } catch (e: Exception) {
-            promise.reject("TELEMETRY_UNINSTALL", "Failed to uninstall telemetry sink: ${e.message}", e)
+            promise.reject("TELEMETRY_FLUSH_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun telemetryStats(promise: Promise) {
+        try {
+            val stats = protocol?.telemetryStats()
+            promise.resolve(stats?.let { encodeTelemetryStats(it) })
+        } catch (e: Exception) {
+            promise.reject("TELEMETRY_STATS_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun endTelemetrySession(promise: Promise) {
+        try {
+            // Blocks for the flush (at most three seconds), off the UI
+            // thread, but on the single native-modules thread: every other
+            // native call queues behind it for that long.
+            protocol?.endTelemetrySession()
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("TELEMETRY_END_SESSION_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun setTelemetryEnabled(enabled: Boolean, promise: Promise) {
+        try {
+            protocol?.setTelemetryEnabled(enabled)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("TELEMETRY_SET_ENABLED_FAILED", e.message, e)
         }
     }
 
@@ -1066,24 +1319,23 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     // The TS `TelemetryConfig` type (bindings/react-native/src/types.ts)
-    // only emits camelCase keys — these parsers match that contract.
+    // only emits camelCase keys — this parser matches that contract.
+    //
+    // The two required strings are forwarded as given, an absent one as "":
+    // the core validates and names the refused field, which reaches JS as
+    // the `TelemetryConfigInvalid` code. Restating the check here would be
+    // a second copy of the rule.
+    //
+    // The platform fields are filled here, never read from the map: the
+    // ingest keys its per-platform aggregates on them, and an app cannot
+    // set them wrong if it cannot set them.
     //
     // Unrecognised `mlsVerbosity` strings fall back to null (Rust default)
     // with a `Log.w` — silent fallback would have hid integrator typos
     // behind a config that "just works" at Lifecycle.
     private fun parseTelemetryConfig(map: ReadableMap?): TelemetryConfig {
-        if (map == null) {
-            return TelemetryConfig(
-                scrubIds = null,
-                mlsVerbosity = null,
-                metricsCadenceMs = null,
-                routingDiagnostic = null,
-                enablePollQueue = null,
-                mlsSamplingBypass = null,
-            )
-        }
-        val scrubIds = readOptionalBoolean(map, "scrubIds")
-        val verbosity = readOptionalString(map, "mlsVerbosity")?.let { raw ->
+        val m: ReadableMap = map ?: Arguments.createMap()
+        val verbosity = readOptionalString(m, "mlsVerbosity")?.let { raw ->
             when (raw.lowercase()) {
                 "off" -> MlsVerbosity.OFF
                 "diagnostic" -> MlsVerbosity.DIAGNOSTIC
@@ -1097,17 +1349,31 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 }
             }
         }
-        val cadence = readOptionalNonNegativeLong(map, "metricsCadenceMs")?.toULong()
-        val routingDiag = readOptionalBoolean(map, "routingDiagnostic")
-        val enablePollQueue = readOptionalBoolean(map, "enablePollQueue")
-        val mlsSamplingBypass = readOptionalBoolean(map, "mlsSamplingBypass")
         return TelemetryConfig(
-            scrubIds = scrubIds,
+            apiKey = readOptionalString(m, "apiKey") ?: "",
+            appId = readOptionalString(m, "appId") ?: "",
+            os = TelemetryOs.ANDROID,
+            // The API level, which is what the earlier client reported too.
+            osMajor = Build.VERSION.SDK_INT.toUShort(),
+            appVersion = readOptionalString(m, "appVersion"),
+            debug = readOptionalBoolean(m, "debug"),
+            flushIntervalMs = readOptionalNonNegativeLong(m, "flushIntervalMs")?.toULong(),
+            maxBatchBytes = readOptionalNonNegativeLong(m, "maxBatchBytes")?.toULong(),
+            // Clamped, not truncated: `toUInt()` on a Long wraps, so a
+            // JavaScript number just past `UInt.MAX_VALUE` would silently
+            // become a one-slot ring buffer rather than a large one. Swift
+            // clamps the same field; a value this large is nonsense either
+            // way, and the two bindings should be nonsense in the same
+            // direction.
+            maxBufferedRecords = readOptionalNonNegativeLong(m, "maxBufferedRecords")
+                ?.coerceAtMost(UInt.MAX_VALUE.toLong())
+                ?.toUInt(),
+            includeDeviceId = readOptionalBoolean(m, "includeDeviceId"),
+            scrubIds = readOptionalBoolean(m, "scrubIds"),
             mlsVerbosity = verbosity,
-            metricsCadenceMs = cadence,
-            routingDiagnostic = routingDiag,
-            enablePollQueue = enablePollQueue,
-            mlsSamplingBypass = mlsSamplingBypass,
+            metricsCadenceMs = readOptionalNonNegativeLong(m, "metricsCadenceMs")?.toULong(),
+            routingDiagnostic = readOptionalBoolean(m, "routingDiagnostic"),
+            mlsSamplingBypass = readOptionalBoolean(m, "mlsSamplingBypass"),
         )
     }
 
@@ -1138,240 +1404,16 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         return value
     }
 
-    /**
-     * Forwards each typed TelemetryRecord variant into the RN bridge as a
-     * discriminated body keyed by `category`. Mirrors the iOS
-     * `TelemetrySinkImpl`. Must not block, reenter the SDK, or panic.
-     *
-     * Deliberately a nested (non-`inner`) class holding a
-     * `WeakReference<OfflineProtocolModule>` — if this were an inner class
-     * it would pin the enclosing module alive for as long as the Rust
-     * adapter kept the sink, defeating React Native's ability to GC a
-     * detached module (e.g. after a reload).
-     */
-    private class TelemetrySinkImpl(module: OfflineProtocolModule) : TelemetrySink {
-        private val moduleRef = WeakReference(module)
-
-        // Every callback is invoked synchronously from the Rust emit path.
-        // A thrown Kotlin exception here would cross the UniFFI boundary
-        // and crash the native caller, so we log-and-swallow anything the
-        // encoders or React bridge throw (e.g. detached ReactContext during
-        // app tear-down). If the weak reference has been GC'd we drop the
-        // record silently — the Rust side will eventually replace or free
-        // this sink.
-        private inline fun safeDispatch(build: (OfflineProtocolModule) -> WritableMap) {
-            val module = moduleRef.get() ?: return
-            try {
-                val params = build(module)
-                module.sendEvent(TELEMETRY_EVENT_NAME, params)
-            } catch (t: Throwable) {
-                Log.w(NAME, "telemetry dispatch failed; dropping record", t)
-            }
-        }
-
-        override fun onProtocolEvent(eventJson: String) = safeDispatch { _ ->
-            Arguments.createMap().apply {
-                putString("category", "protocol")
-                putString("eventJson", eventJson)
-            }
-        }
-
-        override fun onMlsEvent(eventJson: String) = safeDispatch { _ ->
-            Arguments.createMap().apply {
-                putString("category", "mls")
-                putString("eventJson", eventJson)
-            }
-        }
-
-        override fun onMetricsFrame(frame: MetricsFrame) = safeDispatch { m ->
-            Arguments.createMap().apply {
-                putString("category", "metricsFrame")
-                putMap("frame", m.encodeFrame(frame))
-            }
-        }
-
-        override fun onTransportState(event: TransportStateEvent) = safeDispatch { m ->
-            Arguments.createMap().apply {
-                putString("category", "transportState")
-                putMap("event", m.encodeTransportState(event))
-            }
-        }
-
-        override fun onRoutingDecision(decision: RoutingDecision) = safeDispatch { m ->
-            Arguments.createMap().apply {
-                putString("category", "routingDecision")
-                putMap("decision", m.encodeRouting(decision))
-            }
-        }
-
-        override fun onDeviceCapability(snapshot: DeviceCapabilitySnapshot) = safeDispatch { m ->
-            Arguments.createMap().apply {
-                putString("category", "deviceCapability")
-                putMap("snapshot", m.encodeDevice(snapshot))
-            }
-        }
-
-        override fun onExtension(name: String, payloadJson: String) = safeDispatch { _ ->
-            Arguments.createMap().apply {
-                putString("category", "extension")
-                putString("name", name)
-                putString("payloadJson", payloadJson)
-            }
-        }
-    }
-
-    // ---- Telemetry encoders (UniFFI data classes -> WritableMap) ----
-    //
-    // IMPORTANT: every map produced below MUST be structurally identical
-    // to the JSON envelope the Rust adapter enqueues on the pull channel.
-    // The canonical contract is pinned by the `shape_parity_*_envelope`
-    // tests in `crates/offline-protocol-uniffi/src/lib.rs`. If those tests
-    // change, update the matching encoder here in lockstep — the TS
-    // `TelemetryRecord` discriminated union expects ONE shape regardless
-    // of whether a record arrived via `onTelemetry` (push) or
-    // `pollTelemetry` (pull).
-
-    private fun encodeTransport(t: TransportType): String = when (t) {
-        TransportType.INTERNET -> "internet"
-        TransportType.BLE -> "ble"
-        TransportType.WI_FI_DIRECT -> "wifiDirect"
-        TransportType.RETICULUM -> "reticulum"
-        TransportType.NOSTR -> "nostr"
-    }
-
-    private fun encodeStatus(s: TransportStatus): String = when (s) {
-        TransportStatus.AVAILABLE -> "available"
-        TransportStatus.UNAVAILABLE -> "unavailable"
-        TransportStatus.CONNECTING -> "connecting"
-        TransportStatus.DISCONNECTED -> "disconnected"
-        TransportStatus.ERROR -> "error"
-    }
-
-    private fun encodePhase(p: RoutingPhase): String = when (p) {
-        RoutingPhase.SCORE_UPDATED -> "scoreUpdated"
-        RoutingPhase.SELECTED -> "selected"
-        RoutingPhase.SWITCHED -> "switched"
-        RoutingPhase.ESCALATED -> "escalated"
-        RoutingPhase.UNKNOWN -> "unknown"
-    }
-
-    private fun encodeReason(r: RoutingReasonCode): String = when (r) {
-        RoutingReasonCode.INITIAL_SELECTION -> "initialSelection"
-        RoutingReasonCode.PRIMARY_SELECTED -> "primarySelected"
-        RoutingReasonCode.PRIMARY_SUCCESS -> "primarySuccess"
-        RoutingReasonCode.FALLBACK_SUCCESS -> "fallbackSuccess"
-        RoutingReasonCode.ESCALATION_APPLIED -> "escalationApplied"
-        RoutingReasonCode.CURRENT_UNAVAILABLE -> "currentUnavailable"
-        RoutingReasonCode.RETRY_THRESHOLD -> "retryThreshold"
-        RoutingReasonCode.POOR_SIGNAL -> "poorSignal"
-        RoutingReasonCode.CONGESTION -> "congestion"
-        RoutingReasonCode.LOW_TTL -> "lowTtl"
-        RoutingReasonCode.LOW_SUCCESS_RATE -> "lowSuccessRate"
-        RoutingReasonCode.UNKNOWN -> "unknown"
-    }
-
-    private fun encodeMetrics(m: TransportMetrics): WritableMap = Arguments.createMap().apply {
-        // Counter fields (UInt/UInt32/UInt64 on the Rust side) go through
-        // putDouble to avoid Kotlin's signed-Int wrap at 2^31 — long-running
-        // relays accumulate byte/packet counts well past that boundary.
-        putDouble("packetsSent", m.packetsSent.toLong().toDouble())
-        putDouble("packetsReceived", m.packetsReceived.toLong().toDouble())
-        putDouble("bytesSent", m.bytesSent.toLong().toDouble())
-        putDouble("bytesReceived", m.bytesReceived.toLong().toDouble())
-        putDouble("errorRate", m.errorRate.toDouble())
-        putDouble("avgLatencyMs", m.avgLatencyMs.toLong().toDouble())
-        m.rssi?.let { putInt("rssi", it.toInt()) }
-        m.bandwidthBps?.let { putDouble("bandwidthBps", it.toLong().toDouble()) }
-        m.congestion?.let { putDouble("congestion", it.toDouble()) }
-        m.queueDepth?.let { putDouble("queueDepth", it.toLong().toDouble()) }
-        m.batteryLevel?.let { putInt("batteryLevel", it.toInt()) }
-        m.isCharging?.let { putBoolean("isCharging", it) }
-        m.relayConnectionCount?.let { putInt("relayConnectionCount", it.toInt()) }
-        m.isActiveRelay?.let { putBoolean("isActiveRelay", it) }
-        m.deliveryRatio?.let { putDouble("deliveryRatio", it.toDouble()) }
-        m.dropRate?.let { putDouble("dropRate", it.toDouble()) }
-        m.averageHopCount?.let { putDouble("averageHopCount", it.toDouble()) }
-        m.energyCost?.let { putDouble("energyCost", it.toDouble()) }
-    }
-
-    private fun encodeFrame(f: MetricsFrame): WritableMap = Arguments.createMap().apply {
-        putDouble("timestampMs", f.timestampMs.toDouble())
-        val transports = Arguments.createArray()
-        for (entry in f.transports) {
-            transports.pushMap(
-                Arguments.createMap().apply {
-                    putString("transport", encodeTransport(entry.transport))
-                    putMap("metrics", encodeMetrics(entry.metrics))
-                }
-            )
-        }
-        putArray("transports", transports)
-        putMap(
-            "retryQueue",
-            Arguments.createMap().apply {
-                putDouble("totalCount", f.retryQueue.totalCount.toDouble())
-                putDouble("readyCount", f.retryQueue.readyCount.toDouble())
-                putDouble("criticalPriorityCount", f.retryQueue.criticalPriorityCount.toDouble())
-                putDouble("highPriorityCount", f.retryQueue.highPriorityCount.toDouble())
-                putDouble("mediumPriorityCount", f.retryQueue.mediumPriorityCount.toDouble())
-                putDouble("lowPriorityCount", f.retryQueue.lowPriorityCount.toDouble())
-            }
-        )
-        putMap(
-            "dedup",
-            Arguments.createMap().apply {
-                putDouble("totalTracked", f.dedup.totalTracked.toDouble())
-                putDouble("recentTracked", f.dedup.recentTracked.toDouble())
-                putInt("capacityUsedPercent", f.dedup.capacityUsedPercent.toInt())
-                f.dedup.falsePositiveRate?.let { putDouble("falsePositiveRate", it) }
-                putString("mode", f.dedup.mode)
-            }
-        )
-        putDouble("ackPending", f.ackPending.toDouble())
-        putDouble("neighborCount", f.neighborCount.toDouble())
-        putBoolean("isLocalRelay", f.isLocalRelay)
-        f.currentTransport?.let { putString("currentTransport", encodeTransport(it)) }
-    }
-
-    private fun encodeTransportState(e: TransportStateEvent): WritableMap = Arguments.createMap().apply {
-        putDouble("timestampMs", e.timestampMs.toDouble())
-        putString("transport", encodeTransport(e.transport))
-        putString("previous", encodeStatus(e.previous))
-        putString("current", encodeStatus(e.current))
-    }
-
-    private fun encodeRouting(d: RoutingDecision): WritableMap = Arguments.createMap().apply {
-        putDouble("timestampMs", d.timestampMs.toDouble())
-        putString("phase", encodePhase(d.phase))
-        d.from?.let { putString("from", encodeTransport(it)) }
-        d.to?.let { putString("to", encodeTransport(it)) }
-        d.winningScore?.let { putDouble("winningScore", it.toDouble()) }
-        d.reasonCode?.let { putString("reasonCode", encodeReason(it)) }
-        val scores = Arguments.createArray()
-        for (s in d.scores) {
-            scores.pushMap(
-                Arguments.createMap().apply {
-                    putString("transport", encodeTransport(s.transport))
-                    putDouble("signal", s.signal.toDouble())
-                    putDouble("proximity", s.proximity.toDouble())
-                    putDouble("bandwidth", s.bandwidth.toDouble())
-                    putDouble("congestion", s.congestion.toDouble())
-                    putDouble("energy", s.energy.toDouble())
-                    putDouble("reliability", s.reliability.toDouble())
-                    putDouble("load", s.load.toDouble())
-                    putDouble("total", s.total.toDouble())
-                }
-            )
-        }
-        putArray("scores", scores)
-    }
-
-    private fun encodeDevice(s: DeviceCapabilitySnapshot): WritableMap = Arguments.createMap().apply {
-        putDouble("timestampMs", s.timestampMs.toDouble())
-        s.batteryLevel?.let { putInt("batteryLevel", it.toInt()) }
-        putBoolean("isCharging", s.isCharging)
-        putString("relayRole", if (s.relayRole == RelayRole.RELAY) "relay" else "regular")
-        putInt("changedFields", s.changedFields.toInt())
+    // Counters go through putDouble: they are u64 on the Rust side and a
+    // signed Int would wrap at 2^31 on a long-running device.
+    private fun encodeTelemetryStats(s: TelemetryStats): WritableMap = Arguments.createMap().apply {
+        putDouble("buffered", s.buffered.toLong().toDouble())
+        putDouble("sentEvents", s.sentEvents.toLong().toDouble())
+        putDouble("acceptedEvents", s.acceptedEvents.toLong().toDouble())
+        putDouble("dropped", s.dropped.toLong().toDouble())
+        putString("sessionId", s.sessionId)
+        s.lastError?.let { putString("lastError", it) }
+        s.lastFlushAtMs?.let { putDouble("lastFlushAtMs", it.toDouble()) }
     }
 
     @ReactMethod
@@ -2255,7 +2297,28 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             wifiDirectManager = null
             reticulumManager = null
             nostrManager = null
+            // Frees the Rust object now rather than at some later GC. It
+            // holds the telemetry pipe, whose uploader thread and 30 s timer
+            // live for as long as it does: without this the thread outlives a
+            // logout-and-recreate until a collection happens to run, and two
+            // pipes can be awake at once. Dropping it signals the pipe's
+            // final flush and detaches the worker without blocking here.
+            // Idempotent, and safe at this point because every caller into
+            // the protocol — the process scheduler and all five transports —
+            // has been stopped above.
+            // The field is cleared *before* the handle is destroyed, not
+            // after. The process lifecycle watcher reads it on the main
+            // thread while this runs on the native-modules thread, and a
+            // destroyed handle throws; publishing the null first means the
+            // widest that race can be is one already-in-flight call, which
+            // [notifyAppStateQuietly] absorbs.
+            val handle = protocol
             protocol = null
+            try {
+                handle?.destroy()
+            } catch (e: Exception) {
+                android.util.Log.w(NAME, "Releasing the protocol handle failed", e)
+            }
             meshServices = null
             // [listenerCount] is deliberately *not* reset here. React Native
             // owns it through addListener/removeListeners, and this module is a

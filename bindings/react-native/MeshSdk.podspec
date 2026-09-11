@@ -64,6 +64,15 @@ Pod::Spec.new do |s|
     "ios/Generated/*.h"  # Include headers (but not module maps)
   ]
 
+  # The privacy manifest travels with the pod, so an app that enables
+  # telemetry inherits the SDK's own declaration (product interaction,
+  # performance data, diagnostics; nothing linked, nothing tracked). Apple
+  # does not reliably fold library manifests in under static linking, so
+  # docs/privacy.md tells the app what to merge into its own.
+  s.resource_bundles = {
+    "MeshSdkPrivacy" => ["ios/PrivacyInfo.xcprivacy"]
+  }
+
   # Preserve the FFI module map for Swift imports
   s.preserve_paths = [
     "ios/Generated/offline_protocolFFI.modulemap"

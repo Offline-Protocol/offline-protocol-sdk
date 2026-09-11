@@ -1,0 +1,60 @@
+{
+  "batch_id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+  "session_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+  "device_id": "a3f2b4c5d6e7f8091a2b3c4d5e6f7a8b",
+  "app_version": "1.4.2",
+  "os": "ios",
+  "os_major": 18,
+  "sdk_version": "0.24.0",
+  "wire_version": 1,
+  "events": [
+    {
+      "type": "protocol.message.delivered",
+      "ts_ms": 1747000000000,
+      "data": { "latency_ms": 240, "hop_count": 1, "transport": "ble" }
+    },
+    {
+      "type": "mesh_metrics_rollup",
+      "ts_ms": 1747000060000,
+      "data": {
+        "bucket_start_ms": 1747000060000,
+        "bucket_duration_s": 60,
+        "neighbor_count_avg": 4.5,
+        "neighbor_count_max": 9,
+        "neighbor_count_p50": 4,
+        "ack_pending_avg": 1.25,
+        "ack_pending_max": 3,
+        "retry_queue_total_avg": 2.0,
+        "retry_queue_total_max": 5,
+        "retry_queue_critical_count_max": 1,
+        "transport_time_ms": { "ble": 40000, "wifi_direct": 15000, "internet": 5000, "none": 0 },
+        "is_local_relay_duration_s": 12,
+        "current_transport_at_bucket_end": "ble",
+        "sends_attempted_sum": 12,
+        "sends_succeeded_sum": 11,
+        "sends_failed_sum": 1,
+        "bytes_sent_sum": 0,
+        "bytes_received_sum": 0
+      }
+    },
+    {
+      "type": "mesh_session_summary",
+      "ts_ms": 1747000120000,
+      "data": {
+        "session_duration_s": 312,
+        "routing_switches": 14,
+        "routing_escalations": 6,
+        "escalation_reasons": {
+          "poor_signal": 3,
+          "low_success_rate": 1,
+          "retry_threshold": 2,
+          "congestion": 0,
+          "low_ttl": 0,
+          "current_unavailable": 0
+        },
+        "mls_session_ready_latency_p50_ms": 88,
+        "mls_encryption_used_count": 47
+      }
+    }
+  ]
+}

@@ -74,6 +74,11 @@ func mapProtocolBridgeError(_ error: Error) -> (code: String, message: String)? 
         return ("DocTooLarge", message)
     case let .DataCorrupted(message):
         return ("DataCorrupted", message)
+    // A refused telemetry configuration. The message names the field, which
+    // is the whole diagnostic: the app pasted the wrong value, and no retry
+    // fixes it.
+    case let .TelemetryConfigInvalid(message):
+        return ("TelemetryConfigInvalid", message)
     default:
         return nil
     }

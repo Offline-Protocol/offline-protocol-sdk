@@ -107,11 +107,12 @@ impl OfflineProtocol {
         // Legacy emitter consumes a value-typed event (its existing
         // signature), so we clone when a sink is also installed. The clone
         // is cheap — `MlsLifecycleEvent` is small and lives on the stack.
-        if let Some(ctx) = &self.telemetry {
-            self.mls_event_emitter.emit(event.clone());
-            dispatch_record(&ctx.sink, &TelemetryRecord::Mls(event));
-        } else {
-            self.mls_event_emitter.emit(event);
+        match &self.telemetry {
+            Some(ctx) if ctx.enabled() => {
+                self.mls_event_emitter.emit(event.clone());
+                dispatch_record(&ctx.sink, &TelemetryRecord::Mls(event));
+            }
+            _ => self.mls_event_emitter.emit(event),
         }
     }
 
@@ -173,6 +174,36 @@ impl OfflineProtocol {
             context,
             error_category: Some(kind.error_category()),
             failure_kind: kind,
+        });
+    }
+
+    /// Records the moment a handshake with `peer_id` begins: no session
+    /// existed, the peer's key package was imported and a Welcome was built.
+    ///
+    /// This is the start of the span the handshake-latency percentile
+    /// measures. [`Self::emit_mls_session_missing`] covers only the
+    /// handshakes that could *not* start, and with `auto_key_exchange` on
+    /// (the default) the peer's key package usually arrives before the first
+    /// send, so the ordinary handshake raises no miss. Without this emit the
+    /// percentile samples the slow tail and reports it as the median.
+    ///
+    /// Emitted immediately after `create_session`, before the Welcome is
+    /// handed to a transport, so the span covers the delivery it is waiting
+    /// on. Both establishment paths emit it at that same point.
+    pub(super) fn emit_mls_session_establishing(
+        &self,
+        peer_id: &str,
+        group_id: &str,
+        context: MlsOperationContext,
+    ) {
+        let scrubber = self.current_scrubber();
+        self.emit_mls_lifecycle_event(MlsLifecycleEvent::SessionEstablishing {
+            timestamp_ms: timestamp_now_ms(),
+            session_id: self.session_id_for_observability(Some(peer_id), Some(group_id)),
+            group_id: Some(scrubber.hash_id(group_id).into_owned()),
+            peer_id: Some(scrubber.hash_id(peer_id).into_owned()),
+            context,
+            error_category: None,
         });
     }
 

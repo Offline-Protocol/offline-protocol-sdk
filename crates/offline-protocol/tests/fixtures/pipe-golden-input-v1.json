@@ -1,0 +1,1712 @@
+{
+  "config": {
+    "apiKey": "mp_test_key",
+    "appId": "app_test",
+    "appVersion": "1.4.2",
+    "routingDiagnostic": false,
+    "sdkVersion": "<sdk>"
+  },
+  "platform": {
+    "os": "ios",
+    "osMajor": 18
+  },
+  "start_ms": 1747000020000,
+  "steps": [
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 0,
+          "currentTransport": "ble",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 1,
+          "retryQueue": {
+            "criticalPriorityCount": 1,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 0
+          },
+          "timestampMs": 1747000020000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000020000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "transportState",
+        "event": {
+          "current": "available",
+          "previous": "disconnected",
+          "timestampMs": 1747000021000,
+          "transport": "ble"
+        }
+      },
+      "t_ms": 1747000021000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "deviceCapability",
+        "snapshot": {
+          "batteryLevel": 80,
+          "changedFields": 7,
+          "isCharging": false,
+          "relayRole": "regular",
+          "timestampMs": 1747000021000
+        }
+      },
+      "t_ms": 1747000021000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "routingDecision",
+        "decision": {
+          "phase": "selected",
+          "reasonCode": "initialSelection",
+          "scores": [],
+          "timestampMs": 1747000022000,
+          "to": "ble",
+          "winningScore": 84.5
+        }
+      },
+      "t_ms": 1747000022000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"neighbor_discovered\",\"peer_id\":\"off1peer\",\"transport\":\"BLE\",\"rssi\":-60}"
+      },
+      "t_ms": 1747000023000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 1,
+          "currentTransport": "ble",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 2,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 1
+          },
+          "timestampMs": 1747000025000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000025000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_sent\",\"message_id\":\"m1\",\"sender\":\"off1sender\",\"recipient\":\"off1recipient\",\"content\":\"hello\",\"priority\":\"medium\",\"requires_ack\":true,\"timestamp\":0,\"lamport_clock\":1}"
+      },
+      "t_ms": 1747000026000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_delivered\",\"message_id\":\"m1\",\"latency_ms\":240,\"hop_count\":1,\"transport\":\"ble\"}"
+      },
+      "t_ms": 1747000027000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 2,
+          "currentTransport": "ble",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 3,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 2
+          },
+          "timestampMs": 1747000030000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000030000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_sent\",\"message_id\":\"m2\",\"sender\":\"off1sender\",\"recipient\":\"off1recipient\",\"content\":\"hello\",\"priority\":\"medium\",\"requires_ack\":true,\"timestamp\":0,\"lamport_clock\":2}"
+      },
+      "t_ms": 1747000031000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_delivered\",\"message_id\":\"m2\",\"latency_ms\":310,\"hop_count\":2,\"transport\":\"ble\"}"
+      },
+      "t_ms": 1747000032000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 0,
+          "currentTransport": "ble",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 4,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 3
+          },
+          "timestampMs": 1747000035000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000035000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 1,
+          "currentTransport": "ble",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 5,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 0
+          },
+          "timestampMs": 1747000040000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000040000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "mls",
+        "eventJson": "{\"type\":\"initialized\",\"timestamp_ms\":1747000040000,\"session_id\":\"s1\",\"group_id\":null,\"peer_id\":\"peerhash\",\"context\":\"initialize\",\"error_category\":null}"
+      },
+      "t_ms": 1747000040000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "mls",
+        "eventJson": "{\"type\":\"session_ready\",\"timestamp_ms\":1747000040100,\"session_id\":\"s1\",\"group_id\":null,\"peer_id\":\"peerhash\",\"context\":\"session_lookup\",\"error_category\":null}"
+      },
+      "t_ms": 1747000040100
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "mls",
+        "eventJson": "{\"type\":\"encryption_used\",\"timestamp_ms\":1747000041000,\"session_id\":\"s1\",\"group_id\":null,\"peer_id\":null,\"context\":\"send\",\"error_category\":null}"
+      },
+      "t_ms": 1747000041000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "mls",
+        "eventJson": "{\"type\":\"encryption_used\",\"timestamp_ms\":1747000042000,\"session_id\":\"s1\",\"group_id\":null,\"peer_id\":null,\"context\":\"send\",\"error_category\":null}"
+      },
+      "t_ms": 1747000042000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 2,
+          "currentTransport": "ble",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 1,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 1
+          },
+          "timestampMs": 1747000045000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000045000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 0,
+          "currentTransport": "ble",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 2,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 2
+          },
+          "timestampMs": 1747000050000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000050000
+    },
+    {
+      "kind": "flush",
+      "t_ms": 1747000050000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_sent\",\"message_id\":\"m3\",\"sender\":\"off1sender\",\"recipient\":\"off1recipient\",\"content\":\"hello\",\"priority\":\"medium\",\"requires_ack\":true,\"timestamp\":0,\"lamport_clock\":3}"
+      },
+      "t_ms": 1747000052000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_delivered\",\"message_id\":\"m3\",\"latency_ms\":180,\"hop_count\":1,\"transport\":\"wifiDirect\"}"
+      },
+      "t_ms": 1747000053000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 1,
+          "currentTransport": "ble",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 3,
+          "retryQueue": {
+            "criticalPriorityCount": 1,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 3
+          },
+          "timestampMs": 1747000055000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000055000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_sent\",\"message_id\":\"m90\",\"sender\":\"off1sender\",\"recipient\":\"off1recipient\",\"content\":\"hello\",\"priority\":\"medium\",\"requires_ack\":true,\"timestamp\":0,\"lamport_clock\":90}"
+      },
+      "t_ms": 1747000058000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 2,
+          "currentTransport": "ble",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 4,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 0
+          },
+          "timestampMs": 1747000060000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000060000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_failed\",\"message_id\":\"m90\",\"reason\":\"Max retries exceeded\",\"retry_count\":5}"
+      },
+      "t_ms": 1747000060000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "transportState",
+        "event": {
+          "current": "available",
+          "previous": "unavailable",
+          "timestampMs": 1747000064000,
+          "transport": "wifiDirect"
+        }
+      },
+      "t_ms": 1747000064000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 0,
+          "currentTransport": "ble",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 5,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 1
+          },
+          "timestampMs": 1747000065000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000065000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "routingDecision",
+        "decision": {
+          "from": "ble",
+          "phase": "escalated",
+          "reasonCode": "poorSignal",
+          "scores": [],
+          "timestampMs": 1747000065000,
+          "to": "wifiDirect"
+        }
+      },
+      "t_ms": 1747000065000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "routingDecision",
+        "decision": {
+          "from": "ble",
+          "phase": "switched",
+          "reasonCode": "escalationApplied",
+          "scores": [],
+          "timestampMs": 1747000066000,
+          "to": "wifiDirect",
+          "winningScore": 72.25
+        }
+      },
+      "t_ms": 1747000066000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "routingDecision",
+        "decision": {
+          "from": "ble",
+          "phase": "escalated",
+          "reasonCode": "fallbackSuccess",
+          "scores": [],
+          "timestampMs": 1747000067000,
+          "to": "wifiDirect"
+        }
+      },
+      "t_ms": 1747000067000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 1,
+          "currentTransport": "ble",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 1,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 2
+          },
+          "timestampMs": 1747000070000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000070000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_relayed\",\"message_id\":\"r1\",\"sender\":\"off1a\",\"recipient\":\"off1b\",\"hop_count\":2,\"remaining_ttl\":6}"
+      },
+      "t_ms": 1747000070000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 2,
+          "currentTransport": "ble",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 2,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 3
+          },
+          "timestampMs": 1747000075000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000075000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 0,
+          "currentTransport": "ble",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 3,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 0
+          },
+          "timestampMs": 1747000080000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000080000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_sent\",\"message_id\":\"m4\",\"sender\":\"off1sender\",\"recipient\":\"off1recipient\",\"content\":\"hello\",\"priority\":\"medium\",\"requires_ack\":true,\"timestamp\":0,\"lamport_clock\":4}"
+      },
+      "t_ms": 1747000080000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_delivered\",\"message_id\":\"m4\",\"latency_ms\":90,\"hop_count\":1,\"transport\":\"wifiDirect\"}"
+      },
+      "t_ms": 1747000081000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 1,
+          "currentTransport": "ble",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 4,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 1
+          },
+          "timestampMs": 1747000085000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000085000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 2,
+          "currentTransport": "ble",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 5,
+          "retryQueue": {
+            "criticalPriorityCount": 1,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 2
+          },
+          "timestampMs": 1747000090000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000090000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "mls",
+        "eventJson": "{\"type\":\"initialized\",\"timestamp_ms\":1747000090000,\"session_id\":\"s2\",\"group_id\":null,\"peer_id\":\"peerhash\",\"context\":\"initialize\",\"error_category\":null}"
+      },
+      "t_ms": 1747000090000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "mls",
+        "eventJson": "{\"type\":\"session_ready\",\"timestamp_ms\":1747000090250,\"session_id\":\"s2\",\"group_id\":null,\"peer_id\":\"peerhash\",\"context\":\"session_lookup\",\"error_category\":null}"
+      },
+      "t_ms": 1747000090250
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "mls",
+        "eventJson": "{\"type\":\"encryption_used\",\"timestamp_ms\":1747000091000,\"session_id\":\"s2\",\"group_id\":null,\"peer_id\":null,\"context\":\"send\",\"error_category\":null}"
+      },
+      "t_ms": 1747000091000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 0,
+          "currentTransport": "ble",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 1,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 3
+          },
+          "timestampMs": 1747000095000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000095000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "mls",
+        "eventJson": "{\"type\":\"decryption_failed\",\"timestamp_ms\":1747000095000,\"session_id\":\"s2\",\"group_id\":null,\"peer_id\":null,\"context\":\"receive\",\"error_category\":null,\"failure_kind\":\"invalid_ciphertext\"}"
+      },
+      "t_ms": 1747000095000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "mls",
+        "eventJson": "{\"type\":\"session_missing\",\"timestamp_ms\":1747000096000,\"session_id\":\"s9\",\"group_id\":null,\"peer_id\":null,\"context\":\"send\",\"error_category\":null}"
+      },
+      "t_ms": 1747000096000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 1,
+          "currentTransport": "wifiDirect",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": true,
+          "neighborCount": 2,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 0
+          },
+          "timestampMs": 1747000100000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000100000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"relay_promoted\",\"connection_count\":3,\"battery_level\":77}"
+      },
+      "t_ms": 1747000100000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 2,
+          "currentTransport": "wifiDirect",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": true,
+          "neighborCount": 3,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 1
+          },
+          "timestampMs": 1747000105000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000105000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_sent\",\"message_id\":\"m5\",\"sender\":\"off1sender\",\"recipient\":\"off1recipient\",\"content\":\"hello\",\"priority\":\"medium\",\"requires_ack\":true,\"timestamp\":0,\"lamport_clock\":5}"
+      },
+      "t_ms": 1747000109000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 0,
+          "currentTransport": "wifiDirect",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": true,
+          "neighborCount": 4,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 2
+          },
+          "timestampMs": 1747000110000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000110000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_delivered\",\"message_id\":\"m5\",\"latency_ms\":400,\"hop_count\":3,\"transport\":\"ble\"}"
+      },
+      "t_ms": 1747000110000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 1,
+          "currentTransport": "wifiDirect",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": true,
+          "neighborCount": 5,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 3
+          },
+          "timestampMs": 1747000115000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000115000
+    },
+    {
+      "kind": "flush",
+      "t_ms": 1747000115000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_sent\",\"message_id\":\"m91\",\"sender\":\"off1sender\",\"recipient\":\"off1recipient\",\"content\":\"hello\",\"priority\":\"medium\",\"requires_ack\":true,\"timestamp\":0,\"lamport_clock\":91}"
+      },
+      "t_ms": 1747000118000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 2,
+          "currentTransport": "wifiDirect",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": true,
+          "neighborCount": 1,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 0
+          },
+          "timestampMs": 1747000120000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000120000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_deferred\",\"message_id\":\"m91\",\"recipient\":\"off1recipient\",\"reason\":\"recipient_unreachable\",\"retry_count\":1,\"next_retry_at\":null}"
+      },
+      "t_ms": 1747000120000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 0,
+          "currentTransport": "wifiDirect",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": true,
+          "neighborCount": 2,
+          "retryQueue": {
+            "criticalPriorityCount": 1,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 1
+          },
+          "timestampMs": 1747000125000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000125000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "transportState",
+        "event": {
+          "current": "available",
+          "previous": "disconnected",
+          "timestampMs": 1747000128000,
+          "transport": "internet"
+        }
+      },
+      "t_ms": 1747000128000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 1,
+          "currentTransport": "wifiDirect",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": true,
+          "neighborCount": 3,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 2
+          },
+          "timestampMs": 1747000130000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000130000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "routingDecision",
+        "decision": {
+          "from": "wifiDirect",
+          "phase": "switched",
+          "reasonCode": "primarySuccess",
+          "scores": [],
+          "timestampMs": 1747000130000,
+          "to": "internet",
+          "winningScore": 91.0
+        }
+      },
+      "t_ms": 1747000130000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 2,
+          "currentTransport": "wifiDirect",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": true,
+          "neighborCount": 4,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 3
+          },
+          "timestampMs": 1747000135000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000135000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 0,
+          "currentTransport": "internet",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 5,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 0
+          },
+          "timestampMs": 1747000140000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000140000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_sent\",\"message_id\":\"m6\",\"sender\":\"off1sender\",\"recipient\":\"off1recipient\",\"content\":\"hello\",\"priority\":\"medium\",\"requires_ack\":true,\"timestamp\":0,\"lamport_clock\":6}"
+      },
+      "t_ms": 1747000141000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_delivered\",\"message_id\":\"m6\",\"latency_ms\":75,\"hop_count\":1,\"transport\":\"internet\"}"
+      },
+      "t_ms": 1747000142000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 1,
+          "currentTransport": "internet",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 1,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 1
+          },
+          "timestampMs": 1747000145000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000145000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 2,
+          "currentTransport": "internet",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 2,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 2
+          },
+          "timestampMs": 1747000150000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000150000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "mls",
+        "eventJson": "{\"type\":\"initialized\",\"timestamp_ms\":1747000150000,\"session_id\":\"s3\",\"group_id\":null,\"peer_id\":\"peerhash\",\"context\":\"initialize\",\"error_category\":null}"
+      },
+      "t_ms": 1747000150000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "mls",
+        "eventJson": "{\"type\":\"session_ready\",\"timestamp_ms\":1747000150150,\"session_id\":\"s3\",\"group_id\":null,\"peer_id\":\"peerhash\",\"context\":\"session_lookup\",\"error_category\":null}"
+      },
+      "t_ms": 1747000150150
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "mls",
+        "eventJson": "{\"type\":\"encryption_used\",\"timestamp_ms\":1747000151000,\"session_id\":\"s3\",\"group_id\":null,\"peer_id\":null,\"context\":\"send\",\"error_category\":null}"
+      },
+      "t_ms": 1747000151000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 0,
+          "currentTransport": "internet",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 3,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 3
+          },
+          "timestampMs": 1747000155000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000155000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 1,
+          "currentTransport": "internet",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 4,
+          "retryQueue": {
+            "criticalPriorityCount": 1,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 0
+          },
+          "timestampMs": 1747000160000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000160000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"relay_demoted\",\"reason\":\"no traffic carried for other devices recently\"}"
+      },
+      "t_ms": 1747000160000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 2,
+          "currentTransport": "internet",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 5,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 1
+          },
+          "timestampMs": 1747000165000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000165000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_sent\",\"message_id\":\"m7\",\"sender\":\"off1sender\",\"recipient\":\"off1recipient\",\"content\":\"hello\",\"priority\":\"medium\",\"requires_ack\":true,\"timestamp\":0,\"lamport_clock\":7}"
+      },
+      "t_ms": 1747000169000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 0,
+          "currentTransport": "internet",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 1,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 2
+          },
+          "timestampMs": 1747000170000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000170000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_delivered\",\"message_id\":\"m7\",\"latency_ms\":220,\"hop_count\":2,\"transport\":\"ble\"}"
+      },
+      "t_ms": 1747000170000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 1,
+          "currentTransport": "internet",
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 2,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 3
+          },
+          "timestampMs": 1747000175000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000175000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 2,
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 3,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 0
+          },
+          "timestampMs": 1747000180000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000180000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "routingDecision",
+        "decision": {
+          "from": "internet",
+          "phase": "escalated",
+          "reasonCode": "retryThreshold",
+          "scores": [],
+          "timestampMs": 1747000180000,
+          "to": "ble"
+        }
+      },
+      "t_ms": 1747000180000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 0,
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 4,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 1
+          },
+          "timestampMs": 1747000185000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000185000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "routingDecision",
+        "decision": {
+          "phase": "scoreUpdated",
+          "scores": [],
+          "timestampMs": 1747000185000,
+          "winningScore": 66.5
+        }
+      },
+      "t_ms": 1747000185000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 1,
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 5,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 2
+          },
+          "timestampMs": 1747000190000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000190000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"relay_demoted_battery\",\"battery_level\":12,\"min_required\":20}"
+      },
+      "t_ms": 1747000190000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "deviceCapability",
+        "snapshot": {
+          "batteryLevel": 12,
+          "changedFields": 1,
+          "isCharging": false,
+          "relayRole": "regular",
+          "timestampMs": 1747000190000
+        }
+      },
+      "t_ms": 1747000190000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 2,
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 1,
+          "retryQueue": {
+            "criticalPriorityCount": 1,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 3
+          },
+          "timestampMs": 1747000195000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000195000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"neighbor_lost\",\"peer_id\":\"off1peer\"}"
+      },
+      "t_ms": 1747000200000
+    },
+    {
+      "kind": "flush",
+      "t_ms": 1747000220000
+    },
+    {
+      "kind": "app_state",
+      "state": "background",
+      "t_ms": 1747000225000
+    },
+    {
+      "kind": "app_state",
+      "state": "background",
+      "t_ms": 1747000226000
+    },
+    {
+      "kind": "app_state",
+      "state": "inactive",
+      "t_ms": 1747000227000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "mls",
+        "eventJson": "{\"type\":\"encryption_used\",\"timestamp_ms\":1747000230000,\"session_id\":\"s3\",\"group_id\":null,\"peer_id\":null,\"context\":\"send\",\"error_category\":null}"
+      },
+      "t_ms": 1747000230000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "routingDecision",
+        "decision": {
+          "from": "internet",
+          "phase": "switched",
+          "reasonCode": "currentUnavailable",
+          "scores": [],
+          "timestampMs": 1747000235000,
+          "to": "ble",
+          "winningScore": 60.0
+        }
+      },
+      "t_ms": 1747000235000
+    },
+    {
+      "kind": "app_state",
+      "state": "active",
+      "t_ms": 1747000280000
+    },
+    {
+      "kind": "flush",
+      "t_ms": 1747000282000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 0,
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 2,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 0
+          },
+          "timestampMs": 1747000285000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000285000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_sent\",\"message_id\":\"m200\",\"sender\":\"off1sender\",\"recipient\":\"off1recipient\",\"content\":\"hello\",\"priority\":\"medium\",\"requires_ack\":true,\"timestamp\":0,\"lamport_clock\":200}"
+      },
+      "t_ms": 1747000286000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "protocol",
+        "eventJson": "{\"type\":\"message_delivered\",\"message_id\":\"m200\",\"latency_ms\":130,\"hop_count\":1,\"transport\":\"ble\"}"
+      },
+      "t_ms": 1747000287000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 1,
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 3,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 1
+          },
+          "timestampMs": 1747000290000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000290000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 2,
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 4,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 2
+          },
+          "timestampMs": 1747000295000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000295000
+    },
+    {
+      "kind": "record",
+      "record": {
+        "category": "metricsFrame",
+        "frame": {
+          "ackPending": 0,
+          "dedup": {
+            "capacityUsedPercent": 0,
+            "mode": "hashMap",
+            "recentTracked": 0,
+            "totalTracked": 0
+          },
+          "isLocalRelay": false,
+          "neighborCount": 5,
+          "retryQueue": {
+            "criticalPriorityCount": 0,
+            "highPriorityCount": 0,
+            "lowPriorityCount": 0,
+            "mediumPriorityCount": 0,
+            "readyCount": 0,
+            "totalCount": 3
+          },
+          "timestampMs": 1747000300000,
+          "transports": []
+        }
+      },
+      "t_ms": 1747000300000
+    },
+    {
+      "kind": "end_session",
+      "t_ms": 1747000320000
+    },
+    {
+      "kind": "flush",
+      "t_ms": 1747000321000
+    }
+  ]
+}

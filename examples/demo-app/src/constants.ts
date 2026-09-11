@@ -38,3 +38,10 @@ export const PROTOCOL_CONFIG = {
     retry: {maxRetries: 10},
   },
 };
+
+// Telemetry. Paste the key and app id the developer portal issued; with the
+// placeholders left in place the demo runs with telemetry off and says so
+// once in the console. See docs/telemetry.md for what leaves the device.
+export const TELEMETRY_API_KEY = 'PASTE_API_KEY_HERE';
+export const TELEMETRY_APP_ID = 'PASTE_APP_ID_HERE';
+export const APP_VERSION = '0.0.1';

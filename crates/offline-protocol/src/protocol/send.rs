@@ -861,6 +861,17 @@ impl OfflineProtocol {
                             .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
                         manager.create_session(recipient)?
                     };
+                    // The handshake starts here, and this is the branch it
+                    // usually starts on: with `auto_key_exchange` the peer's
+                    // key package has normally arrived already, so the `else`
+                    // below never runs and no `session_missing` is raised.
+                    // Without this emit the latency percentile would see only
+                    // the handshakes that had to wait for a key package.
+                    self.emit_mls_session_establishing(
+                        recipient,
+                        welcome.group_id.as_str(),
+                        MlsOperationContext::Welcome,
+                    );
                     self.mark_encryption_capable(recipient);
 
                     // All operations succeeded, now safe to remove the key package
@@ -1758,7 +1769,7 @@ impl OfflineProtocol {
             self.delete_pending_message_from_storage(&message.message_id);
             self.emit_event(Event::message_failed(
                 message.message_id,
-                "Pending session queue capacity exceeded".to_string(),
+                "Pending session queue capacity exceeded",
                 0,
             ));
         }
@@ -1850,18 +1861,18 @@ impl OfflineProtocol {
     /// honour. Returning the messages for the caller to settle is what let all
     /// three call sites discard them instead, so there is nothing to discard
     /// any more.
-    pub(super) fn drop_pending_queue_for_peer(&mut self, recipient: &str, reason: &str) -> usize {
+    pub(super) fn drop_pending_queue_for_peer(
+        &mut self,
+        recipient: &str,
+        reason: &'static str,
+    ) -> usize {
         let messages = self
             .pending_encrypted_messages
             .remove(recipient)
             .unwrap_or_default();
         self.delete_pending_messages_from_storage(messages.iter().map(|m| &m.message_id));
         for message in &messages {
-            self.emit_event(Event::message_failed(
-                message.message_id.clone(),
-                reason.to_string(),
-                0,
-            ));
+            self.emit_event(Event::message_failed(message.message_id.clone(), reason, 0));
         }
         self.recompute_next_pending_message_expiry();
         messages.len()
@@ -1931,7 +1942,7 @@ impl OfflineProtocol {
                     self.delete_pending_message_from_storage(&msg.message_id);
                     self.emit_event(Event::message_failed(
                         msg.message_id.clone(),
-                        "Recipient blocked".to_string(),
+                        "Recipient blocked",
                         0,
                     ));
                 }
@@ -1990,7 +2001,7 @@ impl OfflineProtocol {
                         );
                         self.emit_event(Event::message_failed(
                             msg.message_id.clone(),
-                            "Duplicate suppressed at flush (probabilistic dedup; possible false positive)".to_string(),
+                            "Duplicate suppressed at flush (probabilistic dedup; possible false positive)",
                             0,
                         ));
                     }
@@ -2841,7 +2852,7 @@ impl OfflineProtocol {
                     // chunks surface through the transfer abort above.)
                     self.emit_event(Event::message_failed(
                         oldest_id.clone(),
-                        "Outbox capacity exceeded".to_string(),
+                        "Outbox capacity exceeded",
                         attempt_count,
                     ));
                     if let Some(recipient) = self.take_undeliverable_connection_request(&oldest_id)
@@ -3139,7 +3150,7 @@ impl OfflineProtocol {
             // restore, which runs before the event pipeline is live.
             self.settle_restored_message_failure(Event::message_failed(
                 message_id,
-                "Pending session lifetime exceeded".to_string(),
+                "Pending session lifetime exceeded",
                 0,
             ));
         }
@@ -3187,7 +3198,7 @@ impl OfflineProtocol {
             // settles the same way when the retry budget runs out.
             self.emit_event(Event::message_failed(
                 message_id.clone(),
-                "Outbox lifetime exceeded".to_string(),
+                "Outbox lifetime exceeded",
                 attempt_count,
             ));
             if let Some(recipient) = self.take_undeliverable_connection_request(&message_id) {
@@ -4789,7 +4800,7 @@ impl OfflineProtocol {
         })?;
         state.emit_event(Event::message_failed(
             message_id.clone(),
-            "Message missing from outbox (cannot retry)".to_string(),
+            "Message missing from outbox (cannot retry)",
             retry_count,
         ));
         drop(state);

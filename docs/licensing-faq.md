@@ -83,3 +83,33 @@ make.
 See [LICENSE-COMMERCIAL.md](../LICENSE-COMMERCIAL.md) — in short, email
 legal@offlineprotocol.com with a brief description of your product, its
 distribution model, and expected scale.
+
+## Is telemetry part of the license?
+
+Hosted telemetry is optional and metered. Its client ships inside the SDK;
+service access, usage allowances, and charges are set out in the applicable
+commercial agreement.
+
+Under the Commercial License, you may leave hosted telemetry disabled, omit
+its credentials, or stop new collection using the documented controls. Unless
+Offline Protocol authorizes otherwise in writing, the bundled telemetry client
+must use an authorized endpoint and preserve its event schema and serialized
+payload format. Ordinary forwarding proxies and local test captures are
+permitted. The exact restriction and exceptions are in
+[Telemetry under the Commercial License](../LICENSE-COMMERCIAL.md#telemetry-under-the-commercial-license).
+
+You may receive events and diagnostics through the SDK's public APIs and
+independently collect, store, analyze, or forward that information, including
+to third-party observability providers. These permissions do not imply that
+every internal telemetry record or hosted aggregate is exposed through those
+APIs. The service, the dashboards, and the reports are Offline Protocol's, and
+"Offline Protocol telemetry" is a name the
+[trademark policy](../TRADEMARKS.md) protects.
+
+Under the AGPL-3.0 option, the telemetry client may be modified, removed, or
+replaced in accordance with that license. Under either option, the SDK
+performs no commercial-license entitlement checks, and core SDK functionality
+does not require hosted telemetry.
+
+See [Telemetry](telemetry.md) for the data inventory and the handling of
+collection, queued records, and in-flight uploads.

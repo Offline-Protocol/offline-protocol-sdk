@@ -751,6 +751,24 @@ interface TransportMetrics {
 | `setBatteryLevel(level)` | `Promise<void>` | Set battery level (0-100) for mesh decisions |
 | `getBatteryLevel()` | `Promise<number \| null>` | Get current battery level |
 
+### Telemetry
+
+Opt-in by key: the SDK collects, batches and uploads accepted events to the
+Offline Protocol ingest on its own background thread. Nothing reaches
+JavaScript per event, and the native module owns the lifecycle. What leaves
+the device is inventoried in [docs/telemetry.md](../../docs/telemetry.md);
+the store disclosures are in [docs/privacy.md](../../docs/privacy.md).
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `enableTelemetry(config)` | `Promise<void>` | Start with `{ apiKey, appId, appVersion }` from the developer portal; rejects `TelemetryConfigInvalid` naming a refused field |
+| `disableTelemetry()` | `Promise<void>` | Final flush (up to 3 s), then stop |
+| `flushTelemetry()` | `Promise<void>` | Ask the uploader to send now |
+| `telemetryStats()` | `Promise<TelemetryStats \| null>` | Sent, accepted, dropped, buffered, session id, last error |
+| `endTelemetrySession()` | `Promise<void>` | Summary, flush, fresh session id |
+| `setTelemetryEnabled(enabled)` | `Promise<void>` | Runtime opt-out for a user setting; queued batches still drain |
+| `telemetryInstallId()` | `Promise<string \| null>` | The opaque per-install id, stamped on batches only with `includeDeviceId` |
+
 ### DORS Configuration
 
 | Method | Returns | Description |

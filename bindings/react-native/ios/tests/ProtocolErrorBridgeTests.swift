@@ -31,6 +31,7 @@ final class ProtocolErrorBridgeTests: XCTestCase {
             (.GroupNotFound(message: "group:missing"), "GroupNotFound"),
             (.PermissionDenied(message: "only admins can invite"), "PermissionDenied"),
             (.InvalidArgument(message: "group name cannot be empty"), "InvalidArgument"),
+            (.TelemetryConfigInvalid(message: "telemetry config invalid: api_key"), "TelemetryConfigInvalid"),
         ]
         for (error, expectedCode) in cases {
             let mapped = mapProtocolBridgeError(error)

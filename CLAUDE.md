@@ -26,6 +26,7 @@ that are versioned, reviewable, and readable by people who are not an agent.
 | `offline-protocol-leaf`: anything a device does at pairing, on a frame, or with its store | ADR [0021](docs/adr/0021-a-leaf-node-speaks-mls.md) and [docs/spec/leaf-provisioning.md](docs/spec/leaf-provisioning.md) (a time source, real entropy, durable-before-emit and authorization are obligations, not suggestions) |
 | Replicated documents: the store, sync frames, attachments | [docs/spec/data-sync.md](docs/spec/data-sync.md), [the replication state machine](docs/state-machines/data-replication.md), ADR [0018](docs/adr/0018-data-layer-engine-and-storage-seams.md) and [0019](docs/adr/0019-remote-document-imports-are-contained-not-trusted.md) |
 | Any binding: Swift, Kotlin, Python, TypeScript | [docs/bridges/](docs/bridges/README.md) |
+| The telemetry pipe: what it sends, when, the queue, the uploader | [docs/telemetry.md](docs/telemetry.md), the [network egress](docs/security/threat-model.md#network-egress) section of the threat model, and [docs/privacy.md](docs/privacy.md) |
 
 The ADR index is the fastest route to "why is this like this". If you are about
 to simplify something that looks redundant, check there first: several shapes in
@@ -115,10 +116,14 @@ offline-protocol-reliability   AckManager, RetryQueue, Deduplicator, AckOptimize
 offline-protocol-mls           MlsManager, MlsStorage trait, session & group encryption
 offline-protocol-services      MeshServices: registry, discovery (gossip), request/response
 offline-protocol-data          DataDoc: replicated documents (CRDT), caps, compaction
+offline-protocol-telemetry-wire  Batch envelope + typed event payloads shared with the
+                               telemetry ingest (a copy of the ingest's own wire crate)
     |
 offline-protocol-router        DORS transport selector, relay role vocabulary
     |
-offline-protocol               Engine: OfflineProtocol, ProtocolConfig, TransportManager, events
+offline-protocol               Engine: OfflineProtocol, ProtocolConfig, TransportManager, events,
+                               and telemetry/pipe: the one background thread and the one
+                               socket in the workspace (feature `telemetry-pipe`, default on)
     |
 offline-protocol-uniffi        UniFFI bindings (cdylib + staticlib)
 offline-protocol-bench         Criterion benchmarks
@@ -140,10 +145,15 @@ offline-protocol-leaf          A constrained device as a never-committing MLS me
   documents over the storage seam. The backend is swappable at runtime via
   `DataConfig::storage` (one line, no rebuild), sealing sits above the
   adapter, and the CRDT engine stays inside `offline-protocol-data`.
-- **`TelemetrySink`**: installed via
-  `OfflineProtocol::install_telemetry_sink(sink, config)`.
-  `TelemetryConfig::mls_verbosity` gates MLS lifecycle emission at runtime;
-  identifier scrubbing is on by default.
+- **Telemetry** is not an extension point. `OfflineProtocol::enable_telemetry`
+  starts the pipe in `crates/offline-protocol/src/telemetry/pipe/`, which is
+  the one production sink; `install_telemetry_sink` is crate-private. The
+  emit path never allocates for an event the pipe drops (`classify.rs`), and
+  the uploader never holds a lock across I/O. `TelemetryConfig::mls_verbosity`
+  gates MLS lifecycle emission at runtime. `scrub_ids` (default on) hashes the
+  peer and group ids on MLS lifecycle records, which the pipe reads only to
+  pair a handshake's start with its end; it never changes what `on_event`
+  delivers or what is uploaded.
 - **`EventCallback`**: the engine emits events (MessageReceived,
   NeighborDiscovered, TransportSwitched, and so on). Events cross UniFFI as
   opaque JSON.
@@ -191,6 +201,15 @@ These fail silently if broken. Each is documented in full where it is linked.
   exactly what `tools/mls-interop` did before this crate existed, and what
   `the_interop_harness_uses_this_crate_rather_than_its_own_copies` now refuses
   ([ADR 0022](docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md)).
+- **The rollup and session-summary wire types exist only inside the telemetry
+  pipe.** The free event API is per-event and unaggregated by design; a name
+  that is both a wire aggregate and an `Event` would hand the product's
+  differentiator to `on_event`. `aggregate_wire_types_never_reach_the_free_event_api`
+  pins it, and greps `src/` outside the pipe for the two literals.
+- **Every binding fills the telemetry platform fields itself and owns the
+  lifecycle** ([C12](docs/bridges/README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform));
+  `every_bridge_reads_the_telemetry_config_section` reads the UDL record and
+  the three parsers.
 - **Never add a catch-all arm to a telemetry reason classifier that matches on
   an enum** (a classifier over an open wire string may, if the fallback returns
   a fixed token and never the input)

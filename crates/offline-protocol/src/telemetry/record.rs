@@ -76,7 +76,7 @@ impl TelemetryRecord {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::events::{
         DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode, PresenceSource,
@@ -105,7 +105,7 @@ mod tests {
     ///    (`impl_telemetry_names_match_catalogue`).
     /// 4. Every name conforms to the documented `snake.dot.case` grammar
     ///    (`all_telemetry_names_match_grammar`).
-    const ALL_TELEMETRY_NAMES: &[&str] = &[
+    pub(crate) const ALL_TELEMETRY_NAMES: &[&str] = &[
         // Event::*
         "protocol.message.sent",
         "protocol.message.received",
@@ -186,6 +186,7 @@ mod tests {
         "mls.encryption_used",
         "mls.decryption_failed",
         "mls.session_missing",
+        "mls.session_establishing",
         "mls.session_ready",
         // Non-Event, non-MLS TelemetryRecord variants.
         //
@@ -378,6 +379,7 @@ mod tests {
             | MlsLifecycleEvent::EncryptionUsed { .. }
             | MlsLifecycleEvent::DecryptionFailed { .. }
             | MlsLifecycleEvent::SessionMissing { .. }
+            | MlsLifecycleEvent::SessionEstablishing { .. }
             | MlsLifecycleEvent::SessionReady { .. } => (),
         }
     }
@@ -385,7 +387,7 @@ mod tests {
     /// Constructs one exemplar per [`Event`] variant, in the same order as
     /// the match arms of [`Event::telemetry_name`]. Field values are
     /// placeholders — the tests only read the telemetry name.
-    fn event_exemplars() -> Vec<Event> {
+    pub(crate) fn event_exemplars() -> Vec<Event> {
         vec![
             Event::MessageSent {
                 message_id: String::new(),
@@ -853,6 +855,14 @@ mod tests {
                 group_id: None,
                 peer_id: None,
                 context: MlsOperationContext::SessionLookup,
+                error_category: None,
+            },
+            MlsLifecycleEvent::SessionEstablishing {
+                timestamp_ms: 0,
+                session_id: String::new(),
+                group_id: None,
+                peer_id: None,
+                context: MlsOperationContext::Welcome,
                 error_category: None,
             },
             MlsLifecycleEvent::SessionReady {

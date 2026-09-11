@@ -1519,7 +1519,11 @@ impl OfflineProtocol {
     /// record every caller of this is handling, and the record is deleted either
     /// way. A settlement nobody can act on still beats a destruction nobody is
     /// told about.
-    fn unrecoverable_message_settlement(key_id: &str, reason: &str, attempts: u32) -> Event {
+    fn unrecoverable_message_settlement(
+        key_id: &str,
+        reason: &'static str,
+        attempts: u32,
+    ) -> Event {
         MessageId::from_str(key_id).map_or_else(
             |_| {
                 Event::convergence_diag(
@@ -1530,7 +1534,7 @@ impl OfflineProtocol {
                     ),
                 )
             },
-            |message_id| Event::message_failed(message_id, reason.to_string(), attempts),
+            |message_id| Event::message_failed(message_id, reason, attempts),
         )
     }
 
@@ -2069,7 +2073,7 @@ impl OfflineProtocol {
             }
             capacity_settlements.push(Event::message_failed(
                 message_id,
-                "Pending session queue capacity exceeded".to_string(),
+                "Pending session queue capacity exceeded",
                 0,
             ));
         }
@@ -2102,7 +2106,7 @@ impl OfflineProtocol {
         self.settle_restored_message_failures(walk.unaddressable.into_iter().map(|message_id| {
             Event::message_failed(
                 message_id,
-                "Recipient is not a valid user ID; queued message cannot be delivered".to_string(),
+                "Recipient is not a valid user ID; queued message cannot be delivered",
                 0,
             )
         }));
@@ -3923,7 +3927,7 @@ impl OfflineProtocol {
             );
             expiry_settlements.push(Event::message_failed(
                 entry.message.id.clone(),
-                "Outbox lifetime exceeded".to_string(),
+                "Outbox lifetime exceeded",
                 entry.attempt_count,
             ));
         }
@@ -3964,7 +3968,7 @@ impl OfflineProtocol {
                 // holds this id and nothing will ever resolve it otherwise.
                 capacity_settlements.push(Event::message_failed(
                     entry.message.id.clone(),
-                    "Outbox capacity exceeded".to_string(),
+                    "Outbox capacity exceeded",
                     entry.attempt_count,
                 ));
             }

@@ -352,14 +352,62 @@ like this one.
 Reference adapters live in `examples/storage-adapters/`, one per binding,
 each with the conformance suite wired into its own test harness.
 
+## C12. Telemetry is callback-free, and the binding fills the platform
+
+Before 0.26 telemetry crossed the bridge as a callback interface: every
+record was serialized to JSON in Rust, handed to a Swift or Kotlin sink,
+re-encoded for the React Native emitter and parsed again in JavaScript, where
+a separate package classified and uploaded it. Now the whole pipeline is in
+the core and nothing crosses per event. The binding owes three things.
+
+**The platform fields are filled by the binding, never read from the app.**
+`TelemetryConfig.os` and `os_major` are what the ingest keys its
+per-platform aggregates on. Kotlin sets `TelemetryOs.ANDROID` and the API
+level, Swift sets `.ios` and the major of `UIDevice.current.systemVersion`,
+Python maps `platform.system()`. The TypeScript `TelemetryConfig` does not
+expose them, and `every_bridge_reads_the_telemetry_config_section` pins both
+halves: every other field is read under its camelCase name, and these two
+are not read at all.
+
+**The binding owns the lifecycle.** Entering the background is the session
+boundary. Kotlin reports it from an `ActivityLifecycleCallbacks` watcher on
+the `Application`, which tracks the started activities by identity and draws
+the edge when the last one stops. Never from `onHostPause`: that is
+`Activity.onPause`, which fires for a runtime permission dialog, the share
+sheet and any translucent activity, so a boundary there would rotate the
+session every time a user granted a permission and count one iOS session as
+several on Android. For the same reason the state seeded at
+`enableTelemetry` comes from that watcher rather than from React Native's
+`lifecycleState`, which is also pause-granularity. Swift reports the edge
+from the `UIApplication` notifications, and wraps the blocking flush in a
+background task so the uploader thread gets its three seconds before the
+process is suspended. Returning to the foreground opens the next session.
+JavaScript makes no lifecycle call, and an application that never touches
+`AppState` still gets correct sessions. Python exposes `notify_app_state` for
+a host that has a lifecycle of its own.
+
+**The blocking calls never run on a UI thread.** `disable_telemetry` and
+`end_telemetry_session` wait up to three seconds for a final flush, and
+`flush_telemetry_blocking` up to the deadline its caller names. React Native
+dispatches bridge methods off the main thread, and the Swift background
+handler hops to its serial queue; a binding that adds a call site keeps that
+property. Off the main thread is not free of consequence on Android, where
+the native-modules thread is single: every other native call queues behind
+those three seconds.
+
+The failure this prevents: a batch stamped `os: android` because an app
+forwarded a platform string, a session that never closes because the app
+never told the pipe it backgrounded, or a main-thread watchdog kill on
+`disableTelemetry`.
+
 ## What each binding owes
 
 | Binding | Owes |
 |---------|------|
-| Swift | The manual Objective-C bridge kept in step with every `@objc` method; secure storage backed by Keychain; a live-instance check before emitting |
-| Kotlin | Secure storage backed by Keystore; no blocking work on the main looper; awareness that platform callbacks arrive on binder threads |
-| Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change |
-| TypeScript | Config normalization, event typing kept in step with the core, and no assumption that a native method exists in an older binary |
+| Swift | The manual Objective-C bridge kept in step with every `@objc` method; secure storage backed by Keychain; a live-instance check before emitting; the telemetry session boundary inside a background task (C12) |
+| Kotlin | Secure storage backed by Keystore; no blocking work on the main looper; awareness that platform callbacks arrive on binder threads; the telemetry session boundary from an `Application.ActivityLifecycleCallbacks` watcher, never `onHostPause` (C12) |
+| Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change; the host platform for telemetry from `platform` |
+| TypeScript | Config normalization, event typing kept in step with the core, no assumption that a native method exists in an older binary, and no telemetry lifecycle code of its own |
 
 A storage adapter written in any of them owes the same thing: a green
 conformance report (C11).

@@ -37,6 +37,11 @@ use crate::telemetry::aggregator::{
     build_metrics_frame, device_battery_from_available, diff_device_capability,
     diff_transport_state, DeviceSnap,
 };
+#[cfg(feature = "telemetry-pipe")]
+use crate::telemetry::pipe::{
+    store::Backend, AppState, PipeParts, TelemetryHost, TelemetryPipe, TelemetryStats,
+    FINAL_FLUSH_BUDGET,
+};
 use crate::telemetry::{
     dispatch_record, Scrubber, TelemetryConfig, TelemetryContext, TelemetryRecord, TelemetrySink,
 };
@@ -644,9 +649,10 @@ pub struct OfflineProtocol {
     /// Rate limiting policy for MLS failure event floods.
     mls_event_rate_limiter: MlsEventRateLimiter,
 
-    /// Pre-install scrubber used by MLS emit sites before
-    /// `install_telemetry_sink` is called. Once a sink is installed, emit
-    /// sites read `self.telemetry.scrubber` instead via `current_scrubber()`.
+    /// Pre-install scrubber used by MLS emit sites before a sink is
+    /// installed (`enable_telemetry`, or `install_sink` beneath it). Once one
+    /// is installed, emit sites read `self.telemetry.scrubber` instead via
+    /// `current_scrubber()`.
     /// Both scrubbers share `telemetry_fallback_secret` so opaque identifiers
     /// observed by the legacy `MlsEventEmitter` stay consistent across the
     /// install boundary.
@@ -654,7 +660,7 @@ pub struct OfflineProtocol {
 
     /// Per-instance fallback secret for identifier scrubbing. Random at
     /// construction. Reused by both the pre-install `telemetry_scrubber`
-    /// and by any scrubber built inside `install_telemetry_sink` (unless the
+    /// and by any scrubber built inside `install_sink` (unless the
     /// installed `TelemetryConfig` carries its own `scrub_secret`). Keeping
     /// the fallback stable across installs means the legacy
     /// `MlsEventEmitter` path observes consistent opaque IDs before and
@@ -684,7 +690,7 @@ pub struct OfflineProtocol {
     nostr_unpersisted_secret: Option<Zeroizing<[u8; 32]>>,
 
     /// Installed telemetry context (sink + config + scrubber). `None` until
-    /// `install_telemetry_sink` is called; thereafter shared with
+    /// `enable_telemetry` installs one; thereafter shared with
     /// `SharedState` via `Arc` clone so both emit paths dispatch through the
     /// same configuration.
     ///
@@ -693,10 +699,17 @@ pub struct OfflineProtocol {
     /// does not hold the shared-state lock, while protocol-event emission
     /// happens inside `SharedState::emit_event` under the lock. Each path
     /// reads the context from whichever side it already has in hand, and
-    /// `install_telemetry_sink` is the single writer that keeps both copies
-    /// in sync (guaranteed atomic from the caller's perspective because
-    /// `&mut self` excludes concurrent calls).
+    /// `install_sink` is the single writer that keeps both copies in sync
+    /// (guaranteed atomic from the caller's perspective because `&mut self`
+    /// excludes concurrent calls), and `detach_telemetry_pipe` the single
+    /// clearer.
     pub(crate) telemetry: Option<Arc<TelemetryContext>>,
+
+    /// The running telemetry pipe, when `enable_telemetry` built one. Its
+    /// sink is what `telemetry` dispatches into; the pipe itself is kept so
+    /// the tick can wake it and `initialize_mls` can hand it storage.
+    #[cfg(feature = "telemetry-pipe")]
+    telemetry_pipe: Option<Arc<TelemetryPipe>>,
 
     /// File transfer manager for chunking outbound and reassembling inbound media.
     file_transfer_manager: FileTransferManager,
@@ -1054,6 +1067,8 @@ impl OfflineProtocol {
             nostr_secret_persisted: false,
             nostr_unpersisted_secret: None,
             telemetry: None,
+            #[cfg(feature = "telemetry-pipe")]
+            telemetry_pipe: None,
             file_transfer_manager: FileTransferManager::new(),
             pending_media_metadata: HashMap::new(),
             outbound_media_transfers: HashMap::new(),
@@ -1364,6 +1379,8 @@ impl OfflineProtocol {
         }
 
         self.mls_manager = Some(manager);
+        #[cfg(feature = "telemetry-pipe")]
+        self.attach_telemetry_storage();
         // A re-init can swap the identity, and with it which groups exist, so
         // the one-shot group enumeration has to run again. Past the last
         // `return Err` above, so a failed init leaves the flag alone.
@@ -1616,10 +1633,27 @@ impl OfflineProtocol {
     ///
     /// [`TelemetryRecord::Protocol`]: crate::telemetry::TelemetryRecord::Protocol
     /// [`TelemetryRecord::Mls`]: crate::telemetry::TelemetryRecord::Mls
-    pub fn install_telemetry_sink(
+    // Crate-private since 0.26: the pipe is the one production sink, and the
+    // engine's own tests are the remaining callers.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn install_telemetry_sink(
         &mut self,
         sink: Arc<dyn TelemetrySink>,
         config: TelemetryConfig,
+    ) -> Result<()> {
+        self.install_sink(
+            sink,
+            config,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
+    }
+
+    /// Installs `sink` behind `gate`, the flag every emit site reads first.
+    fn install_sink(
+        &mut self,
+        sink: Arc<dyn TelemetrySink>,
+        config: TelemetryConfig,
+        gate: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<()> {
         // Forward the routing-diagnostic preference to the TransportManager
         // before wiring any callbacks so the very first routing decision
@@ -1627,7 +1661,7 @@ impl OfflineProtocol {
         self.transport_manager
             .set_routing_diagnostic(config.routing_diagnostic());
 
-        let ctx = TelemetryContext::new(sink, config, self.telemetry_fallback_secret);
+        let ctx = TelemetryContext::with_gate(sink, config, self.telemetry_fallback_secret, gate);
         let mut state = lock_shared_state(&self.shared_state).map_err(|err| {
             error!(
                 error = %err,
@@ -1653,7 +1687,7 @@ impl OfflineProtocol {
         self.transport_manager
             .set_routing_decision_callback(Some(Arc::new(move |decision| {
                 let s = shared_routing.lock_or_recover();
-                if let Some(ctx) = &s.telemetry {
+                if let Some(ctx) = s.telemetry.as_ref().filter(|ctx| ctx.enabled()) {
                     let record = TelemetryRecord::Routing(Box::new(decision));
                     // Dispatch is panic-isolated so a sink that panics
                     // here cannot unwind through the live `MutexGuard`
@@ -1683,6 +1717,144 @@ impl OfflineProtocol {
         self.last_metrics_emit_at = None;
 
         Ok(())
+    }
+
+    /// Enables telemetry: the SDK collects, batches and uploads accepted
+    /// events to the ingest itself.
+    ///
+    /// `config` must carry the `api_key` and `app_id` the developer portal
+    /// issued; [`TelemetryConfig::validate`] names any field that is refused,
+    /// and the refusal is [`Error::TelemetryConfigInvalid`]. `host` names the
+    /// platform stamped on every batch and the application state right now.
+    ///
+    /// Nothing waits on I/O here: the pipe's storage load and first upload
+    /// run on its own thread. Batches are durable across a restart once a
+    /// protocol-state store is attached, which on the mobile bindings
+    /// happens inside `initialize_mls`; before that they are held in memory.
+    /// Calling this again replaces the running pipe after its final flush.
+    ///
+    /// What leaves the device, when, and how to switch it off are in
+    /// `docs/telemetry.md`.
+    #[cfg(feature = "telemetry-pipe")]
+    pub fn enable_telemetry(&mut self, config: TelemetryConfig, host: TelemetryHost) -> Result<()> {
+        if let Err(field) = config.validate() {
+            return Err(Error::TelemetryConfigInvalid(field.to_string()));
+        }
+        if let Some(previous) = self.detach_telemetry_pipe() {
+            previous.stop(FINAL_FLUSH_BUDGET);
+        }
+        // Always started in memory, even when a store is already attached.
+        // Adopting a backend loads the durable queue: an index read, up to
+        // `MAX_PENDING_BATCHES` sealed record reads with a decrypt and a parse
+        // each, a `list_keys` and the orphan sweep. Doing that here would run
+        // it on the caller, holding `&mut self`, which on the mobile bindings
+        // is the common order: `initialize_mls` has already attached storage
+        // by the time an app enables telemetry. `attach_telemetry_storage`
+        // hands the backend over instead, and the pipe's own thread adopts it.
+        let device_id = self.telemetry_install_id();
+        let pipe = TelemetryPipe::start(
+            &config,
+            PipeParts::production(host, Backend::Memory, device_id),
+        )?;
+        self.install_sink(pipe.sink(), config, pipe.enabled_flag())?;
+        self.telemetry_pipe = Some(pipe);
+        self.attach_telemetry_storage();
+        Ok(())
+    }
+
+    /// Disables telemetry: one final flush within [`FINAL_FLUSH_BUDGET`], then
+    /// the uploader thread stops and every emit site goes back to its
+    /// telemetry-off cost. Callers holding an outer lock should prefer
+    /// [`Self::detach_telemetry_pipe`] and stop the pipe outside it.
+    #[cfg(feature = "telemetry-pipe")]
+    pub fn disable_telemetry(&mut self) {
+        if let Some(pipe) = self.detach_telemetry_pipe() {
+            pipe.stop(FINAL_FLUSH_BUDGET);
+        }
+    }
+
+    /// Detaches the running pipe without stopping it: the sink is
+    /// uninstalled, the routing callback cleared, and the pipe handed back
+    /// for the caller to stop once it holds no engine lock. Its final flush
+    /// may block for up to [`FINAL_FLUSH_BUDGET`], which is why the two steps
+    /// are separable.
+    #[cfg(feature = "telemetry-pipe")]
+    pub fn detach_telemetry_pipe(&mut self) -> Option<Arc<TelemetryPipe>> {
+        let pipe = self.telemetry_pipe.take()?;
+        self.telemetry = None;
+        self.shared_state.lock_or_recover().telemetry = None;
+        self.transport_manager.set_routing_decision_callback(None);
+        self.transport_manager.set_routing_diagnostic(false);
+        Some(pipe)
+    }
+
+    /// The running telemetry pipe, if any.
+    #[cfg(feature = "telemetry-pipe")]
+    pub fn telemetry_pipe(&self) -> Option<Arc<TelemetryPipe>> {
+        self.telemetry_pipe.clone()
+    }
+
+    /// Stops or resumes collection without tearing the pipe down. Off, every
+    /// emit site costs one atomic load; what is already queued still drains.
+    #[cfg(feature = "telemetry-pipe")]
+    pub fn set_telemetry_enabled(&self, enabled: bool) {
+        if let Some(pipe) = &self.telemetry_pipe {
+            pipe.set_enabled(enabled);
+        }
+    }
+
+    /// Asks the uploader to flush now. Returns immediately.
+    #[cfg(feature = "telemetry-pipe")]
+    pub fn flush_telemetry(&self) {
+        if let Some(pipe) = &self.telemetry_pipe {
+            pipe.flush();
+        }
+    }
+
+    /// Flushes and waits up to `budget` for the uploader to finish.
+    #[cfg(feature = "telemetry-pipe")]
+    pub fn flush_telemetry_blocking(&self, budget: std::time::Duration) -> bool {
+        self.telemetry_pipe
+            .as_ref()
+            .is_some_and(|pipe| pipe.flush_blocking(budget))
+    }
+
+    /// The pipe's counters, or `None` while telemetry is not enabled.
+    #[cfg(feature = "telemetry-pipe")]
+    pub fn telemetry_stats(&self) -> Option<TelemetryStats> {
+        self.telemetry_pipe.as_ref().map(|pipe| pipe.stats())
+    }
+
+    /// Closes the current telemetry session: summary, a blocking flush,
+    /// then a fresh session id.
+    #[cfg(feature = "telemetry-pipe")]
+    pub fn end_telemetry_session(&self) {
+        if let Some(pipe) = &self.telemetry_pipe {
+            pipe.end_session();
+        }
+    }
+
+    /// Reports an application lifecycle transition to the pipe.
+    #[cfg(feature = "telemetry-pipe")]
+    pub fn notify_app_state(&self, state: AppState) {
+        if let Some(pipe) = &self.telemetry_pipe {
+            pipe.notify_app_state(state);
+        }
+    }
+
+    /// Hands the pipe the protocol-state store and the per-install id once
+    /// `initialize_mls` has them. Adoption happens on the pipe's own thread.
+    #[cfg(feature = "telemetry-pipe")]
+    fn attach_telemetry_storage(&self) {
+        let Some(pipe) = &self.telemetry_pipe else {
+            return;
+        };
+        if let (Some(storage), Some(cipher)) =
+            (&self.protocol_state_storage, &self.state_record_cipher)
+        {
+            pipe.attach_storage(storage.clone(), cipher.clone());
+        }
+        pipe.set_device_id(self.telemetry_install_id());
     }
 
     /// Starts the protocol.
@@ -2642,6 +2814,15 @@ impl OfflineProtocol {
                         .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
                     manager.create_session(peer_id)?
                 };
+                // The handshake starts here. This is the auto-establish path
+                // taken the moment a peer's key package arrives, which is how
+                // an ordinary session begins and which raises no
+                // `session_missing` at all; see `emit_mls_session_establishing`.
+                self.emit_mls_session_establishing(
+                    peer_id,
+                    welcome.group_id.as_str(),
+                    crate::mls_observability::MlsOperationContext::Welcome,
+                );
                 // We only ever build a session from a key package the peer
                 // published, so reaching here proves they run MLS.
                 self.mark_encryption_capable(peer_id);
@@ -3192,9 +3373,7 @@ impl OfflineProtocol {
         // Relaying switched off in configuration.
         if !relay.allow_relay || matches!(relay.relay_priority, RelayPriority::Never) {
             if self.mesh_relay.force_inactive() {
-                self.emit_event(Event::relay_demoted(
-                    "relaying disabled by configuration".to_string(),
-                ));
+                self.emit_event(Event::relay_demoted("relaying disabled by configuration"));
             }
             return;
         }
@@ -3218,7 +3397,7 @@ impl OfflineProtocol {
             }
             Some(RelayActivity::Ceased) => {
                 self.emit_event(Event::relay_demoted(
-                    "no traffic carried for other devices recently".to_string(),
+                    "no traffic carried for other devices recently",
                 ));
             }
             None => {}
@@ -3264,7 +3443,7 @@ impl OfflineProtocol {
     /// suffices there: a panic advances the cursor and the same record is
     /// not re-emitted on the next tick.
     fn tick_telemetry_categories(&mut self) {
-        let Some(ctx) = self.telemetry.clone() else {
+        let Some(ctx) = self.telemetry.clone().filter(|ctx| ctx.enabled()) else {
             return;
         };
         let now_ms = Utc::now().timestamp_millis();
@@ -3293,6 +3472,13 @@ impl OfflineProtocol {
                 }
             }
             dispatch_record(&ctx.sink, &TelemetryRecord::TransportState(event));
+            // An internet-capable transport coming up is the pipe's cue to
+            // send what an offline stretch queued; the pipe decides which
+            // transports count.
+            #[cfg(feature = "telemetry-pipe")]
+            if let Some(pipe) = &self.telemetry_pipe {
+                pipe.notify_transport(event.transport, event.current);
+            }
         }
 
         // Device capability diff. At-most-one emission per tick, so the
@@ -3528,7 +3714,7 @@ impl OfflineProtocol {
         })?;
         state.emit_event(Event::message_failed(
             message_id.clone(),
-            "Max retries exceeded".to_string(),
+            "Max retries exceeded",
             retry_count,
         ));
         if let Some(recipient) = undeliverable_recipient {

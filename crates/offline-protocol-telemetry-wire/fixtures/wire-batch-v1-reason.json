@@ -1,0 +1,34 @@
+{
+  "batch_id": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+  "session_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+  "wire_version": 1,
+  "app_version": "1.4.2",
+  "os": "android",
+  "os_major": 15,
+  "sdk_version": "0.26.0",
+  "events": [
+    {
+      "type": "protocol.message.failed",
+      "ts_ms": 1747000000000,
+      "data": {
+        "reason": "Max retries exceeded",
+        "retry_count": 5
+      }
+    },
+    {
+      "type": "protocol.message.deferred",
+      "ts_ms": 1747000001000,
+      "data": {
+        "reason": "recipient_unreachable",
+        "retry_count": 1
+      }
+    },
+    {
+      "type": "protocol.relay.demoted",
+      "ts_ms": 1747000002000,
+      "data": {
+        "reason": "no traffic carried for other devices recently"
+      }
+    }
+  ]
+}

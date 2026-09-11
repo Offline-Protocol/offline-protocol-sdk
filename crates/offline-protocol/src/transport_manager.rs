@@ -498,10 +498,11 @@ impl TransportManager {
     /// Fires at the same sites as `dors_event_callback`, carrying a richer
     /// shape suitable for the unified telemetry sink.
     ///
-    /// Crate-private: apps must drive routing telemetry through
-    /// [`crate::OfflineProtocol::install_telemetry_sink`] rather than wiring
-    /// the callback directly. This keeps [`crate::telemetry::TelemetryConfig`]
-    /// the single source of truth for sink configuration.
+    /// Crate-private: the callback is installed together with the telemetry
+    /// sink (`OfflineProtocol::enable_telemetry` installs the pipe's) and is
+    /// never wired directly, which keeps
+    /// [`crate::telemetry::TelemetryConfig`] the single source of truth for
+    /// its configuration.
     pub(crate) fn set_routing_decision_callback(
         &mut self,
         callback: Option<Arc<dyn Fn(RoutingDecision) + Send + Sync>>,

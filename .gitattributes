@@ -1,0 +1,35 @@
+# Line endings.
+#
+# Two families of test read files in this repo as bytes and assert on `\n`,
+# and a Windows checkout under the default `core.autocrlf=true` rewrites them
+# to CRLF, so both fail for a reason that has nothing to do with what they
+# test:
+#
+#   - The telemetry golden fixtures are compared byte for byte against a
+#     string a generator builds with `\n` (`pipe::tests::golden`), and the
+#     Node oracle in `crates/offline-protocol/tests/tools/` reads the same
+#     files.
+#   - The bridge source guards in `offline-protocol-uniffi` read the Swift,
+#     Kotlin, TypeScript and UDL sources and match multi-line snippets in
+#     them, which is how the hand-mirrored constants and the lifecycle
+#     wiring are pinned across three languages (docs/bridges/README.md C5).
+#     Dozens of tests do this, and the count grows with every pinned
+#     invariant, so it is deliberately not stated here as a number that would
+#     go stale unpinned. Several were only ever exercised on Unix runners,
+#     because `cargo test` stops at the first failing binary and an earlier
+#     crate always failed on Windows first.
+#
+# Pinning these to LF makes the bytes on disk the bytes the tests expect on
+# every platform. Nothing in the toolchain (cargo, gradle, node, Xcode) wants
+# CRLF, so this costs nothing.
+*.json text eol=lf
+*.swift text eol=lf
+*.kt text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.py text eol=lf
+*.udl text eol=lf
+*.podspec text eol=lf
+*.h text eol=lf
+*.m text eol=lf

@@ -541,6 +541,94 @@ identity key turns one extraction into every unit's identity, and the address
 that names one device names all of them. See
 [Leaf node provisioning](../spec/leaf-provisioning.md#identity-and-key-storage).
 
+### R13. A telemetry key can be extracted and abused
+
+The telemetry pipe authenticates with a bearer key that lives in the app
+binary. Anyone who extracts it can post accepted events against it, and the
+application is billed for them.
+
+**Why it stands:** the key is the only credential a device can hold, and a
+device is not a trusted party (A6). Signing each batch with the identity key
+would name the device to the ingest, which the telemetry design deliberately
+avoids.
+
+**What bounds it:** the ingest rate-limits per key and a key can be revoked
+from the portal, which is the response to a leaked one. Rotation is a portal
+feature; the SDK carries whatever key the application passes.
+
+### R14. The bundled root set ages with the SDK
+
+The pipe trusts the Mozilla root set compiled into the SDK release, never the
+device's trust store. If the ingest's certificate chain ever moves to a root
+absent from a shipped SDK, that SDK's telemetry stops: a network error,
+backoff, and `last_error` in the stats.
+
+**Why it stands:** consulting the device store would make an interception
+certificate installed on the device a trusted one, and redirection by a
+compromised device is exactly what the fixed endpoint and bundled roots exist
+to close.
+
+**What bounds it:** the ingest stays on a mainstream authority, a change of
+authority is treated as an SDK release event, and the failure is loud in the
+stats rather than silent.
+
+## Network egress
+
+Until 0.26 the Rust crates opened no socket: every byte that left a device
+went through a platform bridge the application could see. The telemetry pipe
+is the one exception, and its egress is bounded as follows.
+
+- **One endpoint, fixed at build time.** There is no runtime endpoint setting,
+  no host callback that could repoint the stream, and no redirect the uploader
+  follows. A build for a different ingest says so in its environment, and only
+  `https://` is accepted.
+- **TLS 1.2 or 1.3 through rustls**, with the Mozilla root set compiled in.
+  The device's trust store is not consulted (R14).
+- **An HTTP CONNECT proxy, when the environment names one.** The telemetry
+  uploader can use an HTTP CONNECT proxy selected through the HTTP client's
+  supported environment configuration, read when telemetry is enabled. TLS
+  remains between the SDK and the destination server and is validated against
+  the bundled Mozilla root certificates. Installing an interception
+  certificate only in the device trust store does not make that certificate
+  trusted by the SDK. Such an interception attempt fails certificate
+  validation; queued telemetry remains subject to retry, capacity, and expiry
+  limits.
+- **What crosses** is the inventory in [docs/telemetry.md](../telemetry.md#what-leaves-the-device):
+  typed projections with no identifier field, the engine's own fixed reason
+  tokens, and two aggregates computed on the device. Message content,
+  addresses, group ids, usernames and message ids have no field to land in;
+  the golden fixture pins the bytes.
+- **When it crosses** is a bounded set of wakes on one background thread,
+  never the caller's, and never while the engine holds a lock.
+- **Explicit enablement and shutdown semantics.** The hosted telemetry client
+  performs no collection, buffering, persistence, or uploads before explicit
+  enablement. `set_telemetry_enabled(false)` stops new collection while
+  previously queued records continue to drain. `disable_telemetry()` stops new
+  collection and initiates a final flush, waiting up to three seconds for
+  shutdown. An in-flight request may complete afterward. Remaining persisted
+  batches are retained for a later enablement, subject to queue limits and
+  expiry, except after the ingest answers `telemetry_disabled` (the
+  application's toggle is off in the developer portal). That discards the
+  queue and whatever is collected until the next enablement, so a toggled-off
+  stretch is never uploaded later.
+
+The key that authenticates the stream is R13.
+
+Enabling the pipe also installs the only writer the Rust core has to the
+platform log. That is a local disclosure rather than an egress one, and it is
+bounded the same way: only records under the pipe's own `tracing` target are
+passed through, so the engine's internal logging, which names groups, senders
+and peers, never reaches logcat or the unified log whatever its level. A
+device log is readable by anything on the device that can run `logcat`, which
+is why the filter is on the target and not on a level. See
+[the debug tap](../telemetry.md#the-debug-tap).
+
+The bound is on the core, not on the whole SDK. The React Native bridge
+sources log through `android.util.Log` and `print` on their own account, and
+some of those lines name a profile or a peer address. That is pre-existing
+behaviour outside this filter, and it is the reason a device log is not
+treated as a trust boundary anywhere in this model.
+
 ## The telemetry producer rule
 
 Telemetry ships some string fields verbatim by design. The scrubber hashes
