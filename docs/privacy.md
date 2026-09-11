@@ -119,7 +119,11 @@ batches may upload when telemetry is enabled again under the same `appId`,
 subject to the queue limits and the six-day expiry. It is cleared by
 uninstalling the app, by `wipePersistedState()`, and by enabling telemetry
 under a different `appId`, which discards it rather than uploading another
-application's batches under your key.
+application's batches under your key. It is also cleared when the ingest
+reports that the application's telemetry toggle is off in the developer
+portal: the SDK discards the queue, and whatever it collects until the next
+`enableTelemetry`, rather than holding them for an upload once the toggle is
+back on.
 
 ## What is never collected
 

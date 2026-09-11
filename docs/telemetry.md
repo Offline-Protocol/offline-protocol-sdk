@@ -303,7 +303,7 @@ offline stretch collected. It is cleared by uninstalling the app, by
 | `buffered` | Events in the ring buffer, not yet cut into a batch |
 | `sentEvents` | Events in batches the ingest answered 2xx |
 | `acceptedEvents` | The `accepted` count the ingest reported, summed; a deduplicated replay adds nothing |
-| `dropped` | Events lost: ring overflow, queue caps, the six-day expiry, or a permanent rejection. Counted in events, so it excludes records that would not open, which are counted in records and logged |
+| `dropped` | Events lost: ring overflow, queue caps, the six-day expiry, a permanent rejection, or everything queued or collected after the ingest reported the application's telemetry toggle off. Counted in events, so it excludes records that would not open, which are counted in records and logged |
 | `sessionId` | The current session id |
 | `lastError` | The most recent send failure, or the configuration problem that halted sending |
 | `lastFlushAtMs` | When a batch was last accepted |
@@ -399,7 +399,7 @@ is a portal feature, not an SDK one. The threat model records this as
 |---|---|
 | `apiKey` or `appId` empty or not printable ASCII, empty `appVersion`, zero or over-1 MiB `maxBatchBytes`, zero `maxBufferedRecords`, `flushIntervalMs` under 1000 | `enableTelemetry` rejects with `TelemetryConfigInvalid` naming the field |
 | Wrong key, or a key for another app | `lastError: "ingest responded 401"` (or 403); sending halts until the next `enableTelemetry` |
-| The application's telemetry toggle is off in the developer portal | `lastError: "ingest responded 403 (telemetry_disabled)"`; the queue is dropped, later events are discarded, and sending halts until the next `enableTelemetry` |
+| The application's telemetry toggle is off in the developer portal | `lastError: "ingest responded 403 (telemetry_disabled)"`; the queue is dropped, later events are discarded, and sending halts until the next `enableTelemetry`. The ingest can go on refusing for up to 30 seconds after the toggle comes back on, so a launch inside that window is refused the same way and keeps nothing until the app next calls `enableTelemetry`, usually the launch after |
 | No network | `lastError` names the transport failure; batches wait, bounded by the caps and the six-day expiry |
 | Calling `flushTelemetry` or `telemetryStats` before `enableTelemetry` | A no-op, and `null` |
 
