@@ -415,3 +415,144 @@ fn a_threaded_pipe_starts_flushes_on_request_and_stops_within_the_budget() {
     assert!(pipe.stop(FINAL_FLUSH_BUDGET));
     assert!(started.elapsed() < FINAL_FLUSH_BUDGET);
 }
+
+/// A replaced pipe's worker that outlives its stop cannot cost the pipe that
+/// replaced it a batch.
+///
+/// `stop` detaches a worker it cannot join within its budget, and a detached
+/// worker blocked in a request goes on to finish its drain: it deletes what
+/// the ingest accepted and rewrites the index from its own memory. The
+/// replacement used to adopt the queue at once and persist batches the old
+/// worker never saw, so the old worker's index write left them unnamed and
+/// the next launch swept them as orphans, with nothing counted or logged.
+/// The replacement now keeps its batches in memory until the old worker
+/// lets go of the queue, and adopts it then.
+#[test]
+fn a_detached_worker_finishing_an_upload_cannot_orphan_its_replacements_batch() {
+    use crate::telemetry::pipe::host::{TelemetryHost, TelemetryOs};
+    use crate::telemetry::pipe::store::tests::{SameStore, TEST_APP_ID};
+    use crate::telemetry::pipe::store::BatchStore;
+    use crate::telemetry::pipe::uploader::{HttpClient, Request, Response};
+    use crate::telemetry::pipe::PipeParts;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// Accepts every request, but holds each one until the gate opens.
+    #[derive(Clone, Default)]
+    struct GatedClient {
+        entered: Arc<AtomicBool>,
+        gate: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl GatedClient {
+        fn open(&self) {
+            let (open, opened) = &*self.gate;
+            *open.lock().unwrap() = true;
+            opened.notify_all();
+        }
+    }
+
+    impl HttpClient for GatedClient {
+        fn post(&mut self, _request: &Request<'_>) -> Result<Response, String> {
+            self.entered.store(true, Ordering::SeqCst);
+            let (open, opened) = &*self.gate;
+            let mut open = open.lock().unwrap();
+            while !*open {
+                open = opened.wait(open).unwrap();
+            }
+            Ok(Response {
+                status: 202,
+                retry_after: None,
+                body: r#"{"accepted":1,"rejected":0,"rejected_reasons":[]}"#.to_string(),
+            })
+        }
+    }
+
+    fn threaded(client: Box<dyn HttpClient>, clock: &FakeClock) -> Arc<TelemetryPipe> {
+        TelemetryPipe::start(
+            &test_config(),
+            PipeParts {
+                host: TelemetryHost::new(TelemetryOs::Ios, 18),
+                backend: Backend::Memory,
+                device_id: None,
+                client,
+                clock: clock.clock(),
+                jitter: Box::new(|| 0),
+                spawn_thread: true,
+            },
+        )
+        .expect("starts")
+    }
+
+    fn eventually(what: &str, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting until {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    let clock = FakeClock::at(1_000);
+    let storage = Arc::new(MemoryStorage::default());
+    let cipher = StateRecordCipher::new(&[3u8; 32]);
+
+    // The old pipe owns the queue and blocks inside an upload.
+    let gated = GatedClient::default();
+    let old = threaded(Box::new(gated.clone()), &clock);
+    old.attach_storage(storage.clone(), cipher.clone());
+    eventually("the old pipe adopted the queue", || old.is_durable());
+    let old_session = old.stats().session_id;
+    emit_failed(&old, 1);
+    old.flush();
+    eventually("the old pipe is inside its upload", || {
+        gated.entered.load(Ordering::SeqCst)
+    });
+
+    // Its stop budget runs out, and the worker is detached mid-request.
+    assert!(
+        !old.stop(Duration::from_millis(50)),
+        "the worker was still blocked"
+    );
+
+    // The replacement, started the way `enable_telemetry` starts one: in
+    // memory, then handed the storage. The handle is a different `Arc` over
+    // the same records, as a re-wrapped FFI adapter or a new engine holds.
+    let offline = CapturingClient::accepting();
+    offline.status.store(0, Ordering::SeqCst);
+    let new = threaded(Box::new(offline), &clock);
+    let new_session = new.stats().session_id;
+    new.attach_storage(
+        Arc::new(SameStore {
+            inner: storage.clone(),
+        }),
+        cipher,
+    );
+    emit_failed(&new, 2);
+    assert!(new.flush_blocking(Duration::from_secs(5)));
+
+    // The old request completes. The old worker deletes the batch the ingest
+    // accepted, writes its index, runs its final flush and exits.
+    gated.open();
+    eventually("the old worker exited", || {
+        Arc::strong_count(old.shared()) == 1
+    });
+    eventually("the replacement adopted the queue", || new.is_durable());
+    assert!(new.stop(FINAL_FLUSH_BUDGET));
+
+    // What the next launch finds.
+    let mut reloaded = BatchStore::new(sealed(&storage), TEST_APP_ID.to_string());
+    let mut sessions = Vec::new();
+    while let Some(batch) = reloaded.pop_front() {
+        let body: serde_json::Value = serde_json::from_str(&batch.body).expect("a batch");
+        sessions.push(body["session_id"].as_str().expect("a session").to_string());
+    }
+    assert!(
+        sessions.contains(&new_session),
+        "the replacement's batch did not survive: {sessions:?}"
+    );
+    assert!(
+        !sessions.contains(&old_session),
+        "the batch the ingest accepted was queued again: {sessions:?}"
+    );
+}

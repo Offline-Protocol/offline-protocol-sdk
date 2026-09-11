@@ -168,6 +168,17 @@ the client's answers were wrong on a device rather than merely different:
   ordinary logout-and-login sequence ran it twice; the second pass reloaded the
   pending batches and then re-persisted the in-memory copies, queueing every
   one of them twice and trimming the originals to the byte cap.
+- **One pipe writes a telemetry queue at a time.** A pipe stopped mid-upload
+  finishes on a detached thread, and the pipe that replaced it (a second
+  `enableTelemetry`, or a new engine over the same storage after a teardown)
+  used to adopt the queue at once. Both rewrite the index from their own
+  memory, so the old thread's last write could leave the replacement's
+  batches unnamed, and the next launch swept them as orphans without counting
+  or logging them. The replacement now holds its batches in memory until the
+  old thread lets go, then adopts the queue behind what that thread left, and
+  a pipe that finds its queue owned by another pipe, or cleared, stops writing
+  to it. An index entry whose record was already deleted before a crash is no
+  longer logged as a discarded batch.
 - **`telemetryStats().lastError` clears when a batch is accepted**, so it
   reports the current state rather than the high-water mark of a recovered
   outage.
