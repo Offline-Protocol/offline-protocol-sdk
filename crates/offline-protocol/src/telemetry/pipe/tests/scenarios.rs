@@ -614,6 +614,12 @@ fn a_403_telemetry_disabled_drops_the_queue_and_discards_what_follows() {
     client.status.store(202, Ordering::SeqCst);
     *client.error_code.lock().unwrap() = None;
     let again = inline_pipe(&test_config(), &clock, client.clone(), sealed(&storage));
+    // Without this, a fresh pipe that failed to adopt the store would run in
+    // memory, and "no backfill" below would hold with nothing proven.
+    assert!(
+        again.is_durable(),
+        "the fresh pipe adopted the durable queue"
+    );
     again.flush();
     assert_eq!(client.bodies.lock().unwrap().len(), 1, "no backfill");
     emit_failed(&again, 4);
