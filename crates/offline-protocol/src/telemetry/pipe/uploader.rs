@@ -321,7 +321,7 @@ pub(crate) fn classify_response(
         // Only a 403, and only with the code. A body that does not parse or
         // names any other code is the ordinary halt, so an ingest that
         // predates the code, or answers `forbidden`, keeps the queue as before.
-        403 if error_code(&response.body).as_deref() == Some(ERROR_TELEMETRY_DISABLED) => {
+        403 if has_error_code(&response.body, ERROR_TELEMETRY_DISABLED) => {
             *last_error = Some(format!("ingest responded 403 ({ERROR_TELEMETRY_DISABLED})"));
             Outcome::Disabled
         }
@@ -345,13 +345,11 @@ pub(crate) fn classify_response(
     }
 }
 
-/// The `error` code of an ingest error body, `{"error": "...", "message": "..."}`.
-fn error_code(body: &str) -> Option<String> {
+/// Whether an ingest error body, `{"error": "...", "message": "..."}`, names
+/// `code`. A body that is not JSON, or has no string `error`, names nothing.
+fn has_error_code(body: &str, code: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(body)
-        .ok()?
-        .get("error")?
-        .as_str()
-        .map(str::to_string)
+        .is_ok_and(|value| value.get("error").and_then(serde_json::Value::as_str) == Some(code))
 }
 
 /// The number of events the ingest counted for a 2xx answer.
