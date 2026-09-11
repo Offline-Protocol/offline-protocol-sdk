@@ -126,8 +126,8 @@ literal `8 * 1024 * 1024` in each. There is no per-language test for it, so a
 binding edited alone fails the Rust suite rather than its own. See
 [S6](swift.md#s6-secure-storage).
 
-The one-shot event tag list and the mesh wake task key are pinned the same way,
-by Rust guards that read the binding sources.
+The one-shot event tag list, the buffered inbound event set and the mesh wake
+task key are pinned the same way, by Rust guards that read the binding sources.
 
 **The relay address-proof signing domain** is the fifth, and it is the one set
 pinned by both mechanisms at once. The Swift and Kotlin
@@ -270,6 +270,25 @@ Two shapes solve this and they are not interchangeable:
 Which one applies depends on **where the event fires** relative to subscription,
 not on what the event means. A replay-on-subscribe mechanism alone does not fix
 a one-shot that fires before any subscriber exists.
+
+A third shape exists for one narrow class and must not be folded into either of
+the two above:
+
+- **A held inbound buffer** for events that each report one message the core
+  has already taken responsibility for: `message_received`, `file_received`
+  and the `message_decryption_failed` that stands in for one. By the time they
+  are emitted the core has ACKed the message, dedup-marked its id and dropped
+  its queued copy, so nothing will restate them and a drop is a lost message.
+  They do not collapse per type, since every message is its own fact, so the
+  hold is keyed `type:message_id`, kept in arrival order, and capped at a real
+  capacity (256, oldest dropped) rather than a backstop. Each bridge holds
+  them across the native-to-JS gap (Kotlin `BUFFERED_INBOUND_EVENT_TYPES`,
+  Swift `InboundEventBuffer`) and the TypeScript layer across the JS-to-listener
+  gap, all flushed on subscribe and on foreground and scoped to the session
+  that produced them. The three definitions are pinned together by
+  `react_native_buffered_inbound_event_set_matches_native`. Enrolling a
+  periodic event there would replay stale state; collapsing it into the
+  one-shot map would keep one message of many.
 
 ## C11. A storage adapter is a supported extension point, and is verified
 

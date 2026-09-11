@@ -2167,6 +2167,24 @@ pub(crate) struct OutboxEntry {
     /// verbatim.
     #[serde(skip)]
     pub(crate) reseal: Option<OutboxReseal>,
+    /// The relay has handed this frame to a device push at least once
+    /// (`MessageSent { pushed: true }`, see [`SEND_FAIL_REASON_RELAY_PUSHED`]).
+    ///
+    /// Sticky for the entry's lifetime, and persisted, because of what a later
+    /// relay verdict for the same id means. The relay remembers which
+    /// `(sender, recipient, message_id)` triples it has pushed and answers a
+    /// retry of one with `DeliveryError` (`already_pushed`) instead of a
+    /// second notification, and the bridges cannot tell that verdict from a
+    /// plain "recipient offline": both reach the core as
+    /// `recipient_unreachable`. So the reachability probe a park schedules
+    /// earns a `DeliveryError` fifteen seconds after every push, and without
+    /// this flag the app would be told `MessageUndeliverable` about a message
+    /// the push may already have delivered. With it, that verdict still
+    /// re-parks the entry (the recipient is not on the relay) but emits
+    /// nothing app-facing. A legacy record restores as `false`, so the first
+    /// probe after upgrading emits once; nothing is lost.
+    #[serde(default)]
+    pub(crate) relay_pushed: bool,
 }
 
 #[derive(Clone)]

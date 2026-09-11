@@ -8619,6 +8619,7 @@ fn test_unreachable_media_chunk_resolves_file_id() {
             last_sent_at: chrono::Utc::now(),
             last_transport: Some(TransportType::BLE),
             reseal: None,
+            relay_pushed: false,
         },
     );
     protocol
@@ -8779,6 +8780,173 @@ fn test_relay_pushed_verdict_parks_dm_and_watches_recipient() {
         protocol.presence_watch_peers().contains(&"bob".to_string()),
         "the pushed DM's recipient must be presence-watched"
     );
+}
+
+/// The park's timed probe resends the same id, and the relay answers a retry
+/// of a message it has already pushed with `DeliveryError` (`already_pushed`)
+/// rather than a second notification. The bridges can only report that as
+/// `recipient_unreachable`, so without the entry remembering it was pushed
+/// the first probe would emit the `MessageUndeliverable` the push park exists
+/// not to emit. The verdict must still re-park (the recipient is not on the
+/// relay), just silently; a DM that was never pushed keeps the event.
+#[test]
+fn test_probe_verdict_after_relay_push_reparks_without_undeliverable() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+    let undeliverable_ids = || -> Vec<String> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                Event::MessageUndeliverable { message_id, .. } => Some(message_id.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let pushed_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .on_transport_send_failed_via(
+            &pushed_id.as_str(),
+            Some("relay_pushed".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+    assert!(
+        protocol.outbox.get(&pushed_id).unwrap().relay_pushed,
+        "the park must mark the entry as pushed"
+    );
+    assert!(undeliverable_ids().is_empty());
+
+    // The probe's verdict: the relay refuses to push twice.
+    protocol
+        .on_transport_send_failed_via(
+            &pushed_id.as_str(),
+            Some("recipient_unreachable: Recipient is offline; push already sent".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+    assert!(
+        undeliverable_ids().is_empty(),
+        "a probe verdict for a pushed DM must not tell the app it is undeliverable"
+    );
+    assert!(
+        protocol.outbox.contains_key(&pushed_id),
+        "the verdict still re-parks: the entry stays"
+    );
+    assert!(!protocol.ack_manager.is_waiting_for_ack(&pushed_id));
+    assert!(
+        protocol.retry_queue.contains(&pushed_id.as_str()),
+        "the verdict still re-parks: a probe is rescheduled"
+    );
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&2),
+        "the verdict still re-parks: the interval escalates"
+    );
+
+    // Control: a DM the relay never pushed keeps the advisory event.
+    let plain_id = protocol
+        .send_message("carol", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .on_transport_send_failed_via(
+            &plain_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+    assert_eq!(
+        undeliverable_ids(),
+        vec![plain_id.as_str()],
+        "an un-pushed DM's unreachable verdict is still reported"
+    );
+}
+
+/// The pushed mark rides in the persisted outbox record: the relay remembers
+/// a push for a day, so the first probe after an app restart earns the same
+/// `DeliveryError` and must stay silent too.
+#[test]
+fn test_relay_pushed_mark_survives_restart() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let message_id = {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let mock_transport = MockTransport::new(TransportType::Internet);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::Internet, Box::new(mock_transport));
+        protocol
+            .enable_message_persistence_for_test(storage.clone())
+            .unwrap();
+        protocol.start().unwrap();
+        let message_id = protocol
+            .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        protocol
+            .on_transport_send_failed_via(
+                &message_id.as_str(),
+                Some("relay_pushed".to_string()),
+                Some(TransportType::Internet),
+            )
+            .unwrap();
+        message_id
+    };
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+    assert!(
+        protocol
+            .outbox
+            .get(&message_id)
+            .expect("the parked DM is restored")
+            .relay_pushed,
+        "the pushed mark must be restored with the entry"
+    );
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+    protocol
+        .on_transport_send_failed_via(
+            &message_id.as_str(),
+            Some("recipient_unreachable: Recipient is offline; push already sent".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageUndeliverable { .. })),
+        "the first probe after a restart must stay silent for a pushed DM"
+    );
+    assert!(protocol.outbox.contains_key(&message_id));
 }
 
 /// A pushed connection request may have been delivered by the push, so the
@@ -9367,6 +9535,7 @@ fn test_unreachable_media_chunk_is_not_parked() {
             last_sent_at: chrono::Utc::now(),
             last_transport: Some(TransportType::Internet),
             reseal: None,
+            relay_pushed: false,
         },
     );
     protocol
@@ -9789,6 +9958,7 @@ fn test_unreachable_media_chunk_is_offered_to_the_mesh() {
             last_sent_at: chrono::Utc::now(),
             last_transport: Some(TransportType::Internet),
             reseal: None,
+            relay_pushed: false,
         },
     );
     protocol
@@ -10209,6 +10379,7 @@ fn test_unpark_cancel_spares_connection_request_ack() {
             last_sent_at: chrono::Utc::now(),
             last_transport: Some(TransportType::Internet),
             reseal: None,
+            relay_pushed: false,
         },
     );
     protocol
@@ -10387,6 +10558,7 @@ fn test_unpark_cancel_spares_welcome_ack() {
             last_sent_at: chrono::Utc::now(),
             last_transport: Some(TransportType::Internet),
             reseal: None,
+            relay_pushed: false,
         },
     );
     protocol
@@ -10597,6 +10769,7 @@ fn test_cleanup_outbox_absolute_lifetime_cap_is_terminal_in_process() {
                 last_sent_at: chrono::Utc::now(), // fresh: probe just sent
                 last_transport: None,
                 reseal: None,
+                relay_pushed: false,
             },
         )
     };
@@ -20545,6 +20718,7 @@ fn test_outbox_capacity_prune_stays_inside_the_launch_budget() {
                 last_sent_at: base + ChronoDuration::seconds(i as i64),
                 last_transport: None,
                 reseal: None,
+                relay_pushed: false,
             },
         );
     }
@@ -20624,6 +20798,7 @@ fn test_outbox_absolute_expiry_prune_stays_inside_the_launch_budget() {
                 last_sent_at: stale,
                 last_transport: None,
                 reseal: None,
+                relay_pushed: false,
             },
         );
     }
@@ -24411,6 +24586,7 @@ fn test_restore_outbox_skips_corrupted_entries() {
             last_sent_at: chrono::Utc::now(),
             last_transport: None,
             reseal: None,
+            relay_pushed: false,
         },
     );
     storage
@@ -24458,6 +24634,7 @@ fn test_restore_outbox_prunes_overflow() {
             last_sent_at: base + ChronoDuration::seconds(i as i64),
             last_transport: None,
             reseal: None,
+            relay_pushed: false,
         };
         if i == 0 {
             oldest_id = Some(entry.message.id.as_str());
@@ -24502,6 +24679,7 @@ fn test_restore_outbox_refreshes_expired_ttl_carrier_relative() {
             last_sent_at: old,
             last_transport: None,
             reseal: None,
+            relay_pushed: false,
         },
     );
 
@@ -24652,6 +24830,7 @@ fn test_restore_outbox_prune_keeps_fresh_over_refreshed_stale() {
                 last_sent_at: now - ChronoDuration::seconds((i + 1) as i64),
                 last_transport: None,
                 reseal: None,
+                relay_pushed: false,
             },
         );
     }
@@ -24665,6 +24844,7 @@ fn test_restore_outbox_prune_keeps_fresh_over_refreshed_stale() {
             last_sent_at: now - ChronoDuration::hours(2),
             last_transport: None,
             reseal: None,
+            relay_pushed: false,
         };
         lapsed_ids.push(entry.message.id.as_str().to_string());
         store_outbox_entry(&storage, &entry);
@@ -25228,6 +25408,7 @@ fn test_cleanup_outbox_media_expiry_does_not_emit_message_failed() {
             last_sent_at: chrono::Utc::now() - ChronoDuration::seconds(1),
             last_transport: None,
             reseal: None,
+            relay_pushed: false,
         },
     );
 
@@ -25264,6 +25445,7 @@ fn test_restore_outbox_drops_absolutely_expired() {
             last_sent_at: now - ChronoDuration::seconds(5),
             last_transport: None,
             reseal: None,
+            relay_pushed: false,
         },
     );
 
@@ -25278,6 +25460,7 @@ fn test_restore_outbox_drops_absolutely_expired() {
             last_sent_at: now - ChronoDuration::seconds(2),
             last_transport: None,
             reseal: None,
+            relay_pushed: false,
         },
     );
 
@@ -25382,6 +25565,7 @@ fn test_flush_outbox_for_peer_includes_media_outbox() {
             last_sent_at: chrono::Utc::now(),
             last_transport: None,
             reseal: None,
+            relay_pushed: false,
         },
     );
 
@@ -25447,6 +25631,7 @@ fn test_flush_outbox_all_includes_media_outbox() {
             last_sent_at: chrono::Utc::now(),
             last_transport: None,
             reseal: None,
+            relay_pushed: false,
         },
     );
 
@@ -36696,6 +36881,7 @@ fn test_relay_unreachable_reason_is_classified_and_still_parks_the_dm() {
             last_sent_at: chrono::Utc::now(),
             last_transport: Some(TransportType::BLE),
             reseal: None,
+            relay_pushed: false,
         },
     );
 

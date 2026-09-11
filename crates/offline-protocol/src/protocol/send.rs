@@ -2891,6 +2891,7 @@ impl OfflineProtocol {
                 last_sent_at: Utc::now(),
                 last_transport: None,
                 reseal: staged_reseal,
+                relay_pushed: false,
             });
         // Persist newly-created main-outbox entries so they survive a restart.
         // media entries are intentionally not persisted.
@@ -2932,6 +2933,7 @@ impl OfflineProtocol {
                 last_sent_at: now,
                 last_transport: transport,
                 reseal: staged_reseal,
+                relay_pushed: false,
             });
 
         entry.message = message.clone();
@@ -3787,6 +3789,16 @@ impl OfflineProtocol {
         };
         let recipient = entry.message.recipient.as_str().to_string();
         let attempt_count = entry.attempt_count;
+        // A verdict for a frame the relay has already pushed is the answer to
+        // our own probe (`OutboxEntry::relay_pushed`): the relay refuses to
+        // notify twice, so it says `DeliveryError` for a message that may be
+        // sitting delivered on the recipient's device. Everything below still
+        // applies (the recipient is not on the relay, so record it, back the
+        // probe off, and re-park), except the app-facing event: telling the
+        // app the message is undeliverable would be exactly the claim
+        // `park_relay_pushed_dm` exists not to make. Media is never pushed
+        // and never parked, so the flag is only ever read off the main outbox.
+        let relay_pushed = !is_media && entry.relay_pushed;
         // The verdict, recorded as a fact before anything acts on it. Parking
         // below reacts to *this* message; the fact is what lets the next send
         // to the same recipient skip a carrier that has already said no.
@@ -3813,18 +3825,25 @@ impl OfflineProtocol {
         // targets (e.g. an ordinary DM to a confirmed peer). Done here, after
         // the `entry` borrow of `self.outbox` has ended.
         self.note_confirmation_probe_unreachable(&recipient);
-        warn!(
-            message_id = %message_id,
-            file_id = ?file_id,
-            parked = !is_media,
-            "Recipient unreachable for in-flight message (non-terminal)"
-        );
-        self.emit_event(Event::message_undeliverable(
-            parsed_id.clone(),
-            recipient.clone(),
-            reason,
-            file_id,
-        ));
+        if relay_pushed {
+            debug!(
+                message_id = %message_id,
+                "Recipient unreachable for a relay-pushed DM: re-parking without notifying the app"
+            );
+        } else {
+            warn!(
+                message_id = %message_id,
+                file_id = ?file_id,
+                parked = !is_media,
+                "Recipient unreachable for in-flight message (non-terminal)"
+            );
+            self.emit_event(Event::message_undeliverable(
+                parsed_id.clone(),
+                recipient.clone(),
+                reason,
+                file_id,
+            ));
+        }
         if let Some(frame) = media_frame {
             // The recipient is not on the relay, but they may be a few devices
             // away. A chunk keeps its pending ACK (media is never parked), so
@@ -3862,8 +3881,16 @@ impl OfflineProtocol {
     ///   a Welcome its lifecycle, both awaiting the acknowledgement or session
     ///   confirmation a delivered push produces. `is_parkable_plain_dm`
     ///   excludes both, and media chunks are never in `outbox`.
-    /// - **No `MessageUndeliverable`.** The app would be told a message is
-    ///   undeliverable when it may already have arrived.
+    /// - **No `MessageUndeliverable`, now or on any later probe.** The app
+    ///   would be told a message is undeliverable when it may already have
+    ///   arrived. The park's timed probe resends the same id, and the relay
+    ///   answers a retry of a pushed message with `DeliveryError` rather than
+    ///   a second notification, which the bridges can only report as
+    ///   `recipient_unreachable`. So the entry is flagged
+    ///   (`OutboxEntry::relay_pushed`, persisted) and
+    ///   [`Self::handle_recipient_unreachable_for_message`] re-parks a flagged
+    ///   entry silently. Without the flag the guarantee would last exactly
+    ///   one probe interval.
     fn park_relay_pushed_dm(&mut self, message_id: &str, carrier: Option<TransportType>) {
         let Ok(parsed_id) = MessageId::from_str(message_id) else {
             return;
@@ -3871,11 +3898,21 @@ impl OfflineProtocol {
         if !self.is_parkable_plain_dm(&parsed_id) {
             return;
         }
-        let Some(entry) = self.outbox.get(&parsed_id) else {
+        let Some(entry) = self.outbox.get_mut(&parsed_id) else {
             return;
         };
         let recipient = entry.message.recipient.as_str().to_string();
         let attempt_count = entry.attempt_count;
+        let newly_pushed = !entry.relay_pushed;
+        entry.relay_pushed = true;
+        if newly_pushed {
+            // Re-persisted on the flip only: the entry was written when it
+            // was created, and the flag has to survive a restart for the
+            // silent re-park to hold on the first probe after one.
+            if let Some(entry) = self.outbox.get(&parsed_id) {
+                self.persist_outbox_entry(entry);
+            }
+        }
         // The relay has said this recipient is not on it, which is the same
         // fact a `DeliveryError` records, and the same thing the probe backoff
         // keys on.
@@ -3927,11 +3964,16 @@ impl OfflineProtocol {
     ///   [`Event::MessageUndeliverable`];
     /// - the relay's push fallback succeeds → the relay answers
     ///   `MessageSent { pushed: true }`, which parks the message again
-    ///   ([`Self::park_relay_pushed_dm`]) and escalates the interval. The probe
-    ///   does not become a push per rung: the relay remembers which
-    ///   `(recipient, message_id)` pairs it has pushed and answers a repeat
-    ///   with `DeliveryError` instead of a second notification, and the outbox
-    ///   id is stable across every probe;
+    ///   ([`Self::park_relay_pushed_dm`]) and escalates the interval. That
+    ///   happens once per push: the relay remembers which
+    ///   `(sender, recipient, message_id)` triples it has pushed, for a day,
+    ///   and answers a repeat inside that window with `DeliveryError`
+    ///   (`already_pushed`) instead of a second notification. The outbox id
+    ///   is stable across every probe, so each later rung earns that
+    ///   `DeliveryError`, which re-parks the entry silently
+    ///   (`OutboxEntry::relay_pushed`) rather than re-emitting
+    ///   [`Event::MessageUndeliverable`] for a frame the push may have
+    ///   delivered;
     /// - the peer is back → the probe *is* the delivery, which beats waiting
     ///   for any presence edge.
     ///
