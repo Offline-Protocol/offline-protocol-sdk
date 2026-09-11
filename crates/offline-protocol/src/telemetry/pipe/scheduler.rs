@@ -184,37 +184,45 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    /// This process's live thread count, from procfs.
+    /// The calling thread's kernel id: `/proc/thread-self` links to
+    /// `<pid>/task/<tid>`.
     #[cfg(target_os = "linux")]
-    fn live_thread_count() -> usize {
-        let status = std::fs::read_to_string("/proc/self/status").expect("procfs");
-        status
-            .lines()
-            .find_map(|l| l.strip_prefix("Threads:"))
-            .and_then(|v| v.trim().parse().ok())
-            .expect("Threads: line")
+    fn current_tid() -> std::ffi::OsString {
+        std::fs::read_link("/proc/thread-self")
+            .expect("procfs")
+            .file_name()
+            .expect("a task id")
+            .to_owned()
     }
 
     #[test]
     fn a_thousand_start_stop_cycles_leave_no_thread_behind() {
-        // Measured as a delta against a baseline, never as an absolute count.
-        // The test harness runs this binary's tests in parallel, and siblings
-        // hold threads of their own throughout (the uploader's `tiny_http`
-        // servers, the contention test's drainer), so an absolute bound is a
-        // bound on unrelated work: it failed on CI at 16 threads with nothing
-        // leaked here. The leak this exists to catch is one thread per cycle,
-        // which would show up as a delta in the hundreds, so a small allowance
-        // for concurrent noise costs the test nothing.
+        // Each worker records its kernel thread id, and the check is that
+        // none of those ids is still in this process's task list. Nothing
+        // else is counted. The harness runs this binary's tests in parallel,
+        // so a process-wide thread count is a bound on the siblings: it
+        // failed on CI twice, at an absolute bound and then at a delta
+        // against a baseline, with nothing leaked here. Counting threads by
+        // the scheduler's name carries the same noise, because the threaded
+        // pipe tests run workers under that name and the detach test below
+        // leaves one running after it returns.
         #[cfg(target_os = "linux")]
-        let baseline = live_thread_count();
+        let tids = Arc::new(Mutex::new(Vec::new()));
         for _ in 0..1_000 {
             let signal = Arc::new(WakeSignal::default());
             let worker_signal = signal.clone();
-            let mut scheduler = Scheduler::spawn(move || loop {
-                let (reasons, gen) = worker_signal.wait(Instant::now() + Duration::from_secs(60));
-                worker_signal.complete(gen);
-                if reasons & wake::STOP != 0 {
-                    break;
+            #[cfg(target_os = "linux")]
+            let worker_tids = tids.clone();
+            let mut scheduler = Scheduler::spawn(move || {
+                #[cfg(target_os = "linux")]
+                worker_tids.lock().expect("tids").push(current_tid());
+                loop {
+                    let (reasons, gen) =
+                        worker_signal.wait(Instant::now() + Duration::from_secs(60));
+                    worker_signal.complete(gen);
+                    if reasons & wake::STOP != 0 {
+                        break;
+                    }
                 }
             })
             .expect("spawn");
@@ -224,12 +232,27 @@ mod tests {
         }
         #[cfg(target_os = "linux")]
         {
-            let threads = live_thread_count();
-            assert!(
-                threads <= baseline + 8,
-                "threads did not return to baseline: {baseline} before the cycles, \
-                 {threads} after"
-            );
+            let tids = tids.lock().expect("tids");
+            assert_eq!(tids.len(), 1_000, "every worker recorded its id");
+            // Polled rather than read once: the kernel wakes a joiner before
+            // it removes the exiting thread from the task list, so a joined
+            // thread can stay listed for a moment. A thread id is not reused
+            // until the id space wraps, so an id still listed is one of these
+            // workers.
+            let task = std::path::Path::new("/proc/self/task");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let alive = tids.iter().filter(|tid| task.join(tid).exists()).count();
+                if alive == 0 {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{alive} of the {} workers this test started are still running",
+                    tids.len()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     }
 
