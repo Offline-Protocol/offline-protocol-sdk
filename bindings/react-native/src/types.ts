@@ -3112,9 +3112,9 @@ export interface BleDiagnostics {
 }
 
 /**
- * Per-transport metrics — same shape flows through getTransportMetrics (pull)
- * and MetricsFrame.transports (push). The six legacy counters are always
- * present; the remaining fields populate whenever a transport reports them.
+ * Per-transport metrics, as getTransportMetrics returns them. The six legacy
+ * counters are always present; the remaining fields populate whenever a
+ * transport reports them.
  */
 export interface TransportMetrics {
   packetsSent: number;

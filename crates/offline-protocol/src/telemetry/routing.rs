@@ -6,10 +6,11 @@
 //! record carries the full per-factor scoring breakdown that DORS evaluates
 //! before it decides which transport to use.
 //!
-//! The legacy `Event::Dors*` path continues to fire for back-compat — apps
-//! that want the richer shape consume [`crate::telemetry::TelemetrySink`] and
-//! opt into score populating via
-//! [`crate::telemetry::TelemetryConfig::with_routing_diagnostic`].
+//! The legacy `Event::Dors*` path continues to fire for back-compat, and it
+//! is what an application observes. This record is consumed inside the SDK
+//! by the telemetry pipe, and
+//! [`crate::telemetry::TelemetryConfig::with_routing_diagnostic`] is what
+//! populates its scores.
 
 use offline_protocol_router::TransportScore;
 use offline_protocol_transport::TransportType;

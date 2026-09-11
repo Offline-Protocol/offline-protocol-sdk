@@ -422,7 +422,7 @@ Resolution narrows this considerably: a peer who publishes is re-resolved whenev
 - **The routing tag is derived from the address** — and the address is derived from the identity key generated at `initializeMls`, so two devices only share an inbox if they share an identity. Two installs are two addresses and two inboxes.
 - **Nostr requires the protocol identity.** The tag has no preimage until `initializeMls` has run, so the SDK installs no Nostr transport before then and `enableTransport('nostr')` is refused. Disabling encryption disables Nostr with it. This used to "work" by falling back to the app-chosen profile, which published a label anyone could recompute from a username to every configured relay.
 - **Payload is end-to-end encrypted by MLS** before reaching this transport. Gift-wrap sealing is an additional, hop-local layer over the whole envelope; it does not replace MLS.
-- **Telemetry scrubbing** — when telemetry `scrub_ids` is on (default), pubkeys flowing through the SDK's telemetry sink are SHA-256 hashed before emission.
+- **Telemetry carries no pubkey.** Nothing the SDK's telemetry uploads has a field a key or an address could land in; see [what leaves the device](telemetry.md#what-leaves-the-device). The `onEvent` stream is the application's own and is not scrubbed.
 
 ### Interoperability and the kill switch
 
@@ -590,7 +590,7 @@ The signing path retries up to 3 times per message before permanently failing. S
 
 1. Verify `nostrEnabled: true` and at least one relay is connected
 2. Check DORS scores — Nostr has the lowest tie-break priority and a modest base score
-3. Confirm no higher-priority transport is healthier; install a `TelemetrySink` with `routingDiagnostic: true` to see the per-factor breakdown
+3. Confirm no higher-priority transport is healthier: the `dors_score_updated` event on `onEvent` carries every transport's score for each decision. The per-factor breakdown behind those scores is not exposed through the bindings
 
 ## Further Reading
 

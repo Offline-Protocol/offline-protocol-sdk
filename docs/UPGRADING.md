@@ -2044,10 +2044,13 @@ costs what it cost before.
 **What an app that read the sink for its own dashboards has to do:** the
 free event API is unchanged. `onEvent` (`on_event`) still delivers every
 protocol event, `getTransportMetrics` and `getBleDiagnostics` still answer,
-and both are per-event and unaggregated by design. The two aggregates the
-sink stream fed (`MetricsFrame` every few seconds, and the routing and device
-records) have no replacement on the bridge; the demo's Diagnostics screen
-shows what the free API can drive instead.
+and both are per-event and unaggregated by design. They do not replace every
+record the sink delivered. The MLS lifecycle records, the `MetricsFrame`
+snapshots every few seconds, the per-transport state transitions, the
+structured routing decisions and the device capability snapshots have no
+replacement on the bridge, even where an event such as `transport_switched`
+or `dors_transport_selected` covers part of the same ground; the demo's
+Diagnostics screen shows what the free API can drive instead.
 
 **What the pipe does differently from the analytics package**, each a named
 test: the backoff caps at 15 min rather than 5; a 413 is dropped rather than
