@@ -171,8 +171,15 @@ deduplicates on `batch_id` for seven and a later replay would count twice.
 A 401 or 403 (a bad key, or a key for another app) keeps the batch, records
 the error in the stats, and stops sending until the next `enableTelemetry`:
 the key is a configuration fault you fix and re-enable through, so the queue
-waits rather than losing what it holds. Any other 4xx drops the batch and
-continues, and so does any 3xx, because the uploader follows no redirect. A
+waits rather than losing what it holds. The one exception is a 403 whose
+`error` code is `telemetry_disabled`, the ingest's answer while the
+application's telemetry toggle is off in the developer portal. That drops the
+refused batch and everything queued behind it, discards whatever is collected
+afterwards at the next flush rather than queuing it, and sends nothing more
+until the next `enableTelemetry`, so a toggled-off stretch is a gap on the
+dashboard and the device holds nothing to fill it with later. Any other 4xx
+drops the batch and continues, and so does any 3xx, because the uploader
+follows no redirect. A
 followed 301, 302 or 303 would turn the `POST` into a `GET` at another
 location, where a 2xx would delete the batch unsent and count it as accepted.
 
@@ -392,6 +399,7 @@ is a portal feature, not an SDK one. The threat model records this as
 |---|---|
 | `apiKey` or `appId` empty or not printable ASCII, empty `appVersion`, zero or over-1 MiB `maxBatchBytes`, zero `maxBufferedRecords`, `flushIntervalMs` under 1000 | `enableTelemetry` rejects with `TelemetryConfigInvalid` naming the field |
 | Wrong key, or a key for another app | `lastError: "ingest responded 401"` (or 403); sending halts until the next `enableTelemetry` |
+| The application's telemetry toggle is off in the developer portal | `lastError: "ingest responded 403 (telemetry_disabled)"`; the queue is dropped, later events are discarded, and sending halts until the next `enableTelemetry` |
 | No network | `lastError` names the transport failure; batches wait, bounded by the caps and the six-day expiry |
 | Calling `flushTelemetry` or `telemetryStats` before `enableTelemetry` | A no-op, and `null` |
 

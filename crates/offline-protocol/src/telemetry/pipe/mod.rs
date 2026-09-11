@@ -118,7 +118,9 @@ pub struct TelemetryStats {
     /// Events the ingest reported accepted (the `accepted` count of each
     /// 202 body, summed; a replay counts nothing new).
     pub accepted_events: u64,
-    /// Events lost: ring overflow, queue caps, TTL expiry, permanent 4xx.
+    /// Events lost: ring overflow, queue caps, TTL expiry, permanent 4xx,
+    /// and everything queued or collected once the developer portal switched
+    /// telemetry off for the application.
     ///
     /// Events, never records. This number is what reconciles an invoice
     /// against the device, so it counts in the unit the ingest meters. A
@@ -188,6 +190,15 @@ pub(crate) struct PipeShared {
     /// `-1` until a batch has been accepted.
     last_flush_at_ms: AtomicI64,
     last_error: Mutex<Option<String>>,
+    /// Set once the ingest has answered `telemetry_disabled`: the
+    /// application's toggle is off in the developer portal. From then on the
+    /// ring is emptied into nothing at every cycle rather than cut into
+    /// batches, so nothing collected while the toggle is off is persisted or
+    /// sent, and the gap the toggle promises holds at the device. Read on the
+    /// cycle, never on the emit path, which keeps its one atomic load.
+    /// Cleared only by a fresh pipe, which is what the next `enable_telemetry`
+    /// builds.
+    server_disabled: AtomicBool,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -229,7 +240,13 @@ impl PipeShared {
         self.adopt_pending_backend();
 
         let drained = lock(&self.pipeline).drain();
-        if !drained.is_empty() {
+        if self.server_disabled.load(Ordering::Relaxed) {
+            // Counted as dropped, in events, the unit the rest of `dropped`
+            // uses: the toggle is off, and these are the events it says are
+            // not kept.
+            self.uploader_dropped
+                .fetch_add(drained.len() as u64, Ordering::Relaxed);
+        } else if !drained.is_empty() {
             let device_id = if self.include_device_id {
                 lock(&self.device_id).clone()
             } else {
@@ -279,6 +296,15 @@ impl PipeShared {
             .fetch_add(report.dropped_events, Ordering::Relaxed);
         if report.batches_sent > 0 {
             self.last_flush_at_ms.store(now, Ordering::Relaxed);
+        }
+        if report.disabled && !self.server_disabled.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                target: PIPE_LOG_TARGET,
+                dropped_events = report.dropped_events,
+                "hosted telemetry is switched off for this application in the developer \
+                 portal; the queue was dropped and nothing more is collected until \
+                 enable_telemetry"
+            );
         }
         // Mirrored, not accumulated: the uploader clears its own error when a
         // batch is accepted, and a stats reader asking "is telemetry working"
@@ -606,6 +632,7 @@ impl TelemetryPipe {
             store_dropped: AtomicU64::new(0),
             last_flush_at_ms: AtomicI64::new(-1),
             last_error: Mutex::new(None),
+            server_disabled: AtomicBool::new(false),
         });
         // The host's state at enable time, recorded rather than reported:
         // there is no session to close yet, and the seed exists so that a

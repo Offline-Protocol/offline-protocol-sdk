@@ -556,3 +556,73 @@ fn a_detached_worker_finishing_an_upload_cannot_orphan_its_replacements_batch() 
         "the batch the ingest accepted was queued again: {sessions:?}"
     );
 }
+
+/// The toggle's gap holds at the device. A `403` whose `error` code is
+/// `telemetry_disabled` drops the refused batch and everything queued behind
+/// it, what is collected afterwards is discarded rather than queued, and a
+/// fresh pipe over the same store has nothing from the off period to resend.
+/// Contrast `a_batch_refused_for_a_bad_key_is_still_there_when_the_key_is_fixed`:
+/// a bad key keeps its queue, because that is a fault the developer fixes.
+#[test]
+fn a_403_telemetry_disabled_drops_the_queue_and_discards_what_follows() {
+    let clock = FakeClock::at(1_000);
+    let storage = Arc::new(MemoryStorage::default());
+    let client = CapturingClient::accepting();
+    client.status.store(0, Ordering::SeqCst); // offline, so two batches queue up
+    let pipe = inline_pipe(&test_config(), &clock, client.clone(), sealed(&storage));
+    emit_failed(&pipe, 1);
+    pipe.flush();
+    clock.set(1_500); // inside the backoff: the second batch is cut, not sent
+    emit_failed(&pipe, 2);
+    pipe.flush();
+    let queued = |pipe: &TelemetryPipe| crate::telemetry::pipe::lock(&pipe.shared().store).len();
+    assert_eq!(queued(&pipe), 2);
+    assert!(client.bodies.lock().unwrap().is_empty());
+
+    // The developer switches the toggle off in the portal.
+    client.status.store(403, Ordering::SeqCst);
+    *client.error_code.lock().unwrap() = Some("telemetry_disabled".into());
+    clock.set(3_000);
+    pipe.flush();
+    assert_eq!(client.bodies.lock().unwrap().len(), 1, "one attempt");
+    assert_eq!(
+        pipe.stats().last_error.as_deref(),
+        Some("ingest responded 403 (telemetry_disabled)")
+    );
+    assert_eq!(
+        queued(&pipe),
+        0,
+        "the refused batch and the one queued behind it are gone"
+    );
+    assert_eq!(pipe.stats().dropped, 2);
+
+    // Collected while off: discarded at the next flush, never queued or sent.
+    emit_failed(&pipe, 3);
+    clock.set(4_000);
+    pipe.flush();
+    assert_eq!(queued(&pipe), 0);
+    assert_eq!(pipe.stats().dropped, 3);
+    assert_eq!(
+        client.bodies.lock().unwrap().len(),
+        1,
+        "nothing more is sent"
+    );
+    pipe.stop(FINAL_FLUSH_BUDGET);
+
+    // The toggle comes back on and the app relaunches: a fresh pipe over the
+    // same protocol-state store has nothing from the off period to resend.
+    client.status.store(202, Ordering::SeqCst);
+    *client.error_code.lock().unwrap() = None;
+    let again = inline_pipe(&test_config(), &clock, client.clone(), sealed(&storage));
+    again.flush();
+    assert_eq!(client.bodies.lock().unwrap().len(), 1, "no backfill");
+    emit_failed(&again, 4);
+    again.flush();
+    let bodies = client.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "and new events flow again");
+    assert!(
+        bodies[1].contains("protocol.message.failed"),
+        "{}",
+        bodies[1]
+    );
+}

@@ -132,6 +132,15 @@ the client's answers were wrong on a device rather than merely different:
   through, and the queue now waits for a good one. `telemetryStats().dropped`
   counts events and only events, so a queued batch that cannot be opened on
   load is warned about rather than added to it in a different unit.
+- **A 403 `telemetry_disabled` drops the queue.** The ingest answers with that
+  `error` code, rather than the `forbidden` a bad key draws, while the
+  application's telemetry toggle is off in the developer portal. The pipe
+  drops the refused batch and everything queued behind it, discards what it
+  collects afterwards instead of queuing it, and sends nothing more until the
+  next `enableTelemetry`, so a toggled-off stretch stays a gap on the
+  dashboard rather than filling in from the device's queue once the toggle
+  comes back. Every other 401 or 403 keeps its queue as above, and so does a
+  403 from an ingest that predates the code, which answers `forbidden`.
 - **Telemetry session boundaries follow the process on Android**, through the
   set of started activities rather than `onHostPause`. `onHostPause` is
   `Activity.onPause`, which fires for a runtime permission dialog (including
