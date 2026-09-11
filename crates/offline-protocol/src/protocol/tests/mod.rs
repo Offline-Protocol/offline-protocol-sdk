@@ -18276,6 +18276,51 @@ fn test_dedup_seen_set_survives_stop_and_restart() {
     assert_eq!(bob.dedup_dirty, 0, "a restore is not a change to persist");
 }
 
+/// The React Native layer applies `reliability.dedup` through
+/// `update_dedup_config` on every `start()`, after the seen set has been
+/// restored. The update must carry the restored ids across, not rebuild an
+/// empty deduplicator: otherwise the restart-time duplicate the record exists
+/// to recognise is processed after all, and the next batch write overwrites
+/// the record with the near-empty set.
+#[test]
+fn test_dedup_seen_set_survives_a_runtime_config_update() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut bob = pending_decrypt_bob(storage.clone());
+    bob.start().unwrap();
+    let seen = MessageId::new();
+    assert!(bob.mark_seen_persisted(seen.clone()));
+    bob.stop().unwrap();
+    drop(bob);
+
+    let mut bob = pending_decrypt_bob(storage.clone());
+    bob.start().unwrap();
+    assert!(
+        bob.deduplicator.is_duplicate(&seen),
+        "precondition: restored"
+    );
+
+    let mut updated = bob.config.reliability.dedup.clone();
+    updated.max_tracked_messages += 1;
+    bob.update_dedup_config(updated).unwrap();
+
+    assert!(
+        bob.deduplicator.is_duplicate(&seen),
+        "a runtime config update must not discard the restored seen set"
+    );
+    assert!(
+        bob.dedup_dirty > 0,
+        "the update is a change to persist: the record is re-stated under the new bounds"
+    );
+    bob.stop().unwrap();
+    drop(bob);
+
+    let bob = pending_decrypt_bob(storage);
+    assert!(
+        bob.deduplicator.is_duplicate(&seen),
+        "the record written after the update still holds the id"
+    );
+}
+
 /// A sender's own outgoing ids dedup a relayed echo in memory but never
 /// reach the persisted record: the send paths mark through
 /// `mark_seen_local`, so the record's cap is spent on inbound ids only. A
