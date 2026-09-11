@@ -199,6 +199,23 @@ pub(crate) const WELCOME_PRESENCE_RESCUE_MAX_SECS: i64 = 600;
 /// calling `internet_send_failed_with_reason` — keep them in sync.
 pub(crate) const SEND_FAIL_REASON_RECIPIENT_UNREACHABLE: &str = "recipient_unreachable";
 
+/// The relay accepted a frame for a recipient with no live socket and handed
+/// it to a push notification (`MessageSent { pushed: true }`). Not a failure:
+/// the push may deliver it. What it does establish is that the relay, which
+/// has no store-and-forward, holds no copy for when the recipient reconnects.
+///
+/// Deliberately its own token rather than a `recipient_unreachable` tail.
+/// That prefix fast-fails connection requests and moves Welcomes to `Failed`,
+/// both wrong for a frame that may have arrived. This token parks plain DMs
+/// only (`park_relay_pushed_dm`), and connection requests and Welcomes stay
+/// on their ordinary path.
+///
+/// Cross-layer contract: the React Native platform bridges
+/// (`InternetManager.kt` / `InternetManager.swift`) pass this exact literal
+/// to `internet_send_failed_with_reason`; pinned by
+/// `react_native_relay_parks_a_pushed_message_sent`.
+pub(crate) const SEND_FAIL_REASON_RELAY_PUSHED: &str = "relay_pushed";
+
 /// Fallback token for a send failure that classifies as nothing more specific.
 pub(crate) const SEND_FAIL_REASON_TRANSPORT: &str = "transport_send_failed";
 /// A Welcome was written to a carrier that never confirmed it.
@@ -214,6 +231,7 @@ pub(crate) const SEND_FAIL_REASON_CONFIRM_TIMEOUT: &str = "send_confirmation_tim
 /// `every_send_failure_token_classifies_to_itself` fails otherwise.
 pub(crate) const SEND_FAIL_REASON_TOKENS: &[&str] = &[
     SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
+    SEND_FAIL_REASON_RELAY_PUSHED,
     SEND_FAIL_REASON_TRANSPORT,
     SEND_FAIL_REASON_CONFIRM_TIMEOUT,
     "transport_not_connected",
@@ -2434,6 +2452,21 @@ mod send_failure_classification_tests {
                 SEND_FAIL_REASON_RECIPIENT_UNREACHABLE
             );
         }
+    }
+
+    /// The relay-pushed answer is its own token, not a `recipient_unreachable`
+    /// tail. The bridges pass this literal (pinned on their side by
+    /// `react_native_relay_parks_a_pushed_message_sent`), and reading it under
+    /// the unreachable prefix would fast-fail connection requests and fail
+    /// Welcomes that the push may have delivered.
+    #[test]
+    fn relay_pushed_is_its_own_token() {
+        assert_eq!(SEND_FAIL_REASON_RELAY_PUSHED, "relay_pushed");
+        assert!(!SEND_FAIL_REASON_RELAY_PUSHED.starts_with(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE));
+        assert_eq!(
+            classify_transport_send_error("relay_pushed"),
+            SEND_FAIL_REASON_RELAY_PUSHED
+        );
     }
 
     /// Anything unrecognized fails closed to the fallback, never to itself.

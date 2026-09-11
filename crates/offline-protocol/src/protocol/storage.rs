@@ -594,10 +594,16 @@ pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_G
 /// a live id for, and starving the pending walk defers every diagnostic it
 /// owes. Neither may be held hostage to a key-package flood.
 ///
+/// The inbound walks get a fourth pool for the same reason:
+/// [`OfflineProtocol::restore_pending_decrypt_entries`] holds ciphertext the
+/// app is told about when it is lost, and [`OfflineProtocol::restore_dedup_seen`]
+/// shares the pool after it for its one possible delete. Both refuse rather
+/// than count, since every delete they make is advisory.
+///
 /// # The derived launch ceiling
 ///
-/// Three pools, so `3 × MAX_RESTORE_PRUNE_DELETES` is the whole launch's
-/// allowance. All three are constructed side by side by `initialize_mls` — see
+/// Four pools, so `4 × MAX_RESTORE_PRUNE_DELETES` is the whole launch's
+/// allowance. All four are constructed side by side by `initialize_mls` — see
 /// [`PruneAllowance::pool`] for why none of them may be allocated inside the
 /// walk that spends it — and
 /// `test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling` pins the
@@ -630,7 +636,7 @@ pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_G
 /// by its own truncated-and-resumable pass rather than by this constant. It is
 /// a one-time upgrade sweep on a different provider, so it is deliberately
 /// outside the pools — but a reader deriving "the most barriers one launch can
-/// issue" should count it separately rather than reading `3 ×` as the total.
+/// issue" should count it separately rather than reading `4 ×` as the total.
 ///
 /// # This bounds deletes, and deletes are not the only durable cost
 ///
@@ -823,7 +829,7 @@ impl PruneAllowance {
     /// it. The two constructors had identical bodies, which was the tell.
     ///
     /// So every pool is constructed by the caller that owns the launch —
-    /// `initialize_mls` builds all three side by side — and threaded in. The
+    /// `initialize_mls` builds all four side by side — and threaded in. The
     /// launch ceiling reads off that one call site, and
     /// `test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling` pins
     /// it.
@@ -845,6 +851,18 @@ impl PruneAllowance {
         self.advisory_walks_left = later;
         let reserved = later.saturating_mul(MIN_ADVISORY_PRUNE_DELETES);
         let ceiling = self.remaining.saturating_sub(reserved);
+        PruneBudget::new(&mut self.remaining, ceiling, true)
+    }
+
+    /// A refusing budget on a pool that no advisory walk shares.
+    ///
+    /// [`Self::refusing`] reserves [`MIN_ADVISORY_PRUNE_DELETES`] for each
+    /// advisory walk still to come, which on a private pool reserves for walks
+    /// that never arrive: the first draw on a fresh pool would get half of it.
+    /// This reserves nothing, so a walk that owns its pool can spend all of it,
+    /// and a later walk on the same pool gets whatever is left.
+    pub(super) fn refusing_private(&mut self) -> PruneBudget<'_> {
+        let ceiling = self.remaining;
         PruneBudget::new(&mut self.remaining, ceiling, true)
     }
 
@@ -4529,7 +4547,8 @@ impl OfflineProtocol {
     /// refusing semantics rather than the shared advisory pool: it holds
     /// inbound ciphertext the app is told about when lost, and that must not
     /// be held hostage to a key-package flood in a category it has nothing to
-    /// do with — the same argument the outbound pending walk makes.
+    /// do with — the same argument the outbound pending walk makes. It draws
+    /// first; [`Self::restore_dedup_seen`] shares the pool after it.
     ///
     /// An expired record is settled with a `PendingQueueDropped` decryption
     /// failure carrying the reason `expired_persisted`, through the deferred
@@ -4559,7 +4578,7 @@ impl OfflineProtocol {
         }
 
         let now_ms = Utc::now().timestamp_millis();
-        let mut budget = allowance.refusing();
+        let mut budget = allowance.refusing_private();
         let mut restored: Vec<PendingDecryptRecord> = Vec::new();
         let mut expired_settlements: Vec<Event> = Vec::new();
         for key_id in key_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
@@ -5295,7 +5314,13 @@ impl OfflineProtocol {
     /// version this build does not know, is deleted and the set starts empty:
     /// nothing is owed to anyone for it, since the worst case is the one
     /// restart-time duplicate this record exists to prevent.
-    pub(crate) fn restore_dedup_seen(&mut self) {
+    ///
+    /// That delete is charged to `allowance`, the inbound pool it shares with
+    /// [`Self::restore_pending_decrypt_entries`], because the launch ceiling
+    /// covers every durable delete on the restore path. A refused delete costs
+    /// nothing: the set starts empty either way, and the next write replaces
+    /// the record.
+    pub(crate) fn restore_dedup_seen(&mut self, allowance: &mut PruneAllowance) {
         let Some(storage) = self.protocol_state_storage.clone() else {
             return;
         };
@@ -5313,18 +5338,22 @@ impl OfflineProtocol {
                     version = record.version,
                     "Dropping deduplicator seen set with an unknown record version"
                 );
-                let _ = storage.delete(
-                    storage_keys::DEDUP_SEEN_IDS,
-                    storage_keys::DEDUP_SEEN_IDS_ID,
-                );
+                if allowance.refusing_private().claim() {
+                    let _ = storage.delete(
+                        storage_keys::DEDUP_SEEN_IDS,
+                        storage_keys::DEDUP_SEEN_IDS_ID,
+                    );
+                }
                 return;
             }
             Err(e) => {
                 warn!(error = %e, "Dropping corrupted deduplicator seen set");
-                let _ = storage.delete(
-                    storage_keys::DEDUP_SEEN_IDS,
-                    storage_keys::DEDUP_SEEN_IDS_ID,
-                );
+                if allowance.refusing_private().claim() {
+                    let _ = storage.delete(
+                        storage_keys::DEDUP_SEEN_IDS,
+                        storage_keys::DEDUP_SEEN_IDS_ID,
+                    );
+                }
                 return;
             }
         };

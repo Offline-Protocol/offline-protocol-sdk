@@ -1648,11 +1648,12 @@ public class InternetManager: NSObject, TransportManager {
             // instead. The relay does not store-and-forward, so this is the
             // same fact a DeliveryError carries — the recipient is not on the
             // relay right now — with the message *possibly* arriving through
-            // the push. Park this one id exactly as the unreachable path
-            // would (no ACK budget burnt against an offline peer, a
-            // reachability probe scheduled, the recipient watched) so that if
-            // the push is lost the presence edge re-drives it. Absent on
-            // older relays, which reads as `false`.
+            // the push. Report this one id to the core as `relay_pushed`,
+            // which parks a plain DM as the unreachable path would (no ACK
+            // budget burnt against an offline peer, a reachability probe
+            // scheduled, the recipient watched) so that if the push is lost
+            // the presence edge re-drives it. Absent on older relays, which
+            // reads as `false`.
             let pushed = json["pushed"] as? Bool ?? false
             if pushed, let messageId = sentMessageId, !messageId.isEmpty {
                 parkPushedMessage(recipient: sentRecipient, messageId: messageId)
@@ -2740,21 +2741,23 @@ public class InternetManager: NSObject, TransportManager {
     /// Parks one message the relay reports as `MessageSent { pushed: true }`.
     ///
     /// The narrower sibling of `handleRecipientUnreachable`: the relay named
-    /// exactly one frame, so only that id is failed into the core (with the
-    /// `recipient_unreachable` prefix the core prefix-matches to park a DM
-    /// without burning its ACK budget) and the recipient's other in-flight
-    /// frames are left alone — a later `MessageSent` for each of them says
-    /// what became of it. The recipient is presence-watched and an offline
-    /// presence is fed to the core exactly as the DeliveryError path does, so
-    /// the presence-online edge is what re-drives the parked message if the
-    /// push never reaches the device.
+    /// exactly one frame, so only that id is reported to the core and the
+    /// recipient's other in-flight frames are left alone — a later
+    /// `MessageSent` for each of them says what became of it. The reason is
+    /// the exact `relay_pushed` token, not a `recipient_unreachable` tail: that
+    /// prefix fast-fails connection requests and fails Welcomes, while
+    /// `relay_pushed` parks a plain DM and leaves both of those alone, since
+    /// the push may have delivered them. The recipient is presence-watched
+    /// and an offline presence is fed to the core exactly as the DeliveryError
+    /// path does, so the presence-online edge is what re-drives the parked
+    /// message if the push never reaches the device.
     private func parkPushedMessage(recipient: String, messageId: String) {
         // Sentinel entries track app-authored raw SendMessage frames; their
         // outcomes belong to the app, not the core (see handleRecipientUnreachable).
         if messageId.isEmpty || messageId.hasPrefix(Self.rawSendSentinelPrefix) { return }
         protocolInstance.internetSendFailedWithReason(
             messageId: messageId,
-            reason: "recipient_unreachable: relay_pushed"
+            reason: "relay_pushed"
         )
         // Same self guard as handleRecipientUnreachable: never watch self and
         // never feed "self is offline" into the core.

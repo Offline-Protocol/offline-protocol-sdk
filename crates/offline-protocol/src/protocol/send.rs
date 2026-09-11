@@ -11,8 +11,8 @@ use super::{
     MAX_PENDING_EXPIRIES_PER_PASS, MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER,
     MAX_PENDING_MESSAGE_BYTES_GLOBAL, MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS,
     MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL,
-    RICH_PAYLOAD_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, SEND_FAIL_REASON_TRANSPORT,
-    WELCOME_NO_CARRIER_RETRY_SECS, WELCOME_UNREACHABLE_RETRY_CAP_SECS,
+    RICH_PAYLOAD_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, SEND_FAIL_REASON_RELAY_PUSHED,
+    SEND_FAIL_REASON_TRANSPORT, WELCOME_NO_CARRIER_RETRY_SECS, WELCOME_UNREACHABLE_RETRY_CAP_SECS,
 };
 use super::{classify_transport_send_error, send_failure_token};
 use crate::constants::{
@@ -3626,6 +3626,14 @@ impl OfflineProtocol {
         let transport_error = transport_error
             .as_deref()
             .map(classify_transport_send_error);
+        // A relay push is not a failure, so it is handled before either typed
+        // branch below can read it as one: a connection request would be
+        // fast-failed as undeliverable and a Welcome moved to `Failed`, both
+        // for a frame the push may have delivered.
+        if transport_error == Some(SEND_FAIL_REASON_RELAY_PUSHED) {
+            self.park_relay_pushed_dm(message_id, carrier);
+            return Ok(());
+        }
         // Connection requests first: the relay's "recipient offline"
         // DeliveryError is the only fast, authoritative failure signal a
         // request gets (there is no ACK from an offline peer — the app
@@ -3826,6 +3834,57 @@ impl OfflineProtocol {
         self.park_unreachable_dm(&parsed_id, &recipient, attempt_count);
     }
 
+    /// Handles the relay's `MessageSent { pushed: true }` answer: the recipient
+    /// has no live socket, and the frame went out in a push notification.
+    ///
+    /// A plain DM is parked exactly as for a `DeliveryError`. The relay has no
+    /// store-and-forward, so if the push is lost nothing will re-deliver the
+    /// frame when the recipient reconnects, and without the park the missing
+    /// ACK burns the retry budget to a terminal `message_failed`. If the push
+    /// did deliver, the recipient's acknowledgement settles the parked entry
+    /// (`settle_parked_dm_from_ack`).
+    ///
+    /// Two differences from the `DeliveryError` path, both because the push
+    /// may have delivered the frame:
+    ///
+    /// - **Plain DMs only.** A connection request keeps its typed tracking and
+    ///   a Welcome its lifecycle, both awaiting the acknowledgement or session
+    ///   confirmation a delivered push produces. `is_parkable_plain_dm`
+    ///   excludes both, and media chunks are never in `outbox`.
+    /// - **No `MessageUndeliverable`.** The app would be told a message is
+    ///   undeliverable when it may already have arrived.
+    fn park_relay_pushed_dm(&mut self, message_id: &str, carrier: Option<TransportType>) {
+        let Ok(parsed_id) = MessageId::from_str(message_id) else {
+            return;
+        };
+        if !self.is_parkable_plain_dm(&parsed_id) {
+            return;
+        }
+        let Some(entry) = self.outbox.get(&parsed_id) else {
+            return;
+        };
+        let recipient = entry.message.recipient.as_str().to_string();
+        let attempt_count = entry.attempt_count;
+        // The relay has said this recipient is not on it, which is the same
+        // fact a `DeliveryError` records, and the same thing the probe backoff
+        // keys on.
+        if let Some(carrier) = carrier {
+            self.reachability.record(
+                &recipient,
+                carrier,
+                Claim::Unreachable,
+                FactSource::GatewayVerdict,
+                Instant::now(),
+            );
+        }
+        self.note_confirmation_probe_unreachable(&recipient);
+        debug!(
+            message_id = %message_id,
+            "Relay pushed a DM to an offline recipient; parking it"
+        );
+        self.park_unreachable_dm(&parsed_id, &recipient, attempt_count);
+    }
+
     /// The park action shared by the relay-verdict path
     /// ([`Self::handle_recipient_unreachable_for_message`]) and the
     /// exhausted-probe path ([`Self::try_repark_exhausted_dm`]): drops the
@@ -3855,8 +3914,13 @@ impl OfflineProtocol {
     ///   fresh `DeliveryError` re-enters this park, escalating the interval
     ///   (15s → 600s cap) and re-emitting the non-terminal
     ///   [`Event::MessageUndeliverable`];
-    /// - the relay's push fallback succeeds → no verdict is returned at all
-    ///   and the probe becomes an ordinary in-flight send on the ACK ladder;
+    /// - the relay's push fallback succeeds → the relay answers
+    ///   `MessageSent { pushed: true }`, which parks the message again
+    ///   ([`Self::park_relay_pushed_dm`]) and escalates the interval. The probe
+    ///   does not become a push per rung: the relay remembers which
+    ///   `(recipient, message_id)` pairs it has pushed and answers a repeat
+    ///   with `DeliveryError` instead of a second notification, and the outbox
+    ///   id is stable across every probe;
     /// - the peer is back → the probe *is* the delivery, which beats waiting
     ///   for any presence edge.
     ///

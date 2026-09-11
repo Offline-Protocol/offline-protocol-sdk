@@ -13208,12 +13208,14 @@ mod tests {
     /// `MessageSent` — which, without this, resolved the frame as accepted
     /// and left it awaiting an ACK from a peer who may never receive the
     /// push. Both managers must read `pushed` right where they resolve the
-    /// relay acceptance and, when it is set, fail that one id into the core
-    /// under the `recipient_unreachable` prefix (which the core prefix-matches
-    /// to park a DM: `classify_transport_send_error`) and watch the recipient,
-    /// mirroring `handleRecipientUnreachable`. Neither platform can test the
-    /// call site itself (see the ordering guard below for why), so the source
-    /// is pinned here.
+    /// relay acceptance and, when it is set, report that one id to the core
+    /// under the exact `relay_pushed` token and watch the recipient, mirroring
+    /// `handleRecipientUnreachable`. The token is the core's
+    /// `SEND_FAIL_REASON_RELAY_PUSHED`, and it must not be a
+    /// `recipient_unreachable` tail: that prefix fast-fails connection
+    /// requests and fails Welcomes, both of which the push may have
+    /// delivered. Neither platform can test the call site itself (see the
+    /// ordering guard below for why), so the source is pinned here.
     #[test]
     fn react_native_relay_parks_a_pushed_message_sent() {
         let swift = rn_source_code_only("ios/InternetManager.swift");
@@ -13236,11 +13238,6 @@ mod tests {
                  park through parkPushedMessage right after it — the frame is out of the \
                  in-flight tracker either way, so the park is the only thing left that \
                  stops its ACK budget burning against an offline peer"
-            );
-            assert!(
-                code.contains("\"recipient_unreachable: relay_pushed\""),
-                "{label} parkPushedMessage must fail the id under the recipient_unreachable \
-                 prefix, which is what the core prefix-matches to park a DM"
             );
             // The definition is the last occurrence (both managers define it
             // below the call site, next to handleRecipientUnreachable); the
@@ -13267,6 +13264,20 @@ mod tests {
                 fail < watch && watch < presence,
                 "{label} parkPushedMessage must park first, then watch, then feed presence — \
                  the order handleRecipientUnreachable uses"
+            );
+            // The reason passed to that call: the exact token, and nothing
+            // under the recipient_unreachable prefix.
+            let report = &park_body[fail..watch];
+            assert!(
+                report.contains("\"relay_pushed\""),
+                "{label} parkPushedMessage must report the id under the exact relay_pushed \
+                 token the core parks a plain DM on"
+            );
+            assert!(
+                !report.contains("recipient_unreachable"),
+                "{label} parkPushedMessage must not use the recipient_unreachable prefix: the \
+                 core fast-fails connection requests and fails Welcomes on it, both of which \
+                 the push may have delivered"
             );
             assert!(
                 !park_body[..fail].contains("drainRecipient("),

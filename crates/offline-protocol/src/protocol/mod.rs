@@ -1274,7 +1274,7 @@ impl OfflineProtocol {
         // The launch's whole durable-delete allowance, in one place because the
         // bound is on the launch. A device-barrier storm kills *this call*, not
         // any single walk in it, so no walk may hand itself a pool — see
-        // `PruneAllowance::pool`. Three of them, and the ceiling is their sum:
+        // `PruneAllowance::pool`. Four of them, and the ceiling is their sum:
         //
         // - `advisory_prunes` is shared by the `ADVISORY_PRUNE_WALKS` walks
         //   whose prunes are caches or advisory signals. They draw in the order
@@ -1287,25 +1287,24 @@ impl OfflineProtocol {
         //   settlement-paired walks, because being starved there defers a
         //   diagnostic or a *delivery* rather than a cache eviction, and
         //   neither may be held hostage to a key-package flood in a category it
-        //   has nothing to do with. `pending_decrypt_prunes` below is private
-        //   for the same reason.
+        //   has nothing to do with.
+        // - `inbound_prunes` is private to the two receive-side walks for the
+        //   same reason: the pending-decryption walk holds ciphertext the app
+        //   is told about when it is lost. It draws first, and the seen-set
+        //   restore takes whatever is left for its one possible delete.
         //
         // See `storage::MAX_RESTORE_PRUNE_DELETES`.
         let mut advisory_prunes = PruneAllowance::pool();
         let mut pending_prunes = PruneAllowance::pool();
         let mut outbox_prunes = PruneAllowance::pool();
-        // The inbound pending-decryption walk gets its own pool for the same
-        // reason the outbound pending walk does: it holds ciphertext the app
-        // is told about when lost, and must not be starved by a flood in an
-        // advisory category. See `restore_pending_decrypt_entries`.
-        let mut pending_decrypt_prunes = PruneAllowance::pool();
+        let mut inbound_prunes = PruneAllowance::pool();
 
         // Restore state from previous session
         let restore_result = (|| {
             self.restore_pending_messages(&mut pending_prunes)?;
-            self.restore_pending_decrypt_entries(&mut pending_decrypt_prunes);
+            self.restore_pending_decrypt_entries(&mut inbound_prunes);
             self.restore_lamport_clock();
-            self.restore_dedup_seen();
+            self.restore_dedup_seen(&mut inbound_prunes);
             self.restore_encryption_capable_peers();
             self.restore_blocked_users()?;
             self.restore_session_states_from_manager(manager.clone(), &mut advisory_prunes)?;
@@ -1428,15 +1427,15 @@ impl OfflineProtocol {
         self.restore_nostr_watermark();
         self.restore_nostr_publication_slots();
         self.restore_nostr_discovery_claim();
-        // Same three pools as `initialize_mls_inner`, for the same reason.
+        // Same four pools as `initialize_mls_inner`, for the same reason.
         let mut advisory_prunes = PruneAllowance::pool();
         let mut pending_prunes = PruneAllowance::pool();
         let mut outbox_prunes = PruneAllowance::pool();
-        let mut pending_decrypt_prunes = PruneAllowance::pool();
+        let mut inbound_prunes = PruneAllowance::pool();
         self.restore_pending_messages(&mut pending_prunes)?;
-        self.restore_pending_decrypt_entries(&mut pending_decrypt_prunes);
+        self.restore_pending_decrypt_entries(&mut inbound_prunes);
         self.restore_lamport_clock();
-        self.restore_dedup_seen();
+        self.restore_dedup_seen(&mut inbound_prunes);
         self.restore_encryption_capable_peers();
         self.restore_blocked_users()?;
         self.restore_outbox(&mut outbox_prunes)?;

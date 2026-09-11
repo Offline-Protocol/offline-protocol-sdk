@@ -98,8 +98,12 @@ impl OfflineProtocol {
 
     /// Drains a peer's parked frames without processing them, deleting each
     /// one's persisted record. For the paths where every queued frame from a
-    /// peer is being discarded at once — today, the session reset on unblock.
-    /// Returns how many were discarded.
+    /// peer is being discarded at once: the session reset on unblock, and the
+    /// peer-requested session reset in `message_dispatch`. Returns how many
+    /// were discarded.
+    ///
+    /// Every discard must come through here rather than calling
+    /// `drain_for_peer` directly, or the records outlive their entries.
     pub(super) fn discard_pending_decryption_for_peer(&mut self, peer_id: &str) -> usize {
         let config = self.config.encryption.pending_queue.clone();
         let drained = self.pending_queue.drain_for_peer(&config, peer_id);

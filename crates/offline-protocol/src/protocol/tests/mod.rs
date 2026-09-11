@@ -8714,11 +8714,12 @@ fn test_unreachable_dm_internet_only_parks_with_probe() {
 }
 
 /// The relay's `MessageSent { pushed: true }` reaches the core as the bridge's
-/// `recipient_unreachable: relay_pushed` on the Internet carrier. It must take
-/// the same park as a DeliveryError — pending ACK dropped, outbox entry kept,
-/// probe scheduled — and put the recipient on the presence watch list, because
+/// `relay_pushed` on the Internet carrier. For a plain DM it must take the
+/// same park as a DeliveryError (pending ACK dropped, outbox entry kept,
+/// probe scheduled) and put the recipient on the presence watch list, because
 /// a relay without store-and-forward has just said the only copy in flight is
-/// a push notification.
+/// a push notification. It must not tell the app the message is
+/// undeliverable: the push may have delivered it.
 #[test]
 fn test_relay_pushed_verdict_parks_dm_and_watches_recipient() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
@@ -8728,6 +8729,12 @@ fn test_relay_pushed_verdict_parks_dm_and_watches_recipient() {
         .transport_manager_mut()
         .add_transport(TransportType::Internet, Box::new(mock_transport));
     protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
 
     let message_id = protocol
         .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
@@ -8741,10 +8748,19 @@ fn test_relay_pushed_verdict_parks_dm_and_watches_recipient() {
     protocol
         .on_transport_send_failed_via(
             &message_id.as_str(),
-            Some("recipient_unreachable: relay_pushed".to_string()),
+            Some("relay_pushed".to_string()),
             Some(TransportType::Internet),
         )
         .unwrap();
+
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageUndeliverable { .. })),
+        "a pushed DM may have been delivered, so it must not be reported undeliverable"
+    );
 
     assert!(
         protocol.outbox.contains_key(&message_id),
@@ -8762,6 +8778,131 @@ fn test_relay_pushed_verdict_parks_dm_and_watches_recipient() {
     assert!(
         protocol.presence_watch_peers().contains(&"bob".to_string()),
         "the pushed DM's recipient must be presence-watched"
+    );
+}
+
+/// A pushed connection request may have been delivered by the push, so the
+/// `relay_pushed` answer must not fast-fail it the way a DeliveryError does:
+/// no `ConnectionRequestUndeliverable`, and the request keeps its typed
+/// tracking and its pending ACK so the recipient's answer still settles it.
+#[test]
+fn test_relay_pushed_does_not_fail_a_connection_request() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let sent_id = protocol
+        .send_connection_request("bob", "Alice", None, None)
+        .unwrap();
+    let awaiting_before = protocol.ack_manager.is_waiting_for_ack(&sent_id);
+
+    protocol
+        .on_transport_send_failed_via(
+            &sent_id.as_str(),
+            Some("relay_pushed".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+
+    let captured = events.lock().unwrap();
+    assert!(
+        !captured.iter().any(|e| matches!(
+            e,
+            Event::ConnectionRequestUndeliverable { .. } | Event::MessageUndeliverable { .. }
+        )),
+        "a pushed connection request must not be reported undeliverable"
+    );
+    drop(captured);
+    assert!(
+        protocol
+            .pending_connection_requests
+            .contains_key(&sent_id.as_str()),
+        "the request keeps its typed tracking"
+    );
+    assert_eq!(
+        protocol.ack_manager.is_waiting_for_ack(&sent_id),
+        awaiting_before,
+        "the request is not parked: its ACK state is untouched"
+    );
+}
+
+/// A pushed Welcome may have been delivered by the push, so the `relay_pushed`
+/// answer must leave its lifecycle alone: no move to `Failed`, no refunded
+/// attempt, no `WelcomeSendFailed`. Session confirmation, or the existing
+/// confirmation and rescue machinery, decides what became of it.
+#[test]
+fn test_relay_pushed_leaves_a_welcome_lifecycle_alone() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    protocol.pending_key_packages.insert(
+        id("bob"),
+        ReceivedKeyPackage {
+            key_package_data: bob_key_package.key_package_data,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+    let _ = protocol
+        .send_message(&id("bob"), "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    let before = protocol.welcome_lifecycles.get(&id("bob")).unwrap().clone();
+    let welcome_id = before.welcome_message.id.as_str().to_string();
+
+    protocol
+        .on_transport_send_failed_via(
+            &welcome_id,
+            Some("relay_pushed".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+
+    let after = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
+    assert_eq!(
+        after.state, before.state,
+        "the lifecycle state is untouched"
+    );
+    assert_eq!(after.attempt, before.attempt, "no attempt is refunded");
+    assert_eq!(after.unreachable_parks, before.unreachable_parks);
+    assert_eq!(after.last_reason_code, before.last_reason_code);
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::WelcomeSendFailed { .. })),
+        "a pushed Welcome must not be reported as a failed send"
     );
 }
 
@@ -17988,9 +18129,76 @@ fn test_pending_decrypt_records_are_deleted_when_peer_queue_is_discarded() {
     assert!(bob.pending_queue.contains_peer(&id("carol")));
 }
 
+/// A peer-requested session reset discards the frames parked for the session
+/// it deletes, and their records go with them. Left on disk, the next launch
+/// restores frames sealed to a dead session and drains them into the
+/// replacement one as spurious decrypt failures.
+#[test]
+fn test_session_reset_deletes_persisted_pending_decrypt_records() {
+    let (mut alice, _alice_h) = make_encrypted_protocol("alice");
+    let (mut bob, _bob_h) = make_encrypted_protocol("bob");
+    alice.start().unwrap();
+    bob.start().unwrap();
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+
+    alice.enqueue_pending_decryption(&id("bob"), &pending_test_message(&id("bob"), "old-epoch"));
+    alice.enqueue_pending_decryption(
+        &id("carol"),
+        &pending_test_message(&id("carol"), "unrelated"),
+    );
+    assert_eq!(
+        alice.persisted_pending_decrypt_ids().len(),
+        2,
+        "precondition: both parked frames are persisted"
+    );
+
+    feed_session_reset_key_package(&mut alice, &mut bob, &id("bob"));
+
+    assert!(
+        !alice.pending_queue.contains_peer(&id("bob")),
+        "precondition: the reset drained bob's parked frames"
+    );
+    assert_eq!(
+        alice.persisted_pending_decrypt_ids().len(),
+        1,
+        "the reset must delete the records of the frames it discarded"
+    );
+    assert!(
+        alice.pending_queue.contains_peer(&id("carol")),
+        "another peer's parked frame is untouched"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Deduplicator seen-set persistence (`dedup_seen_ids`)
 // ---------------------------------------------------------------------------
+
+/// Releasing a dropped group entry's replay protection must reach the
+/// persisted seen set. A write that landed while the entry was buffered holds
+/// the id; if the release is not counted, nothing rewrites that record, the
+/// next launch restores the id, and the sender's redelivery is swallowed and
+/// re-ACKed as delivered for the whole retention window.
+#[test]
+fn test_released_replay_protection_is_not_restored_from_the_seen_set() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut bob = pending_decrypt_bob(storage.clone());
+    bob.start().unwrap();
+    let envelope = MessageId::new();
+    assert!(bob.mark_seen_persisted(envelope.clone()));
+    // A batched write lands while the entry is still buffered.
+    bob.flush_dedup_seen();
+    // The buffered entry is then dropped undelivered.
+    bob.release_replay_protection(&envelope.as_str());
+    assert!(!bob.deduplicator.is_duplicate(&envelope));
+    bob.stop().unwrap();
+    drop(bob);
+
+    let bob = pending_decrypt_bob(storage);
+    assert!(
+        !bob.deduplicator.is_duplicate(&envelope),
+        "a released id must not come back from the persisted seen set"
+    );
+}
 
 /// A protocol-state store that counts writes to one category, for pinning
 /// the seen-set batching rule.
@@ -19667,13 +19875,13 @@ fn test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling() {
     // The invariant the whole `PruneAllowance` split exists for, and the one a
     // per-pool test cannot see: `MAX_RESTORE_PRUNE_DELETES` bounds a *launch*,
     // because a device-barrier storm kills the synchronous `initialize_mls`
-    // call rather than any single walk in it. Three pools, so the ceiling is
-    // `3 × MAX_RESTORE_PRUNE_DELETES` — and the point is that adding a seventh
+    // call rather than any single walk in it. Four pools, so the ceiling is
+    // `4 × MAX_RESTORE_PRUNE_DELETES` — and the point is that adding another
     // walk, or letting one allocate its own pool again, moves this number
     // without moving any per-walk assertion.
     //
     // Every restore category that can delete is seeded past its own pool here,
-    // so all three pools bind at once:
+    // so all four pools bind at once:
     //
     // - advisory (shared): session states, peer key packages, peer
     //   capabilities, Welcome lifecycles, media descriptors — 200 potential
@@ -19684,7 +19892,10 @@ fn test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling() {
     //   rather than left out — a walk that starts deleting would move the
     //   total, and this assertion is what would catch it.
     // - pending messages (private): 600 potential, 512 funded;
-    // - outbox (private): 600 potential, 512 funded.
+    // - outbox (private): 600 potential, 512 funded;
+    // - inbound (private): 600 pending-decryption records plus one corrupt
+    //   seen set, 512 funded. The pending-decryption walk draws first and
+    //   takes the whole pool, so the seen-set delete is the one refused.
     use super::storage::MAX_RESTORE_PRUNE_DELETES;
 
     const ADVISORY_SEED: usize = 200;
@@ -19711,7 +19922,22 @@ fn test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling() {
                 b"not a sealed record",
             )
             .unwrap();
+        backing
+            .store(
+                storage_keys::PENDING_DECRYPT_ENTRIES,
+                &format!("in{i:05}"),
+                b"not a sealed record",
+            )
+            .unwrap();
     }
+    // Unsealed, so it opens and then fails to parse.
+    backing
+        .store(
+            storage_keys::DEDUP_SEEN_IDS,
+            storage_keys::DEDUP_SEEN_IDS_ID,
+            b"{not json",
+        )
+        .unwrap();
     for i in 0..ADVISORY_SEED {
         backing
             .store(
@@ -19767,6 +19993,8 @@ fn test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling() {
         + counting.deletes_for(storage_keys::MEDIA_DESCRIPTORS);
     let pending = counting.deletes_for(storage_keys::PENDING_MESSAGES);
     let outbox = counting.deletes_for(storage_keys::OUTBOX);
+    let inbound = counting.deletes_for(storage_keys::PENDING_DECRYPT_ENTRIES)
+        + counting.deletes_for(storage_keys::DEDUP_SEEN_IDS);
 
     assert_eq!(
         advisory,
@@ -19784,8 +20012,13 @@ fn test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling() {
         "so does the outbox walk — its walk bound alone is not the ceiling"
     );
     assert_eq!(
-        advisory + pending + outbox,
-        3 * MAX_RESTORE_PRUNE_DELETES,
+        inbound, MAX_RESTORE_PRUNE_DELETES,
+        "the two inbound walks share one private pool, and the first may spend \
+         all of it rather than reserving for advisory walks that never draw on it"
+    );
+    assert_eq!(
+        advisory + pending + outbox + inbound,
+        4 * MAX_RESTORE_PRUNE_DELETES,
         "the launch ceiling is the sum of the pools, and nothing else on this \
          path may issue an unbudgeted delete"
     );
