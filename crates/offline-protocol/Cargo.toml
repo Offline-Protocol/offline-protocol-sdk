@@ -88,6 +88,10 @@ offline-protocol-leaf = { workspace = true }
 # A local HTTP server for the uploader's status-matrix tests: every status the
 # ingest can answer, plus a server that never answers, without a network.
 tiny_http = "0.12"
+# A TLS server presenting a certificate the bundled roots do not trust, for the
+# uploader's interception test. The rustls and ring the uploader already links
+# through ureq, so it adds no crate to the graph.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 offline-protocol-transport = { workspace = true, features = ["test-utils"] }
 # Forging a leaf that lies about its identity needs raw OpenMLS, which this
 # crate deliberately does not depend on. The fixture lives with the code it

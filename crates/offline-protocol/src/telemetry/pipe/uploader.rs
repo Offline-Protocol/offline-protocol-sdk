@@ -888,6 +888,27 @@ pub(crate) mod tests {
     /// half is a no-op in an ordinary run and never posts anywhere.
     const PROXY_PROBE_ENV: &str = "OFFLINE_TELEMETRY_PROXY_PROBE";
 
+    /// Every variable ureq reads a proxy from, in both cases. A child process
+    /// has all of them cleared before the one under test is set: ureq takes
+    /// the first of these it can parse, a developer's shell may export any of
+    /// them, and on Windows the names are case-insensitive, so clearing
+    /// `https_proxy` after setting `HTTPS_PROXY` would clear the stand-in.
+    const PROXY_VARS: [&str; 8] = [
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ];
+
+    /// Set only on the child processes the proxy configuration test spawns,
+    /// to the `host:port` the child's agent must be configured with, or
+    /// `none`.
+    const PROXY_CONFIG_ENV: &str = "OFFLINE_TELEMETRY_PROXY_CONFIG";
+
     /// The production constructor tunnels through the CONNECT proxy the
     /// environment names, and TLS runs through that tunnel to the
     /// destination rather than terminating at the proxy.
@@ -910,20 +931,7 @@ pub(crate) mod tests {
             .expect("crate-qualified path");
         let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
         command.args(["--exact", &format!("{module}::proxy_probe_child")]);
-        // Cleared before the one that is set: ureq takes the first of these
-        // it can parse, a developer's shell may export any of them, and on
-        // Windows the names are case-insensitive, so clearing `https_proxy`
-        // after setting `HTTPS_PROXY` would clear the stand-in.
-        for name in [
-            "ALL_PROXY",
-            "all_proxy",
-            "HTTPS_PROXY",
-            "https_proxy",
-            "HTTP_PROXY",
-            "http_proxy",
-            "NO_PROXY",
-            "no_proxy",
-        ] {
+        for name in PROXY_VARS {
             command.env_remove(name);
         }
         let mut child = command
@@ -1002,6 +1010,155 @@ pub(crate) mod tests {
             headers: Vec::new(),
             body: "{}",
         });
+    }
+
+    /// The agent takes its proxy from the environment when it is built, in
+    /// the order `docs/telemetry.md` states, exempts what `NO_PROXY` names,
+    /// and has none when nothing is set.
+    ///
+    /// Asserted on the agent's configuration, in child processes so that no
+    /// variable reaches this one. The tunnel test above proves a configured
+    /// proxy carries the request; this pins which proxy gets configured.
+    #[test]
+    fn the_agent_takes_its_proxy_from_the_environment_when_it_is_built() {
+        let cases: [(&[(&str, &str)], &str); 3] = [
+            (
+                &[
+                    ("HTTPS_PROXY", "http://127.0.0.1:3128"),
+                    ("NO_PROXY", "skip.invalid"),
+                ],
+                "127.0.0.1:3128",
+            ),
+            (
+                &[
+                    ("HTTP_PROXY", "http://127.0.0.3:8080"),
+                    ("HTTPS_PROXY", "http://127.0.0.1:3128"),
+                    ("ALL_PROXY", "http://127.0.0.2:8001"),
+                ],
+                "127.0.0.2:8001",
+            ),
+            (&[], "none"),
+        ];
+        let (_, module) = module_path!()
+            .split_once("::")
+            .expect("crate-qualified path");
+        for (vars, expected) in cases {
+            let mut command =
+                std::process::Command::new(std::env::current_exe().expect("test binary"));
+            command.args(["--exact", &format!("{module}::proxy_config_child")]);
+            for name in PROXY_VARS {
+                command.env_remove(name);
+            }
+            for (name, value) in vars {
+                command.env(name, value);
+            }
+            let output = command
+                .env(PROXY_CONFIG_ENV, expected)
+                .output()
+                .expect("child test process");
+            assert!(
+                output.status.success(),
+                "expected {expected}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    /// The child half of the proxy configuration test: builds the production
+    /// client and checks its proxy against [`PROXY_CONFIG_ENV`].
+    #[test]
+    fn proxy_config_child() {
+        let Some(expected) = std::env::var_os(PROXY_CONFIG_ENV) else {
+            return;
+        };
+        let expected = expected.to_str().expect("UTF-8");
+        let client = UreqClient::new();
+        let proxy = client.agent.config().proxy();
+        if expected == "none" {
+            assert!(
+                proxy.is_none(),
+                "{proxy:?} with no proxy in the environment"
+            );
+            return;
+        }
+        let proxy = proxy.expect("the environment's proxy was configured");
+        assert_eq!(format!("{}:{}", proxy.host(), proxy.port()), expected);
+        assert_eq!(proxy.protocol(), ureq::ProxyProtocol::Http);
+        assert!(proxy.is_from_env());
+        let ingest: ureq::http::Uri = "https://ingest.invalid/v1/events".parse().expect("URI");
+        assert!(!proxy.is_no_proxy(&ingest));
+        if std::env::var_os("NO_PROXY").is_some() {
+            let exempt: ureq::http::Uri = "https://skip.invalid/v1/events".parse().expect("URI");
+            assert!(proxy.is_no_proxy(&exempt), "NO_PROXY was not honoured");
+        }
+    }
+
+    /// A certificate nothing in the bundled roots issued is refused, as an
+    /// interception proxy's is, even when it names the host that was dialled.
+    ///
+    /// The server stands in for a TLS-intercepting proxy whose root a user
+    /// installed in the device trust store: its certificate is valid for
+    /// `127.0.0.1` and self-issued. The client must abort the handshake, so
+    /// no request byte reaches the server. The accepting half would need a
+    /// certificate the Mozilla set trusts, so it is pinned on the agent's
+    /// configuration instead, by the test below.
+    #[test]
+    fn a_certificate_the_bundled_roots_do_not_trust_is_refused() {
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+        const CERT: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/untrusted-interception-cert.pem"
+        ));
+        const KEY: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/untrusted-interception-key.pem"
+        ));
+
+        let config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from_pem_slice(CERT).expect("certificate")],
+            PrivateKeyDer::from_pem_slice(KEY).expect("private key"),
+        )
+        .expect("server config");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("https://{}/v1/events", listener.local_addr().expect("addr"));
+        let server = std::thread::spawn(move || {
+            let (mut tcp, _) = listener.accept().expect("accept");
+            tcp.set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("read timeout");
+            let mut tls =
+                rustls::ServerConnection::new(std::sync::Arc::new(config)).expect("connection");
+            while tls.is_handshaking() {
+                if let Err(err) = tls.complete_io(&mut tcp) {
+                    return Err(err.to_string());
+                }
+            }
+            Ok(())
+        });
+
+        let refused = UreqClient::new()
+            .post(&Request {
+                url: &url,
+                headers: vec![("Content-Type", "application/json")],
+                body: r#"{"events":[]}"#,
+            })
+            .expect_err("a certificate the bundled roots do not trust was accepted");
+        assert!(
+            refused.contains("invalid peer certificate") && refused.contains("UnknownIssuer"),
+            "{refused}"
+        );
+        assert!(
+            server.join().expect("server thread").is_err(),
+            "the server finished a handshake the client should have aborted"
+        );
     }
 
     /// The trust anchor has no cheap behaviour test (it would need a
