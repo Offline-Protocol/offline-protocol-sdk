@@ -38,11 +38,14 @@ impl FakeClock {
     }
 }
 
-/// A client that captures every body and answers with a fixed status.
+/// A client that captures every body and answers with a fixed status. A 2xx
+/// carries the ingest's accepted count; anything else carries the ingest's
+/// error shape, with `error_code` as the code (`forbidden` when unset).
 #[derive(Clone)]
 pub(crate) struct CapturingClient {
     pub(crate) bodies: Arc<Mutex<Vec<String>>>,
     pub(crate) status: Arc<AtomicI64>,
+    pub(crate) error_code: Arc<Mutex<Option<String>>>,
 }
 
 impl CapturingClient {
@@ -50,6 +53,7 @@ impl CapturingClient {
         Self {
             bodies: Arc::default(),
             status: Arc::new(AtomicI64::new(202)),
+            error_code: Arc::default(),
         }
     }
 
@@ -74,10 +78,21 @@ impl HttpClient for CapturingClient {
             .ok()
             .and_then(|v| v["events"].as_array().map(|e| e.len()))
             .unwrap_or(0);
+        let body = if (200..300).contains(&status) {
+            format!(r#"{{"accepted":{accepted},"rejected":0,"rejected_reasons":[]}}"#)
+        } else {
+            let code = self
+                .error_code
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "forbidden".to_string());
+            format!(r#"{{"error":"{code}","message":"{code}"}}"#)
+        };
         Ok(Response {
             status: status as u16,
             retry_after: None,
-            body: format!(r#"{{"accepted":{accepted},"rejected":0,"rejected_reasons":[]}}"#),
+            body,
         })
     }
 }

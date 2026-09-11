@@ -1955,10 +1955,11 @@ export class OfflineProtocol {
    * The telemetry pipe's counters, or `null` while telemetry is not
    * enabled. `acceptedEvents` is what the ingest reported accepting, which
    * is what an invoice is reconciled against; `dropped` counts events lost
-   * to the ring buffer, the durable queue's caps, the six-day expiry, or a
-   * permanent rejection; `lastError` is the most recent send failure, and
-   * clears once a batch is accepted, so it reports the current state rather
-   * than the high-water mark of a recovered outage.
+   * to the ring buffer, the durable queue's caps, the six-day expiry, a
+   * permanent rejection, or everything queued or collected after the ingest
+   * reported the application's telemetry toggle off; `lastError` is the most
+   * recent send failure, and clears once a batch is accepted, so it reports
+   * the current state rather than the high-water mark of a recovered outage.
    */
   async telemetryStats(): Promise<TelemetryStats | null> {
     const stats = await OfflineProtocolNativeModule.telemetryStats();

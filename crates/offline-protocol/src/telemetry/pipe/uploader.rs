@@ -14,7 +14,8 @@
 //! | 2xx | The ingest owns the batch; delete it, reset the backoff |
 //! | 3xx | Never followed, so it arrives as an answer; drop it, keep going |
 //! | 413 | The batch can never fit; drop it, keep going |
-//! | 401, 403 | The key or the app id is wrong; keep the batch, record the error, stop until the next `enable_telemetry` |
+//! | 403 with `error: telemetry_disabled` | The application's telemetry toggle is off in the developer portal; drop the batch and everything queued behind it, record the error, stop until the next `enable_telemetry`, and have the pipe discard what it collects meanwhile |
+//! | any other 401, 403 | The key or the app id is wrong; keep the batch, record the error, stop until the next `enable_telemetry` |
 //! | 429 | Wait `Retry-After` when given, else back off |
 //! | 408, 5xx, no answer | Back off: 1 s doubling to 15 min, plus up to a second of jitter |
 //! | any other 4xx | The bytes will never be accepted; drop, keep going |
@@ -48,6 +49,10 @@ pub(crate) const BATTERY_DEFER_BELOW: u8 = 15;
 
 pub(crate) const HEADER_APP_ID: &str = "X-Mesh-Analytics-App-Id";
 pub(crate) const HEADER_IDEMPOTENCY: &str = "Idempotency-Key";
+/// The `error` code the ingest answers a 403 with while the application's
+/// telemetry toggle is off in the developer portal. Every other 403 carries
+/// `forbidden`, and is a bad key or a key for another app.
+pub(crate) const ERROR_TELEMETRY_DISABLED: &str = "telemetry_disabled";
 
 /// One HTTP request, as the client sees it.
 pub(crate) struct Request<'a> {
@@ -83,6 +88,13 @@ pub(crate) enum Outcome {
     Drop,
     /// Never resend anything until re-enabled.
     AuthHalt,
+    /// The developer portal has hosted telemetry switched off for this
+    /// application (403 with `error: telemetry_disabled`). Drop the batch and
+    /// everything queued, and never resend anything until re-enabled. Unlike
+    /// a bad key this is not a fault the developer fixes and re-enables
+    /// through, and holding the events would resend the off period once the
+    /// toggle came back, which is the backfill the toggle promises not to make.
+    Disabled,
 }
 
 /// What one drain did, for the caller's stats.
@@ -93,6 +105,9 @@ pub(crate) struct DrainReport {
     pub(crate) dropped_events: u64,
     pub(crate) batches_sent: u32,
     pub(crate) halted: bool,
+    /// The halt was a `telemetry_disabled`: the queue was dropped, and the
+    /// pipe should discard what it collects from here on.
+    pub(crate) disabled: bool,
 }
 
 pub(crate) struct Uploader {
@@ -217,6 +232,21 @@ impl Uploader {
                     report.halted = true;
                     break;
                 }
+                Outcome::Disabled => {
+                    // The toggle is off in the portal. Nothing queued will be
+                    // wanted when it comes back on, since resending it then
+                    // is exactly the backfill the toggle promises not to
+                    // make, so the whole queue goes, not just the head, and
+                    // the halt stops every later send until the next enable.
+                    while let Some(batch) = store.pop_front() {
+                        report.dropped_events += u64::from(batch.event_count);
+                    }
+                    self.reset_backoff();
+                    self.auth_halted = true;
+                    report.halted = true;
+                    report.disabled = true;
+                    break;
+                }
                 Outcome::Retry { after_ms } => {
                     self.schedule_backoff(now_ms, after_ms);
                     break;
@@ -288,6 +318,13 @@ pub(crate) fn classify_response(
     }
     *last_error = Some(format!("ingest responded {status}"));
     match status {
+        // Only a 403, and only with the code. A body that does not parse or
+        // names any other code is the ordinary halt, so an ingest that
+        // predates the code, or answers `forbidden`, keeps the queue as before.
+        403 if has_error_code(&response.body, ERROR_TELEMETRY_DISABLED) => {
+            *last_error = Some(format!("ingest responded 403 ({ERROR_TELEMETRY_DISABLED})"));
+            Outcome::Disabled
+        }
         401 | 403 => Outcome::AuthHalt,
         408 | 500..=599 => Outcome::Retry { after_ms: None },
         429 => Outcome::Retry {
@@ -306,6 +343,13 @@ pub(crate) fn classify_response(
         // the same answer again.
         _ => Outcome::Drop,
     }
+}
+
+/// Whether an ingest error body, `{"error": "...", "message": "..."}`, names
+/// `code`. A body that is not JSON, or has no string `error`, names nothing.
+fn has_error_code(body: &str, code: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .is_ok_and(|value| value.get("error").and_then(serde_json::Value::as_str) == Some(code))
 }
 
 /// The number of events the ingest counted for a 2xx answer.
@@ -579,6 +623,75 @@ pub(crate) mod tests {
             let again = up.drain(&mut store, 1_000_000, 8, None);
             assert!(again.halted);
             assert_eq!(requests.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_403_telemetry_disabled_drops_the_whole_queue_and_halts() {
+        let body = r#"{"error":"telemetry_disabled","message":"forbidden: mesh telemetry is disabled for this application in the developer portal"}"#;
+        let (mut up, requests) = uploader(vec![answer(403, body), answer(202, "")]);
+        let mut store = test_store(Backend::Memory);
+        store.push(batch(1, 0));
+        store.push(batch(4, 0));
+        let report = up.drain(&mut store, 0, 8, None);
+        assert!(report.halted);
+        assert!(report.disabled);
+        assert!(up.is_halted());
+        assert!(
+            store.is_empty(),
+            "the refused batch and the one queued behind it are both gone"
+        );
+        assert_eq!(report.dropped_events, 5);
+        assert_eq!(requests.lock().unwrap().len(), 1, "nothing more is sent");
+        assert!(up.next_retry_at_ms().is_none());
+        assert_eq!(
+            up.last_error(),
+            Some("ingest responded 403 (telemetry_disabled)")
+        );
+        // Still halted on a later wake, whatever has been queued since.
+        store.push(batch(1, 0));
+        let again = up.drain(&mut store, 1_000_000, 8, None);
+        assert!(again.halted);
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn only_a_403_carrying_the_telemetry_disabled_code_disables() {
+        let mut last = None;
+        let response = |status: u16, body: &str| Response {
+            status,
+            retry_after: None,
+            body: body.into(),
+        };
+        let disabled = r#"{"error":"telemetry_disabled","message":"x"}"#;
+        assert_eq!(
+            classify_response(&response(403, disabled), 0, &mut last),
+            Outcome::Disabled
+        );
+        assert_eq!(
+            last.as_deref(),
+            Some("ingest responded 403 (telemetry_disabled)")
+        );
+        // The code on any other status is not the portal toggle.
+        assert_eq!(
+            classify_response(&response(401, disabled), 0, &mut last),
+            Outcome::AuthHalt
+        );
+        assert_eq!(last.as_deref(), Some("ingest responded 401"));
+        // A 403 with the shared code, no body, or junk is the ordinary halt:
+        // an ingest that predates the code keeps the queue as it always did.
+        for body in [
+            r#"{"error":"forbidden","message":"forbidden: api key revoked"}"#,
+            "",
+            "not json",
+            r#"{"message":"no code"}"#,
+        ] {
+            assert_eq!(
+                classify_response(&response(403, body), 0, &mut last),
+                Outcome::AuthHalt,
+                "{body:?}"
+            );
+            assert_eq!(last.as_deref(), Some("ingest responded 403"), "{body:?}");
         }
     }
 

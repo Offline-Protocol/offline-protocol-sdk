@@ -607,7 +607,10 @@ is the one exception, and its egress is bounded as follows.
   collection and initiates a final flush, waiting up to three seconds for
   shutdown. An in-flight request may complete afterward. Remaining persisted
   batches are retained for a later enablement, subject to queue limits and
-  expiry.
+  expiry, except after the ingest answers `telemetry_disabled` (the
+  application's toggle is off in the developer portal). That discards the
+  queue and whatever is collected until the next enablement, so a toggled-off
+  stretch is never uploaded later.
 
 The key that authenticates the stream is R13.
 

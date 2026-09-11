@@ -2055,7 +2055,8 @@ Diagnostics screen shows what the free API can drive instead.
 **What the pipe does differently from the analytics package**, each a named
 test: the backoff caps at 15 min rather than 5; a 413 is dropped rather than
 split; a 401 or 403 halts sending until the next `enableTelemetry` rather than
-dropping the batch and continuing; `Retry-After` is honoured; `Idempotency-Key`
+dropping the batch and continuing, except a 403 `telemetry_disabled`, which
+drops the queue because the portal toggle is off; `Retry-After` is honoured; `Idempotency-Key`
 and `User-Agent` headers are sent; requests time out at 15 s (10 s to
 connect); flushes are deferred below 15% battery unless charging; and
 `reason` goes up as the engine's raw token rather than a classification made
