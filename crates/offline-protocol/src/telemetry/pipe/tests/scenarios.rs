@@ -696,3 +696,34 @@ fn a_queue_adopted_after_a_telemetry_disabled_refusal_is_dropped_too() {
     again.flush();
     assert_eq!(client.bodies.lock().unwrap().len(), 1, "no backfill");
 }
+
+/// A refusal on the final flush drops the queue the same way. `stop` runs the
+/// same cycle, and a batch it left on disk would be resent by the next
+/// `enable_telemetry`.
+#[test]
+fn a_telemetry_disabled_refusal_on_the_final_flush_drops_the_queue_too() {
+    let clock = FakeClock::at(1_000);
+    let storage = Arc::new(MemoryStorage::default());
+    let client = CapturingClient::accepting();
+    client.status.store(403, Ordering::SeqCst);
+    *client.error_code.lock().unwrap() = Some("telemetry_disabled".into());
+    let pipe = inline_pipe(&test_config(), &clock, client.clone(), sealed(&storage));
+    emit_failed(&pipe, 1);
+    pipe.stop(FINAL_FLUSH_BUDGET);
+    assert_eq!(
+        client.bodies.lock().unwrap().len(),
+        1,
+        "the final flush reached the ingest"
+    );
+    assert_eq!(pipe.stats().dropped, 1);
+
+    client.status.store(202, Ordering::SeqCst);
+    *client.error_code.lock().unwrap() = None;
+    let again = inline_pipe(&test_config(), &clock, client.clone(), sealed(&storage));
+    assert!(
+        again.is_durable(),
+        "the fresh pipe adopted the durable queue"
+    );
+    again.flush();
+    assert_eq!(client.bodies.lock().unwrap().len(), 1, "no backfill");
+}
