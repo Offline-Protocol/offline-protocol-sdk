@@ -4352,7 +4352,12 @@ impl OfflineProtocol {
     ///
     /// `reason` should carry platform-specific error context so reliability
     /// telemetry can classify root causes more accurately.
+    ///
+    /// The bridges also report the relay's `MessageSent { pushed: true }` here,
+    /// as the `relay_pushed` token. That parks the frame in the core but is not
+    /// a failed send, so it is kept out of the transport's delivery metrics.
     pub fn internet_send_failed_with_reason(&self, message_id: String, reason: Option<String>) {
+        let scores_carrier = CoreProtocol::send_report_is_carrier_failure(reason.as_deref());
         let mut protocol = self.lock_inner_recovering();
         if let Err(err) = protocol.on_transport_send_failed_via(
             &message_id,
@@ -4364,6 +4369,9 @@ impl OfflineProtocol {
                 error = %err,
                 "Failed to apply welcome lifecycle transport failure"
             );
+        }
+        if !scores_carrier {
+            return;
         }
         if let Some(transport_arc) = protocol
             .transport_manager()
@@ -8721,6 +8729,71 @@ mod tests {
         })
         .to_string()
         .into_bytes()
+    }
+
+    /// The bridges report the relay's `MessageSent { pushed: true }` through
+    /// `internet_send_failed_with_reason` as `relay_pushed`. The relay took that
+    /// frame, so the report must stay out of the Internet transport's failure
+    /// accounting: the frame still awaits the bridge's write confirmation
+    /// afterwards. A real failure report for the same frame still reaches it.
+    #[test]
+    fn test_internet_relay_push_report_is_not_scored_as_a_send_failure() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        protocol.internet_status_changed(true).unwrap();
+        let internet = || {
+            protocol
+                .lock_inner_recovering()
+                .transport_manager()
+                .get_transport(CoreTransportType::Internet)
+                .expect("the Internet transport is registered")
+        };
+        let awaiting_confirmation = || {
+            internet()
+                .as_any()
+                .downcast_ref::<offline_protocol_transport::InternetTransport>()
+                .expect("the Internet transport is an InternetTransport")
+                .pending_confirmation_count()
+        };
+
+        let message = offline_protocol_core::Message::new(
+            offline_protocol_core::UserId::new("user123").unwrap(),
+            offline_protocol_core::UserId::new("bob").unwrap(),
+            offline_protocol_core::AppId::new("test-app").unwrap(),
+            "pushed while bob was offline",
+        );
+        internet()
+            .send(&message)
+            .expect("queueing to the Internet transport");
+        let frame = protocol
+            .internet_get_next_message()
+            .expect("the platform takes the frame");
+        assert_eq!(frame.message_id, message.id.as_str());
+        assert_eq!(
+            awaiting_confirmation(),
+            1,
+            "precondition: the frame awaits its write confirmation"
+        );
+
+        protocol.internet_send_failed_with_reason(
+            frame.message_id.clone(),
+            Some("relay_pushed".to_string()),
+        );
+        assert_eq!(
+            awaiting_confirmation(),
+            1,
+            "a push is not a failed send, so the transport must not count it"
+        );
+
+        protocol.internet_send_failed_with_reason(
+            frame.message_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        );
+        assert_eq!(
+            awaiting_confirmation(),
+            0,
+            "a real failure report still reaches the transport"
+        );
     }
 
     /// Redundant same-state reports (e.g. bridge auth refresh) must not emit

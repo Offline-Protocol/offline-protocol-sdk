@@ -3864,6 +3864,20 @@ impl OfflineProtocol {
         self.park_unreachable_dm(&parsed_id, &recipient, attempt_count);
     }
 
+    /// Whether a platform send report also belongs in the carrier's delivery
+    /// metrics (`Transport::report_send_failure`).
+    ///
+    /// Every report does except `relay_pushed`. The bridges hand the relay's
+    /// `MessageSent { pushed: true }` to [`Self::on_transport_send_failed_via`]
+    /// because that is their one call for "the relay answered about this id",
+    /// but the relay took the frame into a device push, which is not a failed
+    /// send. A wrapper that scores the report without asking here records a
+    /// failure whenever the relay's answer beats the bridge's own write
+    /// confirmation, against the carrier the router ranks by that ratio.
+    pub fn send_report_is_carrier_failure(reason: Option<&str>) -> bool {
+        reason.map(classify_transport_send_error) != Some(SEND_FAIL_REASON_RELAY_PUSHED)
+    }
+
     /// Handles the relay's `MessageSent { pushed: true }` answer: the recipient
     /// has no live socket, and the frame went out in a push notification.
     ///

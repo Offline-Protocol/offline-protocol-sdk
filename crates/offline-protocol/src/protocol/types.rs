@@ -2497,6 +2497,29 @@ mod send_failure_classification_tests {
         );
     }
 
+    /// A push is parked in the core but is not a failed send, so the one
+    /// report that must stay out of a carrier's failure accounting is the
+    /// exact token. Anything else, including relay text that merely contains
+    /// it, still counts.
+    #[test]
+    fn only_a_relay_push_report_is_kept_out_of_carrier_failures() {
+        use crate::OfflineProtocol;
+        assert!(!OfflineProtocol::send_report_is_carrier_failure(Some(
+            "relay_pushed"
+        )));
+        for reason in [
+            Some("recipient_unreachable: Recipient is offline"),
+            Some("Internet transport send failed"),
+            Some("relay_pushed: extra"),
+            None,
+        ] {
+            assert!(
+                OfflineProtocol::send_report_is_carrier_failure(reason),
+                "{reason:?} is a send failure"
+            );
+        }
+    }
+
     /// Anything unrecognized fails closed to the fallback, never to itself.
     #[test]
     fn unknown_text_falls_back_and_is_never_echoed() {
