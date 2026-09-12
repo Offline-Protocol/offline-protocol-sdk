@@ -18803,6 +18803,159 @@ fn test_pending_decrypt_restore_overflow_is_settled_after_start() {
     }
 }
 
+/// Every drop a restore makes is charged to the inbound pool and reported only
+/// together with its delete.
+///
+/// A frame the in-memory caps turn away on restore came off disk, so its record
+/// has to go. Deleted unbudgeted, one launch could issue a delete per over-cap
+/// record on top of the pool, and `MAX_RESTORE_PRUNE_DELETES` bounds the whole
+/// launch because each delete costs a directory flush. Reported without its
+/// delete, the app would be told a frame was dropped that the next launch
+/// restores and may admit, and an aged-out record would be reported once per
+/// launch until its delete landed. So a record the pool cannot fund stays on
+/// disk unreported, and a later launch reports it exactly once.
+#[test]
+fn test_pending_decrypt_restore_drops_are_budgeted_and_reported_with_their_delete() {
+    use super::storage::{MAX_RESTORE_PRUNE_DELETES, PENDING_DECRYPT_PERSISTED_MAX_AGE_MS};
+    use crate::config::OverflowPolicy;
+    use std::collections::HashSet;
+
+    const SEED: usize = MAX_RESTORE_PRUNE_DELETES + 88;
+
+    // One launch of bob over the same two stores, counting the deletes it
+    // issues. A per-peer cap of one drops every restored frame but one.
+    let launch =
+        |secure: &Arc<InMemoryStorage>, state: &Arc<InMemoryStorage>, policy: OverflowPolicy| {
+            let counting = Arc::new(DeleteCountingStorage::new(state.clone()));
+            let state_handle: Arc<dyn crate::ProtocolStateStorage> = counting.clone();
+            let secure_handle: Arc<dyn MlsStorage> = secure.clone();
+            let mut config = create_test_config_for_user("bob");
+            config.encryption.enabled = true;
+            config.encryption.store_pending = true;
+            config.encryption.pending_queue.max_pending_per_peer = 1;
+            config.encryption.pending_queue.overflow_policy = policy;
+            let mut bob = OfflineProtocol::new(config).unwrap();
+            bob.initialize_mls(secure_handle, state_handle).unwrap();
+            (bob, counting)
+        };
+    // The ids a launch reported as dropped, parked for start().
+    let reported = |bob: &OfflineProtocol| -> HashSet<String> {
+        bob.deferred_restore_settlements
+            .iter()
+            .filter_map(|event| match event {
+                Event::MessageDecryptionFailed {
+                    message_id,
+                    code: DecryptionFailureCode::PendingQueueDropped,
+                    ..
+                } => Some(message_id.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let on_disk = |bob: &OfflineProtocol| -> HashSet<String> {
+        bob.persisted_pending_decrypt_ids().into_iter().collect()
+    };
+
+    // Frames the caps drop, under both overflow policies: the evicted older
+    // entries and the refused incoming ones take the same path.
+    for policy in [OverflowPolicy::DropOldest, OverflowPolicy::DropNewest] {
+        let secure = Arc::new(InMemoryStorage::new());
+        let state = Arc::new(InMemoryStorage::new());
+        let (seeder, _) = launch(&secure, &state, policy);
+        let now_ms = Utc::now().timestamp_millis();
+        for i in 0..SEED {
+            let message = pending_test_message(&id("alice"), &format!("frame {i}"));
+            seeder.persist_pending_decrypt_entry(
+                &id("alice"),
+                &message,
+                now_ms - (SEED - i) as i64,
+                None,
+            );
+        }
+        assert_eq!(on_disk(&seeder).len(), SEED, "{policy:?}: precondition");
+        drop(seeder);
+
+        let (bob, counting) = launch(&secure, &state, policy);
+        let first = reported(&bob);
+        let left = on_disk(&bob);
+        assert_eq!(bob.pending_queue.peer_queue_len(&id("alice")), 1);
+        assert_eq!(
+            counting.deletes_for(storage_keys::PENDING_DECRYPT_ENTRIES),
+            MAX_RESTORE_PRUNE_DELETES,
+            "{policy:?}: every over-cap delete is charged to the inbound pool"
+        );
+        assert_eq!(
+            first.len(),
+            MAX_RESTORE_PRUNE_DELETES,
+            "{policy:?}: a drop is reported only with its delete"
+        );
+        assert!(
+            first.is_disjoint(&left),
+            "{policy:?}: nothing reported is still on disk"
+        );
+        assert_eq!(
+            first.len() + left.len(),
+            SEED,
+            "{policy:?}: every record is either reported and deleted, or still on disk"
+        );
+        drop(bob);
+
+        let (bob, counting) = launch(&secure, &state, policy);
+        let second = reported(&bob);
+        assert_eq!(
+            counting.deletes_for(storage_keys::PENDING_DECRYPT_ENTRIES),
+            SEED - 1 - MAX_RESTORE_PRUNE_DELETES,
+            "{policy:?}: the next launch deletes what the first could not fund"
+        );
+        assert_eq!(second.len(), SEED - 1 - MAX_RESTORE_PRUNE_DELETES);
+        assert!(
+            first.is_disjoint(&second),
+            "{policy:?}: no drop is reported on two launches"
+        );
+        assert_eq!(
+            on_disk(&bob).len(),
+            1,
+            "{policy:?}: only the admitted frame is left"
+        );
+    }
+
+    // Records that aged out on disk follow the same rule.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (seeder, _) = launch(&secure, &state, OverflowPolicy::DropOldest);
+    let aged_out_at = Utc::now().timestamp_millis() - PENDING_DECRYPT_PERSISTED_MAX_AGE_MS - 60_000;
+    for i in 0..SEED {
+        let message = pending_test_message(&id("alice"), &format!("stale {i}"));
+        seeder.persist_pending_decrypt_entry(&id("alice"), &message, aged_out_at, None);
+    }
+    drop(seeder);
+
+    let (bob, counting) = launch(&secure, &state, OverflowPolicy::DropOldest);
+    let first = reported(&bob);
+    let left = on_disk(&bob);
+    assert_eq!(
+        counting.deletes_for(storage_keys::PENDING_DECRYPT_ENTRIES),
+        MAX_RESTORE_PRUNE_DELETES
+    );
+    assert_eq!(
+        first.len(),
+        MAX_RESTORE_PRUNE_DELETES,
+        "an aged-out record is reported only with its delete"
+    );
+    assert!(first.is_disjoint(&left));
+    assert_eq!(left.len(), SEED - MAX_RESTORE_PRUNE_DELETES);
+    drop(bob);
+
+    let (bob, _) = launch(&secure, &state, OverflowPolicy::DropOldest);
+    let second = reported(&bob);
+    assert_eq!(second.len(), SEED - MAX_RESTORE_PRUNE_DELETES);
+    assert!(
+        first.is_disjoint(&second),
+        "an aged-out record is reported on one launch only"
+    );
+    assert!(on_disk(&bob).is_empty());
+}
+
 /// A frame the queue refuses on the live path was never written, so refusing
 /// it must not issue a storage delete. Under a flood of frames the caps turn
 /// away, one delete per refusal is a storage round trip per inbound frame,

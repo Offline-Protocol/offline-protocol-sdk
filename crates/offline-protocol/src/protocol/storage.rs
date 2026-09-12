@@ -598,7 +598,9 @@ pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_G
 /// [`OfflineProtocol::restore_pending_decrypt_entries`] holds ciphertext the
 /// app is told about when it is lost, and [`OfflineProtocol::restore_dedup_seen`]
 /// shares the pool after it for its one possible delete. Both refuse rather
-/// than count, since every delete they make is advisory.
+/// than count, since every delete they make is advisory. The pending-decryption
+/// walk reports a drop only together with its delete, so a refusal defers both
+/// halves to a later launch at once.
 ///
 /// # The derived launch ceiling
 ///
@@ -4545,14 +4547,15 @@ impl OfflineProtocol {
     /// the queue (idempotent by id) instead of hitting the duplicate re-ACK
     /// path, and a restore must leave that invariant where it found it.
     ///
-    /// Every delete the walk causes — unreadable, corrupt, unknown version,
-    /// expired — is advisory: a record left on disk one launch longer is
-    /// re-walked and dropped then. So the walk draws on a pool of its own with
-    /// refusing semantics rather than the shared advisory pool: it holds
-    /// inbound ciphertext the app is told about when lost, and that must not
-    /// be held hostage to a key-package flood in a category it has nothing to
-    /// do with — the same argument the outbound pending walk makes. It draws
-    /// first; [`Self::restore_dedup_seen`] shares the pool after it.
+    /// Every delete the walk causes (unreadable, corrupt, unknown version,
+    /// expired, or dropped by the in-memory caps) is advisory: a record left on
+    /// disk one launch longer is re-walked and dropped then. So the walk draws
+    /// on a pool of its own with refusing semantics rather than the shared
+    /// advisory pool: it holds inbound ciphertext the app is told about when
+    /// lost, and that must not be held hostage to a key-package flood in a
+    /// category it has nothing to do with, the same argument the outbound
+    /// pending walk makes. It draws first; [`Self::restore_dedup_seen`] shares
+    /// the pool after it.
     ///
     /// An expired record is settled with a `PendingQueueDropped` decryption
     /// failure carrying the reason `expired_persisted`, through the deferred
@@ -4560,6 +4563,14 @@ impl OfflineProtocol {
     /// A restored frame the in-memory caps drop (a lowered cap, or more on disk
     /// than memory admits) is settled the same way: emitted directly, it would
     /// reach an app that has not subscribed yet, or no callback at all.
+    ///
+    /// Either one is reported only on the launch that deletes its record. A
+    /// delete the budget refuses leaves the record on disk **unreported**, and
+    /// a later launch walks it again and owns both halves then, which is the
+    /// rule the outbound walk's capacity drain follows. Reporting it anyway
+    /// would repeat an aged-out report on every launch until the delete lands,
+    /// and for a frame the caps dropped it would claim a loss that a later
+    /// launch contradicts by admitting the frame.
     /// Infallible by design: this queue holds nothing the rest of `initialize_mls`
     /// depends on, so a listing failure is logged and the queue simply starts
     /// empty this session.
@@ -4587,7 +4598,7 @@ impl OfflineProtocol {
         let now_ms = Utc::now().timestamp_millis();
         let mut budget = allowance.refusing_private();
         let mut restored: Vec<PendingDecryptRecord> = Vec::new();
-        let mut expired_settlements: Vec<Event> = Vec::new();
+        let mut settlements: Vec<Event> = Vec::new();
         for key_id in key_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             let data = match self.read_state_record_detailed_budgeted(
                 storage.as_ref(),
@@ -4643,15 +4654,18 @@ impl OfflineProtocol {
             if now_ms.saturating_sub(record.first_received_at_ms)
                 >= PENDING_DECRYPT_PERSISTED_MAX_AGE_MS
             {
+                // Reported with its delete or not at all this launch; see the
+                // doc comment above.
+                if !budget.claim() {
+                    continue;
+                }
                 debug!(
                     key_id = %key_id,
                     peer_id = %record.peer_id,
                     "Dropping pending decryption entry that aged out on disk"
                 );
-                if budget.claim() {
-                    self.delete_pending_decrypt_key(&key_id);
-                }
-                expired_settlements.push(Event::message_decryption_failed(
+                self.delete_pending_decrypt_key(&key_id);
+                settlements.push(Event::message_decryption_failed(
                     record.message.id.clone(),
                     record.message.sender.as_str().to_string(),
                     DecryptionFailureCode::PendingQueueDropped,
@@ -4665,14 +4679,6 @@ impl OfflineProtocol {
             restored.push(record);
         }
 
-        if budget.exhausted {
-            warn!(
-                deleted = budget.spent,
-                budget = MAX_RESTORE_PRUNE_DELETES,
-                "Pending decryption prune hit its share of the launch delete budget; the rest is left on disk for a later launch"
-            );
-        }
-
         // Oldest first, so the in-memory FIFO and the overflow policy see the
         // order the live path would have produced. Ties (same millisecond)
         // fall back to the id so the order is stable across launches.
@@ -4683,15 +4689,33 @@ impl OfflineProtocol {
         });
 
         let count = restored.len();
-        let mut settlements = expired_settlements;
         for record in restored {
-            settlements.extend(self.enqueue_restored_pending_decryption(
+            let dropped = self.enqueue_restored_pending_decryption(
                 &record.peer_id,
                 &record.message,
                 record.received_via,
-            ));
+            );
+            // A frame the caps let go is already out of memory but came off
+            // disk, so its record goes, charged like every other delete here.
+            // One the budget cannot fund stays on disk unreported.
+            let mut deleted = Vec::with_capacity(dropped.len());
+            for entry in dropped {
+                if budget.claim() {
+                    self.delete_pending_decrypt_entry_from_storage(&entry.message.id);
+                    deleted.push(entry);
+                }
+            }
+            settlements.extend(Self::pending_drop_events(deleted));
         }
         self.settle_restored_message_failures(settlements);
+
+        if budget.exhausted {
+            warn!(
+                deleted = budget.spent,
+                budget = MAX_RESTORE_PRUNE_DELETES,
+                "Pending decryption prune hit its share of the launch delete budget; the rest is left on disk for a later launch"
+            );
+        }
 
         if count > 0 {
             info!(count, "Restored pending decryption entries from storage");

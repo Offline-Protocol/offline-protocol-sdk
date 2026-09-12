@@ -66,28 +66,25 @@ impl OfflineProtocol {
     /// record on disk is already the durable copy and keeps its first-receipt
     /// timestamp.
     ///
-    /// Every frame on this path came off disk, the refused one included, so
-    /// each drop has its record deleted. The drops are **returned** as events
-    /// rather than emitted: a restore runs from `initialize_mls`, before
-    /// `start()` and often before the app has installed its callback, so the
-    /// caller settles them through `settle_restored_message_failures`, the
-    /// same way it settles a record that aged out on disk.
+    /// Returns every frame the enqueue let go, the refused incoming one
+    /// included. Each came off disk, so unlike on the live path each still has
+    /// a record, and neither the delete nor the report happens here: the
+    /// restore walk charges every delete to the launch budget and reports a
+    /// drop only together with its delete (see
+    /// `restore_pending_decrypt_entries`). A restore also runs before
+    /// `start()`, so the walk settles those reports through
+    /// `settle_restored_message_failures` rather than emitting them.
     pub(crate) fn enqueue_restored_pending_decryption(
         &mut self,
         sender: &str,
         message: &offline_protocol_core::Message,
         received_via: Option<TransportType>,
-    ) -> Vec<Event> {
+    ) -> Vec<DroppedPendingMessage> {
         let config = &self.config.encryption.pending_queue;
         let outcome = self
             .pending_queue
             .enqueue_via(config, sender, message, received_via);
-        let dropped: Vec<DroppedPendingMessage> =
-            outcome.dropped.into_iter().chain(outcome.refused).collect();
-        self.delete_pending_decrypt_entries_from_storage(
-            dropped.iter().map(|entry| &entry.message.id),
-        );
-        Self::pending_drop_events(dropped)
+        outcome.dropped.into_iter().chain(outcome.refused).collect()
     }
 
     pub(super) fn prune_expired_pending_global_front(
@@ -163,7 +160,9 @@ impl OfflineProtocol {
     /// Logs each dropped frame and builds its `PendingQueueDropped` event
     /// without emitting it. Split from the emit because the restore path has
     /// to defer its events until the event pipeline is live.
-    fn pending_drop_events(dropped: impl IntoIterator<Item = DroppedPendingMessage>) -> Vec<Event> {
+    pub(super) fn pending_drop_events(
+        dropped: impl IntoIterator<Item = DroppedPendingMessage>,
+    ) -> Vec<Event> {
         dropped
             .into_iter()
             .map(|entry| {
