@@ -18507,6 +18507,10 @@ fn test_dedup_seen_set_excludes_own_outgoing_ids() {
         storage: Arc::new(InMemoryStorage::new()),
     });
     protocol.protocol_state_storage = Some(storage.clone());
+    // The seen set is sealed, so a write needs the record key.
+    protocol.state_record_cipher = Some(state_crypto::StateRecordCipher::new(
+        &[7u8; state_crypto::STATE_RECORD_KEY_BYTES],
+    ));
     protocol.start().unwrap();
 
     let own = protocol
@@ -18553,6 +18557,10 @@ fn test_dedup_seen_set_persistence_is_batched() {
     });
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     protocol.protocol_state_storage = Some(storage.clone());
+    // The seen set is sealed, so a write needs the record key.
+    protocol.state_record_cipher = Some(state_crypto::StateRecordCipher::new(
+        &[7u8; state_crypto::STATE_RECORD_KEY_BYTES],
+    ));
     protocol.start().unwrap();
     let writes = || *storage.dedup_writes.lock().unwrap();
 
@@ -18628,6 +18636,45 @@ fn test_dedup_seen_set_corrupt_record_is_dropped() {
         .unwrap()
         .is_none(),
         "the unreadable record is deleted rather than re-examined every launch"
+    );
+}
+
+/// The seen set is sealed at rest. Its ids and receipt times are a day-long
+/// timeline of when this install received messages, so the stored bytes must
+/// carry neither in the clear, and the restore must still open them.
+#[test]
+fn test_dedup_seen_set_is_sealed_at_rest() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut bob = pending_decrypt_bob(storage.clone());
+    bob.start().unwrap();
+    let seen = MessageId::new();
+    assert!(bob.mark_seen_persisted(seen.clone()));
+    bob.stop().unwrap();
+
+    let state_storage = bob.protocol_state_storage.clone().unwrap();
+    let raw = state_storage
+        .load(
+            storage_keys::DEDUP_SEEN_IDS,
+            storage_keys::DEDUP_SEEN_IDS_ID,
+        )
+        .unwrap()
+        .expect("stop() flushes the seen set");
+    let id_text = seen.as_str();
+    assert!(
+        !raw.windows(id_text.len())
+            .any(|window| window == id_text.as_bytes()),
+        "the stored seen set must not carry an id in the clear"
+    );
+    assert!(
+        serde_json::from_slice::<super::DedupSeenRecord>(&raw).is_err(),
+        "the stored bytes must be a sealed record, not the plaintext JSON"
+    );
+    drop(bob);
+
+    let bob = pending_decrypt_bob(storage);
+    assert!(
+        bob.deduplicator.is_duplicate(&seen),
+        "the restore opens the sealed record"
     );
 }
 
@@ -20194,7 +20241,8 @@ fn test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling() {
             )
             .unwrap();
     }
-    // Unsealed, so it opens and then fails to parse.
+    // A sealed category, so these bytes will not open: the reader drops the
+    // record, and that delete is charged to the inbound pool like the rest.
     backing
         .store(
             storage_keys::DEDUP_SEEN_IDS,

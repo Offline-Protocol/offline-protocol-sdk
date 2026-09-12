@@ -263,6 +263,14 @@ impl StateCategory {
     ///   pointing at this address forever. Deleting the record instead is the
     ///   benign direction and is not prevented (nothing sealing does can),
     ///   which is why the claim is also republished on every launch.
+    /// - [`storage_keys::DEDUP_SEEN_IDS`]: sealed for the confidentiality of
+    ///   timing rather than content. The record holds up to 2000 inbound
+    ///   message ids, each with the millisecond it arrived, for a day. The wire
+    ///   shows each id in transit; at rest the record is a day-long timeline of
+    ///   when this install received messages, and the threat model lists
+    ///   delivery metadata as an asset. Failing closed is cheap: with the key
+    ///   unavailable the set is not written, and the next launch starts it
+    ///   empty, which costs only the restart-time dedup the record provides.
     ///
     /// Everything else is advertised capability versions, a small state enum, a
     /// logical clock, a coarse wall-clock mark, or a value-less marker whose
@@ -276,14 +284,6 @@ impl StateCategory {
     /// either — the value is clamped to "not in the future" on the way back in,
     /// and moving it backwards only widens a replay window that
     /// `NOSTR_INITIAL_QUERY_LIMIT` already bounds.
-    ///
-    /// [`storage_keys::DEDUP_SEEN_IDS`] is there too: message ids and receipt
-    /// times, both of which every frame already carries in the clear on the
-    /// wire and every delivery ACK repeats. Integrity buys little — the
-    /// damaging edit is *adding* an id, which suppresses one future message
-    /// with that id, but a writer who can edit the record can also delete it,
-    /// which sealing cannot detect, and can inject the id on the wire, which
-    /// the receive path dedups just the same.
     ///
     /// Note what sealing does **not** provide, for any category: it authenticates
     /// bytes that are present, so it cannot detect a record that was deleted or
@@ -302,14 +302,14 @@ impl StateCategory {
             | Self::DataDocs
             | Self::DataDeltaLog
             | Self::DataSpaces
-            | Self::DataSync => true,
+            | Self::DataSync
+            | Self::DedupSeenIds => true,
             Self::PeerCapabilities
             | Self::SessionStates
             | Self::WelcomeLifecycles
             | Self::BlockedUsers
             | Self::BothCreateAwaitingDecrypt
             | Self::LamportClock
-            | Self::DedupSeenIds
             | Self::NostrWatermark
             | Self::StateAdoption => false,
         }
@@ -5323,21 +5323,27 @@ impl OfflineProtocol {
     /// nothing is owed to anyone for it, since the worst case is the one
     /// restart-time duplicate this record exists to prevent.
     ///
-    /// That delete is charged to `allowance`, the inbound pool it shares with
-    /// [`Self::restore_pending_decrypt_entries`], because the launch ceiling
-    /// covers every durable delete on the restore path. A refused delete costs
-    /// nothing: the set starts empty either way, and the next write replaces
-    /// the record.
+    /// Every delete this makes is charged to `allowance`, the inbound pool it
+    /// shares with [`Self::restore_pending_decrypt_entries`], because the
+    /// launch ceiling covers every durable delete on the restore path. That
+    /// includes the reader's own: the record is sealed, so one that will not
+    /// open (a regenerated record key) is dropped inside the read. A refused
+    /// delete costs nothing: the set starts empty either way, and the next
+    /// write replaces the record.
     pub(crate) fn restore_dedup_seen(&mut self, allowance: &mut PruneAllowance) {
         let Some(storage) = self.protocol_state_storage.clone() else {
             return;
         };
-        let Ok(Some(data)) = self.read_state_record(
+        let mut budget = allowance.refusing_private();
+        let data = match self.read_state_record_detailed_budgeted(
             storage.as_ref(),
             storage_keys::DEDUP_SEEN_IDS,
             storage_keys::DEDUP_SEEN_IDS_ID,
-        ) else {
-            return;
+            Some(&mut budget),
+        ) {
+            Ok(StateRecord::Present(data)) => data,
+            Ok(StateRecord::Missing | StateRecord::Unreadable | StateRecord::Unavailable)
+            | Err(_) => return,
         };
         let record = match serde_json::from_slice::<DedupSeenRecord>(&data) {
             Ok(record) if record.version == DEDUP_SEEN_RECORD_VERSION => record,
@@ -5346,7 +5352,7 @@ impl OfflineProtocol {
                     version = record.version,
                     "Dropping deduplicator seen set with an unknown record version"
                 );
-                if allowance.refusing_private().claim() {
+                if budget.claim() {
                     let _ = storage.delete(
                         storage_keys::DEDUP_SEEN_IDS,
                         storage_keys::DEDUP_SEEN_IDS_ID,
@@ -5356,7 +5362,7 @@ impl OfflineProtocol {
             }
             Err(e) => {
                 warn!(error = %e, "Dropping corrupted deduplicator seen set");
-                if allowance.refusing_private().claim() {
+                if budget.claim() {
                     let _ = storage.delete(
                         storage_keys::DEDUP_SEEN_IDS,
                         storage_keys::DEDUP_SEEN_IDS_ID,

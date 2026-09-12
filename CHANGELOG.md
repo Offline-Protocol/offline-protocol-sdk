@@ -43,7 +43,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   to ask for. A record older than seven days on disk is dropped on restore and
   reported as `PENDING_QUEUE_DROPPED` with reason `expired_persisted`.
 - **The deduplicator's seen set is persisted.** Up to 2000 inbound ids, newest
-  first, written in batches (32 changes or 5 seconds on the process tick,
+  first, sealed like the pending queues, written in batches (32 changes or 5
+  seconds on the process tick,
   flushed on stop) and restored beside the Lamport clock, so the relay-socket
   copy of a message the app already consumed from a push injection is
   recognised as a duplicate across a restart instead of reaching a spent

@@ -468,9 +468,11 @@ A protocol-state provider is a byte store, not a trusted one. Store and return
 the bytes you are handed **verbatim** — do not inspect, re-encode, compress, or
 truncate them.
 
-The SDK seals the record values that can carry message plaintext or media key
-material — pending session messages, outbox entries, and media transfer
-descriptors — with ChaCha20-Poly1305 under a per-install key kept in
+The SDK seals the record values that can carry message plaintext, media key
+material, or a timeline of when messages arrived: pending session messages,
+outbox entries, media transfer descriptors, parked inbound ciphertext
+(`pending_decrypt_entries`) and the deduplicator's seen set (`dedup_seen_ids`).
+They are sealed with ChaCha20-Poly1305 under a per-install key kept in
 `MlsStorageProvider` (key type `protocol_state_record_key`). Each record's
 associated data binds it to its `(keyType, keyId)` slot, so a record cannot be
 moved between peers or categories by anyone with write access to the container.
