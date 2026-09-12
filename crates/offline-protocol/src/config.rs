@@ -1942,6 +1942,70 @@ mod tests {
         }
     }
 
+    /// Drift guard: the React Native `updateDedupConfig` fallbacks match the
+    /// core dedup defaults. The TypeScript layer forwards only the fields the
+    /// app set, so a `reliability.dedup` section that sets one field takes the
+    /// other from these literals, and a fallback that disagrees with the
+    /// documented default silently changes it for that app. The id cap sat at
+    /// 10000 against a documented default of 1000, then 2000, that way.
+    #[test]
+    fn rn_bridge_dedup_fallbacks_match_rust_default() {
+        let defaults = ProtocolConfig::new("test-app", "user123").reliability.dedup;
+        let rn_root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let kotlin =
+            rn_root.join("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt");
+        let swift = rn_root.join("ios/OfflineProtocolModule.swift");
+        let expected = [
+            (
+                kotlin.clone(),
+                format!(
+                    "json.optLong(\"maxTrackedMessages\", {})",
+                    defaults.max_tracked_messages
+                ),
+            ),
+            (
+                kotlin,
+                format!(
+                    "json.optLong(\"retentionTimeSecs\", {})",
+                    defaults.retention_time_secs
+                ),
+            ),
+            (
+                swift.clone(),
+                format!(
+                    "(config[\"maxTrackedMessages\"] as? NSNumber)?.uint64Value ?? {}",
+                    defaults.max_tracked_messages
+                ),
+            ),
+            (
+                swift,
+                format!(
+                    "(config[\"retentionTimeSecs\"] as? NSNumber)?.uint64Value ?? {}",
+                    defaults.retention_time_secs
+                ),
+            ),
+        ];
+
+        let Some(sources) = expected
+            .iter()
+            .map(|(path, _)| std::fs::read_to_string(path).ok())
+            .collect::<Option<Vec<_>>>()
+        else {
+            eprintln!("bindings tree not present, skipping RN dedup fallback drift check");
+            return;
+        };
+
+        for ((path, fallback), source) in expected.iter().zip(&sources) {
+            let squeezed = source.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                squeezed.contains(fallback.as_str()),
+                "RN dedup fallback drifted from the core default: expected `{fallback}` in {}",
+                path.display()
+            );
+        }
+    }
+
     /// Drift guard: every public surface that documents
     /// [`EncryptionConfig::crypto_recovery_enabled`] must state that the re-key
     /// trigger is unauthenticated, and must not carry the retired claim that it

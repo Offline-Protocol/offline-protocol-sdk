@@ -166,6 +166,9 @@ the client's answers were wrong on a device rather than merely different:
   (1 h 5 min) now fits inside the retention window, so a reconnect the next
   day deduplicates it instead of re-processing it; `docs/nostr.md`, the
   transport's subscription doc and the drift guard now state the absorption.
+  The React Native `updateDedupConfig` fallback for an omitted
+  `maxTrackedMessages` is 2000 as well (was 10000), so a `dedup` section that
+  sets only the retention no longer tracks five times the documented default.
 - **`TelemetryConfig` is reshaped** on every binding: `apiKey` and `appId` are
   required, `appVersion`, `debug`, `flushIntervalMs`, `maxBatchBytes`,
   `maxBufferedRecords` and `includeDeviceId` are new, `enablePollQueue` is

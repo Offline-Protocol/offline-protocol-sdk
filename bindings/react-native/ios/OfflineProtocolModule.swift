@@ -3677,7 +3677,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
             
             let dedupConfig = DedupConfig(
-                maxTrackedMessages: (config["maxTrackedMessages"] as? NSNumber)?.uint64Value ?? 10000,
+                maxTrackedMessages: (config["maxTrackedMessages"] as? NSNumber)?.uint64Value ?? 2000,
                 retentionTimeSecs: (config["retentionTimeSecs"] as? NSNumber)?.uint64Value ?? 86400
             )
             
