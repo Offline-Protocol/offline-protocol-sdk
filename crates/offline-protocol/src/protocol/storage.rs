@@ -4557,6 +4557,9 @@ impl OfflineProtocol {
     /// An expired record is settled with a `PendingQueueDropped` decryption
     /// failure carrying the reason `expired_persisted`, through the deferred
     /// settlement path so it reaches the app once the event pipeline is live.
+    /// A restored frame the in-memory caps drop (a lowered cap, or more on disk
+    /// than memory admits) is settled the same way: emitted directly, it would
+    /// reach an app that has not subscribed yet, or no callback at all.
     /// Infallible by design: this queue holds nothing the rest of `initialize_mls`
     /// depends on, so a listing failure is logged and the queue simply starts
     /// empty this session.
@@ -4680,14 +4683,15 @@ impl OfflineProtocol {
         });
 
         let count = restored.len();
+        let mut settlements = expired_settlements;
         for record in restored {
-            self.enqueue_restored_pending_decryption(
+            settlements.extend(self.enqueue_restored_pending_decryption(
                 &record.peer_id,
                 &record.message,
                 record.received_via,
-            );
+            ));
         }
-        self.settle_restored_message_failures(expired_settlements);
+        self.settle_restored_message_failures(settlements);
 
         if count > 0 {
             info!(count, "Restored pending decryption entries from storage");

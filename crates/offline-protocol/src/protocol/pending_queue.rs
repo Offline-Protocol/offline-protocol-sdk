@@ -40,7 +40,18 @@ impl OfflineProtocol {
         message: &offline_protocol_core::Message,
         arrival_transport: Option<TransportType>,
     ) {
-        if self.enqueue_pending_decryption_in_memory(sender, message, arrival_transport) {
+        let config = &self.config.encryption.pending_queue;
+        let outcome = self
+            .pending_queue
+            .enqueue_via(config, sender, message, arrival_transport);
+        // Only entries the queue let go can have records. A refused incoming
+        // frame was never written, so it is reported but not deleted.
+        self.delete_pending_decrypt_entries_from_storage(
+            outcome.dropped.iter().map(|entry| &entry.message.id),
+        );
+        let events = Self::pending_drop_events(outcome.dropped.into_iter().chain(outcome.refused));
+        self.emit_pending_drop_events(events);
+        if outcome.admitted {
             self.persist_pending_decrypt_entry(
                 sender,
                 message,
@@ -51,35 +62,32 @@ impl OfflineProtocol {
     }
 
     /// Re-admits a frame read back from storage: the in-memory enqueue with
-    /// the same overflow handling as the live path, but **no** write — the
+    /// the same overflow handling as the live path, but **no** write, since the
     /// record on disk is already the durable copy and keeps its first-receipt
-    /// timestamp. A restored frame the queue refuses (its cap was lowered, or
-    /// the store holds more than memory admits) has its record deleted like
-    /// any other overflow drop.
+    /// timestamp.
+    ///
+    /// Every frame on this path came off disk, the refused one included, so
+    /// each drop has its record deleted. The drops are **returned** as events
+    /// rather than emitted: a restore runs from `initialize_mls`, before
+    /// `start()` and often before the app has installed its callback, so the
+    /// caller settles them through `settle_restored_message_failures`, the
+    /// same way it settles a record that aged out on disk.
     pub(crate) fn enqueue_restored_pending_decryption(
         &mut self,
         sender: &str,
         message: &offline_protocol_core::Message,
         received_via: Option<TransportType>,
-    ) {
-        self.enqueue_pending_decryption_in_memory(sender, message, received_via);
-    }
-
-    /// The shared half of the two enqueue paths: admits into the in-memory
-    /// queue, reports every drop and deletes each dropped frame's record.
-    /// Returns whether the incoming frame was admitted.
-    fn enqueue_pending_decryption_in_memory(
-        &mut self,
-        sender: &str,
-        message: &offline_protocol_core::Message,
-        arrival_transport: Option<TransportType>,
-    ) -> bool {
+    ) -> Vec<Event> {
         let config = &self.config.encryption.pending_queue;
         let outcome = self
             .pending_queue
-            .enqueue_via(config, sender, message, arrival_transport);
-        self.report_dropped_pending(outcome.dropped);
-        outcome.admitted
+            .enqueue_via(config, sender, message, received_via);
+        let dropped: Vec<DroppedPendingMessage> =
+            outcome.dropped.into_iter().chain(outcome.refused).collect();
+        self.delete_pending_decrypt_entries_from_storage(
+            dropped.iter().map(|entry| &entry.message.id),
+        );
+        Self::pending_drop_events(dropped)
     }
 
     pub(super) fn prune_expired_pending_global_front(
@@ -146,37 +154,57 @@ impl OfflineProtocol {
     fn report_dropped_pending(&mut self, dropped: Vec<DroppedPendingMessage>) {
         // A dropped frame's record goes with it: the on-disk copy exists only
         // to mirror what the queue holds, and a record that outlived its entry
-        // would be restored — and re-dropped, and re-reported — on the next
-        // launch. Deleting a record that was never written (a refused frame)
-        // is a no-op.
+        // would be restored, re-dropped and re-reported on the next launch.
         self.delete_pending_decrypt_entries_from_storage(dropped.iter().map(|e| &e.message.id));
-        for entry in dropped {
-            let is_media_chunk = entry.message.content_type == ContentType::FileChunk;
-            let reason = if is_media_chunk {
-                format!(
-                    "encrypted media chunk evicted from pending queue ({}); its file transfer is stalled until the sender resends",
-                    entry.reason
-                )
-            } else {
-                format!(
-                    "encrypted message evicted from pending queue ({}); recoverable only if the sender resends",
-                    entry.reason
-                )
-            };
-            warn!(
-                sender = %entry.message.sender,
-                message_id = %entry.message.id,
-                content_type = %entry.message.content_type,
-                reason = entry.reason,
-                "Encrypted message evicted from pending queue; recoverable only if the sender resends"
-            );
-            if let Ok(state) = lock_shared_state(&self.shared_state) {
-                state.emit_event(Event::message_decryption_failed(
+        let events = Self::pending_drop_events(dropped);
+        self.emit_pending_drop_events(events);
+    }
+
+    /// Logs each dropped frame and builds its `PendingQueueDropped` event
+    /// without emitting it. Split from the emit because the restore path has
+    /// to defer its events until the event pipeline is live.
+    fn pending_drop_events(dropped: impl IntoIterator<Item = DroppedPendingMessage>) -> Vec<Event> {
+        dropped
+            .into_iter()
+            .map(|entry| {
+                let is_media_chunk = entry.message.content_type == ContentType::FileChunk;
+                let reason = if is_media_chunk {
+                    format!(
+                        "encrypted media chunk evicted from pending queue ({}); its file transfer is stalled until the sender resends",
+                        entry.reason
+                    )
+                } else {
+                    format!(
+                        "encrypted message evicted from pending queue ({}); recoverable only if the sender resends",
+                        entry.reason
+                    )
+                };
+                warn!(
+                    sender = %entry.message.sender,
+                    message_id = %entry.message.id,
+                    content_type = %entry.message.content_type,
+                    reason = entry.reason,
+                    "Encrypted message evicted from pending queue; recoverable only if the sender resends"
+                );
+                Event::message_decryption_failed(
                     entry.message.id.clone(),
                     entry.message.sender.as_str().to_string(),
                     DecryptionFailureCode::PendingQueueDropped,
                     reason,
-                ));
+                )
+            })
+            .collect()
+    }
+
+    /// Emits events built by [`Self::pending_drop_events`], taking the
+    /// shared-state lock once for the batch.
+    fn emit_pending_drop_events(&self, events: Vec<Event>) {
+        if events.is_empty() {
+            return;
+        }
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            for event in events {
+                state.emit_event(event);
             }
         }
     }

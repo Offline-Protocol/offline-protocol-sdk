@@ -18678,6 +18678,144 @@ fn test_dedup_seen_set_is_sealed_at_rest() {
     );
 }
 
+/// A restored frame the in-memory caps drop is settled like a record that aged
+/// out on disk: its record is deleted and its `PendingQueueDropped` waits for
+/// `start()`, instead of being emitted during `initialize_mls` into an app that
+/// has not subscribed. Both overflow policies, because they drop through
+/// different paths: `DropOldest` evicts the queued frame, `DropNewest` refuses
+/// the incoming one, and a refused restored frame has a record too.
+#[test]
+fn test_pending_decrypt_restore_overflow_is_settled_after_start() {
+    use crate::config::OverflowPolicy;
+
+    for drop_oldest in [true, false] {
+        let storage = Arc::new(InMemoryStorage::new());
+        let seeder = pending_decrypt_bob(storage.clone());
+        let now_ms = Utc::now().timestamp_millis();
+        let older = pending_test_message(&id("alice"), "older");
+        let newer = pending_test_message(&id("alice"), "newer");
+        seeder.persist_pending_decrypt_entry(&id("alice"), &older, now_ms - 2_000, None);
+        seeder.persist_pending_decrypt_entry(&id("alice"), &newer, now_ms - 1_000, None);
+        drop(seeder);
+
+        let mut config = create_test_config_for_user("bob");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+        config.encryption.pending_queue.max_pending_per_peer = 1;
+        config.encryption.pending_queue.overflow_policy = if drop_oldest {
+            OverflowPolicy::DropOldest
+        } else {
+            OverflowPolicy::DropNewest
+        };
+        let mut bob = OfflineProtocol::new(config).unwrap();
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = Arc::clone(&events);
+        bob.on_event(move |event| {
+            events_handle.lock().unwrap().push(event);
+        });
+        bob.initialize_mls_for_test(storage).unwrap();
+
+        let (dropped, kept) = if drop_oldest {
+            (&older, &newer)
+        } else {
+            (&newer, &older)
+        };
+        let dropped_ids = |events: &[Event]| -> Vec<String> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::MessageDecryptionFailed {
+                        message_id,
+                        code: DecryptionFailureCode::PendingQueueDropped,
+                        ..
+                    } => Some(message_id.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(bob.pending_queue.peer_queue_len(&id("alice")), 1);
+        assert_eq!(
+            bob.persisted_pending_decrypt_ids(),
+            vec![kept.id.as_str()],
+            "drop_oldest={drop_oldest}: the dropped frame's record is deleted"
+        );
+        assert!(
+            dropped_ids(&events.lock().unwrap()).is_empty(),
+            "drop_oldest={drop_oldest}: nothing may reach the app during initialize_mls"
+        );
+        assert_eq!(
+            dropped_ids(&bob.deferred_restore_settlements),
+            vec![dropped.id.as_str()],
+            "drop_oldest={drop_oldest}: the drop waits for start()"
+        );
+
+        bob.start().unwrap();
+        assert_eq!(
+            dropped_ids(&events.lock().unwrap()),
+            vec![dropped.id.as_str()],
+            "drop_oldest={drop_oldest}: start() delivers it"
+        );
+    }
+}
+
+/// A frame the queue refuses on the live path was never written, so refusing
+/// it must not issue a storage delete. Under a flood of frames the caps turn
+/// away, one delete per refusal is a storage round trip per inbound frame,
+/// under the protocol lock, for a record that does not exist. Every refusal is
+/// still reported to the app.
+#[test]
+fn test_pending_decrypt_refused_live_frame_issues_no_delete() {
+    let secure = Arc::new(InMemoryStorage::new());
+    let counting = Arc::new(DeleteCountingStorage::new(Arc::new(InMemoryStorage::new())));
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = counting.clone();
+    let secure_handle: Arc<dyn MlsStorage> = secure.clone();
+    let mut config = create_test_config_for_user("bob");
+    config.encryption.enabled = true;
+    config.encryption.pending_queue.max_pending_per_peer = 1;
+    config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropNewest;
+    let mut bob = OfflineProtocol::new(config).unwrap();
+    bob.initialize_mls(secure_handle, state_handle).unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    bob.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+    let deletes_before = counting.deletes_for(storage_keys::PENDING_DECRYPT_ENTRIES);
+
+    let admitted = pending_test_message(&id("alice"), "admitted");
+    bob.enqueue_pending_decryption(&id("alice"), &admitted);
+    for n in 0..16 {
+        let refused = pending_test_message(&id("alice"), &format!("refused {n}"));
+        bob.enqueue_pending_decryption(&id("alice"), &refused);
+    }
+
+    assert_eq!(bob.pending_queue.peer_queue_len(&id("alice")), 1);
+    assert_eq!(
+        bob.persisted_pending_decrypt_ids(),
+        vec![admitted.id.as_str()]
+    );
+    assert_eq!(
+        counting.deletes_for(storage_keys::PENDING_DECRYPT_ENTRIES) - deletes_before,
+        0,
+        "a refused live frame has no record, so refusing it must not issue a delete"
+    );
+    let reported = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::MessageDecryptionFailed {
+                    code: DecryptionFailureCode::PendingQueueDropped,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(reported, 16, "every refusal is still reported");
+}
+
 #[test]
 fn test_pending_queue_global_limit_fail_closed_when_global_index_corrupted() {
     let mut config = create_test_config();
