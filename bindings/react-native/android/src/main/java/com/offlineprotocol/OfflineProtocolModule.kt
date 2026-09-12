@@ -114,6 +114,33 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     )
 
     /**
+     * Redelivers *inbound message* events that could not be handed to JS —
+     * `message_received`, `file_received`, `message_decryption_failed` — on
+     * the next subscribe or foreground. See [BUFFERED_INBOUND_EVENT_TYPES] for
+     * why these three qualify and [holdInboundEventIfBuffered] for the gate.
+     *
+     * A second [StickyEventDispatcher] rather than more keys in [stickyEvents]
+     * because the two hold different things. A one-shot event collapses per
+     * type and the buffer is sized for two keys; an inbound event is one
+     * message the core has already ACKed and will never restate, so every one
+     * must survive on its own key (`type:message_id`) and the cap has to be a
+     * real capacity — 256, the oldest dropped past it — rather than a backstop.
+     */
+    private val inboundEvents = StickyEventDispatcher(
+        buffer = StickyEventBuffer(maxEntries = INBOUND_EVENT_BUFFER_CAPACITY),
+        canEmit = { canEmitToJs() },
+        emit = { eventJson -> sendEvent(EVENT_NAME, eventParams(eventJson)) },
+        schedule = { runnable ->
+            try {
+                reactApplicationContext.runOnJSQueueThread(runnable)
+            } catch (e: Exception) {
+                android.util.Log.w(NAME, "Could not schedule inbound event flush", e)
+                false
+            }
+        },
+    )
+
+    /**
      * The started activities, which is what tells the process apart from an
      * activity, and the watcher that maintains them. Held by identity rather
      * than counted; see [installProcessLifecycleWatcher] for why, and for
@@ -200,6 +227,26 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
         /** How long `destroy` waits for an in-flight process tick to finish. */
         private const val PROCESS_SHUTDOWN_TIMEOUT_MS = 2_000L
+
+        /**
+         * The inbound event tags [inboundEvents] holds when JS cannot take
+         * them. Each reports one message the core has already ACKed,
+         * dedup-marked and dropped its queued copy of — the sender will not
+         * resend and nothing will restate it — so a drop here is a lost
+         * message, and the drop is ordinary: the React instance is down while
+         * the app is backgrounded, or a push injection lands before JS has
+         * subscribed. Must match `BUFFERED_INBOUND_EVENT_TYPES` in
+         * `src/constants.ts` and `InboundEventBuffer.bufferedEventTypes` on
+         * iOS; pinned by `react_native_buffered_inbound_event_set_matches_native`.
+         */
+        private val BUFFERED_INBOUND_EVENT_TYPES: Set<String> = setOf(
+            "message_received",
+            "file_received",
+            "message_decryption_failed",
+        )
+
+        /** Inbound events held at most; the oldest is dropped past it. */
+        private const val INBOUND_EVENT_BUFFER_CAPACITY = 256
     }
     
     private object Constants {
@@ -688,10 +735,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // Set up event callback
             proto.setEventCallback(object : EventCallback {
                 override fun onEvent(eventJson: String) {
-                    val params = Arguments.createMap().apply {
-                        putString("eventJson", eventJson)
+                    // Held on the emit's own answer rather than on a gate read
+                    // taken before it, so an emit that fails with the gate open
+                    // is held too, as on iOS. The type/id parse that decides
+                    // whether to hold still runs only after a refusal.
+                    if (!sendEvent(EVENT_NAME, eventParams(eventJson))) {
+                        holdInboundEventIfBuffered(eventJson)
                     }
-                    sendEvent(EVENT_NAME, params)
                 }
             })
 
@@ -935,10 +985,43 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         stickyEvents.send(key, eventJson)
     }
 
-    /** Redelivers held one-shot events, if JS looks able to take them now. */
+    /**
+     * Redelivers held one-shot and inbound events, if JS looks able to take
+     * them now.
+     */
     private fun flushStickyEvents() {
         stickyEvents.flush()
+        inboundEvents.flush()
     }
+
+    /**
+     * Holds an inbound message event for redelivery when JS could not take
+     * it, keyed `type:message_id` so every message survives on its own.
+     * Returns whether the event was one of [BUFFERED_INBOUND_EVENT_TYPES] and
+     * was handed to [inboundEvents]; anything else stays dropped, as before.
+     *
+     * Only called after [sendEvent] refused the event, so the parse here is
+     * off the hot path. An event of a buffered type that carries no id at
+     * all is keyed by arrival order rather than dropped: losing a message to
+     * a missing field would be the failure this buffer exists to prevent.
+     */
+    private fun holdInboundEventIfBuffered(eventJson: String): Boolean {
+        val json = try {
+            JSONObject(eventJson)
+        } catch (e: Exception) {
+            return false
+        }
+        val type = json.optString("type", "")
+        if (type !in BUFFERED_INBOUND_EVENT_TYPES) return false
+        val id = json.optString("message_id", "")
+            .ifEmpty { json.optString("file_id", "") }
+            .ifEmpty { "seq-${inboundEventSequence.incrementAndGet()}" }
+        inboundEvents.send("$type:$id", eventJson)
+        return true
+    }
+
+    /** Fallback key source for a buffered inbound event that carries no id. */
+    private val inboundEventSequence = AtomicInteger(0)
 
     private fun emitDiagnostic(level: String, message: String, context: Map<String, Any?> = emptyMap()) {
         try {
@@ -1067,6 +1150,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // that closes it. Collapsing the two is how an event emitted by the
             // session destroy() just ended ends up held for the next one.
             stickyEvents.beginSession()
+            // The inbound buffer follows the same session edges: nothing
+            // buffered can be produced before this start(), and a message held
+            // for the previous session belongs to whatever identity ran it.
+            inboundEvents.beginSession()
             emitDiagnostic("info", "Starting protocol")
             protocol?.start()
             emitDiagnostic("info", "Protocol core started")
@@ -2261,6 +2348,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // exotic one — and would otherwise be held under the new generation
             // for whichever session subscribes next.
             stickyEvents.endSession()
+            inboundEvents.endSession()
             currentConfig = null
             promise.resolve(null)
         } catch (e: Exception) {
@@ -3380,8 +3468,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         try {
             val json = JSONObject(configJson)
             val dedupConfig = DedupConfig(
-                maxTrackedMessages = json.optLong("maxTrackedMessages", 10000).toULong(),
-                retentionTimeSecs = json.optLong("retentionTimeSecs", 3600).toULong()
+                maxTrackedMessages = json.optLong("maxTrackedMessages", 2000).toULong(),
+                retentionTimeSecs = json.optLong("retentionTimeSecs", 86400).toULong()
             )
             
             protocol?.updateDedupConfig(dedupConfig)

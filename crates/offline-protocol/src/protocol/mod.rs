@@ -769,6 +769,16 @@ pub struct OfflineProtocol {
     /// next merge with any peer).
     last_persisted_lamport: u64,
 
+    /// Receive-side changes to the deduplicator's seen set since it was last
+    /// written. Drives the batched write in `persist_dedup_seen_if_due`;
+    /// see `DedupSeenRecord` for why the set is persisted at all.
+    dedup_dirty: u32,
+
+    /// When the seen set was last written (or restored), for the time half of
+    /// the batching rule. Starts at construction so the first write waits for
+    /// either the interval or the dirty threshold like every later one.
+    dedup_last_persist: Instant,
+
     /// The Nostr receive watermark last written to storage, or `None` if this
     /// session has neither written nor restored one. Debounces
     /// `persist_nostr_watermark()` the same way `last_persisted_lamport`
@@ -882,6 +892,10 @@ impl Drop for OfflineProtocol {
         // protocol is dropped without an explicit stop() call.
         self.flush_lamport_clock();
         self.flush_nostr_watermark();
+        // And the deduplicator's seen set, whose write is batched the same
+        // way: a copy of a message received in the last few seconds before
+        // the drop would otherwise be re-processed by the next launch.
+        self.flush_dedup_seen();
         // Same reason: edits batch before they reach a record, so without a
         // flush here the debounce window between an edit and its delta is a
         // window in which work is lost.
@@ -1069,6 +1083,8 @@ impl OfflineProtocol {
             transport_status_snapshot: HashMap::new(),
             device_capability_snapshot: None,
             last_persisted_lamport: 0,
+            dedup_dirty: 0,
+            dedup_last_persist: Instant::now(),
             last_persisted_nostr_watermark: None,
             nostr_publication_slots: Vec::new(),
             nostr_published_slots: HashSet::new(),
@@ -1169,6 +1185,10 @@ impl OfflineProtocol {
         let previous_state_record_cipher = self.state_record_cipher.take();
         let previous_pending_messages = self.pending_encrypted_messages.clone();
         let previous_pending_message_expiry = self.next_pending_message_expiry;
+        // The inbound half of the same transaction: the restore re-admits
+        // parked frames from the store being attached, so a rollback has to put
+        // back what the queue held before, not an empty queue.
+        let previous_pending_queue = self.pending_queue.clone();
         // Populated by restore steps that run before other fallible ones, so
         // they belong in the transaction like everything else: a failed init
         // must not leave a key-package cache, parked media descriptors, or an
@@ -1273,7 +1293,7 @@ impl OfflineProtocol {
         // The launch's whole durable-delete allowance, in one place because the
         // bound is on the launch. A device-barrier storm kills *this call*, not
         // any single walk in it, so no walk may hand itself a pool — see
-        // `PruneAllowance::pool`. Three of them, and the ceiling is their sum:
+        // `PruneAllowance::pool`. Four of them, and the ceiling is their sum:
         //
         // - `advisory_prunes` is shared by the `ADVISORY_PRUNE_WALKS` walks
         //   whose prunes are caches or advisory signals. They draw in the order
@@ -1287,16 +1307,23 @@ impl OfflineProtocol {
         //   diagnostic or a *delivery* rather than a cache eviction, and
         //   neither may be held hostage to a key-package flood in a category it
         //   has nothing to do with.
+        // - `inbound_prunes` is private to the two receive-side walks for the
+        //   same reason: the pending-decryption walk holds ciphertext the app
+        //   is told about when it is lost. It draws first, and the seen-set
+        //   restore takes whatever is left for its one possible delete.
         //
         // See `storage::MAX_RESTORE_PRUNE_DELETES`.
         let mut advisory_prunes = PruneAllowance::pool();
         let mut pending_prunes = PruneAllowance::pool();
         let mut outbox_prunes = PruneAllowance::pool();
+        let mut inbound_prunes = PruneAllowance::pool();
 
         // Restore state from previous session
         let restore_result = (|| {
             self.restore_pending_messages(&mut pending_prunes)?;
+            self.restore_pending_decrypt_entries(&mut inbound_prunes);
             self.restore_lamport_clock();
+            self.restore_dedup_seen(&mut inbound_prunes);
             self.restore_encryption_capable_peers();
             self.restore_blocked_users()?;
             self.restore_session_states_from_manager(manager.clone(), &mut advisory_prunes)?;
@@ -1321,6 +1348,13 @@ impl OfflineProtocol {
             self.state_record_cipher = previous_state_record_cipher;
             self.pending_encrypted_messages = previous_pending_messages;
             self.next_pending_message_expiry = previous_pending_message_expiry;
+            // Back to what the queue held before this call. Emptying it lost
+            // frames that were never persisted (no store was attached, or the
+            // best-effort write failed). Keeping what the restore added would
+            // leave entries sourced from the store the rollback just detached:
+            // draining one deletes nothing on disk, so the next launch restores
+            // it and drains it again into a spent ratchet generation.
+            self.pending_queue = previous_pending_queue;
             // `deferred_restore_settlements` is deliberately left alone — see
             // the comment where the other baselines are captured.
             self.pending_key_packages = previous_pending_key_packages;
@@ -1416,12 +1450,15 @@ impl OfflineProtocol {
         self.restore_nostr_watermark();
         self.restore_nostr_publication_slots();
         self.restore_nostr_discovery_claim();
-        // Same three pools as `initialize_mls_inner`, for the same reason.
+        // Same four pools as `initialize_mls_inner`, for the same reason.
         let mut advisory_prunes = PruneAllowance::pool();
         let mut pending_prunes = PruneAllowance::pool();
         let mut outbox_prunes = PruneAllowance::pool();
+        let mut inbound_prunes = PruneAllowance::pool();
         self.restore_pending_messages(&mut pending_prunes)?;
+        self.restore_pending_decrypt_entries(&mut inbound_prunes);
         self.restore_lamport_clock();
+        self.restore_dedup_seen(&mut inbound_prunes);
         self.restore_encryption_capable_peers();
         self.restore_blocked_users()?;
         self.restore_outbox(&mut outbox_prunes)?;
@@ -1991,6 +2028,9 @@ impl OfflineProtocol {
         // Same for the Nostr receive watermark: an un-flushed tail costs the
         // next launch a wider replay window.
         self.flush_nostr_watermark();
+        // And the deduplicator's seen set: an un-flushed tail is a message
+        // whose second copy the next launch fails to recognise.
+        self.flush_dedup_seen();
         // Answer any lookup still in flight while the transport is still up to
         // take the cancellations. Nothing pumps relays or sweeps deadlines once
         // stopped, so a resolution left here is an event that never comes.
@@ -3276,6 +3316,9 @@ impl OfflineProtocol {
         self.run_throttled_reconciliation("process_tick");
 
         let _ = self.prune_expired_pending_global_front(Instant::now(), 256);
+        // Batched like the Lamport clock: the seen set reaches disk on a
+        // change threshold or a time cadence, never per message.
+        self.persist_dedup_seen_if_due();
         self.pump_media_transfers();
         self.refresh_nostr_key_package_slots();
         self.refresh_nostr_discovery_claim();

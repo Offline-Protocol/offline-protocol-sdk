@@ -383,9 +383,11 @@ impl OfflineProtocol {
                             // Drain the inbound pending decryption queue though:
                             // unlike the outbound side those really are
                             // ciphertexts sealed to the session just deleted, so
-                            // they can never decrypt.
-                            self.pending_queue
-                                .drain_for_peer(&self.config.encryption.pending_queue, sender);
+                            // they can never decrypt. Their persisted records go
+                            // too: left on disk, the next launch restores them and
+                            // drains them into the replacement session as
+                            // spurious decrypt failures.
+                            self.discard_pending_decryption_for_peer(sender);
                             // Allow fresh key exchange
                             self.key_package_sent_to.remove(sender);
                         }

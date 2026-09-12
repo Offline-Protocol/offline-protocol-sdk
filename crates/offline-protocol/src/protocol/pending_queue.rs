@@ -2,7 +2,7 @@
 //! need access to the broader [`OfflineProtocol`] state (shared state, MLS
 //! decryption, lamport clock).
 
-use super::decryption_queue::DroppedPendingMessage;
+use super::decryption_queue::{DroppedPendingMessage, PendingDecryptMessage};
 use super::{lock_shared_state, ChunkOutcome, InternalMessageResult, OfflineProtocol};
 use crate::events::{DecryptionFailureCode, Event};
 use chrono::Utc;
@@ -29,6 +29,11 @@ impl OfflineProtocol {
     /// entry so the drain can send the deferred delivery ACK directly instead of
     /// relying on the sender's next resend (see the deferred-acknowledgement
     /// atom in `docs/state-machines/delivery-and-acks.md`).
+    ///
+    /// An admitted frame is also written to protocol-state storage
+    /// (`PendingDecryptRecord`), stamped with its first receipt, so it survives
+    /// a restart; see [`Self::enqueue_restored_pending_decryption`] for the
+    /// way back in.
     pub(super) fn enqueue_pending_decryption_via(
         &mut self,
         sender: &str,
@@ -36,10 +41,50 @@ impl OfflineProtocol {
         arrival_transport: Option<TransportType>,
     ) {
         let config = &self.config.encryption.pending_queue;
-        let dropped = self
+        let outcome = self
             .pending_queue
             .enqueue_via(config, sender, message, arrival_transport);
-        self.report_dropped_pending_media(dropped);
+        // Only entries the queue let go can have records. A refused incoming
+        // frame was never written, so it is reported but not deleted.
+        self.delete_pending_decrypt_entries_from_storage(
+            outcome.dropped.iter().map(|entry| &entry.message.id),
+        );
+        let events = Self::pending_drop_events(outcome.dropped.into_iter().chain(outcome.refused));
+        self.emit_pending_drop_events(events);
+        if outcome.admitted {
+            self.persist_pending_decrypt_entry(
+                sender,
+                message,
+                Utc::now().timestamp_millis(),
+                arrival_transport,
+            );
+        }
+    }
+
+    /// Re-admits a frame read back from storage: the in-memory enqueue with
+    /// the same overflow handling as the live path, but **no** write, since the
+    /// record on disk is already the durable copy and keeps its first-receipt
+    /// timestamp.
+    ///
+    /// Returns every frame the enqueue let go, the refused incoming one
+    /// included. Each came off disk, so unlike on the live path each still has
+    /// a record, and neither the delete nor the report happens here: the
+    /// restore walk charges every delete to the launch budget and reports a
+    /// drop only together with its delete (see
+    /// `restore_pending_decrypt_entries`). A restore also runs before
+    /// `start()`, so the walk settles those reports through
+    /// `settle_restored_message_failures` rather than emitting them.
+    pub(crate) fn enqueue_restored_pending_decryption(
+        &mut self,
+        sender: &str,
+        message: &offline_protocol_core::Message,
+        received_via: Option<TransportType>,
+    ) -> Vec<DroppedPendingMessage> {
+        let config = &self.config.encryption.pending_queue;
+        let outcome = self
+            .pending_queue
+            .enqueue_via(config, sender, message, received_via);
+        outcome.dropped.into_iter().chain(outcome.refused).collect()
     }
 
     pub(super) fn prune_expired_pending_global_front(
@@ -52,45 +97,113 @@ impl OfflineProtocol {
             .pending_queue
             .prune_expired_global_front(config, now, max_evictions);
         let count = expired.len();
-        self.report_dropped_pending_media(expired);
+        self.report_dropped_pending(expired);
         count
     }
 
-    /// Surfaces pending-queue evictions of encrypted media chunks so an app
-    /// can react to a stalled transfer instead of watching it hang silently.
-    /// (The chunk is still encrypted at this point, so the file_id cannot be
-    /// named here.)
+    /// Drains a peer's parked frames without processing them, deleting each
+    /// one's persisted record. For the paths where every queued frame from a
+    /// peer is being discarded at once: the session reset on unblock, and the
+    /// peer-requested session reset in `message_dispatch`. Returns how many
+    /// were discarded.
+    ///
+    /// Every discard must come through here rather than calling
+    /// `drain_for_peer` directly, or the records outlive their entries.
+    pub(super) fn discard_pending_decryption_for_peer(&mut self, peer_id: &str) -> usize {
+        let config = self.config.encryption.pending_queue.clone();
+        let drained = self.pending_queue.drain_for_peer(&config, peer_id);
+        self.delete_pending_decrypt_entries_from_storage(drained.iter().map(|e| &e.message.id));
+        drained.len()
+    }
+
+    /// Takes a peer's parked frames out of the queue for processing, deleting
+    /// their persisted records first: whatever the drain does with a frame —
+    /// surface it, consume it, or drop it as undecryptable — the queue no
+    /// longer holds it, and a record that outlived its entry would be
+    /// restored and re-drained on the next launch, where a frame whose ratchet
+    /// generation was spent by this drain surfaces as a spurious decrypt
+    /// failure. A frame the handler re-queues during the drain (still
+    /// session-not-ready) goes through the live enqueue and is re-persisted
+    /// there.
+    fn take_pending_decryption_for_drain(&mut self, sender: &str) -> Vec<PendingDecryptMessage> {
+        let config = self.config.encryption.pending_queue.clone();
+        let drained = self.pending_queue.drain_for_peer(&config, sender);
+        self.delete_pending_decrypt_entries_from_storage(drained.iter().map(|e| &e.message.id));
+        drained
+    }
+
+    /// Surfaces every pending-queue eviction as a `PendingQueueDropped`
+    /// decryption failure so an app can react — a stalled media transfer, or a
+    /// text message that will only arrive if the sender resends — instead of
+    /// watching the gap silently. (The frame is still encrypted at this point,
+    /// so neither the file_id nor the text can be named here.)
     ///
     /// Under the deferred-ACK model this is **advisory, not terminal**: an
-    /// evicted chunk was never ACKed, so the sender keeps retransmitting and a
-    /// later resend re-enters the queue and can still complete the transfer
-    /// once the session confirms. The event says the transfer is *stalled*, not
-    /// that it has failed — the terminal media signal is `FileReceiveFailed`.
-    ///
-    /// Dropped text messages keep their existing metrics-only handling: the
-    /// pending message queue was sized for them, they recover on the sender's
-    /// next resend, and their loss is already tracked via `PendingQueueMetrics`.
-    fn report_dropped_pending_media(&mut self, dropped: Vec<DroppedPendingMessage>) {
-        for entry in dropped {
-            if entry.message.content_type != ContentType::FileChunk {
-                continue;
-            }
-            warn!(
-                sender = %entry.message.sender,
-                message_id = %entry.message.id,
-                reason = entry.reason,
-                "Encrypted media chunk evicted from pending queue; its file transfer is stalled until the sender resends"
-            );
-            if let Ok(state) = lock_shared_state(&self.shared_state) {
-                state.emit_event(Event::message_decryption_failed(
-                    entry.message.id.clone(),
-                    entry.message.sender.as_str().to_string(),
-                    DecryptionFailureCode::PendingQueueDropped,
+    /// evicted frame was never ACKed, so a sender still retrying resends it, and
+    /// the resend re-enters the queue and can still complete once the session
+    /// confirms. The event says the message is *at risk*, not that it has
+    /// failed — for media the terminal signal is `FileReceiveFailed`. It is
+    /// emitted for text as well as for chunks: text drops used to be
+    /// metrics-only, which left an app with no way to distinguish "the sender
+    /// went quiet" from "the SDK evicted their message", and a relay that
+    /// pushes ciphertext without store-and-forward has no second copy to fall
+    /// back on, so silence there was a lost message.
+    fn report_dropped_pending(&mut self, dropped: Vec<DroppedPendingMessage>) {
+        // A dropped frame's record goes with it: the on-disk copy exists only
+        // to mirror what the queue holds, and a record that outlived its entry
+        // would be restored, re-dropped and re-reported on the next launch.
+        self.delete_pending_decrypt_entries_from_storage(dropped.iter().map(|e| &e.message.id));
+        let events = Self::pending_drop_events(dropped);
+        self.emit_pending_drop_events(events);
+    }
+
+    /// Logs each dropped frame and builds its `PendingQueueDropped` event
+    /// without emitting it. Split from the emit because the restore path has
+    /// to defer its events until the event pipeline is live.
+    pub(super) fn pending_drop_events(
+        dropped: impl IntoIterator<Item = DroppedPendingMessage>,
+    ) -> Vec<Event> {
+        dropped
+            .into_iter()
+            .map(|entry| {
+                let is_media_chunk = entry.message.content_type == ContentType::FileChunk;
+                let reason = if is_media_chunk {
                     format!(
                         "encrypted media chunk evicted from pending queue ({}); its file transfer is stalled until the sender resends",
                         entry.reason
-                    ),
-                ));
+                    )
+                } else {
+                    format!(
+                        "encrypted message evicted from pending queue ({}); recoverable only if the sender resends",
+                        entry.reason
+                    )
+                };
+                warn!(
+                    sender = %entry.message.sender,
+                    message_id = %entry.message.id,
+                    content_type = %entry.message.content_type,
+                    reason = entry.reason,
+                    "Encrypted message evicted from pending queue; recoverable only if the sender resends"
+                );
+                Event::message_decryption_failed(
+                    entry.message.id.clone(),
+                    entry.message.sender.as_str().to_string(),
+                    DecryptionFailureCode::PendingQueueDropped,
+                    reason,
+                )
+            })
+            .collect()
+    }
+
+    /// Emits events built by [`Self::pending_drop_events`], taking the
+    /// shared-state lock once for the batch.
+    fn emit_pending_drop_events(&self, events: Vec<Event>) {
+        if events.is_empty() {
+            return;
+        }
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            for event in events {
+                state.emit_event(event);
             }
         }
     }
@@ -133,8 +246,8 @@ impl OfflineProtocol {
         let expired = self
             .pending_queue
             .prune_expired_for_peer(&config, sender, Instant::now());
-        self.report_dropped_pending_media(expired);
-        let drained = self.pending_queue.drain_for_peer(&config, sender);
+        self.report_dropped_pending(expired);
+        let drained = self.take_pending_decryption_for_drain(sender);
 
         if drained.is_empty() {
             return;
@@ -177,7 +290,7 @@ impl OfflineProtocol {
                     // now on its arrival transport so the sender can stop
                     // retrying without a further resend.
                     ChunkOutcome::Handled => {
-                        self.deduplicator.mark_seen(msg.id.clone());
+                        self.mark_seen_persisted(msg.id.clone());
                         self.ack_drained_message(&msg, received_via);
                     }
                     // Not delivered, recoverable by a resend. Two shapes, both
@@ -261,7 +374,7 @@ impl OfflineProtocol {
                         // delivery) or re-decrypted (an MLS replay the ratchet
                         // would reject). This is the counterpart to the unmark
                         // in the receive loop's `Deferred` arm.
-                        self.deduplicator.mark_seen(msg.id.clone());
+                        self.mark_seen_persisted(msg.id.clone());
 
                         // ACK on drain: the message is delivered locally now, so
                         // send the deferred delivery ACK directly on its arrival
@@ -279,7 +392,7 @@ impl OfflineProtocol {
                         // path; re-mark so a resend is deduped rather than
                         // reprocessed, and ACK it (control messages are
                         // delivery-sensitive, exactly like the live path).
-                        self.deduplicator.mark_seen(msg.id.clone());
+                        self.mark_seen_persisted(msg.id.clone());
                         self.ack_drained_message(&msg, received_via);
                         debug!(message_id = %msg.id, "Delayed message was consumed internally");
                     }

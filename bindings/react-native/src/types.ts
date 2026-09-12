@@ -619,7 +619,7 @@ export interface PendingQueueConfig {
   maxPendingPerPeer?: number;
   /** Global pending message cap (default: 4096) */
   maxPendingGlobal?: number;
-  /** Pending message TTL in milliseconds (default: 1800000 — 30 min) */
+  /** Pending message TTL in milliseconds (default: 86400000 — 24 h) */
   pendingTtlMs?: number;
   /** Overflow behavior when limits are hit (default: 'drop_oldest') */
   overflowPolicy?: OverflowPolicy;
@@ -1153,10 +1153,13 @@ export interface MessageFailedEvent extends BaseEvent {
 }
 
 /**
- * Machine-readable decryption failure codes. `PENDING_QUEUE_DROPPED` means the
- * message was dropped from the pending-decryption queue (overflow or TTL
- * expiry) before the sender's session became ready; it was ACKed on receipt,
- * so the sender will not retransmit it.
+ * Machine-readable decryption failure codes. `PENDING_QUEUE_DROPPED` means an
+ * encrypted message — text or a media chunk — was evicted from the
+ * pending-decryption queue (overflow, TTL expiry, or aged out of the persisted
+ * queue across restarts) before the sender's session became ready. It is
+ * emitted for text as well as media. The frame was never ACKed, so a sender
+ * that is still retrying will resend it and the resend can still be delivered
+ * once the session confirms; treat it as "at risk", not as terminal.
  */
 export type DecryptionFailureCode =
   | 'INVALID_PAYLOAD'

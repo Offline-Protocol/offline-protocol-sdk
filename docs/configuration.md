@@ -290,7 +290,7 @@ Controls automatic MLS end-to-end encryption. See [MLS Integration Guide](./mls-
 | `cryptoRecoveryEnabled` | boolean | true | Recover an undecryptable 1:1 message instead of dropping it and ACKing anyway (kill switch — see [Crypto-Failure Recovery](#crypto-failure-recovery)) |
 | `pendingQueue.maxPendingPerPeer` | number | 64 | Max inbound encrypted messages held per peer awaiting session readiness |
 | `pendingQueue.maxPendingGlobal` | number | 4096 | Max inbound encrypted messages held across all peers |
-| `pendingQueue.pendingTtlMs` | number | 1800000 | TTL for held encrypted messages (30 minutes) |
+| `pendingQueue.pendingTtlMs` | number | 86400000 | TTL for held encrypted messages (24 hours; the queue is also persisted, see `docs/mls-integration.md`) |
 | `pendingQueue.overflowPolicy` | string | `drop_oldest` | Overflow action: `drop_oldest` or `drop_newest` |
 
 `pendingQueue` bounds the **inbound** pending-*decryption* queue — messages that
@@ -568,8 +568,14 @@ per-member delivery path.
 **Dedup Config**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `maxTrackedMessages` | number | 1000 | Max message IDs to track (must be > 0) |
-| `retentionTimeSecs` | number | 3600 | Retention time (1 hour; must be > 0) |
+| `maxTrackedMessages` | number | 2000 | Max message IDs to track (must be > 0) |
+| `retentionTimeSecs` | number | 86400 | Retention time (24 hours; must be > 0) |
+
+The seen set is persisted (up to 2000 ids, newest first, sealed like the pending
+queues) and restored on the next launch. A message can reach the device twice on
+two paths, a push injection and then the relay socket after a reconnect, and the
+second copy is still recognised as a duplicate across an app restart. The
+retention window is applied again on import.
 
 Both fields are now **rejected at `0`**. Neither failed safe: at
 `maxTrackedMessages: 0` the exact-match tracker evicts on every insert, so it
@@ -889,7 +895,7 @@ config = ProtocolConfig(
     require_encryption=True,
     max_pending_per_peer=64,
     max_pending_global=4096,
-    pending_ttl_ms=1_800_000,  # 30 min (the SDK default)
+    pending_ttl_ms=86_400_000,  # 24 h (the SDK default)
     overflow_policy=OverflowPolicy.DROP_OLDEST,
 )
 ```

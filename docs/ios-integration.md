@@ -117,7 +117,7 @@ final class MeshController {
             storePending: true,
             maxPendingPerPeer: 100,
             maxPendingGlobal: 1000,
-            pendingTtlMs: 1_800_000,   // 30 min (the SDK default)
+            pendingTtlMs: 86_400_000,   // 24 h (the SDK default)
             overflowPolicy: .dropOldest
             // These 9 use their defaults: requireEncryption (true),
             // maxGroupMembers (256), groupRelayEnabled (true),

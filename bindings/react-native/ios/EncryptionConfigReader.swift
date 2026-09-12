@@ -70,7 +70,7 @@ enum EncryptionConfigReader {
             ?? 4096
         let pendingTtlMs = number(pendingQueue, "pendingTtlMs", "pending_ttl_ms")
             ?? number(raw, "pendingTtlMs", "pending_ttl_ms")
-            ?? 1_800_000
+            ?? 86_400_000
         let overflowPolicyRaw = string(pendingQueue, "overflowPolicy", "overflow_policy")
             ?? string(raw, "overflowPolicy", "overflow_policy")
             ?? "drop_oldest"

@@ -201,6 +201,26 @@ pub(crate) const WELCOME_PRESENCE_RESCUE_MAX_SECS: i64 = 600;
 /// calling `internet_send_failed_with_reason` — keep them in sync.
 pub(crate) const SEND_FAIL_REASON_RECIPIENT_UNREACHABLE: &str = "recipient_unreachable";
 
+/// The relay accepted a frame for a recipient with no live socket and handed
+/// it to a push notification (`MessageSent { pushed: true }`). Not a failure:
+/// the push may deliver it. What it does establish is that the relay, which
+/// has no store-and-forward, holds no copy for when the recipient reconnects.
+///
+/// Deliberately its own token rather than a `recipient_unreachable` tail.
+/// That prefix fast-fails connection requests and moves Welcomes to `Failed`,
+/// both wrong for a frame that may have arrived. This token parks plain DMs
+/// only (`park_relay_pushed_dm`), and connection requests and Welcomes stay
+/// on their ordinary path.
+///
+/// Cross-layer contract: the React Native platform bridges
+/// (`InternetManager.kt` / `InternetManager.swift`) and the Python relay
+/// client (`internet_manager.py`) pass this exact literal to
+/// `internet_send_failed_with_reason`; pinned on the React Native side by
+/// `react_native_relay_parks_a_pushed_message_sent` and on the Python side by
+/// `TestMessageSentPushed`. That call must not also score the report as a send
+/// failure; see `OfflineProtocol::send_report_is_carrier_failure`.
+pub(crate) const SEND_FAIL_REASON_RELAY_PUSHED: &str = "relay_pushed";
+
 /// Fallback token for a send failure that classifies as nothing more specific.
 pub(crate) const SEND_FAIL_REASON_TRANSPORT: &str = "transport_send_failed";
 /// A Welcome was written to a carrier that never confirmed it.
@@ -216,6 +236,7 @@ pub(crate) const SEND_FAIL_REASON_CONFIRM_TIMEOUT: &str = "send_confirmation_tim
 /// `every_send_failure_token_classifies_to_itself` fails otherwise.
 pub(crate) const SEND_FAIL_REASON_TOKENS: &[&str] = &[
     SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
+    SEND_FAIL_REASON_RELAY_PUSHED,
     SEND_FAIL_REASON_TRANSPORT,
     SEND_FAIL_REASON_CONFIRM_TIMEOUT,
     "transport_not_connected",
@@ -358,6 +379,48 @@ pub(crate) const RECONCILIATION_THROTTLE_MS: u64 = 2_000;
 /// is only used for causal ordering and the gap is absorbed on the next
 /// merge with any peer.
 pub(crate) const LAMPORT_PERSIST_INTERVAL: u64 = 64;
+
+/// Most seen ids one `DedupSeenRecord` carries. Matches the default
+/// `max_tracked_messages`; a larger configured tracker persists its newest
+/// ids only, which are the ones a replay is most likely to repeat.
+pub(crate) const MAX_PERSISTED_DEDUP_IDS: usize = 2000;
+
+/// Seen-set changes that force a write before the time cadence elapses. A
+/// burst of inbound traffic is exactly when the set is worth having on disk,
+/// and 32 changes at ~60 bytes each is well under the cost of one write.
+pub(crate) const DEDUP_PERSIST_DIRTY_THRESHOLD: u32 = 32;
+
+/// How long a dirty seen set may wait for the next `process()` tick before it
+/// is written. Bounds what a crash loses to a few seconds of receipts.
+pub(crate) const DEDUP_PERSIST_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The deduplicator's seen set as persisted under
+/// [`storage_keys::DEDUP_SEEN_IDS`].
+///
+/// The deduplicator was in-memory only, so after a restart the socket copy of
+/// a message the app had already consumed from a push injection was not
+/// recognised as a duplicate: it went to the ratchet, whose generation for
+/// that message was already spent, and surfaced as a decryption failure — a
+/// spurious signal the app counts toward its split-brain breaker, which then
+/// tears down a healthy session. Persisting the ids makes the second copy
+/// recognisable across the restart. Ids and timestamps only; nothing here is
+/// content.
+///
+/// `version` is the forward-compatibility hinge: an unknown version is dropped
+/// rather than guessed at, and the set simply starts empty.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct DedupSeenRecord {
+    #[serde(default = "dedup_seen_record_version")]
+    pub(crate) version: u8,
+    pub(crate) entries: Vec<offline_protocol_reliability::SeenId>,
+}
+
+/// The only record version this build writes or reads.
+pub(crate) const DEDUP_SEEN_RECORD_VERSION: u8 = 1;
+
+fn dedup_seen_record_version() -> u8 {
+    DEDUP_SEEN_RECORD_VERSION
+}
 /// Seconds the Nostr receive watermark must advance before it is written back
 /// to protocol-state storage. Same debounce role as
 /// [`LAMPORT_PERSIST_INTERVAL`]: every inbound relay event moves the mark, and
@@ -1558,6 +1621,48 @@ pub(crate) struct PendingMessageRecord {
     pub(crate) message: PendingMessage,
 }
 
+/// One inbound encrypted frame parked in the pending-decryption queue, as
+/// persisted under [`storage_keys::PENDING_DECRYPT_ENTRIES`].
+///
+/// The queue itself is in-memory only (`PendingDecryptionQueue`); this record
+/// is what lets an entry survive an app restart. Without it a frame that
+/// arrived before its session was ready was lost the moment the process died
+/// — and with a relay that pushes ciphertext without store-and-forward there
+/// is no second copy to ask for, so a restart during a slow handshake was a
+/// silently lost message.
+///
+/// Keyed by message id, like [`PendingMessageRecord`], so a drain, a prune or
+/// an overflow drop deletes exactly the record it settled. `peer_id` rides
+/// inside the record because the in-memory queue is a per-peer map rebuilt
+/// from records the store enumerates in no particular order.
+///
+/// `first_received_at_ms` is wall-clock, not the `Instant` the in-memory entry
+/// carries: an `Instant` does not survive a restart, so on restore the entry is
+/// re-stamped with a fresh `Instant::now()` (its in-memory TTL restarts) and
+/// this field bounds the *total* time on disk instead —
+/// `PENDING_DECRYPT_PERSISTED_MAX_AGE_MS`.
+///
+/// `version` is a forward-compatibility hinge: a reader that sees a version it
+/// does not know treats the record as corrupt and drops it rather than
+/// guessing at fields. Records written before the field existed default to 1.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PendingDecryptRecord {
+    #[serde(default = "pending_decrypt_record_version")]
+    pub(crate) version: u8,
+    pub(crate) peer_id: String,
+    pub(crate) message: Message,
+    pub(crate) first_received_at_ms: i64,
+    #[serde(default)]
+    pub(crate) received_via: Option<TransportType>,
+}
+
+/// The only record version this build writes or reads.
+pub(crate) const PENDING_DECRYPT_RECORD_VERSION: u8 = 1;
+
+fn pending_decrypt_record_version() -> u8 {
+    PENDING_DECRYPT_RECORD_VERSION
+}
+
 impl PendingMessage {
     /// Recomputes [`Self::serialized_bytes`] from the current field values.
     ///
@@ -1702,6 +1807,10 @@ pub(crate) mod storage_keys {
     /// per-recipient layout could only report the loss per peer, because every
     /// id was inside the record that would not open.
     pub const PENDING_MESSAGE_ENTRIES: &str = "pending_message_entries";
+    /// Inbound ciphertext parked in the pending-decryption queue, one record
+    /// per message keyed by message id — the receive-side mirror of
+    /// [`PENDING_MESSAGE_ENTRIES`]. See `PendingDecryptRecord`.
+    pub const PENDING_DECRYPT_ENTRIES: &str = "pending_decrypt_entries";
     /// Key type for persisted per-peer MLS session confirmation state.
     pub const SESSION_STATES: &str = "session_states";
     /// Key type for persisted per-peer received key packages (survives restart).
@@ -1728,6 +1837,11 @@ pub(crate) mod storage_keys {
     pub const LAMPORT_CLOCK: &str = "lamport_clock";
     /// Key ID for the single Lamport clock entry.
     pub const LAMPORT_CLOCK_ID: &str = "current";
+    /// The deduplicator's exact-mode seen set, one record for the whole set.
+    /// See `DedupSeenRecord`.
+    pub const DEDUP_SEEN_IDS: &str = "dedup_seen_ids";
+    /// Key ID for the single seen-set record.
+    pub const DEDUP_SEEN_IDS_ID: &str = "current";
     /// Key type for the durable record that a peer has proved it runs MLS.
     ///
     /// Successor to the `tofu_keys` category, which stored a pinned public key
@@ -2056,6 +2170,24 @@ pub(crate) struct OutboxEntry {
     /// verbatim.
     #[serde(skip)]
     pub(crate) reseal: Option<OutboxReseal>,
+    /// The relay has handed this frame to a device push at least once
+    /// (`MessageSent { pushed: true }`, see [`SEND_FAIL_REASON_RELAY_PUSHED`]).
+    ///
+    /// Sticky for the entry's lifetime, and persisted, because of what a later
+    /// relay verdict for the same id means. The relay remembers which
+    /// `(sender, recipient, message_id)` triples it has pushed and answers a
+    /// retry of one with `DeliveryError` (`already_pushed`) instead of a
+    /// second notification, and the bridges cannot tell that verdict from a
+    /// plain "recipient offline": both reach the core as
+    /// `recipient_unreachable`. So the reachability probe a park schedules
+    /// earns a `DeliveryError` fifteen seconds after every push, and without
+    /// this flag the app would be told `MessageUndeliverable` about a message
+    /// the push may already have delivered. With it, that verdict still
+    /// re-parks the entry (the recipient is not on the relay) but emits
+    /// nothing app-facing. A legacy record restores as `false`, so the first
+    /// probe after upgrading emits once; nothing is lost.
+    #[serde(default)]
+    pub(crate) relay_pushed: bool,
 }
 
 #[derive(Clone)]
@@ -2349,6 +2481,44 @@ mod send_failure_classification_tests {
             assert_eq!(
                 classify_transport_send_error(&format!("recipient_unreachable: {prose}")),
                 SEND_FAIL_REASON_RECIPIENT_UNREACHABLE
+            );
+        }
+    }
+
+    /// The relay-pushed answer is its own token, not a `recipient_unreachable`
+    /// tail. The bridges pass this literal (pinned on their side by
+    /// `react_native_relay_parks_a_pushed_message_sent`), and reading it under
+    /// the unreachable prefix would fast-fail connection requests and fail
+    /// Welcomes that the push may have delivered.
+    #[test]
+    fn relay_pushed_is_its_own_token() {
+        assert_eq!(SEND_FAIL_REASON_RELAY_PUSHED, "relay_pushed");
+        assert!(!SEND_FAIL_REASON_RELAY_PUSHED.starts_with(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE));
+        assert_eq!(
+            classify_transport_send_error("relay_pushed"),
+            SEND_FAIL_REASON_RELAY_PUSHED
+        );
+    }
+
+    /// A push is parked in the core but is not a failed send, so the one
+    /// report that must stay out of a carrier's failure accounting is the
+    /// exact token. Anything else, including relay text that merely contains
+    /// it, still counts.
+    #[test]
+    fn only_a_relay_push_report_is_kept_out_of_carrier_failures() {
+        use crate::OfflineProtocol;
+        assert!(!OfflineProtocol::send_report_is_carrier_failure(Some(
+            "relay_pushed"
+        )));
+        for reason in [
+            Some("recipient_unreachable: Recipient is offline"),
+            Some("Internet transport send failed"),
+            Some("relay_pushed: extra"),
+            None,
+        ] {
+            assert!(
+                OfflineProtocol::send_report_is_carrier_failure(reason),
+                "{reason:?} is a send failure"
             );
         }
     }

@@ -164,7 +164,7 @@ Four consequences worth designing against:
 
 - **Handlers must be idempotent.** Every one of these mechanisms can deliver the same fact more than once — Android by redelivering a held copy, iOS by restating on each foreground until the transport is re-enabled, the JS layer by replaying to a late listener. Set a flag; do not push a screen or fire a notification per event.
 - **They can arrive late.** Treat them as "this is true", not "this just happened" — reconcile against actual state rather than assuming the event is fresh.
-- **Register listeners before `start()`.** The JS hold makes an `await` between construction and your first `on(...)` survivable, but only for these two tags — every other event in that window is dropped, correctly, because it is periodic or re-derivable. Registering synchronously right after construction keeps the window at zero and is still the right habit. (The SDK warns once per event type if events arrive while you have registered no listeners at all.)
+- **Register listeners before `start()`.** The JS hold makes an `await` between construction and your first `on(...)` survivable, but only for these two tags and for the inbound message events in §6.4. Every other event in that window is dropped, correctly, because it is periodic or re-derivable. Registering synchronously right after construction keeps the window at zero and is still the right habit. (The SDK warns once per event type if events arrive while you have registered no listeners at all.)
 - **They are not durable.** No mechanism survives a process kill, and neither the Android hold nor the JS hold survives a JS reload. Persisting would not help: if the process was killed, the event was never generated in the first place.
 
 The JS hold is also cleared where continuing to hold would be *worse* than dropping — redelivering a stale one-shot is the same failure inverted, not a milder one. A held `mesh_stopped_by_user` replayed after you called `start()` would report a mesh that is coming up as down, with nothing to correct it, so `start()` discards anything no listener has claimed by then; `enableTransport('internet', ...)` discards a held `internet_session_superseded`, because that call is what clears the latch the event reports; and `destroy()` discards whatever is left, so an instance you destroy and start again cannot hand the previous session's event to the next session's first listener.
@@ -199,7 +199,7 @@ Because `isInternetSuperseded()` reads the latch itself rather than a delivery, 
 
 Android can kill your process while mesh is running — memory pressure is the usual reason, and a foreground service makes it less likely, not impossible. The keep-alive service is `START_STICKY`, so the system hands the service back afterwards, **but the SDK never re-creates the protocol from there.** By default, if nothing in the new process has brought a mesh back up by the time the re-delivered intent lands, the service stops itself, so no "Mesh Active" notification outlives the protocol it advertises. (An app that boots React Native from `Application.onCreate` can win that race and have a mesh running already — then the service keeps the notification it is holding for the mesh *your app* started.)
 
-This is a decision, not a missing feature. A protocol re-created with no JavaScript context behind it is worse than one that is simply down: the receive path sends a delivery ACK *before* it emits `message_received`, that ACK makes the sender retire the message from its outbox, and the event is then dropped because nothing is subscribed. The message is gone, and its sender was told it arrived. Staying down keeps the failure recoverable — the sender's outbox holds for up to seven days, retries, parks, and pushes, and delivers once this device is genuinely running again.
+This is a decision, not a missing feature. A protocol re-created with no JavaScript context behind it is worse than one that is simply down: the receive path sends a delivery ACK *before* it emits `message_received`, that ACK makes the sender retire the message from its outbox, and with no JavaScript behind the protocol nothing would ever take the event. The inbound hold in §6.4 bridges a short gap in memory, up to 256 events; it is not a place for messages to wait out a dead process. The message is gone, and its sender was told it arrived. Staying down keeps the failure recoverable: the sender's outbox holds for up to seven days, retries, parks, and pushes, and delivers once this device is genuinely running again.
 
 **You can opt in to having the mesh come back on its own** — see §6.3. It does not weaken any of the above: nothing native re-creates the protocol there either. It starts *JavaScript* first, so a receiver exists before a protocol does, and your own code decides what happens next.
 
@@ -218,7 +218,7 @@ if (state !== ProtocolState.Running) {
 Two more things to know if you restart the SDK yourself:
 
 - **Never reuse a `destroy()`ed instance.** `destroy()` removes the event subscriptions, and only the constructor creates them — a destroyed instance that is `start()`ed again will run but deliver zero events. Construct a new `OfflineProtocol`.
-- **Nothing is queued for you while the process is dead.** The one-shot event delivery described in §6.1 is in-memory on both platforms; a process kill loses it. That is not a gap — if the process was killed, the event was never generated. For the relay case there is a durable read regardless: `isInternetSuperseded()` reports the transport's own latch, so a restarted process that re-enables the relay and is displaced again learns it the same way.
+- **Nothing is queued for you while the process is dead.** The one-shot event delivery described in §6.1 is in-memory on both platforms, and so is the inbound hold in §6.4. For a one-shot that is not a gap: if the process was killed, the event was never generated. For an inbound message it is one, which is why §6.4 says to persist messages in your handler. For the relay case there is a durable read regardless: `isInternetSuperseded()` reports the transport's own latch, so a restarted process that re-enables the relay and is displaced again learns it the same way.
 
 ### 6.3 Restoring the mesh automatically after a process kill (Android, opt-in)
 
@@ -269,6 +269,22 @@ Three more things the task has to get right:
 **Version requirement:** React Native **0.76.5+** when the New Architecture is enabled. Headless tasks did not work under bridgeless before 0.76 and were patchy until 0.76.5. On RN 0.84 and 0.85 a core bug (fixed in 0.86) can leave the wake service running after the task finishes; the SDK's timeout bounds it, but 0.86+ is the cleaner target.
 
 ---
+
+### 6.4 Inbound message events are held until you listen (both platforms)
+
+`message_received`, `file_received` and `message_decryption_failed` each report one message, and nothing restates them. By the time `message_received` or `file_received` is emitted, the core has already acknowledged the content, so its sender has retired it. Dropping one of these events because nothing was listening would lose a message, so the SDK holds them instead.
+
+- **Each native bridge** holds up to 256 of them while JavaScript cannot take them: no subscription yet, or no live React instance while the app is backgrounded. Entries are keyed by event type and message id, kept in arrival order, and redelivered on the next subscription or app foreground.
+- **The JS layer** holds up to 256 that arrive before you have registered a listener for their type, and replays them in arrival order to the first matching `on(...)`, or to an `on('all', ...)` listener.
+- **Held events belong to one session.** `destroy()` discards them on every layer, so a message held for an account you tore down never reaches the next one.
+
+Unlike the one-shot events in §6.1 these are not collapsed: every event is its own message, so you receive each one rather than the latest.
+
+Three limits to design around:
+
+- **The cap is real.** Past 256 held events the oldest is dropped. For `message_received` and `file_received` that is a lost message whose sender was told it arrived. Register those listeners synchronously after construction, before `start()`, so the hold stays empty in normal operation.
+- **Nothing here is durable.** A JS reload or a process kill loses whatever is held. Persist a message in your handler, keyed by `message_id`, before doing anything slower with it.
+- **Keep handlers idempotent.** Dedupe on `message_id`. The holds are built for at-least-once delivery, not exactly-once.
 
 ## 7. Group Messaging (MLS-Encrypted Mesh Groups)
 

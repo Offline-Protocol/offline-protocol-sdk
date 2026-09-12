@@ -2388,10 +2388,15 @@ impl OfflineProtocol {
     /// enter the transport deduplicator (the platform bridges mint a fresh
     /// envelope UUID per injected message), so `from_str` fails or the
     /// unmark is a no-op there — both harmless.
+    ///
+    /// The transport-level release goes through `unmark_seen_persisted`, not
+    /// the deduplicator directly: the seen set is persisted, and an unmark it
+    /// never counted leaves the id in the stored record, so the next launch
+    /// restores it and swallows the redelivery after all.
     pub(crate) fn release_replay_protection(&mut self, message_id: &str) {
         self.group_mesh.message_dedup.remove(message_id);
         if let Ok(envelope_id) = MessageId::from_str(message_id) {
-            self.deduplicator.unmark_seen(&envelope_id);
+            self.unmark_seen_persisted(&envelope_id);
         }
     }
 

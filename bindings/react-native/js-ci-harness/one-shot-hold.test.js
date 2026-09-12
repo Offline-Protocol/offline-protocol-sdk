@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Behavioral tests for the JS-layer one-shot event hold (`src/index.ts`).
+ * Behavioral tests for the JS-layer one-shot event hold and the inbound
+ * message hold (`src/index.ts`).
  *
  * Drives the *real compiled* `OfflineProtocol` class against a stubbed native
  * module, so these assert what the code does rather than what it says. The
@@ -405,6 +406,92 @@ test('no drop warning while the app has any listener registered', async () => {
     0,
     'an app that listens selectively is making a choice, not a mistake'
   );
+});
+
+// ---------------------------------------------------------------------------
+// The inbound hold: messages that arrive before the app has a listener
+// ---------------------------------------------------------------------------
+
+const RECEIVED_1 = { type: 'message_received', timestamp: 1, message_id: 'm1', sender: 'bob', content: 'one' };
+const RECEIVED_2 = { type: 'message_received', timestamp: 2, message_id: 'm2', sender: 'bob', content: 'two' };
+const DECRYPT_FAILED = { type: 'message_decryption_failed', timestamp: 3, message_id: 'm3', sender: 'bob', code: 'PENDING_QUEUE_DROPPED', reason: 'x' };
+
+test("a message_received before on('message_received') is replayed exactly once", async () => {
+  const { sdk, bus } = newSdk();
+  bus.emit(RECEIVED_1);
+  await settle();
+  const seen = [];
+  sdk.on('message_received', (event) => seen.push(event));
+  await settle();
+  await settle();
+  assert.deepEqual(seen.map((event) => event.message_id), ['m1']);
+});
+
+test('two held messages with different ids both survive, in arrival order', async () => {
+  const { sdk, bus } = newSdk();
+  bus.emit(RECEIVED_1);
+  bus.emit(RECEIVED_2);
+  const seen = [];
+  sdk.on('message_received', (event) => seen.push(event));
+  await settle();
+  assert.deepEqual(seen.map((event) => event.message_id), ['m1', 'm2']);
+});
+
+test("a held inbound event of another type stays held for its own listener", async () => {
+  const { sdk, bus } = newSdk();
+  bus.emit(RECEIVED_1);
+  bus.emit(DECRYPT_FAILED);
+  const received = [];
+  const failed = [];
+  sdk.on('message_received', (event) => received.push(event));
+  await settle();
+  assert.deepEqual(received.map((event) => event.message_id), ['m1']);
+  sdk.on('message_decryption_failed', (event) => failed.push(event));
+  await settle();
+  assert.deepEqual(failed.map((event) => event.message_id), ['m3']);
+});
+
+test("an 'all' listener collects every held inbound event", async () => {
+  const { sdk, bus } = newSdk();
+  bus.emit(RECEIVED_1);
+  bus.emit(DECRYPT_FAILED);
+  const seen = [];
+  sdk.on('all', (event) => seen.push(event));
+  await settle();
+  assert.deepEqual(seen.map((event) => event.type), ['message_received', 'message_decryption_failed']);
+});
+
+test('a message delivered live is not also held', async () => {
+  const { sdk, bus } = newSdk();
+  const seen = [];
+  sdk.on('message_received', (event) => seen.push(event));
+  bus.emit(RECEIVED_1);
+  sdk.on('message_received', (event) => seen.push(event));
+  await settle();
+  assert.equal(seen.length, 1);
+});
+
+test('the inbound hold drops the oldest past 256 entries', async () => {
+  const { sdk, bus } = newSdk();
+  for (let i = 0; i < 257; i += 1) {
+    bus.emit({ ...RECEIVED_1, message_id: `m${i}` });
+  }
+  const seen = [];
+  sdk.on('message_received', (event) => seen.push(event));
+  await settle();
+  assert.equal(seen.length, 256);
+  assert.equal(seen[0].message_id, 'm1', 'the oldest is the one that goes');
+  assert.equal(seen[255].message_id, 'm256');
+});
+
+test('destroy() clears the inbound hold', async () => {
+  const { sdk, bus } = newSdk();
+  bus.emit(RECEIVED_1);
+  await sdk.destroy();
+  const seen = [];
+  sdk.on('message_received', (event) => seen.push(event));
+  await settle();
+  assert.equal(seen.length, 0, 'a message held for a torn-down account must not surface later');
 });
 
 // ---------------------------------------------------------------------------

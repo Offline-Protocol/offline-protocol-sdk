@@ -111,16 +111,21 @@ const protocol = new OfflineProtocol({
 | `requireEncryption` | `true` | Enforce encrypted delivery (send fails closed if encryption cannot be applied) |
 | `pendingQueue.maxPendingPerPeer` | `64` | Per-peer cap for encrypted messages received before session readiness |
 | `pendingQueue.maxPendingGlobal` | `4096` | Global cap for encrypted messages received before session readiness |
-| `pendingQueue.pendingTtlMs` | `1800000` | TTL (30 min) for encrypted messages held before session readiness |
+| `pendingQueue.pendingTtlMs` | `86400000` | TTL (24 h) for encrypted messages held before session readiness |
 | `pendingQueue.overflowPolicy` | `drop_oldest` | Overflow policy: `drop_oldest` or `drop_newest` |
 | `compactEnvelopeEnabled` | `true` | Emit the compact MLS envelope to recipients that advertise `env_versions` |
 | `richPayloadEnabled` | `true` | Seal rich extras inside the MLS ciphertext for recipients that advertise `rich_versions` |
 | `cryptoRecoveryEnabled` | `true` | Recover an undecryptable 1:1 message instead of dropping it and ACKing anyway ([below](#crypto-failure-recovery)) |
 
-The `pendingTtlMs` default is 30 minutes, not the 2 minutes earlier releases
-used: under the deferred-ACK model a message held here is not delivery-ACKed on
-receipt, so this queue is the primary recovery window before the session
-confirms. Memory stays bounded by the per-peer and global caps plus the
+The `pendingTtlMs` default is 24 hours (it was 2 minutes, then 30 minutes, in
+earlier releases): under the deferred-ACK model a message held here is not
+delivery-ACKed on receipt, so this queue is the primary recovery window before
+the session confirms. With a relay that pushes ciphertext without
+store-and-forward there is no second copy to ask for, either. The queue is also
+persisted (`pending_decrypt_entries`, sealed like the outbound pending queue),
+so a frame survives an app restart; the in-memory TTL restarts with the
+process and a persisted record is dropped after 7 days on disk, surfacing a
+`PENDING_QUEUE_DROPPED` decryption failure with reason `expired_persisted`. Memory stays bounded by the per-peer and global caps plus the
 `drop_oldest` policy — a longer TTL lets entries linger within those caps, it
 does not raise the ceiling.
 
@@ -463,9 +468,11 @@ A protocol-state provider is a byte store, not a trusted one. Store and return
 the bytes you are handed **verbatim** — do not inspect, re-encode, compress, or
 truncate them.
 
-The SDK seals the record values that can carry message plaintext or media key
-material — pending session messages, outbox entries, and media transfer
-descriptors — with ChaCha20-Poly1305 under a per-install key kept in
+The SDK seals the record values that can carry message plaintext, media key
+material, or a timeline of when messages arrived: pending session messages,
+outbox entries, media transfer descriptors, parked inbound ciphertext
+(`pending_decrypt_entries`) and the deduplicator's seen set (`dedup_seen_ids`).
+They are sealed with ChaCha20-Poly1305 under a per-install key kept in
 `MlsStorageProvider` (key type `protocol_state_record_key`). Each record's
 associated data binds it to its `(keyType, keyId)` slot, so a record cannot be
 moved between peers or categories by anyone with write access to the container.

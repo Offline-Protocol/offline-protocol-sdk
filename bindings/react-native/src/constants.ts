@@ -60,6 +60,39 @@ export const ONE_SHOT_EVENT_TYPES = [
 ] as const;
 
 /**
+ * The *inbound* event tags: events that each report one message the core has
+ * already taken responsibility for.
+ *
+ * By the time `message_received` (or `file_received`, or the
+ * `message_decryption_failed` that stands in for one) is emitted, the core
+ * has sent the delivery ACK, dedup-marked the id and dropped its queued copy
+ * — the sender will not resend, and nothing in the SDK will restate the
+ * event. A drop between the core and the app's handler is therefore a lost
+ * message, and the drop is ordinary: the app is backgrounded and the React
+ * instance is down, or a push injection delivers the ciphertext before the
+ * app has registered `on('message_received')`. Unlike the one-shot set these
+ * do not collapse per type — every message is its own fact — so the native
+ * buffers key them `type:message_id` and the JS-side hold is a FIFO, both
+ * capped at 256 entries.
+ *
+ * The same three tags are enrolled in the native buffers on both platforms
+ * (`OfflineProtocolModule.BUFFERED_INBOUND_EVENT_TYPES` in Kotlin,
+ * `InboundEventBuffer.bufferedEventTypes` in Swift), which hold them across
+ * the *native→JS* gap; this set drives the JS-side hold that covers the
+ * *JS→app-listener* gap (see `OfflineProtocol.on`). A Rust guard
+ * (`react_native_buffered_inbound_event_set_matches_native` in
+ * `crates/offline-protocol-uniffi`) pins the three definitions together.
+ */
+export const BUFFERED_INBOUND_EVENT_TYPES = [
+  'message_received',
+  'file_received',
+  'message_decryption_failed',
+] as const;
+
+/** Most inbound events the JS-side hold keeps; the oldest is dropped past it. */
+export const MAX_PENDING_INBOUND_EVENTS = 256;
+
+/**
  * The Headless JS task key the Android keep-alive uses to wake JavaScript after
  * a process kill (Android only; see `registerMeshWakeTask`).
  *

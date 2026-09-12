@@ -1817,7 +1817,7 @@ impl Default for PendingQueueConfig {
         Self {
             max_pending_per_peer: 64,
             max_pending_global: 4096,
-            // Mirrors the core default (30 min); see DEFAULT_PENDING_TTL_MS in
+            // Mirrors the core default (24 h); see DEFAULT_PENDING_TTL_MS in
             // offline-protocol/src/config.rs for the deferred-ACK rationale.
             pending_ttl_ms: DEFAULT_PENDING_TTL_MS,
             overflow_policy: OverflowPolicy::DropOldest,
@@ -4352,7 +4352,12 @@ impl OfflineProtocol {
     ///
     /// `reason` should carry platform-specific error context so reliability
     /// telemetry can classify root causes more accurately.
+    ///
+    /// The bridges also report the relay's `MessageSent { pushed: true }` here,
+    /// as the `relay_pushed` token. That parks the frame in the core but is not
+    /// a failed send, so it is kept out of the transport's delivery metrics.
     pub fn internet_send_failed_with_reason(&self, message_id: String, reason: Option<String>) {
+        let scores_carrier = CoreProtocol::send_report_is_carrier_failure(reason.as_deref());
         let mut protocol = self.lock_inner_recovering();
         if let Err(err) = protocol.on_transport_send_failed_via(
             &message_id,
@@ -4364,6 +4369,9 @@ impl OfflineProtocol {
                 error = %err,
                 "Failed to apply welcome lifecycle transport failure"
             );
+        }
+        if !scores_carrier {
+            return;
         }
         if let Some(transport_arc) = protocol
             .transport_manager()
@@ -8723,6 +8731,71 @@ mod tests {
         .into_bytes()
     }
 
+    /// The bridges report the relay's `MessageSent { pushed: true }` through
+    /// `internet_send_failed_with_reason` as `relay_pushed`. The relay took that
+    /// frame, so the report must stay out of the Internet transport's failure
+    /// accounting: the frame still awaits the bridge's write confirmation
+    /// afterwards. A real failure report for the same frame still reaches it.
+    #[test]
+    fn test_internet_relay_push_report_is_not_scored_as_a_send_failure() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        protocol.internet_status_changed(true).unwrap();
+        let internet = || {
+            protocol
+                .lock_inner_recovering()
+                .transport_manager()
+                .get_transport(CoreTransportType::Internet)
+                .expect("the Internet transport is registered")
+        };
+        let awaiting_confirmation = || {
+            internet()
+                .as_any()
+                .downcast_ref::<offline_protocol_transport::InternetTransport>()
+                .expect("the Internet transport is an InternetTransport")
+                .pending_confirmation_count()
+        };
+
+        let message = offline_protocol_core::Message::new(
+            offline_protocol_core::UserId::new("user123").unwrap(),
+            offline_protocol_core::UserId::new("bob").unwrap(),
+            offline_protocol_core::AppId::new("test-app").unwrap(),
+            "pushed while bob was offline",
+        );
+        internet()
+            .send(&message)
+            .expect("queueing to the Internet transport");
+        let frame = protocol
+            .internet_get_next_message()
+            .expect("the platform takes the frame");
+        assert_eq!(frame.message_id, message.id.as_str());
+        assert_eq!(
+            awaiting_confirmation(),
+            1,
+            "precondition: the frame awaits its write confirmation"
+        );
+
+        protocol.internet_send_failed_with_reason(
+            frame.message_id.clone(),
+            Some("relay_pushed".to_string()),
+        );
+        assert_eq!(
+            awaiting_confirmation(),
+            1,
+            "a push is not a failed send, so the transport must not count it"
+        );
+
+        protocol.internet_send_failed_with_reason(
+            frame.message_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        );
+        assert_eq!(
+            awaiting_confirmation(),
+            0,
+            "a real failure report still reaches the transport"
+        );
+    }
+
     /// Redundant same-state reports (e.g. bridge auth refresh) must not emit
     /// phantom TransportSwitched events; only real transitions do.
     #[test]
@@ -12142,6 +12215,257 @@ mod tests {
                  recording after it silently hides a fixed subset of peers that were \
                  advertising the whole time and cancels their pending connects at the next \
                  restoration"
+            );
+        }
+    }
+
+    /// The buffered-inbound event set agrees across TypeScript, Kotlin and
+    /// Swift, and each layer's hold is wired to a flush.
+    ///
+    /// `message_received`, `file_received` and `message_decryption_failed`
+    /// each report one message the core has already ACKed, dedup-marked and
+    /// dropped its queued copy of, so nothing will ever restate them and a
+    /// drop between the core and the app's handler is a lost message. Three
+    /// definitions and three holds have to agree for that not to happen —
+    /// the native buffers (Kotlin `BUFFERED_INBOUND_EVENT_TYPES`, Swift
+    /// `InboundEventBuffer.bufferedEventTypes`) cover the native→JS gap and
+    /// `BUFFERED_INBOUND_EVENT_TYPES` in `src/constants.ts` the
+    /// JS→app-listener gap — and every half fails silently, so they are
+    /// pinned here the way [`react_native_one_shot_event_set_matches_native`]
+    /// pins the one-shot set. The set is asserted exactly: enrolling a
+    /// periodic event here would replay stale state.
+    #[test]
+    fn react_native_buffered_inbound_event_set_matches_native() {
+        const INBOUND_TAGS: [&str; 3] = [
+            "message_received",
+            "file_received",
+            "message_decryption_failed",
+        ];
+
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            let path = rn_dir.join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+        fn declared_between(source: &str, start: &str, end: &str) -> Vec<String> {
+            let region = source
+                .split_once(start)
+                .unwrap_or_else(|| panic!("expected {start:?} in source"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("expected {end:?} after {start:?}"))
+                .0;
+            region
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with("//"))
+                .map(|l| {
+                    l.trim_end_matches(',')
+                        .trim_matches(|c| c == '\'' || c == '"')
+                        .to_string()
+                })
+                .collect()
+        }
+
+        // --- TypeScript: exactly these tags, in this order ------------------
+        let constants_ts = read("src/constants.ts");
+        assert_eq!(
+            declared_between(
+                &constants_ts,
+                "export const BUFFERED_INBOUND_EVENT_TYPES = [",
+                "] as const;"
+            ),
+            INBOUND_TAGS.to_vec(),
+            "src/constants.ts BUFFERED_INBOUND_EVENT_TYPES must hold exactly the inbound tags"
+        );
+        assert!(
+            constants_ts.contains("export const MAX_PENDING_INBOUND_EVENTS = 256;"),
+            "the JS-side inbound hold must be capped at 256 like the native buffers"
+        );
+
+        // --- Kotlin ---------------------------------------------------------
+        let kotlin = read("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt");
+        assert_eq!(
+            declared_between(
+                &kotlin,
+                "private val BUFFERED_INBOUND_EVENT_TYPES: Set<String> = setOf(",
+                ")"
+            ),
+            INBOUND_TAGS.to_vec(),
+            "OfflineProtocolModule.kt BUFFERED_INBOUND_EVENT_TYPES must match src/constants.ts"
+        );
+        let kotlin_code = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        );
+        assert!(
+            kotlin_code.contains("INBOUND_EVENT_BUFFER_CAPACITY = 256")
+                && kotlin_code
+                    .contains("StickyEventBuffer(maxEntries = INBOUND_EVENT_BUFFER_CAPACITY)"),
+            "the Android inbound buffer must be a 256-entry StickyEventBuffer of its own"
+        );
+        assert!(
+            kotlin_code.contains(
+                "if (!sendEvent(EVENT_NAME, eventParams(eventJson))) { \
+                 holdInboundEventIfBuffered(eventJson) }"
+            ),
+            "the Android core event callback must hold a buffered inbound event whenever the \
+             emit refuses it, not only when the JS gate read shut before the emit"
+        );
+        assert!(
+            kotlin_code.contains("inboundEvents.send(\"$type:$id\", eventJson)"),
+            "Android must key held inbound events type:message_id so every message survives"
+        );
+        for call in [
+            "inboundEvents.flush()",
+            "inboundEvents.beginSession()",
+            "inboundEvents.endSession()",
+        ] {
+            assert!(
+                kotlin_code.contains(call),
+                "OfflineProtocolModule.kt must drive {call} alongside the one-shot buffer"
+            );
+        }
+
+        // --- Swift ----------------------------------------------------------
+        let swift_buffer = read("ios/InboundEventBuffer.swift");
+        assert_eq!(
+            declared_between(
+                &swift_buffer,
+                "static let bufferedEventTypes: Set<String> = [",
+                "]"
+            ),
+            INBOUND_TAGS.to_vec(),
+            "ios/InboundEventBuffer.swift bufferedEventTypes must match src/constants.ts"
+        );
+        assert!(
+            swift_buffer.contains("static let defaultMaxEntries = 256"),
+            "the iOS inbound buffer must be capped at 256"
+        );
+        let swift_module = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        assert!(
+            swift_module.contains("emitter.holdInboundEventIfBuffered(eventJson, generation: generation)"),
+            "EventCallbackImpl.onEvent must hold a buffered inbound event when sendEventToJS refuses it"
+        );
+        for site in [
+            "override func startObserving() { hasListeners = true DispatchQueue.main.async { [weak self] in self?.flushInboundEvents() } }",
+            "super.addListener(eventName) DispatchQueue.main.async { [weak self] in self?.flushInboundEvents() }",
+            "@objc private func applicationDidBecomeActive() { flushInboundEvents() }",
+        ] {
+            assert!(
+                swift_module.contains(site),
+                "OfflineProtocolModule.swift must flush held inbound events from every trigger; \
+                 missing: {site}"
+            );
+        }
+        assert_eq!(
+            swift_module.matches("inboundEvents.bumpGeneration()").count(),
+            2,
+            "OfflineProtocolModule.swift must bump the inbound generation on create() and destroy()"
+        );
+        assert!(
+            read("MeshSdk.podspec").contains("\"ios/InboundEventBuffer.swift\","),
+            "MeshSdk.podspec must ship ios/InboundEventBuffer.swift — the pod lists sources \
+             explicitly, so a missing entry is a link error in every consuming app"
+        );
+
+        // --- The JS hold and replay ----------------------------------------
+        let index_ts = rn_source_code_only("src/index.ts");
+        assert!(
+            index_ts.contains("BUFFERED_INBOUND_EVENT_TYPE_SET.has(event.type)")
+                && index_ts.contains("this.pendingInboundEvents.push(event)"),
+            "src/index.ts emitEvent must hold an inbound event it could not deliver to any app \
+             listener"
+        );
+        assert!(
+            index_ts.contains("this.replayHeldInboundEvents(eventType);"),
+            "src/index.ts on() must replay held inbound events to a new listener"
+        );
+    }
+
+    /// A `MessageSent { pushed: true }` parks the frame on both bridges.
+    ///
+    /// The relay has no store-and-forward: when the recipient is not on it,
+    /// the ciphertext goes out in a push notification and the sender is told
+    /// `MessageSent` — which, without this, resolved the frame as accepted
+    /// and left it awaiting an ACK from a peer who may never receive the
+    /// push. Both managers must read `pushed` right where they resolve the
+    /// relay acceptance and, when it is set, report that one id to the core
+    /// under the exact `relay_pushed` token and watch the recipient, mirroring
+    /// `handleRecipientUnreachable`. The token is the core's
+    /// `SEND_FAIL_REASON_RELAY_PUSHED`, and it must not be a
+    /// `recipient_unreachable` tail: that prefix fast-fails connection
+    /// requests and fails Welcomes, both of which the push may have
+    /// delivered. Neither platform can test the call site itself (see the
+    /// ordering guard below for why), so the source is pinned here.
+    #[test]
+    fn react_native_relay_parks_a_pushed_message_sent() {
+        let swift = rn_source_code_only("ios/InternetManager.swift");
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/InternetManager.kt");
+
+        for (label, code) in [("ios", &swift), ("android", &kotlin)] {
+            let resolve = code
+                .find("resolveOnRelayAccepted(")
+                .unwrap_or_else(|| panic!("{label} InternetManager must resolve relay acceptance"));
+            let pushed = code
+                .find("\"pushed\"")
+                .unwrap_or_else(|| panic!("{label} InternetManager must read MessageSent.pushed"));
+            let park = code
+                .find("parkPushedMessage(")
+                .unwrap_or_else(|| panic!("{label} InternetManager must park a pushed message"));
+            assert!(
+                resolve < pushed && pushed < park,
+                "{label} InternetManager must read `pushed` next to resolveOnRelayAccepted and \
+                 park through parkPushedMessage right after it — the frame is out of the \
+                 in-flight tracker either way, so the park is the only thing left that \
+                 stops its ACK budget burning against an offline peer"
+            );
+            // The definition is the last occurrence (both managers define it
+            // below the call site, next to handleRecipientUnreachable); the
+            // body checks below start there so they read the park, not the
+            // DeliveryError handler above it.
+            let definition = code
+                .rfind("parkPushedMessage(")
+                .expect("parkPushedMessage definition");
+            assert!(
+                definition > park,
+                "{label} parkPushedMessage must be defined below its call site"
+            );
+            let park_body = &code[definition..];
+            let fail = park_body
+                .find("internetSendFailedWithReason(")
+                .expect("parkPushedMessage must fail the id into the core");
+            let watch = park_body
+                .find("presenceWatch.watch(")
+                .expect("parkPushedMessage must presence-watch the recipient");
+            let presence = park_body
+                .find("internetPeerPresence(")
+                .expect("parkPushedMessage must feed an offline presence to the core");
+            assert!(
+                fail < watch && watch < presence,
+                "{label} parkPushedMessage must park first, then watch, then feed presence — \
+                 the order handleRecipientUnreachable uses"
+            );
+            // The reason passed to that call: the exact token, and nothing
+            // under the recipient_unreachable prefix.
+            let report = &park_body[fail..watch];
+            assert!(
+                report.contains("\"relay_pushed\""),
+                "{label} parkPushedMessage must report the id under the exact relay_pushed \
+                 token the core parks a plain DM on"
+            );
+            assert!(
+                !report.contains("recipient_unreachable"),
+                "{label} parkPushedMessage must not use the recipient_unreachable prefix: the \
+                 core fast-fails connection requests and fails Welcomes on it, both of which \
+                 the push may have delivered"
+            );
+            assert!(
+                !park_body[..fail].contains("drainRecipient("),
+                "{label} parkPushedMessage must fail only the pushed id, never drain the \
+                 recipient's other in-flight frames"
             );
         }
     }

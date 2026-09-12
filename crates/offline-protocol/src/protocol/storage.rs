@@ -3,23 +3,30 @@
 use super::state_crypto::{StateRecordCipher, SEALED_RECORD_OVERHEAD, STATE_RECORD_KEY_BYTES};
 use super::{
     lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
-    PeerCapabilities, PendingMessage, PendingMessageRecord, ReceivedKeyPackage, SessionState,
-    WelcomeDeliveryState, WelcomeLifecycleRecord, DATA_GROUP_V1, DATA_MEDIA_V1, DATA_SYNC_V1,
-    MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO, MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH,
-    MAX_PENDING_KEY_PACKAGES, MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER,
-    MAX_PENDING_MESSAGE_BYTES_GLOBAL, MAX_PENDING_MESSAGE_BYTES_PER_PEER,
-    MAX_PERSISTED_CAPABILITY_VERSIONS, MAX_PROTOCOL_STATE_RECORD_BYTES, MLS_ENVELOPE_COMPACT_V1,
+    PeerCapabilities, PendingDecryptRecord, PendingMessage, PendingMessageRecord,
+    ReceivedKeyPackage, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord, DATA_GROUP_V1,
+    DATA_MEDIA_V1, DATA_SYNC_V1, MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO,
+    MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH, MAX_PENDING_KEY_PACKAGES, MAX_PENDING_MESSAGES_GLOBAL,
+    MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
+    MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_PERSISTED_CAPABILITY_VERSIONS,
+    MAX_PROTOCOL_STATE_RECORD_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_DECRYPT_RECORD_VERSION,
     RICH_PAYLOAD_V1, WELCOME_LIFECYCLE_TTL_SECS,
 };
+use super::{
+    DedupSeenRecord, DEDUP_PERSIST_DIRTY_THRESHOLD, DEDUP_PERSIST_INTERVAL,
+    DEDUP_SEEN_RECORD_VERSION, MAX_PERSISTED_DEDUP_IDS,
+};
 use crate::constants::{MAX_MEDIA_DESCRIPTORS, MAX_OUTBOX_ENTRIES};
+use crate::events::DecryptionFailureCode;
 use crate::{Error, Event, ProtocolStateError, ProtocolStateResult, ProtocolStateStorage, Result};
 use chrono::{Duration as ChronoDuration, Utc};
-use offline_protocol_core::{LamportClock, MessageId};
+use offline_protocol_core::{LamportClock, Message, MessageId};
 use offline_protocol_mls::{MlsManager, MlsStorage};
 use offline_protocol_transport::{NostrKeypair, NostrTransport, TransportType};
 use serde::de::DeserializeOwned;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
@@ -45,6 +52,11 @@ pub(crate) enum StateCategory {
     /// because reading it means decrypting it.
     PendingMessages,
     PendingMessageEntries,
+    /// Inbound ciphertext parked before its session was ready. Post-split
+    /// only, like [`Self::StateAdoption`] — deliberately absent from
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split
+    /// data to inherit for it.
+    PendingDecryptEntries,
     Outbox,
     MediaDescriptors,
     PeerKeyPackages,
@@ -54,6 +66,10 @@ pub(crate) enum StateCategory {
     BlockedUsers,
     BothCreateAwaitingDecrypt,
     LamportClock,
+    /// The deduplicator's seen set. Post-split only, like
+    /// [`Self::NostrWatermark`], and absent from
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] for the same reason.
+    DedupSeenIds,
     /// The Nostr receive watermark. Post-split only, like [`Self::StateAdoption`]
     /// — deliberately absent from [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`],
     /// which has no pre-split data to inherit for it.
@@ -98,6 +114,7 @@ impl StateCategory {
         Some(match key_type {
             storage_keys::PENDING_MESSAGES => Self::PendingMessages,
             storage_keys::PENDING_MESSAGE_ENTRIES => Self::PendingMessageEntries,
+            storage_keys::PENDING_DECRYPT_ENTRIES => Self::PendingDecryptEntries,
             storage_keys::OUTBOX => Self::Outbox,
             storage_keys::MEDIA_DESCRIPTORS => Self::MediaDescriptors,
             storage_keys::PEER_KEY_PACKAGES => Self::PeerKeyPackages,
@@ -107,6 +124,7 @@ impl StateCategory {
             storage_keys::BLOCKED_USERS => Self::BlockedUsers,
             storage_keys::BOTH_CREATE_AWAITING_DECRYPT => Self::BothCreateAwaitingDecrypt,
             storage_keys::LAMPORT_CLOCK => Self::LamportClock,
+            storage_keys::DEDUP_SEEN_IDS => Self::DedupSeenIds,
             storage_keys::NOSTR_WATERMARK => Self::NostrWatermark,
             storage_keys::NOSTR_KEY_PACKAGE_SLOTS => Self::NostrKeyPackageSlots,
             storage_keys::NOSTR_DISCOVERY_CLAIM => Self::NostrDiscoveryClaim,
@@ -133,6 +151,7 @@ impl StateCategory {
     pub(crate) const ALL: &'static [Self] = &[
         Self::PendingMessages,
         Self::PendingMessageEntries,
+        Self::PendingDecryptEntries,
         Self::Outbox,
         Self::MediaDescriptors,
         Self::PeerKeyPackages,
@@ -142,6 +161,7 @@ impl StateCategory {
         Self::BlockedUsers,
         Self::BothCreateAwaitingDecrypt,
         Self::LamportClock,
+        Self::DedupSeenIds,
         Self::NostrWatermark,
         Self::NostrKeyPackageSlots,
         Self::NostrDiscoveryClaim,
@@ -161,6 +181,7 @@ impl StateCategory {
         match self {
             Self::PendingMessages => storage_keys::PENDING_MESSAGES,
             Self::PendingMessageEntries => storage_keys::PENDING_MESSAGE_ENTRIES,
+            Self::PendingDecryptEntries => storage_keys::PENDING_DECRYPT_ENTRIES,
             Self::Outbox => storage_keys::OUTBOX,
             Self::MediaDescriptors => storage_keys::MEDIA_DESCRIPTORS,
             Self::PeerKeyPackages => storage_keys::PEER_KEY_PACKAGES,
@@ -170,6 +191,7 @@ impl StateCategory {
             Self::BlockedUsers => storage_keys::BLOCKED_USERS,
             Self::BothCreateAwaitingDecrypt => storage_keys::BOTH_CREATE_AWAITING_DECRYPT,
             Self::LamportClock => storage_keys::LAMPORT_CLOCK,
+            Self::DedupSeenIds => storage_keys::DEDUP_SEEN_IDS,
             Self::NostrWatermark => storage_keys::NOSTR_WATERMARK,
             Self::NostrKeyPackageSlots => storage_keys::NOSTR_KEY_PACKAGE_SLOTS,
             Self::NostrDiscoveryClaim => storage_keys::NOSTR_DISCOVERY_CLAIM,
@@ -193,6 +215,13 @@ impl StateCategory {
     ///   per-recipient predecessor [`storage_keys::PENDING_MESSAGES`]: original
     ///   plaintext, plus rich extras that can include
     ///   `MediaMetadata::encryption_key`/`iv`.
+    /// - [`storage_keys::PENDING_DECRYPT_ENTRIES`]: inbound frames parked
+    ///   before their session was ready. The body is MLS ciphertext, but the
+    ///   envelope around it is not: sender, recipient, app id, metadata and
+    ///   any outer `media_metadata` are in the clear, and a sealed record is
+    ///   also the only thing stopping a container write from *substituting*
+    ///   a frame — an AEAD makes an edited record unopenable, and unopenable
+    ///   is dropped.
     /// - [`storage_keys::OUTBOX`]: the outgoing `Message` — ciphertext for
     ///   encrypted sends, but plaintext when the app opted out of encryption,
     ///   and its outer `media_metadata` carries the cloud-media secrets on the
@@ -234,6 +263,14 @@ impl StateCategory {
     ///   pointing at this address forever. Deleting the record instead is the
     ///   benign direction and is not prevented (nothing sealing does can),
     ///   which is why the claim is also republished on every launch.
+    /// - [`storage_keys::DEDUP_SEEN_IDS`]: sealed for the confidentiality of
+    ///   timing rather than content. The record holds up to 2000 inbound
+    ///   message ids, each with the millisecond it arrived, for a day. The wire
+    ///   shows each id in transit; at rest the record is a day-long timeline of
+    ///   when this install received messages, and the threat model lists
+    ///   delivery metadata as an asset. Failing closed is cheap: with the key
+    ///   unavailable the set is not written, and the next launch starts it
+    ///   empty, which costs only the restart-time dedup the record provides.
     ///
     /// Everything else is advertised capability versions, a small state enum, a
     /// logical clock, a coarse wall-clock mark, or a value-less marker whose
@@ -256,6 +293,7 @@ impl StateCategory {
         match self {
             Self::PendingMessages
             | Self::PendingMessageEntries
+            | Self::PendingDecryptEntries
             | Self::Outbox
             | Self::MediaDescriptors
             | Self::PeerKeyPackages
@@ -264,7 +302,8 @@ impl StateCategory {
             | Self::DataDocs
             | Self::DataDeltaLog
             | Self::DataSpaces
-            | Self::DataSync => true,
+            | Self::DataSync
+            | Self::DedupSeenIds => true,
             Self::PeerCapabilities
             | Self::SessionStates
             | Self::WelcomeLifecycles
@@ -418,6 +457,17 @@ pub(crate) enum RestorableRecord<T> {
 /// overflow is the safer failure. See the rationale there.
 pub(super) const MAX_RESTORE_KEYS_PER_CATEGORY: usize = 4 * MAX_PENDING_MESSAGES_GLOBAL;
 
+/// How long a parked inbound frame may sit on disk, measured from its first
+/// receipt, before restore drops it instead of re-queuing it.
+///
+/// The in-memory TTL (`PendingQueueConfig::pending_ttl_ms`) restarts with every
+/// process, because it is measured on an `Instant`; without a second bound a
+/// frame whose session never confirms would be restored on every launch
+/// forever. Seven days is well past any handshake that is still going to
+/// succeed, and past the sender's own retry budget, so a record older than
+/// this is one nobody is still trying to deliver.
+pub(crate) const PENDING_DECRYPT_PERSISTED_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
 /// Restore-walk bound for the outbox.
 ///
 /// The live insert path hard-caps the outbox at [`MAX_OUTBOX_ENTRIES`]
@@ -544,10 +594,18 @@ pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_G
 /// a live id for, and starving the pending walk defers every diagnostic it
 /// owes. Neither may be held hostage to a key-package flood.
 ///
+/// The inbound walks get a fourth pool for the same reason:
+/// [`OfflineProtocol::restore_pending_decrypt_entries`] holds ciphertext the
+/// app is told about when it is lost, and [`OfflineProtocol::restore_dedup_seen`]
+/// shares the pool after it for its one possible delete. Both refuse rather
+/// than count, since every delete they make is advisory. The pending-decryption
+/// walk reports a drop only together with its delete, so a refusal defers both
+/// halves to a later launch at once.
+///
 /// # The derived launch ceiling
 ///
-/// Three pools, so `3 × MAX_RESTORE_PRUNE_DELETES` is the whole launch's
-/// allowance. All three are constructed side by side by `initialize_mls` — see
+/// Four pools, so `4 × MAX_RESTORE_PRUNE_DELETES` is the whole launch's
+/// allowance. All four are constructed side by side by `initialize_mls` — see
 /// [`PruneAllowance::pool`] for why none of them may be allocated inside the
 /// walk that spends it — and
 /// `test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling` pins the
@@ -580,7 +638,7 @@ pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_G
 /// by its own truncated-and-resumable pass rather than by this constant. It is
 /// a one-time upgrade sweep on a different provider, so it is deliberately
 /// outside the pools — but a reader deriving "the most barriers one launch can
-/// issue" should count it separately rather than reading `3 ×` as the total.
+/// issue" should count it separately rather than reading `4 ×` as the total.
 ///
 /// # This bounds deletes, and deletes are not the only durable cost
 ///
@@ -773,7 +831,7 @@ impl PruneAllowance {
     /// it. The two constructors had identical bodies, which was the tell.
     ///
     /// So every pool is constructed by the caller that owns the launch —
-    /// `initialize_mls` builds all three side by side — and threaded in. The
+    /// `initialize_mls` builds all four side by side — and threaded in. The
     /// launch ceiling reads off that one call site, and
     /// `test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling` pins
     /// it.
@@ -795,6 +853,18 @@ impl PruneAllowance {
         self.advisory_walks_left = later;
         let reserved = later.saturating_mul(MIN_ADVISORY_PRUNE_DELETES);
         let ceiling = self.remaining.saturating_sub(reserved);
+        PruneBudget::new(&mut self.remaining, ceiling, true)
+    }
+
+    /// A refusing budget on a pool that no advisory walk shares.
+    ///
+    /// [`Self::refusing`] reserves [`MIN_ADVISORY_PRUNE_DELETES`] for each
+    /// advisory walk still to come, which on a private pool reserves for walks
+    /// that never arrive: the first draw on a fresh pool would get half of it.
+    /// This reserves nothing, so a walk that owns its pool can spend all of it,
+    /// and a later walk on the same pool gets whatever is left.
+    pub(super) fn refusing_private(&mut self) -> PruneBudget<'_> {
+        let ceiling = self.remaining;
         PruneBudget::new(&mut self.remaining, ceiling, true)
     }
 
@@ -4364,6 +4434,305 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // PENDING DECRYPTION QUEUE PERSISTENCE
+    // ========================================================================
+
+    /// Writes one parked inbound frame under its own message id.
+    ///
+    /// Best-effort, like [`Self::persist_pending_message`]: a failed write is
+    /// logged and the entry still lives in the in-memory queue, it just will
+    /// not survive a restart. Called only for a frame the queue *admitted* —
+    /// a frame it refused (overflow, oversized) has nothing to persist, and
+    /// a resend of an id already queued is a no-op in memory and on disk
+    /// (the original record is authoritative and keeps its first-receipt
+    /// timestamp).
+    pub(crate) fn persist_pending_decrypt_entry(
+        &self,
+        peer_id: &str,
+        message: &Message,
+        first_received_at_ms: i64,
+        received_via: Option<TransportType>,
+    ) {
+        let Some(storage) = &self.protocol_state_storage else {
+            return;
+        };
+        let record = PendingDecryptRecord {
+            version: PENDING_DECRYPT_RECORD_VERSION,
+            peer_id: peer_id.to_string(),
+            message: message.clone(),
+            first_received_at_ms,
+            received_via,
+        };
+        let data = match serde_json::to_vec(&record) {
+            Ok(data) => data,
+            Err(e) => {
+                warn!(
+                    peer_id = %peer_id,
+                    message_id = %message.id,
+                    error = %e,
+                    "Failed to serialize pending decryption entry"
+                );
+                return;
+            }
+        };
+        if let Err(e) = self.write_state_record(
+            storage.as_ref(),
+            storage_keys::PENDING_DECRYPT_ENTRIES,
+            &message.id.as_str(),
+            &data,
+        ) {
+            warn!(
+                peer_id = %peer_id,
+                message_id = %message.id,
+                error = %e,
+                "Failed to persist pending decryption entry"
+            );
+        }
+    }
+
+    /// Removes one persisted parked frame. Logged rather than swallowed for
+    /// the reason [`Self::delete_pending_message_from_storage`] is: a delete
+    /// that silently failed is a record the next launch restores and drains
+    /// again, and a re-drain of a frame whose ratchet generation was already
+    /// spent surfaces as a spurious decrypt failure.
+    pub(crate) fn delete_pending_decrypt_entry_from_storage(&self, message_id: &MessageId) {
+        let Some(storage) = &self.protocol_state_storage else {
+            return;
+        };
+        if let Err(e) = storage.delete(storage_keys::PENDING_DECRYPT_ENTRIES, &message_id.as_str())
+        {
+            warn!(
+                message_id = %message_id,
+                error = %e,
+                "Failed to clear persisted pending decryption entry"
+            );
+        }
+    }
+
+    /// Removes the persisted copies of a batch of parked frames.
+    pub(crate) fn delete_pending_decrypt_entries_from_storage<'a>(
+        &self,
+        message_ids: impl IntoIterator<Item = &'a MessageId>,
+    ) {
+        for message_id in message_ids {
+            self.delete_pending_decrypt_entry_from_storage(message_id);
+        }
+    }
+
+    /// Test-only: the ids currently persisted for the pending-decryption
+    /// queue, in store order.
+    #[cfg(test)]
+    pub(crate) fn persisted_pending_decrypt_ids(&self) -> Vec<String> {
+        let Some(storage) = self.protocol_state_storage.as_ref() else {
+            return Vec::new();
+        };
+        Self::list_state_keys(storage.as_ref(), storage_keys::PENDING_DECRYPT_ENTRIES)
+            .unwrap_or_default()
+    }
+
+    /// Restores the pending-decryption queue from its per-message records.
+    ///
+    /// Each record that opens, parses, and is younger than
+    /// [`PENDING_DECRYPT_PERSISTED_MAX_AGE_MS`] is pushed back through the
+    /// in-memory enqueue — oldest first by `first_received_at_ms`, so the
+    /// per-peer FIFO and the overflow policy see the same order they would
+    /// have on the live path — **without** being re-persisted: the record on
+    /// disk is already the durable copy and keeps its first-receipt timestamp.
+    /// A restored entry gets a fresh `Instant::now()` as its in-memory
+    /// `received_at`, so its TTL restarts with the process; the 7-day age
+    /// bound is what keeps a frame from being restored forever.
+    ///
+    /// Restored ids are deliberately **not** dedup-marked. The live path
+    /// unmarks a deferred frame on receipt so the sender's resend re-enters
+    /// the queue (idempotent by id) instead of hitting the duplicate re-ACK
+    /// path, and a restore must leave that invariant where it found it.
+    ///
+    /// Every delete the walk causes (unreadable, corrupt, unknown version,
+    /// expired, or dropped by the in-memory caps) is advisory: a record left on
+    /// disk one launch longer is re-walked and dropped then. So the walk draws
+    /// on a pool of its own with refusing semantics rather than the shared
+    /// advisory pool: it holds inbound ciphertext the app is told about when
+    /// lost, and that must not be held hostage to a key-package flood in a
+    /// category it has nothing to do with, the same argument the outbound
+    /// pending walk makes. It draws first; [`Self::restore_dedup_seen`] shares
+    /// the pool after it.
+    ///
+    /// An expired record is settled with a `PendingQueueDropped` decryption
+    /// failure carrying the reason `expired_persisted`, through the deferred
+    /// settlement path so it reaches the app once the event pipeline is live.
+    /// A restored frame the in-memory caps drop (a lowered cap, or more on disk
+    /// than memory admits) is settled the same way: emitted directly, it would
+    /// reach an app that has not subscribed yet, or no callback at all.
+    ///
+    /// Either one is reported only on the launch that deletes its record. A
+    /// delete the budget refuses leaves the record on disk **unreported**, and
+    /// a later launch walks it again and owns both halves then, which is the
+    /// rule the outbound walk's capacity drain follows. Reporting it anyway
+    /// would repeat an aged-out report on every launch until the delete lands,
+    /// and for a frame the caps dropped it would claim a loss that a later
+    /// launch contradicts by admitting the frame.
+    /// Infallible by design: this queue holds nothing the rest of `initialize_mls`
+    /// depends on, so a listing failure is logged and the queue simply starts
+    /// empty this session.
+    pub(crate) fn restore_pending_decrypt_entries(&mut self, allowance: &mut PruneAllowance) {
+        let Some(storage) = self.protocol_state_storage.clone() else {
+            return;
+        };
+        let key_ids =
+            match Self::list_state_keys(storage.as_ref(), storage_keys::PENDING_DECRYPT_ENTRIES) {
+                Ok(keys) => keys,
+                Err(e) => {
+                    warn!(error = %e, "Failed to list pending decryption entries from storage");
+                    return;
+                }
+            };
+        let listed = key_ids.len();
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Pending decryption entries listed more records than any legitimate run can produce; ignoring the tail"
+            );
+        }
+
+        let now_ms = Utc::now().timestamp_millis();
+        let mut budget = allowance.refusing_private();
+        let mut restored: Vec<PendingDecryptRecord> = Vec::new();
+        let mut settlements: Vec<Event> = Vec::new();
+        for key_id in key_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
+            let data = match self.read_state_record_detailed_budgeted(
+                storage.as_ref(),
+                storage_keys::PENDING_DECRYPT_ENTRIES,
+                &key_id,
+                Some(&mut budget),
+            ) {
+                Ok(StateRecord::Present(data)) => data,
+                Ok(StateRecord::Missing | StateRecord::Unreadable | StateRecord::Unavailable)
+                | Err(_) => continue,
+            };
+
+            let record = match serde_json::from_slice::<PendingDecryptRecord>(&data) {
+                Ok(record) if record.version == PENDING_DECRYPT_RECORD_VERSION => record,
+                Ok(record) => {
+                    warn!(
+                        key_id = %key_id,
+                        version = record.version,
+                        "Dropping pending decryption entry with an unknown record version"
+                    );
+                    if budget.claim() {
+                        self.delete_pending_decrypt_key(&key_id);
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    warn!(
+                        key_id = %key_id,
+                        error = %e,
+                        "Dropping corrupted pending decryption entry"
+                    );
+                    if budget.claim() {
+                        self.delete_pending_decrypt_key(&key_id);
+                    }
+                    continue;
+                }
+            };
+
+            // The record is keyed by the message id it holds; a record filed
+            // under some other id is not one this SDK wrote.
+            if record.message.id.as_str() != key_id {
+                warn!(
+                    key_id = %key_id,
+                    message_id = %record.message.id,
+                    "Dropping pending decryption entry whose key does not match its message id"
+                );
+                if budget.claim() {
+                    self.delete_pending_decrypt_key(&key_id);
+                }
+                continue;
+            }
+
+            if now_ms.saturating_sub(record.first_received_at_ms)
+                >= PENDING_DECRYPT_PERSISTED_MAX_AGE_MS
+            {
+                // Reported with its delete or not at all this launch; see the
+                // doc comment above.
+                if !budget.claim() {
+                    continue;
+                }
+                debug!(
+                    key_id = %key_id,
+                    peer_id = %record.peer_id,
+                    "Dropping pending decryption entry that aged out on disk"
+                );
+                self.delete_pending_decrypt_key(&key_id);
+                settlements.push(Event::message_decryption_failed(
+                    record.message.id.clone(),
+                    record.message.sender.as_str().to_string(),
+                    DecryptionFailureCode::PendingQueueDropped,
+                    "encrypted message evicted from pending queue (expired_persisted); \
+                     recoverable only if the sender resends"
+                        .to_string(),
+                ));
+                continue;
+            }
+
+            restored.push(record);
+        }
+
+        // Oldest first, so the in-memory FIFO and the overflow policy see the
+        // order the live path would have produced. Ties (same millisecond)
+        // fall back to the id so the order is stable across launches.
+        restored.sort_by(|left, right| {
+            left.first_received_at_ms
+                .cmp(&right.first_received_at_ms)
+                .then_with(|| left.message.id.as_str().cmp(&right.message.id.as_str()))
+        });
+
+        let count = restored.len();
+        for record in restored {
+            let dropped = self.enqueue_restored_pending_decryption(
+                &record.peer_id,
+                &record.message,
+                record.received_via,
+            );
+            // A frame the caps let go is already out of memory but came off
+            // disk, so its record goes, charged like every other delete here.
+            // One the budget cannot fund stays on disk unreported.
+            let mut deleted = Vec::with_capacity(dropped.len());
+            for entry in dropped {
+                if budget.claim() {
+                    self.delete_pending_decrypt_entry_from_storage(&entry.message.id);
+                    deleted.push(entry);
+                }
+            }
+            settlements.extend(Self::pending_drop_events(deleted));
+        }
+        self.settle_restored_message_failures(settlements);
+
+        if budget.exhausted {
+            warn!(
+                deleted = budget.spent,
+                budget = MAX_RESTORE_PRUNE_DELETES,
+                "Pending decryption prune hit its share of the launch delete budget; the rest is left on disk for a later launch"
+            );
+        }
+
+        if count > 0 {
+            info!(count, "Restored pending decryption entries from storage");
+        }
+    }
+
+    /// Deletes a pending-decryption record by key (restore-internal, mirrors
+    /// [`Self::delete_media_descriptor_key`]).
+    fn delete_pending_decrypt_key(&self, key_id: &str) {
+        if let Some(storage) = &self.protocol_state_storage {
+            if let Err(e) = storage.delete(storage_keys::PENDING_DECRYPT_ENTRIES, key_id) {
+                warn!(key_id = %key_id, error = %e, "Failed to delete pending decryption entry");
+            }
+        }
+    }
+
+    // ========================================================================
     // TELEMETRY SCRUB-SECRET PERSISTENCE
     // ========================================================================
 
@@ -4871,6 +5240,176 @@ impl OfflineProtocol {
                 );
             }
         }
+    }
+}
+
+impl OfflineProtocol {
+    // ========================================================================
+    // DEDUPLICATOR SEEN-SET PERSISTENCE
+    // ========================================================================
+
+    /// Records one change to the deduplicator's seen set — a mark or an
+    /// unmark on the receive path — for the batched write below.
+    ///
+    /// Only receive-side changes are counted. The ids a sender marks for its
+    /// own outgoing frames are not persisted: they exist to stop a relayed
+    /// echo of our own message being re-processed, which a restart does not
+    /// change, and persisting them would spend the record's cap on ids no
+    /// peer will ever push at us. That holds because the send paths mark
+    /// through `Deduplicator::mark_seen_local`, which `export_seen` leaves
+    /// out; a send-side `mark_seen` would put the id in the next record and
+    /// is pinned against by
+    /// `test_dedup_seen_set_excludes_own_outgoing_ids`.
+    pub(crate) fn note_dedup_change(&mut self) {
+        self.dedup_dirty = self.dedup_dirty.saturating_add(1);
+    }
+
+    /// Marks an inbound id as seen and counts the change for persistence.
+    pub(crate) fn mark_seen_persisted(&mut self, message_id: MessageId) -> bool {
+        let fresh = self.deduplicator.mark_seen(message_id);
+        if fresh {
+            self.note_dedup_change();
+        }
+        fresh
+    }
+
+    /// Forgets an inbound id and counts the change for persistence, so a
+    /// record written later does not resurrect an id the receive path
+    /// deliberately released (a deferred or rejected frame whose resend must
+    /// re-enter processing).
+    pub(crate) fn unmark_seen_persisted(&mut self, message_id: &MessageId) -> bool {
+        let removed = self.deduplicator.unmark_seen(message_id);
+        if removed {
+            self.note_dedup_change();
+        }
+        removed
+    }
+
+    /// Batched seen-set persistence, called from every `process()` tick.
+    ///
+    /// Writes when [`DEDUP_PERSIST_DIRTY_THRESHOLD`] changes have accumulated,
+    /// or when any change is at least [`DEDUP_PERSIST_INTERVAL`] old — so a
+    /// burst reaches disk quickly and a trickle reaches it within seconds,
+    /// while a quiet node writes nothing. The unconditional counterpart is
+    /// [`Self::flush_dedup_seen`].
+    pub(crate) fn persist_dedup_seen_if_due(&mut self) {
+        if self.dedup_dirty == 0 {
+            return;
+        }
+        let due = self.dedup_dirty >= DEDUP_PERSIST_DIRTY_THRESHOLD
+            || self.dedup_last_persist.elapsed() >= DEDUP_PERSIST_INTERVAL;
+        if due {
+            self.write_dedup_seen_to_storage();
+        }
+    }
+
+    /// Writes the seen set regardless of the batching state. Called on
+    /// `stop()` and on drop so a shutdown loses nothing to the debounce.
+    pub(crate) fn flush_dedup_seen(&mut self) {
+        if self.dedup_dirty == 0 {
+            return;
+        }
+        self.write_dedup_seen_to_storage();
+    }
+
+    fn write_dedup_seen_to_storage(&mut self) {
+        let Some(storage) = self.protocol_state_storage.clone() else {
+            return;
+        };
+        let record = DedupSeenRecord {
+            version: DEDUP_SEEN_RECORD_VERSION,
+            entries: self.deduplicator.export_seen(MAX_PERSISTED_DEDUP_IDS),
+        };
+        let data = match serde_json::to_vec(&record) {
+            Ok(data) => data,
+            Err(e) => {
+                warn!(error = %e, "Failed to serialize deduplicator seen set");
+                return;
+            }
+        };
+        if let Err(e) = self.write_state_record(
+            storage.as_ref(),
+            storage_keys::DEDUP_SEEN_IDS,
+            storage_keys::DEDUP_SEEN_IDS_ID,
+            &data,
+        ) {
+            warn!(error = %e, "Failed to persist deduplicator seen set");
+            return;
+        }
+        // Reset only on success: a failed write leaves the changes dirty so
+        // the next tick retries rather than declaring them durable.
+        self.dedup_dirty = 0;
+        self.dedup_last_persist = Instant::now();
+    }
+
+    /// Restores the seen set from storage, next to the Lamport clock.
+    ///
+    /// Ids already tracked in memory win, ids past the retention window as
+    /// of now are skipped, and the configured cap is respected — all inside
+    /// `Deduplicator::import_seen`. A record that does not parse, or carries a
+    /// version this build does not know, is deleted and the set starts empty:
+    /// nothing is owed to anyone for it, since the worst case is the one
+    /// restart-time duplicate this record exists to prevent.
+    ///
+    /// Every delete this makes is charged to `allowance`, the inbound pool it
+    /// shares with [`Self::restore_pending_decrypt_entries`], because the
+    /// launch ceiling covers every durable delete on the restore path. That
+    /// includes the reader's own: the record is sealed, so one that will not
+    /// open (a regenerated record key) is dropped inside the read. A refused
+    /// delete costs nothing: the set starts empty either way, and the next
+    /// write replaces the record.
+    pub(crate) fn restore_dedup_seen(&mut self, allowance: &mut PruneAllowance) {
+        let Some(storage) = self.protocol_state_storage.clone() else {
+            return;
+        };
+        let mut budget = allowance.refusing_private();
+        let data = match self.read_state_record_detailed_budgeted(
+            storage.as_ref(),
+            storage_keys::DEDUP_SEEN_IDS,
+            storage_keys::DEDUP_SEEN_IDS_ID,
+            Some(&mut budget),
+        ) {
+            Ok(StateRecord::Present(data)) => data,
+            Ok(StateRecord::Missing | StateRecord::Unreadable | StateRecord::Unavailable)
+            | Err(_) => return,
+        };
+        let record = match serde_json::from_slice::<DedupSeenRecord>(&data) {
+            Ok(record) if record.version == DEDUP_SEEN_RECORD_VERSION => record,
+            Ok(record) => {
+                warn!(
+                    version = record.version,
+                    "Dropping deduplicator seen set with an unknown record version"
+                );
+                if budget.claim() {
+                    let _ = storage.delete(
+                        storage_keys::DEDUP_SEEN_IDS,
+                        storage_keys::DEDUP_SEEN_IDS_ID,
+                    );
+                }
+                return;
+            }
+            Err(e) => {
+                warn!(error = %e, "Dropping corrupted deduplicator seen set");
+                if budget.claim() {
+                    let _ = storage.delete(
+                        storage_keys::DEDUP_SEEN_IDS,
+                        storage_keys::DEDUP_SEEN_IDS_ID,
+                    );
+                }
+                return;
+            }
+        };
+        let listed = record.entries.len();
+        let imported = self.deduplicator.import_seen(record.entries, Utc::now());
+        if imported > 0 {
+            debug!(
+                imported,
+                listed, "Restored deduplicator seen set from storage"
+            );
+        }
+        // What is in memory now matches disk (or is a subset disk already
+        // holds), so nothing is dirty until the next receive.
+        self.dedup_last_persist = Instant::now();
     }
 }
 

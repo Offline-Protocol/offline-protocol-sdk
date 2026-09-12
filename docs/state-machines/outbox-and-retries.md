@@ -139,6 +139,21 @@ recovers through a descriptor-based resend request.
 When the relay reports a recipient unreachable, a direct message is **parked**
 rather than retried into a void.
 
+A relay push is the second trigger. When the recipient has no live socket the
+relay hands the ciphertext to a device push and answers
+`MessageSent { pushed: true }`; it keeps no copy, so if the push is lost nothing
+re-delivers the frame when the recipient reconnects. The bridges report that
+answer to the core as `relay_pushed`, and the message parks exactly as below
+with two differences, both because the push may have delivered it: only a plain
+direct message parks (a connection request keeps its typed tracking and a
+Welcome its lifecycle, both awaiting the answer a delivered push produces), and
+**no `MessageUndeliverable` is emitted**, on the push or on any later probe of
+that frame. The relay remembers what it has pushed for a day and answers a
+repeat with `DeliveryError` rather than a second notification, which reaches
+the core as an ordinary unreachable verdict. The outbox entry therefore carries
+a persisted `relay_pushed` mark, and a verdict for a marked entry re-parks it
+silently. Without the mark the silence would last exactly one probe interval.
+
 A parked message is probed periodically with a backoff that widens from 15
 seconds toward 10 minutes. When the peer returns, parked messages re-enter the
 queue.
@@ -191,7 +206,9 @@ with their own timeouts and their own downgrade paths.
 
 When the recipient is not reachable and a push channel exists, the ciphertext
 travels in the push payload. The message stays in the outbox: a push is a wake
-signal plus an opportunistic delivery, not an acknowledgement.
+signal plus an opportunistic delivery, not an acknowledgement. The relay tells
+the sender it pushed (`MessageSent { pushed: true }`), and the sender parks the
+message on that answer; see [Parking](#parking).
 
 ## Restart behaviour
 

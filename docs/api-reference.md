@@ -181,7 +181,7 @@ interface EncryptionConfig {
   pendingQueue?: {
     maxPendingPerPeer?: number; // Default: 64
     maxPendingGlobal?: number;  // Default: 4096
-    pendingTtlMs?: number;      // Default: 1800000 (30 min)
+    pendingTtlMs?: number;      // Default: 86400000 (24 h)
     overflowPolicy?: 'drop_oldest' | 'drop_newest'; // Default: drop_oldest
   };
   compactEnvelopeEnabled?: boolean; // Default: true

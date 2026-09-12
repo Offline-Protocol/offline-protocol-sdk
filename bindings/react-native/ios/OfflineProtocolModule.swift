@@ -207,11 +207,59 @@ class OfflineProtocolModule: RCTEventEmitter {
             name: UIApplication.willEnterForegroundNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidBecomeActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
     }
     
     private func removeBackgroundObservers() {
         NotificationCenter.default.removeObserver(self, name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.removeObserver(self, name: UIApplication.willEnterForegroundNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
+    }
+
+    /// The foreground flush trigger for held inbound events, besides a
+    /// subscribe. An app whose listeners never went away still needs one: a
+    /// message held because the React instance was briefly down would
+    /// otherwise wait for a resubscribe that is never coming. Mirrors the
+    /// Android `onHostResume` flush.
+    @objc private func applicationDidBecomeActive() {
+        flushInboundEvents()
+    }
+
+    // MARK: - Inbound event hold
+
+    /// Redelivers inbound message events that could not be handed to JS. See
+    /// `InboundEventBuffer` for what is held and why, and
+    /// `EventCallbackImpl.onEvent` for the gate.
+    fileprivate let inboundEvents = InboundEventBuffer()
+
+    /// Holds an inbound event JS could not take, if it is of a buffered type.
+    /// Called only after `sendEventToJS` has refused it, so the parse is off
+    /// the hot path. Main-thread confined like the emit it follows.
+    fileprivate func holdInboundEventIfBuffered(_ eventJson: String, generation: Int) {
+        guard let key = inboundEvents.key(forEventJson: eventJson) else { return }
+        inboundEvents.hold(key: key, eventJson: eventJson, generation: generation)
+    }
+
+    /// Redelivers held inbound events, oldest first, if JS looks able to take
+    /// them now; whatever it refuses goes back. Main-thread confined: every
+    /// caller is either on main already (`startObserving`, the notification)
+    /// or hops there first (`addListener`).
+    fileprivate func flushInboundEvents() {
+        guard canEmitToJs, !inboundEvents.isEmpty else { return }
+        let drained = inboundEvents.drain()
+        var undelivered: [InboundEventBuffer.Entry] = []
+        for entry in drained {
+            guard entry.generation == inboundEvents.currentGeneration() else { continue }
+            if !sendEventToJS(Events.onEvent, body: ["eventJson": entry.eventJson]) {
+                undelivered.append(entry)
+            }
+        }
+        inboundEvents.restore(undelivered)
     }
     
     /// Gates the foreground relay reconnect on how long the app actually stayed
@@ -398,6 +446,10 @@ class OfflineProtocolModule: RCTEventEmitter {
 
     override func startObserving() {
         hasListeners = true
+        // A subscription is the moment a held inbound event becomes
+        // deliverable. Deferred so it runs after RN has finished registering
+        // the listener that triggered it.
+        DispatchQueue.main.async { [weak self] in self?.flushInboundEvents() }
     }
 
     override func stopObserving() {
@@ -406,6 +458,10 @@ class OfflineProtocolModule: RCTEventEmitter {
 
     @objc override func addListener(_ eventName: String) {
         super.addListener(eventName)
+        // The other subscribe-shaped trigger: `startObserving` fires only on
+        // the first listener, and a message held while an app briefly had
+        // none is collected by the next one it adds.
+        DispatchQueue.main.async { [weak self] in self?.flushInboundEvents() }
     }
 
     @objc override func removeListeners(_ count: Double) {
@@ -794,6 +850,9 @@ class OfflineProtocolModule: RCTEventEmitter {
             print("[OfflineProtocolModule] Creating OfflineProtocol instance...")
             let proto = try OfflineProtocol(config: config)
             print("[OfflineProtocolModule] OfflineProtocol instance created successfully")
+            // A new session: nothing held for the previous one may surface in
+            // this one, and an emit still in flight for it is refused.
+            inboundEvents.bumpGeneration()
             currentConfig = config
             emitDiagnostic(level: "info", message: "Protocol core created", context: [
                 "appId": config.appId,
@@ -2481,6 +2540,9 @@ class OfflineProtocolModule: RCTEventEmitter {
         protocolInstance = nil
         meshServicesInstance = nil
         currentConfig = nil
+        // The app tore the SDK down itself; a message held for this account
+        // must not reach whatever it constructs next.
+        inboundEvents.bumpGeneration()
         resolver(nil)
     }
 
@@ -3615,8 +3677,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
             
             let dedupConfig = DedupConfig(
-                maxTrackedMessages: (config["maxTrackedMessages"] as? NSNumber)?.uint64Value ?? 10000,
-                retentionTimeSecs: (config["retentionTimeSecs"] as? NSNumber)?.uint64Value ?? 3600
+                maxTrackedMessages: (config["maxTrackedMessages"] as? NSNumber)?.uint64Value ?? 2000,
+                retentionTimeSecs: (config["retentionTimeSecs"] as? NSNumber)?.uint64Value ?? 86400
             )
             
             try proto.updateDedupConfig(config: dedupConfig)
@@ -5351,13 +5413,22 @@ class EventCallbackImpl: EventCallback, @unchecked Sendable {
     
     func onEvent(eventJson: String) {
         guard let emitter = emitter else { return }
+        // Read before the emit is attempted, so a hold after a failed emit
+        // cannot land in a session that began in between.
+        let generation = emitter.inboundEvents.currentGeneration()
         let body: [String: Any] = ["eventJson": eventJson]
-        if Thread.isMainThread {
-            emitter.sendEventToJS(OfflineProtocolModule.Events.onEvent, body: body)
-        } else {
-            DispatchQueue.main.async {
-                emitter.sendEventToJS(OfflineProtocolModule.Events.onEvent, body: body)
+        let deliver = {
+            if !emitter.sendEventToJS(OfflineProtocolModule.Events.onEvent, body: body) {
+                // JS could not take it. Inbound message events are held for
+                // the next subscribe or foreground; everything else is
+                // periodic or re-derived and is dropped as before.
+                emitter.holdInboundEventIfBuffered(eventJson, generation: generation)
             }
+        }
+        if Thread.isMainThread {
+            deliver()
+        } else {
+            DispatchQueue.main.async(execute: deliver)
         }
     }
 }

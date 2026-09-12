@@ -34,6 +34,41 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **The inbound pending-decryption queue is persisted.** A frame that arrives
+  before its sender's MLS session is ready is written to protocol-state storage
+  (`pending_decrypt_entries`, sealed like the outbound pending queue) when it
+  is admitted, deleted when it is drained, evicted or discarded (blocking the
+  sender discards it), and restored on the next launch. A restart during a slow handshake used to lose it, and a
+  relay that pushes ciphertext without store-and-forward holds no second copy
+  to ask for. A record older than seven days on disk is dropped on restore and
+  reported as `PENDING_QUEUE_DROPPED` with reason `expired_persisted`.
+- **The deduplicator's seen set is persisted.** Up to 2000 inbound ids, newest
+  first, sealed like the pending queues, written in batches (32 changes or 5
+  seconds on the process tick,
+  flushed on stop) and restored beside the Lamport clock, so the relay-socket
+  copy of a message the app already consumed from a push injection is
+  recognised as a duplicate across a restart instead of reaching a spent
+  ratchet generation and surfacing as a decryption failure. A runtime
+  `updateDedupConfig` carries the set across instead of clearing it. A
+  sender's own outgoing ids are tracked for the process only and never
+  written.
+- **`PENDING_QUEUE_DROPPED` is emitted for text messages**, not only for media
+  chunks, whenever the pending-decryption queue evicts a frame (overflow, TTL,
+  or the persisted age bound). Text evictions were metrics-only, which left an
+  app unable to tell "the sender went quiet" from "the SDK evicted their
+  message". The event is advisory: the frame was never ACKed, so a sender
+  still retrying resends it.
+- **Inbound message events are held while nothing can take them.**
+  `message_received`, `file_received` and `message_decryption_failed` each
+  report one message the core has already ACKed and will never restate, so a
+  drop between the core and the app's handler was a lost message. Each React
+  Native bridge now holds up to 256 of them, keyed by message id, while
+  JavaScript has no listener or no live React instance (a backgrounded app, a
+  push injection before the first subscribe), and replays them on subscribe
+  and on foreground; the TypeScript layer does the same across the gap to the
+  app's first `on()`. Held events are scoped to the session that produced
+  them, so a message held for a torn-down account never surfaces in the next
+  one.
 - **`enableTelemetry` / `enable_telemetry` on every binding.** Takes the API key
   and app id the developer portal issued; the binding fills in the platform
   and owns the application lifecycle, so there is no per-event or per-lifecycle
@@ -107,6 +142,33 @@ the client's answers were wrong on a device rather than merely different:
 
 ### Changed
 
+- **A DM the relay only pushed is parked, not left awaiting an ACK.** The relay
+  answers `MessageSent { pushed: true }` when the recipient has no live socket
+  and the ciphertext went out in a device push; it keeps no copy. The React
+  Native bridges and the Python relay client now report that id to the core as
+  `relay_pushed`, which drops
+  the pending ACK, keeps the outbox entry, schedules the reachability probe
+  and presence-watches the recipient, as a `DeliveryError` does, with two
+  differences because the push may have delivered the frame: connection
+  requests and Welcomes stay on their ordinary path, and no
+  `MessageUndeliverable` is emitted, on the push itself or on any later probe
+  verdict for that frame. The outbox entry remembers it was pushed (persisted
+  with the entry), because the relay answers a probe of a pushed message with
+  `DeliveryError` rather than a second notification and the core would
+  otherwise read that as an ordinary unreachable verdict.
+- **`pendingQueue.pendingTtlMs` defaults to 24 hours** (was 30 minutes) on
+  every binding, so a frame parked for a session still being set up outlives
+  a handshake on a phone opened once a day. The in-memory TTL restarts with
+  the process; the persisted copy is bounded separately at seven days. Memory
+  stays bounded by the per-peer and global caps.
+- **`reliability.dedup` defaults to 2000 ids and 24 hours** (were 1000 and
+  1 hour), sized for the persisted seen set. The Nostr replay overlap
+  (1 h 5 min) now fits inside the retention window, so a reconnect the next
+  day deduplicates it instead of re-processing it; `docs/nostr.md`, the
+  transport's subscription doc and the drift guard now state the absorption.
+  The React Native `updateDedupConfig` fallback for an omitted
+  `maxTrackedMessages` is 2000 as well (was 10000), so a `dedup` section that
+  sets only the retention no longer tracks five times the documented default.
 - **`TelemetryConfig` is reshaped** on every binding: `apiKey` and `appId` are
   required, `appVersion`, `debug`, `flushIntervalMs`, `maxBatchBytes`,
   `maxBufferedRecords` and `includeDeviceId` are new, `enablePollQueue` is
@@ -231,6 +293,18 @@ the client's answers were wrong on a device rather than merely different:
   crate-private. The free event API (`onEvent`, `on_event`) is unchanged and
   stays per-event and unaggregated by design; the rollup and session summary
   exist only inside the pipe, and a test pins that neither is ever an event.
+
+### Fixed
+
+- **A peer-requested session reset deletes the persisted pending-decryption
+  records** of the frames it discards. Left on disk, the next launch restored
+  frames sealed to the deleted session and drained them into its replacement
+  as spurious decrypt failures.
+- **Releasing a dropped group entry's replay protection reaches the persisted
+  seen set.** The release unmarked the id in memory only, so a record written
+  while the entry was buffered kept the id, the next launch restored it, and
+  the sender's redelivery was swallowed and re-ACKed as delivered for the whole
+  retention window.
 
 ## [0.25.0] — 2026-09-08
 

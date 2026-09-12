@@ -67,6 +67,8 @@ import {
   LINKING_ERROR,
   MESH_WAKE_TASK_KEY,
   ONE_SHOT_EVENT_TYPES,
+  BUFFERED_INBOUND_EVENT_TYPES,
+  MAX_PENDING_INBOUND_EVENTS,
 } from './constants';
 
 export * from './types';
@@ -98,6 +100,11 @@ type NativeRelayPriority = 'never' | 'auto' | 'always';
  */
 const ONE_SHOT_EVENT_TYPE_SET: ReadonlySet<string> = new Set(
   ONE_SHOT_EVENT_TYPES
+);
+
+/** Membership test for {@link BUFFERED_INBOUND_EVENT_TYPES}, built once. */
+const BUFFERED_INBOUND_EVENT_TYPE_SET: ReadonlySet<string> = new Set(
+  BUFFERED_INBOUND_EVENT_TYPES
 );
 
 interface InitialRuntimeConfig {
@@ -297,6 +304,17 @@ export class OfflineProtocol {
    */
   private pendingOneShotEvents: Map<EventType, ProtocolEvent> = new Map();
   /**
+   * Inbound message events that reached this instance while no listener was
+   * registered for them, held for the first listener that is.
+   *
+   * A FIFO rather than a per-type map: every `message_received` is its own
+   * message, so collapsing would lose all but the last. Capped at
+   * {@link MAX_PENDING_INBOUND_EVENTS}, oldest dropped first. See
+   * {@link BUFFERED_INBOUND_EVENT_TYPES} for why these are held at all and
+   * {@link OfflineProtocol.on} for the replay.
+   */
+  private pendingInboundEvents: ProtocolEvent[] = [];
+  /**
    * Event types already reported as dropped-with-no-listeners, so the warning
    * in {@link OfflineProtocol.emitEvent} fires once per type rather than once
    * per event. A misconfigured integration produces a steady stream of these.
@@ -407,7 +425,7 @@ export class OfflineProtocol {
       pendingQueue: {
         maxPendingPerPeer: encryptionSource?.pendingQueue?.maxPendingPerPeer ?? 64,
         maxPendingGlobal: encryptionSource?.pendingQueue?.maxPendingGlobal ?? 4096,
-        pendingTtlMs: encryptionSource?.pendingQueue?.pendingTtlMs ?? 1800000,
+        pendingTtlMs: encryptionSource?.pendingQueue?.pendingTtlMs ?? 86400000,
         overflowPolicy:
           encryptionSource?.pendingQueue?.overflowPolicy ?? 'drop_oldest',
       },
@@ -780,6 +798,20 @@ export class OfflineProtocol {
       return;
     }
 
+    if (BUFFERED_INBOUND_EVENT_TYPE_SET.has(event.type)) {
+      // Appended, never collapsed: each of these is one message the core has
+      // already ACKed and will never restate. Past the cap the oldest goes —
+      // the same rule the native buffers apply.
+      this.pendingInboundEvents.push(event);
+      if (this.pendingInboundEvents.length > MAX_PENDING_INBOUND_EVENTS) {
+        this.pendingInboundEvents.splice(
+          0,
+          this.pendingInboundEvents.length - MAX_PENDING_INBOUND_EVENTS
+        );
+      }
+      return;
+    }
+
     // Everything else is periodic, re-derivable, or followed by another event
     // carrying the same state, so dropping it is correct — but dropping it
     // *silently* while the app has registered nothing at all is
@@ -852,7 +884,45 @@ export class OfflineProtocol {
     }
     this.eventListeners.get(eventType)!.add(listener as EventListener);
     this.replayHeldOneShotEvents(eventType);
+    this.replayHeldInboundEvents(eventType);
     return this;
+  }
+
+  /**
+   * Hands held inbound events matching [eventType] to the listeners
+   * registered for them, on the next microtask, in arrival order.
+   *
+   * Same shape as {@link replayHeldOneShotEvents} for the same reasons:
+   * entries leave the hold when the replay is scheduled (so several
+   * `on(...)` calls in one tick cannot each deliver them), and delivery goes
+   * back through {@link emitEvent} (so every listener registered by then is
+   * served, and a listener removed in the interim re-holds instead of losing
+   * a message).
+   */
+  private replayHeldInboundEvents(eventType: EventType | "all"): void {
+    if (this.pendingInboundEvents.length === 0) {
+      return;
+    }
+
+    let replay: ProtocolEvent[];
+    if (eventType === "all") {
+      replay = this.pendingInboundEvents;
+      this.pendingInboundEvents = [];
+    } else {
+      replay = this.pendingInboundEvents.filter(
+        (event) => event.type === eventType
+      );
+      if (replay.length === 0) {
+        return;
+      }
+      this.pendingInboundEvents = this.pendingInboundEvents.filter(
+        (event) => event.type !== eventType
+      );
+    }
+
+    Promise.resolve().then(() => {
+      replay.forEach((event) => this.emitEvent(event));
+    });
   }
 
   /**
@@ -3427,6 +3497,10 @@ export class OfflineProtocol {
     // the native `destroy()` above, which an uncreated instance skips.
     await Promise.resolve();
     this.pendingOneShotEvents.clear();
+    // The inbound hold goes with it: the native subscription is gone, so
+    // nothing can arrive, and a message held for an account the app just
+    // tore down must not surface in whatever it constructs next.
+    this.pendingInboundEvents = [];
   }
 
   /**

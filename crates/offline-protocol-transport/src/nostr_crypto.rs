@@ -836,20 +836,20 @@ impl NostrEvent {
 /// again on the next connect. That duplicate is expected; the alternative
 /// (`since + 1`) would drop any event sharing that exact second.
 ///
-/// **How much of the replayed overlap dedup actually absorbs is bounded, and
-/// the bound is smaller than the overlap.** The engine's deduplicator retains
-/// ids for `DeduplicatorConfig::retention_time_secs` (1 h by default) and at
-/// most `max_tracked_messages` of them, while `since` reaches
+/// **The replayed overlap is absorbed by dedup, within its cap.** The engine's
+/// deduplicator retains ids for `DeduplicatorConfig::retention_time_secs`
+/// (24 h by default, persisted across restarts) and at most
+/// `max_tracked_messages` of them, while `since` reaches
 /// `NOSTR_CREATED_AT_JITTER_SECS + NOSTR_CLOCK_SKEW_MARGIN_SECS` (1 h 5 min)
-/// below the mark. A reconnect after longer than the retention window — the
-/// ordinary case for a mobile app reopened the next day — therefore re-processes
-/// the overlap rather than deduplicating it. That is a cost, not a loss: a
-/// replayed ciphertext whose ratchet generation is spent fails closed as
-/// `Decryption` and is dropped, a past-epoch one triggers at most one
-/// rate-limited re-key, and a group copy TTLs out of the pending buffer. The
-/// engine pins this relationship in
-/// `nostr_replay_overlap_exceeds_dedup_retention` so the two constants cannot
-/// drift apart from this note.
+/// below the mark — so a reconnect inside the retention window, including a
+/// mobile app reopened the next day, deduplicates the overlap rather than
+/// re-processing it. Past the window (or past the id cap) the overlap is
+/// re-processed, which is a cost and not a loss: a replayed ciphertext whose
+/// ratchet generation is spent fails closed as `Decryption` and is dropped, a
+/// past-epoch one triggers at most one rate-limited re-key, and a group copy
+/// TTLs out of the pending buffer. The engine pins this relationship in
+/// `nostr_replay_overlap_fits_inside_dedup_retention` so the two constants
+/// cannot drift apart from this note.
 pub fn create_subscription_message(
     pubkey_hex: &str,
     subscription_id: &str,

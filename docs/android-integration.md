@@ -78,7 +78,7 @@ class MainActivity : AppCompatActivity() {
             storePending = true,
             maxPendingPerPeer = 100.toULong(),
             maxPendingGlobal = 1_000.toULong(),
-            pendingTtlMs = 1_800_000.toULong(),  // 30 min (the SDK default)
+            pendingTtlMs = 86_400_000.toULong(),  // 24 h (the SDK default)
             overflowPolicy = OverflowPolicy.DROP_OLDEST,
             // These 9 use their defaults: requireEncryption (true),
             // maxGroupMembers (256u), groupRelayEnabled (true),

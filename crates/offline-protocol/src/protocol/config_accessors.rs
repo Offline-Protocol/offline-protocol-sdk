@@ -11,8 +11,7 @@ use crate::{Error, ProtocolConfig, Result, TransportManager};
 use offline_protocol_core::{MessageId, ServiceDescriptor};
 use offline_protocol_mls::MlsManager;
 use offline_protocol_reliability::{
-    AckConfig, AckManager, Deduplicator, DeduplicatorConfig, DeduplicatorStats, RetryConfig,
-    RetryQueue,
+    AckConfig, AckManager, DeduplicatorConfig, DeduplicatorStats, RetryConfig, RetryQueue,
 };
 use offline_protocol_router::{DorsConfig, RelayConfig};
 use offline_protocol_services::MeshServices;
@@ -195,7 +194,15 @@ impl OfflineProtocol {
 
     /// Updates the deduplication configuration at runtime.
     ///
-    /// Note: This clears the deduplication cache and applies the new config.
+    /// The tracked set is carried across, re-bounded by the new configuration
+    /// (`Deduplicator::reconfigure`), rather than cleared. Clearing it was a
+    /// silent restart while the set lived in memory only; with the set
+    /// persisted it would discard the ids restored at launch — and the React
+    /// Native layer applies `reliability.dedup` through this method on every
+    /// `start()`, right after that restore — so the socket copy of a message
+    /// already consumed from a push injection would reach a spent ratchet
+    /// generation after all. The change is counted for persistence so the next
+    /// batch write re-states the record under the new bounds.
     ///
     /// Validated the same way its two siblings are, and for a reason that only
     /// appeared once they were. Both of those run the *whole*
@@ -211,8 +218,9 @@ impl OfflineProtocol {
         let mut candidate = self.config.clone();
         candidate.reliability.dedup = config.clone();
         candidate.validate()?;
-        self.deduplicator = Deduplicator::with_config(config.clone());
+        self.deduplicator.reconfigure(config.clone());
         self.config.reliability.dedup = config;
+        self.note_dedup_change();
         Ok(())
     }
 

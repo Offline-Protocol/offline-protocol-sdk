@@ -28,6 +28,7 @@ Pod::Spec.new do |s|
     "ios/BleManager.swift",
     "ios/InternetManager.swift",
     "ios/ForcedPresenceCheckQueue.swift",
+    "ios/InboundEventBuffer.swift",
     "ios/InboundFragmentBuffer.swift",
     "ios/OutboundFragmentQueue.swift",
     "ios/AddressDeclarationPolicy.swift",
