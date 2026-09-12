@@ -18302,6 +18302,51 @@ fn test_pending_decrypt_records_are_deleted_when_peer_queue_is_discarded() {
     assert!(bob.pending_queue.contains_peer(&id("carol")));
 }
 
+/// Blocking a peer discards the frames already parked for them, records
+/// included. The block is otherwise applied only when the queue drains, which
+/// never happens for a blocked peer, so the records were restored on every
+/// launch for up to seven days, and each eviction reported a
+/// `PendingQueueDropped` naming the peer the user had blocked.
+#[test]
+fn test_block_user_discards_persisted_pending_decrypt_records() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut bob = pending_decrypt_bob(storage.clone());
+    bob.enqueue_pending_decryption(&id("alice"), &pending_test_message(&id("alice"), "a"));
+    bob.enqueue_pending_decryption(&id("carol"), &pending_test_message(&id("carol"), "c"));
+    assert_eq!(
+        bob.persisted_pending_decrypt_ids().len(),
+        2,
+        "precondition: both parked frames are persisted"
+    );
+
+    bob.block_user(&id("alice")).unwrap();
+
+    assert!(
+        !bob.pending_queue.contains_peer(&id("alice")),
+        "the blocked peer's frames leave the queue"
+    );
+    assert_eq!(
+        bob.persisted_pending_decrypt_ids().len(),
+        1,
+        "and their records leave the store"
+    );
+    drop(bob);
+
+    let bob = pending_decrypt_bob(storage);
+    assert!(
+        bob.is_user_blocked(&id("alice")),
+        "precondition: the block itself survives the restart"
+    );
+    assert!(
+        !bob.pending_queue.contains_peer(&id("alice")),
+        "nothing parked for the blocked peer comes back on the next launch"
+    );
+    assert!(
+        bob.pending_queue.contains_peer(&id("carol")),
+        "another peer's parked frame is untouched"
+    );
+}
+
 /// A peer-requested session reset discards the frames parked for the session
 /// it deletes, and their records go with them. Left on disk, the next launch
 /// restores frames sealed to a dead session and drains them into the

@@ -10,7 +10,8 @@ use tracing::{debug, info};
 impl OfflineProtocol {
     /// Blocks a user. Messages from this user will be silently dropped
     /// (no ACK sent, no event emitted). The blocked user receives no
-    /// notification.
+    /// notification. Encrypted frames of theirs already parked awaiting a
+    /// session are discarded, persisted records included.
     ///
     /// Blocking is idempotent — calling this for an already-blocked user
     /// succeeds silently.
@@ -41,6 +42,23 @@ impl OfflineProtocol {
         }
 
         self.persist_blocked_user(user_id);
+
+        // Frames this user sent before the block may be parked in the
+        // pending-decryption queue, each with a persisted record. The block is
+        // otherwise applied only when that queue drains, which never happens
+        // for a blocked peer, so the records would be restored on every launch
+        // for up to seven days and each eviction would report a
+        // `PendingQueueDropped` naming the user just blocked. Nothing new is
+        // parked after this: the receive path drops a blocked sender's frames
+        // before they reach the queue.
+        let discarded = self.discard_pending_decryption_for_peer(user_id);
+        if discarded > 0 {
+            debug!(
+                user_id = %user_id,
+                count = discarded,
+                "Discarded pending decryption queue for blocked user"
+            );
+        }
 
         info!(user_id = %user_id, "User blocked");
 

@@ -37,8 +37,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 - **The inbound pending-decryption queue is persisted.** A frame that arrives
   before its sender's MLS session is ready is written to protocol-state storage
   (`pending_decrypt_entries`, sealed like the outbound pending queue) when it
-  is admitted, deleted when it is drained, evicted or discarded, and restored
-  on the next launch. A restart during a slow handshake used to lose it, and a
+  is admitted, deleted when it is drained, evicted or discarded (blocking the
+  sender discards it), and restored on the next launch. A restart during a slow handshake used to lose it, and a
   relay that pushes ciphertext without store-and-forward holds no second copy
   to ask for. A record older than seven days on disk is dropped on restore and
   reported as `PENDING_QUEUE_DROPPED` with reason `expired_persisted`.
