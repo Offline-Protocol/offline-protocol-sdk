@@ -117,6 +117,23 @@ export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$NDK_TOOLCHAIN/x86_64-linux-and
 export CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$NDK_TOOLCHAIN/i686-linux-android21-clang"
 export AR="$NDK_TOOLCHAIN/llvm-ar"
 
+# The linker settings above are cargo's; cc-rs, which `ring` (the telemetry
+# uploader's TLS, via rustls) uses for its C and assembly, never reads them
+# and resolves a compiler on its own. It probes PATH for `<triple>-clang`,
+# a name no NDK ships, then a fixed list of versioned names, two of which
+# (armv7a-linux-androideabi16-clang and i686-linux-android16-clang) are API
+# levels that NDK r24 and later no longer carry. So with the toolchain on
+# PATH the 64-bit ABIs happen to build and the 32-bit ones fail in ring's
+# build script. Name each compiler outright, the same clang the linker uses.
+export CC_aarch64_linux_android="$CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
+export CXX_aarch64_linux_android="${CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER}++"
+export CC_armv7_linux_androideabi="$CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER"
+export CXX_armv7_linux_androideabi="${CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER}++"
+export CC_x86_64_linux_android="$CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER"
+export CXX_x86_64_linux_android="${CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER}++"
+export CC_i686_linux_android="$CARGO_TARGET_I686_LINUX_ANDROID_LINKER"
+export CXX_i686_linux_android="${CARGO_TARGET_I686_LINUX_ANDROID_LINKER}++"
+
 for linker in \
   "$CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER" \
   "$CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER" \
