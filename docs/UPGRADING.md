@@ -1,7 +1,7 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.25.x` line.
+current `v0.26.x` line.
 
 The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 `initialize_mls` changes shape, three config updaters become fallible, and
@@ -135,6 +135,15 @@ becomes available, because the attach times out after ten seconds.
 [§19](#19-the-reticulum-transports-inert-configuration-is-gone-v0250) has both
 halves, the frames a daemon owes, and the two new `SecurityWarningCode` values
 that name a refused or mismatched attach.
+`v0.26.0` adds four, and they reach every deployment: the pending-decryption
+TTL default grows from 30 minutes to 24 hours and the dedup window from 1000
+ids over an hour to 2000 over a day; that queue and the seen set are now
+persisted across restarts; a direct message the relay could only push is
+parked without a `MessageUndeliverable`; and the React Native bridges replay
+inbound message events held while nothing could take them. None changes a
+signature.
+[§21](#21-delivery-state-survives-a-restart-and-two-defaults-grow-v0260) has
+all four.
 
 Work through it in order. [§0](#0-before-you-ship-downgrade-is-not-a-rollback)
 is a release-engineering decision, not a code change, and it is the one that
@@ -678,7 +687,8 @@ Sizing the window for your deployment stays your call.
 
 **What to do:** grep your config for `maxTrackedMessages: 0` /
 `retentionTimeSecs: 0` (and the snake_case forms) and pick real values. Defaults
-are `1000` and `3600`.
+are `2000` and `86400` since `v0.26.0` (they were `1000` and `3600` before, see
+[§21](#21-delivery-state-survives-a-restart-and-two-defaults-grow-v0260)).
 
 ---
 
@@ -856,6 +866,10 @@ delivered and was never ACKed. Memory is unchanged: the count caps (64 per peer,
 entries linger *within* those caps rather than raising the ceiling.
 
 If you were relying on the 2-minute behaviour, set `pendingTtlMs` explicitly.
+
+*(v0.26.0: the default moved again, to 24 hours, `86400000`, on every binding
+with a fallback, and the queue is now persisted across restarts. See
+[§21](#21-delivery-state-survives-a-restart-and-two-defaults-grow-v0260).)*
 
 Drift tests now pin all of these bridge literals to the Rust constants, so they
 cannot separate again.
@@ -2072,6 +2086,70 @@ degradation the analytics package had without async-storage.
 declared the analytics package's manifest entries, they are the same three
 data types; if you set `includeDeviceId`, add the device-identifier
 declaration on both stores, as before.
+
+---
+
+## 21. Delivery state survives a restart, and two defaults grow *(v0.26.0)*
+
+**Every binding. Nothing changes signature; four things change at runtime.**
+
+**Two defaults grow.** `pendingQueue.pendingTtlMs` defaults to 24 hours
+(`86400000`) where it was 30 minutes (the Python config record requires the
+field, as before, so it inherits nothing), and `reliability.dedup` to
+`maxTrackedMessages: 2000`, `retentionTimeSecs: 86400` where it was `1000` and
+`3600`. The React Native fallback for an omitted `maxTrackedMessages` is 2000
+as well (it was 10000). An application that sets these explicitly keeps its
+values; one that omits them gets the larger windows. Memory is unchanged: the
+pending queue is still bounded by the per-peer and global count and byte caps,
+and the seen set by its count, so a longer window lets entries linger within
+those caps rather than raising them.
+
+**Two things are persisted that were not.** The inbound pending-decryption
+queue (`pending_decrypt_entries`) and the deduplicator's seen set
+(`dedup_seen_ids`) are written to protocol-state storage, sealed like the
+outbox, and restored on the next launch. A restart during a slow handshake no
+longer loses the frames parked behind it, and the relay-socket copy of a
+message the app already consumed from a push injection is recognised as a
+duplicate after a restart instead of reaching a spent ratchet generation. A
+persisted pending record older than seven days is dropped on restore and
+reported as `PENDING_QUEUE_DROPPED` with reason `expired_persisted`. That
+event now also fires for text messages, not only media chunks, whenever the
+queue evicts a frame; it is advisory, the frame was never ACKed, and a sender
+still retrying resends it. On a downgrade neither record is read: an older
+build behaves as 0.25 did, losing parked frames and reprocessing a duplicate,
+and the records stay in storage, untouched, until `wipePersistedState` clears
+them.
+
+**A direct message the relay could only push is parked.** When the recipient
+has no live socket the relay hands the ciphertext to a device push and answers
+`MessageSent { pushed: true }`, keeping no copy. The React Native bridges and
+the Python relay client report that answer to the core as the `relay_pushed`
+reason, and the core parks the message: the pending ACK is dropped, the outbox
+entry is kept, the reachability probe is scheduled and the recipient is
+presence-watched, as for an unreachable verdict, except that no
+`MessageUndeliverable` is emitted for that frame, on the push or on any later
+probe of it, because the push may have delivered it. From the application the
+message stays parked in the outbox until the recipient is seen again and the
+resend is ACKed, or the outbox lifetime ends as for any parked message; a UI
+that showed "sending" on a pending ACK and "failed" on `MessageUndeliverable`
+shows "sending" for longer. A host that wrote its own relay client against
+the internet-transport FFI reports the pushed answer through
+`internet_send_failed_with_reason` with reason `relay_pushed`; a client that
+reports nothing leaves the message awaiting an ACK as before.
+
+**Inbound message events are held while nothing can take them (React
+Native).** `message_received`, `file_received` and
+`message_decryption_failed` each report one message the core has already
+ACKed and will never restate. Each bridge now holds up to 256 of them, keyed
+by message id, while JavaScript has no listener or no live React instance,
+and replays them on subscribe and on foreground; the TypeScript layer does the
+same across the gap to the app's first `on()`. An application whose first
+`on()` comes after a message arrived (a push injection before the first
+subscribe, a backgrounded app) now receives that message on subscribe rather
+than never. Held events are scoped to the session that produced them, so a
+message held for a torn-down account never surfaces in the next one. Nothing
+to change, unless the app assumed that subscribing late meant nothing had
+happened.
 
 ---
 

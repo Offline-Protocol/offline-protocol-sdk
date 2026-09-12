@@ -1,7 +1,7 @@
 # 0019. Remote document imports are contained, not trusted
 
 **Status:** Accepted
-**Shipped in:** unreleased (F3, 1:1 replication; extended to group spaces
+**Shipped in:** 0.23.0 (F3, 1:1 replication; extended to group spaces
 by F4)
 
 ## Context

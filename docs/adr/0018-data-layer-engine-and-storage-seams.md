@@ -1,7 +1,7 @@
 # 0018. The data layer has two seams: the engine and the backend
 
 **Status:** Accepted
-**Shipped in:** unreleased (F2, local half)
+**Shipped in:** 0.23.0 (F2, local half)
 
 ## Context
 

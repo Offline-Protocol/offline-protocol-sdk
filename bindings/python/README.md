@@ -55,7 +55,7 @@ config = ProtocolConfig(
     require_encryption=False,
     max_pending_per_peer=100,
     max_pending_global=1000,
-    pending_ttl_ms=1_800_000,  # 30 min (the SDK default)
+    pending_ttl_ms=86_400_000,  # 24 h (the SDK default)
     overflow_policy=OverflowPolicy.DROP_OLDEST,
 )
 
