@@ -735,14 +735,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // Set up event callback
             proto.setEventCallback(object : EventCallback {
                 override fun onEvent(eventJson: String) {
-                    // The gate is checked first, before the payload is built
-                    // or the JSON is parsed: with JS reachable the common path
-                    // costs what it always did, and only a shut gate pays for
-                    // the type/id read that decides whether to hold.
-                    if (!canEmitToJs() && holdInboundEventIfBuffered(eventJson)) {
-                        return
+                    // Held on the emit's own answer rather than on a gate read
+                    // taken before it, so an emit that fails with the gate open
+                    // is held too, as on iOS. The type/id parse that decides
+                    // whether to hold still runs only after a refusal.
+                    if (!sendEvent(EVENT_NAME, eventParams(eventJson))) {
+                        holdInboundEventIfBuffered(eventJson)
                     }
-                    sendEvent(EVENT_NAME, eventParams(eventJson))
                 }
             })
 
@@ -999,11 +998,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * Holds an inbound message event for redelivery when JS could not take
      * it, keyed `type:message_id` so every message survives on its own.
      * Returns whether the event was one of [BUFFERED_INBOUND_EVENT_TYPES] and
-     * was handed to [inboundEvents]; anything else is the caller's to emit
-     * (and, for a shut gate, to drop) as before.
+     * was handed to [inboundEvents]; anything else stays dropped, as before.
      *
-     * Only called with the gate already known to be shut, so the parse here
-     * is off the hot path. An event of a buffered type that carries no id at
+     * Only called after [sendEvent] refused the event, so the parse here is
+     * off the hot path. An event of a buffered type that carries no id at
      * all is keyed by arrival order rather than dropped: losing a message to
      * a missing field would be the failure this buffer exists to prevent.
      */

@@ -12306,9 +12306,12 @@ mod tests {
             "the Android inbound buffer must be a 256-entry StickyEventBuffer of its own"
         );
         assert!(
-            kotlin_code.contains("if (!canEmitToJs() && holdInboundEventIfBuffered(eventJson))"),
-            "the Android core event callback must route a buffered inbound event to the hold \
-             when the JS gate is shut"
+            kotlin_code.contains(
+                "if (!sendEvent(EVENT_NAME, eventParams(eventJson))) { \
+                 holdInboundEventIfBuffered(eventJson) }"
+            ),
+            "the Android core event callback must hold a buffered inbound event whenever the \
+             emit refuses it, not only when the JS gate read shut before the emit"
         );
         assert!(
             kotlin_code.contains("inboundEvents.send(\"$type:$id\", eventJson)"),
