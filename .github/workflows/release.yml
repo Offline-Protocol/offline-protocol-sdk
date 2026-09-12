@@ -190,6 +190,20 @@ jobs:
           export ${{ matrix.linker_env }}="$NDK_TOOLCHAIN/${{ matrix.linker_bin }}"
           export AR="$NDK_TOOLCHAIN/llvm-ar"
 
+          # The linker setting above is cargo's; cc-rs, which `ring` (the
+          # telemetry uploader's TLS, via rustls) uses for its C and assembly,
+          # never reads it and resolves a compiler on its own. Left to itself
+          # it probes PATH for `<triple>-clang`, and setup-ndk puts the NDK
+          # root on PATH, not the toolchain bin, so on every ABI the probe
+          # fails inside ring's build script. Its fallback list does not help
+          # either: it names armv7a-linux-androideabi16-clang and
+          # i686-linux-android16-clang, API levels r26b no longer ships. So
+          # name the compiler outright: the same versioned clang the linker
+          # uses. cc-rs reads CC_<triple> with the dashes made underscores.
+          TARGET_VAR="$(printf '%s' '${{ matrix.target }}' | tr '-' '_')"
+          export "CC_${TARGET_VAR}=$NDK_TOOLCHAIN/${{ matrix.linker_bin }}"
+          export "CXX_${TARGET_VAR}=$NDK_TOOLCHAIN/${{ matrix.linker_bin }}++"
+
           cargo build --release --locked --target ${{ matrix.target }} --package offline-protocol-uniffi
 
           mkdir -p jniLibs/${{ matrix.abi }}
