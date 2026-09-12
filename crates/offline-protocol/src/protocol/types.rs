@@ -213,9 +213,12 @@ pub(crate) const SEND_FAIL_REASON_RECIPIENT_UNREACHABLE: &str = "recipient_unrea
 /// on their ordinary path.
 ///
 /// Cross-layer contract: the React Native platform bridges
-/// (`InternetManager.kt` / `InternetManager.swift`) pass this exact literal
-/// to `internet_send_failed_with_reason`; pinned by
-/// `react_native_relay_parks_a_pushed_message_sent`.
+/// (`InternetManager.kt` / `InternetManager.swift`) and the Python relay
+/// client (`internet_manager.py`) pass this exact literal to
+/// `internet_send_failed_with_reason`; pinned on the React Native side by
+/// `react_native_relay_parks_a_pushed_message_sent` and on the Python side by
+/// `TestMessageSentPushed`. That call must not also score the report as a send
+/// failure; see `OfflineProtocol::send_report_is_carrier_failure`.
 pub(crate) const SEND_FAIL_REASON_RELAY_PUSHED: &str = "relay_pushed";
 
 /// Fallback token for a send failure that classifies as nothing more specific.

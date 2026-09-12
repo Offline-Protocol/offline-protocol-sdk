@@ -1094,6 +1094,69 @@ class TestDeliveryErrorRecipientKeyed:
         assert "stuck" in failed
 
 
+class TestMessageSentPushed:
+    """``MessageSent { pushed: true }`` parks the one frame the relay pushed.
+
+    Pins the port of the bridges' ``parkPushedMessage``: the exact
+    ``relay_pushed`` token the core parks a plain DM on (never the
+    ``recipient_unreachable`` prefix, which fast-fails connection requests and
+    fails Welcomes), only the echoed id, and an offline presence for the
+    recipient. The Rust side pins the same literal in
+    ``relay_pushed_is_its_own_token``.
+    """
+
+    @staticmethod
+    def _pushed(recipient: str, message_id: str | None) -> bytes:
+        msg = {"type": "MessageSent", "recipient": recipient, "pushed": True}
+        if message_id is not None:
+            msg["message_id"] = message_id
+        return json.dumps(msg).encode()
+
+    def test_pushed_frame_is_reported_under_the_exact_token(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr._inflight.record_sent("offZ", "pushed-id", mgr._now_ms())
+        mgr._process_received(self._pushed("offZ", "pushed-id"))
+        mock_protocol.internet_send_failed_with_reason.assert_called_once_with(
+            message_id="pushed-id", reason="relay_pushed"
+        )
+        mock_protocol.internet_peer_presence.assert_called_once_with(
+            peer_id="offZ", online=False, last_seen_ms=None
+        )
+
+    def test_push_leaves_the_recipients_other_frames_in_flight(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1")
+        now = mgr._now_ms()
+        mgr._inflight.record_sent("offZ", "pushed-id", now)
+        mgr._inflight.record_sent("offZ", "still-flying", now)
+        mgr._process_received(self._pushed("offZ", "pushed-id"))
+        reported = [
+            c.kwargs.get("message_id")
+            for c in mock_protocol.internet_send_failed_with_reason.call_args_list
+        ]
+        assert reported == ["pushed-id"]
+        # Still tracked, so a later DeliveryError for the recipient can fail it.
+        assert mgr._inflight.drain_recipient("offZ", mgr._now_ms()) == ["still-flying"]
+
+    @pytest.mark.parametrize("extra", [{}, {"pushed": False}])
+    def test_a_frame_the_relay_did_not_push_is_not_parked(
+        self, mock_protocol: MagicMock, extra: dict[str, object]
+    ) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1")
+        msg = {"type": "MessageSent", "recipient": "offZ", "message_id": "sent-id", **extra}
+        mgr._process_received(json.dumps(msg).encode())
+        mock_protocol.internet_send_failed_with_reason.assert_not_called()
+        mock_protocol.internet_peer_presence.assert_not_called()
+
+    def test_a_push_without_an_id_parks_nothing(self, mock_protocol: MagicMock) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr._process_received(self._pushed("offZ", None))
+        mock_protocol.internet_send_failed_with_reason.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # The activity-adaptive send loop. Every piece of the policy is pinned here:
 # the drain-count contract, the backoff ramp, the inbound-frame wake, and the

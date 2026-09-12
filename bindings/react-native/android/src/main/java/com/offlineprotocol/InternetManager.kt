@@ -1361,6 +1361,12 @@ class InternetManager(
                 // re-drives it. Absent on older relays, which reads as
                 // `false`.
                 val pushed = json.optBoolean("pushed", false)
+                // Park the id the relay echoed, never the tracker's fallback
+                // guess above. A relay new enough to send `pushed` echoes our
+                // own id, and the guess (the oldest frame in flight) is least
+                // reliable exactly here, because push outcomes come back out of
+                // order. An echo that names none of our frames parks nothing:
+                // the core ignores an id with no outbox entry.
                 if (pushed && messageId != null && messageId.isNotEmpty()) {
                     parkPushedMessage(recipient, messageId)
                 }

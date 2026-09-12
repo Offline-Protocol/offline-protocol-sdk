@@ -831,6 +831,13 @@ class InternetManager(TransportManager):
                     message_id if message_id else None,
                     self._now_ms(),
                 )
+            # ``pushed: true``: the relay had no live socket for the recipient
+            # and handed the ciphertext to a device push. It keeps no copy, so
+            # this is the fact a DeliveryError carries (the recipient is not on
+            # the relay) with the frame possibly delivered by the push. Older
+            # relays omit the field, which reads as not pushed.
+            if msg.get("pushed") is True and message_id:
+                self._park_pushed_message(recipient, message_id)
 
         elif msg_type == "DeliveryError":
             recipient = msg.get("recipient", "")
@@ -881,6 +888,42 @@ class InternetManager(TransportManager):
 
         else:
             self._emit_diagnostic("debug", f"Unhandled relay message type: {msg_type}")
+
+    def _park_pushed_message(self, recipient: str, message_id: str) -> None:
+        """Parks the one frame the relay answered ``MessageSent { pushed: true }`` for.
+
+        A port of ``parkPushedMessage`` in the iOS and Android bridges, and the
+        narrower sibling of the DeliveryError path above. The relay named
+        exactly one frame, so only that id is reported and the recipient's
+        other in-flight frames are left alone. The reason is the exact
+        ``relay_pushed`` token, not a ``recipient_unreachable`` tail: that
+        prefix fast-fails connection requests and fails Welcomes, while
+        ``relay_pushed`` parks a plain DM, leaves both of those alone and tells
+        the app nothing, since the push may have delivered the frame.
+
+        The id is the one the relay echoed, never the tracker's fallback guess:
+        push outcomes come back out of order, so the oldest frame in flight is
+        the least likely to be the pushed one. An echo that names none of our
+        frames parks nothing, because the core ignores an id with no outbox
+        entry.
+        """
+        try:
+            self._protocol.internet_send_failed_with_reason(
+                message_id=message_id, reason="relay_pushed"
+            )
+        except Exception as exc:
+            logger.debug("internet_send_failed_with_reason(relay_pushed) failed: %s", exc)
+        if recipient:
+            try:
+                self._protocol.internet_peer_presence(
+                    peer_id=recipient, online=False, last_seen_ms=None
+                )
+            except Exception as exc:
+                logger.debug("internet_peer_presence(offline) failed: %s", exc)
+        self._emit_diagnostic("info", "Relay pushed message to offline recipient; parked", {
+            "recipient": recipient,
+            "messageId": message_id,
+        })
 
     # -- incoming message handlers --------------------------------------------
 

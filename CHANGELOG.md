@@ -144,7 +144,8 @@ the client's answers were wrong on a device rather than merely different:
 - **A DM the relay only pushed is parked, not left awaiting an ACK.** The relay
   answers `MessageSent { pushed: true }` when the recipient has no live socket
   and the ciphertext went out in a device push; it keeps no copy. The React
-  Native bridges now report that id to the core as `relay_pushed`, which drops
+  Native bridges and the Python relay client now report that id to the core as
+  `relay_pushed`, which drops
   the pending ACK, keeps the outbox entry, schedules the reachability probe
   and presence-watches the recipient, as a `DeliveryError` does, with two
   differences because the push may have delivered the frame: connection

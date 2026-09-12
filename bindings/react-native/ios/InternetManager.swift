@@ -1655,6 +1655,12 @@ public class InternetManager: NSObject, TransportManager {
             // the presence edge re-drives it. Absent on older relays, which
             // reads as `false`.
             let pushed = json["pushed"] as? Bool ?? false
+            // Park the id the relay echoed, never the tracker's fallback guess
+            // above. A relay new enough to send `pushed` echoes our own id, and
+            // the guess (the oldest frame in flight) is least reliable exactly
+            // here, because push outcomes come back out of order. An echo that
+            // names none of our frames parks nothing: the core ignores an id
+            // with no outbox entry.
             if pushed, let messageId = sentMessageId, !messageId.isEmpty {
                 parkPushedMessage(recipient: sentRecipient, messageId: messageId)
             }
