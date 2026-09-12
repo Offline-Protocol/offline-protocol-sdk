@@ -2293,7 +2293,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -2327,7 +2327,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-bench"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "criterion",
  "offline-protocol",
@@ -2340,7 +2340,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-core"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "base64 0.22.1",
  "bech32",
@@ -2355,7 +2355,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-data"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "loro",
  "serde",
@@ -2366,7 +2366,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-leaf"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.16",
@@ -2384,7 +2384,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-mls"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2407,7 +2407,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-reliability"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "chrono",
  "offline-protocol-core",
@@ -2417,7 +2417,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-router"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "chrono",
  "offline-protocol-core",
@@ -2429,7 +2429,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-sealed"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "base64 0.22.1",
  "offline-protocol-core",
@@ -2441,7 +2441,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-services"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "offline-protocol-core",
  "serde",
@@ -2453,7 +2453,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-telemetry-wire"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2462,7 +2462,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-transport"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "base64 0.22.1",
  "chacha20",
@@ -2483,7 +2483,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-uniffi"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "android_logger",
  "log",

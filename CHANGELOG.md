@@ -11,7 +11,7 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
-## [Unreleased]
+## [0.26.0] — 2026-09-12
 
 > **The SDK ships its own telemetry.** Until now the SDK handed every telemetry
 > record to application code through a sink callback, and a separate React
@@ -31,6 +31,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 > the telemetry pipe, which posts to one endpoint fixed at build time over TLS
 > with a bundled root set. The threat model gains a network-egress section and
 > two residual risks for it.
+>
+> **Delivery state survives a restart, and two defaults grow.** The inbound
+> pending-decryption queue and the deduplicator's seen set are now persisted,
+> sealed like the outbox, so a restart during a slow handshake no longer loses
+> the frames parked behind it, and a message that reaches the device twice is
+> still one message across the restart. To match, `pendingQueue.pendingTtlMs`
+> defaults to 24 hours (was 30 minutes) and `reliability.dedup` to 2000 ids
+> over 24 hours (was 1000 over 1 hour) wherever a binding fills them in. A
+> direct message the
+> relay could only push is parked rather than left awaiting an ACK, with no
+> `MessageUndeliverable` for it, and the React Native bridges hold inbound
+> message events while nothing can take them. None of this changes a
+> signature;
+> [§21](docs/UPGRADING.md#21-delivery-state-survives-a-restart-and-two-defaults-grow-v0260)
+> says what each looks like from the application.
 
 ### Added
 
@@ -157,7 +172,8 @@ the client's answers were wrong on a device rather than merely different:
   `DeliveryError` rather than a second notification and the core would
   otherwise read that as an ordinary unreachable verdict.
 - **`pendingQueue.pendingTtlMs` defaults to 24 hours** (was 30 minutes) on
-  every binding, so a frame parked for a session still being set up outlives
+  every binding that fills the field in (the Python config record requires it,
+  as before), so a frame parked for a session still being set up outlives
   a handshake on a phone opened once a day. The in-memory TTL restarts with
   the process; the persisted copy is bounded separately at seven days. Memory
   stays bounded by the per-peer and global caps.
@@ -306,281 +322,28 @@ the client's answers were wrong on a device rather than merely different:
   the sender's redelivery was swallowed and re-ACKed as delivered for the whole
   retention window.
 
-## [0.25.0] — 2026-09-08
-
-> **A device on Reticulum could never receive anything. It can now.** Both
-> mobile managers attached to a daemon by opening a socket, sending `Identify`,
-> announcing the carrier, and confirming every send the instant the write
-> returned. They read two frame types and ignored the rest, so against a daemon
-> answering [contract v1](docs/spec/gateway-contract.md) the session was never
-> bound, and an unbound session may submit and be told a verdict but is never
-> registered as a recipient. Nothing addressed to the device would ever have
-> arrived, while the core settled every outbound frame as sent. The attach is
-> now the handshake the contract specifies, sends settle on the gateway's
-> verdict rather than on the write, and a `recipient_unreachable` reaches the
-> classifier that parks a direct message and offers it to the mesh. **Reticulum
-> is off by default** (`reticulum_enabled: false`), so this reaches only
-> deployments that turned it on and pointed at a daemon; for those it is the
-> difference between a transport that reported health and one that carries
-> traffic.
->
-> **The same change, read from the other end: a daemon speaking the older shape
-> now gets a transport that connects and never becomes available.** The attach
-> times out after ten seconds and the manager reconnects on its ladder, so the
-> failure is a carrier that never arrives rather than an error. If you run your
-> own daemon, [§19](docs/UPGRADING.md#19-the-reticulum-transports-inert-configuration-is-gone-v0250)
-> names the frames it owes and the two new `SecurityWarningCode` values,
-> `GATEWAY_ADDRESS_BINDING_MISMATCH` and `GATEWAY_ADDRESS_DECLARATION_REFUSED`,
-> that explain a refused or mismatched attach.
->
-> **An iOS phone that had stopped finding new peers was chasing peripherals
-> whose owners no longer exist.** `willRestoreState` re-issued `connect(...)` on
-> every peripheral iOS handed back, and the OS keeps servicing those requests
-> across process relaunches for as long as the restore identifier is stable. A
-> peripheral UUID belonging to a device that had been reset, reinstalled or
-> thrown away was pursued until the app itself was reinstalled: no Bluetooth
-> toggle, sign-out or force quit cleared it. Restoration is now partitioned, a
-> pending connect survives only on evidence this device recently saw that
-> peripheral advertise, and everything else is cancelled, which is the only
-> thing that clears the OS-side queue. iOS only, no wire or FFI change, and
-> nothing for an application to call.
->
-> **The wire specification can be implemented from the text now, and vectors
-> decide whether you got it right.** The binary v1 frame was specified as a
-> field order and never said how an integer or a string becomes bytes, so a
-> careful implementer would reasonably have written fixed-width big-endian
-> fields and produced frames this protocol cannot decode. The chapter carries a
-> normative primitive-encoding table, and seven vector files generated by a
-> standard-library-only second implementation now pin the frame, address
-> derivation, the control-plane and gateway signing payloads, the compact MLS
-> envelope and the key package. A new [conformance chapter](docs/spec/conformance.md)
-> states the two implementation profiles and what every implementation owes.
->
-> **`ReticulumConfig` and everything around it is deleted, in the Rust crates
-> only.** The type and its four fields, a second constructor, three methods, a
-> builder and two constants, none of which anything read; `ReticulumTransport::new`
-> is the one constructor left. No binding surface, configuration key or
-> behaviour follows them out, and the React Native `transports.reticulum`
-> section is untouched. TypeScript consumers who exhaustively `switch` on
-> `PresenceSource` or `SecurityWarningCode` do get a compile error, because both
-> unions widen.
-
-### Added
-
-- **The Reticulum transport speaks the gateway contract.** Both mobile managers
-  attached to a daemon by opening a TCP socket, sending `Identify`, announcing
-  the carrier, and confirming every send the instant the write returned. They
-  read two frame types and ignored the rest, so a daemon answering
-  [contract v1](docs/spec/gateway-contract.md) got nothing back: the session was
-  never bound, which on the other side means it may submit and be told a verdict
-  and is never registered as a recipient. Nothing addressed to the device would
-  ever have arrived, and the core meanwhile settled every frame as sent.
-
-  The attach is now the handshake the contract specifies: `Identify` with a
-  version, a challenge signed under `offline-gateway-addr-v1`, `DeclareAddress`,
-  the echo checked against this device's own address, capabilities, and only
-  then the carrier announced. A refused declaration closes the connection rather
-  than offering a transport that can only refuse, which is where this
-  deliberately differs from the relay: an undeclared relay connection still
-  works in account-name space, and a gateway has no such space. Two new
-  `SecurityWarningCode` values, `GATEWAY_ADDRESS_BINDING_MISMATCH` and
-  `GATEWAY_ADDRESS_DECLARATION_REFUSED`, report both answers.
-
-  Sends settle on the gateway's verdict. `MessageSent` confirms, `DeliveryError`
-  fails with the gateway's reason verbatim, and `recipient_unreachable` now
-  reaches the classifier that parks a direct message and offers it to the mesh,
-  which closes the Reticulum half of the mixed-neighbourhood residual
-  `docs/mesh.md` has carried. Presence is watched from the SDK's own watchlist,
-  and a gateway's answer un-parks over Reticulum rather than over the internet
-  transport.
-
-  `offline-gateway-addr-v1` is now a live signing domain with published
-  [conformance vectors](docs/spec/conformance.md). The proof is built and signed
-  in the core rather than in each bridge, so there is one implementation of the
-  construction instead of one per platform.
-
-  New FFI: `reticulum_address_declared`, `reticulum_address_declaration_refused`,
-  `reticulum_gateway_capabilities`, `reticulum_peer_presence`,
-  `reticulum_presence_watchlist` and `gateway_address_declaration`. New
-  `PresenceSource` value `reticulum`, so an app filtering presence by carrier
-  still can.
-
-- **`RetryConfig.edge_driven_unreachable_dm`** (default `false`): an opt-in that,
-  for deployments whose peers always interact or advertise presence on return
-  (for example a machine-to-machine capability exchange), stops timed-probing a
-  durably-unreachable direct message after a bounded number of probes and
-  re-drives it only on a reachability edge, additionally bounding the core resend
-  rate to gone peers. Default `false` preserves the documented perpetual-probe
-  contract (a parked message "never goes fully quiet") so every existing native
-  and third-party integration is unaffected. Exposed across the UDL, all
-  generated bindings (Swift, Kotlin, Python), and the React Native TypeScript and
-  native layers. See
-  [docs/configuration.md](docs/configuration.md#reliability-configuration).
-
-### Changed
-
-- **The Python internet send loop is now activity-adaptive.** The relay bridge
-  drained the core's outbox on a fixed 100 ms tick, so a reply to an inbound
-  frame waited out most of a tick before leaving, and that wait dominated a
-  warm round trip. An inbound frame now wakes the send loop immediately, a
-  drain that moved frames re-drains at event-loop speed, and an empty drain
-  backs off exponentially (2 ms doubling up to the unchanged 100 ms idle
-  interval). A warm round trip drops from ~100 ms to single-digit
-  milliseconds, with no standing busy-poll and no change to quiet-link cost.
-  Python only; the Swift and Kotlin managers keep the fixed tick for now
-  (see [docs/bridges/python.md](docs/bridges/python.md#p7-the-internet-send-loop-is-adaptive-here-and-fixed-elsewhere)).
-
-### Removed
-
-- **The Reticulum transport's inert configuration, in full.** `ReticulumConfig`
-  and its four fields (`connection_timeout`, `auto_reconnect`, `reconnect_delay`,
-  `max_reconnect_attempts`), `ReticulumTransport::with_config`, `config()`,
-  `should_reconnect`, `increment_reconnect_attempts`, `ReticulumTransportBuilder`
-  and the constants `RETICULUM_CONNECTION_TIMEOUT_SECS` and
-  `RETICULUM_MAX_PAYLOAD_SIZE` are deleted. Nothing read any of them:
-  reconnection is owned by the native managers and configured from the app's
-  transport config, `reconnect_delay` had no reader at all, and the payload
-  constant was never enforced anywhere. `ReticulumTransport::new` is now the
-  only constructor. **Rust-library consumers only**: the FFI never threaded
-  any of it, so no binding, no configuration key and no behaviour changes.
-  See [docs/UPGRADING.md](docs/UPGRADING.md#19-the-reticulum-transports-inert-configuration-is-gone-v0250).
-
-### Fixed
-
-- **Re-discovering an established iOS BLE link no longer repeats the work that
-  set it up.** `BleManager`'s characteristic-discovery callback is not a
-  first-contact callback: the connection monitor re-runs characteristic
-  discovery every five seconds on any peripheral missing from the connection
-  registry, and CoreBluetooth replays the callback from its cache when it does,
-  so a live connection reaches it indefinitely. Every arrival re-subscribed to
-  the message characteristic and re-read both halves of the peer handshake.
-
-  The subscribe now runs only when the characteristic reports that it is not
-  already notifying. A redundant one re-emitted the bridge's own subscribe
-  diagnostic, so a link that subscribed once read in the logs as one
-  re-subscribing every sweep, and where the write reached the peer it re-ran
-  that peer's inbound admission decision, which can evict a different peer.
-  The handshake reads now stop once the peer is announced, which also drops a
-  signature verification and an address derivation that ran on the main thread
-  on every sweep and whose result was discarded. A disconnect still resets both
-  gates, so a reconnect re-subscribes and re-proves the peer from scratch.
-
-- **iOS state restoration no longer chases peripherals whose owners are gone.**
-  `BleManager.centralManager(_:willRestoreState:)` re-issued `connect(...)` on
-  every peripheral iOS handed back. The OS keeps servicing those connect
-  requests across process relaunches for as long as the restore identifier is
-  stable, and the only clear the app itself controls is
-  `cancelPeripheralConnection` on the instance the system hands back, so a
-  peripheral UUID whose owner had stopped existing was chased until the app was
-  reinstalled. No Bluetooth toggle, sign-out or force quit cleared it. The
-  visible symptom was a phone that would not discover a legitimate new peer,
-  and a device burning battery on connect requests that could never complete.
-
-  The restored list is now partitioned. A peripheral handed back in
-  `.connected` state is restored unconditionally: the link is alive at that
-  instant, and it is usually the reason iOS relaunched the app. A pending
-  connect is restored only if this device saw that peripheral within 60 seconds
-  of the last thing it saw before it was terminated, tracked in a small
-  last-seen map that survives the relaunch. Everything else is cancelled, which
-  is what clears the OS-side queue. Sightings are recorded from advertisements,
-  from completed connections, and from traffic arriving on a live link. An
-  advertisement counts as seen before the adaptive filters that shed scanning
-  work in dense environments, so a peer one of those filters skips is not
-  mistaken for a peer that stopped advertising.
-
-  That 60 seconds is measured against the newest advertisement the scan
-  received, not against the relaunch clock and not against the newest entry in
-  the map. Nothing records a sighting while the app is dead and iOS relaunches
-  it hours later, so measuring against the relaunch clock would cancel every
-  pending connect at every restoration. Measuring against the newest entry has
-  the same effect by a slower route, because traffic on a live link keeps
-  refreshing an entry while the app is backgrounded and the scan is stopped: a
-  single connected peer would push the window past every absent peer's last
-  sighting and cancel all of them. An advertisement is the only observation
-  that proves the app was in a position to see anything at all. A pending
-  connect is the only way iOS wakes the app when a known peer reappears, since
-  a background scan with no service filter is ignored by the OS, so either
-  mistake would have traded a visible bug for an invisible one.
-
-  Both halves of the decision are issued once the central reports `.poweredOn`,
-  not where the restored list arrives. `willRestoreState` is delivered before
-  `centralManagerDidUpdateState`, and CoreBluetooth discards a command issued
-  before then, so cancelling on arrival would leave the OS-side queue intact
-  while the diagnostics reported the peripherals as dropped. The failed-connect
-  retry also now skips a peripheral that has been dropped from the discovered
-  map, so a cancelled connect request is not immediately re-armed.
-
-  A restored peripheral that is still only connecting is no longer booked as a
-  live connection, so it neither spends a connection slot nor suppresses the
-  retry that is supposed to chase it.
-
-  The last-seen map is device-scoped, holds only OS-assigned peripheral UUIDs
-  and timestamps, and is not account state, so `wipePersistedState()` does not
-  touch it (see [docs/bridges/README.md](docs/bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified)).
-  iOS only. No wire, FFI or configuration change.
-
-- **Internet-only providers no longer flap a relay's rate limiter into a
-  disconnect loop under a backlog of unreachable direct messages.** Three
-  compounding defects drove unbounded resends to gone peers. (1) A resend that
-  had to register a fresh ACK (for example after an ACK-timeout re-queue)
-  restarted the backoff ladder at `retry_count` 0, pinning `delay_for_retry` at
-  its 1s floor forever for a never-ACKing recipient;
-  `AckManager::set_retry_count` now carries the retry-queue entry's accumulated
-  count onto the fresh ACK so backoff continues instead of resetting. (2) An
-  unconfirmed peer that vanished was re-probed every 5s indefinitely; the
-  confirmation probe now escalates on the same 15s to 600s ladder as the welcome
-  lifecycle and resets on a reachability edge. (3) The Python relay bridge
-  dropped the relay's recipient-keyed `DeliveryError` verdict; it now correlates
-  in-flight sends per recipient (a port of the iOS/Android
-  `RecipientInFlightTracker`), fails the affected message ids fast, and feeds
-  `internet_peer_presence(online=false)`. Default behavior is otherwise
-  unchanged; the always-on fixes only reduce redundant relay traffic.
-
 ### Documentation
 
-- **The wire specification now says how a primitive becomes bytes, and seven
-  vector files hold it to that.** `docs/spec/wire-format.md` specified the
-  binary v1 frame as a field order (`id 16 raw bytes`, `sender string`,
-  `timestamp i64`) and never stated the encoding of an integer or a string. The
-  implementation uses varints: unsigned values are LEB128, signed values are
-  zigzagged first, strings and byte sequences carry a varint length prefix, and
-  the two 16-byte identifier fields carry none. An implementer reading the
-  chapter would reasonably have written fixed-width big-endian fields and
-  produced frames this protocol cannot decode, misaligned from the first varint
-  onward. The chapter now carries a normative primitive-encoding table, states
-  the identifier and Lamport-clock bounds as numbers, and says that metadata
-  keys sort byte-wise on their UTF-8, which is the same order as by code point
-  but not the order a Java, JavaScript or C# string comparison produces above
-  U+FFFF.
-  Conformance vectors now cover the binary frame, address derivation and
-  parsing, the session slot, the two control-plane canonical signing payloads,
-  the gateway address-declaration proof, the compact MLS envelope, and the key
-  package payload's parse behaviour. They are generated by
-  `tools/spec-vectors/generate.py`, a standard-library-only second
-  implementation written from the chapters that never reads the crates it pins,
-  and CI regenerates and diffs them so an expectation cannot be edited to turn a
-  red test green. A new `docs/spec/conformance.md` states the two
-  implementation profiles, what every implementation owes, what the vectors
-  deliberately do not cover, and how a second implementation self-tests.
-  No runtime behaviour changed.
-
-- **The signing-domain registry omitted a live domain.** The table in
-  `docs/spec/username-discovery.md` listed four live domains and still does not
-  appear anywhere else, but `offline-ctrl-v2` has been live since control-frame
-  freshness shipped, making five. `offline-gateway-addr-v1` joins them in this
-  release, so the table now carries six. Non-prefixing is a property of the
-  whole set, so a registry that cannot see every member cannot be used to choose
-  a new domain safely, which is what that table exists for. The row is now present and
-  a test fails if a domain the control-signing vectors pin is missing from it.
-
-- **The service-message prefix was reserved but never published.**
-  `docs/spec/control-messages.md` referred to "a generic service message prefix"
-  without naming it. It is `__SVC_`, and it bounds a namespace rather than
-  naming a frame, which the chapter now states: a conformance check that treats
-  the registry as a set of frame tags fails on that entry alone. The reserved
-  prefix registry is now checked against the chapter in both directions, so a
-  prefix reserved here and unpublished there, or published there with no
-  constant behind it, fails the build.
+- **ADR 0024 records why the SDK ships its own TLS stack for telemetry** rather
+  than handing the upload to a host HTTP callback: `ureq` with exactly its
+  `rustls` feature and the bundled Mozilla roots, no redirect, an HTTP CONNECT
+  proxy from the environment only, and each of those settings named in the
+  uploader's agent configuration and pinned by a test, so a `ureq` upgrade
+  cannot change them silently. An interception certificate installed in the
+  device trust store is not trusted by the SDK.
+- **`docs/telemetry.md` is rewritten around the pipe**: what leaves the device
+  and when, sessions, durability, the stats call, the debug tap, controlling
+  cost, keys and revocation, and identifier scrubbing. `docs/privacy.md` sits
+  beside it with the store disclosures. The threat model gains a network
+  egress section and two residual risks, R13 (a telemetry key can be
+  extracted and abused) and R14 (the bundled root set ages with the SDK).
+- **`docs/bridges/README.md` gains C12**, the telemetry contract a binding
+  owes (fill the platform fields itself, own the lifecycle, keep the blocking
+  calls off a UI thread), and names the held inbound buffer as a third
+  event-holding shape that must not be folded into the one-shot map.
+- **`docs/licensing-faq.md` answers whether telemetry is part of the
+  license**, and `docs/configuration.md` and `docs/mls-integration.md` state
+  the new queue and dedup defaults and the two new sealed record kinds.
 
 ## Archived releases
 
@@ -589,6 +352,7 @@ its own release table.
 
 | Series | Releases |
 |--------|----------|
+| [0.25.x](docs/changelog/0.25.md) | 0.25.0 |
 | [0.24.x](docs/changelog/0.24.md) | 0.24.1, 0.24.0 |
 | [0.23.x](docs/changelog/0.23.md) | 0.23.0 |
 | [0.22.x](docs/changelog/0.22.md) | 0.22.0 |

@@ -297,7 +297,7 @@ Controls automatic MLS end-to-end encryption. See [MLS Integration Guide](./mls-
 arrived before the MLS session or group state was ready. Under the deferred-ACK
 model such a message is not delivery-ACKed on receipt, so this queue is the
 primary recovery window before the session confirms; that is why the TTL default
-is 30 minutes rather than the 2 minutes earlier releases used. The Rust
+is 24 hours (it was 2 minutes, then 30 minutes, in earlier releases). The Rust
 `PendingQueueConfig` additionally carries `max_pending_bytes_per_peer` (4 MiB) and
 `max_pending_bytes_global` (32 MiB) — memory bounds that the count limits alone
 cannot provide, since a queued media chunk is far larger than a text message.
