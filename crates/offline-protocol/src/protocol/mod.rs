@@ -1185,6 +1185,10 @@ impl OfflineProtocol {
         let previous_state_record_cipher = self.state_record_cipher.take();
         let previous_pending_messages = self.pending_encrypted_messages.clone();
         let previous_pending_message_expiry = self.next_pending_message_expiry;
+        // The inbound half of the same transaction: the restore re-admits
+        // parked frames from the store being attached, so a rollback has to put
+        // back what the queue held before, not an empty queue.
+        let previous_pending_queue = self.pending_queue.clone();
         // Populated by restore steps that run before other fallible ones, so
         // they belong in the transaction like everything else: a failed init
         // must not leave a key-package cache, parked media descriptors, or an
@@ -1344,11 +1348,13 @@ impl OfflineProtocol {
             self.state_record_cipher = previous_state_record_cipher;
             self.pending_encrypted_messages = previous_pending_messages;
             self.next_pending_message_expiry = previous_pending_message_expiry;
-            // The inbound queue is rebuilt from storage on the next successful
-            // init, so emptying it here loses nothing durable: every frame it
-            // held before this call was persisted when it was admitted, and
-            // every frame the restore just re-admitted still has its record.
-            self.pending_queue = PendingDecryptionQueue::default();
+            // Back to what the queue held before this call. Emptying it lost
+            // frames that were never persisted (no store was attached, or the
+            // best-effort write failed). Keeping what the restore added would
+            // leave entries sourced from the store the rollback just detached:
+            // draining one deletes nothing on disk, so the next launch restores
+            // it and drains it again into a spent ratchet generation.
+            self.pending_queue = previous_pending_queue;
             // `deferred_restore_settlements` is deliberately left alone — see
             // the comment where the other baselines are captured.
             self.pending_key_packages = previous_pending_key_packages;

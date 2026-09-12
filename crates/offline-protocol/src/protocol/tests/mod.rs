@@ -18816,6 +18816,89 @@ fn test_pending_decrypt_refused_live_frame_issues_no_delete() {
     assert_eq!(reported, 16, "every refusal is still reported");
 }
 
+/// A failed `initialize_mls` puts the inbound pending-decryption queue back to
+/// what it held before the call. Emptying it lost a frame that was never
+/// persisted. Keeping what the restore added left a frame sourced from the
+/// store the rollback detached, whose drain deletes nothing on disk.
+#[test]
+fn test_initialize_mls_restore_failure_rolls_back_pending_decryption_queue() {
+    struct FailingOutboxListStorage {
+        inner: Arc<InMemoryStorage>,
+    }
+    impl MlsStorage for FailingOutboxListStorage {
+        fn store(
+            &self,
+            key_type: &str,
+            key_id: &str,
+            data: &[u8],
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.store(key_type, key_id, data)
+        }
+        fn load(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+            self.inner.load(key_type, key_id)
+        }
+        fn delete(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.delete(key_type, key_id)
+        }
+        fn list_keys(
+            &self,
+            key_type: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+            if key_type == storage_keys::OUTBOX {
+                return Err(offline_protocol_mls::StorageError::LoadFailed(
+                    "forced outbox restore failure".to_string(),
+                ));
+            }
+            self.inner.list_keys(key_type)
+        }
+    }
+
+    // A parked frame on disk, which the restore re-admits before the outbox
+    // step fails.
+    let backing = Arc::new(InMemoryStorage::new());
+    let on_disk = pending_test_message(&id("alice"), "on-disk");
+    {
+        let mut seeder = pending_decrypt_bob(backing.clone());
+        seeder.enqueue_pending_decryption(&id("alice"), &on_disk);
+        assert_eq!(
+            seeder.persisted_pending_decrypt_ids(),
+            vec![on_disk.id.as_str()]
+        );
+    }
+
+    let mut config = create_test_config_for_user("bob");
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+    let mut bob = OfflineProtocol::new(config).unwrap();
+    // Parked before any store is attached, so it exists only in memory.
+    let in_memory = pending_test_message(&id("carol"), "in-memory");
+    bob.enqueue_pending_decryption(&id("carol"), &in_memory);
+
+    let result = bob.initialize_mls_for_test(Arc::new(FailingOutboxListStorage { inner: backing }));
+    assert!(
+        result.is_err(),
+        "precondition: the outbox restore step fails"
+    );
+
+    assert_eq!(
+        bob.pending_queue.peer_queue_len(&id("carol")),
+        1,
+        "a frame that only ever lived in memory must survive the rollback"
+    );
+    assert!(
+        !bob.pending_queue.contains_peer(&id("alice")),
+        "a frame the failed restore re-admitted must not outlive the store it came from"
+    );
+}
+
 #[test]
 fn test_pending_queue_global_limit_fail_closed_when_global_index_corrupted() {
     let mut config = create_test_config();

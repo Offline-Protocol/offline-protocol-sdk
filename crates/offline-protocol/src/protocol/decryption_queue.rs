@@ -144,7 +144,7 @@ pub struct PendingQueueMetrics {
 /// Encapsulates the bounded pending decryption queue: encrypted messages
 /// received before the MLS session is ready, with per-peer and global limits,
 /// TTL expiration, and configurable overflow policies.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct PendingDecryptionQueue {
     /// Per-peer FIFO queues of encrypted messages.
     queues: HashMap<String, VecDeque<PendingDecryptMessage>>,
