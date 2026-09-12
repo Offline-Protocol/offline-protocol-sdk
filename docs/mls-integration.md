@@ -120,8 +120,8 @@ const protocol = new OfflineProtocol({
 The `pendingTtlMs` default is 24 hours (it was 2 minutes, then 30 minutes, in
 earlier releases): under the deferred-ACK model a message held here is not
 delivery-ACKed on receipt, so this queue is the primary recovery window before
-the session confirms — and with a relay that pushes ciphertext without
-store-and-forward there is no second copy to ask for. The queue is also
+the session confirms. With a relay that pushes ciphertext without
+store-and-forward there is no second copy to ask for, either. The queue is also
 persisted (`pending_decrypt_entries`, sealed like the outbound pending queue),
 so a frame survives an app restart; the in-memory TTL restarts with the
 process and a persisted record is dropped after 7 days on disk, surfacing a
