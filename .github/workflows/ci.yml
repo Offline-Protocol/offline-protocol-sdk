@@ -579,7 +579,11 @@ jobs:
 
       # ubuntu-latest ships an Android SDK, but provision it explicitly so the
       # toolchain (and license acceptance) doesn't drift out from under us.
+      # `packages` defaults to `tools platform-tools`; the obsolete `tools`
+      # package is gone from the SDK repository and sdkmanager exits 1 on it.
       - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
 
       - uses: gradle/actions/setup-gradle@v6
         with:
