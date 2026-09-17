@@ -8858,6 +8858,74 @@ fn test_relay_stored_verdict_parks_a_dm_without_a_probe() {
     );
 }
 
+/// A `relay_stored` verdict for a frame that is *already* being probed drops
+/// that probe.
+///
+/// This is the path the platform bridges depend on, not a corner case. The
+/// relay answers each submission separately, so the first verdict for an
+/// offline recipient drains the bridge's whole in-flight queue and every frame
+/// but the named one is reported `recipient_unreachable` and parked with a
+/// probe. The later verdicts then name those frames as held, and each arrives
+/// here against a message that already holds a retry slot. `park_unreachable_dm`
+/// clears the slot before it decides whether to re-arm it, so the re-park is
+/// what actually retires the probe — without that ordering the bridge fix would
+/// report the right token and change nothing.
+#[test]
+fn test_relay_stored_verdict_drops_an_existing_probe() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    // The ordinary verdict first: this frame was not the one the relay named,
+    // so it parks with the escalating probe.
+    protocol
+        .on_transport_send_failed_via(
+            &message_id.as_str(),
+            Some("recipient_unreachable: User not connected".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+    assert!(
+        protocol.retry_queue.contains(&message_id.as_str()),
+        "precondition: an unheld frame parks with the reachability probe"
+    );
+
+    // Then its own verdict arrives, naming it held.
+    protocol
+        .on_transport_send_failed_via(
+            &message_id.as_str(),
+            Some("relay_stored".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+
+    assert!(
+        !protocol.retry_queue.contains(&message_id.as_str()),
+        "the re-park must retire the probe it was parked on: the relay holds this frame now, so \
+         every further rung would rewrite a row it already has"
+    );
+    assert!(
+        protocol.outbox.contains_key(&message_id),
+        "the entry still stays until it is acknowledged"
+    );
+    assert!(
+        !protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "and still holds no pending ACK to burn a budget against an offline peer"
+    );
+    assert!(
+        protocol.presence_watch_peers().contains(&"bob".to_string()),
+        "the recipient stays watched, so the edge can still re-drive the frame"
+    );
+}
+
 /// Dropping the probe is only safe because the reachability edge still is one.
 ///
 /// A stored DM rests in the outbox with no pending ACK and nothing on a timer,

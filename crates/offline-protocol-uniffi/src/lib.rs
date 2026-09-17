@@ -12506,6 +12506,16 @@ mod tests {
     /// frame in flight to the recipient, and nothing says the others are held,
     /// so the token must reach exactly the id the relay echoed and the rest
     /// must keep the `recipient_unreachable` prefix they have today.
+    ///
+    /// And the held id must be reported even when the drain did not return it.
+    /// The relay answers each submission separately, so the *first* verdict for
+    /// a recipient empties that recipient's whole in-flight queue: every later
+    /// verdict, each naming a frame of its own, finds nothing to drain. A
+    /// bridge that reports only the drain would carry the token for the first
+    /// frame of a burst and silently drop it for the rest, leaving them on the
+    /// probe until one earned the same verdict again — the relay write the
+    /// token exists to avoid. Pinned per platform below, beside the drain it
+    /// has to survive.
     #[test]
     fn react_native_relay_parks_a_stored_delivery_error() {
         let swift = rn_source_code_only("ios/InternetManager.swift");
@@ -12521,6 +12531,46 @@ mod tests {
             "both managers must read the relay's `stored` flag off the frame and default it to \
              false, since a missing key never means the frame is held"
         );
+
+        // Per platform: the append, and the guard that keeps it from
+        // double-reporting an id the drain already returned.
+        for (label, code, appends, guarded_by) in [
+            (
+                "ios",
+                &swift,
+                "failedIds.append(storedMessageId)",
+                "!drained.contains(storedMessageId)",
+            ),
+            (
+                "android",
+                &kotlin,
+                "drained + storedMessageId",
+                "storedMessageId !in drained",
+            ),
+        ] {
+            let definition = code
+                .rfind("handleRecipientUnreachable(")
+                .expect("handleRecipientUnreachable definition");
+            let body = &code[definition..];
+            let drain = body
+                .find("drainRecipient(")
+                .unwrap_or_else(|| panic!("{label} handleRecipientUnreachable must drain"));
+            let fail = body
+                .find("internetSendFailedWithReason(")
+                .expect("handleRecipientUnreachable must fail the ids into the core");
+            let selection = &body[drain..fail];
+            assert!(
+                selection.contains(appends),
+                "{label} handleRecipientUnreachable must report the held id even when the drain \
+                 did not return it: the first verdict for a recipient drains the whole queue, so \
+                 every later held frame would otherwise keep a probe the relay makes pointless"
+            );
+            assert!(
+                selection.contains(guarded_by),
+                "{label} the append must be guarded on the id not already being in the drain, so \
+                 a held frame still in flight is reported once, not twice"
+            );
+        }
 
         for (label, code) in [("ios", &swift), ("android", &kotlin)] {
             // First occurrence is the DeliveryError call site, last is the

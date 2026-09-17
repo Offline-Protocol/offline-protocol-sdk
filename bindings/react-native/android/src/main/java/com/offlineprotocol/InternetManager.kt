@@ -2239,7 +2239,24 @@ class InternetManager(
             return
         }
         val now = monotonicNowMs()
-        val failedIds = inFlightTracker.drainRecipient(recipient, now)
+        val drained = inFlightTracker.drainRecipient(recipient, now)
+        // The relay answers every submission with its own verdict, and the
+        // first one to arrive for a recipient drains that recipient's whole
+        // queue. So a held id named by a *later* verdict is already out of the
+        // tracker, and reporting only what the drain returned would discard
+        // the one fact this path exists to carry: that frame would keep the
+        // probe the relay's own redelivery makes pointless until a probe
+        // earned the same verdict again — which is the relay write the token
+        // exists to avoid. Append it, as the Python client does. Safe for an
+        // id that is not ours, because the core ignores an id with no outbox
+        // entry; and re-parking one that has an entry drops its probe, because
+        // `park_unreachable_dm` clears the retry slot before deciding whether
+        // to re-arm it. The sentinel guard in the loop still applies.
+        val failedIds = if (storedMessageId != null && storedMessageId !in drained) {
+            drained + storedMessageId
+        } else {
+            drained
+        }
         for (id in failedIds) {
             // Sentinel entries track app-authored raw SendMessage frames
             // only to keep the per-recipient FIFO honest for MessageSent

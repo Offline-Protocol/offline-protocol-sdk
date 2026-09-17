@@ -2744,7 +2744,23 @@ public class InternetManager: NSObject, TransportManager {
             return
         }
         let now = monotonicNowMs()
-        let failedIds = inFlightTracker.drainRecipient(recipient, nowMs: now)
+        let drained = inFlightTracker.drainRecipient(recipient, nowMs: now)
+        // The relay answers every submission with its own verdict, and the
+        // first one to arrive for a recipient drains that recipient's whole
+        // queue. So a held id named by a *later* verdict is already out of the
+        // tracker, and reporting only what the drain returned would discard
+        // the one fact this path exists to carry: that frame would keep the
+        // probe the relay's own redelivery makes pointless until a probe
+        // earned the same verdict again — which is the relay write the token
+        // exists to avoid. Append it, as the Python client does. Safe for an
+        // id that is not ours, because the core ignores an id with no outbox
+        // entry; and re-parking one that has an entry drops its probe, because
+        // `park_unreachable_dm` clears the retry slot before deciding whether
+        // to re-arm it. The sentinel guard in the loop still applies.
+        var failedIds = drained
+        if let storedMessageId = storedMessageId, !drained.contains(storedMessageId) {
+            failedIds.append(storedMessageId)
+        }
         for id in failedIds {
             // Sentinel entries track app-authored raw SendMessage frames
             // only to keep the per-recipient FIFO honest for MessageSent
