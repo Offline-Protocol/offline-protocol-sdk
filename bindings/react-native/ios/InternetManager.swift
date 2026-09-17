@@ -1645,16 +1645,24 @@ public class InternetManager: NSObject, TransportManager {
 
             // `pushed: true` is the relay saying it had no live socket for the
             // recipient and handed the ciphertext to a push notification
-            // instead. The relay does not store-and-forward, so this is the
-            // same fact a DeliveryError carries — the recipient is not on the
-            // relay right now — with the message *possibly* arriving through
-            // the push. Report this one id to the core as `relay_pushed`,
-            // which parks a plain DM as the unreachable path would (no ACK
-            // budget burnt against an offline peer, a reachability probe
-            // scheduled, the recipient watched) so that if the push is lost
-            // the presence edge re-drives it. Absent on older relays, which
-            // reads as `false`.
+            // instead — the same fact a DeliveryError carries, the recipient
+            // is not on the relay right now, with the message *possibly*
+            // arriving through the push. Report this one id to the core as
+            // `relay_pushed`, which parks a plain DM as the unreachable path
+            // would (no ACK budget burnt against an offline peer, a
+            // reachability probe scheduled, the recipient watched) so that if
+            // the push is lost the presence edge re-drives it. Absent on older
+            // relays, which reads as `false`.
             let pushed = json["pushed"] as? Bool ?? false
+            // `stored: true` (relay capability `mailbox_v1`) adds that the
+            // relay's mailbox holds this frame and re-sends it on the
+            // recipient's next connection. The park is then the same one minus
+            // its probe — nothing this device can send improves on a
+            // redelivery the relay already owes, and the relay asks senders
+            // not to try. Absent on an older relay, on one whose mailbox is
+            // off, and whenever the store itself failed: all read as `false`
+            // and keep the probe, which is the safe direction.
+            let stored = json["stored"] as? Bool ?? false
             // Park the id the relay echoed, never the tracker's fallback guess
             // above. A relay new enough to send `pushed` echoes our own id, and
             // the guess (the oldest frame in flight) is least reliable exactly
@@ -1662,7 +1670,7 @@ public class InternetManager: NSObject, TransportManager {
             // names none of our frames parks nothing: the core ignores an id
             // with no outbox entry.
             if pushed, let messageId = sentMessageId, !messageId.isEmpty {
-                parkPushedMessage(recipient: sentRecipient, messageId: messageId)
+                parkPushedMessage(recipient: sentRecipient, messageId: messageId, stored: stored)
             }
 
             if let messageId = sentMessageId, !messageId.isEmpty {
@@ -1675,7 +1683,8 @@ public class InternetManager: NSObject, TransportManager {
                     "messageId": messageId,
                     "recipient": sentRecipient,
                     "timestamp": timestamp,
-                    "pushed": pushed
+                    "pushed": pushed,
+                    "stored": stored
                 ])
                 // Note: The protocol SDK will handle the message_sent event internally
                 // The frontend will receive it via the normal event stream
@@ -1789,10 +1798,20 @@ public class InternetManager: NSObject, TransportManager {
             // burning their retry budget) and start watching presence.
             let recipient = json["recipient"] as? String ?? ""
             let reason = json["reason"] as? String ?? "Unknown error"
+            // `stored: true` (relay capability `mailbox_v1`) makes this a
+            // deferral rather than a loss: the mailbox holds the frame for the
+            // recipient's next connection. It is a statement about the one
+            // message the relay named and about no other, so only that id
+            // carries it into the core below.
+            let stored = json["stored"] as? Bool ?? false
+            let echoedMessageId = json["message_id"] as? String
+            let storedMessageId: String? =
+                stored && echoedMessageId?.isEmpty == false ? echoedMessageId : nil
             handleRecipientUnreachable(
                 recipient: recipient,
                 reason: reason,
-                source: "DeliveryError"
+                source: "DeliveryError",
+                storedMessageId: storedMessageId
             )
 
         case "PresenceStatus", "PresenceStatusWithLastSeen":
@@ -2703,10 +2722,19 @@ public class InternetManager: NSObject, TransportManager {
     /// per-peer no-carrier and parks welcomes without burning budget),
     /// ingests an authoritative offline presence, and adds the recipient to
     /// the presence watch set.
+    ///
+    /// `storedMessageId` names the one frame the relay's mailbox is holding,
+    /// when it said so. That id is reported under `relay_stored` instead: the
+    /// same verdict, parked without a reachability probe, because the relay
+    /// re-sends the held copy on the recipient's next connection. It is
+    /// deliberately one id and not the recipient — the relay's `stored` is a
+    /// statement about a message, and the other frames drained here may well
+    /// be unheld.
     private func handleRecipientUnreachable(
         recipient: String,
         reason: String,
-        source: String
+        source: String,
+        storedMessageId: String? = nil
     ) {
         guard !recipient.isEmpty else {
             emitDiagnostic("warning", "Recipient-unreachable signal without recipient", context: [
@@ -2724,7 +2752,9 @@ public class InternetManager: NSObject, TransportManager {
             if id.hasPrefix(Self.rawSendSentinelPrefix) { continue }
             protocolInstance.internetSendFailedWithReason(
                 messageId: id,
-                reason: "recipient_unreachable: \(reason)"
+                reason: id == storedMessageId
+                    ? "relay_stored"
+                    : "recipient_unreachable: \(reason)"
             )
         }
         // Never watch self, and never feed "self is offline" into the core:
@@ -2740,7 +2770,8 @@ public class InternetManager: NSObject, TransportManager {
             "recipient": recipient,
             "reason": reason,
             "source": source,
-            "failedInFlight": failedIds.count
+            "failedInFlight": failedIds.count,
+            "stored": storedMessageId != nil
         ])
     }
 
@@ -2757,13 +2788,18 @@ public class InternetManager: NSObject, TransportManager {
     /// and an offline presence is fed to the core exactly as the DeliveryError
     /// path does, so the presence-online edge is what re-drives the parked
     /// message if the push never reaches the device.
-    private func parkPushedMessage(recipient: String, messageId: String) {
+    ///
+    /// `stored` is the relay adding that its mailbox holds the frame, which
+    /// swaps the token for `relay_pushed_stored`: the same park, minus the
+    /// probe the core would otherwise schedule, since the relay re-sends the
+    /// held copy itself.
+    private func parkPushedMessage(recipient: String, messageId: String, stored: Bool) {
         // Sentinel entries track app-authored raw SendMessage frames; their
         // outcomes belong to the app, not the core (see handleRecipientUnreachable).
         if messageId.isEmpty || messageId.hasPrefix(Self.rawSendSentinelPrefix) { return }
         protocolInstance.internetSendFailedWithReason(
             messageId: messageId,
-            reason: "relay_pushed"
+            reason: stored ? "relay_pushed_stored" : "relay_pushed"
         )
         // Same self guard as handleRecipientUnreachable: never watch self and
         // never feed "self is offline" into the core.
@@ -2773,7 +2809,8 @@ public class InternetManager: NSObject, TransportManager {
         }
         emitDiagnostic("info", "Relay pushed message to offline recipient; parked", context: [
             "recipient": recipient,
-            "messageId": messageId
+            "messageId": messageId,
+            "stored": stored
         ])
     }
 

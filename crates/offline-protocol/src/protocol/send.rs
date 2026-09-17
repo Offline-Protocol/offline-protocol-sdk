@@ -12,6 +12,7 @@ use super::{
     MAX_PENDING_MESSAGE_BYTES_GLOBAL, MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS,
     MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL,
     RICH_PAYLOAD_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, SEND_FAIL_REASON_RELAY_PUSHED,
+    SEND_FAIL_REASON_RELAY_PUSHED_STORED, SEND_FAIL_REASON_RELAY_STORED,
     SEND_FAIL_REASON_TRANSPORT, WELCOME_NO_CARRIER_RETRY_SECS, WELCOME_UNREACHABLE_RETRY_CAP_SECS,
 };
 use super::{classify_transport_send_error, send_failure_token};
@@ -3639,12 +3640,28 @@ impl OfflineProtocol {
         let transport_error = transport_error
             .as_deref()
             .map(classify_transport_send_error);
+        // Whether the relay's mailbox holds this frame is orthogonal to why
+        // the socket write missed, and it changes exactly one thing: a parked
+        // plain DM needs no reachability probe, because the relay re-sends the
+        // held copy on the recipient's next connection. So it is lifted out
+        // here and the token normalized onto the vocabulary the rest of this
+        // function already speaks — which is what leaves connection requests
+        // and Welcomes on the paths they are on today.
+        let stored = matches!(
+            transport_error,
+            Some(SEND_FAIL_REASON_RELAY_STORED | SEND_FAIL_REASON_RELAY_PUSHED_STORED)
+        );
+        let transport_error = match transport_error {
+            Some(SEND_FAIL_REASON_RELAY_STORED) => Some(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE),
+            Some(SEND_FAIL_REASON_RELAY_PUSHED_STORED) => Some(SEND_FAIL_REASON_RELAY_PUSHED),
+            other => other,
+        };
         // A relay push is not a failure, so it is handled before either typed
         // branch below can read it as one: a connection request would be
         // fast-failed as undeliverable and a Welcome moved to `Failed`, both
         // for a frame the push may have delivered.
         if transport_error == Some(SEND_FAIL_REASON_RELAY_PUSHED) {
-            self.park_relay_pushed_dm(message_id, carrier);
+            self.park_relay_pushed_dm(message_id, carrier, stored);
             return Ok(());
         }
         // Connection requests first: the relay's "recipient offline"
@@ -3688,7 +3705,12 @@ impl OfflineProtocol {
             // Not a connection request, not a welcome: a plain DM or media
             // chunk. Surface the relay's verdict and park plain DMs so the
             // ACK retry budget stops burning against an offline peer.
-            self.handle_recipient_unreachable_for_message(message_id, transport_error, carrier);
+            self.handle_recipient_unreachable_for_message(
+                message_id,
+                transport_error,
+                carrier,
+                stored,
+            );
             return Ok(());
         };
         // A reason tagged "recipient_unreachable" (the internet bridge's
@@ -3766,6 +3788,7 @@ impl OfflineProtocol {
         message_id: &str,
         transport_error: Option<&'static str>,
         carrier: Option<TransportType>,
+        stored: bool,
     ) {
         let Some(reason) = transport_error.filter(|r| *r == SEND_FAIL_REASON_RECIPIENT_UNREACHABLE)
         else {
@@ -3861,32 +3884,47 @@ impl OfflineProtocol {
             return;
         }
 
-        self.park_unreachable_dm(&parsed_id, &recipient, attempt_count);
+        self.park_unreachable_dm(&parsed_id, &recipient, attempt_count, stored);
     }
 
     /// Whether a platform send report also belongs in the carrier's delivery
     /// metrics (`Transport::report_send_failure`).
     ///
-    /// Every report does except `relay_pushed`. The bridges hand the relay's
-    /// `MessageSent { pushed: true }` to [`Self::on_transport_send_failed_via`]
-    /// because that is their one call for "the relay answered about this id",
-    /// but the relay took the frame into a device push, which is not a failed
-    /// send. A wrapper that scores the report without asking here records a
-    /// failure whenever the relay's answer beats the bridge's own write
-    /// confirmation, against the carrier the router ranks by that ratio.
+    /// Every report does except the two push tokens. The bridges hand the
+    /// relay's `MessageSent { pushed: true }` to
+    /// [`Self::on_transport_send_failed_via`] because that is their one call
+    /// for "the relay answered about this id", but the relay took the frame
+    /// into a device push, which is not a failed send. A wrapper that scores
+    /// the report without asking here records a failure whenever the relay's
+    /// answer beats the bridge's own write confirmation, against the carrier
+    /// the router ranks by that ratio.
+    ///
+    /// `relay_stored` is not in that company: it answers a `DeliveryError`,
+    /// where the write really did miss. That the mailbox kept a copy says
+    /// nothing about the carrier.
     pub fn send_report_is_carrier_failure(reason: Option<&str>) -> bool {
-        reason.map(classify_transport_send_error) != Some(SEND_FAIL_REASON_RELAY_PUSHED)
+        !matches!(
+            reason.map(classify_transport_send_error),
+            Some(SEND_FAIL_REASON_RELAY_PUSHED | SEND_FAIL_REASON_RELAY_PUSHED_STORED)
+        )
     }
 
     /// Handles the relay's `MessageSent { pushed: true }` answer: the recipient
     /// has no live socket, and the frame went out in a push notification.
     ///
-    /// A plain DM is parked exactly as for a `DeliveryError`. The relay has no
-    /// store-and-forward, so if the push is lost nothing will re-deliver the
-    /// frame when the recipient reconnects, and without the park the missing
-    /// ACK burns the retry budget to a terminal `message_failed`. If the push
-    /// did deliver, the recipient's acknowledgement settles the parked entry
-    /// (`settle_parked_dm_from_ack`).
+    /// A plain DM is parked exactly as for a `DeliveryError`: without the park
+    /// the missing ACK burns the retry budget to a terminal `message_failed`.
+    /// If the push did deliver, the recipient's acknowledgement settles the
+    /// parked entry (`settle_parked_dm_from_ack`).
+    ///
+    /// `stored` is the relay saying its mailbox also holds the frame
+    /// (`MessageSent { pushed: true, stored: true }`, reported as
+    /// [`SEND_FAIL_REASON_RELAY_PUSHED_STORED`]). It reaches
+    /// [`Self::park_unreachable_dm`] and nothing else: the park is identical
+    /// but for its recovery, which becomes the relay's own redelivery instead
+    /// of a timed probe. Without it — an older relay, a mailbox turned off, a
+    /// store that failed — the probe stands, because then a lost push really
+    /// does mean nothing re-delivers the frame when the recipient reconnects.
     ///
     /// Two differences from the `DeliveryError` path, both because the push
     /// may have delivered the frame:
@@ -3905,7 +3943,12 @@ impl OfflineProtocol {
     ///   [`Self::handle_recipient_unreachable_for_message`] re-parks a flagged
     ///   entry silently. Without the flag the guarantee would last exactly
     ///   one probe interval.
-    fn park_relay_pushed_dm(&mut self, message_id: &str, carrier: Option<TransportType>) {
+    fn park_relay_pushed_dm(
+        &mut self,
+        message_id: &str,
+        carrier: Option<TransportType>,
+        stored: bool,
+    ) {
         let Ok(parsed_id) = MessageId::from_str(message_id) else {
             return;
         };
@@ -3942,9 +3985,10 @@ impl OfflineProtocol {
         self.note_confirmation_probe_unreachable(&recipient);
         debug!(
             message_id = %message_id,
+            stored = stored,
             "Relay pushed a DM to an offline recipient; parking it"
         );
-        self.park_unreachable_dm(&parsed_id, &recipient, attempt_count);
+        self.park_unreachable_dm(&parsed_id, &recipient, attempt_count, stored);
     }
 
     /// The park action shared by the relay-verdict path
@@ -3953,6 +3997,13 @@ impl OfflineProtocol {
     /// pending ACK and any scheduled retry so nothing burns budget against
     /// the offline peer, offers the frame to the mesh, then schedules the
     /// escalating reachability probe.
+    ///
+    /// `stored` drops that last step. The relay's mailbox is holding the
+    /// frame and will deliver it on the recipient's next connection, so the
+    /// park keeps everything that stops budget burning and adds no traffic of
+    /// its own; recovery is the relay's drain, plus the reachability edge for
+    /// the case where the held copy is evicted or expires. Everything the
+    /// probe rationale below argues for still holds for an unheld frame.
     ///
     /// The mesh offer is here rather than at either caller so both parks make
     /// it, and because this is where the frame is already at hand. Its rationale
@@ -4031,7 +4082,13 @@ impl OfflineProtocol {
     /// The counter increment is unconditional for the same reason: it is what
     /// arms [`Self::try_repark_exhausted_dm`], so a probe that exhausts its
     /// ACK budget re-parks instead of settling terminally.
-    fn park_unreachable_dm(&mut self, message_id: &MessageId, recipient: &str, attempt_count: u32) {
+    fn park_unreachable_dm(
+        &mut self,
+        message_id: &MessageId,
+        recipient: &str,
+        attempt_count: u32,
+        stored: bool,
+    ) {
         // Park: no pending ACK to time out, no backoff-scheduled resend.
         self.ack_manager.remove_ack(message_id);
         self.retry_queue.remove(&message_id.as_str());
@@ -4082,8 +4139,16 @@ impl OfflineProtocol {
             // -> flush_outbox_for_peer_via). This zeroes steady-state relay
             // traffic to a durably-gone peer, at the cost of the timed-probe
             // self-recovery guarantee for a silent returning peer.
-            let edge_driven = self.config.reliability.retry.edge_driven_unreachable_dm
-                && parks > crate::protocol::types::DM_UNREACHABLE_PROBE_LIMIT;
+            // `stored`: the relay's mailbox holds this frame and re-sends it
+            // on the recipient's next connection, so the probe has nothing
+            // left to achieve — it would re-store the same row, once per rung,
+            // for as long as the peer stays away. Edge-driven unconditionally
+            // here, not behind `edge_driven_unreachable_dm`: that opt-in
+            // trades away a delivery guarantee, while this is the one case
+            // where something else already carries it.
+            let edge_driven = stored
+                || (self.config.reliability.retry.edge_driven_unreachable_dm
+                    && parks > crate::protocol::types::DM_UNREACHABLE_PROBE_LIMIT);
             if !edge_driven {
                 let _ = self.retry_queue.enqueue_with_delay(
                     message,
@@ -4098,7 +4163,8 @@ impl OfflineProtocol {
             retry_in_secs = retry_in_secs,
             parks = parks,
             handed_to_mesh,
-            "Parked unreachable DM with escalating reachability probe"
+            stored = stored,
+            "Parked unreachable DM"
         );
     }
 
@@ -4143,7 +4209,10 @@ impl OfflineProtocol {
             recipient = %recipient,
             "ACK budget exhausted by reachability probes; re-parking instead of settling"
         );
-        self.park_unreachable_dm(message_id, &recipient, attempt_count);
+        // Not `stored`: a held DM is never probed, so it does not burn an ACK
+        // budget and does not arrive here. Anything that does got here by
+        // probing, and keeps the probe it was re-parked from.
+        self.park_unreachable_dm(message_id, &recipient, attempt_count, false);
         true
     }
 

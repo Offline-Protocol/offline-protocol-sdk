@@ -4356,6 +4356,13 @@ impl OfflineProtocol {
     /// The bridges also report the relay's `MessageSent { pushed: true }` here,
     /// as the `relay_pushed` token. That parks the frame in the core but is not
     /// a failed send, so it is kept out of the transport's delivery metrics.
+    ///
+    /// A relay advertising `mailbox_v1` adds `stored: true` when it has kept a
+    /// copy to re-send on the recipient's next connection. Report those as
+    /// `relay_pushed_stored` (beside `pushed: true`) and `relay_stored` (on a
+    /// `DeliveryError`, for the one id the relay named and no other). Both park
+    /// the frame without the reachability probe, which would only rewrite the
+    /// copy the relay already holds.
     pub fn internet_send_failed_with_reason(&self, message_id: String, reason: Option<String>) {
         let scores_carrier = CoreProtocol::send_report_is_carrier_failure(reason.as_deref());
         let mut protocol = self.lock_inner_recovering();
@@ -12386,11 +12393,11 @@ mod tests {
 
     /// A `MessageSent { pushed: true }` parks the frame on both bridges.
     ///
-    /// The relay has no store-and-forward: when the recipient is not on it,
-    /// the ciphertext goes out in a push notification and the sender is told
-    /// `MessageSent` — which, without this, resolved the frame as accepted
-    /// and left it awaiting an ACK from a peer who may never receive the
-    /// push. Both managers must read `pushed` right where they resolve the
+    /// When the recipient is not on the relay, the ciphertext goes out in a
+    /// push notification and the sender is told `MessageSent` — which, without
+    /// this, resolved the frame as accepted and left it awaiting an ACK from a
+    /// peer who may never receive the push. Both managers must read `pushed`
+    /// right where they resolve the
     /// relay acceptance and, when it is set, report that one id to the core
     /// under the exact `relay_pushed` token and watch the recipient, mirroring
     /// `handleRecipientUnreachable`. The token is the core's
@@ -12466,6 +12473,96 @@ mod tests {
                 !park_body[..fail].contains("drainRecipient("),
                 "{label} parkPushedMessage must fail only the pushed id, never drain the \
                  recipient's other in-flight frames"
+            );
+            // The mailbox variant rides the same call. A relay that also holds
+            // the frame owes its redelivery, so the park must drop the probe —
+            // a distinct token, because `relay_pushed` keeps it.
+            assert!(
+                report.contains("\"relay_pushed_stored\""),
+                "{label} parkPushedMessage must report a frame the mailbox holds under \
+                 relay_pushed_stored, which parks it without the reachability probe the \
+                 relay's own redelivery makes pointless"
+            );
+            assert!(
+                code[..park].contains("\"stored\""),
+                "{label} InternetManager must read MessageSent.stored beside `pushed`, before \
+                 the park that carries it"
+            );
+        }
+    }
+
+    /// A `DeliveryError { stored: true }` parks the one frame the relay named,
+    /// and parks it without a probe, on both bridges.
+    ///
+    /// The mailbox holds that frame and re-sends it on the recipient's next
+    /// connection, so the escalating reachability probe an ordinary
+    /// unreachable park schedules would only rewrite a copy the relay already
+    /// has — once per rung, per parked message, for as long as the peer stays
+    /// away. The core drops the probe on the `relay_stored` token
+    /// (`SEND_FAIL_REASON_RELAY_STORED`); these bridges are the only thing
+    /// that produces it, and neither platform can test its own call site.
+    ///
+    /// `stored` is a statement about one message. This path fails *every*
+    /// frame in flight to the recipient, and nothing says the others are held,
+    /// so the token must reach exactly the id the relay echoed and the rest
+    /// must keep the `recipient_unreachable` prefix they have today.
+    #[test]
+    fn react_native_relay_parks_a_stored_delivery_error() {
+        let swift = rn_source_code_only("ios/InternetManager.swift");
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/InternetManager.kt");
+
+        // The wire read itself, defaulting to false: an older relay, a relay
+        // whose mailbox is off, and a store that failed all omit the key, and
+        // every one of them must keep the probe.
+        assert!(
+            swift.contains("json[\"stored\"] as? Bool ?? false")
+                && kotlin.contains("json.optBoolean(\"stored\", false)"),
+            "both managers must read the relay's `stored` flag off the frame and default it to \
+             false, since a missing key never means the frame is held"
+        );
+
+        for (label, code) in [("ios", &swift), ("android", &kotlin)] {
+            // First occurrence is the DeliveryError call site, last is the
+            // definition below it (the same shape parkPushedMessage has).
+            let call = code
+                .find("handleRecipientUnreachable(")
+                .unwrap_or_else(|| panic!("{label} InternetManager must handle DeliveryError"));
+            let definition = code
+                .rfind("handleRecipientUnreachable(")
+                .expect("handleRecipientUnreachable definition");
+            assert!(
+                definition > call,
+                "{label} handleRecipientUnreachable must be defined below its call site"
+            );
+            assert!(
+                code[call..definition].contains("storedMessageId"),
+                "{label} the DeliveryError call site must hand the held id down; reading \
+                 `stored` and dropping it parks the frame on a probe the relay makes pointless"
+            );
+
+            let body = &code[definition..];
+            let fail = body
+                .find("internetSendFailedWithReason(")
+                .expect("handleRecipientUnreachable must fail the drained ids into the core");
+            let watch = body
+                .find("presenceWatch.watch(")
+                .expect("handleRecipientUnreachable must presence-watch the recipient");
+            let report = &body[fail..watch];
+            assert!(
+                report.contains("id == storedMessageId"),
+                "{label} handleRecipientUnreachable must choose the token per id: `stored` \
+                 names one message, never the recipient"
+            );
+            assert!(
+                report.contains("\"relay_stored\""),
+                "{label} handleRecipientUnreachable must report the held id under the exact \
+                 relay_stored token, the one the core parks edge-driven on"
+            );
+            assert!(
+                report.contains("recipient_unreachable"),
+                "{label} handleRecipientUnreachable must keep the unreachable prefix for every \
+                 other drained id — nothing says the relay holds those"
             );
         }
     }

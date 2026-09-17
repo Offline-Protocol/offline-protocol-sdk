@@ -1768,7 +1768,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [rustls 0.23.44](https://github.com/rustls/rustls)
+- [rustls 0.23.45](https://github.com/rustls/rustls)
 
 ```
 Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>

@@ -832,12 +832,17 @@ class InternetManager(TransportManager):
                     self._now_ms(),
                 )
             # ``pushed: true``: the relay had no live socket for the recipient
-            # and handed the ciphertext to a device push. It keeps no copy, so
-            # this is the fact a DeliveryError carries (the recipient is not on
-            # the relay) with the frame possibly delivered by the push. Older
-            # relays omit the field, which reads as not pushed.
+            # and handed the ciphertext to a device push — the fact a
+            # DeliveryError carries (the recipient is not on the relay) with
+            # the frame possibly delivered by the push. ``stored: true`` (relay
+            # capability ``mailbox_v1``) adds that the relay's mailbox holds
+            # the frame and re-sends it on the recipient's next connection, so
+            # the park needs no reachability probe. Older relays omit both,
+            # which reads as neither.
             if msg.get("pushed") is True and message_id:
-                self._park_pushed_message(recipient, message_id)
+                self._park_pushed_message(
+                    recipient, message_id, msg.get("stored") is True
+                )
 
         elif msg_type == "DeliveryError":
             recipient = msg.get("recipient", "")
@@ -861,7 +866,15 @@ class InternetManager(TransportManager):
             # enough to echo the outbox id we additionally fail that exact id in
             # case it was never recorded. Then feed presence-offline so the core
             # parks welcomes and starts watching for the peer's return.
+            #
+            # ``stored: true`` (relay capability ``mailbox_v1``) makes this a
+            # deferral rather than a loss: the mailbox holds the frame for the
+            # recipient's next connection, so that id is reported under
+            # ``relay_stored`` — the same verdict, parked without a probe the
+            # relay's own redelivery makes pointless. It names one message, so
+            # the recipient's other drained frames keep the unreachable prefix.
             now = self._now_ms()
+            stored_id = message_id if (msg.get("stored") is True and message_id) else None
             failed_ids = self._inflight.drain_recipient(recipient, now) if recipient else []
             if message_id and message_id not in failed_ids:
                 failed_ids.append(message_id)
@@ -869,7 +882,11 @@ class InternetManager(TransportManager):
                 try:
                     self._protocol.internet_send_failed_with_reason(
                         message_id=mid,
-                        reason=f"recipient_unreachable: {reason}",
+                        reason=(
+                            "relay_stored"
+                            if mid == stored_id
+                            else f"recipient_unreachable: {reason}"
+                        ),
                     )
                 except Exception as exc:
                     logger.debug(
@@ -889,7 +906,9 @@ class InternetManager(TransportManager):
         else:
             self._emit_diagnostic("debug", f"Unhandled relay message type: {msg_type}")
 
-    def _park_pushed_message(self, recipient: str, message_id: str) -> None:
+    def _park_pushed_message(
+        self, recipient: str, message_id: str, stored: bool = False
+    ) -> None:
         """Parks the one frame the relay answered ``MessageSent { pushed: true }`` for.
 
         A port of ``parkPushedMessage`` in the iOS and Android bridges, and the
@@ -906,13 +925,19 @@ class InternetManager(TransportManager):
         the least likely to be the pushed one. An echo that names none of our
         frames parks nothing, because the core ignores an id with no outbox
         entry.
+
+        ``stored`` is the relay adding that its mailbox holds the frame, which
+        swaps the token for ``relay_pushed_stored``: the same park, minus the
+        reachability probe the core would otherwise schedule, since the relay
+        re-sends the held copy itself.
         """
+        token = "relay_pushed_stored" if stored else "relay_pushed"
         try:
             self._protocol.internet_send_failed_with_reason(
-                message_id=message_id, reason="relay_pushed"
+                message_id=message_id, reason=token
             )
         except Exception as exc:
-            logger.debug("internet_send_failed_with_reason(relay_pushed) failed: %s", exc)
+            logger.debug("internet_send_failed_with_reason(%s) failed: %s", token, exc)
         if recipient:
             try:
                 self._protocol.internet_peer_presence(
@@ -923,6 +948,7 @@ class InternetManager(TransportManager):
         self._emit_diagnostic("info", "Relay pushed message to offline recipient; parked", {
             "recipient": recipient,
             "messageId": message_id,
+            "stored": stored,
         })
 
     # -- incoming message handlers --------------------------------------------

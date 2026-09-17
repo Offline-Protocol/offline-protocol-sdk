@@ -1156,6 +1156,89 @@ class TestMessageSentPushed:
         mgr._process_received(self._pushed("offZ", None))
         mock_protocol.internet_send_failed_with_reason.assert_not_called()
 
+    def test_a_pushed_frame_the_mailbox_holds_takes_the_stored_token(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        # `stored: true` means the relay will re-send the frame itself on the
+        # recipient's next connection, so the core parks it without a
+        # reachability probe. Same park otherwise.
+        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr._inflight.record_sent("offZ", "held-id", mgr._now_ms())
+        msg = {
+            "type": "MessageSent",
+            "recipient": "offZ",
+            "message_id": "held-id",
+            "pushed": True,
+            "stored": True,
+        }
+        mgr._process_received(json.dumps(msg).encode())
+        mock_protocol.internet_send_failed_with_reason.assert_called_once_with(
+            message_id="held-id", reason="relay_pushed_stored"
+        )
+
+
+class TestDeliveryErrorStored:
+    """``DeliveryError { stored: true }`` parks the named frame probe-free.
+
+    The relay's mailbox holds that one frame, so it takes the ``relay_stored``
+    token the core parks edge-driven on. ``stored`` is a statement about a
+    message, not about the recipient, so every other frame this path drains
+    keeps the ``recipient_unreachable`` prefix it has always had. The Rust side
+    pins the same literals in ``stored_answers_are_their_own_tokens``.
+    """
+
+    @staticmethod
+    def _error(recipient: str, message_id: str | None, stored: bool) -> bytes:
+        msg: dict[str, object] = {
+            "type": "DeliveryError",
+            "recipient": recipient,
+            "reason": "User not connected",
+        }
+        if message_id is not None:
+            msg["message_id"] = message_id
+        if stored:
+            msg["stored"] = True
+        return json.dumps(msg).encode()
+
+    def test_the_held_id_takes_the_stored_token(self, mock_protocol: MagicMock) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr._inflight.record_sent("offZ", "held-id", mgr._now_ms())
+        mgr._process_received(self._error("offZ", "held-id", stored=True))
+        mock_protocol.internet_send_failed_with_reason.assert_called_once_with(
+            message_id="held-id", reason="relay_stored"
+        )
+
+    def test_the_recipients_other_frames_keep_the_unreachable_prefix(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1")
+        now = mgr._now_ms()
+        mgr._inflight.record_sent("offZ", "held-id", now)
+        mgr._inflight.record_sent("offZ", "other-id", now)
+        mgr._process_received(self._error("offZ", "held-id", stored=True))
+        reported = {
+            c.kwargs["message_id"]: c.kwargs["reason"]
+            for c in mock_protocol.internet_send_failed_with_reason.call_args_list
+        }
+        assert reported["held-id"] == "relay_stored"
+        assert reported["other-id"].startswith("recipient_unreachable")
+
+    @pytest.mark.parametrize("stored", [False, True])
+    def test_an_unnamed_frame_is_never_reported_as_held(
+        self, mock_protocol: MagicMock, stored: bool
+    ) -> None:
+        # An older relay sends no message_id at all. Nothing is held then, and
+        # the fallback drain must not borrow the flag for ids the relay never
+        # named.
+        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr._inflight.record_sent("offZ", "guessed-id", mgr._now_ms())
+        mgr._process_received(self._error("offZ", None, stored=stored))
+        reasons = [
+            c.kwargs["reason"]
+            for c in mock_protocol.internet_send_failed_with_reason.call_args_list
+        ]
+        assert reasons == ["recipient_unreachable: User not connected"]
+
 
 # ---------------------------------------------------------------------------
 # The activity-adaptive send loop. Every piece of the policy is pinned here:

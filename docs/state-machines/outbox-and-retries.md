@@ -141,9 +141,9 @@ rather than retried into a void.
 
 A relay push is the second trigger. When the recipient has no live socket the
 relay hands the ciphertext to a device push and answers
-`MessageSent { pushed: true }`; it keeps no copy, so if the push is lost nothing
-re-delivers the frame when the recipient reconnects. The bridges report that
-answer to the core as `relay_pushed`, and the message parks exactly as below
+`MessageSent { pushed: true }`; if the push is lost and the relay kept no copy,
+nothing re-delivers the frame when the recipient reconnects. The bridges report
+that answer to the core as `relay_pushed`, and the message parks exactly as below
 with two differences, both because the push may have delivered it: only a plain
 direct message parks (a connection request keeps its typed tracking and a
 Welcome its lifecycle, both awaiting the answer a delivered push produces), and
@@ -157,6 +157,23 @@ silently. Without the mark the silence would last exactly one probe interval.
 A parked message is probed periodically with a backoff that widens from 15
 seconds toward 10 minutes. When the peer returns, parked messages re-enter the
 queue.
+
+**A frame the relay's mailbox holds is parked without that probe.** A relay
+advertising `mailbox_v1` answers `stored: true` beside the `DeliveryError` or
+the pushed `MessageSent`, meaning it has kept the frame and will re-send it on
+the recipient's next connection. The bridges report those two answers as
+`relay_stored` and `relay_pushed_stored`, and the park is otherwise identical:
+the pending acknowledgement still goes, the entry still stays, the frame is
+still offered to the mesh, and the recipient is still watched. Only the timer is
+dropped, because a probe would rewrite a copy the relay already has - once per
+rung, per parked message, for as long as the peer stays away. Recovery is the
+relay's own redelivery, with the reachability edge behind it for the case where
+the held copy is evicted or expires.
+
+`stored` is a statement about one message, so only the id the relay named is
+reported that way; everything else this path drains keeps the ordinary
+unreachable verdict. A missing key - an older relay, a relay whose mailbox is
+off, a store that failed - means no copy is held, and the probe stands.
 
 **Parking removes the pending acknowledgement**, which is what makes it
 different from a long retry: nothing is counting down against the message any
