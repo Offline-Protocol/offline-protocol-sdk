@@ -225,9 +225,9 @@ session to an address this device does not control.
 
 ```
 → {"type":"SendMessage","recipient":"<off1…>","content":"<base64>","encoding":"base64","message_id":"<id>","reply_to_msg":"<id>"}
-← {"type":"MessageSent","message_id":"<id>","recipient":"<off1…>"}
+← {"type":"MessageSent","message_id":"<id>","recipient":"<off1…>","pushed":false,"stored":false}
   or
-← {"type":"DeliveryError","message_id":"<id>","recipient":"<off1…>","reason":"recipient_unreachable: <text>"}
+← {"type":"DeliveryError","message_id":"<id>","recipient":"<off1…>","reason":"recipient_unreachable: <text>","stored":false}
 ```
 
 A gateway MUST answer every `SendMessage` with exactly one of these. Silence is
@@ -251,6 +251,29 @@ disliked would be worse than one that rejected the submission outright.
 `recipient` on both verdicts is the address the verdict is about. Additive, and
 a client that does not read it is unaffected; a client that does can act on the
 recipient without keeping its own id-to-recipient map.
+
+`pushed` and `stored` are **optional booleans, and both default to `false`
+when absent.** A gateway that implements neither omits both and is a conforming
+gateway; a client MUST treat a missing key as `false`, never as unknown.
+
+- `pushed` (on `MessageSent`) says the gateway had no live session for the
+  recipient and handed the ciphertext to a device push instead. The frame was
+  accepted but not delivered to a session, so a client MUST NOT treat this
+  `MessageSent` as proof of arrival.
+- `stored` (on either verdict) says the gateway has kept a copy of this frame
+  and will re-send it on the recipient's next attach. A gateway that sets it
+  MUST actually redeliver, and MUST advertise the capability that names its
+  mailbox — `mailbox_v1` on the internet relay — at attach time. A gateway
+  whose store failed MUST omit it, because a client reads it as a commitment
+  and stops probing on the strength of it.
+
+**Both are statements about the one frame the verdict names, never about the
+recipient.** A gateway MUST NOT set `stored` on a verdict to mean that other
+frames to the same recipient are also held. This matters because a
+`DeliveryError` resolves every frame a client had in flight to that recipient,
+so a client applies the flag to the named id alone and reports the rest as
+ordinary unreachable. It follows that a gateway holding several frames MUST set
+`stored` on each frame's own verdict.
 
 `reason` MUST begin with `recipient_unreachable` when the recipient is not
 reachable through this gateway. That token is the one the SDK classifier matches

@@ -4005,6 +4005,31 @@ impl OfflineProtocol {
     /// the case where the held copy is evicted or expires. Everything the
     /// probe rationale below argues for still holds for an unheld frame.
     ///
+    /// Two things that rationale does *not* cover, both deliberate:
+    ///
+    /// - **What is actually saved is the rungs, not the re-drive.** The edge
+    ///   fires on any reconnect, not only on an eviction, and
+    ///   [`Self::flush_outbox_for_peer_via`] selects on "in the outbox, not
+    ///   awaiting an ACK" — so a returning peer re-drives a held frame
+    ///   alongside the relay's own drain, exactly as it would an unheld one.
+    ///   Dedup collapses the pair. What the flag removes is the 15s→600s
+    ///   ladder *while the peer is away*, which is the traffic the relay asks
+    ///   senders not to generate. It follows that past the mailbox's own
+    ///   retention the delivery guarantee is that edge and the outbox
+    ///   lifetime — the same trade `edge_driven_unreachable_dm` opts into for
+    ///   every parked frame, taken unconditionally here because the mailbox is
+    ///   already committed to the redelivery.
+    /// - **`stored` is not persisted on the entry, unlike
+    ///   `OutboxEntry::relay_pushed`.** Nothing needs it to be: a restart
+    ///   re-drives the outbox, the relay answers `stored` again for a frame it
+    ///   still holds, and the park is re-derived from that answer — whereas
+    ///   `relay_pushed` has to survive, because it suppresses an app-facing
+    ///   event no later answer would restate. Persisting this one would also
+    ///   be wrong on its own terms: it records what the relay's mailbox held
+    ///   at park time, and the mailbox can evict between then and the next
+    ///   launch, so a restored flag would suppress the probe on the strength
+    ///   of a copy that may be gone.
+    ///
     /// The mesh offer is here rather than at either caller so both parks make
     /// it, and because this is where the frame is already at hand. Its rationale
     /// is inline below; the short version is that a relay verdict is the only
