@@ -203,8 +203,10 @@ pub(crate) const SEND_FAIL_REASON_RECIPIENT_UNREACHABLE: &str = "recipient_unrea
 
 /// The relay accepted a frame for a recipient with no live socket and handed
 /// it to a push notification (`MessageSent { pushed: true }`). Not a failure:
-/// the push may deliver it. What it does establish is that the relay, which
-/// has no store-and-forward, holds no copy for when the recipient reconnects.
+/// the push may deliver it. What it does establish is that the recipient is
+/// not on the relay, and that the push is the only thing carrying this frame:
+/// a relay whose mailbox also holds a copy says so with `stored: true`, which
+/// the bridges report as [`SEND_FAIL_REASON_RELAY_PUSHED_STORED`] instead.
 ///
 /// Deliberately its own token rather than a `recipient_unreachable` tail.
 /// That prefix fast-fails connection requests and moves Welcomes to `Failed`,
@@ -220,6 +222,47 @@ pub(crate) const SEND_FAIL_REASON_RECIPIENT_UNREACHABLE: &str = "recipient_unrea
 /// `TestMessageSentPushed`. That call must not also score the report as a send
 /// failure; see `OfflineProtocol::send_report_is_carrier_failure`.
 pub(crate) const SEND_FAIL_REASON_RELAY_PUSHED: &str = "relay_pushed";
+
+/// The relay's mailbox holds this frame for the recipient's next connection
+/// (`DeliveryError { stored: true }`, on a relay advertising `mailbox_v1`).
+///
+/// The socket write still missed, so this is the `recipient_unreachable`
+/// verdict in every respect but one: the frame is not lost, and the relay
+/// re-sends it the moment the recipient connects. A plain DM is therefore
+/// parked *edge-driven* — no escalating reachability probe — because a probe
+/// would only rewrite the copy the relay already holds. That is what the
+/// relay's own contract asks for ("do not retry faster on its account"), and
+/// what keeps a fleet whose peers are merely asleep from paying relay traffic
+/// for a redelivery the relay is already committed to. Recovery without the
+/// probe is the reachability edge, and the relay's drain either way.
+///
+/// Everything that is not a parkable plain DM is deliberately unchanged: the
+/// token is normalized back to [`SEND_FAIL_REASON_RECIPIENT_UNREACHABLE`] in
+/// `on_transport_send_failed_via`, so connection requests still fast-fail and
+/// Welcomes still park on their own lifecycle. Both carry their own proof of
+/// arrival, and a held copy is not a reason to stop waiting for it.
+///
+/// Cross-layer contract: the React Native platform bridges
+/// (`InternetManager.kt` / `InternetManager.swift`) and the Python relay
+/// client (`internet_manager.py`) pass this exact literal, and only for the
+/// one id the relay named — `stored` is a statement about a single message,
+/// never about the recipient's other in-flight frames. Pinned on the React
+/// Native side by `react_native_relay_parks_a_stored_delivery_error`.
+pub(crate) const SEND_FAIL_REASON_RELAY_STORED: &str = "relay_stored";
+
+/// [`SEND_FAIL_REASON_RELAY_PUSHED`] for a frame the mailbox also holds
+/// (`MessageSent { pushed: true, stored: true }`).
+///
+/// Parks exactly as `relay_pushed` does — plain DMs only, no
+/// `MessageUndeliverable`, kept out of the carrier's failure accounting —
+/// except that the park schedules no reachability probe, for the reason
+/// [`SEND_FAIL_REASON_RELAY_STORED`] gives.
+///
+/// Two tokens rather than one token and a flag because the two origins differ
+/// for everything that is *not* a plain DM: a pushed frame must not fast-fail
+/// a connection request, and a missed one must. Collapsing them would trade
+/// that distinction for one fewer string.
+pub(crate) const SEND_FAIL_REASON_RELAY_PUSHED_STORED: &str = "relay_pushed_stored";
 
 /// Fallback token for a send failure that classifies as nothing more specific.
 pub(crate) const SEND_FAIL_REASON_TRANSPORT: &str = "transport_send_failed";
@@ -237,6 +280,8 @@ pub(crate) const SEND_FAIL_REASON_CONFIRM_TIMEOUT: &str = "send_confirmation_tim
 pub(crate) const SEND_FAIL_REASON_TOKENS: &[&str] = &[
     SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
     SEND_FAIL_REASON_RELAY_PUSHED,
+    SEND_FAIL_REASON_RELAY_STORED,
+    SEND_FAIL_REASON_RELAY_PUSHED_STORED,
     SEND_FAIL_REASON_TRANSPORT,
     SEND_FAIL_REASON_CONFIRM_TIMEOUT,
     "transport_not_connected",
@@ -2500,20 +2545,48 @@ mod send_failure_classification_tests {
         );
     }
 
-    /// A push is parked in the core but is not a failed send, so the one
-    /// report that must stay out of a carrier's failure accounting is the
-    /// exact token. Anything else, including relay text that merely contains
-    /// it, still counts.
+    /// The mailbox tokens are their own too, for the same reason: neither may
+    /// be read under the `recipient_unreachable` prefix, and each must
+    /// classify to itself so a persisted record survives a round trip.
+    #[test]
+    fn stored_answers_are_their_own_tokens() {
+        assert_eq!(SEND_FAIL_REASON_RELAY_STORED, "relay_stored");
+        assert_eq!(SEND_FAIL_REASON_RELAY_PUSHED_STORED, "relay_pushed_stored");
+        for token in [
+            SEND_FAIL_REASON_RELAY_STORED,
+            SEND_FAIL_REASON_RELAY_PUSHED_STORED,
+        ] {
+            assert!(!token.starts_with(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE));
+            assert_eq!(classify_transport_send_error(token), token);
+        }
+        // `relay_pushed_stored` must not be read as `relay_pushed` with a
+        // tail: classification is exact for these, so the longer token keeps
+        // its own meaning rather than degrading to the shorter one.
+        assert_ne!(
+            classify_transport_send_error(SEND_FAIL_REASON_RELAY_PUSHED_STORED),
+            SEND_FAIL_REASON_RELAY_PUSHED
+        );
+    }
+
+    /// A push is parked in the core but is not a failed send, so the reports
+    /// that must stay out of a carrier's failure accounting are the two exact
+    /// push tokens. Anything else, including relay text that merely contains
+    /// one, still counts — and `relay_stored` counts, because it answers a
+    /// socket write that really did miss.
     #[test]
     fn only_a_relay_push_report_is_kept_out_of_carrier_failures() {
         use crate::OfflineProtocol;
-        assert!(!OfflineProtocol::send_report_is_carrier_failure(Some(
-            "relay_pushed"
-        )));
+        for reason in ["relay_pushed", "relay_pushed_stored"] {
+            assert!(
+                !OfflineProtocol::send_report_is_carrier_failure(Some(reason)),
+                "{reason} is a push, not a failed send"
+            );
+        }
         for reason in [
             Some("recipient_unreachable: Recipient is offline"),
             Some("Internet transport send failed"),
             Some("relay_pushed: extra"),
+            Some("relay_stored"),
             None,
         ] {
             assert!(

@@ -11,6 +11,41 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+### Changed
+
+- **A frame the relay's mailbox holds is parked without a reachability probe.**
+  A relay advertising `mailbox_v1` keeps a copy of a frame it could not deliver
+  and re-sends it on the recipient's next connection, and says so with
+  `stored: true` beside the `DeliveryError` or the pushed `MessageSent`. The
+  React Native bridges and the Python relay client now read that flag and
+  report those two answers to the core as the new `relay_stored` and
+  `relay_pushed_stored` tokens. The park they produce is the existing one in
+  every respect that matters - the pending acknowledgement is dropped so no
+  budget burns against an offline peer, the outbox entry stays, the frame is
+  still offered to the mesh, and the recipient is still presence-watched - and
+  drops only the escalating 15s→600s probe. The probe existed because nothing
+  else would re-deliver the frame; now something does, and each rung would only
+  rewrite the row the relay already holds, per parked message, for as long as
+  the peer stays away. Recovery is the relay's own redelivery, with the
+  reachability edge behind it for a copy that is evicted or expires.
+
+  Everything that is not a plain direct message is deliberately untouched: both
+  tokens normalize back onto the existing vocabulary before any typed branch
+  reads them, so a connection request still fast-fails with
+  `ConnectionRequestUndeliverable` and a Welcome still parks on its own
+  lifecycle. `MessageUndeliverable` is still emitted on the `DeliveryError`
+  path, because it is documented as a repeatable status signal and "the
+  recipient is offline right now" is true whether or not a copy was kept. A
+  missing `stored` key - an older relay, a relay whose mailbox is off, a store
+  that failed - reads as "not held" and keeps the probe.
+
+  `stored` is a statement about one message, not about the recipient. The
+  `DeliveryError` path fails every frame in flight to that recipient, so only
+  the id the relay echoed takes the new token and the rest keep the
+  `recipient_unreachable` prefix they have always had.
+
 ## [0.26.0] — 2026-09-12
 
 > **The SDK ships its own telemetry.** Until now the SDK handed every telemetry

@@ -1350,17 +1350,26 @@ class InternetManager(
 
                 // `pushed: true` is the relay saying it had no live socket for
                 // the recipient and handed the ciphertext to a push
-                // notification instead. The relay does not store-and-forward,
-                // so this is the same fact a DeliveryError carries — the
-                // recipient is not on the relay right now — with the message
-                // *possibly* arriving through the push. Report this one id to
-                // the core as `relay_pushed`, which parks a plain DM as the
-                // unreachable path would (no ACK budget burnt against an
-                // offline peer, a reachability probe scheduled, the recipient
-                // watched) so that if the push is lost the presence edge
-                // re-drives it. Absent on older relays, which reads as
+                // notification instead — the same fact a DeliveryError
+                // carries, the recipient is not on the relay right now, with
+                // the message *possibly* arriving through the push. Report
+                // this one id to the core as `relay_pushed`, which parks a
+                // plain DM as the unreachable path would (no ACK budget burnt
+                // against an offline peer, a reachability probe scheduled, the
+                // recipient watched) so that if the push is lost the presence
+                // edge re-drives it. Absent on older relays, which reads as
                 // `false`.
                 val pushed = json.optBoolean("pushed", false)
+                // `stored: true` (relay capability `mailbox_v1`) adds that the
+                // relay's mailbox holds this frame and re-sends it on the
+                // recipient's next connection. The park is then the same one
+                // minus its probe — nothing this device can send improves on a
+                // redelivery the relay already owes, and the relay asks
+                // senders not to try. Absent on an older relay, on one whose
+                // mailbox is off, and whenever the store itself failed: all
+                // read as `false` and keep the probe, which is the safe
+                // direction.
+                val stored = json.optBoolean("stored", false)
                 // Park the id the relay echoed, never the tracker's fallback
                 // guess above. A relay new enough to send `pushed` echoes our
                 // own id, and the guess (the oldest frame in flight) is least
@@ -1368,7 +1377,7 @@ class InternetManager(
                 // order. An echo that names none of our frames parks nothing:
                 // the core ignores an id with no outbox entry.
                 if (pushed && messageId != null && messageId.isNotEmpty()) {
-                    parkPushedMessage(recipient, messageId)
+                    parkPushedMessage(recipient, messageId, stored)
                 }
 
                 if (messageId != null && messageId.isNotEmpty()) {
@@ -1379,7 +1388,8 @@ class InternetManager(
                         "messageId" to messageId,
                         "recipient" to recipient,
                         "timestamp" to timestamp,
-                        "pushed" to pushed
+                        "pushed" to pushed,
+                        "stored" to stored
                     ))
                     // Note: The protocol SDK will handle the message_sent event internally
                     // The frontend will receive it via the normal event stream
@@ -1496,7 +1506,17 @@ class InternetManager(
                 // burning their retry budget) and start watching presence.
                 val recipient = json.safeOptString("recipient")
                 val reason = json.safeOptString("reason", "Unknown error")
-                handleRecipientUnreachable(recipient, reason, "DeliveryError")
+                // `stored: true` (relay capability `mailbox_v1`) makes this a
+                // deferral rather than a loss: the mailbox holds the frame for
+                // the recipient's next connection. It is a statement about the
+                // one message the relay named and about no other, so only that
+                // id carries it into the core below.
+                val storedMessageId = if (json.optBoolean("stored", false)) {
+                    json.safeOptString("message_id").takeIf { it.isNotEmpty() }
+                } else {
+                    null
+                }
+                handleRecipientUnreachable(recipient, reason, "DeliveryError", storedMessageId)
             }
 
             "PresenceStatus", "PresenceStatusWithLastSeen" -> {
@@ -2196,11 +2216,20 @@ class InternetManager(
      * per-peer no-carrier and parks welcomes without burning budget),
      * ingests an authoritative offline presence, and adds the recipient to
      * the presence watch set.
+     *
+     * [storedMessageId] names the one frame the relay's mailbox is holding,
+     * when it said so. That id is reported under `relay_stored` instead: the
+     * same verdict, parked without a reachability probe, because the relay
+     * re-sends the held copy on the recipient's next connection. It is
+     * deliberately one id and not the recipient — the relay's `stored` is a
+     * statement about a message, and the other frames drained here may well be
+     * unheld.
      */
     private fun handleRecipientUnreachable(
         recipient: String,
         reason: String,
-        source: String
+        source: String,
+        storedMessageId: String? = null
     ) {
         if (recipient.isEmpty()) {
             emitDiagnostic("warning", "Recipient-unreachable signal without recipient", mapOf(
@@ -2217,7 +2246,10 @@ class InternetManager(
             // resolution; their outcomes belong to the app, not the core.
             if (id.startsWith(RAW_SEND_SENTINEL_PREFIX)) continue
             try {
-                protocol.internetSendFailedWithReason(id, "recipient_unreachable: $reason")
+                protocol.internetSendFailedWithReason(
+                    id,
+                    if (id == storedMessageId) "relay_stored" else "recipient_unreachable: $reason"
+                )
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to fail-fast in-flight message $id", e)
             }
@@ -2239,7 +2271,8 @@ class InternetManager(
             "recipient" to recipient,
             "reason" to reason,
             "source" to source,
-            "failedInFlight" to failedIds.size
+            "failedInFlight" to failedIds.size,
+            "stored" to (storedMessageId != null)
         ))
     }
 
@@ -2257,13 +2290,21 @@ class InternetManager(
      * and an offline presence is fed to the core exactly as the DeliveryError
      * path does, so the presence-online edge is what re-drives the parked
      * message if the push never reaches the device.
+     *
+     * [stored] is the relay adding that its mailbox holds the frame, which
+     * swaps the token for `relay_pushed_stored`: the same park, minus the
+     * probe the core would otherwise schedule, since the relay re-sends the
+     * held copy itself.
      */
-    private fun parkPushedMessage(recipient: String, messageId: String) {
+    private fun parkPushedMessage(recipient: String, messageId: String, stored: Boolean) {
         // Sentinel entries track app-authored raw SendMessage frames; their
         // outcomes belong to the app, not the core (see handleRecipientUnreachable).
         if (messageId.isEmpty() || messageId.startsWith(RAW_SEND_SENTINEL_PREFIX)) return
         try {
-            protocol.internetSendFailedWithReason(messageId, "relay_pushed")
+            protocol.internetSendFailedWithReason(
+                messageId,
+                if (stored) "relay_pushed_stored" else "relay_pushed"
+            )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to park pushed message $messageId", e)
         }
@@ -2279,7 +2320,8 @@ class InternetManager(
         }
         emitDiagnostic("info", "Relay pushed message to offline recipient; parked", mapOf(
             "recipient" to recipient,
-            "messageId" to messageId
+            "messageId" to messageId,
+            "stored" to stored
         ))
     }
 

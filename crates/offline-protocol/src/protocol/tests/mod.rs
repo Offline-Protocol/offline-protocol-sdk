@@ -8782,6 +8782,247 @@ fn test_relay_pushed_verdict_parks_dm_and_watches_recipient() {
     );
 }
 
+/// The relay's `DeliveryError { stored: true }` reaches the core as the
+/// bridge's `relay_stored`. It is the unreachable park in every respect but
+/// one: no reachability probe.
+///
+/// The mailbox holds the frame and re-sends it on the recipient's next
+/// connection, so a probe would rewrite a copy the relay already has — once
+/// per rung, per parked message, for as long as the peer stays away, which is
+/// exactly the traffic the relay asks senders not to generate. Everything the
+/// park exists for is unchanged: the pending ACK is dropped so no budget burns
+/// against an offline peer, the entry stays, and the recipient is watched, so
+/// a reachability edge still re-drives the message if the held copy is evicted
+/// or expires.
+///
+/// The `MessageUndeliverable` event is deliberately kept. It is documented as
+/// a repeatable status signal, it is the app's only word that the recipient is
+/// offline right now, and that is true whether or not the relay kept a copy.
+#[test]
+fn test_relay_stored_verdict_parks_a_dm_without_a_probe() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    assert!(protocol.ack_manager.is_waiting_for_ack(&message_id));
+
+    protocol
+        .on_transport_send_failed_via(
+            &message_id.as_str(),
+            Some("relay_stored".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+
+    assert!(
+        protocol.outbox.contains_key(&message_id),
+        "a held DM must stay in the outbox until it is acknowledged"
+    );
+    assert!(
+        !protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "the park must drop the pending ACK so no budget burns against an offline peer"
+    );
+    assert!(
+        !protocol.retry_queue.contains(&message_id.as_str()),
+        "a frame the relay holds must not be probed: the relay redelivers it on connect"
+    );
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&1),
+        "the park still counts, so the peer's other messages escalate as they do today"
+    );
+    assert!(
+        protocol.presence_watch_peers().contains(&"bob".to_string()),
+        "the recipient is still watched: the reachability edge is now the only re-drive"
+    );
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageUndeliverable { .. })),
+        "the verdict is still the app's word that the recipient is offline right now"
+    );
+}
+
+/// Dropping the probe is only safe because the reachability edge still is one.
+///
+/// A stored DM rests in the outbox with no pending ACK and nothing on a timer,
+/// so a presence-online answer is its only self-recovery short of the relay's
+/// own redelivery — and it is what covers the cases the relay's copy does not:
+/// a held frame evicted by the mailbox's caps, or expired unread. The flush
+/// selects on "in the outbox, not awaiting an ACK", never on holding a retry
+/// entry, which is what makes an edge-driven entry reachable here at all; and
+/// it re-seals against the peer's current session on the way out, so a re-key
+/// while the peer was away does not flush undecryptable bytes.
+#[test]
+fn test_presence_online_still_redrives_a_stored_dm() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    let handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .on_transport_send_failed_via(
+            &message_id.as_str(),
+            Some("relay_stored".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+    assert!(
+        !protocol.retry_queue.contains(&message_id.as_str()),
+        "precondition: the held DM rests on nothing but the edge"
+    );
+    assert!(
+        protocol.presence_watch_peers().contains(&"bob".to_string()),
+        "precondition: the recipient is watched, so the edge can arrive"
+    );
+    handle.clear_sent_messages();
+
+    protocol.on_peer_presence("bob", true, None);
+
+    assert!(
+        handle.sent_messages().iter().any(|m| m.id == message_id),
+        "presence-online must re-drive a held DM, which has no timer of its own"
+    );
+    assert!(
+        protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "the re-driven send registers a fresh pending ACK"
+    );
+    assert!(
+        !protocol.dm_unreachable_parks.contains_key("bob"),
+        "the edge clears the park counter, as it does for any re-driven DM"
+    );
+}
+
+/// `MessageSent { pushed: true, stored: true }`, bridged as
+/// `relay_pushed_stored`, is the push park minus the probe.
+///
+/// Both halves matter: the frame may have arrived by push, so the app is still
+/// told nothing and the entry is still flagged pushed for the silent re-park;
+/// and the mailbox holds it either way, so nothing needs to go on a timer.
+#[test]
+fn test_relay_pushed_stored_parks_without_a_probe_or_an_event() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    protocol
+        .on_transport_send_failed_via(
+            &message_id.as_str(),
+            Some("relay_pushed_stored".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageUndeliverable { .. })),
+        "a pushed DM may have been delivered, so it must not be reported undeliverable"
+    );
+    assert!(
+        protocol.outbox.get(&message_id).unwrap().relay_pushed,
+        "the entry must still be marked pushed, so a later probe verdict re-parks silently"
+    );
+    assert!(
+        !protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "the park must drop the pending ACK"
+    );
+    assert!(
+        !protocol.retry_queue.contains(&message_id.as_str()),
+        "a frame the relay holds must not be probed, pushed or not"
+    );
+    assert!(protocol.presence_watch_peers().contains(&"bob".to_string()));
+}
+
+/// `relay_stored` changes the plain-DM park and nothing else.
+///
+/// A connection request is not parkable, and the mailbox holding it is no
+/// reason to stop telling the app the peer is offline — the request carries
+/// its own proof of arrival, and the typed event is documented as
+/// non-terminal. So the token normalizes back to `recipient_unreachable`
+/// before any of the typed branches read it, and this path behaves exactly as
+/// it did before the mailbox existed.
+#[test]
+fn test_relay_stored_still_fast_fails_a_connection_request() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let sent_id = protocol
+        .send_connection_request("bob", "Alice", None, None)
+        .unwrap();
+
+    protocol
+        .on_transport_send_failed_via(
+            &sent_id.as_str(),
+            Some("relay_stored".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+
+    let reason = events
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|e| match e {
+            Event::ConnectionRequestUndeliverable { reason, .. } => Some(reason.clone()),
+            _ => None,
+        })
+        .expect("a held connection request is still undeliverable right now");
+    assert_eq!(
+        reason, "recipient_unreachable",
+        "the typed event keeps the vocabulary it has always used"
+    );
+}
+
 /// The park's timed probe resends the same id, and the relay answers a retry
 /// of a message it has already pushed with `DeliveryError` (`already_pushed`)
 /// rather than a second notification. The bridges can only report that as
