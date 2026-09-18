@@ -263,7 +263,7 @@ gateway; a client MUST treat a missing key as `false`, never as unknown.
 - `stored` (on either verdict) says the gateway has kept a copy of this frame
   and will re-send it on the recipient's next attach. A gateway that sets it
   MUST actually redeliver, and MUST advertise the capability that names its
-  mailbox — `mailbox_v1` on the internet relay — at attach time. A gateway
+  mailbox (`mailbox_v1` on the internet relay) at attach time. A gateway
   whose store failed MUST omit it, because a client reads it as a commitment
   and stops probing on the strength of it.
 

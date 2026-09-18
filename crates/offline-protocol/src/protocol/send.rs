@@ -4031,9 +4031,9 @@ impl OfflineProtocol {
     /// `stored` drops that last step. The relay's mailbox is holding the
     /// frame and will deliver it on the recipient's next connection, so the
     /// park keeps everything that stops budget burning and adds no traffic of
-    /// its own; recovery is the relay's drain, plus the reachability edge for
-    /// the case where the held copy is evicted or expires. Everything the
-    /// probe rationale below argues for still holds for an unheld frame.
+    /// its own; recovery is the relay's drain, with the reachability edge
+    /// behind it as for every parked frame. Everything the probe rationale
+    /// below argues for still holds for an unheld frame.
     ///
     /// Two things that rationale does *not* cover, both deliberate:
     ///
