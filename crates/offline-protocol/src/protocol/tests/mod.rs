@@ -8858,6 +8858,74 @@ fn test_relay_stored_verdict_parks_a_dm_without_a_probe() {
     );
 }
 
+/// A `relay_stored` verdict for a frame that is *already* being probed drops
+/// that probe.
+///
+/// This is the path the platform bridges depend on, not a corner case. The
+/// relay answers each submission separately, so the first verdict for an
+/// offline recipient drains the bridge's whole in-flight queue and every frame
+/// but the named one is reported `recipient_unreachable` and parked with a
+/// probe. The later verdicts then name those frames as held, and each arrives
+/// here against a message that already holds a retry slot. `park_unreachable_dm`
+/// clears the slot before it decides whether to re-arm it, so the re-park is
+/// what actually retires the probe — without that ordering the bridge fix would
+/// report the right token and change nothing.
+#[test]
+fn test_relay_stored_verdict_drops_an_existing_probe() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    // The ordinary verdict first: this frame was not the one the relay named,
+    // so it parks with the escalating probe.
+    protocol
+        .on_transport_send_failed_via(
+            &message_id.as_str(),
+            Some("recipient_unreachable: User not connected".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+    assert!(
+        protocol.retry_queue.contains(&message_id.as_str()),
+        "precondition: an unheld frame parks with the reachability probe"
+    );
+
+    // Then its own verdict arrives, naming it held.
+    protocol
+        .on_transport_send_failed_via(
+            &message_id.as_str(),
+            Some("relay_stored".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+
+    assert!(
+        !protocol.retry_queue.contains(&message_id.as_str()),
+        "the re-park must retire the probe it was parked on: the relay holds this frame now, so \
+         every further rung would rewrite a row it already has"
+    );
+    assert!(
+        protocol.outbox.contains_key(&message_id),
+        "the entry still stays until it is acknowledged"
+    );
+    assert!(
+        !protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "and still holds no pending ACK to burn a budget against an offline peer"
+    );
+    assert!(
+        protocol.presence_watch_peers().contains(&"bob".to_string()),
+        "the recipient stays watched, so the edge can still re-drive the frame"
+    );
+}
+
 /// Dropping the probe is only safe because the reachability edge still is one.
 ///
 /// A stored DM rests in the outbox with no pending ACK and nothing on a timer,
@@ -9020,6 +9088,144 @@ fn test_relay_stored_still_fast_fails_a_connection_request() {
     assert_eq!(
         reason, "recipient_unreachable",
         "the typed event keeps the vocabulary it has always used"
+    );
+}
+
+/// A protocol with a Welcome in flight to bob over the internet, the events it
+/// emits, and the Welcome's message id.
+fn welcome_in_flight_to_bob() -> (OfflineProtocol, Arc<Mutex<Vec<Event>>>, String) {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    protocol.pending_key_packages.insert(
+        id("bob"),
+        ReceivedKeyPackage {
+            key_package_data: bob_key_package.key_package_data,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+    let _ = protocol
+        .send_message(&id("bob"), "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    let welcome_id = protocol
+        .welcome_lifecycles
+        .get(&id("bob"))
+        .unwrap()
+        .welcome_message
+        .id
+        .as_str()
+        .to_string();
+    (protocol, events, welcome_id)
+}
+
+fn welcome_send_failed_count(events: &Arc<Mutex<Vec<Event>>>) -> usize {
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, Event::WelcomeSendFailed { .. }))
+        .count()
+}
+
+/// A Welcome the relay's mailbox holds is still failed by its own verdict.
+///
+/// `stored` changes the plain-DM park and nothing else, so when the held
+/// Welcome is the frame the verdict names, and nothing has reported it yet, it
+/// takes the ordinary unreachable failure. This is the half of the repeat
+/// guard below that keeps it narrow: a guard that skipped every held verdict
+/// for a Welcome would leave this one wire-confirmed as `Sent` for a frame the
+/// peer never received.
+#[test]
+fn test_relay_stored_still_fails_a_welcome_on_its_own_verdict() {
+    let (mut protocol, events, welcome_id) = welcome_in_flight_to_bob();
+
+    protocol
+        .on_transport_send_failed_via(
+            &welcome_id,
+            Some("relay_stored".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+
+    let record = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
+    assert_eq!(record.state, WelcomeDeliveryState::Failed);
+    assert_eq!(record.unreachable_parks, 1);
+    assert_eq!(welcome_send_failed_count(&events), 1);
+}
+
+/// The second report of one Welcome send leaves the Welcome alone.
+///
+/// The relay answers each submission separately, and the bridges report the
+/// id a `stored` verdict names even when the first verdict of the burst has
+/// already drained that recipient's in-flight set, because for a plain DM that
+/// second report is what retires the probe. A Welcome that was not first in
+/// the burst is therefore reported twice for one send, milliseconds apart:
+/// `recipient_unreachable` by the drain, then `relay_stored` by its own
+/// verdict. Applied twice, it climbed two rungs of the Welcome ladder and told
+/// the app `welcome_send_failed` twice.
+#[test]
+fn test_relay_stored_after_a_drain_does_not_fail_a_welcome_twice() {
+    let (mut protocol, events, welcome_id) = welcome_in_flight_to_bob();
+
+    protocol
+        .on_transport_send_failed_via(
+            &welcome_id,
+            Some("recipient_unreachable: User not connected".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+    let drained = protocol.welcome_lifecycles.get(&id("bob")).unwrap().clone();
+    assert_eq!(
+        drained.state,
+        WelcomeDeliveryState::Failed,
+        "precondition: the drain failed the Welcome"
+    );
+    assert_eq!(welcome_send_failed_count(&events), 1);
+
+    protocol
+        .on_transport_send_failed_via(
+            &welcome_id,
+            Some("relay_stored".to_string()),
+            Some(TransportType::Internet),
+        )
+        .unwrap();
+
+    let after = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
+    assert_eq!(
+        after.unreachable_parks, drained.unreachable_parks,
+        "one send must climb one rung of the Welcome ladder, not two"
+    );
+    assert_eq!(
+        after.next_retry_at, drained.next_retry_at,
+        "the retry the drain scheduled stands"
+    );
+    assert_eq!(after.attempt, drained.attempt);
+    assert_eq!(
+        welcome_send_failed_count(&events),
+        1,
+        "the app is told once that this send failed"
     );
 }
 

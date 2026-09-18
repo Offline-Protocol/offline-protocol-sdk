@@ -28,8 +28,17 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   drops only the escalating 15s→600s probe. The probe existed because nothing
   else would re-deliver the frame; now something does, and each rung would only
   rewrite the row the relay already holds, per parked message, for as long as
-  the peer stays away. Recovery is the relay's own redelivery, with the
-  reachability edge behind it for a copy that is evicted or expires.
+  the peer stays away.
+
+  Recovery is the relay's own redelivery, and the reachability edge behind it. A
+  returning peer already re-drives every parked frame the outbox holds, so a
+  held copy the mailbox evicted or expired is covered by the same edge that has
+  always covered an unheld one - which means what the token saves is the probe
+  rungs while the peer is away, not the write on its return. Past the mailbox's
+  own retention the guarantee is that edge and the outbox lifetime: the trade
+  `edge_driven_unreachable_dm` opts into for every parked frame, taken here for
+  held frames alone, where something else is already committed to delivering
+  them.
 
   Everything that is not a plain direct message is deliberately untouched: both
   tokens normalize back onto the existing vocabulary before any typed branch
@@ -44,7 +53,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `stored` is a statement about one message, not about the recipient. The
   `DeliveryError` path fails every frame in flight to that recipient, so only
   the id the relay echoed takes the new token and the rest keep the
-  `recipient_unreachable` prefix they have always had.
+  `recipient_unreachable` prefix they have always had. Each held frame takes it
+  from its own verdict: the relay answers every submission separately, and the
+  first answer for an offline recipient resolves that recipient's whole
+  in-flight set, so a client reports the id its verdict named even when that set
+  is already drained. Without that, only the first frame of a burst would park
+  probe-free and the rest would each pay one probe before the relay said
+  `stored` again. A Welcome reported that way has usually been failed already
+  by the drain, and is not failed a second time: one send climbs one rung of its
+  retry ladder, and the app hears `welcome_send_failed` once.
 
 ## [0.26.0] — 2026-09-12
 

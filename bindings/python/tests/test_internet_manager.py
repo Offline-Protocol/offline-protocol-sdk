@@ -1176,6 +1176,27 @@ class TestMessageSentPushed:
             message_id="held-id", reason="relay_pushed_stored"
         )
 
+    def test_stored_without_pushed_parks_nothing(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        # `pushed: false` on a `MessageSent` is the ordinary accepted answer:
+        # the relay had a live socket and delivered the frame. A `stored` flag
+        # beside it says nothing this path can act on — there is no park to
+        # make and no probe to drop — so the whole park is gated on `pushed`,
+        # and a relay that sets only `stored` here must not move the frame out
+        # of its pending ACK.
+        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr._inflight.record_sent("offZ", "live-id", mgr._now_ms())
+        msg = {
+            "type": "MessageSent",
+            "recipient": "offZ",
+            "message_id": "live-id",
+            "pushed": False,
+            "stored": True,
+        }
+        mgr._process_received(json.dumps(msg).encode())
+        mock_protocol.internet_send_failed_with_reason.assert_not_called()
+
 
 class TestDeliveryErrorStored:
     """``DeliveryError { stored: true }`` parks the named frame probe-free.
@@ -1238,6 +1259,40 @@ class TestDeliveryErrorStored:
             for c in mock_protocol.internet_send_failed_with_reason.call_args_list
         ]
         assert reasons == ["recipient_unreachable: User not connected"]
+
+    def test_a_later_verdict_still_reports_its_own_frame_as_held(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        # The relay answers each submission separately, and the *first* verdict
+        # for a recipient drains that recipient's whole in-flight queue. The
+        # verdict for the second frame therefore finds nothing to drain, and
+        # the echoed id is the only thing left naming it. Reporting the drain
+        # alone would carry the token for the first frame of a burst and drop
+        # it for every other, leaving them on a probe the relay's own
+        # redelivery makes pointless until a probe earned the same verdict
+        # again. The React Native bridges are held to this by
+        # ``react_native_relay_parks_a_stored_delivery_error``, and the core
+        # retires the already-scheduled probe in
+        # ``test_relay_stored_verdict_drops_an_existing_probe``.
+        mgr = InternetManager(mock_protocol, "dev-1")
+        now = mgr._now_ms()
+        mgr._inflight.record_sent("offZ", "first-id", now)
+        mgr._inflight.record_sent("offZ", "second-id", now)
+
+        mgr._process_received(self._error("offZ", "first-id", stored=True))
+        # The burst's first verdict drained both: one held, one not.
+        reported = {
+            c.kwargs["message_id"]: c.kwargs["reason"]
+            for c in mock_protocol.internet_send_failed_with_reason.call_args_list
+        }
+        assert reported["first-id"] == "relay_stored"
+        assert reported["second-id"].startswith("recipient_unreachable")
+
+        mock_protocol.internet_send_failed_with_reason.reset_mock()
+        mgr._process_received(self._error("offZ", "second-id", stored=True))
+        mock_protocol.internet_send_failed_with_reason.assert_called_once_with(
+            message_id="second-id", reason="relay_stored"
+        )
 
 
 # ---------------------------------------------------------------------------

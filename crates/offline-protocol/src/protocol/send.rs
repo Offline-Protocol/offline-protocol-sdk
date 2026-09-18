@@ -3732,6 +3732,36 @@ impl OfflineProtocol {
                     Instant::now(),
                 );
             }
+            // A held verdict that finds its Welcome already `Failed` is the
+            // second report of one send, not a second failure. The bridges
+            // report the id a `stored` verdict names even after that
+            // recipient's in-flight set was drained, because for a plain DM
+            // the second report is what retires the probe the first one
+            // scheduled. So a Welcome anywhere but first in a burst is failed
+            // by the drain as `recipient_unreachable`, then reported again as
+            // `relay_stored` by its own verdict. Applied twice, the failure
+            // climbs two rungs of the Welcome ladder for one send and tells
+            // the app `welcome_send_failed` twice.
+            //
+            // `Failed` is what identifies the repeat: a resend moves the record
+            // to `SendAttempted` before it writes, so the verdict for a fresh
+            // send never finds it there. Holding the frame changes nothing for
+            // a Welcome, which keeps its own ladder either way, so skipping the
+            // repeat loses nothing. The fact above is still recorded, because
+            // the relay did say it again.
+            if stored
+                && self
+                    .welcome_lifecycles
+                    .get(&peer_id)
+                    .is_some_and(|record| record.state == WelcomeDeliveryState::Failed)
+            {
+                debug!(
+                    peer_id = %peer_id,
+                    message_id = %message_id,
+                    "Held verdict for a Welcome this send already failed; not failing it twice"
+                );
+                return Ok(());
+            }
             return self.apply_recipient_unreachable_failure(&peer_id, transport_error);
         }
         let reason = crate::events::WelcomeReasonCode::TransportUnavailable;
@@ -4001,9 +4031,34 @@ impl OfflineProtocol {
     /// `stored` drops that last step. The relay's mailbox is holding the
     /// frame and will deliver it on the recipient's next connection, so the
     /// park keeps everything that stops budget burning and adds no traffic of
-    /// its own; recovery is the relay's drain, plus the reachability edge for
-    /// the case where the held copy is evicted or expires. Everything the
-    /// probe rationale below argues for still holds for an unheld frame.
+    /// its own; recovery is the relay's drain, with the reachability edge
+    /// behind it as for every parked frame. Everything the probe rationale
+    /// below argues for still holds for an unheld frame.
+    ///
+    /// Two things that rationale does *not* cover, both deliberate:
+    ///
+    /// - **What is actually saved is the rungs, not the re-drive.** The edge
+    ///   fires on any reconnect, not only on an eviction, and
+    ///   [`Self::flush_outbox_for_peer_via`] selects on "in the outbox, not
+    ///   awaiting an ACK" — so a returning peer re-drives a held frame
+    ///   alongside the relay's own drain, exactly as it would an unheld one.
+    ///   Dedup collapses the pair. What the flag removes is the 15s→600s
+    ///   ladder *while the peer is away*, which is the traffic the relay asks
+    ///   senders not to generate. It follows that past the mailbox's own
+    ///   retention the delivery guarantee is that edge and the outbox
+    ///   lifetime — the same trade `edge_driven_unreachable_dm` opts into for
+    ///   every parked frame, taken unconditionally here because the mailbox is
+    ///   already committed to the redelivery.
+    /// - **`stored` is not persisted on the entry, unlike
+    ///   `OutboxEntry::relay_pushed`.** Nothing needs it to be: a restart
+    ///   re-drives the outbox, the relay answers `stored` again for a frame it
+    ///   still holds, and the park is re-derived from that answer — whereas
+    ///   `relay_pushed` has to survive, because it suppresses an app-facing
+    ///   event no later answer would restate. Persisting this one would also
+    ///   be wrong on its own terms: it records what the relay's mailbox held
+    ///   at park time, and the mailbox can evict between then and the next
+    ///   launch, so a restored flag would suppress the probe on the strength
+    ///   of a copy that may be gone.
     ///
     /// The mesh offer is here rather than at either caller so both parks make
     /// it, and because this is where the frame is already at hand. Its rationale

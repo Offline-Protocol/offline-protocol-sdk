@@ -2239,7 +2239,29 @@ class InternetManager(
             return
         }
         val now = monotonicNowMs()
-        val failedIds = inFlightTracker.drainRecipient(recipient, now)
+        val drained = inFlightTracker.drainRecipient(recipient, now)
+        // The relay answers every submission with its own verdict, and the
+        // first one to arrive for a recipient drains that recipient's whole
+        // queue. So a held id named by a *later* verdict is already out of the
+        // tracker, and reporting only what the drain returned would discard
+        // the one fact this path exists to carry: that frame would keep the
+        // probe the relay's own redelivery makes pointless until a probe
+        // earned the same verdict again — which is the relay write the token
+        // exists to avoid. Append it, as the Python client does. The id has
+        // usually been reported once already, by the drain, and the second
+        // report is safe for every kind of frame: the core ignores an id with
+        // no outbox entry; re-parking a plain DM drops its probe, because
+        // `park_unreachable_dm` clears the retry slot before deciding whether
+        // to re-arm it; a Welcome the drain already failed is left alone
+        // rather than failed twice; and a connection request, whose typed
+        // event the drain already fired, parks as the plain DM its first ACK
+        // retry would have made it. The sentinel guard in the loop still
+        // applies. Mirrors InternetManager.swift.
+        val failedIds = if (storedMessageId != null && storedMessageId !in drained) {
+            drained + storedMessageId
+        } else {
+            drained
+        }
         for (id in failedIds) {
             // Sentinel entries track app-authored raw SendMessage frames
             // only to keep the per-recipient FIFO honest for MessageSent
@@ -2271,7 +2293,7 @@ class InternetManager(
             "recipient" to recipient,
             "reason" to reason,
             "source" to source,
-            "failedInFlight" to failedIds.size,
+            "failedInFlight" to drained.size,
             "stored" to (storedMessageId != null)
         ))
     }

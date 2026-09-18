@@ -166,14 +166,41 @@ the recipient's next connection. The bridges report those two answers as
 the pending acknowledgement still goes, the entry still stays, the frame is
 still offered to the mesh, and the recipient is still watched. Only the timer is
 dropped, because a probe would rewrite a copy the relay already has - once per
-rung, per parked message, for as long as the peer stays away. Recovery is the
-relay's own redelivery, with the reachability edge behind it for the case where
-the held copy is evicted or expires.
+rung, per parked message, for as long as the peer stays away.
+
+Recovery is the relay's own redelivery, and the reachability edge behind it. A
+returning peer already re-drives every parked frame the outbox holds, so a held
+copy the mailbox evicted or expired is covered by the same edge that has always
+covered an unheld one. What the token saves is therefore the probe rungs while
+the peer is away, not the write on its return. Past the mailbox's own retention
+the guarantee is that edge and the outbox lifetime: the trade
+`edge_driven_unreachable_dm` opts into for every parked frame, taken here for
+held frames alone, where something else is already committed to delivering
+them.
 
 `stored` is a statement about one message, so only the id the relay named is
 reported that way; everything else this path drains keeps the ordinary
 unreachable verdict. A missing key - an older relay, a relay whose mailbox is
 off, a store that failed - means no copy is held, and the probe stands.
+
+**Each held frame takes the token from its own verdict, even after the drain.**
+The relay answers every submission separately, and the first answer for an
+offline recipient resolves that recipient's whole in-flight set. So a client
+reports the id its verdict named even when that set is already empty. Without
+that, only the first frame of a burst parks probe-free and every other one pays
+a probe rung before the relay says `stored` again. A frame reported this way
+has usually been reported once already, as unreachable by the drain, and the
+second report is safe for each kind of frame:
+
+- A plain direct message is re-parked, and the re-park is what retires the
+  probe the first report scheduled.
+- A Welcome the first report already failed is left alone, so one send climbs
+  one rung of its ladder and the app hears `welcome_send_failed` once.
+- A connection request has already had its typed undeliverable event, which
+  consumed its tracking. It parks as the plain message it now is, with that
+  path's `MessageUndeliverable`, which is where the verdict on its first
+  acknowledgement retry would have taken it anyway.
+- An id with no outbox entry is ignored.
 
 **Parking removes the pending acknowledgement**, which is what makes it
 different from a long retry: nothing is counting down against the message any
