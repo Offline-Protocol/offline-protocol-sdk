@@ -175,6 +175,25 @@ reported that way; everything else this path drains keeps the ordinary
 unreachable verdict. A missing key - an older relay, a relay whose mailbox is
 off, a store that failed - means no copy is held, and the probe stands.
 
+**Each held frame takes the token from its own verdict, even after the drain.**
+The relay answers every submission separately, and the first answer for an
+offline recipient resolves that recipient's whole in-flight set. So a client
+reports the id its verdict named even when that set is already empty. Without
+that, only the first frame of a burst parks probe-free and every other one pays
+a probe rung before the relay says `stored` again. A frame reported this way
+has usually been reported once already, as unreachable by the drain, and the
+second report is safe for each kind of frame:
+
+- A plain direct message is re-parked, and the re-park is what retires the
+  probe the first report scheduled.
+- A Welcome the first report already failed is left alone, so one send climbs
+  one rung of its ladder and the app hears `welcome_send_failed` once.
+- A connection request has already had its typed undeliverable event, which
+  consumed its tracking. It parks as the plain message it now is, with that
+  path's `MessageUndeliverable`, which is where the verdict on its first
+  acknowledgement retry would have taken it anyway.
+- An id with no outbox entry is ignored.
+
 **Parking removes the pending acknowledgement**, which is what makes it
 different from a long retry: nothing is counting down against the message any
 more.

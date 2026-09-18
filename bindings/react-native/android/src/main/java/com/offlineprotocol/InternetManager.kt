@@ -2247,11 +2247,16 @@ class InternetManager(
         // the one fact this path exists to carry: that frame would keep the
         // probe the relay's own redelivery makes pointless until a probe
         // earned the same verdict again — which is the relay write the token
-        // exists to avoid. Append it, as the Python client does. Safe for an
-        // id that is not ours, because the core ignores an id with no outbox
-        // entry; and re-parking one that has an entry drops its probe, because
+        // exists to avoid. Append it, as the Python client does. The id has
+        // usually been reported once already, by the drain, and the second
+        // report is safe for every kind of frame: the core ignores an id with
+        // no outbox entry; re-parking a plain DM drops its probe, because
         // `park_unreachable_dm` clears the retry slot before deciding whether
-        // to re-arm it. The sentinel guard in the loop still applies.
+        // to re-arm it; a Welcome the drain already failed is left alone
+        // rather than failed twice; and a connection request, whose typed
+        // event the drain already fired, parks as the plain DM its first ACK
+        // retry would have made it. The sentinel guard in the loop still
+        // applies. Mirrors InternetManager.swift.
         val failedIds = if (storedMessageId != null && storedMessageId !in drained) {
             drained + storedMessageId
         } else {
@@ -2288,7 +2293,7 @@ class InternetManager(
             "recipient" to recipient,
             "reason" to reason,
             "source" to source,
-            "failedInFlight" to failedIds.size,
+            "failedInFlight" to drained.size,
             "stored" to (storedMessageId != null)
         ))
     }

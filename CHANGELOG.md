@@ -59,7 +59,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   in-flight set, so a client reports the id its verdict named even when that set
   is already drained. Without that, only the first frame of a burst would park
   probe-free and the rest would each pay one probe before the relay said
-  `stored` again.
+  `stored` again. A Welcome reported that way has usually been failed already
+  by the drain, and is not failed a second time: one send climbs one rung of its
+  retry ladder, and the app hears `welcome_send_failed` once.
 
 ## [0.26.0] — 2026-09-12
 

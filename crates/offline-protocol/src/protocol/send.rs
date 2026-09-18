@@ -3732,6 +3732,36 @@ impl OfflineProtocol {
                     Instant::now(),
                 );
             }
+            // A held verdict that finds its Welcome already `Failed` is the
+            // second report of one send, not a second failure. The bridges
+            // report the id a `stored` verdict names even after that
+            // recipient's in-flight set was drained, because for a plain DM
+            // the second report is what retires the probe the first one
+            // scheduled. So a Welcome anywhere but first in a burst is failed
+            // by the drain as `recipient_unreachable`, then reported again as
+            // `relay_stored` by its own verdict. Applied twice, the failure
+            // climbs two rungs of the Welcome ladder for one send and tells
+            // the app `welcome_send_failed` twice.
+            //
+            // `Failed` is what identifies the repeat: a resend moves the record
+            // to `SendAttempted` before it writes, so the verdict for a fresh
+            // send never finds it there. Holding the frame changes nothing for
+            // a Welcome, which keeps its own ladder either way, so skipping the
+            // repeat loses nothing. The fact above is still recorded, because
+            // the relay did say it again.
+            if stored
+                && self
+                    .welcome_lifecycles
+                    .get(&peer_id)
+                    .is_some_and(|record| record.state == WelcomeDeliveryState::Failed)
+            {
+                debug!(
+                    peer_id = %peer_id,
+                    message_id = %message_id,
+                    "Held verdict for a Welcome this send already failed; not failing it twice"
+                );
+                return Ok(());
+            }
             return self.apply_recipient_unreachable_failure(&peer_id, transport_error);
         }
         let reason = crate::events::WelcomeReasonCode::TransportUnavailable;
