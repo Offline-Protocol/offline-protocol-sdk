@@ -13,8 +13,9 @@
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use std::collections::BTreeMap;
 
@@ -36,7 +37,28 @@ use offline_protocol_sealed::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
 const APP_ID: &str = "com.example.lock";
-const NOW: u64 = 1_787_314_332;
+
+/// The instant every test in this file runs at: the wall clock, read once per
+/// process.
+///
+/// It cannot be a fixed date, however much that would read better. The device
+/// is told the time explicitly, but the phone is a production `MlsManager`,
+/// and its MLS library checks a key package's lifetime against the system
+/// clock with no seam to pin it. So a fixed instant expires together with the
+/// device's key packages (`LEAF_KEY_PACKAGE_LIFETIME` after it). The first
+/// value here, 2026-08-21, turned forty-eight of these tests red on
+/// 2026-09-18, on every branch, for changes that had nothing to do with
+/// pairing. Read once, it still gives every stamp and every `handle` call in a
+/// run the same instant, which is the property [`phone_control_frame`] needs.
+fn now() -> u64 {
+    static NOW: OnceLock<u64> = OnceLock::new();
+    *NOW.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("the clock is past 1970")
+            .as_secs()
+    })
+}
 
 /// A phone, constructed the way production does it: the identity is minted
 /// first and the manager is then built at the address it derives to.
@@ -74,15 +96,13 @@ fn device(store: Arc<dyn LeafStore>) -> LeafDevice {
 /// construction both ends use, so this is the phone's own signature rather
 /// than a second implementation of one.
 ///
-/// The frame is stamped at [`NOW`], the same instant the device is told the
-/// time is, rather than at the wall clock. That is not tidiness: the stamp is
-/// inside the signature and the device refuses a frame older than its window,
-/// so a fixture stamped from the real clock would pass today and start failing
-/// on its own once wall-clock time drifted past `NOW` by more than the window
-/// allows. A test that expires is worse than no test, because it fails in a
-/// week on a change that had nothing to do with it.
+/// The frame is stamped at [`now`], the same instant the device is told the
+/// time is, rather than at a fresh reading of the clock. That is not tidiness:
+/// the stamp is inside the signature and the device refuses a frame outside its
+/// window, so a stamp taken separately from the instant handed to the device
+/// could land on the wrong side of it on a slow runner.
 fn phone_control_frame(phone: &Phone, to: &str, content: String) -> Message {
-    phone_control_frame_at(phone, to, content, NOW)
+    phone_control_frame_at(phone, to, content, now())
 }
 
 /// [`phone_control_frame`] stamped at a chosen instant, for the tests whose
@@ -154,7 +174,7 @@ fn pair(phone: &Phone, device: &mut LeafDevice) -> String {
     let device_address = device.address().to_string();
 
     let advertisement = device
-        .key_package_frame(&phone.address, NOW)
+        .key_package_frame(&phone.address, now())
         .expect("device mints a key package");
     import_device_key_package(phone, &advertisement);
 
@@ -172,7 +192,7 @@ fn pair(phone: &Phone, device: &mut LeafDevice) -> String {
         ),
     );
 
-    let handled = device.handle(&welcome_frame, NOW).expect("device joins");
+    let handled = device.handle(&welcome_frame, now()).expect("device joins");
     assert!(
         handled.events.contains(&LeafEvent::SessionEstablished {
             peer: phone.address.clone(),
@@ -260,7 +280,7 @@ fn a_phone_and_a_device_pair_and_talk_both_ways() {
         .encrypt_for_user(&device_address, b"unlock")
         .expect("phone seals");
     let frame = phone_sealed_frame(&phone, &device_address, &sealed);
-    let handled = device.handle(&frame, NOW).expect("device opens");
+    let handled = device.handle(&frame, now()).expect("device opens");
     assert_eq!(
         handled.events,
         vec![LeafEvent::MessageReceived {
@@ -271,7 +291,7 @@ fn a_phone_and_a_device_pair_and_talk_both_ways() {
 
     // Device to phone.
     let answer = device
-        .seal(&phone.address, "unlocked", NOW)
+        .seal(&phone.address, "unlocked", now())
         .expect("device seals");
     let opened = phone
         .manager
@@ -327,7 +347,7 @@ fn a_driven_rekey_reaches_the_device_as_a_session_reset() {
         ),
     );
 
-    let handled = device.handle(&reset_frame, NOW).expect("device resets");
+    let handled = device.handle(&reset_frame, now()).expect("device resets");
     assert!(
         handled.events.contains(&LeafEvent::SessionReset {
             peer: phone.address.clone(),
@@ -362,7 +382,9 @@ fn a_driven_rekey_reaches_the_device_as_a_session_reset() {
             serde_json::to_string(&welcome).expect("welcome serializes")
         ),
     );
-    let rejoined = device.handle(&welcome_frame, NOW).expect("device rejoins");
+    let rejoined = device
+        .handle(&welcome_frame, now())
+        .expect("device rejoins");
     assert!(rejoined.events.contains(&LeafEvent::SessionEstablished {
         peer: phone.address.clone(),
     }));
@@ -381,7 +403,7 @@ fn an_unsigned_control_frame_is_refused() {
     frame.metadata.clear();
 
     let err = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect_err("unsigned was accepted");
     assert!(
         matches!(err, LeafError::ControlFrameRefused(_)),
@@ -404,7 +426,7 @@ fn half_a_signature_is_refused() {
         .remove(offline_protocol_sealed::CTRL_SIG_META_KEY);
 
     let err = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect_err("a key without a signature was accepted");
     assert!(
         matches!(err, LeafError::ControlFrameRefused(_)),
@@ -428,7 +450,7 @@ fn a_signing_key_that_does_not_derive_to_the_sender_is_refused() {
     sign_as(&impostor, &mut frame);
 
     let err = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect_err("an impostor's key was accepted");
     assert!(
         matches!(err, LeafError::IdentityBinding(_)),
@@ -452,7 +474,7 @@ fn a_sender_that_is_not_an_address_is_refused() {
     sign_as(&phone, &mut frame);
 
     let err = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect_err("a nickname sender was accepted");
     assert!(
         matches!(err, LeafError::IdentityBinding(_)),
@@ -496,7 +518,7 @@ fn a_key_package_that_claims_another_owner_is_refused() {
     );
 
     let err = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect_err("a borrowed-name package was accepted");
     assert!(
         matches!(err, LeafError::IdentityBinding(_)),
@@ -515,7 +537,7 @@ fn a_welcome_for_another_pairs_group_is_refused() {
     // phone. Without the group check the device would join a room whose
     // membership it never chose.
     let advertisement = device
-        .key_package_frame(&stranger.address, NOW)
+        .key_package_frame(&stranger.address, now())
         .expect("device advertises");
     import_device_key_package(&stranger, &advertisement);
     let welcome = stranger
@@ -534,7 +556,7 @@ fn a_welcome_for_another_pairs_group_is_refused() {
     );
 
     let err = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect_err("a relayed welcome was accepted");
     assert!(
         matches!(err, LeafError::IdentityBinding(_)),
@@ -566,7 +588,7 @@ fn state_survives_a_power_cycle() {
         .encrypt_for_user(&device_address, b"still there?")
         .expect("phone seals");
     let frame = phone_sealed_frame(&phone, &device_address, &sealed);
-    let handled = revived.handle(&frame, NOW).expect("revived device opens");
+    let handled = revived.handle(&frame, now()).expect("revived device opens");
     assert_eq!(
         handled.events,
         vec![LeafEvent::MessageReceived {
@@ -600,7 +622,9 @@ fn an_accepted_frame_is_answered_with_a_delivery_acknowledgement() {
         "the frame under test did not ask for an answer, so it proves nothing"
     );
 
-    let handled = device.handle(&frame, NOW).expect("device opens the frame");
+    let handled = device
+        .handle(&frame, now())
+        .expect("device opens the frame");
     let answers = acknowledgements(&handled);
     assert_eq!(answers.len(), 1, "an accepted frame was not answered");
     let ack = answers[0];
@@ -654,7 +678,7 @@ fn a_frame_from_a_peer_this_device_does_not_know_is_not_answered() {
     sign_as(&stranger, &mut frame);
     assert!(frame.requires_ack, "the frame did not ask for an answer");
 
-    let handled = device.handle(&frame, NOW).expect("a stranger is ignored");
+    let handled = device.handle(&frame, now()).expect("a stranger is ignored");
     assert!(
         handled.outbound.is_empty(),
         "a device answered a peer it has never paired with: {:?}",
@@ -691,7 +715,7 @@ fn a_frame_that_names_a_known_peer_but_proves_nothing_is_not_answered() {
     );
 
     let handled = device
-        .handle(&forged, NOW)
+        .handle(&forged, now())
         .expect("an unsigned frame is ignored");
     assert!(
         handled.outbound.is_empty(),
@@ -718,7 +742,9 @@ fn frames_that_prove_nothing_cannot_evict_what_a_device_answered() {
         .encrypt_for_user(&device_address, b"unlock")
         .expect("phone seals");
     let genuine = phone_sealed_frame(&phone, &device_address, &sealed);
-    device.handle(&genuine, NOW).expect("first delivery opens");
+    device
+        .handle(&genuine, now())
+        .expect("first delivery opens");
 
     // Exactly the depth, which is the fewest that would push the genuine id
     // off the end if junk were remembered. The same four that
@@ -731,7 +757,7 @@ fn frames_that_prove_nothing_cannot_evict_what_a_device_answered() {
             offline_protocol_core::AppId::new(APP_ID).expect("app id"),
             format!("junk {n}"),
         );
-        let handled = device.handle(&forged, NOW).expect("junk is ignored");
+        let handled = device.handle(&forged, now()).expect("junk is ignored");
         assert!(
             handled.outbound.is_empty(),
             "a device answered junk: {:?}",
@@ -740,7 +766,7 @@ fn frames_that_prove_nothing_cannot_evict_what_a_device_answered() {
     }
 
     let repeat = device
-        .handle(&genuine, NOW)
+        .handle(&genuine, now())
         .expect("a retransmission is answered");
     assert_eq!(
         acknowledgements(&repeat).len(),
@@ -768,7 +794,7 @@ fn an_unsolicited_probe_acknowledgement_is_not_answered() {
     );
 
     let handled = device
-        .handle(&forged, NOW)
+        .handle(&forged, now())
         .expect("an unsolicited ack is ignored");
     assert!(
         handled.outbound.is_empty(),
@@ -799,7 +825,7 @@ fn a_frame_that_is_refused_is_not_answered() {
     frame.content.push_str(" tampered");
 
     let err = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect_err("a tampered frame was accepted");
     assert!(
         matches!(
@@ -827,12 +853,12 @@ fn what_a_device_answered_survives_a_power_cycle() {
         .encrypt_for_user(&device_address, b"unlock")
         .expect("phone seals");
     let frame = phone_sealed_frame(&phone, &device_address, &sealed);
-    device.handle(&frame, NOW).expect("first delivery opens");
+    device.handle(&frame, now()).expect("first delivery opens");
 
     // The same flash, a fresh device.
     let mut rebooted = LeafDevice::resume(Arc::clone(&store), APP_ID).expect("device resumes");
     let handled = rebooted
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect("a replay after a reboot is answered");
     assert_eq!(
         acknowledgements(&handled).len(),
@@ -855,7 +881,9 @@ fn a_frame_that_does_not_ask_for_an_answer_is_not_answered() {
     let mut frame = phone_sealed_frame(&phone, &device_address, &sealed);
     frame.requires_ack = false;
 
-    let handled = device.handle(&frame, NOW).expect("device opens the frame");
+    let handled = device
+        .handle(&frame, now())
+        .expect("device opens the frame");
     assert!(
         acknowledgements(&handled).is_empty(),
         "a device answered a frame that asked for no answer"
@@ -888,7 +916,7 @@ fn a_replayed_sealed_frame_is_answered_again_and_never_opened_twice() {
         .expect("phone seals");
     let frame = phone_sealed_frame(&phone, &device_address, &sealed);
 
-    let first = device.handle(&frame, NOW).expect("first delivery opens");
+    let first = device.handle(&frame, now()).expect("first delivery opens");
     assert!(
         first.events.contains(&LeafEvent::MessageReceived {
             peer: phone.address.clone(),
@@ -903,7 +931,7 @@ fn a_replayed_sealed_frame_is_answered_again_and_never_opened_twice() {
         "an accepted frame was not answered"
     );
 
-    let second = device.handle(&frame, NOW).expect("a replay is answered");
+    let second = device.handle(&frame, now()).expect("a replay is answered");
     assert_eq!(
         acknowledgements(&second).len(),
         1,
@@ -948,7 +976,9 @@ fn a_replay_the_device_no_longer_remembers_is_refused() {
         .encrypt_for_user(&device_address, b"unlock")
         .expect("phone seals");
     let capture = phone_sealed_frame(&phone, &device_address, &sealed);
-    device.handle(&capture, NOW).expect("first delivery opens");
+    device
+        .handle(&capture, now())
+        .expect("first delivery opens");
 
     // Four more, which is exactly the depth, so the captured frame's id falls
     // off the end.
@@ -958,11 +988,11 @@ fn a_replay_the_device_no_longer_remembers_is_refused() {
             .encrypt_for_user(&device_address, format!("later {n}").as_bytes())
             .expect("phone seals");
         let frame = phone_sealed_frame(&phone, &device_address, &sealed);
-        device.handle(&frame, NOW).expect("later delivery opens");
+        device.handle(&frame, now()).expect("later delivery opens");
     }
 
     let err = device
-        .handle(&capture, NOW)
+        .handle(&capture, now())
         .expect_err("a forgotten replay was answered anyway");
     assert!(
         matches!(err, LeafError::Mls(_)),
@@ -981,7 +1011,7 @@ fn the_device_answers_a_probe_with_an_ack() {
         &device.address().to_string(),
         prefixes::SESSION_CONFIRM_PROBE.to_string(),
     );
-    let handled = device.handle(&probe, NOW).expect("device answers");
+    let handled = device.handle(&probe, now()).expect("device answers");
 
     let said = spoken(&handled);
     assert_eq!(said.len(), 1);
@@ -1013,7 +1043,7 @@ fn a_probe_without_a_session_is_not_answered() {
         &device.address().to_string(),
         prefixes::SESSION_CONFIRM_PROBE.to_string(),
     );
-    let handled = device.handle(&probe, NOW).expect("probe is handled");
+    let handled = device.handle(&probe, now()).expect("probe is handled");
 
     assert!(
         handled.outbound.is_empty(),
@@ -1045,7 +1075,7 @@ fn an_unsolicited_acknowledgement_does_not_establish_a_session() {
     );
 
     let handled = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect("the acknowledgement is handled");
     assert!(
         !handled
@@ -1069,7 +1099,7 @@ fn an_unsolicited_acknowledgement_does_not_establish_a_session() {
     // And what firmware would have acted on is refused where it counts: there
     // is no session to seal into, whatever the event said.
     let err = device
-        .seal(&stranger.address, "unlock", NOW)
+        .seal(&stranger.address, "unlock", now())
         .expect_err("sealed to a peer that only sent an acknowledgement");
     assert!(matches!(err, LeafError::NoSession(_)), "produced {err:?}");
 }
@@ -1082,7 +1112,7 @@ fn a_peer_that_already_has_a_key_package_is_not_sent_another() {
 
     // The device advertises first, which is how pairing starts.
     let _ = device
-        .key_package_frame(&phone.address, NOW)
+        .key_package_frame(&phone.address, now())
         .expect("device advertises");
 
     // The phone answers with its own package, as the engine does. If the
@@ -1115,7 +1145,9 @@ fn a_peer_that_already_has_a_key_package_is_not_sent_another() {
         ),
     );
 
-    let handled = device.handle(&frame, NOW).expect("device records the peer");
+    let handled = device
+        .handle(&frame, now())
+        .expect("device records the peer");
     assert!(
         spoken(&handled).is_empty(),
         "the device answered a key package with another one, which loops"
@@ -1138,7 +1170,7 @@ fn the_envelope_encoding_follows_what_the_peer_advertised() {
         .expect("record")
         .is_empty());
     let floor = device
-        .seal(&phone.address, "floor", NOW)
+        .seal(&phone.address, "floor", now())
         .expect("device seals");
     let body = floor
         .content
@@ -1206,7 +1238,7 @@ fn a_failing_store_produces_no_frame() {
     store.arm();
 
     let err = device
-        .seal(&phone.address, "unlock", NOW)
+        .seal(&phone.address, "unlock", now())
         .expect_err("a frame was produced despite the store failing");
     assert!(
         matches!(err, LeafError::Storage(_)),
@@ -1281,7 +1313,7 @@ fn a_store_that_fails_while_recording_the_answer_still_reports_the_message() {
     store.arm();
 
     let handled = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect("a frame this device opened was reported as a failure");
     assert!(
         handled.events.contains(&LeafEvent::MessageReceived {
@@ -1345,7 +1377,7 @@ fn a_device_address_derives_from_its_own_key() {
     );
     sign_as(&phone, &mut frame);
 
-    let handled = device.handle(&frame, NOW).expect("probe answered");
+    let handled = device.handle(&frame, now()).expect("probe answered");
     let ack = spoken(&handled)[0];
     let key = BASE64
         .decode(
@@ -1425,7 +1457,7 @@ fn commit_to(phone: &Phone, device: &mut LeafDevice, device_address: &str) {
     let commit = phone.manager.update_keys(&group_id).expect("phone commits");
     let frame = phone_sealed_frame(phone, device_address, &commit);
     let handled = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect("device applies the commit");
     assert!(
         handled
@@ -1469,7 +1501,7 @@ fn a_commit_trims_the_prior_epochs_it_leaves_behind() {
         .encrypt_for_user(&device_address, b"still talking")
         .expect("phone seals");
     let frame = phone_sealed_frame(&phone, &device_address, &sealed);
-    let handled = device.handle(&frame, NOW).expect("device opens");
+    let handled = device.handle(&frame, now()).expect("device opens");
     assert_eq!(
         handled.events,
         vec![LeafEvent::MessageReceived {
@@ -1534,7 +1566,7 @@ fn a_corrupt_group_state_is_not_reported_as_a_missing_session() {
         .expect("store");
 
     let err = device
-        .seal(&phone.address, "unlock", NOW)
+        .seal(&phone.address, "unlock", now())
         .expect_err("a corrupt group state still produced a frame");
     assert!(
         matches!(err, LeafError::Storage(_)),
@@ -1545,7 +1577,7 @@ fn a_corrupt_group_state_is_not_reported_as_a_missing_session() {
     // not simply asserting that everything is a storage failure.
     let stranger = new_phone();
     let err = device
-        .seal(&stranger.address, "unlock", NOW)
+        .seal(&stranger.address, "unlock", now())
         .expect_err("sealed to a peer with no session");
     assert!(
         matches!(err, LeafError::NoSession(_)),
@@ -1696,7 +1728,7 @@ fn a_replayed_session_reset_does_not_tear_down_the_new_session() {
         ),
     );
 
-    let handled = device.handle(&reset_frame, NOW).expect("device resets");
+    let handled = device.handle(&reset_frame, now()).expect("device resets");
     assert!(handled.events.contains(&LeafEvent::SessionReset {
         peer: phone.address.clone(),
     }));
@@ -1716,7 +1748,9 @@ fn a_replayed_session_reset_does_not_tear_down_the_new_session() {
             serde_json::to_string(&welcome).expect("welcome")
         ),
     );
-    device.handle(&welcome_frame, NOW).expect("device rejoins");
+    device
+        .handle(&welcome_frame, now())
+        .expect("device rejoins");
     assert!(device.has_session(&phone.address).expect("session check"));
 
     // Now the captured frame is sent again. Its signature verifies exactly as
@@ -1726,7 +1760,7 @@ fn a_replayed_session_reset_does_not_tear_down_the_new_session() {
     // frame captured once is a session teardown replayable for as long as the
     // window lasts.
     let replayed = device
-        .handle(&reset_frame, NOW)
+        .handle(&reset_frame, now())
         .expect("the replay is handled");
     assert!(
         !replayed.events.contains(&LeafEvent::SessionReset {
@@ -1746,7 +1780,7 @@ fn a_replayed_session_reset_does_not_tear_down_the_new_session() {
         .encrypt_for_user(&device_address, b"unlock")
         .expect("phone seals");
     let frame = phone_sealed_frame(&phone, &device_address, &sealed);
-    let handled = device.handle(&frame, NOW).expect("device opens");
+    let handled = device.handle(&frame, now()).expect("device opens");
     assert_eq!(
         handled.events,
         vec![LeafEvent::MessageReceived {
@@ -1792,7 +1826,7 @@ fn a_flood_of_strangers_cannot_displace_an_established_peer() {
         ),
     );
     device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect("device records the phone");
 
     // Producing a signature that derives to its own address is as hard as
@@ -1823,7 +1857,7 @@ fn a_flood_of_strangers_cannot_displace_an_established_peer() {
             ),
         );
         // Admitted or refused, both are fine. What is not fine is unbounded.
-        let _ = device.handle(&frame, NOW);
+        let _ = device.handle(&frame, now());
     }
 
     assert!(
@@ -1843,7 +1877,7 @@ fn a_flood_of_strangers_cannot_displace_an_established_peer() {
         .encrypt_for_user(&device_address, b"unlock")
         .expect("phone seals");
     let frame = phone_sealed_frame(&phone, &device_address, &sealed);
-    let handled = device.handle(&frame, NOW).expect("device opens");
+    let handled = device.handle(&frame, now()).expect("device opens");
     assert_eq!(
         handled.events,
         vec![LeafEvent::MessageReceived {
@@ -1864,7 +1898,7 @@ fn a_welcome_whose_body_lies_about_its_group_is_refused() {
     // on material that really was handed to this peer. That is what keeps this
     // test pointed at the gate it names rather than at an earlier one.
     let advertisement = device
-        .key_package_frame(&phone.address, NOW)
+        .key_package_frame(&phone.address, now())
         .expect("device advertises");
     let decoy = phone
         .manager
@@ -1901,7 +1935,7 @@ fn a_welcome_whose_body_lies_about_its_group_is_refused() {
     );
 
     let err = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect_err("a welcome whose body lied was accepted");
     assert!(
         matches!(err, LeafError::IdentityBinding(_)),
@@ -2007,7 +2041,7 @@ fn a_cut_between_the_epoch_records_and_the_state_does_not_wedge_the_session() {
     let commit = phone.manager.update_keys(&group_id).expect("phone commits");
     let frame = phone_sealed_frame(&phone, &device_address, &commit);
     let err = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect_err("a state write that failed still reported success");
     assert!(
         matches!(err, LeafError::Storage(_)),
@@ -2025,7 +2059,7 @@ fn a_cut_between_the_epoch_records_and_the_state_does_not_wedge_the_session() {
     // which is what a radio does with anything unacknowledged.
     store.restore_power();
     let retried = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect("the retried commit was refused, so the session is wedged");
     assert!(
         retried
@@ -2043,7 +2077,7 @@ fn a_cut_between_the_epoch_records_and_the_state_does_not_wedge_the_session() {
         .encrypt_for_user(&device_address, b"unlock")
         .expect("phone seals");
     let app_frame = phone_sealed_frame(&phone, &device_address, &sealed);
-    let handled = device.handle(&app_frame, NOW).expect("device opens");
+    let handled = device.handle(&app_frame, now()).expect("device opens");
     assert_eq!(
         handled.events,
         vec![LeafEvent::MessageReceived {
@@ -2055,7 +2089,7 @@ fn a_cut_between_the_epoch_records_and_the_state_does_not_wedge_the_session() {
     // The device answers too, so its own ratchet advanced rather than merely
     // its reader.
     let answer = device
-        .seal(&phone.address, "unlocked", NOW)
+        .seal(&phone.address, "unlocked", now())
         .expect("device seals");
     let opened = phone
         .manager
@@ -2124,7 +2158,7 @@ fn a_probe_against_a_group_state_that_will_not_load_is_not_answered() {
         prefixes::SESSION_CONFIRM_PROBE.to_string(),
     );
     let err = device
-        .handle(&probe, NOW)
+        .handle(&probe, now())
         .expect_err("a device with an unloadable session confirmed one anyway");
 
     // And it is reported as what it is. A store handing back bytes this device
@@ -2263,7 +2297,7 @@ fn a_frame_addressed_to_another_node_is_ignored() {
     // dispatch verifies it happily; only the addressing says it is not ours.
     let overheard = phone_control_frame(&phone, &bystander.address, body.clone());
     let handled = device
-        .handle(&overheard, NOW)
+        .handle(&overheard, now())
         .expect("overhearing a neighbour is not a failure");
 
     assert!(
@@ -2299,7 +2333,7 @@ fn a_frame_addressed_to_another_node_is_ignored() {
     // this the test above would pass on a device that answers nothing at all.
     let addressed = phone_control_frame(&phone, &device_address, body);
     let handled = device
-        .handle(&addressed, NOW)
+        .handle(&addressed, now())
         .expect("device handles a frame addressed to it");
     assert_eq!(
         spoken(&handled).len(),
@@ -2337,7 +2371,7 @@ fn a_sealed_frame_addressed_elsewhere_is_not_opened() {
     let elsewhere = phone_sealed_frame(&phone, &bystander.address, &sealed);
 
     let handled = device
-        .handle(&elsewhere, NOW)
+        .handle(&elsewhere, now())
         .expect("a frame addressed elsewhere is not a failure");
     assert!(
         matches!(handled.events.as_slice(), [LeafEvent::Ignored { .. }]),
@@ -2348,7 +2382,7 @@ fn a_sealed_frame_addressed_elsewhere_is_not_opened() {
     // The control: the same ciphertext addressed here opens. What the device
     // refused was the addressing rather than the frame.
     let addressed = phone_sealed_frame(&phone, &device_address, &sealed);
-    let handled = device.handle(&addressed, NOW).expect("device opens");
+    let handled = device.handle(&addressed, now()).expect("device opens");
     assert_eq!(
         handled.events,
         vec![LeafEvent::MessageReceived {
@@ -2384,7 +2418,7 @@ fn traffic_between_two_neighbours_is_ignored_rather_than_reported_as_a_failure()
     let overheard = phone_sealed_frame(&stranger, &bystander.address, &envelope);
 
     let handled = device
-        .handle(&overheard, NOW)
+        .handle(&overheard, now())
         .expect("two neighbours talking is not this device's failure");
     assert!(
         matches!(handled.events.as_slice(), [LeafEvent::Ignored { .. }]),
@@ -2400,7 +2434,7 @@ fn traffic_between_two_neighbours_is_ignored_rather_than_reported_as_a_failure()
         .encrypt_for_user(&device.address().to_string(), b"unlock")
         .expect("phone seals");
     let frame = phone_sealed_frame(&phone, &device.address().to_string(), &sealed);
-    let handled = device.handle(&frame, NOW).expect("device opens");
+    let handled = device.handle(&frame, now()).expect("device opens");
     assert_eq!(
         handled.events,
         vec![LeafEvent::MessageReceived {
@@ -2469,7 +2503,7 @@ fn a_failed_eviction_leaves_no_key_package_the_index_has_forgotten() {
     let peers: Vec<String> = (0..MAX_UNSPENT).map(|_| new_phone().address).collect();
     for peer in &peers {
         device
-            .key_package_frame(peer, NOW)
+            .key_package_frame(peer, now())
             .expect("device mints a key package");
     }
     let held: Vec<String> = store
@@ -2485,7 +2519,7 @@ fn a_failed_eviction_leaves_no_key_package_the_index_has_forgotten() {
 
     // One more. This one evicts, the erase fails, and the mint fails with it.
     let err = device
-        .key_package_frame(&new_phone().address, NOW)
+        .key_package_frame(&new_phone().address, now())
         .expect_err("a package was minted although its eviction could not be erased");
 
     // The invariant: nothing is on flash that the index has stopped naming.
@@ -2526,7 +2560,7 @@ fn an_overheard_key_package_cannot_be_spent_by_the_node_that_overheard_it() {
     let device_address = device.address().to_string();
 
     let advertisement = device
-        .key_package_frame(&phone.address, NOW)
+        .key_package_frame(&phone.address, now())
         .expect("device advertises to the phone");
 
     // Copied off the air and spent under the eavesdropper's own name.
@@ -2546,7 +2580,7 @@ fn an_overheard_key_package_cannot_be_spent_by_the_node_that_overheard_it() {
     );
 
     let err = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect_err("an overheard key package was spent by whoever copied it");
     assert!(
         matches!(err, LeafError::UnsolicitedWelcome(_)),
@@ -2587,7 +2621,7 @@ fn an_overheard_key_package_cannot_be_spent_by_the_node_that_overheard_it() {
         ),
     );
     let handled = device
-        .handle(&welcome_frame, NOW)
+        .handle(&welcome_frame, now())
         .expect("the intended peer can still join");
     assert!(
         handled.events.contains(&LeafEvent::SessionEstablished {
@@ -2612,12 +2646,12 @@ fn a_welcome_cannot_spend_a_key_package_minted_for_a_different_peer() {
     let device_address = device.address().to_string();
 
     let for_phone = device
-        .key_package_frame(&phone.address, NOW)
+        .key_package_frame(&phone.address, now())
         .expect("device advertises to the phone");
     // The neighbour is paired with too, so it holds a record and a package of
     // its own on this device.
     device
-        .key_package_frame(&neighbour.address, NOW)
+        .key_package_frame(&neighbour.address, now())
         .expect("device advertises to the neighbour");
 
     // But it builds its Welcome on the phone's package rather than its own.
@@ -2637,7 +2671,7 @@ fn a_welcome_cannot_spend_a_key_package_minted_for_a_different_peer() {
     );
 
     let err = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect_err("a peer spent a package minted for somebody else");
     assert!(
         matches!(err, LeafError::UnsolicitedWelcome(_)),
@@ -2666,7 +2700,7 @@ fn a_welcome_cannot_spend_a_key_package_minted_for_a_different_peer() {
         ),
     );
     let handled = device
-        .handle(&welcome_frame, NOW)
+        .handle(&welcome_frame, now())
         .expect("the intended peer can still join");
     assert!(
         handled.events.contains(&LeafEvent::SessionEstablished {
@@ -2704,7 +2738,7 @@ fn a_commit_that_adds_a_third_member_is_refused() {
 
     let frame = phone_sealed_frame(&phone, &device_address, &commit);
     let err = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect_err("the device followed its peer into a room it never chose");
     assert!(
         matches!(err, LeafError::IdentityBinding(_)),
@@ -2732,7 +2766,7 @@ fn widen_the_pair(phone: &Phone, device: &mut LeafDevice, device_address: &str) 
 
     let frame = phone_sealed_frame(phone, device_address, &commit);
     let err = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect_err("the device followed its peer into a room it never chose");
     assert!(
         matches!(err, LeafError::IdentityBinding(_)),
@@ -2754,13 +2788,13 @@ fn a_group_that_stopped_being_a_pair_is_not_sealed_into() {
     let device_address = pair(&phone, &mut device);
 
     device
-        .seal(&phone.address, "while it was a pair", NOW)
+        .seal(&phone.address, "while it was a pair", now())
         .expect("a pair seals");
 
     widen_the_pair(&phone, &mut device, &device_address);
 
     let err = device
-        .seal(&phone.address, "after", NOW)
+        .seal(&phone.address, "after", now())
         .expect_err("the device sealed into a group holding a third member");
     assert!(
         matches!(err, LeafError::IdentityBinding(_)),
@@ -2772,7 +2806,7 @@ fn a_group_that_stopped_being_a_pair_is_not_sealed_into() {
     drop(device);
     let mut revived = LeafDevice::resume(Arc::clone(&store), APP_ID).expect("device resumes");
     let err = revived
-        .seal(&phone.address, "after a reboot", NOW)
+        .seal(&phone.address, "after a reboot", now())
         .expect_err("a rebooted device sealed into a group holding a third member");
     assert!(
         matches!(err, LeafError::IdentityBinding(_)),
@@ -2800,7 +2834,7 @@ fn a_message_into_a_group_that_stopped_being_a_pair_is_not_opened() {
         .expect("phone seals");
     let frame = phone_sealed_frame(&phone, &device_address, &sealed);
     let err = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect_err("the device opened a message from a group holding a third member");
     assert!(
         matches!(err, LeafError::IdentityBinding(_)),
@@ -2828,7 +2862,7 @@ fn a_probe_against_a_group_that_stopped_being_a_pair_is_not_answered() {
         prefixes::SESSION_CONFIRM_PROBE.to_string(),
     );
     let err = device
-        .handle(&probe, NOW)
+        .handle(&probe, now())
         .expect_err("the device promised a session it will not seal into");
     assert!(
         matches!(err, LeafError::IdentityBinding(_)),
@@ -2863,7 +2897,7 @@ fn unpairing_sweeps_an_epoch_record_a_torn_write_left_above_every_anchor() {
     let commit = phone.manager.update_keys(&group_id).expect("phone commits");
     let frame = phone_sealed_frame(&phone, &device_address, &commit);
     let err = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect_err("the state write was cut and the frame was handled anyway");
     assert!(
         matches!(err, LeafError::Storage(_)),
@@ -2909,7 +2943,7 @@ fn unpairing_erases_the_key_package_minted_for_the_peer() {
     // Minted and never spent, which is the state that accumulates: an
     // abandoned pairing, or one a stranger provoked.
     device
-        .key_package_frame(&phone.address, NOW)
+        .key_package_frame(&phone.address, now())
         .expect("device mints a key package");
 
     let held: Vec<String> = store
@@ -2950,7 +2984,7 @@ fn unpairing_survives_a_peer_record_that_will_not_decode() {
     let mut device = device(Arc::clone(&store) as Arc<dyn LeafStore>);
 
     device
-        .key_package_frame(&phone.address, NOW)
+        .key_package_frame(&phone.address, now())
         .expect("device mints a key package");
 
     // The record holding the reference is now unreadable.
@@ -2989,7 +3023,7 @@ fn a_welcome_that_spends_a_package_the_device_no_longer_holds_names_the_real_fai
     let device_address = device.address().to_string();
 
     let advertisement = device
-        .key_package_frame(&phone.address, NOW)
+        .key_package_frame(&phone.address, now())
         .expect("device advertises to the phone");
     import_device_key_package(&phone, &advertisement);
 
@@ -2997,7 +3031,7 @@ fn a_welcome_that_spends_a_package_the_device_no_longer_holds_names_the_real_fai
     // package out of the ring. The phone's record still names it.
     for peer in (0..MAX_UNSPENT).map(|_| new_phone().address) {
         device
-            .key_package_frame(&peer, NOW)
+            .key_package_frame(&peer, now())
             .expect("device mints for another peer");
     }
 
@@ -3016,7 +3050,7 @@ fn a_welcome_that_spends_a_package_the_device_no_longer_holds_names_the_real_fai
     );
 
     let err = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect_err("the package this welcome spends is no longer held");
     assert!(
         matches!(err, LeafError::StaleKeyPackage(_)),
@@ -3035,7 +3069,7 @@ fn a_frame_older_than_the_window_is_refused() {
     let mut device = device(Arc::new(MemoryStore::new()));
     let device_address = pair(&phone, &mut device);
 
-    let stale_at = NOW - (LEAF_CTRL_FRESHNESS_PAST_MS / 1000) - 60;
+    let stale_at = now() - (LEAF_CTRL_FRESHNESS_PAST_MS / 1000) - 60;
     let frame = phone_control_frame_at(
         &phone,
         &device_address,
@@ -3043,7 +3077,7 @@ fn a_frame_older_than_the_window_is_refused() {
         stale_at,
     );
 
-    let refused = device.handle(&frame, NOW);
+    let refused = device.handle(&frame, now());
     assert!(
         matches!(refused, Err(LeafError::StaleControlFrame(_))),
         "a frame older than the window must be refused as stale, got {refused:?}"
@@ -3055,9 +3089,9 @@ fn a_frame_older_than_the_window_is_refused() {
         &phone,
         &device_address,
         format!("{}{{}}", prefixes::SESSION_CONFIRM_PROBE),
-        NOW,
+        now(),
     );
-    assert!(device.handle(&fresh, NOW).is_ok());
+    assert!(device.handle(&fresh, now()).is_ok());
 }
 
 /// And one stamped well ahead of the device's clock, which is what a *local*
@@ -3068,7 +3102,7 @@ fn a_frame_from_the_future_is_refused() {
     let mut device = device(Arc::new(MemoryStore::new()));
     let device_address = pair(&phone, &mut device);
 
-    let ahead = NOW + (CTRL_FRESHNESS_FUTURE_MS / 1000) + 60;
+    let ahead = now() + (CTRL_FRESHNESS_FUTURE_MS / 1000) + 60;
     let frame = phone_control_frame_at(
         &phone,
         &device_address,
@@ -3077,7 +3111,7 @@ fn a_frame_from_the_future_is_refused() {
     );
 
     assert!(matches!(
-        device.handle(&frame, NOW),
+        device.handle(&frame, now()),
         Err(LeafError::StaleControlFrame(_))
     ));
 
@@ -3087,9 +3121,9 @@ fn a_frame_from_the_future_is_refused() {
         &phone,
         &device_address,
         format!("{}{{}}", prefixes::SESSION_CONFIRM_PROBE),
-        NOW + 30,
+        now() + 30,
     );
-    assert!(device.handle(&slight, NOW).is_ok());
+    assert!(device.handle(&slight, now()).is_ok());
 }
 
 /// A leaf verifies the freshness-bound payload and nothing else.
@@ -3111,7 +3145,7 @@ fn a_frame_under_the_older_payload_is_refused() {
         offline_protocol_core::AppId::new(APP_ID).expect("app id"),
         format!("{}{{}}", prefixes::SESSION_CONFIRM_PROBE),
     );
-    frame.timestamp = offline_protocol_core::Timestamp::from_millis((NOW as i64) * 1000);
+    frame.timestamp = offline_protocol_core::Timestamp::from_millis((now() as i64) * 1000);
     // The v1 payload: every field but the stamp.
     let payload = offline_protocol_sealed::control_signing_payload(&frame).expect("v1 payload");
     let signature = phone.manager.sign_data(&payload).expect("phone signs");
@@ -3128,7 +3162,7 @@ fn a_frame_under_the_older_payload_is_refused() {
         BASE64.encode(&public),
     );
 
-    let refused = device.handle(&frame, NOW);
+    let refused = device.handle(&frame, now());
     assert!(
         matches!(refused, Err(LeafError::ControlFrameRefused(_))),
         "a frame under the older payload must not verify here, got {refused:?}"
@@ -3180,16 +3214,16 @@ fn a_reset_older_than_the_last_one_acted_on_is_refused() {
 
     // An older capture the device never saw, and the current reset. Both are
     // inside the window, so freshness alone admits either.
-    let older = reset_frame_at(NOW - 3600);
-    let current = reset_frame_at(NOW);
+    let older = reset_frame_at(now() - 3600);
+    let current = reset_frame_at(now());
 
-    let acted = device.handle(&current, NOW).expect("device resets");
+    let acted = device.handle(&current, now()).expect("device resets");
     assert!(acted.events.contains(&LeafEvent::SessionReset {
         peer: phone.address.clone(),
     }));
 
     let replayed = device
-        .handle(&older, NOW)
+        .handle(&older, now())
         .expect("the older one is handled");
     assert!(
         !replayed.events.contains(&LeafEvent::SessionReset {
@@ -3234,10 +3268,10 @@ fn a_spent_reset_stays_spent_across_a_power_cycle() {
             prefixes::KEY_PACKAGE,
             serde_json::to_string(&payload).expect("payload")
         ),
-        NOW,
+        now(),
     );
 
-    let acted = device.handle(&reset_frame, NOW).expect("device resets");
+    let acted = device.handle(&reset_frame, now()).expect("device resets");
     assert!(acted.events.contains(&LeafEvent::SessionReset {
         peer: phone.address.clone(),
     }));
@@ -3247,7 +3281,7 @@ fn a_spent_reset_stays_spent_across_a_power_cycle() {
     let mut rebooted = crate::device(store);
 
     let replayed = rebooted
-        .handle(&reset_frame, NOW)
+        .handle(&reset_frame, now())
         .expect("the replay is handled");
     assert!(
         !replayed.events.contains(&LeafEvent::SessionReset {
@@ -3291,7 +3325,7 @@ fn phone_undated_frame(phone: &Phone, to: &str, content: String) -> Message {
         content,
     );
     message.priority = MessagePriority::High;
-    message.timestamp = offline_protocol_core::Timestamp::from_millis((NOW as i64) * 1000);
+    message.timestamp = offline_protocol_core::Timestamp::from_millis((now() as i64) * 1000);
     sign_as_undated(phone, &mut message);
     message
 }
@@ -3317,7 +3351,7 @@ fn a_key_package_that_states_no_time_is_admitted_because_first_contact_has_none(
 
     let frame = phone_undated_frame(&phone, &device_address, advertisement_body(&phone.address));
     let handled = device
-        .handle(&frame, NOW)
+        .handle(&frame, now())
         .expect("a device that refuses this can never be paired with by a phone");
 
     assert!(
@@ -3383,7 +3417,7 @@ fn a_session_reset_that_states_no_time_is_refused_its_teardown() {
     );
     let frame = phone_undated_frame(&phone, &device_address, content);
 
-    let handled = device.handle(&frame, NOW).expect("the frame is admitted");
+    let handled = device.handle(&frame, now()).expect("the frame is admitted");
 
     assert!(
         !handled
@@ -3424,7 +3458,7 @@ fn a_welcome_that_states_no_time_is_refused() {
     // The device advertises first, so the phone holds a real key package and
     // the Welcome below is refused for its payload rather than for its body.
     let advertisement = device
-        .key_package_frame(&phone.address, NOW)
+        .key_package_frame(&phone.address, now())
         .expect("device mints");
     import_device_key_package(&phone, &advertisement);
     let welcome = phone
@@ -3438,7 +3472,7 @@ fn a_welcome_that_states_no_time_is_refused() {
     );
 
     let frame = phone_undated_frame(&phone, &device_address, content);
-    let refusal = device.handle(&frame, NOW);
+    let refusal = device.handle(&frame, now());
 
     assert!(
         matches!(refusal, Err(LeafError::ControlFrameRefused(_))),
@@ -3463,7 +3497,7 @@ fn a_probe_that_states_no_time_is_refused() {
         &device_address,
         prefixes::SESSION_CONFIRM_PROBE.to_string(),
     );
-    let refusal = device.handle(&frame, NOW);
+    let refusal = device.handle(&frame, now());
 
     assert!(
         matches!(refusal, Err(LeafError::ControlFrameRefused(_))),
@@ -3483,7 +3517,7 @@ fn a_stale_key_package_is_still_refused_rather_than_retried_undated() {
     let mut device = device(Arc::clone(&store));
     let device_address = device.address().to_string();
 
-    let stale_at = NOW - (LEAF_CTRL_FRESHNESS_PAST_MS / 1000) - 60;
+    let stale_at = now() - (LEAF_CTRL_FRESHNESS_PAST_MS / 1000) - 60;
     let frame = phone_control_frame_at(
         &phone,
         &device_address,
@@ -3491,7 +3525,7 @@ fn a_stale_key_package_is_still_refused_rather_than_retried_undated() {
         stale_at,
     );
 
-    let refusal = device.handle(&frame, NOW);
+    let refusal = device.handle(&frame, now());
 
     assert!(
         matches!(refusal, Err(LeafError::StaleControlFrame(_))),
