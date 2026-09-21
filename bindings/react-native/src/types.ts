@@ -1143,7 +1143,11 @@ export interface MessageDeliveredEvent extends BaseEvent {
 }
 
 /**
- * Message failed event
+ * Message failed event. Terminal: the SDK has stopped retrying the message
+ * when this fires, and no `message_delivered` follows it for the same
+ * `message_id`. Handle it idempotently all the same: a restore that is
+ * retried after a failed MLS initialization can report an id it already
+ * reported.
  */
 export interface MessageFailedEvent extends BaseEvent {
   type: 'message_failed';

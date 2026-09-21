@@ -7,7 +7,9 @@ application hands it over until it reaches a terminal state.
 
 **S1. Every message with acknowledgement enabled reaches exactly one terminal
 state**: delivered, or failed. There is no third outcome and no indefinite
-pending state.
+pending state. Settling a message retires it from everything that could send
+it again, so no retry, flush or acknowledgement timeout reports it a second
+time. See [Giving a message up](#giving-a-message-up).
 
 **S2. Expiry is terminal, including across restarts.** A restart may refresh a
 relative delivery window, but an absolute cap bounds the total lifetime, or an
@@ -42,6 +44,10 @@ stateDiagram-v2
     Parked --> Queued: probe succeeds / peer returns
     Parked --> Failed: lifetime expired
 
+    Queued --> Failed: evicted, outbox full
+    Pending --> Failed: evicted, outbox full
+    Parked --> Failed: evicted, outbox full
+
     Delivered --> [*]
     Failed --> [*]
 ```
@@ -71,6 +77,30 @@ should be:
   accepted, which is why there is a pending acknowledgement for the park to
   remove.
 
+Eviction is the one edge that leaves every non-terminal state. When the outbox
+is full, the least recently sent entry fails to make room, whatever it was
+doing.
+
+### Giving a message up
+
+**A message that fails leaves the retry queue, the acknowledgement tracker and
+the outbox together.** Capacity eviction, lifetime expiry, retry exhaustion and
+an acknowledgement timeout that finds no outbox entry all go through one
+function (`retire_undeliverable_message`) for that reason, and the event each
+one owes the application is emitted by the path itself.
+
+Removing the outbox entry alone is not enough, because the retry and flush paths
+re-create a missing entry before they resend, with fresh timestamps. An id left
+in the retry queue is therefore never expired by anything: the outbox is the only
+thing that expires a message, and each resurrection resets its clocks. Eviction
+once removed only the outbox entry. The next retry brought the message back and,
+the outbox being full, evicted a different one to make room, whose own retry did
+the same. A device holding more than a full outbox of undeliverable messages
+reported a terminal failure on every retry, indefinitely, for ids it had already
+settled. An id left in the acknowledgement tracker fails differently: its
+timeout reports it failed a second time, and an acknowledgement arriving first
+reports it delivered after it was reported failed.
+
 ## Timing
 
 | Parameter | Default | Notes |
@@ -80,7 +110,7 @@ should be:
 | Backoff multiplier | 2.0 | Exponential |
 | Maximum backoff delay | 300 s | Caps the exponential |
 | Maximum pending acknowledgements | 1000 | |
-| Outbox capacity | 500 entries | |
+| Outbox capacity | 500 entries | When full, the least recently sent entry fails |
 | Outbox lifetime | 7 days | Per entry, carrier-relative |
 | Absolute lifetime cap | 4 × lifetime (28 days) | Measured from first send, bounds restart refreshes |
 
