@@ -111,7 +111,7 @@ paired per peer, so a handshake this device did not start contributes nothing
 want whose handshake never completes is discarded after ten minutes rather
 than reported.
 
-Three things about that table are worth stating plainly.
+Four things about that table are worth stating plainly.
 
 **No identifier has a field to land in.** Message ids, peer addresses, group
 ids, usernames, message content, file names: none of them appear in any row
@@ -129,6 +129,17 @@ other devices recently`), never text chosen by a remote party. That is the
 [threat model's producer rule](security/threat-model.md#the-telemetry-producer-rule),
 and it is why the classification of reasons into families happens on the
 ingest rather than on the device.
+
+**`protocol.message.failed` rows are capped per reason; failures are not.**
+Each reason sends up to 500 rows at once, enough for a full outbox failing in
+one sweep, and then one row every ten seconds. Every failure is still counted
+into the rollup's `sends_failed_sum`, so the minute totals stay exact; only the
+per-row `reason` and `retry_count` are thinned, and a row held back is counted
+in `dropped`. The cap exists because no row can carry a message id, so the
+ingest cannot tell one failure reported many times from many failures and
+meters every row. A device that reports the same failure in a loop would
+otherwise bill the loop, and one did: an SDK bug made a full outbox report a
+failure on every retry, about fifteen a second per device.
 
 **Some events are counted and never sent.** `protocol.message.sent` carries
 the message content, so only its count survives, folded into the rollup's
@@ -303,7 +314,7 @@ offline stretch collected. It is cleared by uninstalling the app, by
 | `buffered` | Events in the ring buffer, not yet cut into a batch |
 | `sentEvents` | Events in batches the ingest answered 2xx |
 | `acceptedEvents` | The `accepted` count the ingest reported, summed; a deduplicated replay adds nothing |
-| `dropped` | Events lost: ring overflow, queue caps, the six-day expiry, a permanent rejection, or everything queued or collected after the ingest reported the application's telemetry toggle off. Counted in events, so it excludes records that would not open, which are counted in records and logged |
+| `dropped` | Events lost: ring overflow, queue caps, the six-day expiry, a permanent rejection, everything queued or collected after the ingest reported the application's telemetry toggle off, or a `protocol.message.failed` row past its per-reason cap (its failure is still in the rollup). Counted in events, so it excludes records that would not open, which are counted in records and logged |
 | `sessionId` | The current session id |
 | `lastError` | The most recent send failure, or the configuration problem that halted sending |
 | `lastFlushAtMs` | When a batch was last accepted |
@@ -364,6 +375,11 @@ The service meters accepted events. The controls, from coarsest to finest:
 - `maxBatchBytes` and `flushIntervalMs` trade upload frequency for batch
   size; they do not change how many events are accepted.
 - `acceptedEvents` and `dropped` in the stats are the reconciliation.
+
+One limit is not a setting: the per-reason cap on `protocol.message.failed`
+rows described under [What leaves the device](#what-leaves-the-device). It bounds what a device reporting the
+same failure in a loop can cost, and it costs nothing in accuracy that the
+rollup does not keep.
 
 ## The free event API is per-event and unaggregated by design
 
