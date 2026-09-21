@@ -26288,6 +26288,255 @@ fn test_outbox_capacity_eviction_settles_pending_connection_request() {
     );
 }
 
+/// Every `MessageFailed` captured so far, for any reason, as
+/// `(message_id, reason)`. A terminal-once assertion has to count across
+/// reasons: a second settlement for the same id rarely repeats the first one's
+/// reason, so filtering on it hides exactly the duplicate being looked for.
+fn captured_failures(events: &Mutex<Vec<Event>>) -> Vec<(String, String)> {
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageFailed {
+                message_id, reason, ..
+            } => Some((message_id.clone(), reason.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Fills the outbox one past capacity through the real failing-send path, so
+/// every entry is also queued for retry, as on a device whose recipients are
+/// all unreachable. Returns the one message evicted: the first, backdated so it
+/// is deterministically the oldest.
+fn overflow_outbox_through_failed_sends(
+    config: ProtocolConfig,
+) -> (OfflineProtocol, Arc<Mutex<Vec<Event>>>, MessageId) {
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let evicted = protocol
+        .send_message(
+            "bob",
+            "oldest, will be evicted",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+    protocol
+        .outbox
+        .get_mut(&evicted)
+        .expect("first message must be in the outbox")
+        .last_sent_at -= ChronoDuration::seconds(60);
+    for i in 0..crate::constants::MAX_OUTBOX_ENTRIES {
+        let _ = protocol.send_message(
+            "bob",
+            &format!("filler-{i}"),
+            None::<MessagePriority>,
+            None::<String>,
+        );
+    }
+    assert!(
+        !protocol.outbox.contains_key(&evicted),
+        "the backdated first message must be the one evicted"
+    );
+    (protocol, events, evicted)
+}
+
+/// An evicted message must stay settled while the retry ladder runs.
+///
+/// Eviction used to leave the id in the retry queue. The next retry re-created
+/// its outbox entry with fresh clocks, which at capacity evicted a different
+/// message, whose own retry entry did the same: a device holding more than a
+/// full outbox of undeliverable messages emitted a "terminal" `message_failed`
+/// on every retry, forever, for ids it had already reported. Nothing expired
+/// the cycle, because the outbox is the only lifetime authority and every
+/// resurrection reset its clocks.
+#[test]
+fn test_outbox_capacity_eviction_is_not_resurrected_by_the_retry_queue() {
+    let mut config = create_test_config();
+    // The shortest backoff the config accepts, so every tick below finds the
+    // whole queue due, as on a device that has been failing for a while.
+    config.reliability.retry.initial_delay_ms = 1;
+    config.reliability.retry.max_delay_ms = 1;
+    let (mut protocol, events, evicted) = overflow_outbox_through_failed_sends(config);
+
+    for _ in 0..10 {
+        thread::sleep(Duration::from_millis(2));
+        protocol.process().unwrap();
+    }
+
+    assert_eq!(
+        captured_failures(&events),
+        vec![(evicted.as_str(), "Outbox capacity exceeded".to_string())],
+        "one eviction settles one message, once, however long the retries run"
+    );
+    assert!(
+        !protocol.is_tracked_for_delivery(&evicted),
+        "an evicted message must leave the retry queue and the ACK tracker too"
+    );
+    assert_eq!(
+        protocol.outbox_entry_count(),
+        crate::constants::MAX_OUTBOX_ENTRIES
+    );
+    // Every message still in flight on an all-failing device holds exactly
+    // one retry entry; an eviction that leaks one shows up as a surplus.
+    assert_eq!(protocol.retry_queue_size(), protocol.outbox_entry_count());
+}
+
+/// The reconnect flush drains the retry queue ignoring backoff and re-creates
+/// any missing outbox entry before sending, so a leaked retry entry is
+/// resurrected there too, one full outbox eviction per flush.
+#[test]
+fn test_outbox_capacity_eviction_is_not_resurrected_by_a_flush() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let (mut protocol, events, evicted) = overflow_outbox_through_failed_sends(config);
+
+    protocol.flush_outbox_all();
+
+    assert_eq!(
+        captured_failures(&events),
+        vec![(evicted.as_str(), "Outbox capacity exceeded".to_string())],
+        "a flush must not re-drive a message that was already settled"
+    );
+    assert!(!protocol.is_tracked_for_delivery(&evicted));
+}
+
+/// A message evicted while its acknowledgement is pending must not be settled
+/// a second time. Left in the ACK tracker, its timeout found no outbox entry
+/// and reported it failed again ("Message missing from outbox"), and an ACK
+/// arriving first reported it delivered after it had been reported failed.
+#[test]
+fn test_outbox_capacity_eviction_while_awaiting_ack_settles_once() {
+    let mut config = create_test_config();
+    config.reliability.ack.default_timeout_ms = 10;
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Accepts the first send, then fails every one after it.
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, 0);
+    let failures = Arc::clone(&flaky.failures_remaining);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let in_flight = protocol
+        .send_message(
+            "bob",
+            "sent, awaiting its ack",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+    assert!(protocol.ack_manager.is_waiting_for_ack(&in_flight));
+    protocol
+        .outbox
+        .get_mut(&in_flight)
+        .expect("a sent message must be in the outbox")
+        .last_sent_at -= ChronoDuration::seconds(60);
+
+    *failures.lock().unwrap() = u32::MAX;
+    for i in 0..crate::constants::MAX_OUTBOX_ENTRIES {
+        let _ = protocol.send_message(
+            "bob",
+            &format!("filler-{i}"),
+            None::<MessagePriority>,
+            None::<String>,
+        );
+    }
+    assert!(!protocol.outbox.contains_key(&in_flight));
+
+    // Past the acknowledgement timeout, then a late acknowledgement.
+    thread::sleep(Duration::from_millis(20));
+    protocol.process().unwrap();
+    let ack = Message::builder(
+        UserId::new("bob").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(String::new())
+    .metadata(ACK_FOR_KEY, in_flight.as_str())
+    .build();
+    protocol.handle_ack_message(&ack);
+
+    assert_eq!(
+        captured_failures(&events),
+        vec![(in_flight.as_str(), "Outbox capacity exceeded".to_string())],
+        "the ACK timeout must not settle an evicted message a second time"
+    );
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageDelivered { .. })),
+        "a message reported failed must not then be reported delivered"
+    );
+    assert!(!protocol.is_tracked_for_delivery(&in_flight));
+}
+
+/// The media outbox evicts through the same function and leaked its retry
+/// entry the same way. Nothing reports a chunk's eviction per message (the
+/// transfer abort covers it), so the resurrection churn there was silent.
+#[test]
+fn test_media_outbox_capacity_eviction_retires_the_retry_entry() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let chunk = |i: usize| {
+        Message::builder(
+            UserId::new("user123").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+        )
+        .content(format!("chunk-{i}"))
+        .content_type(ContentType::FileChunk)
+        .requires_ack(true)
+        .build()
+    };
+
+    let first = chunk(0);
+    protocol.handle_send_failure(&first, None).unwrap();
+    protocol
+        .media_outbox
+        .get_mut(&first.id)
+        .expect("a failed chunk must be in the media outbox")
+        .last_sent_at -= ChronoDuration::seconds(60);
+    for i in 1..=crate::constants::MAX_MEDIA_OUTBOX_ENTRIES {
+        protocol.handle_send_failure(&chunk(i), None).unwrap();
+    }
+
+    assert!(!protocol.media_outbox.contains_key(&first.id));
+    assert!(
+        !protocol.is_tracked_for_delivery(&first.id),
+        "an evicted chunk must leave the retry queue too"
+    );
+    assert_eq!(protocol.retry_queue_size(), protocol.outbox_entry_count());
+}
+
 /// Media chunks settle through the transfer abort (`media_resend_required`
 /// path), never a per-chunk `message_failed` — lock down the asymmetry.
 #[test]

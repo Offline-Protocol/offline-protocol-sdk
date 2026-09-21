@@ -63,6 +63,30 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   by the drain, and is not failed a second time: one send climbs one rung of its
   retry ladder, and the app hears `welcome_send_failed` once.
 
+### Fixed
+
+- **A message evicted from a full outbox stays failed.** Eviction removed the
+  outbox entry and reported `message_failed` (`"Outbox capacity exceeded"`),
+  but left the message queued for retry. The next retry, or the next reconnect
+  flush, re-created its outbox entry with fresh timestamps and evicted a
+  different message to make room, whose own retry did the same. A device
+  holding more than 500 undeliverable messages therefore reported a terminal
+  `message_failed` on every retry, indefinitely, for ids it had already
+  reported. Nothing ever ended the cycle, because the outbox is the only thing
+  that expires a message and each resurrection reset its clocks. With the
+  telemetry pipe on, every one of those reports was an uploaded, metered
+  event. The media outbox leaked retry entries the same way, silently.
+
+  Every path that gives a message up (capacity eviction, lifetime expiry, retry
+  exhaustion, an acknowledgement timeout that finds no outbox entry) now takes
+  it out of the retry queue, the acknowledgement tracker and the outbox
+  together. An application that counted `message_failed` events saw that count
+  inflated and will see it drop to one per failed message.
+- **A message evicted while awaiting its acknowledgement is settled once.** Its
+  acknowledgement stayed tracked, so the timeout reported it failed a second
+  time (`"Message missing from outbox (cannot retry)"`), and an acknowledgement
+  arriving first reported it delivered after it had been reported failed.
+
 ## [0.26.0] — 2026-09-12
 
 > **The SDK ships its own telemetry.** Until now the SDK handed every telemetry

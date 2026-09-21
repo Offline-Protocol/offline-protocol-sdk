@@ -237,7 +237,7 @@ The outbox persists messages that require acknowledgment. It serves as the sourc
 | Max media entries | 100 | File chunk messages |
 | Max lifetime | 7 days | `outbox_max_lifetime_ms` |
 
-When the outbox is full, the oldest entry is evicted with a terminal `message_failed` event (reason `"Outbox capacity exceeded"`). When a message exceeds its lifetime and has no pending ACK, it is dropped and a terminal `message_failed` event (reason `"Outbox lifetime exceeded"`) is emitted so the app can settle its UI state.
+When the outbox is full, the oldest entry is evicted with a terminal `message_failed` event (reason `"Outbox capacity exceeded"`). Eviction retires the message from the retry queue and from acknowledgement tracking as well, so an evicted message is never resent, and neither a later retry nor its acknowledgement settles it a second time. When a message exceeds its lifetime and has no pending ACK, it is dropped and a terminal `message_failed` event (reason `"Outbox lifetime exceeded"`) is emitted so the app can settle its UI state.
 
 **Important**: When a message storage backend is configured, regular-message outbox entries are persisted and restored on the next `start()` with a refreshed delivery window. Media chunks are never persisted — an interrupted transfer surfaces as `media_resend_required` instead. See [Client-Side Persistence](#client-side-persistence) for the app-side layer.
 
@@ -376,6 +376,12 @@ When a message exceeds max ACK retries:
 2. The message is removed from the retry queue
 3. The ACK tracking is removed
 4. The outbox entry is removed
+
+Capacity eviction, lifetime expiry and an ACK timeout that finds no outbox entry
+retire the message the same way, all three structures together. That is what
+makes `MessageFailed` final: the retry and flush paths re-create a missing outbox
+entry before resending, so a message left in the retry queue would be sent
+again, and one left in ACK tracking would be settled a second time.
 
 ## Configuration
 
