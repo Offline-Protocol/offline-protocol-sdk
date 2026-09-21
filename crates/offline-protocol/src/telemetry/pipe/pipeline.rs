@@ -14,6 +14,7 @@ use crate::events::Event;
 use crate::telemetry::pipe::classify::{
     classify, classify_protocol, ClassifyCtx, Disposition, MessageKind,
 };
+use crate::telemetry::pipe::failure_limit::FailureRowLimit;
 use crate::telemetry::pipe::host::AppState;
 use crate::telemetry::pipe::rollup::RollupAggregator;
 use crate::telemetry::pipe::session_pairer::SessionPairer;
@@ -50,6 +51,10 @@ pub(crate) struct Pipeline {
     /// Bytes buffered since the last flush, by the cheap per-event estimate.
     buffered_bytes: usize,
     max_batch_bytes: usize,
+    /// The per-reason ceiling on `protocol.message.failed` rows. Lives as
+    /// long as the pipe, not the session, so a device that foregrounds often
+    /// does not get a fresh burst each time.
+    failure_rows: FailureRowLimit,
 }
 
 impl Pipeline {
@@ -71,11 +76,17 @@ impl Pipeline {
             summary_reported: false,
             buffered_bytes: 0,
             max_batch_bytes,
+            failure_rows: FailureRowLimit::default(),
         }
     }
 
     /// Routes one record. Returns whether the size trigger fired.
     pub(crate) fn handle(&mut self, record: &TelemetryRecord, now_ms: i64) -> bool {
+        if let TelemetryRecord::Protocol(event) = record {
+            if self.hold_back_failure_row(event, now_ms) {
+                return false;
+            }
+        }
         let ctx = ClassifyCtx {
             routing_diagnostic: self.routing_diagnostic,
             now_ms,
@@ -86,7 +97,31 @@ impl Pipeline {
     /// Routes one protocol event by reference. Returns whether the size
     /// trigger fired.
     pub(crate) fn handle_protocol_event(&mut self, event: &Event, now_ms: i64) -> bool {
+        if self.hold_back_failure_row(event, now_ms) {
+            return false;
+        }
         self.apply(classify_protocol(event, now_ms), now_ms)
+    }
+
+    /// Keeps a `protocol.message.failed` row past its reason's ceiling off
+    /// the wire, and says whether it did. See [`FailureRowLimit`].
+    ///
+    /// The failure is still counted into the rollup, exactly as a forwarded
+    /// one is, so `sends_failed_sum` stays exact and only the row is thinned.
+    /// The row goes into `dropped`, which is what keeps sent plus dropped
+    /// equal to everything the pipe was handed. Checked on the borrowed
+    /// event, before classification copies the reason, so a held row costs
+    /// no allocation.
+    fn hold_back_failure_row(&mut self, event: &Event, now_ms: i64) -> bool {
+        let Event::MessageFailed { reason, .. } = event else {
+            return false;
+        };
+        if self.failure_rows.allow(reason, now_ms) {
+            return false;
+        }
+        self.rollup.count_message(MessageKind::Failed);
+        self.dropped += 1;
+        true
     }
 
     fn apply(&mut self, disposition: Disposition, now_ms: i64) -> bool {
@@ -312,6 +347,58 @@ mod tests {
 
     fn pipeline() -> Pipeline {
         Pipeline::new(16, 1 << 20, false, 0)
+    }
+
+    /// A failure past its reason's ceiling loses its row and keeps its
+    /// count, on both routes a protocol event takes into the pipeline.
+    #[test]
+    fn a_repeating_failure_is_counted_in_full_and_sent_up_to_its_ceiling() {
+        use crate::telemetry::pipe::classify::FrameSample;
+        use crate::telemetry::pipe::failure_limit::BURST;
+
+        let mut p = Pipeline::new(4096, usize::MAX, false, 0);
+        // Open a rollup window, so the failure count has somewhere to land.
+        let _ = p.rollup.add(FrameSample {
+            ts_ms: 0,
+            neighbor_count: 0,
+            ack_pending: 0,
+            retry_total: 0,
+            retry_critical: 0,
+            current_transport: None,
+            is_local_relay: false,
+        });
+        let failed = Event::MessageFailed {
+            message_id: "m".into(),
+            reason: "Outbox capacity exceeded".into(),
+            retry_count: 0,
+        };
+        let record = TelemetryRecord::Protocol(Box::new(failed.clone()));
+        let extra = 100u32;
+        for n in 0..BURST + extra {
+            if n % 2 == 0 {
+                p.handle_protocol_event(&failed, 1_000);
+            } else {
+                p.handle(&record, 1_000);
+            }
+        }
+
+        let rows = p
+            .buffer()
+            .iter()
+            .filter(|b| matches!(b.event.data, WireEventData::MessageFailed { .. }))
+            .count();
+        assert_eq!(rows, BURST as usize, "the two routes share one ceiling");
+        assert_eq!(p.dropped(), u64::from(extra));
+
+        let rollup = p.rollup.flush().expect("the window holds sends");
+        let WireEventData::MetricsRollup(rollup) = rollup.data else {
+            panic!("the flush emits a rollup");
+        };
+        assert_eq!(
+            rollup.sends_failed_sum,
+            i64::from(BURST + extra),
+            "every failure is counted, whether or not its row was sent"
+        );
     }
 
     #[test]

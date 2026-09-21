@@ -15,6 +15,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Changed
 
+- **The telemetry pipe caps `protocol.message.failed` rows per reason.** Each
+  reason sends up to 500 rows at once, enough for a full outbox failing in one
+  sweep, and then one row every ten seconds. Every failure is still counted
+  into the minute rollup's `sends_failed_sum`, so the totals are exact; only
+  the per-row `reason` and `retry_count` are thinned, and a held-back row is
+  counted in `telemetryStats().dropped`, so sent plus dropped still accounts
+  for every event. A row cannot carry a message id, so the ingest has no way
+  to tell one failure reported many times from many failures and meters every
+  row. Without the cap, a device reporting the same failure in a loop is billed
+  for the loop, which is what an outbox bug fixed in this release did at about
+  fifteen rows a second per device. The check runs on the borrowed event before
+  anything is copied, so a held-back row allocates nothing. There is no
+  setting.
 - **A frame the relay's mailbox holds is parked without a reachability probe.**
   A relay advertising `mailbox_v1` keeps a copy of a frame it could not deliver
   and re-sends it on the recipient's next connection, and says so with

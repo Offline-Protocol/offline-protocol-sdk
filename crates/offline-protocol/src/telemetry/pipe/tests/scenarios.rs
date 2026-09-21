@@ -299,6 +299,34 @@ fn enabling_in_the_background_emits_no_summary_and_opens_no_socket() {
     assert_ne!(pipe.stats().session_id, first);
 }
 
+/// A device reporting the same failure in a loop uploads the burst and then
+/// no more, and the stats say where the rest went.
+#[test]
+fn a_looping_failure_uploads_its_burst_and_counts_the_rest_as_dropped() {
+    use crate::telemetry::pipe::failure_limit::BURST;
+
+    let clock = FakeClock::at(1_000);
+    let client = CapturingClient::accepting();
+    let pipe = inline_pipe(&test_config(), &clock, client.clone(), Backend::Memory);
+    let extra = 50;
+    for n in 0..BURST + extra {
+        emit_failed(&pipe, n);
+    }
+    pipe.flush();
+
+    let uploaded = client
+        .batches()
+        .iter()
+        .filter_map(|b| b["events"].as_array())
+        .flatten()
+        .filter(|e| e["type"] == "protocol.message.failed")
+        .count();
+    assert_eq!(uploaded, BURST as usize);
+    let stats = pipe.stats();
+    assert_eq!(stats.dropped, u64::from(extra));
+    assert_eq!(stats.sent_events + stats.dropped, u64::from(BURST + extra));
+}
+
 #[test]
 fn three_days_offline_never_exceed_the_caps_and_every_batch_arrives_exactly_once() {
     let clock = FakeClock::at(1_000);
@@ -323,12 +351,15 @@ fn three_days_offline_never_exceed_the_caps_and_every_batch_arrives_exactly_once
     }
     let stats = pipe.stats();
     assert_eq!(stats.sent_events, 0);
-    let queued = {
+    let (queued, trimmed) = {
         let store = crate::telemetry::pipe::lock(&pipe.shared().store);
-        store.len()
+        (store.len(), store.dropped_events())
     };
     assert!(queued > 0);
-    assert!(stats.dropped > 0, "the caps trimmed the queue");
+    // Asked of the store itself: `dropped` also counts the failure rows held
+    // back by their per-reason ceiling, which this identical-reason stream
+    // hits within the first minutes.
+    assert!(trimmed > 0, "the caps trimmed the queue");
     assert!(stats.last_error.is_some());
 
     // The network returns. Ticks continue; every queued batch that is
@@ -365,8 +396,9 @@ fn three_days_offline_never_exceed_the_caps_and_every_batch_arrives_exactly_once
         .sum();
     let stats = pipe.stats();
     assert_eq!(stats.sent_events, sent);
-    // The caps trimmed the queue during the outage: those count as dropped,
-    // and sent plus dropped is everything that was ever emitted.
+    // The caps trimmed the queue during the outage and the failure ceiling
+    // held rows back throughout: both count as dropped, and sent plus
+    // dropped is everything that was ever emitted.
     assert_eq!(stats.sent_events + stats.dropped, emitted);
 }
 

@@ -50,6 +50,7 @@
 //! reports.
 
 pub(crate) mod classify;
+pub(crate) mod failure_limit;
 pub mod host;
 pub(crate) mod pipeline;
 pub(crate) mod rollup;
