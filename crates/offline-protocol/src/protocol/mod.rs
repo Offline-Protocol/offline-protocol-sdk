@@ -2571,8 +2571,11 @@ impl OfflineProtocol {
 
     /// Attempts to send a single message as part of a flush operation.
     ///
-    /// Ensures the outbox entry exists before sending (it may have been evicted
-    /// by capacity limits while the message sat in the retry queue). On success,
+    /// Ensures the outbox entry exists before sending. A message reaching here
+    /// normally has one: every path that gives a message up retires its retry
+    /// entry with it (`retire_undeliverable_message`), so an eviction no longer
+    /// leaves one behind to resurrect here, and re-creating a settled message
+    /// would evict a live one at capacity. On success,
     /// registers ACK tracking and updates the outbox entry. On failure,
     /// re-enqueues the message to the retry queue with its current attempt count
     /// so backoff resumes. Returns the transport the send went out over, or
@@ -3575,6 +3578,10 @@ impl OfflineProtocol {
 
             processed += 1;
             let previous_transport = self.transport_manager.current_transport();
+            // Normally finds the entry already there: a retry entry outlives
+            // its outbox entry only if a give-up path skipped
+            // `retire_undeliverable_message`, and at capacity this call would
+            // then evict a live message to bring a settled one back.
             self.ensure_outbox_entry(&entry.message);
 
             // Tier 2: re-seal against the peer's current session before this
@@ -3737,14 +3744,7 @@ impl OfflineProtocol {
         }
         drop(state);
 
-        self.handle_outbound_media_chunk_failed(message_id, "max retries exceeded");
-        self.retry_queue.remove(&message_id.as_str());
-        self.ack_manager.remove_ack(message_id);
-        if let Some(entry) = self.remove_outbox_entry(message_id) {
-            if let Some(transport) = entry.last_transport {
-                self.transport_manager.record_delivery_failure(transport);
-            }
-        }
+        self.retire_undeliverable_message(message_id, "max retries exceeded");
         Ok(())
     }
 

@@ -2828,24 +2828,18 @@ impl OfflineProtocol {
         };
 
         if !outbox.contains_key(&message.id) && outbox.len() >= capacity {
-            if let Some((oldest_id, last_transport, attempt_count)) = outbox
+            let oldest_id = outbox
                 .iter()
                 .min_by_key(|(_, entry)| entry.last_sent_at)
-                .map(|(id, entry)| (id.clone(), entry.last_transport, entry.attempt_count))
-            {
-                if let Some(transport) = last_transport {
-                    self.transport_manager.record_delivery_failure(transport);
-                }
-                let outbox = if is_media {
-                    &mut self.media_outbox
-                } else {
-                    &mut self.outbox
-                };
-                outbox.remove(&oldest_id);
-                if !is_media {
-                    self.clear_outbox_entry_from_storage(&oldest_id);
-                }
-                self.handle_outbound_media_chunk_failed(&oldest_id, "outbox eviction");
+                .map(|(id, _)| id.clone());
+            if let Some(oldest_id) = oldest_id {
+                // Retired, not just removed: this function is also how the
+                // retry and flush paths re-create an entry before resending,
+                // so a retry entry left behind here would bring the message
+                // back and evict another in its place.
+                let attempt_count = self
+                    .retire_undeliverable_message(&oldest_id, "outbox eviction")
+                    .map_or(0, |entry| entry.attempt_count);
                 if !is_media {
                     // Capacity eviction is as terminal as expiry: the entry
                     // and its persisted copy are gone, so without an event
@@ -3066,6 +3060,40 @@ impl OfflineProtocol {
         self.media_outbox.remove(message_id)
     }
 
+    /// Takes a message this device has given up on out of everything that
+    /// could send it again, returning its outbox entry if it still had one.
+    ///
+    /// A settlement is only terminal if nothing can bring the message back
+    /// afterwards, and three things can: the retry queue, the pending-ACK
+    /// tracker (whose timeout re-queues it), and the outbox. The retry and
+    /// flush paths re-create a missing outbox entry before resending, with
+    /// fresh clocks, so an id dropped from the outbox but left queued for
+    /// retry is never expired by anything. At capacity each of those resends
+    /// evicted a live message to make room, and that message's own retry entry
+    /// did the same: a device holding more than a full outbox of undeliverable
+    /// messages reported a "terminal" `message_failed` on every retry,
+    /// indefinitely, for ids it had already settled. An id left in the ACK
+    /// tracker is settled a second time when its timeout finds no entry.
+    ///
+    /// Every give-up path calls this, so the teardown is written once. It
+    /// emits nothing: which event a drop owes the application differs by
+    /// path, and stays with the caller. `media_reason` is what the aborted
+    /// transfer reports when the id is a media chunk.
+    pub(super) fn retire_undeliverable_message(
+        &mut self,
+        message_id: &MessageId,
+        media_reason: &str,
+    ) -> Option<OutboxEntry> {
+        self.retry_queue.remove(&message_id.as_str());
+        self.ack_manager.remove_ack(message_id);
+        self.handle_outbound_media_chunk_failed(message_id, media_reason);
+        let entry = self.remove_outbox_entry(message_id);
+        if let Some(transport) = entry.as_ref().and_then(|entry| entry.last_transport) {
+            self.transport_manager.record_delivery_failure(transport);
+        }
+        entry
+    }
+
     /// Settles the pending connection-request entry for `message_id` when a
     /// terminal drop occurs (max retries, outbox expiry, capacity eviction),
     /// returning the recipient the caller should emit
@@ -3181,20 +3209,10 @@ impl OfflineProtocol {
             {
                 continue;
             }
-            expired_from_outbox.push((
-                message_id.clone(),
-                entry.last_transport,
-                entry.attempt_count,
-            ));
+            expired_from_outbox.push((message_id.clone(), entry.attempt_count));
         }
-        for (message_id, last_transport, attempt_count) in expired_from_outbox {
-            if let Some(transport) = last_transport {
-                self.transport_manager.record_delivery_failure(transport);
-            }
-            self.retry_queue.remove(&message_id.as_str());
-            self.outbox.remove(&message_id);
-            self.clear_outbox_entry_from_storage(&message_id);
-            self.handle_outbound_media_chunk_failed(&message_id, "outbox lifetime exceeded");
+        for (message_id, attempt_count) in expired_from_outbox {
+            self.retire_undeliverable_message(&message_id, "outbox lifetime exceeded");
 
             // Expiry is terminal: without an event the app shows the message
             // as pending forever. Mirrors handle_max_retries_exceeded, which
@@ -3239,15 +3257,10 @@ impl OfflineProtocol {
             {
                 continue;
             }
-            expired_from_media.push((message_id.clone(), entry.last_transport));
+            expired_from_media.push(message_id.clone());
         }
-        for (message_id, last_transport) in expired_from_media {
-            if let Some(transport) = last_transport {
-                self.transport_manager.record_delivery_failure(transport);
-            }
-            self.retry_queue.remove(&message_id.as_str());
-            self.media_outbox.remove(&message_id);
-            self.handle_outbound_media_chunk_failed(&message_id, "outbox lifetime exceeded");
+        for message_id in expired_from_media {
+            self.retire_undeliverable_message(&message_id, "outbox lifetime exceeded");
         }
     }
 
@@ -4985,8 +4998,7 @@ impl OfflineProtocol {
         ));
         drop(state);
 
-        self.handle_outbound_media_chunk_failed(message_id, "missing outbox entry");
-        self.ack_manager.remove_ack(message_id);
+        self.retire_undeliverable_message(message_id, "missing outbox entry");
         Ok(())
     }
 
