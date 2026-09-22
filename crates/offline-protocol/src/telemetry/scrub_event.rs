@@ -809,7 +809,7 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             hash_string(space_id, scrubber);
             hash_string(doc_id, scrubber);
         }
-        Event::DataDocDeleted {
+        Event::DataDocRemoved {
             space_id,
             doc_id,
             // A fixed token this crate chooses (`local` or `peer`), never a
@@ -950,7 +950,7 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::UserBlocked { .. }
         | Event::UserUnblocked { .. }
         | Event::DataChanged { .. }
-        | Event::DataDocDeleted { .. }
+        | Event::DataDocRemoved { .. }
         | Event::DataDocSizeWarning { .. }
         | Event::DataAttachmentRequested { .. }
         | Event::DataAttachmentReceived { .. }

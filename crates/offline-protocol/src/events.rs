@@ -560,7 +560,7 @@ pub struct UsernameClaim {
     pub issued_at_ms: i64,
 }
 
-/// Who removed a replicated document, on [`Event::DataDocDeleted`].
+/// Who removed a replicated document, on [`Event::DataDocRemoved`].
 ///
 /// A fixed token this crate chooses, never a peer's words, which is what
 /// lets the telemetry scrubber pass it through unhashed. Serialises as
@@ -1779,7 +1779,7 @@ pub enum Event {
     /// after this fires. That arrives as an ordinary `DataChanged` on a
     /// document the application thought was gone, which is the honest
     /// report: the edit won, and its contents are the contents.
-    DataDocDeleted {
+    DataDocRemoved {
         /// The space the document belonged to.
         space_id: String,
         /// The document that was removed.
@@ -2913,7 +2913,7 @@ impl Event {
             Self::UserBlocked { .. } => "protocol.user.blocked",
             Self::UserUnblocked { .. } => "protocol.user.unblocked",
             Self::DataChanged { .. } => "protocol.data.changed",
-            Self::DataDocDeleted { .. } => "protocol.data.doc_deleted",
+            Self::DataDocRemoved { .. } => "protocol.data.doc_removed",
             Self::DataDocSizeWarning { .. } => "protocol.data.doc_size_warning",
             Self::DataAttachmentRequested { .. } => "protocol.data.attachment_requested",
             Self::DataAttachmentReceived { .. } => "protocol.data.attachment_received",
@@ -3732,12 +3732,12 @@ impl fmt::Debug for Event {
                 .field("doc_id", &"[REDACTED]")
                 .field("delta_bytes", delta_bytes)
                 .finish(),
-            Self::DataDocDeleted {
+            Self::DataDocRemoved {
                 space_id: _,
                 doc_id: _,
                 by,
             } => f
-                .debug_struct("DataDocDeleted")
+                .debug_struct("DataDocRemoved")
                 .field("space_id", &"[REDACTED]")
                 .field("doc_id", &"[REDACTED]")
                 // A fixed token this crate chooses, never a peer's words.

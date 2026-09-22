@@ -855,7 +855,7 @@ Emitted when a group is renamed.
 | Event | Fields | When |
 |---|---|---|
 | `data_changed` | `space_id`, `doc_id`, `delta_bytes` | A document change reached storage |
-| `data_doc_deleted` | `space_id`, `doc_id`, `by` | A document was removed from every replica. `by` is `local` or `peer`. A document may come back afterwards if somebody edited it concurrently, which arrives as an ordinary `data_changed` |
+| `data_doc_removed` | `space_id`, `doc_id`, `by` | A document was removed from every replica. `by` is `local` or `peer`. A document may come back afterwards if somebody edited it concurrently, which arrives as an ordinary `data_changed` |
 | `data_doc_size_warning` | `space_id`, `doc_id`, `compacted_bytes`, `cap_bytes` | A document passed 768 KiB, approaching the 1 MiB cap |
 | `data_attachment_requested` | `space_id`, `peer_id`, `hash` | A peer wants the bytes behind a reference. Answer with `provideAttachment` or `declineAttachment` |
 | `data_attachment_received` | `space_id`, `peer_id`, `hash`, `data` | Fetched bytes arrived and matched the hash that asked for them. `data` is the whole blob, base64 |

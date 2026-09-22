@@ -2172,7 +2172,7 @@ new call is for.
 **`removeDoc(space, doc)` removes the document everywhere.** It records the
 version the document stood at, deletes it here, and tells the space. A replica
 whose copy that version covers deletes it too and reports
-`data_doc_deleted` with `by: "peer"`. `removeSpace(space)` does the same for
+`data_doc_removed` with `by: "peer"`. `removeSpace(space)` does the same for
 every document a space holds.
 
 **An edit made while a removal was crossing wins, and brings the whole
@@ -2204,7 +2204,7 @@ each offer, and the document stays removed here. Nothing loops and nothing is
 surfaced wrongly. It disappears there when they update and the next exchange
 runs.
 
-**One new event and two new methods.** `data_doc_deleted` carries `space_id`,
+**One new event and two new methods.** `data_doc_removed` carries `space_id`,
 `doc_id` and `by` (`local` or `peer`). The two methods are on `DataStore` in
 every binding. No error code was added.
 

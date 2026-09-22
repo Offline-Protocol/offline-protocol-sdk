@@ -3712,7 +3712,7 @@ fn a_removal_is_reported_to_the_application_on_both_sides() {
             .unwrap()
             .iter()
             .filter_map(|event| match event {
-                crate::Event::DataDocDeleted { doc_id, by, .. } => Some(format!("{doc_id}:{by}")),
+                crate::Event::DataDocRemoved { doc_id, by, .. } => Some(format!("{doc_id}:{by}")),
                 _ => None,
             })
             .collect()

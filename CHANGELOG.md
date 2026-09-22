@@ -18,7 +18,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 - **Replicated documents can be removed from every replica.**
   `DataStore.removeDoc(space, doc)` records the version the document stood at
   and tells the space; a replica whose copy that version covers deletes it too
-  and reports the new `data_doc_deleted` event with `by: "peer"`.
+  and reports the new `data_doc_removed` event with `by: "peer"`.
   `removeSpace(space)` does the same for every document a space holds. Before
   this, a document deleted on one device was absent from its next offer and
   still present on the peer's, and the rules that exist to carry a document a

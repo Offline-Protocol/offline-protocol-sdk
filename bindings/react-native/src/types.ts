@@ -2496,8 +2496,8 @@ export interface DataChangedEvent extends BaseEvent {
  * app thought was gone, which is the honest report: the edit won, and its
  * contents are the contents.
  */
-export interface DataDocDeletedEvent extends BaseEvent {
-  type: 'data_doc_deleted';
+export interface DataDocRemovedEvent extends BaseEvent {
+  type: 'data_doc_removed';
   space_id: string;
   doc_id: string;
   /** `local` for this device, `peer` for a removal learned from the space. */
@@ -2760,7 +2760,7 @@ export type ProtocolEvent =
   | UserBlockedEvent
   | UserUnblockedEvent
   | DataChangedEvent
-  | DataDocDeletedEvent
+  | DataDocRemovedEvent
   | DataDocSizeWarningEvent
   | DataAttachmentRequestedEvent
   | DataAttachmentReceivedEvent

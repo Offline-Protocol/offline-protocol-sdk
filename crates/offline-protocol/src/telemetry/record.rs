@@ -176,7 +176,7 @@ pub(crate) mod tests {
         "protocol.user.blocked",
         "protocol.user.unblocked",
         "protocol.data.changed",
-        "protocol.data.doc_deleted",
+        "protocol.data.doc_removed",
         "protocol.data.doc_size_warning",
         "protocol.data.attachment_requested",
         "protocol.data.attachment_received",
@@ -363,7 +363,7 @@ pub(crate) mod tests {
             | Event::UserBlocked { .. }
             | Event::UserUnblocked { .. }
             | Event::DataChanged { .. }
-            | Event::DataDocDeleted { .. }
+            | Event::DataDocRemoved { .. }
             | Event::DataDocSizeWarning { .. }
             | Event::DataAttachmentRequested { .. }
             | Event::DataAttachmentReceived { .. }
@@ -790,7 +790,7 @@ pub(crate) mod tests {
                 doc_id: String::new(),
                 delta_bytes: 0,
             },
-            Event::DataDocDeleted {
+            Event::DataDocRemoved {
                 space_id: String::new(),
                 doc_id: String::new(),
                 by: crate::events::DocRemovedBy::Local,

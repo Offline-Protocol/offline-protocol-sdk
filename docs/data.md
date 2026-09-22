@@ -191,7 +191,7 @@ Two verbs, and the difference is who they affect.
 
 **`removeDoc(spaceId, docId)` removes the document from every replica.** It
 records the version the document stood at and tells the space. A replica whose
-copy that version covers deletes it too, and `data_doc_deleted` fires there
+copy that version covers deletes it too, and `data_doc_removed` fires there
 with `by: 'peer'`. Removing a name this device does not hold does nothing.
 
 **`deleteDoc(spaceId, docId)` drops this device's copy only.** It records
@@ -306,7 +306,7 @@ account that made them.
 | Event | Handle it because |
 |-------|-------------------|
 | `data_changed` | The change is durable. Re-render here |
-| `data_doc_deleted` | The document was removed from every replica, by this device (`local`) or by the space (`peer`). Close whatever has it open |
+| `data_doc_removed` | The document was removed from every replica, by this device (`local`) or by the space (`peer`). Close whatever has it open |
 | `data_doc_size_warning` | The cap is a cliff otherwise, met for the first time as a failed write |
 | `data_attachment_requested` | Only your app has the bytes. Answer or decline |
 | `data_attachment_received` | The bytes arrived and matched the hash that asked for them. Store them where you keep files |

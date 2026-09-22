@@ -1051,7 +1051,7 @@ impl OfflineProtocol {
             );
         }
 
-        self.emit_event(Event::DataDocDeleted {
+        self.emit_event(Event::DataDocRemoved {
             space_id: space.to_string(),
             doc_id: doc.to_string(),
             by: DocRemovedBy::Peer,
@@ -1439,7 +1439,7 @@ impl OfflineProtocol {
         }
         self.persist_space(storage.as_ref(), space)?;
 
-        self.emit_event(Event::DataDocDeleted {
+        self.emit_event(Event::DataDocRemoved {
             space_id: space.to_string(),
             doc_id: doc.to_string(),
             by: DocRemovedBy::Local,
