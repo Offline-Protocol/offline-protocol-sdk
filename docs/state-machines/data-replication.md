@@ -91,9 +91,16 @@ document back into existence.
 
 **A floor outlives its document.** Re-using the name starts a document whose
 history is disjoint from the floor, so it is alive, and a stale replica's copy
-of the old contents is still refused. Floors never expire; they are bounded by
-the per-space document ceiling, which counts removed names alongside held
-ones.
+of the old contents alone is still refused. It is not fenced off: a replica
+that kept the old contents past the floor merges them into the new document,
+and a stale replica merges the new contents into its old copy. Floors never
+expire; they are bounded by the per-space document ceiling, which counts
+removed names alongside held ones, and each floor is bounded in size.
+
+**A floor already held decides once.** A floor the record already covers is
+answered from memory: no write, no open, no deletion. Floors are re-sent on
+every offer, and a name brought back and not yet written to stands at the
+empty version, which every floor covers.
 
 **`deleteDoc` is eviction and records no floor.** It reclaims what the
 document occupies here and says nothing about the name, so the next exchange

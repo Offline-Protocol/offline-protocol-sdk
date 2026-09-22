@@ -1903,6 +1903,11 @@ interface DataStore {
     //
     // Removing a name this device does not hold does nothing: there is no
     // version to record, and no content to name.
+    //
+    // Re-using the name afterwards is not fenced off: a replica that kept
+    // the old contents past the removal merges them into the new document,
+    // and a replica on an older build merges the new contents into its old
+    // copy. Give new content a fresh name.
     [Throws=ProtocolError]
     void remove_doc(string space_id, string doc_id);
 
@@ -1991,8 +1996,8 @@ interface DataStore {
     // application that configured its own backend.
     //
     // Only durable once replication has stopped, and it removes nothing from
-    // anybody else. A wipe leaves no removal records behind — it has to,
-    // because a logout must leave a custom backend empty — so a peer cannot
+    // anybody else. A wipe leaves no removal records behind (it has to,
+    // because a logout must leave a custom backend empty), so a peer cannot
     // tell a wiped space from one this device has never seen, and on a
     // running engine with live sessions its next version offer recreates and
     // refills every document. Stopping covers it only while it stays

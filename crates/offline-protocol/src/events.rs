@@ -560,6 +560,29 @@ pub struct UsernameClaim {
     pub issued_at_ms: i64,
 }
 
+/// Who removed a replicated document, on [`Event::DataDocDeleted`].
+///
+/// A fixed token this crate chooses, never a peer's words, which is what
+/// lets the telemetry scrubber pass it through unhashed. Serialises as
+/// `local` or `peer`, which is the contract every binding types against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DocRemovedBy {
+    /// This device removed it.
+    Local,
+    /// A removal learned from the space.
+    Peer,
+}
+
+impl fmt::Display for DocRemovedBy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Local => "local",
+            Self::Peer => "peer",
+        })
+    }
+}
+
 /// Events that can occur in the protocol.
 ///
 /// Note: This type implements a custom Debug that redacts sensitive fields
@@ -1763,7 +1786,7 @@ pub enum Event {
         doc_id: String,
         /// Who removed it: `local` for this device, `peer` for a removal
         /// learned from the space.
-        by: String,
+        by: DocRemovedBy,
     },
 
     /// A replicated document is approaching the per-document size cap.

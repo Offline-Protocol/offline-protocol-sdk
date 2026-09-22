@@ -3928,7 +3928,10 @@ export class DataStore {
    * removal whichever happened first. That arrives as an ordinary
    * `data_changed` on a document you removed.
    *
-   * Removing a name this device does not hold does nothing.
+   * Removing a name this device does not hold does nothing. Re-using the
+   * name afterwards is not fenced off: a replica that kept the old contents
+   * past the removal merges them into the new document. Give new content a
+   * fresh name.
    */
   async removeDoc(spaceId: string, docId: string): Promise<void> {
     await OfflineProtocolNativeModule.dataRemoveDoc(spaceId, docId);

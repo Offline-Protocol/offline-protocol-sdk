@@ -12,12 +12,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use offline_protocol_data::DataValue;
+use offline_protocol_data::{DataValue, VersionToken};
 use offline_protocol_transport::{MockTransport, Transport, TransportType};
 
 use crate::constants::ACK_FOR_KEY;
 use crate::mls::InMemoryStorage;
-use crate::protocol::data_sync::{blob_digest, MAX_DOCS_PER_SPACE, MAX_QUARANTINED_BLOBS};
+use crate::protocol::data::TombstoneOutcome;
+use crate::protocol::data_sync::{
+    blob_digest, MAX_DOCS_PER_SPACE, MAX_QUARANTINED_BLOBS, MAX_REMOVAL_FLOOR_BYTES,
+};
 use crate::protocol::tests::{create_test_config_for_user, id};
 use crate::protocol::types::{storage_keys, SessionState};
 use crate::protocol::{OfflineProtocol, TestProtocolStateStorage};
@@ -3867,28 +3870,7 @@ fn the_removal_record_reaches_disk_before_the_records_it_removes() {
     // deletes holds exactly the same floor. What it does not do is survive
     // a crash in between, which leaves records whose presence votes the
     // document back into existence at the next open.
-    let mut config = create_test_config_for_user("alice");
-    config.encryption.enabled = true;
-    config.data.enabled = true;
-    let mut alice = OfflineProtocol::new(config).expect("protocol");
-    let writes = Arc::new(Mutex::new(Vec::new()));
-    alice
-        .initialize_mls(
-            crate::test_identity::seeded_storage("alice"),
-            Arc::new(RecordingStateStorage {
-                inner: TestProtocolStateStorage {
-                    storage: Arc::new(InMemoryStorage::new()),
-                },
-                writes: writes.clone(),
-            }),
-        )
-        .expect("initialize_mls");
-    let mock = MockTransport::new(TransportType::BLE);
-    mock.start().expect("transport start");
-    alice
-        .transport_manager_mut()
-        .add_transport(TransportType::BLE, Box::new(mock));
-    alice.start().expect("start");
+    let (mut alice, writes) = recording_protocol("alice");
 
     let space = id("bob");
     alice
@@ -4060,6 +4042,454 @@ fn a_removal_a_crash_interrupted_is_finished_at_the_next_open() {
         "the interrupted removal was never finished, so its records are still there to \
          be replayed into the next document of that name"
     );
+}
+
+#[test]
+fn a_floor_already_held_is_answered_without_a_write_or_a_deletion() {
+    // Floors travel on every offer for the life of the space, so the common
+    // case for a removal arriving is one this device has already judged.
+    // Two things must not happen then. The obvious one is a write: one
+    // sealed record per removed name per exchange, from every peer, for
+    // ever. The other is a deletion: every version covers the empty one, so
+    // a floor judged afresh reads a name brought back on purpose and not yet
+    // written to as removed content.
+    let (mut alice, writes) = recording_protocol("alice");
+    let space = id("bob");
+    alice
+        .data_map_set(&space, "notes", "m", "title", DataValue::text("hello"))
+        .expect("set");
+    alice.data_flush(&space, "notes").expect("flush");
+    let floor = VersionToken::from_bytes(
+        BASE64
+            .decode(alice.data_doc_version(&space, "notes").expect("version"))
+            .expect("base64"),
+    );
+
+    assert_eq!(
+        alice
+            .data_apply_tombstone(&space, "notes", &floor)
+            .expect("apply"),
+        TombstoneOutcome::Deleted
+    );
+
+    let meta_writes = |writes: &Arc<Mutex<Vec<String>>>| -> usize {
+        writes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.as_str() == storage_keys::DATA_DOC_META)
+            .count()
+    };
+
+    // The same floor, re-sent on the next offer.
+    writes.lock().unwrap().clear();
+    assert_eq!(
+        alice
+            .data_apply_tombstone(&space, "notes", &floor)
+            .expect("apply again"),
+        TombstoneOutcome::Unchanged
+    );
+    assert_eq!(
+        meta_writes(&writes),
+        0,
+        "a floor already held was written again"
+    );
+
+    // The name is brought back on purpose and nothing has been written to
+    // it yet, which is the window between an application's createDoc and
+    // its first edit.
+    alice
+        .data_create_doc(&space, "notes")
+        .expect("create again");
+    writes.lock().unwrap().clear();
+    assert_eq!(
+        alice
+            .data_apply_tombstone(&space, "notes", &floor)
+            .expect("apply once more"),
+        TombstoneOutcome::Unchanged
+    );
+    assert!(
+        alice
+            .data_list_docs(&space)
+            .expect("list")
+            .contains(&"notes".to_string()),
+        "a floor that was already judged deleted a document created after it"
+    );
+    assert_eq!(
+        meta_writes(&writes),
+        0,
+        "a floor already held was written again for a name that came back"
+    );
+}
+
+#[test]
+fn a_removal_for_a_held_document_still_applies_at_the_ceiling() {
+    // A space that reaches the ceiling stays there for good, because floors
+    // never expire. So a removal arriving at a full space is the ordinary
+    // case for the rest of that space's life, and it arrives in a frame
+    // that also re-sends every floor already held here. A name already
+    // known costs nothing new and must admit; a refused fresh name must not
+    // take the rest of the frame down with it.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+
+    let mut sent = 0usize;
+    while sent < MAX_DOCS_PER_SPACE {
+        let docs: Vec<String> = (sent..sent + 128)
+            .map(|n| format!(r#""doc{n:04}":"""#))
+            .collect();
+        alice.protocol.handle_data_sync_frame(
+            &bob.address,
+            &format!(
+                r#"{{"v":1,"k":"vv","reply":true,"partial":true,"docs":{{{}}}}}"#,
+                docs.join(",")
+            ),
+        );
+        sent += 128;
+    }
+    assert_eq!(
+        alice
+            .protocol
+            .data_list_docs(&alice_space)
+            .expect("list")
+            .len(),
+        MAX_DOCS_PER_SPACE,
+        "precondition: the space has to be full"
+    );
+    // Created from an offer and never written, so this is the empty version,
+    // which every one of these documents stands at.
+    let empty = alice
+        .protocol
+        .data_doc_version(&alice_space, "doc0000")
+        .expect("version");
+
+    // One removal. The space is now 1023 held and one removed: still full.
+    alice.protocol.handle_data_sync_frame(
+        &bob.address,
+        &format!(
+            r#"{{"v":1,"k":"vv","reply":true,"partial":true,"docs":{{}},"gone":{{"doc0000":"{empty}"}}}}"#
+        ),
+    );
+    assert!(
+        !holds(&mut alice, &alice_space, "doc0000"),
+        "precondition: a removal for a held document applies at the ceiling"
+    );
+
+    // The next offer re-sends that floor, as every offer does, alongside a
+    // fresh name and a removal for another held document. Sorted, the fresh
+    // name comes first.
+    alice.protocol.handle_data_sync_frame(
+        &bob.address,
+        &format!(
+            r#"{{"v":1,"k":"vv","reply":true,"partial":true,"docs":{{}},"gone":{{"aaaa-fresh":"{empty}","doc0000":"{empty}","doc0001":"{empty}"}}}}"#
+        ),
+    );
+    assert!(
+        !removal_records(&alice).contains(&format!("{alice_space}/aaaa-fresh")),
+        "the ceiling admitted a fresh name"
+    );
+    assert!(
+        !holds(&mut alice, &alice_space, "doc0001"),
+        "a removal for a held document was dropped at the ceiling"
+    );
+
+    // And the one thing a full space must still let through: an edit beyond
+    // a removed name's floor. The name is known here, so admitting the blob
+    // costs no record the space does not already hold, and refusing it would
+    // make edit-wins the one rule a full space silently drops.
+    let bob_space = Node::space_for(&alice);
+    write(
+        &mut bob,
+        &bob_space,
+        "doc0000",
+        "title",
+        "edited past the removal",
+    );
+    let blob = bob
+        .protocol
+        .data_export_snapshot(&bob_space, "doc0000")
+        .expect("snapshot");
+    alice
+        .protocol
+        .handle_data_sync_frame(&bob.address, &snapshot_frame("doc0000", &blob));
+    assert!(
+        holds(&mut alice, &alice_space, "doc0000"),
+        "an edit beyond the floor was refused at the ceiling, though the name costs nothing new"
+    );
+    assert_eq!(
+        read(&mut alice, &alice_space, "doc0000", "title"),
+        Some(DataValue::text("edited past the removal")),
+        "the edit that brought the name back did not bring its contents"
+    );
+}
+
+#[test]
+fn removing_a_space_announces_once() {
+    // An offer carries every removal the space holds and reads the version
+    // of every document still in it, so announcing per removed document
+    // would send N offers built from N opens each.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    for doc in ["one", "two", "three"] {
+        write(&mut alice, &alice_space, doc, "k", "v");
+    }
+    settle(&mut alice, &mut bob);
+
+    alice.transport.clear_sent_messages();
+    alice
+        .protocol
+        .data_remove_space(&alice_space)
+        .expect("remove space");
+    let announced = alice
+        .transport
+        .sent_messages()
+        .iter()
+        .filter(|message| !message.metadata.contains_key(ACK_FOR_KEY))
+        .count();
+    assert_eq!(
+        announced, 1,
+        "removing a space sent one offer per document rather than one for the space"
+    );
+}
+
+#[test]
+fn a_refused_blob_leaves_a_removed_name_removed() {
+    // A blob from beyond the floor brings a removed name back, and every
+    // refusal that can still stop the blob has to come first: a name
+    // brought back for a blob that is then refused is live with no document
+    // under it, and reads as empty rather than as removed.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+    write(&mut alice, &alice_space, "notes", "title", "hello");
+    settle(&mut alice, &mut bob);
+    alice
+        .protocol
+        .data_remove_doc(&alice_space, "notes")
+        .expect("remove");
+    alice.transport.clear_sent_messages();
+
+    // Bob edits without hearing about the removal, so his copy is beyond
+    // the floor and would bring the name back if it applied.
+    write(&mut bob, &bob_space, "notes", "added", "B");
+    bob.transport.clear_sent_messages();
+    let blob = bob
+        .protocol
+        .data_export_snapshot(&bob_space, "notes")
+        .expect("snapshot");
+
+    // It is a blob a previous run died inside, so it is refused.
+    seed_sync_record(
+        &mut alice,
+        &alice_space,
+        &serde_json::json!({ "quarantined": [blob_digest(&blob)] }),
+    );
+    alice.restart(&bob.address);
+    alice
+        .protocol
+        .handle_data_sync_frame(&bob.address, &snapshot_frame("notes", &blob));
+
+    assert!(
+        !holds(&mut alice, &alice_space, "notes"),
+        "a refused blob created a document"
+    );
+    assert!(
+        matches!(
+            alice
+                .protocol
+                .data_map_get(&alice_space, "notes", "m", "title"),
+            Err(crate::Error::InvalidState(_))
+        ),
+        "a refused blob brought the name back without a document under it"
+    );
+}
+
+#[test]
+fn a_floor_that_is_not_a_version_is_refused() {
+    // A floor that does not decode covers nothing and would be stored for
+    // the life of the space: a record for no removal at all.
+    let (mut alice, bob) = pair();
+    let alice_space = Node::space_for(&bob);
+
+    let garbage = BASE64.encode([0xffu8, 0xfe, 0xfd, 0xfc]);
+    alice.protocol.handle_data_sync_frame(
+        &bob.address,
+        &format!(
+            r#"{{"v":1,"k":"vv","reply":true,"partial":true,"docs":{{}},"gone":{{"notes":"{garbage}"}}}}"#
+        ),
+    );
+    assert!(
+        removal_records(&alice).is_empty(),
+        "a floor that is not a version was stored"
+    );
+
+    let huge = BASE64.encode(vec![0u8; MAX_REMOVAL_FLOOR_BYTES + 1]);
+    alice.protocol.handle_data_sync_frame(
+        &bob.address,
+        &format!(
+            r#"{{"v":1,"k":"vv","reply":true,"partial":true,"docs":{{}},"gone":{{"notes":"{huge}"}}}}"#
+        ),
+    );
+    assert!(
+        removal_records(&alice).is_empty(),
+        "an oversized floor was stored"
+    );
+    assert!(
+        !holds(&mut alice, &alice_space, "notes"),
+        "a refused floor created a document"
+    );
+}
+
+#[test]
+fn removing_a_document_nobody_wrote_to_removes_the_peers_empty_copy() {
+    // The floor of a document nobody wrote to is the empty version, which
+    // covers exactly one thing: another empty copy.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    alice
+        .protocol
+        .data_create_doc(&alice_space, "draft")
+        .expect("create");
+    alice.protocol.nudge_data_sync(&alice_space, None, "test");
+    settle(&mut alice, &mut bob);
+    assert!(
+        holds(&mut bob, &bob_space, "draft"),
+        "precondition: the empty document has to reach the peer"
+    );
+
+    alice
+        .protocol
+        .data_remove_doc(&alice_space, "draft")
+        .expect("remove");
+    settle(&mut alice, &mut bob);
+    assert!(!holds(&mut alice, &alice_space, "draft"));
+    assert!(
+        !holds(&mut bob, &bob_space, "draft"),
+        "an empty floor did not remove the peer's empty copy"
+    );
+}
+
+#[test]
+fn a_space_whose_documents_were_all_removed_still_lists() {
+    // The removals are what the space has left to say to its peers, and the
+    // start-up sweep offers only the spaces this list names. Pinned against
+    // the removal records alone, with the index record deleted, because the
+    // index would keep the space listed on its own.
+    let mut alice = Node::new("alice");
+    let space = id("bob");
+    write(&mut alice, &space, "notes", "k", "v");
+    alice.protocol.data_remove_space(&space).expect("remove");
+    assert!(alice
+        .protocol
+        .data_list_docs(&space)
+        .expect("list")
+        .is_empty());
+
+    TestProtocolStateStorage {
+        storage: alice.state.clone(),
+    }
+    .delete(storage_keys::DATA_SPACES, &space)
+    .expect("delete the index record");
+    alice.restart(&bob_address());
+
+    assert!(
+        alice
+            .protocol
+            .data_list_spaces()
+            .expect("spaces")
+            .contains(&space),
+        "a space with removals to report was left out of the list"
+    );
+}
+
+#[test]
+fn re_using_a_removed_name_merges_a_concurrent_edit_into_the_new_document() {
+    // What the docs say and what the floor cannot prevent: an edit made on
+    // the old contents keeps them alive, and a new document under the same
+    // name is where the exchange merges them. This is the edit-wins rule
+    // applied to a re-used name, and the reason the guide says to use a
+    // fresh one.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+    write(&mut alice, &alice_space, "notes", "title", "hello");
+    settle(&mut alice, &mut bob);
+
+    // Apart: Alice removes and starts over under the same name; Bob edits
+    // the old contents.
+    alice
+        .protocol
+        .data_remove_doc(&alice_space, "notes")
+        .expect("remove");
+    alice
+        .protocol
+        .data_create_doc(&alice_space, "notes")
+        .expect("create again");
+    write(&mut alice, &alice_space, "notes", "fresh", "new");
+    write(&mut bob, &bob_space, "notes", "added", "B");
+    alice.transport.clear_sent_messages();
+    bob.transport.clear_sent_messages();
+
+    alice.protocol.nudge_data_sync(&alice_space, None, "test");
+    bob.protocol.nudge_data_sync(&bob_space, None, "test");
+    let rounds = settle(&mut alice, &mut bob);
+
+    for (node, space, label) in [
+        (&mut alice, alice_space.as_str(), "alice"),
+        (&mut bob, bob_space.as_str(), "bob"),
+    ] {
+        assert_eq!(
+            read(node, space, "notes", "fresh"),
+            Some(DataValue::text("new")),
+            "{label} lost the new document"
+        );
+        assert_eq!(
+            read(node, space, "notes", "added"),
+            Some(DataValue::text("B")),
+            "{label} lost the edit that kept the old contents alive"
+        );
+        assert_eq!(
+            read(node, space, "notes", "title"),
+            Some(DataValue::text("hello")),
+            "{label} kept the edit without the contents it was made on, which the \
+             history cannot express"
+        );
+    }
+    assert_eq!(
+        rounds.last(),
+        Some(&0),
+        "the exchange did not terminate: {rounds:?}"
+    );
+}
+
+/// One replica over a store that records every write, for tests about what
+/// an operation writes rather than what it leaves behind.
+fn recording_protocol(label: &str) -> (OfflineProtocol, Arc<Mutex<Vec<String>>>) {
+    let mut config = create_test_config_for_user(label);
+    config.encryption.enabled = true;
+    config.data.enabled = true;
+    let mut protocol = OfflineProtocol::new(config).expect("protocol");
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    protocol
+        .initialize_mls(
+            crate::test_identity::seeded_storage(label),
+            Arc::new(RecordingStateStorage {
+                inner: TestProtocolStateStorage {
+                    storage: Arc::new(InMemoryStorage::new()),
+                },
+                writes: writes.clone(),
+            }),
+        )
+        .expect("initialize_mls");
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.start().expect("transport start");
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().expect("start");
+    (protocol, writes)
 }
 
 /// An address that is not this node's, for a space name.

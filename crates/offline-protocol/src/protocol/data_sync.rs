@@ -129,6 +129,17 @@ pub(crate) const DATA_SYNC_OFFER_INTERVAL: Duration = Duration::from_secs(30);
 /// by it, and those still replicate outward.
 pub(crate) const MAX_DOCS_PER_SPACE: usize = 1024;
 
+/// Bytes a removal floor may occupy, on the wire and in the record.
+///
+/// A floor is one version vector, and the floor held for a name is the
+/// union of every floor ever merged into it, which only grows: a member of
+/// a space can grow it by naming a fresh replica in every offer, and nothing
+/// but this stops the record and every comparison against it growing with
+/// it. Sized well past a real document: the version of a document edited
+/// across thousands of sessions is still under this, and a document whose
+/// version could not fit here could not be offered in a frame either.
+pub(crate) const MAX_REMOVAL_FLOOR_BYTES: usize = 64 * 1024;
+
 /// Blob digests remembered per space after a crash.
 ///
 /// Small on purpose. The list only has to outlive the sender's retries of
@@ -275,6 +286,33 @@ enum SyncBody {
 /// back after a removal is offered *and* still reports the floor, for the
 /// sake of a third replica that never heard about the removal.
 type OfferEntry = (String, Option<String>, Option<String>);
+
+/// Split an offer into frames, each within [`MAX_DOCS_PER_VERSION_FRAME`].
+///
+/// A name carrying both a version and a floor counts twice: the budget
+/// stands in for bytes, and such a name costs the frame two encoded
+/// versions and its own name twice. Counting it once would let a space
+/// whose every document came back after a removal build a frame twice the
+/// size the budget was chosen to keep inside the transport.
+///
+/// An empty offer is still one frame. It is what tells a peer holding
+/// documents to send them to a replica that has never seen any.
+fn offer_batches(entries: &[OfferEntry]) -> Vec<&[OfferEntry]> {
+    let mut batches = Vec::new();
+    let mut start = 0usize;
+    let mut weight = 0usize;
+    for (index, (_, version, floor)) in entries.iter().enumerate() {
+        let cost = usize::from(version.is_some()) + usize::from(floor.is_some());
+        if index > start && weight + cost > MAX_DOCS_PER_VERSION_FRAME {
+            batches.push(&entries[start..index]);
+            start = index;
+            weight = 0;
+        }
+        weight += cost;
+    }
+    batches.push(&entries[start..]);
+    batches
+}
 
 /// Where a sync frame goes and what it is sealed under.
 ///
@@ -711,11 +749,7 @@ impl OfflineProtocol {
         }
         entries.sort_by(|left, right| left.0.cmp(&right.0));
 
-        let batches: Vec<&[OfferEntry]> = if entries.is_empty() {
-            vec![&[]]
-        } else {
-            entries.chunks(MAX_DOCS_PER_VERSION_FRAME).collect()
-        };
+        let batches = offer_batches(&entries);
         // Every frame of a split offer is partial, including the last: the
         // inference that needs the complete list cannot be drawn from any
         // one of them, and there is nowhere to accumulate them that a
@@ -1051,16 +1085,27 @@ impl OfflineProtocol {
                 warn!(space, doc, "A removal names an invalid document");
                 continue;
             }
+            // Bound the decode by the floor budget, the way a blob is bound
+            // by the frame budget: base64 grows by a third, so the encoded
+            // length refuses an oversized floor before allocating for it.
+            if encoded.len() > MAX_REMOVAL_FLOOR_BYTES * 4 / 3 + 4 {
+                warn!(space, doc, "Oversized removal floor in a sync frame");
+                continue;
+            }
             // A removal costs a stored record for a name this device may
             // never have held, so it answers to the same ceiling every
-            // other name a peer introduces does.
+            // other name a peer introduces does. `continue` rather than
+            // `break`: a name already known here always admits, and a
+            // removal for a held document sorted after a refused fresh name
+            // is exactly the removal a full space still has to apply.
             if !self.data_space_admits_doc(space, doc, MAX_DOCS_PER_SPACE) {
                 warn!(
                     space,
+                    doc,
                     cap = MAX_DOCS_PER_SPACE,
-                    "Space is at its document ceiling; ignoring the rest of the removals"
+                    "Space is at its document ceiling; ignoring a removal for a new name"
                 );
-                break;
+                continue;
             }
             let floor = match BASE64.decode(encoded) {
                 Ok(bytes) => VersionToken::from_bytes(bytes),
@@ -1459,15 +1504,6 @@ impl OfflineProtocol {
             );
             return Ok(());
         }
-        // Past that check the blob carries something the removal never saw,
-        // which is an edit made concurrently with it or after it. An edit
-        // beats a removal, so the name comes back before the import that
-        // needs it. The floor stays, so the rest of the removed content is
-        // still refused from a replica that has not heard about the removal.
-        if let Err(err) = self.data_revive_removed_doc(space, doc) {
-            warn!(space, doc, error = %err, "Could not bring back a removed document for a change that outlives its removal");
-            return Ok(());
-        }
         if !self.data_space_admits_doc(space, doc, MAX_DOCS_PER_SPACE) {
             warn!(
                 space,
@@ -1487,6 +1523,19 @@ impl OfflineProtocol {
             // wrong is the process and the cost of being right is one
             // document change that the sender still holds.
             warn!(space, doc, "Refusing a quarantined blob");
+            return Ok(());
+        }
+
+        // Past every refusal, the blob carries something the removal never
+        // saw, which is an edit made concurrently with it or after it. An
+        // edit beats a removal, so the name comes back here, after the last
+        // check that can refuse the blob and before the first step that
+        // needs the name open. Brought back any earlier, a refused blob
+        // would leave the name live with no document under it. The floor
+        // stays, so the rest of the removed content is still refused from a
+        // replica that has not heard about the removal.
+        if let Err(err) = self.data_revive_removed_doc(space, doc) {
+            warn!(space, doc, error = %err, "Could not bring back a removed document for a change that outlives its removal");
             return Ok(());
         }
 
@@ -2373,6 +2422,50 @@ impl OfflineProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_name_in_both_maps_costs_two_entries_of_the_frame_budget() {
+        let entry = |n: usize, version: bool, floor: bool| -> OfferEntry {
+            (
+                format!("doc{n}"),
+                version.then(|| "AQID".to_string()),
+                floor.then(|| "BAUG".to_string()),
+            )
+        };
+
+        let full: Vec<OfferEntry> = (0..MAX_DOCS_PER_VERSION_FRAME)
+            .map(|n| entry(n, true, false))
+            .collect();
+        assert_eq!(offer_batches(&full).len(), 1);
+
+        let one_over: Vec<OfferEntry> = (0..=MAX_DOCS_PER_VERSION_FRAME)
+            .map(|n| entry(n, true, false))
+            .collect();
+        assert_eq!(offer_batches(&one_over).len(), 2);
+
+        // Every name came back after a removal, so each costs the frame two
+        // versions: half the budget in names is the whole budget in bytes.
+        let dual: Vec<OfferEntry> = (0..=MAX_DOCS_PER_VERSION_FRAME / 2)
+            .map(|n| entry(n, true, true))
+            .collect();
+        let batches = offer_batches(&dual);
+        assert_eq!(
+            batches.len(),
+            2,
+            "a frame of names in both maps was built to twice the byte budget"
+        );
+        assert_eq!(
+            batches.iter().map(|batch| batch.len()).sum::<usize>(),
+            dual.len(),
+            "an entry was dropped or duplicated across the split"
+        );
+
+        assert_eq!(
+            offer_batches(&[]).len(),
+            1,
+            "an empty offer is still one frame: it is what tells a peer to send everything"
+        );
+    }
 
     #[test]
     fn a_frame_carries_its_version_where_a_future_build_can_find_it() {

@@ -44,7 +44,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::error::{Error, Result};
-use crate::events::Event;
+use crate::events::{DocRemovedBy, Event};
+use crate::protocol::data_sync::MAX_REMOVAL_FLOOR_BYTES;
 use crate::protocol::storage::StateRecord;
 use crate::protocol::types::{storage_keys, MAX_PROTOCOL_STATE_RECORD_BYTES};
 use crate::protocol::OfflineProtocol;
@@ -102,6 +103,10 @@ pub(crate) enum TombstoneOutcome {
     /// Nothing was held under that name; the floor is recorded so a replica
     /// that still holds the removed content cannot seed it back.
     Recorded,
+    /// A floor already held here covers this one, so it carried nothing
+    /// new and nothing was written or opened. The common case: floors
+    /// travel on every offer for the life of the space.
+    Unchanged,
 }
 
 /// A document held open in memory.
@@ -929,6 +934,16 @@ impl OfflineProtocol {
     /// is an edit the removal never saw. Either way the floor is recorded,
     /// including for a name this device has never held, so a third replica
     /// still holding the removed content cannot seed it back later.
+    ///
+    /// A floor this device already holds, or one a held floor covers, is
+    /// answered from memory with no write and no open. Floors are carried on
+    /// every offer for the life of the space, so that is the common case,
+    /// and it has to be free for two reasons. The obvious one is cost: one
+    /// sealed record per removed name per exchange, from every peer. The
+    /// other is a name that was brought back on purpose and not yet written
+    /// to: every version covers the empty one, so a floor that was already
+    /// judged would read the fresh document as removed content and delete
+    /// it. A floor decides once, when it first arrives.
     pub(crate) fn data_apply_tombstone(
         &mut self,
         space: &str,
@@ -938,20 +953,37 @@ impl OfflineProtocol {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
         Self::validate_ids(space, doc)?;
+        // Checked once on the way in. A floor that does not decode is stored
+        // for the life of the space and covers nothing, which costs a record
+        // for no removal at all.
+        floor.validate().map_err(map_data_error)?;
         let storage = self.require_data_storage()?;
         self.load_space(storage.as_ref(), space)?;
-
-        let merged = match self.doc_floor(space, doc) {
-            Some(existing) => existing.union(floor).map_err(map_data_error)?,
-            None => floor.clone(),
-        };
-        let encoded = BASE64.encode(merged.as_bytes());
 
         let held = self
             .data
             .spaces
             .get(space)
             .is_some_and(|record| record.docs.contains(doc));
+
+        let merged = match self.doc_floor(space, doc) {
+            Some(existing) if existing.includes(floor).map_err(map_data_error)? => {
+                return Ok(TombstoneOutcome::Unchanged);
+            }
+            Some(existing) => existing.union(floor).map_err(map_data_error)?,
+            None => floor.clone(),
+        };
+        // The union only ever grows, and a peer can grow it by naming a
+        // fresh replica in every offer. Bounded here rather than at the
+        // frame, because the frame bounds one floor and this bounds the
+        // sum of every floor ever merged into this name.
+        if merged.as_bytes().len() > MAX_REMOVAL_FLOOR_BYTES {
+            return Err(Error::Other(format!(
+                "removal floor for {space}/{doc} would exceed {MAX_REMOVAL_FLOOR_BYTES} bytes"
+            )));
+        }
+        let encoded = BASE64.encode(merged.as_bytes());
+
         if !held {
             let alive = self
                 .data
@@ -1022,7 +1054,7 @@ impl OfflineProtocol {
         self.emit_event(Event::DataDocDeleted {
             space_id: space.to_string(),
             doc_id: doc.to_string(),
-            by: "peer".to_string(),
+            by: DocRemovedBy::Peer,
         });
         Ok(TombstoneOutcome::Deleted)
     }
@@ -1124,6 +1156,13 @@ impl OfflineProtocol {
     /// outlives the document by design, so counting only what is held would
     /// let a peer name a fresh thousand documents after every removal
     /// sweep.
+    ///
+    /// A name already known here, held or removed, always admits: nothing a
+    /// peer says about it costs a record that does not already exist. That
+    /// matters at the ceiling, where a space stays for good once it gets
+    /// there, because floors never expire. Refusing a known name there
+    /// would refuse the floor a peer re-sends on every offer, and a removal
+    /// for a held document sorted after it.
     pub(crate) fn data_space_admits_doc(&mut self, space: &str, doc: &str, cap: usize) -> bool {
         // Called once per name in an inbound frame, so it reads both fields
         // in place rather than cloning the index: a peer may send offers as
@@ -1135,7 +1174,12 @@ impl OfflineProtocol {
         let Some(record) = self.data.spaces.get(space) else {
             return true;
         };
-        if record.docs.contains(doc) {
+        if record.docs.contains(doc)
+            || self
+                .data
+                .meta
+                .contains_key(&(space.to_string(), doc.to_string()))
+        {
             return true;
         }
         let removed = self
@@ -1289,13 +1333,31 @@ impl OfflineProtocol {
     /// Removing a name this device does not hold does nothing. There is no
     /// version to take a floor from, and an empty floor would name no
     /// content at all.
+    ///
+    /// Re-using the name afterwards starts a document whose history is
+    /// disjoint from the floor. What it does not do is fence the old
+    /// contents off: a replica that edited them concurrently keeps them and
+    /// the ordinary exchange merges them into the new document, and a
+    /// replica that never learned of the removal merges the new contents
+    /// into its old copy. A name is cheap; a fresh one is the safe choice.
     pub fn data_remove_doc(&mut self, space: &str, doc: &str) -> Result<()> {
+        self.remove_doc_inner(space, doc, true).map(|_| ())
+    }
+
+    /// [`Self::data_remove_doc`], with the offer that announces it optional.
+    ///
+    /// Returns whether a removal was recorded. `announce` is false only from
+    /// [`Self::data_remove_space`], which announces once for the lot: an
+    /// offer carries every removal the space holds and reads the version of
+    /// every document still in it, so announcing per document would send N
+    /// offers of N entries built from N opens each.
+    fn remove_doc_inner(&mut self, space: &str, doc: &str, announce: bool) -> Result<bool> {
         Self::validate_ids(space, doc)?;
         let storage = self.require_data_storage()?;
         self.load_space(storage.as_ref(), space)?;
 
         if self.doc_is_removed(space, doc) {
-            return Ok(());
+            return Ok(false);
         }
         if !self
             .data
@@ -1307,7 +1369,7 @@ impl OfflineProtocol {
                 space,
                 doc, "Nothing to remove: this device does not hold the document"
             );
-            return Ok(());
+            return Ok(false);
         }
 
         // Errors here are logged and stepped over, exactly as the import
@@ -1354,32 +1416,46 @@ impl OfflineProtocol {
         self.emit_event(Event::DataDocDeleted {
             space_id: space.to_string(),
             doc_id: doc.to_string(),
-            by: "local".to_string(),
+            by: DocRemovedBy::Local,
         });
-        self.nudge_data_sync(space, None, "document_removed");
+        if announce {
+            self.nudge_data_sync(space, None, "document_removed");
+        }
 
         match first_error {
             Some(detail) => Err(Error::Other(format!(
                 "document {space}/{doc} is removed, but not every record could be deleted: \
                  {detail}"
             ))),
-            None => Ok(()),
+            None => Ok(true),
         }
     }
 
     /// Remove every document a space holds, from every replica of it.
     ///
     /// Each document is attempted even after one fails, and the first error
-    /// is what the caller hears.
+    /// is what the caller hears. The space is told once, at the end: one
+    /// offer carries every removal.
     pub fn data_remove_space(&mut self, space: &str) -> Result<()> {
         offline_protocol_data::validate_space_name(space).map_err(map_data_error)?;
         let mut first_error: Option<Error> = None;
+        let mut announce = false;
         for doc in self.data_list_docs(space)? {
-            if let Err(err) = self.data_remove_doc(space, &doc) {
-                if first_error.is_none() {
-                    first_error = Some(err);
+            match self.remove_doc_inner(space, &doc, false) {
+                Ok(removed) => announce |= removed,
+                Err(err) => {
+                    // An error past the removal record is still a removal,
+                    // and one before it costs at worst an offer that says
+                    // nothing new.
+                    announce = true;
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
                 }
             }
+        }
+        if announce {
+            self.nudge_data_sync(space, None, "space_removed");
         }
         match first_error {
             Some(err) => Err(err),
@@ -1403,7 +1479,9 @@ impl OfflineProtocol {
     /// Every space the store knows of.
     ///
     /// Derived from what is on disk, so a space whose last document was
-    /// deleted still lists while its index record survives.
+    /// deleted still lists while its index record survives, and a space
+    /// whose documents were all removed lists for as long as its removal
+    /// records do, which is the life of the space.
     pub fn data_list_spaces(&mut self) -> Result<Vec<String>> {
         let storage = self.require_data_storage()?;
         let mut spaces = BTreeSet::new();

@@ -33,7 +33,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   old contents and its history is those contents. That arrives as an ordinary
   `data_changed` on a document the application removed. A product that needs a
   removal which cannot be undone that way should model it as a field it
-  writes rather than as a document that disappears.
+  writes rather than as a document that disappears. For the same reason a
+  removed name is not fenced off when it is re-used: a replica that kept the
+  old contents past the removal merges them into the new document, and a
+  replica on an older build merges the new contents into its old copy. Give
+  new content a fresh name.
 
   A removal never expires, so a device away for a year still learns about it,
   and a removed name keeps a small record for the life of the space. Those
@@ -55,7 +59,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   removing side refuses each offer and each blob against its own record, so
   the removal holds there regardless. Nothing loops and nothing is surfaced
   wrongly. New storage category `data_doc_meta`, sealed like every other, and
-  no new error code.
+  no new error code. `listSpaces()` includes a space whose documents were all
+  removed, because it still has removals to report.
 
 ### Changed
 

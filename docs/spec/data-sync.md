@@ -226,10 +226,28 @@ would never be sent.
 
 **A floor outlives the document it removed.** Re-creating a removed name
 starts a document whose history is disjoint from the floor, so it is alive by
-rule 2, and a stale replica's copy of the old contents is still refused by
-rule 4. An implementation MUST keep the floor when a name comes back, and
+rule 2, and a stale replica's copy of the old contents alone is still refused
+by rule 4. An implementation MUST keep the floor when a name comes back, and
 MUST report the floor for such a name in `gone` as well, for the third-replica
 reason in rule 2.
+
+What the floor does not do is keep the old contents and the new apart. A
+replica holding an edit beyond the floor keeps the old contents with it by
+rule 2, and the exchange merges them into the new document. A replica that
+does not read `gone` merges the new contents into its old copy, after which
+its blobs carry both and pass rule 4 on the remover. Each is the edit-wins
+rule doing what it says, applied to a name that was re-used: a floor decides
+about content, never about a name. An application that wants new content kept
+apart from old uses a new name, and an implementation MUST NOT document
+re-use as fencing the old contents off.
+
+**A floor already held decides once.** A `gone` entry the floor held for that
+name already covers carries nothing new, and a receiver MUST NOT act on it: no
+write, no open, and in particular no deletion. Floors are re-sent on every
+offer for the life of the space, so this is the common case, and it must be
+free. The deletion matters as much as the cost: every version covers the
+empty one, so a floor judged afresh reads a name brought back and not yet
+written to as removed content.
 
 **A floor does not expire.** An implementation MUST NOT discard one on a
 timer. A removal a replica can outlive is a removal that replica undoes when
@@ -324,7 +342,17 @@ instead, which is the rung above every frame. See
 
 Removals share the per-frame budget with versions, because they cost a
 receiver the same thing: one name it has to store something about. A frame
-carries at most 128 names in total across `docs` and `gone`.
+carries at most 128 entries in total across `docs` and `gone`, and a name
+present in both maps counts as two, because it costs the frame twice the
+bytes.
+
+A floor is one version vector, and the floor held for a name is the union of
+every floor ever merged into it, which only grows. An implementation MUST
+bound the stored floor rather than let a member grow it by naming a fresh
+replica in every offer. This implementation refuses a `gone` value, and a
+merge, over 64 KiB: a document whose version could not fit there could not be
+offered in a frame either. The ceiling on names bounds how many floors a space
+holds; this bounds how big each one gets.
 
 A space whose version list does not fit in one frame costs more than
 proportional traffic: every frame of a split offer is answered on its own, so

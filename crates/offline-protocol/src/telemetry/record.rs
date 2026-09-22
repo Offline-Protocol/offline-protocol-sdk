@@ -793,7 +793,7 @@ pub(crate) mod tests {
             Event::DataDocDeleted {
                 space_id: String::new(),
                 doc_id: String::new(),
-                by: String::new(),
+                by: crate::events::DocRemovedBy::Local,
             },
             Event::DataDocSizeWarning {
                 space_id: String::new(),

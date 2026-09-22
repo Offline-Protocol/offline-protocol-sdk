@@ -220,8 +220,15 @@ Two things follow that are worth knowing before you rely on either verb:
   `removeSpace()` to clear the room.
 
 A removed name can be used again: `createDoc` starts an empty document under
-it, and the old contents cannot come back from a replica that missed the
-removal.
+it. It is not fenced off, though. A replica that edited the old contents while
+the removal was crossing still holds them, and the exchange merges them into
+the new document on every replica; a replica on a build that does not read
+removals merges the new contents into its old copy instead. Both are the
+edit-wins rule applied to a re-used name. If new content must not meet the
+old, give it a fresh name.
+
+`listSpaces()` keeps listing a space whose documents were all removed: the
+space still has removals to report, and `listDocs()` on it is empty.
 
 ## Size, and what happens at each limit
 

@@ -63,6 +63,17 @@ impl VersionToken {
         ours.merge(&decode_version(&other.0)?);
         Ok(Self(ours.encode()))
     }
+
+    /// Whether these bytes decode as a version at all.
+    ///
+    /// A removal floor arrives off a wire and is then stored for the life
+    /// of its space, so it is checked once on the way in rather than
+    /// failing every question later asked of it. Bytes that do not decode
+    /// are not a version of anything, and a floor made of them would cover
+    /// nothing while still costing a record.
+    pub fn validate(&self) -> DataResult<()> {
+        decode_version(&self.0).map(|_| ())
+    }
 }
 
 fn decode_version(bytes: &[u8]) -> DataResult<VersionVector> {

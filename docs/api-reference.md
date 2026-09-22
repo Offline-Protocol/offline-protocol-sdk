@@ -1032,7 +1032,7 @@ await store.flush('space-1', 'profile');
 | `removeDoc(space, doc)` | `void` | Removes the document from every replica of the space. An edit made concurrently with the removal wins and brings the document back whole |
 | `removeSpace(space)` | `void` | Removes every document the space holds, from every replica |
 | `listDocs(space)` | `string[]` | |
-| `listSpaces()` | `string[]` | Spaces holding at least one document |
+| `listSpaces()` | `string[]` | Spaces this device holds documents or removal records for |
 | `mapSet(space, doc, collection, key, value)` | `void` | |
 | `mapDelete(space, doc, collection, key)` | `void` | |
 | `mapGet(space, doc, collection, key)` | `DataValue \| null` | |
