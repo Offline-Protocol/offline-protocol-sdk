@@ -1381,6 +1381,25 @@ await protocol.cancelFileTransfer(fileId);
 3. Ensure background modes enabled (iOS)
 4. Verify devices are within range
 
+### Several Apps on This SDK on One Phone
+
+Every app built on this SDK serves the same Bluetooth service, so a phone
+running two of them presents two instances of it. Each app reads a small tag
+derived from its `appId` to pick its own counterpart, and a peer running one
+SDK app is paired exactly as before. Keep `appId` the same across builds of one
+app, or its builds will not recognise each other.
+
+- A phone running only other SDK apps still appears in `neighbor_discovered`:
+  it relays for you. Identify your own counterparts by the address you already
+  have for them, not by discovery.
+- An app built on an earlier SDK version cannot pick its counterpart on a phone
+  running several SDK apps. Upgrade every SDK app on your test phones, or keep
+  one per phone while testing.
+- After installing or removing an SDK app on one phone, turn Bluetooth off and
+  on again on the *other* phone if pairing does not resume. iOS may cache a
+  peer's list of services, and a stale list can outlast the change until
+  Bluetooth restarts.
+
 ### Frequent Disconnections
 
 1. Check signal strength via `neighbor_discovered` RSSI

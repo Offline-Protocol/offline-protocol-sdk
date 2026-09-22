@@ -51,14 +51,16 @@ them is a wire break rather than a refactor:
 
 ## The GATT contract
 
-A device offers one primary service with three characteristics.
+A device offers one primary service for each application on it that runs this
+protocol, with three required characteristics and one optional one.
 
-| Role | UUID |
-|------|------|
-| Service | `6E400001-B5A3-F393-E0A9-E50E24DCCA9E` |
-| Message | `6E400002-B5A3-F393-E0A9-E50E24DCCA9E` |
-| Device id | `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` |
-| Identity | `6E400004-B5A3-F393-E0A9-E50E24DCCA9E` |
+| Role | UUID | Required |
+|------|------|----------|
+| Service | `6E400001-B5A3-F393-E0A9-E50E24DCCA9E` | |
+| Message | `6E400002-B5A3-F393-E0A9-E50E24DCCA9E` | yes |
+| Device id | `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` | yes |
+| Identity | `6E400004-B5A3-F393-E0A9-E50E24DCCA9E` | yes |
+| App tag | `6E400005-B5A3-F393-E0A9-E50E24DCCA9E` | no |
 
 These are the Nordic UART Service UUIDs, adopted rather than minted. That was
 not a considered choice and it collides with any NUS peripheral in range, which
@@ -78,6 +80,55 @@ signed identity assertion specified below. The pair matters together: the
 device id says who a peer claims to be, the identity characteristic is what
 makes the claim checkable, and a central that reads the first without checking
 the second has learned nothing.
+
+**App tag** names the application behind this instance of the service. It MAY
+be absent: a device running one application loses nothing by omitting it. When
+present it MUST be readable and carries eight bytes, the first eight of
+`SHA-256("offline-protocol-ble-app-tag-v1" || 0x00 || app_id)`, where `app_id`
+is the application id of [the wire format](wire-format.md) as UTF-8. It proves
+nothing, and is read only to choose between instances, below.
+
+### Several instances behind one link
+
+**One link carries one peer.** A phone that runs several applications on this
+protocol serves one instance of the service per application, and both iOS and
+Android merge every application's service into one GATT database, so a central
+sees all of them behind a single connection. The link still carries one peer,
+because a peripheral attributes an inbound write to its sender by the link it
+arrived on. A second identity on the same link would have its hop-0 control
+frames refused by the receiving core's transport-sender check.
+
+So a central that finds more than one instance MUST choose one before it reads
+Device id or Identity, and MUST then read, subscribe and write on that instance
+only. Among the instances that expose both Device id and Identity, it takes:
+
+1. the first whose App tag equals its own;
+2. otherwise, when exactly one has no App tag (absent, or its read failed),
+   that one, since it is a build that predates the tag;
+3. otherwise the first.
+
+When no instance exposes both, it takes the first, and the handshake refuses it
+for the characteristic it lacks. "First" is the order the platform reports the
+instances in. A central that finds one instance has nothing to choose, and the
+shipped centrals do not read App tag at all in that case.
+
+The choice never refuses a link. A phone running only other applications is
+still a mesh neighbour: relay forwarding is keyed on the recipient, never on the
+application, so refusing it would cost relaying to fix discovery. Rule 3 is what
+a central did before App tag existed.
+
+A choice lasts one connection. If the chosen instance disappears while the link
+is up, because its application quit or re-registered, a central SHOULD drop the
+link and handshake again rather than move to another instance: the link was
+announced under the chosen instance's identity, and another instance belongs to
+another application.
+
+App tag is not signed. Any identity key could sign any tag, so a signature would
+prove nothing the Identity characteristic does not. An application on the peer's
+phone that serves another's tag is chosen in its place, and is still bound
+under its own proved address, never the displaced one's. That, and what the tag
+reveals to an observer, is residual risk
+[R15](../security/threat-model.md#r15-the-bluetooth-le-app-tag-is-unsigned-and-readable).
 
 ### The identity assertion
 

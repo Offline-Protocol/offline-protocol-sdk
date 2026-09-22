@@ -102,7 +102,7 @@ See [ADR 0014](../adr/0014-dedicated-ffi-entry-points.md).
 
 ## C5. Hand-mirrored constants must be pinned in every language
 
-Some constants exist in several places no single compiler sees together. Nine
+Some constants exist in several places no single compiler sees together. Ten
 sets do today, and they are pinned by **two different** mechanisms, so knowing
 which one you are touching matters.
 
@@ -202,6 +202,21 @@ pointer bits of a tagged `NSNumber` in place of the number. That one is quieter
 than a missing selector, because the call arrives and the method runs: it cost
 seven more methods, whose type table had recommended the wrong mapping since
 before any of them were written.
+
+**The Bluetooth LE app tag** is the tenth, and it crosses platforms on the air
+rather than in the process: a central on one platform matches a tag computed on
+the other when a phone runs several apps on this SDK
+([BLE framing](../spec/ble-framing.md#several-instances-behind-one-link)). The
+Swift and Kotlin `BleAppTag` each hold the domain separator, the bridges each
+declare the characteristic UUID, and `BleServiceInstanceSelection` is the same
+rule written twice. The rule and the digest are pinned per language by mirrored
+tests with shared vectors. The UUID, the domain and the shared vectors are
+pinned by `react_native_ble_binds_one_service_instance_per_link`, which also
+asserts that every service lookup in `BleManager.swift` and
+`CentralGattClient.kt` goes through the chosen instance, because neither
+callback chain runs in CI. A drift on one side makes that platform's instances
+read as untagged, which falls back to the first instance and looks like the
+bug the tag fixed.
 
 ## C6. Config parsers must not default to literals
 
