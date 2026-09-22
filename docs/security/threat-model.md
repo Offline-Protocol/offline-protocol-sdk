@@ -572,6 +572,29 @@ to close.
 authority is treated as an SDK release event, and the failure is loud in the
 stats rather than silent.
 
+### R15. The Bluetooth LE app tag is unsigned and readable
+
+A phone running several applications on this protocol serves one instance of
+the GATT service per application, and a central picks its own application's
+instance by an eight-byte App tag
+([BLE framing](../spec/ble-framing.md#several-instances-behind-one-link)).
+The tag is unsigned. An application co-installed on a peer's phone can serve
+another application's tag and so be chosen by that application's centrals, and
+any device in radio range (A1) can read which tags a phone serves.
+
+**Why it stands:** a signature would prove only that the instance holds some
+identity key, which the Identity characteristic already proves; any key can
+sign any tag. Spoofing needs code on the peer's own phone, which is A5, and the
+SDK does not defend an application against the device it runs on.
+
+**What bounds it:** the choice decides only which instance a link binds to, and
+the chosen instance still proves its own address. A spoofing application is
+therefore bound under its own identity, never the one it displaced; what it
+costs is that phone's link to the displaced application, and every frame is
+still authenticated above this layer. The tag is a digest of the application
+id, so an observer learns which applications a phone runs only for ids it
+already knows. It is stable and linkable, like the address beside it.
+
 ## Network egress
 
 Until 0.26 the Rust crates opened no socket: every byte that left a device

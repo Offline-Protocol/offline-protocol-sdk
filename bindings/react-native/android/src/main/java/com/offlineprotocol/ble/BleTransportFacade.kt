@@ -13,6 +13,7 @@ import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.offlineprotocol.BleAppTag
 import com.offlineprotocol.BleDiscoveryBootstrapPolicy
 import com.offlineprotocol.TransportException
 import com.offlineprotocol.TransportManager
@@ -156,8 +157,16 @@ class BleTransportFacade(
     // Thread-safe: OfflineProtocol uses Mutex/RwLock internally (see offline-protocol-uniffi)
     private val protocol: OfflineProtocol,
     private val deviceId: String,
+    appId: String,
     private val diagnosticEmitter: ((String, String, Map<String, Any?>) -> Unit)? = null
 ) : TransportManager {
+
+    /**
+     * This app's [BleAppTag]: served in our own `APP_TAG` characteristic, and
+     * matched against a remote phone's instances when it runs several SDK apps.
+     * Fixed for the facade's lifetime, like the address.
+     */
+    private val appTag: ByteArray = BleAppTag.compute(appId)
     
     // MARK: - TransportManager Implementation
     
@@ -177,6 +186,7 @@ class BleTransportFacade(
         private val MESSAGE_CHAR_UUID = UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
         private val DEVICE_ID_CHAR_UUID = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
         private val IDENTITY_CHAR_UUID = UUID.fromString("6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
+        private val APP_TAG_CHAR_UUID = UUID.fromString("6E400005-B5A3-F393-E0A9-E50E24DCCA9E")
         private const val AD_TYPE_INCOMPLETE_128_BIT_SERVICE_UUIDS = 0x06
         private const val AD_TYPE_COMPLETE_128_BIT_SERVICE_UUIDS = 0x07
         private const val UUID_128_BIT_LENGTH_BYTES = 16
@@ -447,6 +457,8 @@ class BleTransportFacade(
             messageCharUuid = MESSAGE_CHAR_UUID,
             deviceIdCharUuid = DEVICE_ID_CHAR_UUID,
             identityCharUuid = IDENTITY_CHAR_UUID,
+            appTagCharUuid = APP_TAG_CHAR_UUID,
+            appTag = appTag,
             host = object : CentralGattClient.Host {
                 override val protocol: OfflineProtocol get() = this@BleTransportFacade.protocol
                 override val connections: MeshConnectionRegistry get() = this@BleTransportFacade.connections
@@ -1524,6 +1536,7 @@ class BleTransportFacade(
                 messageUuid = MESSAGE_CHAR_UUID,
                 deviceIdUuid = DEVICE_ID_CHAR_UUID,
                 identityUuid = IDENTITY_CHAR_UUID,
+                appTagUuid = APP_TAG_CHAR_UUID,
             )
 
             Log.i(TAG, "GATT server setup initiated, waiting for service registration callback...")
@@ -3414,9 +3427,11 @@ class BleTransportFacade(
             }
         }
         
-        val service = gatt.getService(SERVICE_UUID)
+        // The instance this link handshook with: the only one for a peer
+        // running one SDK app, the chosen one for a peer running several.
+        val service = centralClient.handshakeService(gatt)
         val characteristic = service?.getCharacteristic(MESSAGE_CHAR_UUID)
-        
+
         if (service == null || characteristic == null) {
             if (logThrottler.shouldLog("missing_char_$recipientId")) {
                 Log.w(TAG, "Message characteristic not found for recipient: $recipientId")
@@ -4034,6 +4049,13 @@ class BleTransportFacade(
             }
             Log.d(TAG, "Sent signed identity to ${device.address}")
             return identity
+        }
+
+        override fun provideAppTagBytes(device: BluetoothDevice): ByteArray? {
+            if (shuttingDown) return null
+            // Computed once from `appId` at construction; a copy so a caller
+            // that mutates the buffer cannot change what the next central reads.
+            return appTag.copyOf()
         }
     }
 

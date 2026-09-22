@@ -99,6 +99,26 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   acknowledgement stayed tracked, so the timeout reported it failed a second
   time (`"Message missing from outbox (cannot retry)"`), and an acknowledgement
   arriving first reported it delivered after it had been reported failed.
+- **Bluetooth pairing works on a phone running several apps built on this
+  SDK.** Every such app serves the same BLE service, so a phone running two of
+  them presents two instances of it behind one connection. The React Native
+  bridges assumed one. On iOS the handshake read both instances into one slot
+  and joined whichever reads landed first, so the peer was refused or announced
+  under the other app's identity at random; on Android it always bound to the
+  first app to register. Two copies of one app could stop finding each other
+  as soon as a second SDK app was installed on either phone.
+
+  Each app now serves an eight-byte tag derived from its `appId` in a new,
+  optional GATT characteristic (`6E400005-…`), and a central that finds several
+  instances reads their tags and binds to its own app's, then handshakes,
+  subscribes and writes on that instance only. A phone running only other SDK
+  apps is still bound (to the first instance, as before) and still relays.
+  A peer running one SDK app is handled exactly as before and its tag is never
+  read. No API or configuration changes; the tag comes from the `appId` the app
+  already passes. An app built on an earlier SDK serves no tag, and one such
+  build among tagged apps is still found; it cannot find its own counterpart on
+  a multi-app phone until it upgrades. See
+  [BLE framing](docs/spec/ble-framing.md#several-instances-behind-one-link).
 
 ## [0.26.0] — 2026-09-12
 

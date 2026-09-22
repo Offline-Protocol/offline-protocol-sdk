@@ -10,6 +10,16 @@ pub const BLE_MESSAGE_CHAR_UUID: &str = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
 /// BLE characteristic UUID for device ID.
 pub const BLE_DEVICE_ID_CHAR_UUID: &str = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
 
+/// BLE characteristic UUID for the app tag: eight bytes naming the application
+/// behind one instance of the service.
+///
+/// Every SDK app on a phone registers the same service, so a phone running two
+/// of them presents two instances behind one BLE link. A central reads this
+/// only then, to pick its own app's instance. The bridges serve and read it,
+/// and `react_native_ble_binds_one_service_instance_per_link` pins both
+/// bridges' literals to this one.
+pub const BLE_APP_TAG_CHAR_UUID: &str = "6E400005-B5A3-F393-E0A9-E50E24DCCA9E";
+
 /// Fallback fragment size used when no MTU has been negotiated for a peer.
 ///
 /// Matches the historical iOS CoreBluetooth auto-negotiated minimum ATT MTU

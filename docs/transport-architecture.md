@@ -125,6 +125,8 @@ interface TransportManager {
 - Message Characteristic: `6E400002-B5A3-F393-E0A9-E50E24DCCA9E`
 - Device ID Characteristic: `6E400003-B5A3-F393-E0A9-E50E24DCCA9E`
 - Identity Characteristic: `6E400004-B5A3-F393-E0A9-E50E24DCCA9E`
+- App Tag Characteristic: `6E400005-B5A3-F393-E0A9-E50E24DCCA9E` (read only
+  when a peer runs several apps on this SDK, to pick this app's instance)
 
 These, the fragment header and the reassembly rules are specified normatively
 in [Bluetooth LE framing](spec/ble-framing.md), which is the authority; this

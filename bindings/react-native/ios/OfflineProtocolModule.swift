@@ -890,7 +890,7 @@ class OfflineProtocolModule: RCTEventEmitter {
 
             // Initialize BLE manager if BLE is enabled
             if config.bleEnabled {
-                let manager = BleManager(protocol: proto, deviceId: config.profile)
+                let manager = BleManager(protocol: proto, deviceId: config.profile, appId: config.appId)
                 manager.delegate = self
                 bleManager = manager
                 
@@ -2680,7 +2680,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             case "ble":
                 // Start BLE manager if stopped
                 if bleManager == nil {
-                    let newManager = BleManager(protocol: proto, deviceId: currentConfig?.profile ?? "unknown")
+                    let newManager = BleManager(
+                        protocol: proto,
+                        deviceId: currentConfig?.profile ?? "unknown",
+                        appId: currentConfig?.appId ?? ""
+                    )
                     newManager.delegate = self
                     bleManager = newManager
                     proto.setBleTransportCallback(callback: BleTransportCallbackImpl(bleManager: newManager))

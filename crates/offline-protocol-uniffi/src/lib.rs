@@ -11981,6 +11981,158 @@ mod tests {
         );
     }
 
+    /// A phone running several SDK apps presents one instance of the service
+    /// per app behind one BLE link, and each central binds exactly one of them.
+    ///
+    /// Every SDK app registers the same service UUID and a phone merges every
+    /// app's GATT service into one database. The bridges used to assume one
+    /// instance per link: iOS read DEVICE_ID and IDENTITY from every instance
+    /// into one per-peripheral slot and joined whichever pair landed (a random
+    /// refusal, or the wrong app's identity), and Android took
+    /// `gatt.getService`, the first instance. Now a link with several instances
+    /// reads each one's APP_TAG and picks one (`BleServiceInstanceSelection`,
+    /// unit-tested on both platforms) before the handshake, and a link with one
+    /// instance runs exactly the path it ran before.
+    ///
+    /// None of that is reachable from a Swift or Kotlin test: it lives in the
+    /// CoreBluetooth delegate and the `BluetoothGatt` callback chain, which CI
+    /// only typechecks or compiles. So the call sites are pinned here:
+    ///
+    /// 1. **One UUID and one tag on both platforms.** A central on one platform
+    ///    matches a tag computed on the other. The UUID literals are pinned to
+    ///    the Rust constant, the domain separator to one string, and the two
+    ///    platforms' test vectors to the same bytes.
+    /// 2. **Only the chosen instance handshakes.** On iOS the gate sits above
+    ///    the subscribe in the discovery delegate, so an unchosen instance is
+    ///    neither subscribed to nor read. Every service lookup, the send path's
+    ///    included, goes through `handshakeService`, the one place that falls
+    ///    back to the first instance, and only for a link with one.
+    /// 3. **Android turns to the tag reads at every exit from the MTU
+    ///    exchange.** There are three (the callback, its watchdog, and a
+    ///    refused request); one missed exit handshakes with the first instance
+    ///    whenever that path is taken. Every later lookup goes through
+    ///    `handshakeService`.
+    #[test]
+    fn react_native_ble_binds_one_service_instance_per_link() {
+        use offline_protocol_transport::constants::BLE_APP_TAG_CHAR_UUID;
+
+        let swift = rn_source_code_only("ios/BleManager.swift");
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/CentralGattClient.kt",
+        );
+        let facade = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+
+        // --- 1. One UUID, one tag -------------------------------------------
+        assert!(
+            swift.contains(&format!("CBUUID(string: \"{BLE_APP_TAG_CHAR_UUID}\")"))
+                && facade.contains(&format!("UUID.fromString(\"{BLE_APP_TAG_CHAR_UUID}\")")),
+            "BleManager.swift and BleTransportFacade.kt must both declare the APP_TAG \
+             characteristic as {BLE_APP_TAG_CHAR_UUID}. A central looks the characteristic up \
+             by UUID on a peer that may be the other platform, so a drift on one side makes every \
+             instance on that platform read as untagged"
+        );
+        let domain = "\"offline-protocol-ble-app-tag-v1\"";
+        assert!(
+            rn_source_code_only("ios/BleAppTag.swift").contains(domain)
+                && rn_source_code_only("android/src/main/java/com/offlineprotocol/BleAppTag.kt")
+                    .contains(domain),
+            "BleAppTag.swift and BleAppTag.kt must hash under the same domain separator, {domain}"
+        );
+        let swift_vectors = rn_source_code_only("ios/tests/BleAppTagTests.swift");
+        let kotlin_vectors =
+            rn_source_code_only("android/src/test/java/com/offlineprotocol/BleAppTagTest.kt");
+        for vector in ["2e2e6107567ff67b", "3a88052657e598e1", "d5c9ed34fbf6503f"] {
+            assert!(
+                swift_vectors.contains(vector) && kotlin_vectors.contains(vector),
+                "both platforms' BleAppTag tests must pin the vector {vector}. Each test proves \
+                 its own platform's digest; only sharing the vectors proves the two agree"
+            );
+        }
+
+        // --- 2. iOS: only the chosen instance handshakes ---------------------
+        let body_start = swift
+            .find(
+                "public func peripheral(_ peripheral: CBPeripheral, \
+                 didDiscoverCharacteristicsFor service: CBService, error: Error?) {",
+            )
+            .expect("BleManager.swift must implement didDiscoverCharacteristicsFor");
+        let body_end = swift
+            .find(
+                "public func peripheral(_ peripheral: CBPeripheral, \
+                 didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {",
+            )
+            .expect("BleManager.swift must implement didUpdateValueFor");
+        let body = &swift[body_start..body_end];
+        let gate = body
+            .find(
+                "guard serviceInstanceRunsHandshake(service, characteristics: characteristics, \
+                 on: peripheral) else { return }",
+            )
+            .expect(
+                "didDiscoverCharacteristicsFor must return early for a service instance this \
+                 link did not choose",
+            );
+        let subscribe = body
+            .find("peripheral.setNotifyValue(true, for: messageCharacteristic)")
+            .expect("the subscribe must live in the discovery delegate body");
+        assert!(
+            gate < subscribe,
+            "the instance gate must sit ABOVE the subscribe: an unchosen instance must be \
+             neither subscribed to nor read, or its app's frames arrive attributed to this \
+             link's peer"
+        );
+        assert_eq!(
+            swift
+                .matches("peripheral.services?.first(where: { $0.uuid == SERVICE_UUID })")
+                .count(),
+            1,
+            "BleManager.swift may resolve the first service instance in exactly one place, \
+             handshakeService, which does so only for a link with one instance. Any other \
+             `services.first` is a lookup that talks to the first app on a multi-app phone"
+        );
+        assert!(
+            swift.contains("guard let service = handshakeService(on: peripheral),"),
+            "the send path must find the message characteristic through handshakeService"
+        );
+        assert_eq!(
+            swift.matches("BleServiceInstanceSelection.select(").count(),
+            1,
+            "BleManager.swift must choose an instance in exactly one place"
+        );
+
+        // --- 3. Android: every MTU exit turns to the tag reads ---------------
+        assert_eq!(
+            kotlin
+                .matches("readServiceInstanceTagsIfChoosing(gatt, address)")
+                .count(),
+            3,
+            "CentralGattClient.kt must check for a pending instance choice at all three exits \
+             from the MTU exchange: onMtuChanged, its watchdog, and a refused requestMtu"
+        );
+        assert_eq!(
+            kotlin.matches("gatt.getService(serviceUuid)").count(),
+            2,
+            "CentralGattClient.kt may call gatt.getService(serviceUuid) only for the non-mesh \
+             check in onServicesDiscovered and as handshakeService's one-instance fallback. \
+             Anywhere else it returns the first app's instance on a multi-app phone"
+        );
+        assert!(
+            !facade.contains("getService(SERVICE_UUID)")
+                && facade.contains("centralClient.handshakeService(gatt)"),
+            "BleTransportFacade.kt must write through the instance the link handshook with, \
+             centralClient.handshakeService, never gatt.getService"
+        );
+        assert_eq!(
+            kotlin
+                .matches("BleServiceInstanceSelection.select(")
+                .count(),
+            1,
+            "CentralGattClient.kt must choose an instance in exactly one place"
+        );
+    }
+
     /// State restoration must not issue CoreBluetooth commands where iOS hands
     /// it the restored list.
     ///
