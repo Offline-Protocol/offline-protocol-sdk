@@ -47,7 +47,8 @@ public class BleManager: NSObject, TransportManager {
     private let MESSAGE_CHAR_UUID = CBUUID(string: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
     private let DEVICE_ID_CHAR_UUID = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
     private let IDENTITY_CHAR_UUID = CBUUID(string: "6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
-    
+    private let APP_TAG_CHAR_UUID = CBUUID(string: "6E400005-B5A3-F393-E0A9-E50E24DCCA9E")
+
     // Fragment sizing is fully owned by the Rust transport now: it stores
     // a per-peer maximum usable payload seeded from
     // `CBPeripheral.maximumWriteValueLength(for: .withoutResponse)` via
@@ -83,6 +84,10 @@ public class BleManager: NSObject, TransportManager {
     // Thread-safe: OfflineProtocol uses Mutex/RwLock internally (see offline-protocol-uniffi)
     private let protocolInstance: OfflineProtocol
     private let deviceId: String
+    /// This app's `BleAppTag`: served in our own `APP_TAG` characteristic, and
+    /// matched against a remote phone's instances when it runs several SDK
+    /// apps. Fixed for the instance's lifetime, like the address.
+    private let appTag: Data
     private let meshController: MeshController
     
     // Central (scanner/client) components
@@ -101,7 +106,8 @@ public class BleManager: NSObject, TransportManager {
     private var messageCharacteristic: CBMutableCharacteristic?
     private var deviceIdCharacteristic: CBMutableCharacteristic?
     private var identityCharacteristic: CBMutableCharacteristic?
-    
+    private var appTagCharacteristic: CBMutableCharacteristic?
+
     /// Cached signed identity and local address for serving via GATT.
     ///
     /// Both are produced by UniFFI calls that take the core protocol mutex, so
@@ -155,6 +161,79 @@ public class BleManager: NSObject, TransportManager {
     /// Peripherals already announced via `blePeerDiscovered`, so a re-read of
     /// either characteristic on a live link cannot announce twice.
     private var announcedPeripherals: Set<UUID> = []
+
+    // MARK: - Service instance selection
+    //
+    // Every SDK app registers the same service UUID, and a phone merges every
+    // app's GATT service into one database, so a phone running two SDK apps
+    // presents two instances of the service behind one link. Everything keyed
+    // by `peripheral.identifier` in this file assumes one, so the handshake
+    // reads of two instances used to land in one slot and the join paired
+    // whichever arrived: a random refusal, or the wrong app's identity. A link
+    // with several instances now picks one (`BleServiceInstanceSelection`)
+    // before the handshake runs, and talks to that one only.
+    //
+    // A link with ONE instance never touches any of this: it has no probe and
+    // no binding, and runs the handshake and the send path exactly as before.
+
+    /// A multi-instance link's instances while the central waits for their
+    /// characteristics and APP_TAG reads. Main queue only.
+    private struct ServiceInstanceProbe {
+        /// Tells a deadline that belongs to an earlier probe on the same
+        /// peripheral to stand down.
+        let generation = UUID()
+        /// In the order the platform reported them, which is the order the
+        /// selection's first-instance fallback means.
+        let instances: [CBService]
+        var characteristicsKnown: Set<ObjectIdentifier> = []
+        var canHandshake: [ObjectIdentifier: Bool] = [:]
+        var tags: [ObjectIdentifier: Data] = [:]
+        var pendingTagReads: Set<ObjectIdentifier> = []
+
+        var isComplete: Bool {
+            characteristicsKnown.count == instances.count && pendingTagReads.isEmpty
+        }
+    }
+    private var serviceInstanceProbes: [UUID: ServiceInstanceProbe] = [:]
+    private var serviceInstanceDeadlines: [UUID: DispatchWorkItem] = [:]
+
+    /// How long a multi-instance link waits for its instances' characteristics
+    /// and tags before choosing with what it has. An instance still unknown
+    /// then counts as unable to handshake, and a tag still unread as absent.
+    private let SERVICE_INSTANCE_SELECTION_TIMEOUT: TimeInterval = 3.0
+
+    /// Which instance a multi-instance link talks to. Absent for a link with
+    /// one instance. Written on the main queue by the delegate and read on
+    /// `fragmentQueue` by the send path, hence the lock.
+    ///
+    /// A binding belongs to one connection: it is dropped on connect,
+    /// disconnect, refusal and stop. If the bound instance disappears while the
+    /// link is up (its app quit on the remote phone), the link is dropped and
+    /// re-handshaken rather than rebound, so the identity announced for this
+    /// link and the instance its frames go to can never be two different apps.
+    private enum ServiceInstanceBinding {
+        /// Selection in progress: the send path writes nothing, rather than
+        /// guess an instance for a peer id remembered from an earlier link.
+        case choosing
+        case bound(CBService)
+        /// The bound instance vanished and the link is being cancelled. Until
+        /// the disconnect lands, nothing on it handshakes or writes.
+        case dropping
+    }
+    private let serviceInstanceLock = NSLock()
+    private var serviceInstanceBindings: [UUID: ServiceInstanceBinding] = [:]
+
+    private func serviceInstanceBinding(for identifier: UUID) -> ServiceInstanceBinding? {
+        serviceInstanceLock.lock()
+        defer { serviceInstanceLock.unlock() }
+        return serviceInstanceBindings[identifier]
+    }
+
+    private func setServiceInstanceBinding(_ binding: ServiceInstanceBinding?, for identifier: UUID) {
+        serviceInstanceLock.lock()
+        defer { serviceInstanceLock.unlock() }
+        serviceInstanceBindings[identifier] = binding
+    }
 
     // Fragment sending (event-driven, no polling)
     private let fragmentQueue = DispatchQueue(label: "com.offlineprotocol.ble.fragments")
@@ -480,9 +559,10 @@ public class BleManager: NSObject, TransportManager {
     
     // MARK: - Initialization
     
-    public init(protocol protocolInstance: OfflineProtocol, deviceId: String) {
+    public init(protocol protocolInstance: OfflineProtocol, deviceId: String, appId: String) {
         self.protocolInstance = protocolInstance
         self.deviceId = deviceId
+        self.appTag = BleAppTag.compute(appId: appId)
         self.meshController = MeshController(selfId: deviceId)
         super.init()
         meshController.markPeerActive(deviceId)
@@ -649,6 +729,13 @@ public class BleManager: NSObject, TransportManager {
         notifyOutbound.removeAll()
 
         pendingRestoredPeripherals = [:]
+
+        for deadline in serviceInstanceDeadlines.values { deadline.cancel() }
+        serviceInstanceDeadlines.removeAll()
+        serviceInstanceProbes.removeAll()
+        serviceInstanceLock.lock()
+        serviceInstanceBindings.removeAll()
+        serviceInstanceLock.unlock()
 
         // Clean up managers
         centralManager = nil
@@ -1032,8 +1119,15 @@ public class BleManager: NSObject, TransportManager {
 
         if peripheral.state == .connected {
             connections.registerPeripheral(peripheral)
-            if let service = peripheral.services?.first(where: { $0.uuid == SERVICE_UUID }) {
-                peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID], for: service)
+            // Adopting a live link is a new link to us, as `didConnect` is, so
+            // it chooses its service instance afresh. Straight to the
+            // characteristics only when there is exactly one instance to pick;
+            // with several, service discovery is where one is chosen, and
+            // skipping it would handshake with the first.
+            clearServiceInstanceSelection(for: peripheral.identifier)
+            let instances = peripheral.services?.filter { $0.uuid == SERVICE_UUID } ?? []
+            if instances.count == 1 {
+                peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID], for: instances[0])
             } else {
                 peripheral.discoverServices([SERVICE_UUID])
             }
@@ -1309,9 +1403,22 @@ public class BleManager: NSObject, TransportManager {
         // present, so publication is never racing an async refresh.
         identityCharacteristic?.value = signedIdentity.encode()
 
+        // Names this app among the SDK apps on this phone, all of which
+        // register the same service UUID into one shared GATT database. A
+        // central reads it only when it finds several instances of the
+        // service behind one link, so a peer running one SDK app never costs
+        // it a read. Static like DEVICE_ID: `appId` is fixed for the lifetime
+        // of this manager.
+        appTagCharacteristic = CBMutableCharacteristic(
+            type: APP_TAG_CHAR_UUID,
+            properties: [.read],
+            value: appTag,
+            permissions: [.readable]
+        )
+
         // Create service
         let service = CBMutableService(type: SERVICE_UUID, primary: true)
-        service.characteristics = [messageCharacteristic!, deviceIdCharacteristic!, identityCharacteristic!]
+        service.characteristics = [messageCharacteristic!, deviceIdCharacteristic!, identityCharacteristic!, appTagCharacteristic!]
         
         // Add service to peripheral manager (asynchronous - callback in peripheralManager(_:didAdd:error:))
         peripheral.add(service)
@@ -1882,11 +1989,27 @@ public class BleManager: NSObject, TransportManager {
     }
     
     private func findMessageCharacteristic(on peripheral: CBPeripheral) -> (CBService, CBCharacteristic)? {
-        guard let service = peripheral.services?.first(where: { $0.uuid == SERVICE_UUID }),
+        guard let service = handshakeService(on: peripheral),
               let characteristic = service.characteristics?.first(where: { $0.uuid == MESSAGE_CHAR_UUID }) else {
             return nil
         }
         return (service, characteristic)
+    }
+
+    /// The instance of the service this link talks to, re-resolved from
+    /// `peripheral.services` on every call. The first (and only) one for a
+    /// link with one instance, exactly as before selection existed; the bound
+    /// one for a link with several; none while a link is still choosing, or
+    /// once its bound instance has gone.
+    private func handshakeService(on peripheral: CBPeripheral) -> CBService? {
+        switch serviceInstanceBinding(for: peripheral.identifier) {
+        case nil:
+            return peripheral.services?.first(where: { $0.uuid == SERVICE_UUID })
+        case .choosing?, .dropping?:
+            return nil
+        case .bound(let bound)?:
+            return peripheral.services?.first(where: { $0 === bound })
+        }
     }
     
     private func handleReceivedData(_ data: Data, senderId: String?, centralId: UUID? = nil) {
@@ -2426,7 +2549,7 @@ public class BleManager: NSObject, TransportManager {
     }
     
     private func readDeviceId(from peripheral: CBPeripheral) {
-        guard let service = peripheral.services?.first(where: { $0.uuid == SERVICE_UUID }),
+        guard let service = handshakeService(on: peripheral),
               let characteristic = service.characteristics?.first(where: { $0.uuid == DEVICE_ID_CHAR_UUID }) else {
             return
         }
@@ -2898,6 +3021,9 @@ extension BleManager: CBCentralManagerDelegate {
         emitDiagnostic("info", "Connected to BLE peripheral", context: ["identifier": peripheral.identifier.uuidString])
 
         connections.registerPeripheral(peripheral)
+        // A new connection chooses its service instance afresh; the CBService
+        // objects of an earlier one are not this link's.
+        clearServiceInstanceSelection(for: peripheral.identifier)
         connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
         connectionRetryCount.removeValue(forKey: peripheral.identifier) // Reset retry count on successful connection
         // `.linkActivity`, not `.advertisement`: a completed connect proves
@@ -2965,6 +3091,7 @@ extension BleManager: CBCentralManagerDelegate {
         verifiedPeerAddresses.removeValue(forKey: peripheral.identifier)
         verifiedPeerIdentities.removeValue(forKey: peripheral.identifier)
         announcedPeripherals.remove(peripheral.identifier)
+        clearServiceInstanceSelection(for: peripheral.identifier)
         if logThrottler.shouldLog(key: "disconnect_\(peripheral.identifier.uuidString)", interval: 10) {
             let errorDescription = (error as NSError?)?.localizedDescription ?? "none"
             print("[BleManager] Disconnected from \(peripheral.identifier) error=\(errorDescription)")
@@ -3075,8 +3202,29 @@ extension BleManager: CBPeripheralDelegate {
         let hasOurService = services.contains { $0.uuid == SERVICE_UUID }
         
         if hasOurService {
-            for service in services where service.uuid == SERVICE_UUID {
-                peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID], for: service)
+            let instances = services.filter { $0.uuid == SERVICE_UUID }
+            let binding = serviceInstanceBinding(for: peripheral.identifier)
+            if case .dropping? = binding {
+                // Being cancelled; the reconnect discovers afresh.
+            } else if case .bound(let bound)? = binding {
+                // Re-discovery on a link that already chose. Only the bound
+                // instance is ever handshaken; if it is gone, so is the app
+                // this link's identity came from.
+                if instances.contains(where: { $0 === bound }) {
+                    peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID], for: bound)
+                } else {
+                    dropLinkForVanishedServiceInstance(peripheral)
+                }
+            } else if instances.count > 1 {
+                beginServiceInstanceSelection(on: peripheral, instances: instances)
+            } else {
+                // One instance. A selection still running from an earlier
+                // discovery, when there were more, no longer has a choice to
+                // make; for a link that never had several this clears nothing.
+                clearServiceInstanceSelection(for: peripheral.identifier)
+                for service in services where service.uuid == SERVICE_UUID {
+                    peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID], for: service)
+                }
             }
             emitDiagnostic("info", "Discovered BLE services", context: ["peripheral": peripheral.identifier.uuidString])
         } else {
@@ -3101,6 +3249,12 @@ extension BleManager: CBPeripheralDelegate {
         }
         
         guard let characteristics = service.characteristics else { return }
+
+        // A phone running several SDK apps presents one instance of this
+        // service per app. Only the instance chosen for the link goes on to the
+        // handshake; the other discoveries feed the choice. A link with one
+        // instance passes straight through.
+        guard serviceInstanceRunsHandshake(service, characteristics: characteristics, on: peripheral) else { return }
 
         // This callback fires more than once per link without an intervening
         // disconnect. The connection monitor re-invokes
@@ -3182,6 +3336,13 @@ extension BleManager: CBPeripheralDelegate {
     }
     
     public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        // Read only while choosing among several instances, and never part of
+        // the handshake: a failed read means "no tag", not a refusal.
+        if characteristic.uuid == APP_TAG_CHAR_UUID {
+            recordServiceInstanceTag(from: characteristic, error: error, on: peripheral)
+            return
+        }
+
         if let error = error {
             print("[BleManager] Error reading characteristic: \(error)")
             emitDiagnostic("error", "Error reading characteristic", context: ["error": error.localizedDescription])
@@ -3444,6 +3605,7 @@ extension BleManager: CBPeripheralDelegate {
         advertisedDeviceIds.removeValue(forKey: peripheral.identifier)
         verifiedPeerAddresses.removeValue(forKey: peripheral.identifier)
         verifiedPeerIdentities.removeValue(forKey: peripheral.identifier)
+        retireServiceInstanceSelection(for: peripheral.identifier)
 
         print("[BleManager] ⚠️ Refusing peer \(peripheral.identifier): \(reason) (\(detail))")
         emitDiagnostic("warning", "BLE peer refused: unproven identity", context: [
@@ -3456,6 +3618,188 @@ extension BleManager: CBPeripheralDelegate {
         _ = connections.removePeripheral(peripheral.identifier)
     }
 
+    // MARK: Service instance selection
+
+    /// Starts choosing among several instances of the service on one link:
+    /// discovers each instance's characteristics, including APP_TAG, and
+    /// chooses once all are in or `SERVICE_INSTANCE_SELECTION_TIMEOUT` passes.
+    private func beginServiceInstanceSelection(on peripheral: CBPeripheral, instances: [CBService]) {
+        let identifier = peripheral.identifier
+        serviceInstanceDeadlines.removeValue(forKey: identifier)?.cancel()
+        let probe = ServiceInstanceProbe(instances: instances)
+        serviceInstanceProbes[identifier] = probe
+        setServiceInstanceBinding(.choosing, for: identifier)
+
+        emitDiagnostic("info", "BLE peer serves several service instances; choosing one", context: [
+            "peripheral": identifier.uuidString,
+            "instances": instances.count,
+        ])
+        for instance in instances {
+            peripheral.discoverCharacteristics(
+                [MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID, APP_TAG_CHAR_UUID],
+                for: instance
+            )
+        }
+
+        let generation = probe.generation
+        let deadline = DispatchWorkItem { [weak self, weak peripheral] in
+            guard let self = self, let peripheral = peripheral,
+                  self.serviceInstanceProbes[identifier]?.generation == generation else { return }
+            self.finishServiceInstanceSelection(on: peripheral, timedOut: true)
+        }
+        serviceInstanceDeadlines[identifier] = deadline
+        DispatchQueue.main.asyncAfter(deadline: .now() + SERVICE_INSTANCE_SELECTION_TIMEOUT, execute: deadline)
+    }
+
+    /// Whether a characteristic discovery for `service` goes on to the
+    /// handshake. Always, for a link with one instance. For a link with
+    /// several: only the bound instance's, and a discovery that arrives while
+    /// the link is still choosing is recorded as a probe instead.
+    private func serviceInstanceRunsHandshake(
+        _ service: CBService,
+        characteristics: [CBCharacteristic],
+        on peripheral: CBPeripheral
+    ) -> Bool {
+        let identifier = peripheral.identifier
+        if var probe = serviceInstanceProbes[identifier] {
+            let key = ObjectIdentifier(service)
+            guard probe.instances.contains(where: { $0 === service }),
+                  !probe.characteristicsKnown.contains(key) else { return false }
+            probe.characteristicsKnown.insert(key)
+            probe.canHandshake[key] = characteristics.contains { $0.uuid == DEVICE_ID_CHAR_UUID }
+                && characteristics.contains { $0.uuid == IDENTITY_CHAR_UUID }
+            if let tagCharacteristic = characteristics.first(where: { $0.uuid == APP_TAG_CHAR_UUID }) {
+                probe.pendingTagReads.insert(key)
+                peripheral.readValue(for: tagCharacteristic)
+            }
+            serviceInstanceProbes[identifier] = probe
+            if probe.isComplete {
+                finishServiceInstanceSelection(on: peripheral, timedOut: false)
+            }
+            return false
+        }
+        switch serviceInstanceBinding(for: identifier) {
+        case nil:
+            return true
+        case .choosing?, .dropping?:
+            return false
+        case .bound(let bound)?:
+            return service === bound
+        }
+    }
+
+    /// Records one instance's APP_TAG read. An error or an empty value counts
+    /// as no tag; any other value is kept as served, so a tag of the wrong
+    /// length is simply one that is not ours.
+    private func recordServiceInstanceTag(from characteristic: CBCharacteristic, error: Error?, on peripheral: CBPeripheral) {
+        let identifier = peripheral.identifier
+        guard var probe = serviceInstanceProbes[identifier],
+              let service = characteristic.service else { return }
+        let key = ObjectIdentifier(service)
+        guard probe.pendingTagReads.remove(key) != nil else { return }
+        if let error = error {
+            emitDiagnostic("debug", "BLE app tag read failed; treating the instance as untagged", context: [
+                "peripheral": identifier.uuidString,
+                "error": error.localizedDescription,
+            ])
+        } else if let tag = characteristic.value, !tag.isEmpty {
+            probe.tags[key] = tag
+        }
+        serviceInstanceProbes[identifier] = probe
+        if probe.isComplete {
+            finishServiceInstanceSelection(on: peripheral, timedOut: false)
+        }
+    }
+
+    /// Chooses the instance, binds the link to it, and re-issues its
+    /// characteristic discovery so the handshake runs on it exactly as it
+    /// runs on a link with one instance.
+    private func finishServiceInstanceSelection(on peripheral: CBPeripheral, timedOut: Bool) {
+        let identifier = peripheral.identifier
+        guard let probe = serviceInstanceProbes.removeValue(forKey: identifier) else { return }
+        serviceInstanceDeadlines.removeValue(forKey: identifier)?.cancel()
+
+        let candidates = probe.instances.map { instance -> BleServiceInstanceSelection.Candidate in
+            let key = ObjectIdentifier(instance)
+            return BleServiceInstanceSelection.Candidate(
+                tag: probe.tags[key],
+                canHandshake: probe.canHandshake[key] ?? false
+            )
+        }
+        let selection = BleServiceInstanceSelection.select(candidates, ownTag: appTag)
+        let chosen = probe.instances[selection.index]
+        setServiceInstanceBinding(.bound(chosen), for: identifier)
+
+        print("[BleManager] Chose service instance \(selection.index + 1) of \(probe.instances.count) on \(identifier) (\(selection.reason))")
+        emitDiagnostic("info", "BLE service instance chosen", context: [
+            "peripheral": identifier.uuidString,
+            "instances": probe.instances.count,
+            "index": selection.index,
+            "reason": selection.reason,
+            "tagged": probe.tags.count,
+            "timedOut": timedOut,
+        ])
+        peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID], for: chosen)
+    }
+
+    /// Drops everything selection holds for one link. A no-op for a link that
+    /// never presented several instances.
+    private func clearServiceInstanceSelection(for identifier: UUID) {
+        serviceInstanceDeadlines.removeValue(forKey: identifier)?.cancel()
+        serviceInstanceProbes.removeValue(forKey: identifier)
+        setServiceInstanceBinding(nil, for: identifier)
+    }
+
+    /// For a link about to be cancelled: stops any selection and, if the link
+    /// presented several instances, parks it at `.dropping` until the
+    /// disconnect clears it. A link with one instance has no binding and keeps
+    /// none, so its behaviour is unchanged.
+    private func retireServiceInstanceSelection(for identifier: UUID) {
+        serviceInstanceDeadlines.removeValue(forKey: identifier)?.cancel()
+        serviceInstanceProbes.removeValue(forKey: identifier)
+        if serviceInstanceBinding(for: identifier) != nil {
+            setServiceInstanceBinding(.dropping, for: identifier)
+        }
+    }
+
+    /// The instance this link was bound to is gone, and with it the app whose
+    /// identity the link was announced under. Rebinding to another instance
+    /// would send that identity's frames to a different app, so the link is
+    /// dropped instead and the reconnect path handshakes afresh.
+    ///
+    /// The binding moves to `.dropping` rather than being cleared: until the
+    /// disconnect lands, a late discovery must not fall through to the
+    /// handshake as if the link had one instance, and the send path must not
+    /// write. `didDisconnectPeripheral` clears it.
+    private func dropLinkForVanishedServiceInstance(_ peripheral: CBPeripheral) {
+        let identifier = peripheral.identifier
+        print("[BleManager] Bound service instance vanished on \(identifier); reconnecting")
+        emitDiagnostic("warning", "BLE bound service instance vanished; reconnecting", context: [
+            "peripheral": identifier.uuidString,
+        ])
+        retireServiceInstanceSelection(for: identifier)
+        centralManager?.cancelPeripheralConnection(peripheral)
+    }
+
+    /// An app on the remote phone changed its service. Only a link with
+    /// several instances reacts: losing the bound instance drops the link, and
+    /// a selection still running starts over on the current set. A link with
+    /// one instance keeps its existing behaviour, from before this callback was
+    /// implemented at all.
+    public func peripheral(_ peripheral: CBPeripheral, didModifyServices invalidatedServices: [CBService]) {
+        let identifier = peripheral.identifier
+        if case .bound(let bound)? = serviceInstanceBinding(for: identifier),
+           invalidatedServices.contains(where: { $0 === bound }) {
+            dropLinkForVanishedServiceInstance(peripheral)
+            return
+        }
+        let affectsProbe = serviceInstanceProbes[identifier]?.instances.contains { instance in
+            invalidatedServices.contains { $0 === instance }
+        } ?? false
+        if affectsProbe {
+            peripheral.discoverServices([SERVICE_UUID])
+        }
+    }
 
     /// Verifies a peer's signed identity and records the address it proves.
     ///

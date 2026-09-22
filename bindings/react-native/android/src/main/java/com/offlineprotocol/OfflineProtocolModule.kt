@@ -761,6 +761,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     reactApplicationContext,
                     proto,
                     config.profile,
+                    config.appId,
                 ) { level, message, context ->
                     emitDiagnostic(level, message, context)
                 }.also { manager ->
@@ -2500,6 +2501,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                             reactApplicationContext,
                             proto,
                             currentConfig?.profile ?: "unknown",
+                            currentConfig?.appId ?: "",
                         ) { level, message, context ->
                             emitDiagnostic(level, message, context)
                         }

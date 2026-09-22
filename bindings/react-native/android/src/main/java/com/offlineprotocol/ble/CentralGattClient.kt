@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.offlineprotocol.BleServiceInstanceSelection
 import com.offlineprotocol.PeerIdentityBinding
 import com.offlineprotocol.mesh.MeshController
 import com.offlineprotocol.mesh.SignedIdentityData
@@ -68,6 +69,9 @@ internal class CentralGattClient(
     private val messageCharUuid: UUID,
     private val deviceIdCharUuid: UUID,
     private val identityCharUuid: UUID,
+    private val appTagCharUuid: UUID,
+    /** This app's [BleAppTag], matched against a remote phone's instances. */
+    private val appTag: ByteArray,
     private val host: Host,
     private val diagnosticEmitter: (level: String, message: String, ctx: Map<String, Any?>) -> Unit =
         { _, _, _ -> },
@@ -191,6 +195,11 @@ internal class CentralGattClient(
          *  transport falls back to its 185-byte fragment floor for that
          *  peer. */
         private const val MTU_WATCHDOG_MS = 3000L
+        /** Deadline for one APP_TAG read while a multi-instance link chooses
+         *  its instance. A read that misses it counts as "no tag", the same
+         *  as a failed one. Same margin as [MTU_WATCHDOG_MS], for the same
+         *  reason: a stack that accepts a read and never answers it. */
+        private const val APP_TAG_READ_WATCHDOG_MS = 3000L
     }
 
     // Addresses with an in-flight `requestMtu` whose `onMtuChanged`
@@ -232,6 +241,63 @@ internal class CentralGattClient(
      */
     private val advertisedDeviceIds = ConcurrentHashMap<String, String>()
 
+    // --- Service instance selection ---
+    //
+    // Every SDK app registers the same service UUID, and a phone merges every
+    // app's GATT service into one database, so a phone running two SDK apps
+    // presents two instances of the service behind one link.
+    // `gatt.getService(serviceUuid)` returns the first, so this client used to
+    // handshake with whichever app registered first. A link with several
+    // instances now reads each one's APP_TAG after the MTU exchange, picks one
+    // ([BleServiceInstanceSelection]), and runs the rest of the chain against
+    // that instance only.
+    //
+    // A link with ONE instance never touches any of this: it has no probe and
+    // no binding, and [handshakeService] returns `gatt.getService(serviceUuid)`
+    // exactly as every step of the chain used before.
+
+    /**
+     * A multi-instance link's instances while their APP_TAG characteristics
+     * are read, one GATT op at a time like the rest of the chain. Created on
+     * the binder thread in `onServicesDiscovered`; every later access is on
+     * the BLE thread.
+     */
+    private class ServiceInstanceProbe(val instances: List<BluetoothGattService>) {
+        val tags = arrayOfNulls<ByteArray>(instances.size)
+        /** Index of the next instance whose tag has not been asked for. */
+        var next = 0
+        /** Index whose read is outstanding, or -1. */
+        var readInFlight = -1
+    }
+
+    private val serviceInstanceProbes = ConcurrentHashMap<String, ServiceInstanceProbe>()
+    private val appTagReadWatchdogs = ConcurrentHashMap<String, Runnable>()
+
+    /**
+     * `instanceId` of the service each multi-instance link chose. Absent for a
+     * link with one instance. Belongs to one connection: dropped on connect,
+     * close, give-up and stop.
+     */
+    private val boundServiceInstanceIds = ConcurrentHashMap<String, Int>()
+
+    /**
+     * The instance of the service this link talks to. `gatt.getService` (the
+     * first, and only, one) for a link with one instance, exactly as before
+     * selection existed; the chosen one for a link with several.
+     */
+    fun handshakeService(gatt: BluetoothGatt): BluetoothGattService? {
+        val bound = boundServiceInstanceIds[gatt.device.address] ?: return gatt.getService(serviceUuid)
+        return gatt.services.firstOrNull { it.uuid == serviceUuid && it.instanceId == bound }
+    }
+
+    /** Drops everything selection holds for [address]. A no-op for a link
+     *  that never presented several instances. */
+    private fun clearServiceInstanceSelection(address: String) {
+        serviceInstanceProbes.remove(address)
+        appTagReadWatchdogs.remove(address)?.let { bleHandler.removeCallbacks(it) }
+        boundServiceInstanceIds.remove(address)
+    }
+
     /** True if a successful CCCD write has been observed for [address]. */
     fun isLinkReady(address: String): Boolean = linkReady.contains(address)
 
@@ -242,6 +308,7 @@ internal class CentralGattClient(
         deviceIdResolutionAttempts.remove(address)
         advertisedDeviceIds.remove(address)
         cancelMtuWatchdog(address)
+        clearServiceInstanceSelection(address)
     }
 
     /** Drop all per-address state. Used by transport stop. */
@@ -253,6 +320,10 @@ internal class CentralGattClient(
         mtuInFlight.clear()
         mtuWatchdogs.values.forEach { bleHandler.removeCallbacks(it) }
         mtuWatchdogs.clear()
+        serviceInstanceProbes.clear()
+        appTagReadWatchdogs.values.forEach { bleHandler.removeCallbacks(it) }
+        appTagReadWatchdogs.clear()
+        boundServiceInstanceIds.clear()
     }
 
     /**
@@ -336,6 +407,20 @@ internal class CentralGattClient(
             Log.i(TAG, "Found offline protocol service on $address")
             diagnosticEmitter("info", "GATT services discovered", mapOf("address" to address))
 
+            // One instance per SDK app on the remote phone. With several, the
+            // chain reads their tags after the MTU exchange and picks one
+            // before the device-id read; with one, nothing below changes.
+            clearServiceInstanceSelection(address)
+            val instances = gatt.services.filter { it.uuid == serviceUuid }
+            if (instances.size > 1) {
+                serviceInstanceProbes[address] = ServiceInstanceProbe(instances)
+                Log.i(TAG, "$address serves ${instances.size} service instances; choosing one")
+                diagnosticEmitter("info", "BLE peer serves several service instances; choosing one", mapOf(
+                    "address" to address,
+                    "instances" to instances.size,
+                ))
+            }
+
             // Kick off the first GATT op only. Android's BLE stack serialises
             // one GATT op at a time, so we chain:
             //   onServicesDiscovered → requestMtu(REQUESTED_ATT_MTU)
@@ -414,10 +499,11 @@ internal class CentralGattClient(
                 //   - `readDeviceIdCharacteristicOrClose` issues exactly
                 //     one GATT op, which the stack queues behind any
                 //     still-in-flight op on the same gatt.
+                if (readServiceInstanceTagsIfChoosing(gatt, address)) return@Runnable
                 // Re-fetch the service — the cached local may still be
                 // valid, but going through `gatt.getService` is resilient
                 // if the stack tore it down underneath us.
-                val currentService = gatt.getService(serviceUuid)
+                val currentService = handshakeService(gatt)
                 if (currentService == null) {
                     closeGattClient(gatt, "service_missing_post_mtu_watchdog")
                 } else {
@@ -436,7 +522,9 @@ internal class CentralGattClient(
                     // the callback will never arrive, so fall through to
                     // the device-id read under the controller-default MTU.
                     cancelMtuWatchdog(address)
-                    readDeviceIdCharacteristicOrClose(gatt, service, address)
+                    if (!readServiceInstanceTagsIfChoosing(gatt, address)) {
+                        readDeviceIdCharacteristicOrClose(gatt, service, address)
+                    }
                 }
             } catch (e: SecurityException) {
                 Log.e(TAG, "Permission denied requesting MTU", e)
@@ -516,7 +604,8 @@ internal class CentralGattClient(
             // Resume the handshake chain regardless of MTU negotiation
             // outcome — a missing MTU is recoverable (fallback fragment
             // size), but skipping the device-id read is not.
-            val service = gatt.getService(serviceUuid)
+            if (readServiceInstanceTagsIfChoosing(gatt, address)) return
+            val service = handshakeService(gatt)
             if (service == null) {
                 Log.w(TAG, "Service disappeared between discover and MTU ack for $address")
                 diagnosticEmitter("warning", "Service missing after MTU negotiation", mapOf("address" to address))
@@ -560,6 +649,109 @@ internal class CentralGattClient(
             }
         }
 
+        // --- Service instance selection (BLE thread from here on) ---
+
+        /**
+         * Where the chain resumes after the MTU exchange. True if [address] is
+         * still choosing among several service instances: the tag reads are
+         * started and the caller stops. False for a link with one instance,
+         * and the caller goes on to the device-id read as before.
+         */
+        private fun readServiceInstanceTagsIfChoosing(gatt: BluetoothGatt, address: String): Boolean {
+            if (!serviceInstanceProbes.containsKey(address)) return false
+            bleHandler.post {
+                if (host.isShuttingDown()) return@post
+                readNextServiceInstanceTag(gatt, address)
+            }
+            return true
+        }
+
+        /**
+         * Issues the next APP_TAG read, one at a time. An instance without the
+         * characteristic, or whose read cannot be started, counts as having no
+         * tag. Chooses once every instance has been asked.
+         */
+        private fun readNextServiceInstanceTag(gatt: BluetoothGatt, address: String) {
+            val probe = serviceInstanceProbes[address] ?: return
+            while (probe.next < probe.instances.size) {
+                val index = probe.next++
+                val tagChar = probe.instances[index].getCharacteristic(appTagCharUuid) ?: continue
+                val started = try {
+                    gatt.readCharacteristic(tagChar)
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "Permission denied reading app tag on $address", e)
+                    false
+                }
+                if (!started) continue
+                probe.readInFlight = index
+                val watchdog = Runnable {
+                    if (host.isShuttingDown()) return@Runnable
+                    if (serviceInstanceProbes[address] !== probe || probe.readInFlight != index) return@Runnable
+                    appTagReadWatchdogs.remove(address)
+                    probe.readInFlight = -1
+                    Log.w(TAG, "App tag read timed out on $address; treating the instance as untagged")
+                    diagnosticEmitter("warning", "BLE app tag read timed out", mapOf("address" to address))
+                    readNextServiceInstanceTag(gatt, address)
+                }
+                appTagReadWatchdogs[address] = watchdog
+                bleHandler.postDelayed(watchdog, APP_TAG_READ_WATCHDOG_MS)
+                return
+            }
+            finishServiceInstanceSelection(gatt, address)
+        }
+
+        /** Records one APP_TAG read, then asks the next instance. An error or
+         *  an empty value counts as no tag; any other value is kept as served,
+         *  so a tag of the wrong length is simply one that is not ours. */
+        private fun handleAppTagRead(gatt: BluetoothGatt, instanceId: Int?, value: ByteArray?, status: Int) {
+            val address = gatt.device.address
+            val probe = serviceInstanceProbes[address] ?: return
+            val index = probe.readInFlight
+            if (index < 0 || probe.instances[index].instanceId != instanceId) return
+            probe.readInFlight = -1
+            appTagReadWatchdogs.remove(address)?.let { bleHandler.removeCallbacks(it) }
+            if (status == BluetoothGatt.GATT_SUCCESS && value != null && value.isNotEmpty()) {
+                probe.tags[index] = value
+            } else if (status != BluetoothGatt.GATT_SUCCESS) {
+                diagnosticEmitter("debug", "BLE app tag read failed; treating the instance as untagged", mapOf(
+                    "address" to address,
+                    "status" to status,
+                ))
+            }
+            readNextServiceInstanceTag(gatt, address)
+        }
+
+        /**
+         * Chooses the instance, binds the link to it, and continues the chain
+         * with the device-id read on that instance, exactly as a link with one
+         * instance continues after the MTU exchange.
+         */
+        private fun finishServiceInstanceSelection(gatt: BluetoothGatt, address: String) {
+            val probe = serviceInstanceProbes.remove(address) ?: return
+            appTagReadWatchdogs.remove(address)?.let { bleHandler.removeCallbacks(it) }
+
+            val candidates = probe.instances.mapIndexed { index, instance ->
+                BleServiceInstanceSelection.Candidate(
+                    tag = probe.tags[index],
+                    canHandshake = instance.getCharacteristic(deviceIdCharUuid) != null &&
+                        instance.getCharacteristic(identityCharUuid) != null,
+                )
+            }
+            val selection = BleServiceInstanceSelection.select(candidates, appTag)
+            val chosen = probe.instances[selection.index]
+            boundServiceInstanceIds[address] = chosen.instanceId
+
+            Log.i(TAG, "Chose service instance ${selection.index + 1} of ${probe.instances.size} on $address (${selection.reason})")
+            diagnosticEmitter("info", "BLE service instance chosen", mapOf(
+                "address" to address,
+                "instances" to probe.instances.size,
+                "index" to selection.index,
+                "reason" to selection.reason,
+                "tagged" to probe.tags.count { it != null },
+            ))
+            readDeviceIdCharacteristicOrClose(gatt, chosen, address)
+        }
+
         override fun onCharacteristicRead(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
@@ -577,6 +769,18 @@ internal class CentralGattClient(
             val charUuid = characteristic.uuid
             @Suppress("DEPRECATION")
             val snapshot = characteristic.value?.copyOf()
+            if (charUuid == appTagCharUuid) {
+                // Read only while choosing among several instances, and never
+                // part of the handshake: a failed read means "no tag", not a
+                // refusal. The instance id travels with it so a late answer to
+                // a read already given up on cannot be credited to the next.
+                val instanceId = characteristic.service?.instanceId
+                bleHandler.post {
+                    if (host.isShuttingDown()) return@post
+                    handleAppTagRead(gatt, instanceId, snapshot, status)
+                }
+                return
+            }
             bleHandler.post {
                 if (host.isShuttingDown()) return@post
                 handleCharacteristicReadOnBleThread(gatt, charUuid, snapshot, status)
@@ -679,6 +883,8 @@ internal class CentralGattClient(
         // subsequent disconnect still benefits.
         connectionRetryCount.remove(address)
         linkReady.remove(address)
+        // A new connection chooses its service instance afresh.
+        clearServiceInstanceSelection(address)
         try {
             Log.d(TAG, "Starting service discovery for $address")
             val discoveryStarted = gatt.discoverServices()
@@ -810,6 +1016,7 @@ internal class CentralGattClient(
         // `onConnectionStateChange` can reach here without having gone
         // through close first.
         cancelMtuWatchdog(address)
+        clearServiceInstanceSelection(address)
         try {
             host.protocol.blePeerLost(peerId)
         } catch (e: Exception) {
@@ -899,7 +1106,7 @@ internal class CentralGattClient(
         // only thing that can make this peer real, so every path that fails
         // to obtain it now closes the link instead of proceeding to CCCD.
         // A peer we cannot bind to a key is one we will never address.
-        val service = gatt.getService(serviceUuid)
+        val service = handshakeService(gatt)
         val identityChar = service?.getCharacteristic(identityCharUuid)
         if (identityChar == null) {
             Log.w(TAG, "Identity characteristic not found on $address; peer cannot prove its id")
@@ -1042,7 +1249,7 @@ internal class CentralGattClient(
 
     private fun enableNotificationsOnLink(gatt: BluetoothGatt) {
         val address = gatt.device.address
-        val service = gatt.getService(serviceUuid)
+        val service = handshakeService(gatt)
         val messageChar = service?.getCharacteristic(messageCharUuid)
         if (messageChar == null) {
             Log.w(TAG, "Message characteristic NOT FOUND on $address")
@@ -1107,6 +1314,7 @@ internal class CentralGattClient(
         // this connection's device id with the next one's identity.
         advertisedDeviceIds.remove(address)
         cancelMtuWatchdog(address)
+        clearServiceInstanceSelection(address)
     }
 
     /**

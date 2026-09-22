@@ -142,6 +142,8 @@ class PeripheralGattServer(
         fun provideDeviceIdBytes(device: BluetoothDevice): ByteArray?
         /** Return the current signed-identity bytes, or null to fail the read. */
         fun provideIdentityBytes(device: BluetoothDevice): ByteArray?
+        /** Return this app's `BleAppTag`, or null to fail the read. */
+        fun provideAppTagBytes(device: BluetoothDevice): ByteArray?
         fun onReady()
         fun onSetupFailed(reason: String)
     }
@@ -186,6 +188,8 @@ class PeripheralGattServer(
     private var deviceIdCharacteristic: BluetoothGattCharacteristic? = null
     @Volatile
     private var identityCharacteristic: BluetoothGattCharacteristic? = null
+    @Volatile
+    private var appTagCharacteristic: BluetoothGattCharacteristic? = null
 
     private data class IdentitySnapshot(val bytes: ByteArray, val timestamp: Long)
 
@@ -237,6 +241,7 @@ class PeripheralGattServer(
         val messageUuid: UUID,
         val deviceIdUuid: UUID,
         val identityUuid: UUID,
+        val appTagUuid: UUID,
     )
 
     /**
@@ -252,13 +257,14 @@ class PeripheralGattServer(
         messageUuid: UUID,
         deviceIdUuid: UUID,
         identityUuid: UUID,
+        appTagUuid: UUID,
     ) {
         check(Looper.myLooper() == bleHandler.looper) {
             "PeripheralGattServer.start must be called on the BLE thread"
         }
         stop()
         setupAttempts = 0
-        pendingSetup = PendingSetup(serviceUuid, messageUuid, deviceIdUuid, identityUuid)
+        pendingSetup = PendingSetup(serviceUuid, messageUuid, deviceIdUuid, identityUuid, appTagUuid)
         attemptSetup()
     }
 
@@ -280,6 +286,7 @@ class PeripheralGattServer(
         messageCharacteristic = null
         deviceIdCharacteristic = null
         identityCharacteristic = null
+        appTagCharacteristic = null
         subscribedCentralAddresses.clear()
         identityReadSnapshots.clear()
         isReady = false
@@ -402,9 +409,19 @@ class PeripheralGattServer(
             BluetoothGattCharacteristic.PROPERTY_READ,
             BluetoothGattCharacteristic.PERMISSION_READ,
         )
+        // Names this app among the SDK apps on this phone, all of which
+        // register the same service UUID into one shared GATT database. A
+        // central reads it only when it finds several instances of the service
+        // behind one link, so a peer running one SDK app never costs it a read.
+        val appTagChar = BluetoothGattCharacteristic(
+            setup.appTagUuid,
+            BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_READ,
+        )
         messageCharacteristic = message
         deviceIdCharacteristic = deviceIdChar
         identityCharacteristic = identityChar
+        appTagCharacteristic = appTagChar
 
         val service = BluetoothGattService(
             setup.serviceUuid,
@@ -413,6 +430,7 @@ class PeripheralGattServer(
         service.addCharacteristic(message)
         service.addCharacteristic(deviceIdChar)
         service.addCharacteristic(identityChar)
+        service.addCharacteristic(appTagChar)
 
         val added = try {
             server.addService(service)
@@ -460,6 +478,7 @@ class PeripheralGattServer(
         messageCharacteristic = null
         deviceIdCharacteristic = null
         identityCharacteristic = null
+        appTagCharacteristic = null
         isReady = false
 
         if (setupAttempts >= MAX_SETUP_ATTEMPTS) {
@@ -595,6 +614,7 @@ class PeripheralGattServer(
             // an unrelated characteristic if both fields were ever cleared.
             val deviceIdChar = deviceIdCharacteristic
             val identityChar = identityCharacteristic
+            val appTagChar = appTagCharacteristic
             val charUuid = characteristic.uuid
 
             val value: ByteArray? = try {
@@ -603,6 +623,8 @@ class PeripheralGattServer(
                         listener.provideDeviceIdBytes(device)
                     identityChar != null && charUuid == identityChar.uuid ->
                         resolveIdentityValue(device, offset)
+                    appTagChar != null && charUuid == appTagChar.uuid ->
+                        listener.provideAppTagBytes(device)
                     else -> null
                 }
             } catch (e: Exception) {
