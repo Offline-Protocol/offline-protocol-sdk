@@ -3925,6 +3925,48 @@ fn removing_a_space_removes_every_document_in_it() {
 }
 
 #[test]
+fn removing_a_space_purges_the_deltas_its_own_flushes_wrote() {
+    // The removal lists the delta log once for the whole space, and every
+    // document is flushed before that listing is taken. Flushed after it,
+    // the delta a flush writes is one the listing does not name, the purge
+    // leaves it behind, and the next document under that name replays it.
+    let mut alice = Node::new("alice");
+    let space = id("bob");
+    for doc in ["one", "two", "three"] {
+        write(&mut alice, &space, doc, "k", "v");
+        // A second edit left pending: the delta the removal's own flush
+        // writes, after the first one is already on disk.
+        alice
+            .protocol
+            .data_map_set(&space, doc, "m", "later", DataValue::text("pending"))
+            .expect("set");
+    }
+
+    alice
+        .protocol
+        .data_remove_space(&space)
+        .expect("remove space");
+
+    for doc in ["one", "two", "three"] {
+        assert_eq!(
+            alice.delta_records(&space, doc),
+            0,
+            "a delta the removal flushed survived its own purge: {doc}"
+        );
+        alice
+            .protocol
+            .data_create_doc(&space, doc)
+            .expect("create again");
+        assert_eq!(
+            read(&mut alice, &space, doc, "later"),
+            None,
+            "the removed contents came back under a re-used name: {doc}"
+        );
+        assert_eq!(read(&mut alice, &space, doc, "k"), None);
+    }
+}
+
+#[test]
 fn a_wipe_takes_the_removal_records_with_it() {
     let (mut alice, mut bob) = pair();
     let alice_space = Node::space_for(&bob);
