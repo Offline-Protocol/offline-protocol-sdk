@@ -539,6 +539,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment() != 64484:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from() != 26988:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush() != 26356:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all() != 41167:
@@ -1470,6 +1472,14 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment.a
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment_from.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment_from.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_flush.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2757,6 +2767,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw.r
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush.restype = ctypes.c_uint16
@@ -8057,6 +8070,8 @@ class DataStoreProtocol(typing.Protocol):
         raise NotImplementedError
     def fetch_attachment(self, space_id: str,hash: str) -> None:
         raise NotImplementedError
+    def fetch_attachment_from(self, space_id: str,peer_id: str,hash: str) -> None:
+        raise NotImplementedError
     def flush(self, space_id: str,doc_id: str) -> None:
         raise NotImplementedError
     def flush_all(self, ) -> None:
@@ -8333,6 +8348,27 @@ class DataStore(DataStoreProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def fetch_attachment_from(self, space_id: str,peer_id: str,hash: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterString.check_lower(peer_id)
+        
+        _UniffiFfiConverterString.check_lower(hash)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterString.lower(peer_id),
+            _UniffiFfiConverterString.lower(hash),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment_from,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)

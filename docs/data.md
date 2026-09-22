@@ -181,10 +181,10 @@ the whole roster. Three consequences an application can see:
 - **A change received from a group is not pushed back into it.** Anti-entropy
   still closes real gaps, and re-broadcasting would turn one edit into N²
   frames.
-- **Attachment bytes do not move inside a group** in this version. References
-  replicate like any other value; fetching the blob from a group member is
-  refused, because the transfer needs a confirmed pairwise session and two
-  group members need not have one.
+- **Attachment bytes move inside a group as frames**, up to 1 MiB. Ask a
+  named member with `fetchAttachmentFrom`, because a reference says nothing
+  about who holds the bytes. A larger blob needs a 1:1 session, and the
+  holder is told so at the call rather than halfway through.
 
 ## Removing documents
 
@@ -386,7 +386,10 @@ the [design record](spec/data-sync.md) or the ADRs.
   there is no way to ask for documents by their contents.
 - **No hosted component.** Relays and gateways carry sync frames as opaque MLS
   ciphertext they cannot read, and nothing in this layer requires a server.
-- **No blob carriage in groups**, as above.
+- **No blob larger than 1 MiB inside a group.** The whole answer to a
+  request leaves at once, which is what keeps it a single question with a
+  single answer; carrying more would need flow control this layer does not
+  have. Use a 1:1 session for anything bigger.
 - **No garbage collection for blobs.** The SDK does not know which references
   still exist across every space, so deciding when your stored bytes are
   unreferenced is your app's job.

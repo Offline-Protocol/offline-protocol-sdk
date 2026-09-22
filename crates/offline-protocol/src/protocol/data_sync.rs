@@ -292,7 +292,20 @@ enum SyncBody {
     /// than by where a reference to it happens to sit, so the same bytes
     /// referenced from three documents are one blob and one request.
     #[serde(rename = "need_blob")]
-    NeedBlob { hash: String },
+    NeedBlob {
+        hash: String,
+        /// The member this question is for, inside a group.
+        ///
+        /// Absent on a 1:1 session, where the recipient is the only peer
+        /// there is. In a group it is load-bearing rather than a
+        /// convenience: a directed frame is promoted to a roster-wide
+        /// delivery whenever the sender's ratchet budget runs out, and a
+        /// receiver cannot tell a promoted frame from one addressed to it.
+        /// Without this field every member's application would be asked for
+        /// bytes the asker can only accept from one of them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+    },
     /// "I do not have those bytes, and asking again will not change that."
     ///
     /// The frame that lets a fetch end. An attachment reference outlives the
@@ -303,6 +316,33 @@ enum SyncBody {
     /// forever.
     #[serde(rename = "blob_gone")]
     BlobGone { hash: String },
+    /// One piece of a blob, travelling as a frame rather than as a
+    /// transfer.
+    ///
+    /// The group answer to `need_blob`. A 1:1 fetch rides the media path,
+    /// which needs a confirmed pairwise session; two members of a group need
+    /// not have one with each other, and requiring it would make an
+    /// attachment depend on a handshake that may never happen. Frames need
+    /// only the group key, which membership already is.
+    ///
+    /// `i` is the index and `n` the count, so a receiver knows when it is
+    /// done without the sender saying so twice. Carrying the count on every
+    /// chunk rather than on the first is what makes the pieces independent:
+    /// they may arrive in any order, and a duplicate replaces rather than
+    /// appends.
+    ///
+    /// Provokes nothing, which is the property that lets `need_blob` stay a
+    /// single-hop question. That is what bounds a blob to
+    /// [`MAX_GROUP_BLOB_CHUNKS`] pieces: a larger one would need the
+    /// requester to ask again for each window, and a chain of questions is
+    /// exactly what this layer does not have.
+    #[serde(rename = "chunk")]
+    Chunk {
+        hash: String,
+        i: u32,
+        n: u32,
+        blob: String,
+    },
 }
 
 /// One name in a version offer: its version when we hold it, and its removal
@@ -336,6 +376,69 @@ fn offer_batches(entries: &[OfferEntry]) -> Vec<&[OfferEntry]> {
     }
     batches.push(&entries[start..]);
     batches
+}
+
+/// One fetch this device is waiting on.
+///
+/// The record both bounds the wait and admits the answer, which is why its
+/// clock is the last sign of life rather than the moment of the question: a
+/// record that expires mid-carriage discards a blob that fully arrived, and
+/// the retry it invites dies at the same point.
+#[derive(Debug)]
+pub(crate) struct PendingFetch {
+    /// The last sign that an answer is coming.
+    pub(crate) last_seen: Instant,
+    /// The member being asked, when the space is a group.
+    ///
+    /// `None` on a 1:1 space, where the peer *is* the space and there is
+    /// nothing to choose. In a group there is: the reference names bytes and
+    /// not who holds them, so the application says which member to ask.
+    pub(crate) holder: Option<String>,
+    /// Chunks accepted so far, when the bytes travel as frames.
+    ///
+    /// Only a group fetch assembles here. A 1:1 fetch rides the media path,
+    /// which does its own reassembly and hands over one finished blob.
+    pub(crate) assembly: Option<BlobAssembly>,
+}
+
+impl PendingFetch {
+    /// A fetch just put to a 1:1 peer.
+    fn to_peer() -> Self {
+        Self {
+            last_seen: Instant::now(),
+            holder: None,
+            assembly: None,
+        }
+    }
+
+    /// A fetch just put to one member of a group.
+    fn to_member(member: &str) -> Self {
+        Self {
+            last_seen: Instant::now(),
+            holder: Some(member.to_string()),
+            assembly: None,
+        }
+    }
+
+    /// Whether `sender` is who this fetch is waiting on.
+    fn is_answered_by(&self, space: &str, sender: &str) -> bool {
+        match &self.holder {
+            Some(member) => member == sender,
+            None => space == sender,
+        }
+    }
+}
+
+/// A blob being reassembled from frames.
+#[derive(Debug, Default)]
+pub(crate) struct BlobAssembly {
+    /// How many chunks the first arrival said there would be.
+    total: u32,
+    /// Chunks by index, so a duplicate replaces rather than appends and the
+    /// order they arrive in does not matter.
+    chunks: BTreeMap<u32, Vec<u8>>,
+    /// Bytes held, so the cap is checked without walking the map.
+    bytes: usize,
 }
 
 /// What one version offer says.
@@ -373,6 +476,21 @@ const _: () = assert!(
     super::data::MAX_INTEREST_PATTERNS <= MAX_INTEREST_PATTERNS_PER_FRAME,
     "a pattern an application may declare must be one every peer reads"
 );
+
+/// How many frames one blob may be carried in inside a group.
+///
+/// The bound that keeps `need_blob` a single-hop question: the whole answer
+/// leaves at once, so nothing has to ask for the next window and no chain of
+/// questions exists to terminate. At [`MAX_SYNC_BLOB_BYTES`] a piece, this
+/// puts a group attachment at 1 MiB.
+///
+/// That is far below what the 1:1 path carries, and deliberately so. Moving
+/// a hundred megabytes this way would mean flow control, a holder keeping
+/// the bytes between windows, and a re-ask clock — the machinery the media
+/// path already has and that a frame path would have to grow. A group
+/// attachment is a receipt, a signature, a small photo; anything larger
+/// travels 1:1, and the sender is told which it is at the call.
+pub(crate) const MAX_GROUP_BLOB_CHUNKS: u32 = 32;
 
 /// Where a sync frame goes and what it is sealed under.
 ///
@@ -1152,8 +1270,13 @@ impl OfflineProtocol {
                 self.accept_remote_blob(&space, channel, &doc, &blob, BlobKind::Snapshot)
             }
             SyncBody::NeedSnapshot { doc } => self.answer_snapshot_request(&space, channel, &doc),
-            SyncBody::NeedBlob { hash } => self.answer_blob_request(&space, channel, &hash),
-            SyncBody::BlobGone { hash } => self.report_blob_gone(channel, &space, &hash),
+            SyncBody::NeedBlob { hash, to } => {
+                self.answer_blob_request(&space, channel, &hash, to.as_deref())
+            }
+            SyncBody::BlobGone { hash } => self.report_blob_gone(&space, sender, &hash),
+            SyncBody::Chunk { hash, i, n, blob } => {
+                self.accept_blob_chunk(&space, sender, &hash, i, n, &blob)
+            }
         };
         if let Err(err) = outcome {
             warn!(peer = %sender, error = %err, "Sync frame could not be handled");
@@ -1969,7 +2092,8 @@ impl OfflineProtocol {
         Self::validate_attachment_hash(hash)?;
         if self.group_space_roster(space).is_some() {
             return Err(Error::InvalidArgument(format!(
-                "space {space} is a group; attachment carriage is 1:1 in this version"
+                "space {space} is a group: a reference names bytes and not who holds them, so \
+                 ask a member with data_fetch_attachment_from"
             )));
         }
         if !self.data_media_active(space) {
@@ -1985,8 +2109,8 @@ impl OfflineProtocol {
         // a spinner on a timer would otherwise seal and send one frame per
         // retry, and the holder answering none of them is the case that
         // provokes the retries.
-        if let Some(asked_at) = self.pending_attachment_fetches.get(&key) {
-            if Instant::now().duration_since(*asked_at) < DATA_SYNC_OFFER_INTERVAL {
+        if let Some(pending) = self.pending_attachment_fetches.get(&key) {
+            if Instant::now().duration_since(pending.last_seen) < DATA_SYNC_OFFER_INTERVAL {
                 debug!(
                     space,
                     "Blob fetch repeated inside its window; already asked"
@@ -2004,7 +2128,7 @@ impl OfflineProtocol {
             if let Some(oldest) = self
                 .pending_attachment_fetches
                 .iter()
-                .min_by_key(|(_, seen_at)| **seen_at)
+                .min_by_key(|(_, pending)| pending.last_seen)
                 .map(|(key, _)| key.clone())
             {
                 self.pending_attachment_fetches.remove(&oldest);
@@ -2016,13 +2140,248 @@ impl OfflineProtocol {
                 Self::report_fetch_ended(&self.shared_state, &oldest, "evicted");
             }
         }
-        self.pending_attachment_fetches.insert(key, Instant::now());
+        self.pending_attachment_fetches
+            .insert(key, PendingFetch::to_peer());
 
         self.send_sync_frame(
             space,
             &SyncChannel::Peer,
             &SyncBody::NeedBlob {
                 hash: hash.to_string(),
+                to: None,
+            },
+        );
+        Ok(())
+    }
+
+    /// Send one chunk frame as a holder would, without the hash check
+    /// `data_provide_attachment` makes on the way out.
+    ///
+    /// Test-only, and it exists because the receive-side hash check has no
+    /// other way to be reached: the send surface refuses to carry bytes that
+    /// do not hash to the address they are sent under, so a lying holder
+    /// cannot be staged through it.
+    #[cfg(test)]
+    pub(crate) fn send_group_chunk_for_test(
+        &mut self,
+        space: &str,
+        member: &str,
+        hash: &str,
+        index: u32,
+        total: u32,
+        blob: &str,
+    ) {
+        self.send_sync_frame(
+            space,
+            &SyncChannel::GroupDirected(member.to_string()),
+            &SyncBody::Chunk {
+                hash: hash.to_string(),
+                i: index,
+                n: total,
+                blob: blob.to_string(),
+            },
+        );
+    }
+
+    /// Take one piece of a blob a member is sending.
+    ///
+    /// Admitted only against a fetch this device started, and only from the
+    /// member it was put to. Both halves matter: the first is what stops a
+    /// member spending this device's memory on bytes nobody asked for, and
+    /// the second is what stops a different member answering a question that
+    /// was not put to them. Neither is a substitute for the hash check at
+    /// the end, which is the only thing that says what the bytes *are*.
+    ///
+    /// Provokes no answer in any outcome, which is what keeps `need_blob` a
+    /// single-hop question.
+    fn accept_blob_chunk(
+        &mut self,
+        space: &str,
+        sender: &str,
+        hash: &str,
+        index: u32,
+        total: u32,
+        encoded: &str,
+    ) -> Result<()> {
+        if Self::validate_attachment_hash(hash).is_err() {
+            warn!(space, "A blob chunk names something that is not a hash");
+            return Ok(());
+        }
+        // The receiver's own bound, not a restatement of the sender's. A
+        // holder that ignores the cap would otherwise spend this device's
+        // memory up to whatever it felt like declaring.
+        if total == 0 || total > MAX_GROUP_BLOB_CHUNKS || index >= total {
+            warn!(
+                space,
+                index, total, "A blob chunk declares a shape this layer does not carry"
+            );
+            return Ok(());
+        }
+        let key = Self::attachment_fetch_key(space, hash);
+        let Some(pending) = self.pending_attachment_fetches.get_mut(&key) else {
+            debug!(space, "Discarding a blob chunk nothing asked for");
+            return Ok(());
+        };
+        if !pending.is_answered_by(space, sender) {
+            warn!(
+                space,
+                sender, "Discarding a blob chunk from a member this fetch was not put to"
+            );
+            return Ok(());
+        }
+        let bytes = match BASE64.decode(encoded) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                warn!(space, error = %err, "Undecodable blob chunk");
+                return Ok(());
+            }
+        };
+        if bytes.len() > MAX_SYNC_BLOB_BYTES {
+            warn!(
+                space,
+                bytes = bytes.len(),
+                "A blob chunk is over the frame budget"
+            );
+            return Ok(());
+        }
+
+        // Arriving bytes are the sign of life the timeout measures from, and
+        // the refresh happens before anything below can refuse this chunk:
+        // a carriage in progress must not expire because one piece of it was
+        // malformed.
+        pending.last_seen = Instant::now();
+        let assembly = pending.assembly.get_or_insert_with(BlobAssembly::default);
+        if assembly.total == 0 {
+            assembly.total = total;
+        } else if assembly.total != total {
+            // One of the two is lying about the shape. The chunk is refused
+            // rather than the fetch, because the hash at the end is what
+            // decides the question either way, and ending the fetch here
+            // would let one bad frame cancel a carriage that is otherwise
+            // arriving.
+            warn!(
+                space,
+                declared = assembly.total,
+                arriving = total,
+                "A blob chunk contradicts the count its siblings declared"
+            );
+            return Ok(());
+        }
+        if let Some(previous) = assembly.chunks.insert(index, bytes) {
+            assembly.bytes -= previous.len();
+        }
+        assembly.bytes += assembly.chunks[&index].len();
+        if (assembly.chunks.len() as u32) < assembly.total {
+            return Ok(());
+        }
+
+        // Complete. Whether it is the *right* blob is a separate question,
+        // and the only one authentication cannot answer.
+        let assembled: Vec<u8> = assembly
+            .chunks
+            .values()
+            .flat_map(|chunk| chunk.iter().copied())
+            .collect();
+        self.pending_attachment_fetches.remove(&key);
+
+        let actual = Self::data_attachment_hash(&assembled);
+        if actual != hash {
+            warn!(
+                space,
+                sender, "Assembled blob does not hash to what was asked for"
+            );
+            Self::report_fetch_ended(&self.shared_state, &key, "hash_mismatch");
+            return Ok(());
+        }
+        if let Ok(state) = crate::protocol::lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::DataAttachmentReceived {
+                space_id: space.to_string(),
+                peer_id: sender.to_string(),
+                hash: hash.to_string(),
+                data: BASE64.encode(&assembled),
+            });
+        }
+        Ok(())
+    }
+
+    /// Ask one member of a group for the bytes behind a reference.
+    ///
+    /// A group needs the member named, where a 1:1 space does not: the
+    /// reference replicates to everybody and says nothing about who holds
+    /// the bytes. The SDK does not walk the roster on the application's
+    /// behalf, because each miss costs the whole silence timeout and a
+    /// reference nobody holds would spend one per member. The application
+    /// knows who wrote the reference; that is the member to ask.
+    ///
+    /// The answer arrives as frames under the group key rather than as a
+    /// transfer, so it needs no pairwise session with that member, and it is
+    /// bounded at 32 pieces of 32 KiB: 1 MiB in all. Anything larger travels
+    /// over a 1:1 session, and the holder is told so at the call.
+    pub fn data_fetch_attachment_from(
+        &mut self,
+        space: &str,
+        peer: &str,
+        hash: &str,
+    ) -> Result<()> {
+        if !self.config.data.enabled {
+            return Err(Error::DataDisabled);
+        }
+        Self::validate_attachment_hash(hash)?;
+        let Some(members) = self.group_space_roster(space) else {
+            return Err(Error::InvalidArgument(format!(
+                "space {space} is not a group; use data_fetch_attachment"
+            )));
+        };
+        if !members.iter().any(|member| member == peer) {
+            return Err(Error::InvalidArgument(format!(
+                "{peer} is not a member of {space}"
+            )));
+        }
+        // Refused only on knowledge, never on its absence. Members do not
+        // exchange key packages with each other, so "we have not heard" is
+        // the ordinary case and must not read as "they cannot": the
+        // inviter's attestation fills it in where there is one, and where
+        // there is not, asking and hearing nothing is the honest outcome
+        // and the silence timeout reports it.
+        if self.data_group_blob_known_absent(peer) {
+            return Err(Error::InvalidArgument(format!(
+                "member {peer} does not carry attachment bytes inside a group"
+            )));
+        }
+
+        let key = Self::attachment_fetch_key(space, hash);
+        self.expire_attachment_fetches();
+        if let Some(pending) = self.pending_attachment_fetches.get(&key) {
+            if Instant::now().duration_since(pending.last_seen) < DATA_SYNC_OFFER_INTERVAL {
+                debug!(
+                    space,
+                    peer, "Blob fetch repeated inside its window; already asked"
+                );
+                return Ok(());
+            }
+        }
+        if self.pending_attachment_fetches.len() >= MAX_PENDING_ATTACHMENT_FETCHES
+            && !self.pending_attachment_fetches.contains_key(&key)
+        {
+            if let Some(oldest) = self
+                .pending_attachment_fetches
+                .iter()
+                .min_by_key(|(_, pending)| pending.last_seen)
+                .map(|(key, _)| key.clone())
+            {
+                self.pending_attachment_fetches.remove(&oldest);
+                Self::report_fetch_ended(&self.shared_state, &oldest, "evicted");
+            }
+        }
+        self.pending_attachment_fetches
+            .insert(key, PendingFetch::to_member(peer));
+
+        self.send_sync_frame(
+            space,
+            &SyncChannel::GroupDirected(peer.to_string()),
+            &SyncBody::NeedBlob {
+                hash: hash.to_string(),
+                to: Some(peer.to_string()),
             },
         );
         Ok(())
@@ -2054,16 +2413,54 @@ impl OfflineProtocol {
                 "an attachment must have bytes".to_string(),
             ));
         }
-        if space != peer {
+        let group = self.group_space_roster(space);
+        if group.is_none() && space != peer {
             return Err(Error::InvalidArgument(format!(
                 "space {space} is not the 1:1 space with {peer}"
             )));
+        }
+        if let Some(members) = &group {
+            if !members.iter().any(|member| member == peer) {
+                return Err(Error::InvalidArgument(format!(
+                    "{peer} is not a member of {space}"
+                )));
+            }
         }
         let actual = Self::data_attachment_hash(&bytes);
         if actual != hash {
             return Err(Error::InvalidArgument(format!(
                 "these bytes hash to {actual}, not to {hash}"
             )));
+        }
+
+        // A group answer leaves as frames rather than as a transfer, and
+        // leaves all at once: that is what keeps the request a single-hop
+        // question, and it is why the size is bounded here rather than by
+        // the transfer layer's own limit.
+        if group.is_some() {
+            let chunks = bytes.len().div_ceil(MAX_SYNC_BLOB_BYTES);
+            if chunks > MAX_GROUP_BLOB_CHUNKS as usize {
+                return Err(Error::InvalidArgument(format!(
+                    "an attachment carried inside a group is at most {} bytes, and these are {}: \
+                     send it over a 1:1 session instead",
+                    MAX_GROUP_BLOB_CHUNKS as usize * MAX_SYNC_BLOB_BYTES,
+                    bytes.len()
+                )));
+            }
+            let channel = SyncChannel::GroupDirected(peer.to_string());
+            for (index, chunk) in bytes.chunks(MAX_SYNC_BLOB_BYTES).enumerate() {
+                self.send_sync_frame(
+                    space,
+                    &channel,
+                    &SyncBody::Chunk {
+                        hash: hash.to_string(),
+                        i: index as u32,
+                        n: chunks as u32,
+                        blob: BASE64.encode(chunk),
+                    },
+                );
+            }
+            return Ok(());
         }
 
         // Answering twice is not an error to report back: the app did as it
@@ -2106,24 +2503,42 @@ impl OfflineProtocol {
             return Err(Error::DataDisabled);
         }
         Self::validate_attachment_hash(hash)?;
-        if space != peer {
+        let group = self.group_space_roster(space);
+        if group.is_none() && space != peer {
             return Err(Error::InvalidArgument(format!(
                 "space {space} is not the 1:1 space with {peer}"
             )));
         }
-        // Gated like every other frame in this file, and it is the one that
-        // was not. A refusal toward a peer that never advertised the
-        // capability is unreadable to them, so the caller believes they
-        // answered and the asking side keeps waiting; toward a blocked peer
-        // it is a liveness signal blocking exists to withhold.
-        if !self.data_media_active(peer) {
-            return Err(Error::InvalidArgument(format!(
-                "peer {peer} did not advertise attachment carriage"
-            )));
-        }
+        let channel = match &group {
+            Some(members) => {
+                if !members.iter().any(|member| member == peer) {
+                    return Err(Error::InvalidArgument(format!(
+                        "{peer} is not a member of {space}"
+                    )));
+                }
+                SyncChannel::GroupDirected(peer.to_string())
+            }
+            None => {
+                // Gated like every other frame in this file, and it is the
+                // one that was not. A refusal toward a peer that never
+                // advertised the capability is unreadable to them, so the
+                // caller believes they answered and the asking side keeps
+                // waiting; toward a blocked peer it is a liveness signal
+                // blocking exists to withhold.
+                //
+                // A group needs no equivalent: the refusal rides the group
+                // key, which every member can already open.
+                if !self.data_media_active(peer) {
+                    return Err(Error::InvalidArgument(format!(
+                        "peer {peer} did not advertise attachment carriage"
+                    )));
+                }
+                SyncChannel::Peer
+            }
+        };
         self.send_sync_frame(
             space,
-            &SyncChannel::Peer,
+            &channel,
             &SyncBody::BlobGone {
                 hash: hash.to_string(),
             },
@@ -2292,7 +2707,7 @@ impl OfflineProtocol {
         };
         let key = Self::attachment_fetch_key(peer, hash);
         if let Some(seen_at) = self.pending_attachment_fetches.get_mut(&key) {
-            *seen_at = Instant::now();
+            seen_at.last_seen = Instant::now();
         }
     }
 
@@ -2332,7 +2747,9 @@ impl OfflineProtocol {
         let expired: Vec<String> = self
             .pending_attachment_fetches
             .iter()
-            .filter(|(_, asked_at)| now.duration_since(**asked_at) >= ATTACHMENT_FETCH_TIMEOUT)
+            .filter(|(_, pending)| {
+                now.duration_since(pending.last_seen) >= ATTACHMENT_FETCH_TIMEOUT
+            })
             .map(|(key, _)| key.clone())
             .collect();
         for key in expired {
@@ -2353,17 +2770,51 @@ impl OfflineProtocol {
         space: &str,
         channel: &SyncChannel,
         hash: &str,
+        to: Option<&str>,
     ) -> Result<()> {
-        if !matches!(channel, SyncChannel::Peer) {
-            warn!(
-                space,
-                "A blob request arrived inside a group; attachment carriage is 1:1"
-            );
-            return Ok(());
-        }
         if Self::validate_attachment_hash(hash).is_err() {
             warn!(space, "Blob request names something that is not a hash");
             return Ok(());
+        }
+        // The member that asked, which in a group is not the space. A
+        // roster-wide request is refused rather than answered: there is
+        // nobody to send the bytes to, and answering it would mean choosing
+        // a member on the asker's behalf.
+        let asker = match channel {
+            SyncChannel::Peer => space.to_string(),
+            SyncChannel::GroupDirected(member) => member.clone(),
+            SyncChannel::GroupBroadcast => {
+                warn!(
+                    space,
+                    "A blob request arrived addressed to the whole roster; ignoring"
+                );
+                return Ok(());
+            }
+        };
+        // Inside a group the question names the member it is for, and one
+        // that names somebody else is not ours to answer. The sender's
+        // directed frame is promoted to the whole roster when its ratchet
+        // budget runs out, so it arrives at every member either way; without
+        // this check every member's application would be asked for bytes
+        // that only one of them can have accepted.
+        if !matches!(channel, SyncChannel::Peer) {
+            match to {
+                Some(member) if member == self.local_id => {}
+                Some(_) => {
+                    debug!(
+                        space,
+                        "A blob request names another member; not ours to answer"
+                    );
+                    return Ok(());
+                }
+                None => {
+                    warn!(
+                        space,
+                        "A blob request inside a group names no member; ignoring"
+                    );
+                    return Ok(());
+                }
+            }
         }
         // A request this device could not answer is not put to the
         // application. Both answers to `DataAttachmentRequested` refuse
@@ -2375,20 +2826,30 @@ impl OfflineProtocol {
         // Ahead of the rate limiter rather than behind it, so a peer that
         // cannot be answered spends no window slot: the budget exists to
         // bound work this device would otherwise do, and there is none here.
-        if !self.data_media_active(space) {
+        let answerable = match channel {
+            SyncChannel::Peer => self.data_media_active(space),
+            // In a group the question is whether *this* device can answer,
+            // and it can: the bytes leave as frames under the group key,
+            // which every member can already open. What the asker speaks is
+            // their problem, and they only get an answer because they asked.
+            _ => self.config.data.enabled,
+        };
+        if !answerable {
             warn!(
                 space,
                 "A blob request came from a peer that never advertised carriage; ignoring"
             );
             return Ok(());
         }
-        if !self.blob_request_due(space, hash) {
+        // Budgeted against the member that asked rather than the space, or
+        // one member could spend the whole group's window.
+        if !self.blob_request_due(&asker, hash) {
             return Ok(());
         }
         if let Ok(state) = crate::protocol::lock_shared_state(&self.shared_state) {
             state.emit_event(Event::DataAttachmentRequested {
                 space_id: space.to_string(),
-                peer_id: space.to_string(),
+                peer_id: asker,
                 hash: hash.to_string(),
             });
         }
@@ -2402,29 +2863,32 @@ impl OfflineProtocol {
     /// a frame arriving over a group would compose a key from a group id.
     /// Unreachable today because a group id cannot collide with an address,
     /// which is exactly the kind of accident a later refactor removes.
-    fn report_blob_gone(&mut self, channel: &SyncChannel, space: &str, hash: &str) -> Result<()> {
-        if !matches!(channel, SyncChannel::Peer) {
-            warn!(
-                space,
-                "A blob refusal arrived inside a group; attachment carriage is 1:1"
-            );
-            return Ok(());
-        }
+    fn report_blob_gone(&mut self, space: &str, sender: &str, hash: &str) -> Result<()> {
         if Self::validate_attachment_hash(hash).is_err() {
             warn!(space, "Blob refusal names something that is not a hash");
             return Ok(());
         }
         let key = Self::attachment_fetch_key(space, hash);
-        // Only a fetch this device actually made is reported. Otherwise a
-        // peer could emit refusals for blobs nobody asked about.
-        if self.pending_attachment_fetches.remove(&key).is_none() {
-            debug!(space, "A blob refusal answers no question we asked");
+        // Only a fetch this device actually made is reported, and only by
+        // the peer it was put to. Otherwise a peer could emit refusals for
+        // blobs nobody asked about, and in a group any member could end a
+        // question that was put to somebody else.
+        let answers_us = self
+            .pending_attachment_fetches
+            .get(&key)
+            .is_some_and(|pending| pending.is_answered_by(space, sender));
+        if !answers_us {
+            debug!(
+                space,
+                sender, "A blob refusal answers no question we put to this peer"
+            );
             return Ok(());
         }
+        self.pending_attachment_fetches.remove(&key);
         if let Ok(state) = crate::protocol::lock_shared_state(&self.shared_state) {
             state.emit_event(Event::DataAttachmentUnavailable {
                 space_id: space.to_string(),
-                peer_id: space.to_string(),
+                peer_id: sender.to_string(),
                 hash: hash.to_string(),
                 reason: "declined".to_string(),
             });
@@ -2858,7 +3322,7 @@ mod golden_vectors {
                 .unwrap_or_else(|| panic!("{name} must be an array"))
                 .len()
         };
-        assert_eq!(len("frames"), 10);
+        assert_eq!(len("frames"), 12);
         assert_eq!(len("parse_defaults"), 3);
         assert_eq!(len("attachment_hashes"), 3);
         assert_eq!(len("attachment_references"), 2);
@@ -2967,12 +3431,33 @@ mod golden_vectors {
             .expect("hash")
             .to_string();
         assert_eq!(
-            framed(&SyncBody::NeedBlob { hash: hash.clone() }),
+            framed(&SyncBody::NeedBlob {
+                hash: hash.clone(),
+                to: None,
+            }),
             wire(&vectors, "blob request")
         );
         assert_eq!(
-            framed(&SyncBody::BlobGone { hash }),
+            framed(&SyncBody::BlobGone { hash: hash.clone() }),
             wire(&vectors, "blob refusal")
+        );
+
+        assert_eq!(
+            framed(&SyncBody::NeedBlob {
+                hash: hash.clone(),
+                to: Some("off1qy60a3pu0l9tnthnk08c4w59teq7u6w28gjwg8zk".to_string()),
+            }),
+            wire(&vectors, "blob request addressed to one member")
+        );
+
+        assert_eq!(
+            framed(&SyncBody::Chunk {
+                hash,
+                i: 0,
+                n: 2,
+                blob: BASE64.encode([0u8, 1, 2, 3]),
+            }),
+            wire(&vectors, "blob chunk")
         );
     }
 
@@ -3008,6 +3493,7 @@ mod golden_vectors {
                 SyncBody::NeedSnapshot { .. } => "need_snap",
                 SyncBody::NeedBlob { .. } => "blob",
                 SyncBody::BlobGone { .. } => "gone",
+                SyncBody::Chunk { .. } => "chunk",
             };
             let expected = match frame["kind"].as_str().expect("kind") {
                 "need_blob" => "blob",

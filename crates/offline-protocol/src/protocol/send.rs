@@ -976,6 +976,7 @@ impl OfflineProtocol {
                     super::types::DATA_MEDIA_V1,
                     super::types::DATA_TOMBSTONE_V1,
                     super::types::DATA_INTEREST_V1,
+                    super::types::DATA_GROUP_BLOB_V1,
                 ];
             }
         }
@@ -1082,6 +1083,32 @@ impl OfflineProtocol {
         #[cfg(not(feature = "data"))]
         {
             let _ = recipient;
+            false
+        }
+    }
+
+    /// Whether `peer` is *known* not to carry attachment bytes inside a
+    /// group.
+    ///
+    /// Knowledge, never its absence. Members of a group do not exchange key
+    /// packages with each other, so "we have not heard" is the ordinary case
+    /// and must not read as "they cannot": that would refuse every fetch put
+    /// to a member this device has never dealt with directly. An inviter's
+    /// attestation fills the gap where there is one.
+    ///
+    /// [`DATA_GROUP_BLOB_V1`]: crate::protocol::types::DATA_GROUP_BLOB_V1
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(super) fn data_group_blob_known_absent(&self, peer: &str) -> bool {
+        #[cfg(feature = "data")]
+        {
+            let heard_directly = self.peer_data_sync.contains(peer);
+            let attested = self.peer_data_group_blob_attested.contains(peer);
+            let carries = self.peer_data_group_blob.contains(peer) || attested;
+            (heard_directly || attested) && !carries
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            let _ = peer;
             false
         }
     }
@@ -1234,9 +1261,27 @@ impl OfflineProtocol {
     pub(crate) fn attestable_data_versions(&self, peer_id: &str) -> Option<Vec<u8>> {
         #[cfg(feature = "data")]
         {
-            (self.peer_data_group.contains(peer_id)
-                || self.peer_data_group_attested.contains(peer_id))
-            .then(|| vec![super::types::DATA_GROUP_V1])
+            // Every group-relevant entry this device knows about the peer,
+            // rather than the one it used to be. An inviter is the only
+            // source a member has for another member, so anything it leaves
+            // out is something nobody else can supply.
+            let mut versions = Vec::new();
+            if self.peer_data_group.contains(peer_id)
+                || self.peer_data_group_attested.contains(peer_id)
+            {
+                versions.push(super::types::DATA_GROUP_V1);
+            }
+            if self.peer_data_group_blob.contains(peer_id)
+                || self.peer_data_group_blob_attested.contains(peer_id)
+            {
+                versions.push(super::types::DATA_GROUP_BLOB_V1);
+            }
+            // Entry 2 is what makes a member reachable at all, so an
+            // attestation without it says nothing usable and is not sent.
+            versions
+                .first()
+                .is_some_and(|first| *first == super::types::DATA_GROUP_V1)
+                .then_some(versions)
         }
         #[cfg(not(feature = "data"))]
         {

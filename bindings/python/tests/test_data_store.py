@@ -236,3 +236,24 @@ def test_an_interest_pattern_that_could_never_match_is_refused(data_config) -> N
             store.set_interest("space-1", [bad])
     with pytest.raises(ProtocolError.InvalidArgument):
         store.set_interest("space-1", [f"d{n}*" for n in range(33)])
+
+
+def test_a_group_fetch_names_the_member_and_a_one_to_one_fetch_does_not(data_config) -> None:
+    # The two fetch surfaces refuse each other's spaces, and each refusal
+    # names the call that works. A reference replicates to everybody and says
+    # nothing about who holds the bytes, which is why the group one takes a
+    # member.
+    protocol = OfflineProtocol(data_config)
+    protocol.initialize_mls(_in_memory_mls_storage(), DictStateStorage())
+    store = DataStore.with_storage(protocol, DictStateStorage())
+    blob_hash = store.attachment_hash(b"some bytes")
+
+    # "space-1" is neither a peer address nor a group id, so it is local-only
+    # and both calls refuse it, each for its own reason.
+    with pytest.raises(ProtocolError.InvalidArgument) as one_to_one:
+        store.fetch_attachment("space-1", blob_hash)
+    assert "advertise" in str(one_to_one.value)
+
+    with pytest.raises(ProtocolError.InvalidArgument) as group:
+        store.fetch_attachment_from("space-1", "peer-1", blob_hash)
+    assert "not a group" in str(group.value)

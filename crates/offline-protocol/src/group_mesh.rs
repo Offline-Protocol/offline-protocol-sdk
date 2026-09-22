@@ -11,8 +11,8 @@
 
 use crate::protocol::{
     base64_decode, base64_encode, internal_prefixes, GroupMemberRemovedPayload,
-    InternalMessageResult, OfflineProtocol, RichPayloadV1, RichSendExtras, DATA_GROUP_V1,
-    RICH_PAYLOAD_V1,
+    InternalMessageResult, OfflineProtocol, RichPayloadV1, RichSendExtras, DATA_GROUP_BLOB_V1,
+    DATA_GROUP_V1, RICH_PAYLOAD_V1,
 };
 use crate::{Error, Event, Result};
 use chrono::{DateTime, Utc};
@@ -3391,9 +3391,19 @@ impl OfflineProtocol {
                     // the single error that puts `__DATA_V1__` in front of a
                     // user as text, and a self-attestation is the one place
                     // the claim cannot be corrected by a direct exchange.
-                    self.advertised_data_versions()
-                        .contains(&DATA_GROUP_V1)
-                        .then(|| (m.clone(), vec![DATA_GROUP_V1]))
+                    // Read off the same list every peer is told, so a
+                    // self-attestation can never claim more than this device
+                    // advertises. Entry 2 is what makes the attestation
+                    // usable at all; the blob entry rides beside it and is
+                    // read independently.
+                    let advertised = self.advertised_data_versions();
+                    advertised.contains(&DATA_GROUP_V1).then(|| {
+                        let mut versions = vec![DATA_GROUP_V1];
+                        if advertised.contains(&DATA_GROUP_BLOB_V1) {
+                            versions.push(DATA_GROUP_BLOB_V1);
+                        }
+                        (m.clone(), versions)
+                    })
                 } else {
                     self.attestable_data_versions(m).map(|v| (m.clone(), v))
                 }

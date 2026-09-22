@@ -461,6 +461,12 @@ RCT_EXTERN_METHOD(dataRemoveSpace:(NSString *)spaceId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(dataFetchAttachmentFrom:(NSString *)spaceId
+                  peerId:(NSString *)peerId
+                  hash:(NSString *)hash
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(dataSetInterest:(NSString *)spaceId
                   patterns:(NSArray *)patterns
                   resolver:(RCTPromiseResolveBlock)resolve

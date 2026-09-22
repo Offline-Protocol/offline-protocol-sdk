@@ -3510,6 +3510,18 @@ impl OfflineProtocol {
             .map_err(ProtocolError::from)
     }
 
+    pub(crate) fn data_fetch_attachment_from(
+        &self,
+        space_id: String,
+        peer_id: String,
+        hash: String,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_fetch_attachment_from(&space_id, &peer_id, &hash)
+            .map_err(ProtocolError::from)
+    }
+
     pub(crate) fn data_set_interest(
         &self,
         space_id: String,
@@ -6879,6 +6891,16 @@ impl DataStore {
 
     pub fn remove_space(&self, space_id: String) -> Result<(), ProtocolError> {
         self.protocol.data_remove_space(space_id)
+    }
+
+    pub fn fetch_attachment_from(
+        &self,
+        space_id: String,
+        peer_id: String,
+        hash: String,
+    ) -> Result<(), ProtocolError> {
+        self.protocol
+            .data_fetch_attachment_from(space_id, peer_id, hash)
     }
 
     pub fn set_interest(

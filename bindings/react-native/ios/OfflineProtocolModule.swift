@@ -1880,6 +1880,25 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    @objc func dataFetchAttachmentFrom(_ spaceId: String,
+                                       peerId: String,
+                                       hash: String,
+                                       resolver: @escaping RCTPromiseResolveBlock,
+                                       rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.fetchAttachmentFrom(spaceId: spaceId, peerId: peerId, hash: hash)
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATAFETCHATTACHMENTFROM",
+                                    fallbackMessage: "fetchAttachmentFrom failed")
+        }
+    }
+
     @objc func dataSetInterest(_ spaceId: String,
                                patterns: [String],
                                resolver: @escaping RCTPromiseResolveBlock,

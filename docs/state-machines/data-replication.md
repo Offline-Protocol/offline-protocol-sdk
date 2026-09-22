@@ -219,6 +219,16 @@ The holding side answers `data_attachment_requested`, and the SDK cannot
 answer for it: blob bytes never entered protocol state, so only the
 application has them.
 
+**In a group the bytes ride frames rather than a transfer**, because two
+members need not share a pairwise session. The fetch names the member, both
+because a reference says nothing about who holds the bytes and because a
+directed frame is promoted to the whole roster when the sender's ratchet
+budget runs out: without the name, every member's application would be asked
+for bytes only one of them can have accepted. A chunk is admitted only
+against an outstanding request and only from the member it was put to, and
+the whole answer is at most 32 chunks, which is what keeps the request a
+single-hop question.
+
 | Bound | Value | What it stops |
 |-------|-------|---------------|
 | Per-hash window | 30 seconds | A peer re-asking for one blob it has already been answered about |
@@ -251,3 +261,6 @@ The frames and the ladder are identical. Three rules are not:
 - **A change received from a group is never pushed back into it.** The
   ciphertext already reached every member; re-broadcasting turns one edit into
   N² frames.
+- **Attachment bytes travel as frames**, at most 1 MiB of them, addressed to
+  the member that asked. A larger blob goes over a 1:1 session, and the
+  holder is told so at the call.

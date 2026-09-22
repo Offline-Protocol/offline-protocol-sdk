@@ -62,15 +62,18 @@ __DATA_V1__{"v":1,"k":"vv","reply":false,"partial":false,"docs":{"<doc>":"<base6
 __DATA_V1__{"v":1,"k":"delta","doc":"<name>","blob":"<base64>"}
 __DATA_V1__{"v":1,"k":"snap","doc":"<name>","blob":"<base64>"}
 __DATA_V1__{"v":1,"k":"need_snap","doc":"<name>"}
-__DATA_V1__{"v":1,"k":"need_blob","hash":"<64 lowercase hex>"}
+__DATA_V1__{"v":1,"k":"need_blob","hash":"<64 lowercase hex>","to":"<member>"}
 __DATA_V1__{"v":1,"k":"blob_gone","hash":"<64 lowercase hex>"}
+__DATA_V1__{"v":1,"k":"chunk","hash":"<64 lowercase hex>","i":<index>,"n":<count>,"blob":"<base64>"}
 ```
 
 `vv`, `delta`, `snap` and `need_snap` are gated on `data_versions` entry 1.
 `need_blob` and `blob_gone` are gated on entry 3, and are covered under
 [Attachments](#attachments). The `gone` field of a `vv` frame is gated on
 entry 4 and is covered under [Deletion](#deletion); its `want` field is gated
-on entry 5 and is covered under [Interest](#interest).
+on entry 5 and is covered under [Interest](#interest). `chunk`, and the `to`
+field of a `need_blob`, are gated on entry 6 and are covered under
+[Carriage in a group](#carriage-in-a-group).
 
 Base64 is the standard alphabet with padding. `reply` and `partial` default to
 false when absent, so a sender MAY omit them; a receiver MUST treat an absent
@@ -550,7 +553,8 @@ a phone wants to spend a battery on.
 
 | Inbound | Answer |
 |---------|--------|
-| `need_blob` | The bytes over the media path, or one `blob_gone`, or nothing |
+| `need_blob` | The bytes over the media path (1:1) or as `chunk` frames (a group), or one `blob_gone`, or nothing |
+| `chunk` | Nothing |
 | `blob_gone` | Nothing |
 | Blob bytes over the media path | Nothing |
 
@@ -606,17 +610,60 @@ takes effect, which is earlier than it looks.
 
 ### Scope
 
-Attachment carriage is 1:1 in this version. The media path is a transfer to a
-confirmed pairwise session, and two members of a group need not have one with
-each other: requiring it would make an attachment depend on a handshake that
-may never happen.
+A blob travels one of two ways, and which one is decided by the space rather
+than by the bytes.
 
-References themselves replicate in group spaces like any other value. What a
-group member cannot do is fetch the bytes from another member, and an
-implementation MUST report that rather than leaving the request outstanding.
+**On a 1:1 session it rides the media path**, the transfer machinery
+messaging already uses for files, and is bounded by that path rather than by
+this layer.
 
-A later version that carries blobs in groups needs no new reference format,
-only a new capability entry and a way to move bytes under a group key.
+**In a group it rides `chunk` frames** under the group key. The media path is
+a transfer to a confirmed pairwise session and two members of a group need
+not have one with each other; requiring it would make an attachment depend on
+a handshake that may never happen. Frames need only the group key, which
+membership already is.
+
+### Carriage in a group
+
+**A request names the member it is for.** `need_blob` carries `to` inside a
+group, and a member that is not named MUST NOT act on it. This is not
+addressing for its own sake: a directed frame is promoted to a roster-wide
+delivery when the sender's ratchet budget runs out, and a receiver cannot
+tell a promoted frame from one addressed to it. Without the field every
+member's application is asked for bytes the requester can accept from only
+one of them.
+
+**The answer is at most `32` chunks**, each bounded by the frame budget, so a
+blob carried this way is at most 1 MiB. That bound is what keeps `need_blob`
+a single-hop question: the whole answer leaves at once, so nothing has to ask
+for the next window and no chain of questions exists to terminate. A holder
+MUST refuse to carry more and MUST say so to its caller, which still has the
+bytes in hand; a receiver MUST refuse a chunk declaring more, because a bound
+stated only by the sender is not a bound.
+
+**A chunk carries its own index and count.** Carrying the count on every
+piece rather than on the first is what makes the pieces independent: they may
+arrive in any order, and a duplicate replaces rather than appends. A chunk
+whose count contradicts its siblings MUST be refused on its own, without
+ending the carriage: the hash check decides the question either way, and
+ending it would let one malformed frame cancel an answer that is otherwise
+arriving.
+
+**A chunk is admitted only against an outstanding request, and only from the
+member that request was put to.** The first is what stops a member spending a
+device's memory on bytes nobody asked for, and promotion guarantees such
+chunks arrive. The second is what stops one member answering, or refusing, a
+question that was put to somebody else. Neither substitutes for verifying
+that the assembled bytes hash to the address that was asked for, which is the
+only check that says what the bytes *are*.
+
+**The requester names the member.** An implementation SHOULD NOT try members
+in turn on the application's behalf: each miss costs the whole silence
+timeout, so a reference nobody holds would spend one per member. The
+application knows who wrote the reference.
+
+References themselves replicate in group spaces like any other value, and
+have never needed anything from this section.
 
 ## Documents too large for a frame
 
@@ -630,6 +677,15 @@ It is gated on `data_versions` entry 3, it is 1:1 only, and the arriving bytes
 go through the same import containment every remote blob goes through. The
 road the bytes travelled says nothing about what they are: this is still an
 import from a peer who is authenticated and may still be wrong.
+
+It stayed 1:1 when attachment bytes stopped being, and the difference is the
+rule in the paragraph below. A blob is *asked for*, so a chunk of one is
+admitted against an outstanding request and refused without one; a document
+carried this way is unsolicited, so frames carrying one would be admitted on
+nothing but the sender's say-so, and a member could spend every other
+member's memory by sending them. A group implementation would need a rule
+this one does not have, so a group document too large for a frame is still
+reported rather than carried.
 
 It differs from an attachment transfer in one rule, and it is the rule a
 reader is most likely to carry over by mistake. A snapshot is **unsolicited by

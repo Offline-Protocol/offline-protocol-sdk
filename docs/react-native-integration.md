@@ -604,7 +604,8 @@ await store.flush('space-1', 'profile');
 | **docSize** | `docSize(spaceId, docId): Promise<number>` | Compacted size in bytes. |
 | **wipeAll** | `wipeAll(): Promise<void>` | Deletes every data-layer record. Needed on logout only when documents were pointed at an app-supplied backend, which `wipePersistedState` cannot reach. Only durable once replication has stopped: with the engine running and sessions live, the peer's next version offer recreates and refills every document. |
 | **attachmentHash** | `attachmentHash(bytesBase64: string): Promise<string>` | The address of some bytes, in the spelling a reference uses. Compute it here rather than anywhere else: two spellings of one hash are two addresses. |
-| **fetchAttachment** | `fetchAttachment(spaceId, hash): Promise<void>` | Asks the peer for a blob. The answer arrives as an event, never inline. Rejects for a group space, and for a peer that cannot carry blobs. |
+| **fetchAttachment** | `fetchAttachment(spaceId, hash): Promise<void>` | Asks a 1:1 peer for a blob. The answer arrives as an event, never inline. Rejects for a group space, which needs `fetchAttachmentFrom`, and for a peer that cannot carry blobs. |
+| **fetchAttachmentFrom** | `fetchAttachmentFrom(spaceId, peerId, hash): Promise<void>` | Asks one member of a group for a blob. Capped at 1 MiB; anything larger needs a 1:1 session. |
 | **provideAttachment** | `provideAttachment(spaceId, peerId, hash, bytesBase64): Promise<void>` | Answers a peer's request. Rejects if the bytes do not hash to `hash`. |
 | **declineAttachment** | `declineAttachment(spaceId, peerId, hash): Promise<void>` | Tells a peer the bytes are gone. Rejects for a peer that cannot carry blobs. |
 

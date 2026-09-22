@@ -1966,6 +1966,19 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun dataFetchAttachmentFrom(spaceId: String, peerId: String, hash: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.fetchAttachmentFrom(spaceId, peerId, hash)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(
+                promise, e, "ERROR_DATAFETCHATTACHMENTFROM", "fetchAttachmentFrom failed"
+            )
+        }
+    }
+
+    @ReactMethod
     fun dataSetInterest(spaceId: String, patterns: ReadableArray, promise: Promise) {
         try {
             val store = dataStore ?: throw IllegalStateException("DataStore not initialized")

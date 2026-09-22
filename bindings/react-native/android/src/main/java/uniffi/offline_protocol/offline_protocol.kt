@@ -850,6 +850,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_flush(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all(
@@ -1328,6 +1330,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_datastore_doc_size(`ptr`: 
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_export_raw(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`hash`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment_from(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`peerId`: RustBuffer.ByValue,`hash`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_flush(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1909,6 +1913,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment() != 64859.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from() != 5000.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush() != 53125.toShort()) {
@@ -3140,6 +3147,8 @@ public interface DataStoreInterface {
     
     fun `fetchAttachment`(`spaceId`: kotlin.String, `hash`: kotlin.String)
     
+    fun `fetchAttachmentFrom`(`spaceId`: kotlin.String, `peerId`: kotlin.String, `hash`: kotlin.String)
+    
     fun `flush`(`spaceId`: kotlin.String, `docId`: kotlin.String)
     
     fun `flushAll`()
@@ -3412,6 +3421,19 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment(
         it,
         FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`hash`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `fetchAttachmentFrom`(`spaceId`: kotlin.String, `peerId`: kotlin.String, `hash`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment_from(
+        it,
+        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`peerId`),FfiConverterString.lower(`hash`),_status)
 }
     }
     

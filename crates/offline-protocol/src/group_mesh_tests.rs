@@ -1,7 +1,7 @@
 use super::group_mesh::*;
 use crate::protocol::tests::{create_test_config, create_test_config_for_user};
-use crate::protocol::DATA_GROUP_V1;
 use crate::protocol::{base64_decode, base64_encode, internal_prefixes, InternalMessageResult};
+use crate::protocol::{DATA_GROUP_BLOB_V1, DATA_GROUP_V1};
 use crate::test_identity::{id, session_slot};
 use crate::{Event, OfflineProtocol};
 use offline_protocol_core::{AppId, UserId};
@@ -12325,8 +12325,10 @@ fn invite_attests_group_replication_on_commit_and_welcome() {
     .unwrap();
     assert_eq!(
         welcome_payload.member_data.get(&id("alice")),
-        Some(&vec![DATA_GROUP_V1]),
-        "the welcome must self-attest the inviter"
+        Some(&vec![DATA_GROUP_V1, DATA_GROUP_BLOB_V1]),
+        "the welcome must self-attest the inviter, with every group-relevant \
+         entry it advertises: entry 2 is what makes the attestation usable, \
+         and entry 6 rides beside it and is read independently"
     );
     assert_eq!(
         welcome_payload.member_data.get(&id("bob")),
@@ -12380,7 +12382,7 @@ fn invite_omits_group_replication_attestation_for_unknown_members() {
     .unwrap();
     assert_eq!(
         welcome_payload.member_data.get(&id("alice")),
-        Some(&vec![DATA_GROUP_V1]),
+        Some(&vec![DATA_GROUP_V1, DATA_GROUP_BLOB_V1]),
         "the inviter still self-attests from what it actually advertises"
     );
     assert!(!welcome_payload.member_data.contains_key(&id("bob")));

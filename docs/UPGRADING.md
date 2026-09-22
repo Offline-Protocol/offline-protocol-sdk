@@ -2255,6 +2255,34 @@ exactly the one whose removal you still need to hear about.
 
 ---
 
+## 24. Attachment bytes inside a group *(unreleased)*
+
+References always replicated to every member; now the bytes can follow.
+
+**`fetchAttachmentFrom(space, peer, hash)` asks one member.** The reference
+says what the bytes are and nothing about who has them, so the call takes the
+member; the SDK does not try members in turn, because each miss costs the
+full silence timeout. The answer arrives as the same `data_attachment_received`
+event a 1:1 fetch produces.
+
+**`fetchAttachment` still refuses a group space**, and its message now names
+the call that works.
+
+**A group attachment is capped at 1 MiB.** `provideAttachment` refuses a
+larger blob at the call, while your app still has the file, and says to send
+it over a 1:1 session. The 1:1 path is unchanged and still carries up to the
+transfer layer's limit.
+
+**`provideAttachment` and `declineAttachment` now accept a group space**, with
+the member that asked as the peer.
+
+**A member on an older build refuses the request and drops the chunks.**
+Nothing is surfaced wrongly there; the fetch ends at the silence timeout with
+`data_attachment_unavailable`. Where an inviter has attested the member's
+capability, the fetch is refused at the call instead.
+
+---
+
 ## Appendix A: limits reference
 
 | Limit | Value | Where enforced |
