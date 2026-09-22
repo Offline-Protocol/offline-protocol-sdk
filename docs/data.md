@@ -202,6 +202,14 @@ space on a device and the wrong one for content somebody wants gone.
 **`removeSpace(spaceId)` removes every document a space holds**, from every
 replica of it.
 
+**A removed name refuses reads and writes.** Every call on it, `mapGet` and
+`mapSet` included, throws `InvalidState` until `createDoc` brings the name
+back, on the device that removed it and on every device that learned of the
+removal. Before a removal a name is created by its first write; after one it
+is not, because a read that answered empty would be indistinguishable from a
+cleared document. `data_doc_removed` is the cue to close whatever has the
+document open.
+
 **An edit made while a removal was crossing wins, and brings the whole
 document back.** Not the edit alone: the edit was made *on* the old contents,
 so its history is those contents, and there is no version of this that returns
@@ -214,7 +222,11 @@ Two things follow that are worth knowing before you rely on either verb:
 
 - **A removal never expires**, so a device that has been away for a year still
   learns about it. A removed name keeps a small record for the life of the
-  space, and counts against the 1024-document ceiling a peer can fill.
+  space, and counts against the 1024-document ceiling a peer can fill. That
+  record has no eviction: `deleteDoc` on a removed name leaves it in place,
+  and `wipeAll()` is the only call that drops one. A peer who removed a
+  thousand names has spent the space's peer-name budget for good, whether or
+  not they are still in the space.
 - **`wipeAll()` is not a removal.** It clears this device and records nothing,
   so on a running engine the peers refill it. It is the logout path; use
   `removeSpace()` to clear the room.
@@ -226,6 +238,12 @@ the new document on every replica; a replica on a build that does not read
 removals merges the new contents into its old copy instead. Both are the
 edit-wins rule applied to a re-used name. If new content must not meet the
 old, give it a fresh name.
+
+A re-created name reaches the peers with its first write rather than with
+`createDoc`. An empty document stands at the version every floor covers, so a
+peer that no longer holds the name reads its offer as the removed content and
+does not create it; the first write moves the version past the floor, and the
+next exchange carries the document.
 
 `listSpaces()` keeps listing a space whose documents were all removed: the
 space still has removals to report, and `listDocs()` on it is empty.

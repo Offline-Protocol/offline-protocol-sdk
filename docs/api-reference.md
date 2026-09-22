@@ -1029,7 +1029,7 @@ await store.flush('space-1', 'profile');
 |---|---|---|
 | `createDoc(space, doc)` | `void` | No-op if it already exists |
 | `deleteDoc(space, doc)` | `void` | Drops this device's copy. Records nothing about the name, so a replica that still holds the document refills it |
-| `removeDoc(space, doc)` | `void` | Removes the document from every replica of the space. An edit made concurrently with the removal wins and brings the document back whole |
+| `removeDoc(space, doc)` | `void` | Removes the document from every replica of the space. An edit made concurrently with the removal wins and brings the document back whole. Reads and writes on the name throw `InvalidState` until `createDoc` |
 | `removeSpace(space)` | `void` | Removes every document the space holds, from every replica |
 | `listDocs(space)` | `string[]` | |
 | `listSpaces()` | `string[]` | Spaces this device holds documents or removal records for |

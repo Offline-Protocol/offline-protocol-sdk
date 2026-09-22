@@ -327,7 +327,11 @@ name in an offer, every blob naming an unfamiliar document, and every name in
 `gone` becomes stored state, and nothing else bounds how many names one
 exchange can carry. Removed names count against the ceiling alongside held
 ones, because a floor outlives its document: counting only what is held would
-let a peer name a fresh thousand after every removal.
+let a peer name a fresh thousand after every removal. A space that reaches
+the ceiling stays there: floors do not expire and an implementation MUST NOT
+drop one to make room, so the budget a peer spends on removals is spent for
+the life of the space, whether or not that peer remains in it. The threat
+model names this as an accepted residual.
 The ceiling applies only to documents a peer names; an application creating
 its own is not subject to it.
 

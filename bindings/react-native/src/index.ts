@@ -3928,6 +3928,11 @@ export class DataStore {
    * removal whichever happened first. That arrives as an ordinary
    * `data_changed` on a document you removed.
    *
+   * Every later call on the name rejects with `InvalidState` until
+   * {@link createDoc} brings it back, on this device and on every device
+   * that learns of the removal. `data_doc_removed` is the cue to close
+   * whatever has the document open.
+   *
    * Removing a name this device does not hold does nothing. Re-using the
    * name afterwards is not fenced off: a replica that kept the old contents
    * past the removal merges them into the new document. Give new content a

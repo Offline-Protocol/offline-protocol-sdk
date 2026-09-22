@@ -2160,8 +2160,17 @@ happened.
 
 ## 22. Documents can be removed from every replica *(unreleased)*
 
-Replicated documents can be removed from every replica of a space. Nothing
-about an existing call changes, and no application has to act.
+Replicated documents can be removed from every replica of a space. No
+existing call changes for a name that has never been removed, and an
+application that never calls `removeDoc`, and whose peers never do, has
+nothing to act on.
+
+**A removed name refuses reads and writes.** Every call on it throws
+`InvalidState` until `createDoc` brings the name back, on the device that
+removed it and on every device that learned of the removal. Before this
+release every name was created by its first write; a removed name is not, so
+a screen that reads a document a peer removed sees an error rather than an
+empty document. `data_doc_removed` is the cue to close it.
 
 **`deleteDoc` is unchanged.** It drops this device's copy and records nothing
 about the name, so a replica that still holds the document refills it at the
@@ -2211,6 +2220,12 @@ every binding. No error code was added.
 **`listSpaces()` includes a space whose documents were all removed.** The
 space still has removals to report, and the start-up sweep offers only the
 spaces this list names. `listDocs()` on it is empty.
+
+**Rolling back to a build before this release.** Such a build does not read
+the removal records, so a removal made here holds there only until a replica
+offers the document back, and `wipeAll()` on that build leaves the records
+behind: they are sealed, and they name documents. Wipe on this release, or
+accept a few sealed names surviving a logout on the older one.
 
 ---
 

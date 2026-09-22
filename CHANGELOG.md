@@ -19,11 +19,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `DataStore.removeDoc(space, doc)` records the version the document stood at
   and tells the space; a replica whose copy that version covers deletes it too
   and reports the new `data_doc_removed` event with `by: "peer"`.
-  `removeSpace(space)` does the same for every document a space holds. Before
-  this, a document deleted on one device was absent from its next offer and
-  still present on the peer's, and the rules that exist to carry a document a
-  peer has never seen recreated and refilled it: a delete was undone by the
-  next exchange, with no error and no event.
+  `removeSpace(space)` does the same for every document a space holds. A
+  removed name refuses reads and writes with `InvalidState` until `createDoc`
+  brings it back. Before this, a document deleted on one device was absent
+  from its next offer and still present on the peer's, and the rules that
+  exist to carry a document a peer has never seen recreated and refilled it:
+  a delete was undone by the next exchange, with no error and no event.
 
   The removal is a version rather than a flag, which is what lets every
   replica reach the same answer without knowing what happened first. Content
