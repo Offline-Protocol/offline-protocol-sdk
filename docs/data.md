@@ -29,9 +29,10 @@ profile, a synced counter: those are documents, and building them out of
 messages means writing merge rules by hand for every field.
 
 Note that a document is not a database in the query sense. There is no query
-language, no index, and no partial replication in this version: a space
-replicates whole. Model state a member is entitled to hold in full, and keep
-anything else in messages or in your own storage.
+language and no index in this version. A space replicates whole unless you
+narrow it, and narrowing is by document name rather than by contents. Model
+state a member is entitled to hold in full, and keep anything else in
+messages or in your own storage.
 
 ## The model
 
@@ -248,6 +249,42 @@ next exchange carries the document.
 `listSpaces()` keeps listing a space whose documents were all removed: the
 space still has removals to report, and `listDocs()` on it is empty.
 
+## Replicating part of a space
+
+`setInterest(spaceId, patterns)` narrows a space to the documents this device
+wants. Each pattern is a document name, optionally ending in `*` to match a
+prefix; `['*']` is everything and is the default, `[]` is nothing, and a
+space accepts at most 32 patterns.
+
+```typescript
+await store.setInterest(peerAddress, ['inbox*', 'profile']);
+```
+
+It does two things, and they are worth telling apart.
+
+- **Toward the peer it is a request.** Every version offer carries it, so the
+  peer answers only with what you asked for. That is the bandwidth saving,
+  and it needs the peer to be on a build that reads the field.
+- **Here it is a refusal.** A document outside the patterns is never stored,
+  whoever sends it. That half depends on nothing, so a narrowed space stays
+  narrow even against a peer that ignores the request.
+
+**Set it before `start()`.** It is not persisted, on purpose: it is your
+application's policy for this launch rather than a fact about the store, and
+a durable copy would be a second thing to reconcile against an app that has
+changed its mind.
+
+**Narrowing does not delete what is already held.** A document that falls
+outside the new patterns stops being updated and stays where it is, because a
+policy change should not destroy data you did not ask to lose. Use
+`deleteDoc` to reclaim it.
+
+**Widening asks.** The newly wanted documents are absent from this device's
+next offer and inside the declared interest, so the peer answers with them.
+
+Removals are never filtered by interest. A document you no longer want but
+still hold is exactly the one whose removal you still need to hear about.
+
 ## Size, and what happens at each limit
 
 A document is bounded by one sealed protocol-state record. The limits below
@@ -336,7 +373,8 @@ account that made them.
 Each of these is a decision rather than an omission, and the reasoning is in
 the [design record](spec/data-sync.md) or the ADRs.
 
-- **No query language and no partial replication.** A space replicates whole.
+- **No query language.** Interest patterns match document names and prefixes;
+  there is no way to ask for documents by their contents.
 - **No hosted component.** Relays and gateways carry sync frames as opaque MLS
   ciphertext they cannot read, and nothing in this layer requires a server.
 - **No blob carriage in groups**, as above.

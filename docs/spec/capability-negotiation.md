@@ -10,7 +10,7 @@ Peers advertise what they can parse in the key package payload, the body of a
 | `wire_versions` | Hop-local | Which frame encodings we may emit to this peer | JSON only |
 | `env_versions` | End to end | Which `__MLS_ENC__` payload forms we may emit | Legacy JSON envelope only |
 | `rich_versions` | End to end | Whether we may seal a `__RICH_V1__` body, and the v2 media envelope | Plain text only, extras dropped |
-| `data_versions` | End to end | Whether we may send `__DATA_V1__` document sync frames, and which document encoding they carry. Entry 1 is 1:1 replication; entry 2 additionally means the peer intercepts these frames inside a *group* ciphertext; entry 3 additionally means the peer speaks the blob-fetch frames and routes a data-purposed media transfer into its document layer; entry 4 additionally means the peer reads the removals a version offer carries | No replication with that peer |
+| `data_versions` | End to end | Whether we may send `__DATA_V1__` document sync frames, and which document encoding they carry. Entry 1 is 1:1 replication; entry 2 additionally means the peer intercepts these frames inside a *group* ciphertext; entry 3 additionally means the peer speaks the blob-fetch frames and routes a data-purposed media transfer into its document layer; entry 4 additionally means the peer reads the removals a version offer carries; entry 5 additionally means it answers inside the interest an offer declares | No replication with that peer |
 | `ctrl_versions` | End to end | Which control-frame signing payload we build for this peer. Entry 2 means the peer verifies `offline-ctrl-v2`, which binds the frame's timestamp | Build `offline-ctrl-v1`, which states no freshness |
 | `nostr_pubkey` | End to end | Which key metadata is sealed to on the Nostr path | Seal to the publicly computable key |
 
@@ -94,6 +94,13 @@ harmless and useless, so a sender MAY omit it. In a group it is not gated at
 all: one ciphertext reaches the whole roster, so there is no per-member
 choice to make, and the roster-wide gate on entry 2 already decides whether
 the frame may be sent.
+
+Entry 5 is the fourth's sibling in every respect. A peer without it ignores
+the `want` field and answers with everything it holds; the asking side
+refuses what it did not ask for on arrival, so a narrowed space is narrow
+either way, and what the entry buys is the bytes never leaving the peer. A
+sender MAY therefore omit the field toward such a peer, and in a group MUST
+NOT make it conditional on any member.
 
 Entry 2 has a second source, because members of a group never exchange key
 packages with each other: a group inviter MAY attest it for a member on the

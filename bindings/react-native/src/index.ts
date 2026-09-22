@@ -3947,6 +3947,26 @@ export class DataStore {
     await OfflineProtocolNativeModule.dataRemoveSpace(spaceId);
   }
 
+  /**
+   * The documents this device wants from its peers in one space.
+   *
+   * Each pattern is a document name, optionally ending in `*` to match a
+   * prefix. `['*']` is everything and is the default; `[]` is nothing. At
+   * most 32 patterns per space.
+   *
+   * Toward a peer this is a request that saves the radio. Locally it is a
+   * refusal, so a document outside it is never stored however it arrives,
+   * which is what makes a narrowing mean something against a peer on an
+   * older build.
+   *
+   * Not persisted: declare it at launch, before `start()`. Narrowing does
+   * not delete what is already held; widening asks the peers for what it
+   * adds.
+   */
+  async setInterest(spaceId: string, patterns: string[]): Promise<void> {
+    await OfflineProtocolNativeModule.dataSetInterest(spaceId, patterns);
+  }
+
   /** The documents in a space. */
   async listDocs(spaceId: string): Promise<string[]> {
     return JSON.parse(await OfflineProtocolNativeModule.dataListDocs(spaceId));

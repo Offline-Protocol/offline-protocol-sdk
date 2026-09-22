@@ -18,7 +18,9 @@ use crate::group_mesh::{RosterRatchetGap, MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS
 use crate::mls::InMemoryStorage;
 use crate::protocol::prefixes::internal_prefixes;
 use crate::protocol::tests::{create_test_config_for_user, id};
-use crate::protocol::types::{DATA_GROUP_V1, DATA_MEDIA_V1, DATA_SYNC_V1, DATA_TOMBSTONE_V1};
+use crate::protocol::types::{
+    DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1, DATA_SYNC_V1, DATA_TOMBSTONE_V1,
+};
 use crate::protocol::{OfflineProtocol, TestProtocolStateStorage};
 
 /// One member of the group, with the transport its frames go through.
@@ -737,7 +739,8 @@ fn the_group_capability_is_advertised_and_recorded() {
             DATA_SYNC_V1,
             DATA_GROUP_V1,
             DATA_MEDIA_V1,
-            DATA_TOMBSTONE_V1
+            DATA_TOMBSTONE_V1,
+            DATA_INTEREST_V1
         ],
         "a build that intercepts group frames has to say so, or no peer \
          will ever send it one. The media entry rides the same list and is \

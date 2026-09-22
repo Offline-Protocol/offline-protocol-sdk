@@ -203,3 +203,36 @@ def test_removing_a_space_removes_every_document_in_it(data_config) -> None:
 
     store.remove_space("space-1")
     assert store.list_docs("space-1") == []
+
+
+def test_interest_scopes_what_this_device_stores(data_config) -> None:
+    # The half that does not depend on any peer: a document outside the
+    # declared interest is refused here, whoever offers it.
+    protocol = OfflineProtocol(data_config)
+    protocol.initialize_mls(_in_memory_mls_storage(), DictStateStorage())
+    store = DataStore.with_storage(protocol, DictStateStorage())
+
+    store.set_interest("space-1", ["wanted*"])
+
+    # An application's own documents are not subject to it; the refusal is
+    # about what arrives from a peer.
+    store.map_set("space-1", "wanted.notes", "fields", "k", value("text", value="v"))
+    store.flush_all()
+    assert store.list_docs("space-1") == ["wanted.notes"]
+
+    # Widening and narrowing are both accepted, and the default is
+    # expressible.
+    store.set_interest("space-1", ["*"])
+    store.set_interest("space-1", [])
+
+
+def test_an_interest_pattern_that_could_never_match_is_refused(data_config) -> None:
+    protocol = OfflineProtocol(data_config)
+    protocol.initialize_mls(_in_memory_mls_storage(), DictStateStorage())
+    store = DataStore.with_storage(protocol, DictStateStorage())
+
+    for bad in ("", "has space", "notes/sub", "a*b"):
+        with pytest.raises(ProtocolError.InvalidArgument):
+            store.set_interest("space-1", [bad])
+    with pytest.raises(ProtocolError.InvalidArgument):
+        store.set_interest("space-1", [f"d{n}*" for n in range(33)])

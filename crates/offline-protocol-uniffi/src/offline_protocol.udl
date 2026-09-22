@@ -1918,6 +1918,23 @@ interface DataStore {
     [Throws=ProtocolError]
     void remove_space(string space_id);
 
+    // The documents this device wants from its peers in one space.
+    //
+    // Each pattern is a document name, optionally ending in `*` to match a
+    // prefix. `["*"]` is everything and is the default; an empty list is
+    // nothing. At most 32 patterns per space.
+    //
+    // Two halves. Toward a peer it is carried in every version offer, so the
+    // peer sends nothing else: that is the traffic saving, and it needs the
+    // peer to read it. Locally it is a refusal, so a document outside it is
+    // never stored however it arrives — which is what makes a narrowing mean
+    // something against a peer that ignores the request.
+    //
+    // Not persisted: declare it at launch, before start(). Narrowing does not
+    // delete what is already held; widening asks the peers for what it adds.
+    [Throws=ProtocolError]
+    void set_interest(string space_id, sequence<string> patterns);
+
     [Throws=ProtocolError]
     sequence<string> list_docs(string space_id);
 

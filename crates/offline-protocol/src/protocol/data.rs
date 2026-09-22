@@ -51,6 +51,63 @@ use crate::protocol::types::{storage_keys, MAX_PROTOCOL_STATE_RECORD_BYTES};
 use crate::protocol::OfflineProtocol;
 use crate::protocol_state_storage::ProtocolStateStorage;
 
+/// How many interest patterns one space accepts.
+///
+/// A bound rather than a policy: the list is walked once per document per
+/// offer, so an unbounded one would let an application make its own peers
+/// expensive to answer.
+pub(crate) const MAX_INTEREST_PATTERNS: usize = 32;
+
+/// Whether one interest pattern matches a document name.
+///
+/// `*` alone is everything; a trailing `*` is a prefix; anything else is an
+/// exact name. The document charset (`A-Z a-z 0-9 . _ -`) has no `*` in it,
+/// so a wildcard is never ambiguous with a name that contains one.
+pub(crate) fn interest_matches(pattern: &str, doc: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => doc.starts_with(prefix),
+        None => pattern == doc,
+    }
+}
+
+/// Reject a pattern that could never match, or that names something the
+/// document charset cannot express.
+///
+/// Checked where it is written rather than where it is used, so an
+/// application hears about a typo at the call that made it instead of
+/// silently receiving nothing.
+fn validate_interest_pattern(pattern: &str) -> Result<()> {
+    let body = pattern.strip_suffix('*').unwrap_or(pattern);
+    if body.is_empty() {
+        // Either `*` (everything) or an empty exact name. The first is
+        // valid, the second cannot match a name, since names are non-empty.
+        return if pattern == "*" {
+            Ok(())
+        } else {
+            Err(Error::InvalidArgument(
+                "an interest pattern may not be empty".to_string(),
+            ))
+        };
+    }
+    if body.len() > offline_protocol_data::MAX_NAME_LEN {
+        return Err(Error::InvalidArgument(format!(
+            "an interest pattern may not exceed {} bytes, got {}",
+            offline_protocol_data::MAX_NAME_LEN,
+            body.len()
+        )));
+    }
+    if !body
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(Error::InvalidArgument(format!(
+            "an interest pattern may only use the document charset \
+             (A-Z a-z 0-9 . _ -), with an optional trailing `*`: {pattern}"
+        )));
+    }
+    Ok(())
+}
+
 /// The document index for one space.
 ///
 /// Deliberately thin. Sizes and sequence numbers are derived from the
@@ -143,6 +200,14 @@ pub(crate) struct DataLayer {
     spaces: BTreeMap<String, SpaceRecord>,
     /// Removal state per document, loaded with the space that holds it.
     meta: BTreeMap<(String, String), DocMeta>,
+    /// What this device wants from its peers, per space.
+    ///
+    /// Absent means everything, which is what a space nobody has narrowed
+    /// says and what every release before interest existed said. Deliberately
+    /// not persisted: it is application policy about this launch, not a fact
+    /// about the store, and a durable copy would be a second thing to
+    /// reconcile against an application that has changed its mind.
+    interest: BTreeMap<String, Vec<String>>,
 }
 
 impl std::fmt::Debug for DataLayer {
@@ -151,6 +216,7 @@ impl std::fmt::Debug for DataLayer {
             .field("open_docs", &self.docs.len())
             .field("loaded_spaces", &self.spaces.len())
             .field("removed_docs", &self.meta.len())
+            .field("narrowed_spaces", &self.interest.len())
             .finish()
     }
 }
@@ -1093,6 +1159,67 @@ impl OfflineProtocol {
             by: DocRemovedBy::Peer,
         });
         Ok(TombstoneOutcome::Deleted)
+    }
+
+    /// The documents this device wants from its peers in one space.
+    ///
+    /// `patterns` is a list of document names, each of which MAY end in `*`
+    /// to match a prefix. `["*"]` is everything and is the default; `[]` is
+    /// nothing. The document charset excludes `*`, so the wildcard can never
+    /// be part of a name it is matching.
+    ///
+    /// Two halves, and only one of them is a request. Toward a peer this is
+    /// carried in every version offer, so the peer sends nothing else: that
+    /// is the traffic saving, and it depends on the peer reading the field.
+    /// Locally it is a refusal, so a document outside it is never created
+    /// from an offer and never imported however it arrives. The refusal is
+    /// what makes this safe against a peer that ignores the request, which
+    /// includes every peer on a build that predates it.
+    ///
+    /// Narrowing does not delete what is already held. A document that falls
+    /// outside the new patterns stops being updated and stays where it is,
+    /// because deleting on a policy change would make a narrowing lose data
+    /// no caller asked to lose. `data_delete_doc` is how it leaves.
+    ///
+    /// Widening asks: the newly wanted documents are absent from this
+    /// device's next offer and inside its declared want, so the peer answers
+    /// with them.
+    pub fn data_set_interest(&mut self, space: &str, patterns: Vec<String>) -> Result<()> {
+        offline_protocol_data::validate_space_name(space).map_err(map_data_error)?;
+        if patterns.len() > MAX_INTEREST_PATTERNS {
+            return Err(Error::InvalidArgument(format!(
+                "at most {MAX_INTEREST_PATTERNS} interest patterns per space, got {}",
+                patterns.len()
+            )));
+        }
+        for pattern in &patterns {
+            validate_interest_pattern(pattern)?;
+        }
+        let everything = patterns.len() == 1 && patterns[0] == "*";
+        if everything {
+            // The default, expressed explicitly. Held as absence so the wire
+            // and every read below take the cheap path.
+            self.data.interest.remove(space);
+        } else {
+            self.data.interest.insert(space.to_string(), patterns);
+        }
+        self.nudge_data_sync(space, None, "interest_changed");
+        Ok(())
+    }
+
+    /// The patterns declared for a space, or `None` for the default.
+    pub(crate) fn data_interest(&self, space: &str) -> Option<&Vec<String>> {
+        self.data.interest.get(space)
+    }
+
+    /// Whether this device wants `doc` in `space`.
+    pub(crate) fn data_wants(&self, space: &str, doc: &str) -> bool {
+        match self.data.interest.get(space) {
+            None => true,
+            Some(patterns) => patterns
+                .iter()
+                .any(|pattern| interest_matches(pattern, doc)),
+        }
     }
 
     /// Let a removed name hold a document again, because something beyond

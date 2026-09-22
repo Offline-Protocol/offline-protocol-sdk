@@ -975,6 +975,7 @@ impl OfflineProtocol {
                     super::types::DATA_GROUP_V1,
                     super::types::DATA_MEDIA_V1,
                     super::types::DATA_TOMBSTONE_V1,
+                    super::types::DATA_INTEREST_V1,
                 ];
             }
         }
@@ -1053,6 +1054,30 @@ impl OfflineProtocol {
         #[cfg(feature = "data")]
         {
             self.data_sync_active(recipient) && self.peer_data_tombstones.contains(recipient)
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            let _ = recipient;
+            false
+        }
+    }
+
+    /// Whether a narrowed interest may be declared toward `recipient`: 1:1
+    /// replication is live with them and they advertised
+    /// [`DATA_INTEREST_V1`], so they answer inside it rather than ignoring
+    /// it.
+    ///
+    /// A traffic gate, like the one above it. A peer without the entry sends
+    /// everything it holds and this device refuses what it did not ask for,
+    /// so a narrowed space is narrow either way; what the entry buys is the
+    /// bytes never leaving the peer.
+    ///
+    /// [`DATA_INTEREST_V1`]: crate::protocol::types::DATA_INTEREST_V1
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(super) fn data_interest_active(&self, recipient: &str) -> bool {
+        #[cfg(feature = "data")]
+        {
+            self.data_sync_active(recipient) && self.peer_data_interest.contains(recipient)
         }
         #[cfg(not(feature = "data"))]
         {

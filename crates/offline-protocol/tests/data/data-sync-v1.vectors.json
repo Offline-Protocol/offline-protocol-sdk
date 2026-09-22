@@ -38,6 +38,12 @@
       "note": "Entry 4. `gone` follows `docs` and maps a document name to the version it was removed at. A name may appear in both maps: a document that came back after a removal is offered and its floor is still reported, because a third replica may hold the removed content. Absent when nothing has been removed, which is what every frame above says."
     },
     {
+      "name": "version offer declaring an interest",
+      "kind": "vv",
+      "wire": "__DATA_V1__{\"v\":1,\"k\":\"vv\",\"reply\":false,\"partial\":false,\"docs\":{\"notes\":\"AQID\"},\"want\":[\"notes\",\"draft*\"]}",
+      "note": "Entry 5. `want` follows `gone` and lists document names, each of which may end in `*` to match a prefix. Absent means everything, which is what every frame above says; an empty list means nothing, so the two cannot be collapsed. It scopes what the receiver sends back and nothing else."
+    },
+    {
       "name": "delta",
       "kind": "delta",
       "wire": "__DATA_V1__{\"v\":1,\"k\":\"delta\",\"doc\":\"notes\",\"blob\":\"AAECAwQFBgc=\"}",
@@ -76,7 +82,8 @@
       "expect": {
         "reply": false,
         "partial": false,
-        "gone": {}
+        "gone": {},
+        "want": null
       }
     },
     {
@@ -85,7 +92,18 @@
       "expect": {
         "reply": false,
         "partial": false,
-        "gone": {}
+        "gone": {},
+        "want": null
+      }
+    },
+    {
+      "name": "an offer that declares no interest asks for everything",
+      "body": "{\"v\":1,\"k\":\"vv\",\"docs\":{},\"gone\":{}}",
+      "expect": {
+        "reply": false,
+        "partial": false,
+        "gone": {},
+        "want": null
       }
     }
   ],

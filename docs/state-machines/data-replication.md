@@ -102,6 +102,13 @@ answered from memory: no write, no open, no deletion. Floors are re-sent on
 every offer, and a name brought back and not yet written to stands at the
 empty version, which every floor covers.
 
+**Interest is a refusal here and a request on the wire.** `setInterest`
+scopes what this device stores: a document outside it is never created from
+an offer and never imported however it arrives. The same patterns are
+declared in every version offer, which scopes what the peer sends, but that
+half depends on the peer reading them. Interest is not persisted and does not
+delete what is already held.
+
 **`deleteDoc` is eviction and records no floor.** It reclaims what the
 document occupies here and says nothing about the name, so the next exchange
 with a replica that still holds it refills it.
@@ -122,6 +129,12 @@ sequenceDiagram
     A->>B: targeted offer (reply true, partial true) for documents this created
     B->>A: catch-up for those
 ```
+
+An answer is scoped to the interest the offer declared, and the scope is the
+asker's declared want rather than the names their frame happened to carry:
+the second would silently drop a document they have never seen. A
+counter-offer carries the complete list regardless, and removals are never
+scoped, because a peer that narrowed still holds what it held before.
 
 Removals are applied first, before anything is created or asked for: a name
 the peer has removed must not be created from the same frame and then deleted

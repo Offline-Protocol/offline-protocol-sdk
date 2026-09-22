@@ -58,7 +58,7 @@ The body is a JSON object. Its first field is the schema version and its `k`
 field names the kind:
 
 ```
-__DATA_V1__{"v":1,"k":"vv","reply":false,"partial":false,"docs":{"<doc>":"<base64 version>"},"gone":{"<doc>":"<base64 version>"}}
+__DATA_V1__{"v":1,"k":"vv","reply":false,"partial":false,"docs":{"<doc>":"<base64 version>"},"gone":{"<doc>":"<base64 version>"},"want":["<doc>","<prefix>*"]}
 __DATA_V1__{"v":1,"k":"delta","doc":"<name>","blob":"<base64>"}
 __DATA_V1__{"v":1,"k":"snap","doc":"<name>","blob":"<base64>"}
 __DATA_V1__{"v":1,"k":"need_snap","doc":"<name>"}
@@ -69,13 +69,19 @@ __DATA_V1__{"v":1,"k":"blob_gone","hash":"<64 lowercase hex>"}
 `vv`, `delta`, `snap` and `need_snap` are gated on `data_versions` entry 1.
 `need_blob` and `blob_gone` are gated on entry 3, and are covered under
 [Attachments](#attachments). The `gone` field of a `vv` frame is gated on
-entry 4 and is covered under [Deletion](#deletion).
+entry 4 and is covered under [Deletion](#deletion); its `want` field is gated
+on entry 5 and is covered under [Interest](#interest).
 
 Base64 is the standard alphabet with padding. `reply` and `partial` default to
 false when absent, so a sender MAY omit them; a receiver MUST treat an absent
 field as false rather than as unknown. `gone` defaults to empty on the same
 terms: a frame that omits it reports no removals, which is what every frame
 from an implementation that predates them says.
+
+`want` is the one field where absent and empty differ. Absent means every
+document; an empty list means none. An implementation MUST NOT read one as
+the other, because collapsing them turns the narrowest request a sender can
+make into the widest.
 
 A field a receiver does not know is ignored, which is what lets a field be
 added to a frame kind under the same `v`. Adding one is not free of rules: it
@@ -274,6 +280,53 @@ Emptying a document remains available and means something different: the
 document stays, and its contents replicate away as ordinary changes. Removal
 is for the name.
 
+## Interest
+
+A space replicates whole unless a receiver says otherwise. `want` is how it
+says so: a list of document names, each of which MAY end in `*` to match a
+prefix. The document charset has no `*` in it, so a wildcard is never
+ambiguous with the name it matches.
+
+It has two halves, and they fail differently.
+
+**As a request, it scopes what the receiver sends back.** A receiver
+answering an offer MUST NOT send a catch-up for a document outside the
+sender's declared want. That is the traffic saving, and it is the half that
+depends on the peer reading the field.
+
+**As a refusal, it scopes what the declarer stores.** An implementation MUST
+NOT create a document outside its own interest from an offer, and MUST refuse
+a `delta` or `snap` for one however it arrives. This half depends on nothing,
+which is what makes a narrowed space narrow toward a peer that ignores the
+request entirely, including every implementation that predates the field.
+
+Three rules keep it from losing documents:
+
+1. **The absence inference is scoped by want, never by the names a frame
+   carried.** A receiver answering an offer walks its *own* list and skips
+   what the sender did not ask for. Scoping to the names the inbound frame
+   happened to carry instead drops a document the sender has never seen, with
+   no symptom on either device; that rule is stated as a MUST NOT under
+   [Sizes](#sizes) and interest does not weaken it.
+2. **A counter-offer carries the complete list.** An implementation MAY NOT
+   narrow its own offer by the peer's want. The saving is one name per
+   unwanted document, and the hazard is the one in rule 1.
+3. **Removals are not scoped.** A peer that narrows keeps what it already
+   held, so a removal for a document it no longer wants is exactly the one it
+   still needs. `gone` is carried in full regardless of `want`.
+
+Narrowing does not delete what is already held: an implementation MUST NOT
+treat a change of interest as a deletion, because a policy change would then
+destroy data no caller asked it to. Widening asks, because the newly wanted
+documents are absent from the declarer's next offer and inside its declared
+want, so the peer answers with them.
+
+A receiver MUST bound how many patterns it reads from one frame, because a
+peer chooses the list and every pattern is walked per document. Reading a
+prefix of an over-long list and answering it is preferable to refusing the
+frame: the patterns are a request, and a truncated answer is closer to what
+was asked for than none.
+
 ## Every leg ends
 
 Every chain of answers is finite, and no answer restarts an exchange. This is
@@ -282,7 +335,7 @@ symptom on either device except traffic that never stops.
 
 | Inbound | Answer |
 |---------|--------|
-| Offer (`reply: false`) | Removals applied, catch-up for each stale document, then one `reply: true` offer |
+| Offer (`reply: false`) | Removals applied, catch-up for each stale document the sender asked for, then one `reply: true` offer |
 | Offer (`reply: true`) | Catch-up for each stale document, plus one targeted offer naming any document this frame caused the receiver to create |
 | `delta` that applies, is already held, is unreadable, or is covered by a removal | Nothing |
 | `delta` held behind a missing predecessor | One targeted offer (`reply: true`, `partial: true`) for that document |

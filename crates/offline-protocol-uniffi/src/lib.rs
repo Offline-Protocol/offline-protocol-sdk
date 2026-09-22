@@ -3510,6 +3510,17 @@ impl OfflineProtocol {
             .map_err(ProtocolError::from)
     }
 
+    pub(crate) fn data_set_interest(
+        &self,
+        space_id: String,
+        patterns: Vec<String>,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_set_interest(&space_id, patterns)
+            .map_err(ProtocolError::from)
+    }
+
     pub(crate) fn data_list_docs(&self, space_id: String) -> Result<Vec<String>, ProtocolError> {
         let mut guard = self.lock_inner()?;
         guard.data_list_docs(&space_id).map_err(ProtocolError::from)
@@ -6868,6 +6879,14 @@ impl DataStore {
 
     pub fn remove_space(&self, space_id: String) -> Result<(), ProtocolError> {
         self.protocol.data_remove_space(space_id)
+    }
+
+    pub fn set_interest(
+        &self,
+        space_id: String,
+        patterns: Vec<String>,
+    ) -> Result<(), ProtocolError> {
+        self.protocol.data_set_interest(space_id, patterns)
     }
 
     /// The documents in a space.

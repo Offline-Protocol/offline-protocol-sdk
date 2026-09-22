@@ -1593,8 +1593,6 @@ Applications that never called these methods (the expected case, since nothing
 in the delivery path depended on them) need no changes beyond removing the
 config section if present.
 
----
-
 ## 16. Replicated documents are available, 1:1 and in groups *(v0.23.0)*
 
 A new `DataStore` object ships on every binding: offline-first documents any
@@ -2226,6 +2224,32 @@ the removal records, so a removal made here holds there only until a replica
 offers the document back, and `wipeAll()` on that build leaves the records
 behind: they are sealed, and they name documents. Wipe on this release, or
 accept a few sealed names surviving a logout on the older one.
+
+---
+
+## 23. A space can replicate in part *(unreleased)*
+
+A space still replicates whole unless you narrow it, so nothing changes for
+an application that does nothing.
+
+**`setInterest(space, patterns)` names what this device wants.** Each pattern
+is a document name, optionally ending in `*` to match a prefix; `["*"]` is
+everything and is the default, `[]` is nothing, and a space takes at most 32.
+
+**Set it before `start()`.** It is not persisted, on purpose: it is your
+policy for this launch, not a fact about the store.
+
+**It is a request toward the peer and a refusal here.** The peer answers
+inside it, which is the bandwidth saving; this device refuses what falls
+outside it however it arrives, which is what makes the narrowing hold against
+a peer on an older build that ignores the request.
+
+**Narrowing does not delete what is already held.** Those documents stop
+being updated and stay where they are. Use `deleteDoc` to reclaim the space.
+**Widening asks** the peers for what it adds, so no extra call is needed.
+
+**Removals ignore interest.** A document you no longer want but still hold is
+exactly the one whose removal you still need to hear about.
 
 ---
 

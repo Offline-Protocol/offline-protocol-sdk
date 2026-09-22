@@ -6,9 +6,9 @@ use super::{
     GroupMemberAddedPayload, GroupMemberRemovedPayload, GroupMessageReceivedPayload,
     InternalMessageResult, KeyPackagePayload, OfflineProtocol, PeerCapabilities, PresencePayload,
     ReadReceiptPayload, ReceivedKeyPackage, TypingIndicatorPayload, UserGroupsPayload,
-    DATA_GROUP_V1, DATA_MEDIA_V1, DATA_SYNC_V1, DATA_TOMBSTONE_V1, MAX_KEY_PACKAGE_LIFETIME_MS,
-    MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES, MAX_READ_RECEIPT_IDS,
-    MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
+    DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1, DATA_SYNC_V1, DATA_TOMBSTONE_V1,
+    MAX_KEY_PACKAGE_LIFETIME_MS, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES,
+    MAX_READ_RECEIPT_IDS, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
 };
 use crate::events::{DecryptionFailureCode, Event, SecurityWarningCode};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
@@ -223,6 +223,19 @@ impl OfflineProtocol {
                 self.peer_data_tombstones.insert(sender.to_string());
             } else {
                 self.peer_data_tombstones.remove(sender);
+            }
+
+            // Interest, on the same terms: the set decides whether a narrowed
+            // space says so on the wire, never whether the narrowing holds.
+            if self.config.data.enabled && payload.data_versions.contains(&DATA_INTEREST_V1) {
+                if !self.peer_data_interest.contains(sender)
+                    && self.peer_data_interest.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.peer_data_interest.clear();
+                }
+                self.peer_data_interest.insert(sender.to_string());
+            } else {
+                self.peer_data_interest.remove(sender);
             }
 
             // Direct knowledge is authoritative for the group capability
