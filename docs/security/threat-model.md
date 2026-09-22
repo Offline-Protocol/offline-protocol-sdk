@@ -524,6 +524,15 @@ to everyone. What it does cost is a small record per removed name, which
 counts against the same per-space document ceiling every other name a peer
 introduces does.
 
+**The judgement of a blob against a removal floor is an engine decode**, and
+it runs inside the same on-disk in-flight marker an import does. A crafted
+blob that ends the process there leaves its digest behind and is refused
+when the sender retries it, exactly as one that ends the process inside the
+import is. Without the marker this would be the one engine decode of a
+peer's bytes outside the quarantine, on a path a peer can steer a blob onto
+by sending the floor first; see
+[ADR 0019](../adr/0019-remote-document-imports-are-contained-not-trusted.md).
+
 **A smaller cost at the same boundary:** every version offer a peer sends
 makes this device read the version of each document in that space, and a peer
 may send offers as fast as the link carries them. The work is bounded by the

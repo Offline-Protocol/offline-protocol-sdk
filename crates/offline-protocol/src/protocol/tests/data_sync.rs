@@ -1494,6 +1494,90 @@ fn the_in_flight_marker_reaches_disk_before_the_engine_sees_the_blob() {
 }
 
 #[test]
+fn a_blob_judged_against_a_floor_is_judged_inside_the_in_flight_marker() {
+    // Judging a blob against a removal floor decodes every change it carries
+    // with the engine's own decoder, in a scratch document, which is the
+    // decode ADR 0019 puts behind the marker: a crafted blob that ends the
+    // process inside it has to leave its digest behind, or the sender's
+    // retry ends the next process too. It is a path a peer can steer a blob
+    // onto, by sending the floor first. As above, the ordering is invisible
+    // in what the record says afterwards, so this asserts on what the store
+    // was told.
+    let mut alice = Node::new("alice");
+    let sender = alice.address.clone();
+    let space = id("bob");
+    write(&mut alice, &space, "notes", "title", "hello");
+    let blob = alice
+        .protocol
+        .data_export_snapshot(&space, "notes")
+        .expect("snapshot");
+    let floor = VersionToken::from_bytes(
+        BASE64
+            .decode(
+                alice
+                    .protocol
+                    .data_doc_version(&space, "notes")
+                    .expect("version"),
+            )
+            .expect("base64"),
+    );
+
+    // The receiver holds nothing under the name and learns its floor, which
+    // is a third replica's view of a removal. The blob above carries exactly
+    // the content the floor names, so it is refused, and the refusal is the
+    // only thing this exchange writes.
+    let (mut receiver, writes) = recording_protocol("bob");
+    assert_eq!(
+        receiver
+            .data_apply_tombstone(&sender, "notes", &floor)
+            .expect("apply"),
+        TombstoneOutcome::Recorded
+    );
+
+    writes.lock().unwrap().clear();
+    receiver.handle_data_sync_frame(&sender, &snapshot_frame("notes", &blob));
+
+    assert!(
+        !receiver
+            .data_list_docs(&sender)
+            .expect("list")
+            .contains(&"notes".to_string()),
+        "precondition: the floor has to refuse the blob for the marker question to be about the floor"
+    );
+
+    let order: Vec<String> = writes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|key_type| {
+            [
+                storage_keys::DATA_SYNC,
+                storage_keys::DATA_DOCS,
+                storage_keys::DATA_DELTA_LOG,
+            ]
+            .contains(&key_type.as_str())
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        order
+            .iter()
+            .filter(|key_type| key_type.as_str() == storage_keys::DATA_SYNC)
+            .count(),
+        2,
+        "a blob was judged against a floor with no in-flight marker written before the \
+         decode and cleared after it, so one that ends the process there is retried on \
+         every launch: {order:?}"
+    );
+    assert!(
+        order
+            .iter()
+            .all(|key_type| key_type == storage_keys::DATA_SYNC),
+        "a blob the floor refused still wrote a document record: {order:?}"
+    );
+}
+
+#[test]
 fn the_quarantine_forgets_its_oldest_entry_rather_than_growing() {
     let (alice, mut bob) = pair();
     let bob_space = Node::space_for(&alice);

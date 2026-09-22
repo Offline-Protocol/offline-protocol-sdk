@@ -1490,20 +1490,6 @@ impl OfflineProtocol {
             warn!(space, doc, "A remote blob names an invalid document");
             return Ok(());
         }
-        // Judged on the blob's own header, before the ceiling and long
-        // before the engine. A blob carrying nothing beyond a removal floor
-        // is the content that removal deleted, arriving from a replica that
-        // has not heard about it yet: importing it would recreate the
-        // document, and doing so costs a record either way. Terminal, like
-        // every other refusal here: the sender is told by the `gone` entry
-        // in our next offer, not by an answer to this.
-        if self.data_blob_below_floor(space, doc, &blob) {
-            debug!(
-                space,
-                doc, "Refusing a blob that carries only content a removal covers"
-            );
-            return Ok(());
-        }
         if !self.data_space_admits_doc(space, doc, MAX_DOCS_PER_SPACE) {
             warn!(
                 space,
@@ -1524,6 +1510,44 @@ impl OfflineProtocol {
             // document change that the sender still holds.
             warn!(space, doc, "Refusing a quarantined blob");
             return Ok(());
+        }
+
+        // A blob for a name with a removal floor is judged against the floor
+        // before anything acts on it. A blob carrying nothing beyond the
+        // floor is the content that removal deleted, arriving from a replica
+        // that has not heard about it yet: importing it would recreate the
+        // document. Terminal when it refuses, like every other refusal here:
+        // the sender is told by the `gone` entry in our next offer, not by
+        // an answer to this.
+        //
+        // The judgement is an engine decode, not a header read. The engine
+        // decodes every change the blob carries into a scratch document to
+        // find the version they end at, with the same decoder an import
+        // runs, and ADR 0019 contains that decoder for a reason: a crafted
+        // blob can end the process inside it, and under `panic = "abort"`
+        // nothing catches that. So it runs inside its own in-flight marker,
+        // exactly as the import below does. A blob that ends the process
+        // here leaves its digest behind, and the sender's retry is refused
+        // instead of ending the next process too. Outside the marker this
+        // would be the one engine decode of a peer's bytes with no
+        // quarantine, on a path a peer steers a blob onto by sending the
+        // floor first.
+        //
+        // Paid only by a name that has a floor: two marker writes on a path
+        // a space nobody has removed anything from never takes.
+        if self.data_doc_has_floor(space, doc) {
+            record.in_flight = Some(digest.clone());
+            self.persist_sync_record(space, &record);
+            let below_floor = self.data_blob_below_floor(space, doc, &blob);
+            record.in_flight = None;
+            self.persist_sync_record(space, &record);
+            if below_floor {
+                debug!(
+                    space,
+                    doc, "Refusing a blob that carries only content a removal covers"
+                );
+                return Ok(());
+            }
         }
 
         // Past every refusal, the blob carries something the removal never

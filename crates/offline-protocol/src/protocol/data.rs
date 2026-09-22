@@ -1073,6 +1073,29 @@ impl OfflineProtocol {
         self.revive_doc(storage.as_ref(), space, doc)
     }
 
+    /// The removal floor for a document, with its space loaded first.
+    ///
+    /// [`Self::doc_floor`] answers off memory and needs the space loaded.
+    /// The sync paths below can be the first thing to touch a space after
+    /// a launch, on the media road in particular, and a floor missed there
+    /// is a removed document refilled.
+    fn loaded_doc_floor(&mut self, space: &str, doc: &str) -> Option<VersionToken> {
+        let storage = self.data_storage_for_sync()?;
+        self.load_space(storage.as_ref(), space).ok()?;
+        self.doc_floor(space, doc)
+    }
+
+    /// Whether a document has a removal floor at all.
+    ///
+    /// What decides whether a blob for it has to be judged against one.
+    /// That judgement is an engine decode and has to run inside an
+    /// in-flight marker, so a name with no floor, which is every name in a
+    /// space nobody has removed anything from, skips the marker and the
+    /// decode both.
+    pub(crate) fn data_doc_has_floor(&mut self, space: &str, doc: &str) -> bool {
+        self.loaded_doc_floor(space, doc).is_some()
+    }
+
     /// Whether a version a peer offers is content a removal already covered.
     ///
     /// Cheap and answered from memory: the overwhelming case is a space with
@@ -1083,7 +1106,7 @@ impl OfflineProtocol {
         doc: &str,
         theirs: &VersionToken,
     ) -> bool {
-        let Some(floor) = self.doc_floor(space, doc) else {
+        let Some(floor) = self.loaded_doc_floor(space, doc) else {
             return false;
         };
         floor.includes(theirs).unwrap_or(false)
@@ -1091,12 +1114,15 @@ impl OfflineProtocol {
 
     /// Whether a blob carries nothing beyond a removal floor.
     ///
-    /// Judged on the blob's own header, so nothing reaches the engine on the
-    /// way to this answer. A document with no floor skips the decode
-    /// entirely, which is every document in a space nobody has removed
-    /// anything from.
+    /// An engine decode, not a header read: the blob's changes are decoded
+    /// into a scratch document to find the version they end at, with the
+    /// same decoder an import runs. The caller owes it the containment an
+    /// import gets, an in-flight marker written before and cleared after;
+    /// see [`offline_protocol_data::blob_end_version`]. A document with no
+    /// floor skips the decode entirely, which is every document in a space
+    /// nobody has removed anything from.
     pub(crate) fn data_blob_below_floor(&mut self, space: &str, doc: &str, blob: &[u8]) -> bool {
-        let Some(floor) = self.doc_floor(space, doc) else {
+        let Some(floor) = self.loaded_doc_floor(space, doc) else {
             return false;
         };
         match offline_protocol_data::blob_end_version(blob) {

@@ -82,15 +82,21 @@ fn decode_version(bytes: &[u8]) -> DataResult<VersionVector> {
 
 /// The version a blob would leave a document at, without importing it.
 ///
-/// Decoded from the blob's own header with the checksum on, so this says
-/// nothing about whether the blob will apply: it answers what the bytes
-/// claim to carry, which is the only question that can be asked before the
-/// engine is allowed to touch them. That ordering is the same one
-/// [`DataDoc::inspect`] exists for, and for the same reason.
+/// Not a header read. The engine decodes every change the blob carries into
+/// a scratch document to answer this (a snapshot's whole change store, or a
+/// run's changes), with the checksum on, using the same decoder an import
+/// runs. For containment it *is* an import: a crafted blob that ends the
+/// process inside the decoder ends it here too, and under `panic = "abort"`
+/// nothing catches that. A caller MUST run this inside the same in-flight
+/// marker an import runs inside, or the blob that ended one process is
+/// retried on every launch. [`DataDoc::inspect`] carries the same
+/// obligation and is called under the same marker.
 ///
-/// A caller compares this against a removal floor: a blob whose end version
-/// the floor already covers carries nothing the removal did not delete, and
-/// importing it would recreate a document that was removed on purpose.
+/// It says nothing about whether the blob will apply; it answers what the
+/// bytes carry. A caller compares this against a removal floor: a blob
+/// whose end version the floor already covers carries nothing the removal
+/// did not delete, and importing it would recreate a document that was
+/// removed on purpose.
 pub fn blob_end_version(bytes: &[u8]) -> DataResult<VersionToken> {
     let meta = LoroDoc::decode_import_blob_meta(bytes, true)
         .map_err(|err| DataError::Corrupt(err.to_string()))?;
