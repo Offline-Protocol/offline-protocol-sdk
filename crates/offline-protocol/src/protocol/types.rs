@@ -873,6 +873,26 @@ pub(crate) const DATA_GROUP_V1: u8 = 2;
 /// there is nothing about group carriage for an inviter to attest.
 pub(crate) const DATA_MEDIA_V1: u8 = 3;
 
+/// Document removals, advertised in [`KeyPackagePayload::data_versions`]
+/// alongside [`DATA_SYNC_V1`]: the sender reads the `gone` field of a
+/// version offer, and removes what a floor covers instead of offering it
+/// back.
+///
+/// A fourth entry rather than a bump, for the reason the second and third
+/// exist, and here the compatibility story is unusually gentle. A build
+/// without this entry ignores an unknown field on a frame kind it knows, so
+/// it keeps its copy and re-offers it forever; this device refuses each
+/// offer and each blob against its own floor, so the removal still holds
+/// everywhere it is known. Nothing is surfaced wrongly and nothing loops:
+/// the cost is one offer per exchange that is answered with nothing.
+///
+/// Gating the *field* on the entry is therefore a traffic decision rather
+/// than a safety one, which is why a group carries it ungated: one
+/// ciphertext reaches the whole roster, so there is no per-member choice to
+/// make, and the roster-wide gate on [`DATA_GROUP_V1`] already decides
+/// whether the frame may be sent at all.
+pub(crate) const DATA_TOMBSTONE_V1: u8 = 4;
+
 /// Rich fields accepted by the `send_message_with` surface. Only ever
 /// delivered inside the sealed [`RichPayloadV1`] body — toward a recipient
 /// that did not advertise [`RICH_PAYLOAD_V1`] they are silently dropped,
@@ -2035,6 +2055,30 @@ pub(crate) mod storage_keys {
     /// [`ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split data to inherit
     /// for it.
     pub const DATA_SYNC: &str = "data_sync";
+    /// Key type for what a replicated document's name says after a removal.
+    ///
+    /// Key ID is `{space}/{doc}`, the same composition [`DATA_DOCS`] uses.
+    /// The value carries the removal floor (the document's version at the
+    /// moment it was removed) and whether the name currently holds a
+    /// document again.
+    ///
+    /// A separate category rather than a field on [`DATA_SPACES`] for the
+    /// reason that record is a cache: it is reconciled from `list_keys` at
+    /// open, so a removal recorded there would be rebuilt away by exactly
+    /// the listing that still shows the records a half-finished removal
+    /// left behind. It is written *before* those records are deleted, so a
+    /// crash in between leaves a name this category already calls removed,
+    /// and the next open finishes the job. The reverse order is the
+    /// resurrection the whole mechanism exists to prevent.
+    ///
+    /// An absent record means a live document that has never been removed,
+    /// so a store written before removals existed reads correctly with no
+    /// migration.
+    ///
+    /// Post-split only: deliberately absent from
+    /// [`ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split data to inherit
+    /// for it.
+    pub const DATA_DOC_META: &str = "data_doc_meta";
 
     /// Every key type that moved from secure storage into protocol-state
     /// storage when the two domains were split.

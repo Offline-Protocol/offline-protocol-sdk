@@ -855,6 +855,7 @@ Emitted when a group is renamed.
 | Event | Fields | When |
 |---|---|---|
 | `data_changed` | `space_id`, `doc_id`, `delta_bytes` | A document change reached storage |
+| `data_doc_removed` | `space_id`, `doc_id`, `by` | A document was removed from every replica. `by` is `local` or `peer`. A document may come back afterwards if somebody edited it concurrently, which arrives as an ordinary `data_changed` |
 | `data_doc_size_warning` | `space_id`, `doc_id`, `compacted_bytes`, `cap_bytes` | A document passed 768 KiB, approaching the 1 MiB cap |
 | `data_attachment_requested` | `space_id`, `peer_id`, `hash` | A peer wants the bytes behind a reference. Answer with `provideAttachment` or `declineAttachment` |
 | `data_attachment_received` | `space_id`, `peer_id`, `hash`, `data` | Fetched bytes arrived and matched the hash that asked for them. `data` is the whole blob, base64 |
@@ -1027,9 +1028,11 @@ await store.flush('space-1', 'profile');
 | Method | Returns | Notes |
 |---|---|---|
 | `createDoc(space, doc)` | `void` | No-op if it already exists |
-| `deleteDoc(space, doc)` | `void` | Removes every record the document owns |
+| `deleteDoc(space, doc)` | `void` | Drops this device's copy. Records nothing about the name, so a replica that still holds the document refills it |
+| `removeDoc(space, doc)` | `void` | Removes the document from every replica of the space. An edit made concurrently with the removal wins and brings the document back whole. Reads and writes on the name throw `InvalidState` until `createDoc` |
+| `removeSpace(space)` | `void` | Removes every document the space holds, from every replica |
 | `listDocs(space)` | `string[]` | |
-| `listSpaces()` | `string[]` | Spaces holding at least one document |
+| `listSpaces()` | `string[]` | Spaces this device holds documents or removal records for |
 | `mapSet(space, doc, collection, key, value)` | `void` | |
 | `mapDelete(space, doc, collection, key)` | `void` | |
 | `mapGet(space, doc, collection, key)` | `DataValue \| null` | |
@@ -1185,14 +1188,15 @@ Verify a custom backend with `runStorageConformance(provider)`, and call
 account directory, which a custom backend is not inside. See
 [storage adapter references](../examples/storage-adapters/README.md).
 
-`wipeAll()` is only durable once replication has stopped. There are no
-deletion tombstones, so a peer cannot tell a wiped space from one this device
-has never seen, and on a running engine with live sessions its next version
-offer recreates and refills every document, with no error and no event. On the
-logout path the engine is being torn down anyway; anywhere else, stop it
-first, and only for as long as it stays stopped: the peer still holds the
-documents, so they return when replication resumes. Read `wipeAll()` as
-clearing this device rather than as deleting content.
+`wipeAll()` is only durable once replication has stopped, and it removes
+nothing from anybody else. It leaves no removal records behind, because a
+logout has to leave a custom backend empty, so a peer cannot tell a wiped
+space from one this device has never seen, and on a running engine with live
+sessions its next version offer recreates and refills every document, with no
+error and no event. On the logout path the engine is being torn down anyway;
+anywhere else, stop it first, and only for as long as it stays stopped. Read
+`wipeAll()` as clearing this device, and `removeSpace()` as clearing the
+room.
 
 ## UniFFI Bindings
 

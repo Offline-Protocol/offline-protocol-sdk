@@ -680,6 +680,10 @@ public protocol DataStoreProtocol: AnyObject, Sendable {
     
     func provideAttachment(spaceId: String, peerId: String, hash: String, data: Data) throws 
     
+    func removeDoc(spaceId: String, docId: String) throws 
+    
+    func removeSpace(spaceId: String) throws 
+    
     func textDelete(spaceId: String, docId: String, collection: String, position: UInt32, count: UInt32) throws 
     
     func textInsert(spaceId: String, docId: String, collection: String, position: UInt32, text: String) throws 
@@ -961,6 +965,23 @@ open func provideAttachment(spaceId: String, peerId: String, hash: String, data:
         FfiConverterString.lower(peerId),
         FfiConverterString.lower(hash),
         FfiConverterData.lower(data),$0
+    )
+}
+}
+    
+open func removeDoc(spaceId: String, docId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_remove_doc(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(docId),$0
+    )
+}
+}
+    
+open func removeSpace(spaceId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_remove_space(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),$0
     )
 }
 }
@@ -9546,6 +9567,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment() != 58573) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_doc() != 62307) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space() != 3889) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete() != 35552) {

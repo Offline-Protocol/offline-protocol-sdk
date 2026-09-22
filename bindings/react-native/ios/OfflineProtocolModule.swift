@@ -1845,6 +1845,41 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    @objc func dataRemoveDoc(_ spaceId: String,
+                             docId: String,
+                             resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.removeDoc(spaceId: spaceId, docId: docId)
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATAREMOVEDOC",
+                                    fallbackMessage: "removeDoc failed")
+        }
+    }
+
+    @objc func dataRemoveSpace(_ spaceId: String,
+                               resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.removeSpace(spaceId: spaceId)
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATAREMOVESPACE",
+                                    fallbackMessage: "removeSpace failed")
+        }
+    }
+
     @objc func dataListDocs(_ spaceId: String,
                             resolver: @escaping RCTPromiseResolveBlock,
                             rejecter: @escaping RCTPromiseRejectBlock) {

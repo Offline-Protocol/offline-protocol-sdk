@@ -580,9 +580,11 @@ await store.flush('space-1', 'profile');
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | **createDoc** | `createDoc(spaceId, docId): Promise<void>` | Creates a document, or does nothing if it exists. |
-| **deleteDoc** | `deleteDoc(spaceId, docId): Promise<void>` | Deletes a document and every record it owns. |
+| **deleteDoc** | `deleteDoc(spaceId, docId): Promise<void>` | Drops this device's copy. Records nothing about the name, so a replica that still holds the document refills it. |
+| **removeDoc** | `removeDoc(spaceId, docId): Promise<void>` | Removes the document from every replica of the space. An edit made concurrently with the removal wins and brings the document back whole. |
+| **removeSpace** | `removeSpace(spaceId): Promise<void>` | Removes every document the space holds, from every replica. |
 | **listDocs** | `listDocs(spaceId): Promise<string[]>` | Documents in a space. |
-| **listSpaces** | `listSpaces(): Promise<string[]>` | Spaces holding at least one document. |
+| **listSpaces** | `listSpaces(): Promise<string[]>` | Spaces this device holds documents or removal records for. |
 | **mapSet** | `mapSet(spaceId, docId, collection, key, value: DataValue): Promise<void>` | Sets a key in a map collection. |
 | **mapDelete** | `mapDelete(spaceId, docId, collection, key): Promise<void>` | Removes a key. |
 | **mapGet** | `mapGet(spaceId, docId, collection, key): Promise<DataValue \| null>` | Reads a key. |

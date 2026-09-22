@@ -58,7 +58,7 @@ The body is a JSON object. Its first field is the schema version and its `k`
 field names the kind:
 
 ```
-__DATA_V1__{"v":1,"k":"vv","reply":false,"partial":false,"docs":{"<doc>":"<base64 version>"}}
+__DATA_V1__{"v":1,"k":"vv","reply":false,"partial":false,"docs":{"<doc>":"<base64 version>"},"gone":{"<doc>":"<base64 version>"}}
 __DATA_V1__{"v":1,"k":"delta","doc":"<name>","blob":"<base64>"}
 __DATA_V1__{"v":1,"k":"snap","doc":"<name>","blob":"<base64>"}
 __DATA_V1__{"v":1,"k":"need_snap","doc":"<name>"}
@@ -68,11 +68,21 @@ __DATA_V1__{"v":1,"k":"blob_gone","hash":"<64 lowercase hex>"}
 
 `vv`, `delta`, `snap` and `need_snap` are gated on `data_versions` entry 1.
 `need_blob` and `blob_gone` are gated on entry 3, and are covered under
-[Attachments](#attachments).
+[Attachments](#attachments). The `gone` field of a `vv` frame is gated on
+entry 4 and is covered under [Deletion](#deletion).
 
 Base64 is the standard alphabet with padding. `reply` and `partial` default to
 false when absent, so a sender MAY omit them; a receiver MUST treat an absent
-field as false rather than as unknown.
+field as false rather than as unknown. `gone` defaults to empty on the same
+terms: a frame that omits it reports no removals, which is what every frame
+from an implementation that predates them says.
+
+A field a receiver does not know is ignored, which is what lets a field be
+added to a frame kind under the same `v`. Adding one is not free of rules: it
+MUST be optional, it MUST default to the behaviour of an implementation that
+never sends it, and it MUST be gated on a new `data_versions` entry, so a
+sender never pays for a field the recipient will drop. Changing what an
+existing field *means* is the case a new `v` is for.
 
 A receiver MUST read `v` before attempting to parse the body, and MUST consume
 a frame whose version it does not know without surfacing it. Reversing that
@@ -161,14 +171,6 @@ it created, marked `reply: true` and `partial: true`. A receiver that creates
 a document and asks for nothing leaves it empty for as long as the link stays
 up, and nothing on either device reports it.
 
-Deletion has no representation in this version. A document deleted locally is
-absent from the deleting side's next offer and still present on the peer's, so
-the rules above recreate it and refill it: the deletion is undone rather than
-propagated. Removing content from both replicas means emptying the document,
-whose internal deletions replicate as ordinary changes. A future version that
-adds tombstones needs a new `v`, because a peer without them recreates
-everything the peer with them deletes.
-
 A document *absent* from an offer is read as one the sender has never seen,
 and answered with the whole document. That inference needs the complete list,
 so a sender MUST set `partial` on any frame carrying less than everything it
@@ -178,6 +180,100 @@ marked `partial`. Without the flag, a peer holding more documents than one
 frame carries is sent the entire space, in full, on every exchange, while
 perfectly in sync.
 
+## Deletion
+
+A document's absence from an offer means one thing to the rules above: the
+sender has never seen it, and the answer is the whole document. A document
+somebody deleted is absent for a different reason and would be answered the
+same way, which is why deletion cannot be expressed by leaving a name out.
+
+**A removal is a version, not a flag.** `gone` maps a document name to the
+version that document stood at when it was removed. Everything at or below
+that version is what the removal decided about; anything beyond it is an edit
+made concurrently with the removal or after it, which the removal never saw.
+Carrying the version rather than a bare "this is gone" is what lets every
+replica reach the same answer without knowing which happened first.
+
+**An edit beats a removal.** A replica holding a version the floor does not
+cover keeps its document, and hands it back through the ordinary exchange. It
+hands back the whole document, not the edit alone: the edit's causal history
+*is* the rest of the contents, so there is no version of this rule that
+returns one without the other. An implementation MUST NOT present that as a
+partial recovery, and MUST NOT attempt to subtract the removed content from
+it.
+
+The rules, in the order a receiver applies them:
+
+1. **Merge every `gone` entry into the floor held for that name**, by version
+   union. Two replicas that removed the same document independently each hold
+   a floor the other does not, and neither is wrong.
+2. **A copy the merged floor covers is deleted.** A copy carrying anything
+   beyond it is kept. A name not held at all still records the floor: a third
+   replica that never heard about the removal is holding exactly the content
+   the floor names, and this is what refuses it later.
+3. **A version offered at or below the floor is not a document to create**,
+   and is not asked for. This is the rule that replaces the absence
+   inference for removed names.
+4. **A `delta` or `snap` whose end version the floor covers is refused**,
+   terminally and with no answer. A blob carrying anything beyond the floor
+   brings the name back before it is imported.
+
+Rule 3 applies only to a name the receiver does not hold. Asked of one it
+does hold, it would be wrong in the case that matters: every version covers
+the empty one, so a replica that re-created the name and has nothing in it
+yet would read as holding removed content, and the document it is waiting for
+would never be sent.
+
+**A floor outlives the document it removed.** Re-creating a removed name
+starts a document whose history is disjoint from the floor, so it is alive by
+rule 2, and a stale replica's copy of the old contents alone is still refused
+by rule 4. An implementation MUST keep the floor when a name comes back, and
+MUST report the floor for such a name in `gone` as well, for the third-replica
+reason in rule 2.
+
+What the floor does not do is keep the old contents and the new apart. A
+replica holding an edit beyond the floor keeps the old contents with it by
+rule 2, and the exchange merges them into the new document. A replica that
+does not read `gone` merges the new contents into its old copy, after which
+its blobs carry both and pass rule 4 on the remover. Each is the edit-wins
+rule doing what it says, applied to a name that was re-used: a floor decides
+about content, never about a name. An application that wants new content kept
+apart from old uses a new name, and an implementation MUST NOT document
+re-use as fencing the old contents off.
+
+**A floor already held decides once.** A `gone` entry the floor held for that
+name already covers carries nothing new, and a receiver MUST NOT act on it: no
+write, no open, and in particular no deletion. Floors are re-sent on every
+offer for the life of the space, so this is the common case, and it must be
+free. The deletion matters as much as the cost: every version covers the
+empty one, so a floor judged afresh reads a name brought back and not yet
+written to as removed content.
+
+**A floor does not expire.** An implementation MUST NOT discard one on a
+timer. A removal a replica can outlive is a removal that replica undoes when
+it returns, which is the failure the whole mechanism exists to prevent, and it
+arrives long after anybody is watching for it. Floors are bounded by the
+per-space document ceiling instead: a name a peer removes counts against it
+exactly as a name a peer creates does.
+
+**A removal is durable before the records it removes.** An implementation MUST
+record the floor before deleting the document it names. The reverse order
+leaves, after a crash in between, records whose presence votes the document
+back into existence at the next open, which is the resurrection this chapter
+is about.
+
+**An implementation that does not know `gone` ignores it**, keeps its copy,
+and offers it back on every exchange. That costs one refused offer per
+exchange and nothing else: the refusals in rules 3 and 4 are the receiver's
+own, and hold whether or not the sender can read the field. A sender MAY
+therefore omit `gone` toward a peer that has not advertised entry 4, and in a
+group MUST NOT make the field conditional on any member, because one
+ciphertext reaches the whole roster.
+
+Emptying a document remains available and means something different: the
+document stays, and its contents replicate away as ordinary changes. Removal
+is for the name.
+
 ## Every leg ends
 
 Every chain of answers is finite, and no answer restarts an exchange. This is
@@ -186,9 +282,9 @@ symptom on either device except traffic that never stops.
 
 | Inbound | Answer |
 |---------|--------|
-| Offer (`reply: false`) | Catch-up for each stale document, then one `reply: true` offer |
+| Offer (`reply: false`) | Removals applied, catch-up for each stale document, then one `reply: true` offer |
 | Offer (`reply: true`) | Catch-up for each stale document, plus one targeted offer naming any document this frame caused the receiver to create |
-| `delta` that applies, is already held, or is unreadable | Nothing |
+| `delta` that applies, is already held, is unreadable, or is covered by a removal | Nothing |
 | `delta` held behind a missing predecessor | One targeted offer (`reply: true`, `partial: true`) for that document |
 | `delta` needing trimmed history | `need_snap` for that document |
 | `snap` | Nothing, in every outcome |
@@ -227,8 +323,15 @@ replicas stay apart. See
 ## Sizes
 
 A space accepts at most 1024 documents on a peer's say-so. Every unfamiliar
-name in an offer, and every blob naming an unfamiliar document, becomes
-stored state, and nothing else bounds how many names one exchange can carry.
+name in an offer, every blob naming an unfamiliar document, and every name in
+`gone` becomes stored state, and nothing else bounds how many names one
+exchange can carry. Removed names count against the ceiling alongside held
+ones, because a floor outlives its document: counting only what is held would
+let a peer name a fresh thousand after every removal. A space that reaches
+the ceiling stays there: floors do not expire and an implementation MUST NOT
+drop one to make room, so the budget a peer spends on removals is spent for
+the life of the space, whether or not that peer remains in it. The threat
+model names this as an accepted residual.
 The ceiling applies only to documents a peer names; an application creating
 its own is not subject to it.
 
@@ -240,6 +343,20 @@ frame's own JSON, the sealed envelope, and the message header.
 A document that does not fit that budget in any form travels the media path
 instead, which is the rung above every frame. See
 [Documents too large for a frame](#documents-too-large-for-a-frame).
+
+Removals share the per-frame budget with versions, because they cost a
+receiver the same thing: one name it has to store something about. A frame
+carries at most 128 entries in total across `docs` and `gone`, and a name
+present in both maps counts as two, because it costs the frame twice the
+bytes.
+
+A floor is one version vector, and the floor held for a name is the union of
+every floor ever merged into it, which only grows. An implementation MUST
+bound the stored floor rather than let a member grow it by naming a fresh
+replica in every offer. This implementation refuses a `gone` value, and a
+merge, over 64 KiB: a document whose version could not fit there could not be
+offered in a frame either. The ceiling on names bounds how many floors a space
+holds; this bounds how big each one gets.
 
 A space whose version list does not fit in one frame costs more than
 proportional traffic: every frame of a split offer is answered on its own, so

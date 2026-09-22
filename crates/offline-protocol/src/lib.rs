@@ -30,8 +30,9 @@ pub use config::{
 };
 pub use error::{Error, EstablishmentState, Result, SessionStateError};
 pub use events::{
-    DecryptionFailureCode, DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode, Event,
-    EventCallback, GroupInfoMember, PresenceSource, PresenceStatus, UserGroupSummary,
+    DecryptionFailureCode, DocRemovedBy, DorsEscalationPhase, DorsEscalationReasonCode,
+    DorsReasonCode, Event, EventCallback, GroupInfoMember, PresenceSource, PresenceStatus,
+    UserGroupSummary,
 };
 pub use group_mesh::{
     GroupRichReadiness, GroupSendOptions, RelaySyncState, MAX_RELAY_CAPABILITIES,

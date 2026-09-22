@@ -53,6 +53,10 @@ stateDiagram-v2
 
     Open --> HistoryIncomplete: a record parks or will not read
     HistoryIncomplete --> Open: an open sees a complete log again
+
+    Persisted --> Removed: removeDoc records the floor, then deletes
+    Compacted --> Removed: the same
+    Removed --> Open: createDoc, or a change from beyond the floor
 ```
 
 **Edits batch; a flush is what makes them durable.** Flushes happen on an
@@ -77,6 +81,31 @@ changes the records still describe, so folding would write a snapshot without
 them and then delete the records holding them. A growing log is the cheaper
 failure.
 
+**A removal is a version, not a flag.** `removeDoc` records the version the
+document stood at, then deletes it. That version is the floor: content at or
+below it is what the removal decided about, and anything beyond it is an edit
+the removal never saw. The floor is written before the records it removes, so
+a crash in between leaves a name every reader already treats as removed and
+the next open finishes the job. The reverse order leaves records that vote the
+document back into existence.
+
+**A floor outlives its document.** Re-using the name starts a document whose
+history is disjoint from the floor, so it is alive, and a stale replica's copy
+of the old contents alone is still refused. It is not fenced off: a replica
+that kept the old contents past the floor merges them into the new document,
+and a stale replica merges the new contents into its old copy. Floors never
+expire; they are bounded by the per-space document ceiling, which counts
+removed names alongside held ones, and each floor is bounded in size.
+
+**A floor already held decides once.** A floor the record already covers is
+answered from memory: no write, no open, no deletion. Floors are re-sent on
+every offer, and a name brought back and not yet written to stands at the
+empty version, which every floor covers.
+
+**`deleteDoc` is eviction and records no floor.** It reclaims what the
+document occupies here and says nothing about the name, so the next exchange
+with a replica that still holds it refills it.
+
 ## An exchange, between two replicas
 
 Anti-entropy, not a stream. Each side offers what it holds, the other answers
@@ -93,6 +122,13 @@ sequenceDiagram
     A->>B: targeted offer (reply true, partial true) for documents this created
     B->>A: catch-up for those
 ```
+
+Removals are applied first, before anything is created or asked for: a name
+the peer has removed must not be created from the same frame and then deleted
+again. A copy the floor covers is deleted; a copy carrying an edit beyond it
+is kept and handed back whole, contents and all, because the edit's history
+*is* those contents. That is the one case where a removal loses, and it loses
+the same way on every replica.
 
 The last leg is the only chain longer than one hop, and it terminates because
 it names only documents the peer has just offered: the peer creates nothing

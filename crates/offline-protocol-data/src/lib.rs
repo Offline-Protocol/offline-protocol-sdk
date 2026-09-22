@@ -33,7 +33,8 @@ pub mod policy;
 pub mod value;
 
 pub use doc::{
-    BlobMeta, CatchUp, DataDoc, Delta, DocStats, ImportOutcome, RemoteImport, VersionToken,
+    blob_end_version, BlobMeta, CatchUp, DataDoc, Delta, DocStats, ImportOutcome, RemoteImport,
+    VersionToken,
 };
 pub use error::{DataError, DataResult};
 pub use policy::{

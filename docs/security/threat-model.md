@@ -514,6 +514,44 @@ rather than a crash loop driven by the delivery ladder faithfully doing its
 job. See
 [ADR 0019](../adr/0019-remote-document-imports-are-contained-not-trusted.md).
 
+**A member can also remove a document from the space.** A removal travels, so
+any member can make one and every replica applies it. Same trust class as
+above rather than a new one: it takes somebody the user accepted into a shared
+document, it is attributable to the member whose leaf signed the frame, and it
+does not destroy content a replica still has a claim on, because a replica
+holding an edit the removal did not cover keeps the document and hands it back
+to everyone.
+
+What it does cost is a record per removed name, and that record is the one
+piece of state a peer can put in this device's store that outlives the peer.
+A removal floor never expires, because a floor a replica can outlive is a
+removal that replica undoes when it returns, so there is no eviction for one:
+`deleteDoc` on a removed name leaves the record, and only `wipeAll()` drops
+it, device-wide. A member can therefore spend a space's peer-name budget for
+good, by removing a thousand names nobody ever held, and leave the space
+before anyone notices. Documents a departed member leaves behind are evicted
+one by one with `deleteDoc`; the floors they leave are not. The bound is the
+same per-space ceiling every other name a peer introduces counts against, and
+it has to be that ceiling: a removal of a held name moves it from held to
+removed and leaves the total unchanged, which is what keeps churn from
+growing the store, and a separate budget for floors would either grow without
+bound under that churn or refuse to record the removal of a document this
+device holds. The bytes are bounded too, at 1024 floors of at most 64 KiB
+each, a sixteenth of what the same member can leave behind as documents.
+Accepted as a residual: it is attributable, it costs new peer-named
+documents in one space and nothing else, and the remedy is the one the layer
+already has for state an accepted member left behind, which is to wipe this
+device's documents.
+
+**The judgement of a blob against a removal floor is an engine decode**, and
+it runs inside the same on-disk in-flight marker an import does. A crafted
+blob that ends the process there leaves its digest behind and is refused
+when the sender retries it, exactly as one that ends the process inside the
+import is. Without the marker this would be the one engine decode of a
+peer's bytes outside the quarantine, on a path a peer can steer a blob onto
+by sending the floor first; see
+[ADR 0019](../adr/0019-remote-document-imports-are-contained-not-trusted.md).
+
 **A smaller cost at the same boundary:** every version offer a peer sends
 makes this device read the version of each document in that space, and a peer
 may send offers as fast as the link carries them. The work is bounded by the

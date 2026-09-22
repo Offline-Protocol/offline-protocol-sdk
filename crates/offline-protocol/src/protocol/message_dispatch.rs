@@ -6,7 +6,7 @@ use super::{
     GroupMemberAddedPayload, GroupMemberRemovedPayload, GroupMessageReceivedPayload,
     InternalMessageResult, KeyPackagePayload, OfflineProtocol, PeerCapabilities, PresencePayload,
     ReadReceiptPayload, ReceivedKeyPackage, TypingIndicatorPayload, UserGroupsPayload,
-    DATA_GROUP_V1, DATA_MEDIA_V1, DATA_SYNC_V1, MAX_KEY_PACKAGE_LIFETIME_MS,
+    DATA_GROUP_V1, DATA_MEDIA_V1, DATA_SYNC_V1, DATA_TOMBSTONE_V1, MAX_KEY_PACKAGE_LIFETIME_MS,
     MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES, MAX_READ_RECEIPT_IDS,
     MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
 };
@@ -209,6 +209,20 @@ impl OfflineProtocol {
                 // that is still crossing. The wait is bounded either way,
                 // and the timeout is the surface that ends this one.
                 self.peer_data_media.remove(sender);
+            }
+
+            // Removals. A peer without this entry is not mishandled by
+            // sending it anyway; the set exists so an offer toward one stays
+            // as small as it was before removals existed.
+            if self.config.data.enabled && payload.data_versions.contains(&DATA_TOMBSTONE_V1) {
+                if !self.peer_data_tombstones.contains(sender)
+                    && self.peer_data_tombstones.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.peer_data_tombstones.clear();
+                }
+                self.peer_data_tombstones.insert(sender.to_string());
+            } else {
+                self.peer_data_tombstones.remove(sender);
             }
 
             // Direct knowledge is authoritative for the group capability

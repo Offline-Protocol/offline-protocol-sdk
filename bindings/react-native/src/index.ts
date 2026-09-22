@@ -3908,9 +3908,43 @@ export class DataStore {
     await OfflineProtocolNativeModule.dataCreateDoc(spaceId, docId);
   }
 
-  /** Deletes a document and every record belonging to it. */
+  /**
+   * Drops this device's copy, leaving the peers' copies alone.
+   *
+   * Eviction rather than removal: it reclaims what the document occupies
+   * here and records nothing about the name, so the next version exchange
+   * with a replica that still holds it recreates and refills it. Use
+   * {@link removeDoc} to remove content from the room.
+   */
   async deleteDoc(spaceId: string, docId: string): Promise<void> {
     await OfflineProtocolNativeModule.dataDeleteDoc(spaceId, docId);
+  }
+
+  /**
+   * Removes a document from every replica of its space.
+   *
+   * A replica holding an edit made concurrently with the removal keeps its
+   * copy and hands the document back, contents and all, so an edit beats a
+   * removal whichever happened first. That arrives as an ordinary
+   * `data_changed` on a document you removed.
+   *
+   * Every later call on the name rejects with `InvalidState` until
+   * {@link createDoc} brings it back, on this device and on every device
+   * that learns of the removal. `data_doc_removed` is the cue to close
+   * whatever has the document open.
+   *
+   * Removing a name this device does not hold does nothing. Re-using the
+   * name afterwards is not fenced off: a replica that kept the old contents
+   * past the removal merges them into the new document. Give new content a
+   * fresh name.
+   */
+  async removeDoc(spaceId: string, docId: string): Promise<void> {
+    await OfflineProtocolNativeModule.dataRemoveDoc(spaceId, docId);
+  }
+
+  /** Removes every document a space holds, from every replica of it. */
+  async removeSpace(spaceId: string): Promise<void> {
+    await OfflineProtocolNativeModule.dataRemoveSpace(spaceId);
   }
 
   /** The documents in a space. */
@@ -4145,14 +4179,15 @@ export class DataStore {
    * directory, which a custom backend is not inside. Skipping it there
    * leaves documents behind after the account that made them is gone.
    *
-   * Only durable once replication has stopped. There are no deletion
-   * tombstones, so a peer cannot tell a wiped space from one this device has
-   * never seen, and with the engine running and sessions live its next
-   * version offer recreates and refills every document, with no error and no
-   * event. Logout tears the engine down anyway; call `destroy()` first if you
-   * are wiping for any other reason, and only for as long as it stays stopped:
-   * the peer still holds the documents, so they return when replication
-   * resumes. This clears the device, it does not delete content.
+   * Only durable once replication has stopped. A wipe records no removals,
+   * because a logout has to leave a custom backend empty, so a peer cannot
+   * tell a wiped space from one this device has never seen, and with the
+   * engine running and sessions live its next version offer recreates and
+   * refills every document, with no error and no event. Logout tears the
+   * engine down anyway; call `destroy()` first if you are wiping for any
+   * other reason, and only for as long as it stays stopped: the peer still
+   * holds the documents, so they return when replication resumes. This
+   * clears the device; {@link removeSpace} is what clears the room.
    */
   async wipeAll(): Promise<void> {
     await OfflineProtocolNativeModule.dataWipeAll();

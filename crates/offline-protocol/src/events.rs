@@ -560,6 +560,29 @@ pub struct UsernameClaim {
     pub issued_at_ms: i64,
 }
 
+/// Who removed a replicated document, on [`Event::DataDocRemoved`].
+///
+/// A fixed token this crate chooses, never a peer's words, which is what
+/// lets the telemetry scrubber pass it through unhashed. Serialises as
+/// `local` or `peer`, which is the contract every binding types against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DocRemovedBy {
+    /// This device removed it.
+    Local,
+    /// A removal learned from the space.
+    Peer,
+}
+
+impl fmt::Display for DocRemovedBy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Local => "local",
+            Self::Peer => "peer",
+        })
+    }
+}
+
 /// Events that can occur in the protocol.
 ///
 /// Note: This type implements a custom Debug that redacts sensitive fields
@@ -1745,6 +1768,27 @@ pub enum Event {
         delta_bytes: u64,
     },
 
+    /// A replicated document was removed from every replica of its space.
+    ///
+    /// Distinct from a document merely disappearing locally: this one is a
+    /// decision that travels. It fires when this device removes a document
+    /// and when it learns of a removal from a peer, so an application
+    /// holding the document open can close it either way.
+    ///
+    /// A removal loses to a concurrent edit, so a document may come back
+    /// after this fires. That arrives as an ordinary `DataChanged` on a
+    /// document the application thought was gone, which is the honest
+    /// report: the edit won, and its contents are the contents.
+    DataDocRemoved {
+        /// The space the document belonged to.
+        space_id: String,
+        /// The document that was removed.
+        doc_id: String,
+        /// Who removed it: `local` for this device, `peer` for a removal
+        /// learned from the space.
+        by: DocRemovedBy,
+    },
+
     /// A replicated document is approaching the per-document size cap.
     ///
     /// Fires while there is still room to act. Without it the cap would be a
@@ -2869,6 +2913,7 @@ impl Event {
             Self::UserBlocked { .. } => "protocol.user.blocked",
             Self::UserUnblocked { .. } => "protocol.user.unblocked",
             Self::DataChanged { .. } => "protocol.data.changed",
+            Self::DataDocRemoved { .. } => "protocol.data.doc_removed",
             Self::DataDocSizeWarning { .. } => "protocol.data.doc_size_warning",
             Self::DataAttachmentRequested { .. } => "protocol.data.attachment_requested",
             Self::DataAttachmentReceived { .. } => "protocol.data.attachment_received",
@@ -3686,6 +3731,17 @@ impl fmt::Debug for Event {
                 .field("space_id", &"[REDACTED]")
                 .field("doc_id", &"[REDACTED]")
                 .field("delta_bytes", delta_bytes)
+                .finish(),
+            Self::DataDocRemoved {
+                space_id: _,
+                doc_id: _,
+                by,
+            } => f
+                .debug_struct("DataDocRemoved")
+                .field("space_id", &"[REDACTED]")
+                .field("doc_id", &"[REDACTED]")
+                // A fixed token this crate chooses, never a peer's words.
+                .field("by", by)
                 .finish(),
             Self::DataDocSizeWarning {
                 space_id: _,

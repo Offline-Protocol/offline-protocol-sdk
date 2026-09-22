@@ -185,6 +185,69 @@ the whole roster. Three consequences an application can see:
   refused, because the transfer needs a confirmed pairwise session and two
   group members need not have one.
 
+## Removing documents
+
+Two verbs, and the difference is who they affect.
+
+**`removeDoc(spaceId, docId)` removes the document from every replica.** It
+records the version the document stood at and tells the space. A replica whose
+copy that version covers deletes it too, and `data_doc_removed` fires there
+with `by: 'peer'`. Removing a name this device does not hold does nothing.
+
+**`deleteDoc(spaceId, docId)` drops this device's copy only.** It records
+nothing about the name, so the next exchange with a replica that still holds
+the document recreates and refills it. That is the right call for reclaiming
+space on a device and the wrong one for content somebody wants gone.
+
+**`removeSpace(spaceId)` removes every document a space holds**, from every
+replica of it.
+
+**A removed name refuses reads and writes.** Every call on it, `mapGet` and
+`mapSet` included, throws `InvalidState` until `createDoc` brings the name
+back, on the device that removed it and on every device that learned of the
+removal. Before a removal a name is created by its first write; after one it
+is not, because a read that answered empty would be indistinguishable from a
+cleared document. `data_doc_removed` is the cue to close whatever has the
+document open.
+
+**An edit made while a removal was crossing wins, and brings the whole
+document back.** Not the edit alone: the edit was made *on* the old contents,
+so its history is those contents, and there is no version of this that returns
+one without the other. Both replicas converge on the document, and the
+application sees an ordinary `data_changed` on a document it removed. If that
+matters to your product, the answer is to make removal a field your app
+writes rather than a document that disappears.
+
+Two things follow that are worth knowing before you rely on either verb:
+
+- **A removal never expires**, so a device that has been away for a year still
+  learns about it. A removed name keeps a small record for the life of the
+  space, and counts against the 1024-document ceiling a peer can fill. That
+  record has no eviction: `deleteDoc` on a removed name leaves it in place,
+  and `wipeAll()` is the only call that drops one. A peer who removed a
+  thousand names has spent the space's peer-name budget for good, whether or
+  not they are still in the space.
+- **`wipeAll()` is not a removal.** It clears this device and records nothing,
+  so on a running engine the peers refill it. It is the logout path; use
+  `removeSpace()` to clear the room.
+
+A removed name can be used again: `createDoc` starts an empty document under
+it. It is not fenced off, though. A replica that edited the old contents while
+the removal was crossing still holds them, and the exchange merges them into
+the new document on every replica; a replica on a build that does not read
+removals merges the new contents into its old copy instead. Both are the
+edit-wins rule applied to a re-used name. If new content must not meet the
+old, give it a fresh name.
+
+A re-created name reaches the peers with its first write rather than with
+`createDoc`. An empty document stands at the version every floor covers, so a
+peer that no longer holds the name reads its offer as the removed content and
+does not create it; the first write moves the version past the floor, and the
+next exchange carries the document.
+
+`listSpaces()` keeps listing a space whose documents were all removed: the
+space still has removals to report, and `listDocs()` on it is empty.
+
 ## Size, and what happens at each limit
 
 A document is bounded by one sealed protocol-state record. The limits below
@@ -261,6 +324,7 @@ account that made them.
 | Event | Handle it because |
 |-------|-------------------|
 | `data_changed` | The change is durable. Re-render here |
+| `data_doc_removed` | The document was removed from every replica, by this device (`local`) or by the space (`peer`). Close whatever has it open |
 | `data_doc_size_warning` | The cap is a cliff otherwise, met for the first time as a failed write |
 | `data_attachment_requested` | Only your app has the bytes. Answer or decline |
 | `data_attachment_received` | The bytes arrived and matched the hash that asked for them. Store them where you keep files |
@@ -272,12 +336,6 @@ account that made them.
 Each of these is a decision rather than an omission, and the reasoning is in
 the [design record](spec/data-sync.md) or the ADRs.
 
-- **No deletion tombstones.** `deleteDoc` removes the document here, and the
-  peer's next offer recreates and refills it, because a peer cannot tell a
-  deleted document from one this device has never seen. To remove content from
-  both replicas, empty the document: deletions *inside* a document replicate
-  like any other change. The same applies to `wipeAll()`, which is durable only
-  once replication has stopped.
 - **No query language and no partial replication.** A space replicates whole.
 - **No hosted component.** Relays and gateways carry sync frames as opaque MLS
   ciphertext they cannot read, and nothing in this layer requires a server.

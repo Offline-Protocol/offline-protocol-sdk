@@ -43,6 +43,13 @@
 //! answers converge perfectly well and then talk until the battery dies, and
 //! the failure has no symptom on either device except traffic.
 //!
+//! A removal carried by an offer does not lengthen any of this. It is a
+//! field on a frame that was already answered exactly once, and what it
+//! provokes is a deletion rather than a frame: the answer to an offer
+//! carrying removals is the same single reply an offer without them draws.
+//! The one thing it must not do is revive what it just removed, which is why
+//! removals are applied before anything is created or asked for.
+//!
 //! One outbound frame is not an answer and does not count against this: a
 //! blob arriving for a document with local edits still pending flushes them
 //! first, which pushes them. That is work this device already owed the peer
@@ -121,6 +128,17 @@ pub(crate) const DATA_SYNC_OFFER_INTERVAL: Duration = Duration::from_secs(30);
 /// documents a peer names: an application creating its own is not restricted
 /// by it, and those still replicate outward.
 pub(crate) const MAX_DOCS_PER_SPACE: usize = 1024;
+
+/// Bytes a removal floor may occupy, on the wire and in the record.
+///
+/// A floor is one version vector, and the floor held for a name is the
+/// union of every floor ever merged into it, which only grows: a member of
+/// a space can grow it by naming a fresh replica in every offer, and nothing
+/// but this stops the record and every comparison against it growing with
+/// it. Sized well past a real document: the version of a document edited
+/// across thousands of sessions is still under this, and a document whose
+/// version could not fit here could not be offered in a frame either.
+pub(crate) const MAX_REMOVAL_FLOOR_BYTES: usize = 64 * 1024;
 
 /// Blob digests remembered per space after a crash.
 ///
@@ -208,6 +226,23 @@ enum SyncBody {
         partial: bool,
         /// Document name to base64 of its version token.
         docs: BTreeMap<String, String>,
+        /// Document name to base64 of the version it was removed at.
+        ///
+        /// A removal floor rather than a bare "this is gone": it names the
+        /// content the removal covered, so a replica holding an edit beyond
+        /// it keeps its copy and hands the document back, while one holding
+        /// nothing newer deletes it. That is what makes a removal and a
+        /// concurrent edit resolve the same way on every replica without
+        /// either side knowing which happened first.
+        ///
+        /// Absent means "no removals to report", which is what every frame
+        /// from a build that predates them says, and what a space nobody
+        /// has removed anything from says today. Entries are carried for
+        /// names that came back as well as names that are still gone: a
+        /// third replica that never heard about the removal is holding
+        /// exactly the content the floor names.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        gone: BTreeMap<String, String>,
     },
     /// A run of changes, base64.
     #[serde(rename = "delta")]
@@ -244,6 +279,39 @@ enum SyncBody {
     /// forever.
     #[serde(rename = "blob_gone")]
     BlobGone { hash: String },
+}
+
+/// One name in a version offer: its version when we hold it, and its removal
+/// floor when it has one. A name can carry both, because a document that came
+/// back after a removal is offered *and* still reports the floor, for the
+/// sake of a third replica that never heard about the removal.
+type OfferEntry = (String, Option<String>, Option<String>);
+
+/// Split an offer into frames, each within [`MAX_DOCS_PER_VERSION_FRAME`].
+///
+/// A name carrying both a version and a floor counts twice: the budget
+/// stands in for bytes, and such a name costs the frame two encoded
+/// versions and its own name twice. Counting it once would let a space
+/// whose every document came back after a removal build a frame twice the
+/// size the budget was chosen to keep inside the transport.
+///
+/// An empty offer is still one frame. It is what tells a peer holding
+/// documents to send them to a replica that has never seen any.
+fn offer_batches(entries: &[OfferEntry]) -> Vec<&[OfferEntry]> {
+    let mut batches = Vec::new();
+    let mut start = 0usize;
+    let mut weight = 0usize;
+    for (index, (_, version, floor)) in entries.iter().enumerate() {
+        let cost = usize::from(version.is_some()) + usize::from(floor.is_some());
+        if index > start && weight + cost > MAX_DOCS_PER_VERSION_FRAME {
+            batches.push(&entries[start..index]);
+            start = index;
+            weight = 0;
+        }
+        weight += cost;
+    }
+    batches.push(&entries[start..]);
+    batches
 }
 
 /// Where a sync frame goes and what it is sealed under.
@@ -610,8 +678,36 @@ impl OfflineProtocol {
                 return;
             }
         };
-        debug!(space = %peer, cause, docs = docs.len(), "Offering document versions");
-        self.send_version_frames(peer, channel, docs, false, false);
+        let gone = self.tombstones_for(peer, channel);
+        debug!(space = %peer, cause, docs = docs.len(), gone = gone.len(), "Offering document versions");
+        self.send_version_frames(peer, channel, docs, gone, false, false);
+    }
+
+    /// The removals to carry toward one channel.
+    ///
+    /// Empty toward a peer that has not advertised them, which is not a
+    /// downgrade but the whole compatibility story: such a peer ignores the
+    /// field, keeps its copy and re-offers it forever, and this device
+    /// refuses each offer against its own floor. Leaving the field out
+    /// keeps that exchange as small as it can be.
+    ///
+    /// A group is different, and is not gated here. One ciphertext reaches
+    /// the whole roster, so there is no per-member choice to make, and a
+    /// member that does not know the field ignores it exactly as a 1:1 peer
+    /// would. The roster-wide gate that decides whether the frame may be
+    /// sent at all is the one on entry 2, which is enforced where the frame
+    /// is sealed.
+    fn tombstones_for(&mut self, space: &str, channel: &SyncChannel) -> BTreeMap<String, String> {
+        if matches!(channel, SyncChannel::Peer) && !self.data_tombstones_active(space) {
+            return BTreeMap::new();
+        }
+        match self.data_sync_tombstones(space) {
+            Ok(gone) => gone,
+            Err(err) => {
+                warn!(space, error = %err, "Could not read this space's removals");
+                BTreeMap::new()
+            }
+        }
     }
 
     /// Send one version frame per batch of documents.
@@ -626,39 +722,62 @@ impl OfflineProtocol {
         space: &str,
         channel: &SyncChannel,
         docs: BTreeMap<String, String>,
+        gone: BTreeMap<String, String>,
         reply: bool,
         force_partial: bool,
     ) {
         // A space with no documents still says so on the offering leg: that
         // is what tells a peer holding documents to send them to a replica
         // that has never seen any.
-        if docs.is_empty() && reply {
+        if docs.is_empty() && gone.is_empty() && reply {
             return;
         }
-        let batches: Vec<BTreeMap<String, String>> = if docs.is_empty() {
-            vec![BTreeMap::new()]
-        } else {
-            docs.into_iter()
-                .collect::<Vec<_>>()
-                .chunks(MAX_DOCS_PER_VERSION_FRAME)
-                .map(|chunk| chunk.iter().cloned().collect())
-                .collect()
-        };
+        // Removals share the per-frame budget with versions, because they
+        // cost the receiver the same thing: one name it has to store
+        // something about. Counting only the versions would let a space
+        // whose documents were all removed build one frame of a thousand
+        // entries, which is the case most likely to produce a lot of them
+        // at once.
+        let mut entries: Vec<OfferEntry> = Vec::new();
+        let mut removals = gone;
+        for (doc, version) in docs {
+            let floor = removals.remove(&doc);
+            entries.push((doc, Some(version), floor));
+        }
+        for (doc, floor) in removals {
+            entries.push((doc, None, Some(floor)));
+        }
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let batches = offer_batches(&entries);
         // Every frame of a split offer is partial, including the last: the
         // inference that needs the complete list cannot be drawn from any
         // one of them, and there is nowhere to accumulate them that a
         // restart would not have to reconcile.
         let partial = force_partial || batches.len() > 1;
-        for batch in batches {
-            self.send_sync_frame(
-                space,
-                channel,
-                &SyncBody::Versions {
+        let bodies: Vec<SyncBody> = batches
+            .into_iter()
+            .map(|batch| {
+                let mut batch_docs = BTreeMap::new();
+                let mut batch_gone = BTreeMap::new();
+                for (doc, version, floor) in batch {
+                    if let Some(version) = version {
+                        batch_docs.insert(doc.clone(), version.clone());
+                    }
+                    if let Some(floor) = floor {
+                        batch_gone.insert(doc.clone(), floor.clone());
+                    }
+                }
+                SyncBody::Versions {
                     reply,
                     partial,
-                    docs: batch,
-                },
-            );
+                    docs: batch_docs,
+                    gone: batch_gone,
+                }
+            })
+            .collect();
+        for body in bodies {
+            self.send_sync_frame(space, channel, &body);
         }
     }
 
@@ -681,6 +800,7 @@ impl OfflineProtocol {
             space,
             channel,
             BTreeMap::from([(doc.to_string(), version)]),
+            BTreeMap::new(),
             true,
             true,
         );
@@ -929,7 +1049,8 @@ impl OfflineProtocol {
                 reply,
                 partial,
                 docs,
-            } => self.answer_version_offer(&space, channel, reply, partial, docs),
+                gone,
+            } => self.answer_version_offer(&space, channel, reply, partial, docs, gone),
             SyncBody::Delta { doc, blob } => {
                 self.accept_remote_blob(&space, channel, &doc, &blob, BlobKind::Delta)
             }
@@ -953,7 +1074,56 @@ impl OfflineProtocol {
         reply: bool,
         partial: bool,
         theirs: BTreeMap<String, String>,
+        gone: BTreeMap<String, String>,
     ) -> Result<()> {
+        // Removals first, before anything is created or asked for. A name
+        // the peer has removed must not be created from this same frame and
+        // then deleted again, and a version below a floor must not be
+        // answered with a question about content the floor already covers.
+        for (doc, encoded) in &gone {
+            if offline_protocol_data::validate_name(doc).is_err() {
+                warn!(space, doc, "A removal names an invalid document");
+                continue;
+            }
+            // Bound the decode by the floor budget, the way a blob is bound
+            // by the frame budget: base64 grows by a third, so the encoded
+            // length refuses an oversized floor before allocating for it.
+            if encoded.len() > MAX_REMOVAL_FLOOR_BYTES * 4 / 3 + 4 {
+                warn!(space, doc, "Oversized removal floor in a sync frame");
+                continue;
+            }
+            // A removal costs a stored record for a name this device may
+            // never have held, so it answers to the same ceiling every
+            // other name a peer introduces does. `continue` rather than
+            // `break`: a name already known here always admits, and a
+            // removal for a held document sorted after a refused fresh name
+            // is exactly the removal a full space still has to apply.
+            if !self.data_space_admits_doc(space, doc, MAX_DOCS_PER_SPACE) {
+                warn!(
+                    space,
+                    doc,
+                    cap = MAX_DOCS_PER_SPACE,
+                    "Space is at its document ceiling; ignoring a removal for a new name"
+                );
+                continue;
+            }
+            let floor = match BASE64.decode(encoded) {
+                Ok(bytes) => VersionToken::from_bytes(bytes),
+                Err(err) => {
+                    warn!(space, doc, error = %err, "Undecodable removal floor in a sync frame");
+                    continue;
+                }
+            };
+            match self.data_apply_tombstone(space, doc, &floor) {
+                Ok(outcome) => {
+                    debug!(space, doc, ?outcome, "Applied a removal from a peer");
+                }
+                Err(err) => {
+                    warn!(space, doc, error = %err, "Could not apply a removal from a peer");
+                }
+            }
+        }
+
         let mut ours = self.data_sync_versions(space).unwrap_or_default();
 
         // Documents they have and we do not. A created document is empty,
@@ -962,8 +1132,23 @@ impl OfflineProtocol {
         // before this frame is done with: the peer has already told us
         // everything it intends to and will not volunteer it again.
         let mut created = BTreeMap::new();
-        for doc in theirs.keys() {
+        for (doc, theirs_encoded) in &theirs {
             if ours.contains_key(doc) || offline_protocol_data::validate_name(doc).is_err() {
+                continue;
+            }
+            // A version a removal already covers is not a document this
+            // device has never seen: it is the one it removed. Creating it
+            // would undo the removal, and asking for it would ask for
+            // exactly the content the removal deleted.
+            //
+            // Only ever asked of a name this device does not hold, which is
+            // what this loop is. Asked of one it does hold, the answer would
+            // be wrong in the one case it matters: every version covers the
+            // empty one, so a replica that re-created the name and has
+            // nothing in it yet would read as holding removed content, and
+            // the document it is waiting for would never be sent.
+            if self.version_is_removed_content(space, doc, theirs_encoded) {
+                debug!(space, doc, "Ignoring an offer of content a removal covers");
                 continue;
             }
             // The same door a blob for an unknown document goes through,
@@ -1031,11 +1216,25 @@ impl OfflineProtocol {
         // the peer has said everything it had to say and nothing else here
         // ever asks.
         if !reply {
-            self.send_version_frames(space, channel, ours, true, false);
+            let our_gone = self.tombstones_for(space, channel);
+            self.send_version_frames(space, channel, ours, our_gone, true, false);
         } else {
-            self.send_version_frames(space, channel, created, true, true);
+            self.send_version_frames(space, channel, created, BTreeMap::new(), true, true);
         }
         Ok(())
+    }
+
+    /// Whether an offered version names content a removal here already
+    /// covered.
+    fn version_is_removed_content(&mut self, space: &str, doc: &str, encoded: &str) -> bool {
+        match BASE64.decode(encoded) {
+            Ok(bytes) => {
+                self.data_version_below_floor(space, doc, &VersionToken::from_bytes(bytes))
+            }
+            // Undecodable is not "removed"; the arms below report it where
+            // the decode is actually needed.
+            Err(_) => false,
+        }
     }
 
     /// Send `doc` to the peer in whatever form can carry it.
@@ -1310,6 +1509,57 @@ impl OfflineProtocol {
             // wrong is the process and the cost of being right is one
             // document change that the sender still holds.
             warn!(space, doc, "Refusing a quarantined blob");
+            return Ok(());
+        }
+
+        // A blob for a name with a removal floor is judged against the floor
+        // before anything acts on it. A blob carrying nothing beyond the
+        // floor is the content that removal deleted, arriving from a replica
+        // that has not heard about it yet: importing it would recreate the
+        // document. Terminal when it refuses, like every other refusal here:
+        // the sender is told by the `gone` entry in our next offer, not by
+        // an answer to this.
+        //
+        // The judgement is an engine decode, not a header read. The engine
+        // decodes every change the blob carries into a scratch document to
+        // find the version they end at, with the same decoder an import
+        // runs, and ADR 0019 contains that decoder for a reason: a crafted
+        // blob can end the process inside it, and under `panic = "abort"`
+        // nothing catches that. So it runs inside its own in-flight marker,
+        // exactly as the import below does. A blob that ends the process
+        // here leaves its digest behind, and the sender's retry is refused
+        // instead of ending the next process too. Outside the marker this
+        // would be the one engine decode of a peer's bytes with no
+        // quarantine, on a path a peer steers a blob onto by sending the
+        // floor first.
+        //
+        // Paid only by a name that has a floor: two marker writes on a path
+        // a space nobody has removed anything from never takes.
+        if self.data_doc_has_floor(space, doc) {
+            record.in_flight = Some(digest.clone());
+            self.persist_sync_record(space, &record);
+            let below_floor = self.data_blob_below_floor(space, doc, &blob);
+            record.in_flight = None;
+            self.persist_sync_record(space, &record);
+            if below_floor {
+                debug!(
+                    space,
+                    doc, "Refusing a blob that carries only content a removal covers"
+                );
+                return Ok(());
+            }
+        }
+
+        // Past every refusal, the blob carries something the removal never
+        // saw, which is an edit made concurrently with it or after it. An
+        // edit beats a removal, so the name comes back here, after the last
+        // check that can refuse the blob and before the first step that
+        // needs the name open. Brought back any earlier, a refused blob
+        // would leave the name live with no document under it. The floor
+        // stays, so the rest of the removed content is still refused from a
+        // replica that has not heard about the removal.
+        if let Err(err) = self.data_revive_removed_doc(space, doc) {
+            warn!(space, doc, error = %err, "Could not bring back a removed document for a change that outlives its removal");
             return Ok(());
         }
 
@@ -2198,6 +2448,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_name_in_both_maps_costs_two_entries_of_the_frame_budget() {
+        let entry = |n: usize, version: bool, floor: bool| -> OfferEntry {
+            (
+                format!("doc{n}"),
+                version.then(|| "AQID".to_string()),
+                floor.then(|| "BAUG".to_string()),
+            )
+        };
+
+        let full: Vec<OfferEntry> = (0..MAX_DOCS_PER_VERSION_FRAME)
+            .map(|n| entry(n, true, false))
+            .collect();
+        assert_eq!(offer_batches(&full).len(), 1);
+
+        let one_over: Vec<OfferEntry> = (0..=MAX_DOCS_PER_VERSION_FRAME)
+            .map(|n| entry(n, true, false))
+            .collect();
+        assert_eq!(offer_batches(&one_over).len(), 2);
+
+        // Every name came back after a removal, so each costs the frame two
+        // versions: half the budget in names is the whole budget in bytes.
+        let dual: Vec<OfferEntry> = (0..=MAX_DOCS_PER_VERSION_FRAME / 2)
+            .map(|n| entry(n, true, true))
+            .collect();
+        let batches = offer_batches(&dual);
+        assert_eq!(
+            batches.len(),
+            2,
+            "a frame of names in both maps was built to twice the byte budget"
+        );
+        assert_eq!(
+            batches.iter().map(|batch| batch.len()).sum::<usize>(),
+            dual.len(),
+            "an entry was dropped or duplicated across the split"
+        );
+
+        assert_eq!(
+            offer_batches(&[]).len(),
+            1,
+            "an empty offer is still one frame: it is what tells a peer to send everything"
+        );
+    }
+
+    #[test]
     fn a_frame_carries_its_version_where_a_future_build_can_find_it() {
         // The version has to be readable off a frame whose body this build
         // cannot parse, or every future format looks like corruption to
@@ -2223,6 +2517,7 @@ mod tests {
             reply: true,
             partial: true,
             docs: BTreeMap::from([("notes".to_string(), "dgA=".to_string())]),
+            gone: BTreeMap::from([("old".to_string(), "ZwA=".to_string())]),
         };
         let json = serde_json::to_string(&body).unwrap();
         let parsed: SyncBody = serde_json::from_str(&json).unwrap();
@@ -2231,13 +2526,33 @@ mod tests {
                 reply,
                 partial,
                 docs,
+                gone,
             } => {
                 assert!(reply);
                 assert!(partial);
                 assert_eq!(docs.get("notes").map(String::as_str), Some("dgA="));
+                assert_eq!(gone.get("old").map(String::as_str), Some("ZwA="));
             }
             other => panic!("expected a version frame, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_offer_with_no_removals_carries_no_removal_field() {
+        // Byte-identical to what a build that predates removals sends, which
+        // is what keeps every frozen vector above valid and every space
+        // nobody has removed anything from as cheap as it was.
+        let json = serde_json::to_string(&SyncBody::Versions {
+            reply: false,
+            partial: false,
+            docs: BTreeMap::new(),
+            gone: BTreeMap::new(),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"k":"vv","reply":false,"partial":false,"docs":{}}"#
+        );
     }
 
     #[test]
@@ -2252,10 +2567,15 @@ mod tests {
                 reply,
                 partial,
                 docs,
+                gone,
             } => {
                 assert!(!reply);
                 assert!(!partial);
                 assert!(docs.is_empty());
+                assert!(
+                    gone.is_empty(),
+                    "an offer from a build that predates removals read as removing something"
+                );
             }
             other => panic!("expected a version frame, got {other:?}"),
         }
@@ -2348,8 +2668,8 @@ mod golden_vectors {
                 .unwrap_or_else(|| panic!("{name} must be an array"))
                 .len()
         };
-        assert_eq!(len("frames"), 8);
-        assert_eq!(len("parse_defaults"), 1);
+        assert_eq!(len("frames"), 9);
+        assert_eq!(len("parse_defaults"), 2);
         assert_eq!(len("attachment_hashes"), 3);
         assert_eq!(len("attachment_references"), 2);
         assert_eq!(len("data_purposes"), 2);
@@ -2369,6 +2689,7 @@ mod golden_vectors {
                 reply: false,
                 partial: false,
                 docs,
+                gone: BTreeMap::new(),
             }),
             wire(&vectors, "version offer, complete, asking")
         );
@@ -2383,6 +2704,7 @@ mod golden_vectors {
                 reply: true,
                 partial: true,
                 docs,
+                gone: BTreeMap::new(),
             }),
             wire(&vectors, "version offer, answering leg")
         );
@@ -2392,8 +2714,23 @@ mod golden_vectors {
                 reply: false,
                 partial: false,
                 docs: BTreeMap::new(),
+                gone: BTreeMap::new(),
             }),
             wire(&vectors, "version offer with no documents")
+        );
+
+        let mut docs = BTreeMap::new();
+        docs.insert("kept".to_string(), "AQID".to_string());
+        let mut gone = BTreeMap::new();
+        gone.insert("removed".to_string(), "BAUG".to_string());
+        assert_eq!(
+            framed(&SyncBody::Versions {
+                reply: false,
+                partial: false,
+                docs,
+                gone,
+            }),
+            wire(&vectors, "version offer carrying a removal")
         );
 
         let blob = BASE64.encode([0u8, 1, 2, 3, 4, 5, 6, 7]);
@@ -2493,6 +2830,24 @@ mod golden_vectors {
                 partial,
                 case["expect"]["partial"].as_bool().expect("partial")
             );
+        }
+    }
+
+    #[test]
+    fn an_absent_removal_map_parses_as_removing_nothing() {
+        let vectors = vectors();
+        for case in vectors["parse_defaults"]
+            .as_array()
+            .expect("parse_defaults")
+        {
+            let value: serde_json::Value =
+                serde_json::from_str(case["body"].as_str().expect("body")).expect("JSON");
+            let SyncBody::Versions { gone, .. } = serde_json::from_value(value).expect("parses")
+            else {
+                panic!("{}: expected a version offer", case["name"]);
+            };
+            let expected = case["expect"]["gone"].as_object().expect("gone");
+            assert_eq!(gone.len(), expected.len(), "{}", case["name"]);
         }
     }
 

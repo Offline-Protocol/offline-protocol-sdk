@@ -1944,6 +1944,28 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun dataRemoveDoc(spaceId: String, docId: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.removeDoc(spaceId, docId)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATAREMOVEDOC", "removeDoc failed")
+        }
+    }
+
+    @ReactMethod
+    fun dataRemoveSpace(spaceId: String, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            store.removeSpace(spaceId)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATAREMOVESPACE", "removeSpace failed")
+        }
+    }
+
+    @ReactMethod
     fun dataListDocs(spaceId: String, promise: Promise) {
         try {
             val store = dataStore ?: throw IllegalStateException("DataStore not initialized")

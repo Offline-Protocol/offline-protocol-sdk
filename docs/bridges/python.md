@@ -91,9 +91,10 @@ A worked reference lives in
 Python currently ships **no** `wipePersistedState` equivalent (the mobile
 bindings do). An application that needs logout has to clear its own storage
 root, and if it pointed documents at a separate backend, call
-`DataStore.wipe_all()` too. Stop the protocol first: there are no deletion
-tombstones, so a wipe on a running engine with live sessions is undone by the
-peer's next version offer, which recreates and refills every document.
+`DataStore.wipe_all()` too. Stop the protocol first: a wipe records no
+removals, so on a running engine with live sessions it is undone by the peer's
+next version offer, which recreates and refills every document.
+`DataStore.remove_space()` is what removes documents from the other replicas.
 
 ## P7. The internet send loop is adaptive here, and fixed elsewhere
 

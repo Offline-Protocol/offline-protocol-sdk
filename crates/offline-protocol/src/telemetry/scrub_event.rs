@@ -809,6 +809,16 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             hash_string(space_id, scrubber);
             hash_string(doc_id, scrubber);
         }
+        Event::DataDocRemoved {
+            space_id,
+            doc_id,
+            // A fixed token this crate chooses (`local` or `peer`), never a
+            // peer's words: see the producer rule at the top of this file.
+            by: _,
+        } => {
+            hash_string(space_id, scrubber);
+            hash_string(doc_id, scrubber);
+        }
         Event::DataDocSizeWarning {
             space_id,
             doc_id,
@@ -940,6 +950,7 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::UserBlocked { .. }
         | Event::UserUnblocked { .. }
         | Event::DataChanged { .. }
+        | Event::DataDocRemoved { .. }
         | Event::DataDocSizeWarning { .. }
         | Event::DataAttachmentRequested { .. }
         | Event::DataAttachmentReceived { .. }

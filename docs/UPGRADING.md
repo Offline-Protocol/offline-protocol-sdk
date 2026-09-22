@@ -1645,7 +1645,10 @@ change made on the other side depends on. Nothing is lost on either device and
 nothing crashes; the documents simply stay apart, and the refusal is logged.
 
 **Deleting a document does not delete it from the peer, and does not keep it
-deleted here.** There are no deletion tombstones in this release. `deleteDoc`
+deleted here.** *(True of this release. A later release adds `removeDoc`,
+which does remove a document everywhere; see the removals section at the top
+of this file. `deleteDoc` itself still behaves exactly as described here.)*
+There are no deletion tombstones in this release. `deleteDoc`
 removes the records on this device, and the peer's next version offer names the
 document again, so it is recreated and refilled from their copy. In a space
 named after a peer, treat deletion as local cleanup that replication may undo,
@@ -1694,7 +1697,9 @@ logging it, because nothing inside the application will show the difference.
 
 **A wipe is only durable once replication has stopped.** It is the same
 missing tombstone described above: nothing distinguishes a space this device
-wiped from one it has never seen. Called while the engine is still running
+wiped from one it has never seen. (Still true in every later release: a wipe
+records no removals, because a logout has to leave a custom backend empty.
+`removeSpace()` is the call that clears the room.) Called while the engine is still running
 with live sessions, every document comes back, from both directions. The
 peer's next version offer names the documents and they are recreated and
 refilled from the peer's copy, and an offer of our own naming nothing reads to
@@ -2150,6 +2155,77 @@ than never. Held events are scoped to the session that produced them, so a
 message held for a torn-down account never surfaces in the next one. Nothing
 to change, unless the app assumed that subscribing late meant nothing had
 happened.
+
+---
+
+## 22. Documents can be removed from every replica *(unreleased)*
+
+Replicated documents can be removed from every replica of a space. No
+existing call changes for a name that has never been removed, and an
+application that never calls `removeDoc`, and whose peers never do, has
+nothing to act on.
+
+**A removed name refuses reads and writes.** Every call on it throws
+`InvalidState` until `createDoc` brings the name back, on the device that
+removed it and on every device that learned of the removal. Before this
+release every name was created by its first write; a removed name is not, so
+a screen that reads a document a peer removed sees an error rather than an
+empty document. `data_doc_removed` is the cue to close it.
+
+**`deleteDoc` is unchanged.** It drops this device's copy and records nothing
+about the name, so a replica that still holds the document refills it at the
+next exchange. If you were using it to reclaim space, it still does that. If
+you were using it to remove content and finding it came back, that is what the
+new call is for.
+
+**`removeDoc(space, doc)` removes the document everywhere.** It records the
+version the document stood at, deletes it here, and tells the space. A replica
+whose copy that version covers deletes it too and reports
+`data_doc_removed` with `by: "peer"`. `removeSpace(space)` does the same for
+every document a space holds.
+
+**An edit made while a removal was crossing wins, and brings the whole
+document back.** Not the edit alone: it was made on the old contents, so its
+history is those contents. Both replicas converge on the document, and your
+application sees an ordinary `data_changed` on a document it removed. If your
+product needs a removal that cannot be undone this way, model it as a field
+your application writes rather than as a document that disappears.
+
+**Re-using a removed name is not fenced off.** `createDoc` under a removed
+name starts an empty document, but a replica that edited the old contents
+while the removal was crossing still holds them, and the exchange merges them
+into the new document on every replica; a replica on a build that does not
+read removals merges the new contents into its old copy instead. Both are the
+edit-wins rule applied to a re-used name. Give new content a fresh name.
+
+**A removal never expires.** A device away for a year still learns about it
+when it returns. The cost is a small record per removed name, which counts
+against the existing 1024-document ceiling a peer can fill in one space.
+
+**`wipeAll()` is still not a removal.** It clears this device and leaves no
+removal records, because a logout has to leave a custom backend empty. On a
+running engine the peers refill it, exactly as before. Use `removeSpace()` to
+clear the room.
+
+**A peer on an older build keeps its copy.** It does not understand the
+removal, so it offers the document back on every exchange; this device refuses
+each offer, and the document stays removed here. Nothing loops and nothing is
+surfaced wrongly. It disappears there when they update and the next exchange
+runs.
+
+**One new event and two new methods.** `data_doc_removed` carries `space_id`,
+`doc_id` and `by` (`local` or `peer`). The two methods are on `DataStore` in
+every binding. No error code was added.
+
+**`listSpaces()` includes a space whose documents were all removed.** The
+space still has removals to report, and the start-up sweep offers only the
+spaces this list names. `listDocs()` on it is empty.
+
+**Rolling back to a build before this release.** Such a build does not read
+the removal records, so a removal made here holds there only until a replica
+offers the document back, and `wipeAll()` on that build leaves the records
+behind: they are sealed, and they name documents. Wipe on this release, or
+accept a few sealed names surviving a logout on the older one.
 
 ---
 

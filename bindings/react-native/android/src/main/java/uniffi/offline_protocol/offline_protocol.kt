@@ -872,6 +872,10 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_doc(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert(
@@ -1344,6 +1348,10 @@ external fun uniffi_offline_protocol_uniffi_fn_method_datastore_map_get_json(`pt
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_map_set(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`valueJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_provide_attachment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`peerId`: RustBuffer.ByValue,`hash`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_datastore_remove_doc(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_datastore_remove_space(`ptr`: Long,`spaceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_datastore_text_delete(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`position`: Int,`count`: Int,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1930,6 +1938,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment() != 58573.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_doc() != 62307.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space() != 3889.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete() != 35552.toShort()) {
@@ -3141,6 +3155,10 @@ public interface DataStoreInterface {
     
     fun `provideAttachment`(`spaceId`: kotlin.String, `peerId`: kotlin.String, `hash`: kotlin.String, `data`: kotlin.ByteArray)
     
+    fun `removeDoc`(`spaceId`: kotlin.String, `docId`: kotlin.String)
+    
+    fun `removeSpace`(`spaceId`: kotlin.String)
+    
     fun `textDelete`(`spaceId`: kotlin.String, `docId`: kotlin.String, `collection`: kotlin.String, `position`: kotlin.UInt, `count`: kotlin.UInt)
     
     fun `textInsert`(`spaceId`: kotlin.String, `docId`: kotlin.String, `collection`: kotlin.String, `position`: kotlin.UInt, `text`: kotlin.String)
@@ -3532,6 +3550,32 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_provide_attachment(
         it,
         FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`peerId`),FfiConverterString.lower(`hash`),FfiConverterByteArray.lower(`data`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `removeDoc`(`spaceId`: kotlin.String, `docId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_remove_doc(
+        it,
+        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `removeSpace`(`spaceId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_remove_space(
+        it,
+        FfiConverterString.lower(`spaceId`),_status)
 }
     }
     

@@ -3492,6 +3492,24 @@ impl OfflineProtocol {
             .map_err(ProtocolError::from)
     }
 
+    pub(crate) fn data_remove_doc(
+        &self,
+        space_id: String,
+        doc_id: String,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_remove_doc(&space_id, &doc_id)
+            .map_err(ProtocolError::from)
+    }
+
+    pub(crate) fn data_remove_space(&self, space_id: String) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .data_remove_space(&space_id)
+            .map_err(ProtocolError::from)
+    }
+
     pub(crate) fn data_list_docs(&self, space_id: String) -> Result<Vec<String>, ProtocolError> {
         let mut guard = self.lock_inner()?;
         guard.data_list_docs(&space_id).map_err(ProtocolError::from)
@@ -6844,6 +6862,14 @@ impl DataStore {
         self.protocol.data_delete_doc(space_id, doc_id)
     }
 
+    pub fn remove_doc(&self, space_id: String, doc_id: String) -> Result<(), ProtocolError> {
+        self.protocol.data_remove_doc(space_id, doc_id)
+    }
+
+    pub fn remove_space(&self, space_id: String) -> Result<(), ProtocolError> {
+        self.protocol.data_remove_space(space_id)
+    }
+
     /// The documents in a space.
     pub fn list_docs(&self, space_id: String) -> Result<Vec<String>, ProtocolError> {
         self.protocol.data_list_docs(space_id)
@@ -7014,14 +7040,15 @@ impl DataStore {
 
     /// Deletes every record the data layer owns.
     ///
-    /// Only durable once replication has stopped. There are no deletion
-    /// tombstones, so a peer cannot tell a wiped space from one this device
-    /// has never seen, and on a running engine with live sessions its next
-    /// version offer recreates and refills every document. The logout path
-    /// tears the engine down anyway; anywhere else, stop it first, and only
-    /// for as long as it stays stopped: the peer still holds the documents,
-    /// so they return when replication resumes. This clears the device, it
-    /// does not delete content.
+    /// Only durable once replication has stopped. A wipe records no
+    /// removals, because a logout has to leave a custom backend empty, so a
+    /// peer cannot tell a wiped space from one this device has never seen,
+    /// and on a running engine with live sessions its next version offer
+    /// recreates and refills every document. The logout path tears the
+    /// engine down anyway; anywhere else, stop it first, and only for as
+    /// long as it stays stopped: the peer still holds the documents, so they
+    /// return when replication resumes. This clears the device;
+    /// `remove_space` is what clears the room.
     pub fn wipe_all(&self) -> Result<(), ProtocolError> {
         self.protocol.data_wipe_all()
     }

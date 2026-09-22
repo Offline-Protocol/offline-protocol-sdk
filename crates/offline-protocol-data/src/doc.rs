@@ -33,6 +33,74 @@ impl VersionToken {
     pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
         Self(bytes.into())
     }
+
+    /// Whether this version covers every change `other` names.
+    ///
+    /// The question a deletion floor asks. A document removed at version
+    /// `T` is removed along with everything at or below `T`, and anything a
+    /// peer offers or sends from below it is content that removal already
+    /// covered. What sits *beyond* `T` is an edit made concurrently with
+    /// the removal or after it, which is content the removal never saw and
+    /// therefore never decided about.
+    ///
+    /// Both tokens are decoded, so a caller holding bytes that came off a
+    /// wire gets an error rather than a wrong answer. Equality is not
+    /// enough for this question and neither is byte comparison: two
+    /// encodings of one version need not be identical, and a version that
+    /// merely *overlaps* another is neither below it nor beyond it.
+    pub fn includes(&self, other: &VersionToken) -> DataResult<bool> {
+        Ok(decode_version(&self.0)?.includes_vv(&decode_version(&other.0)?))
+    }
+
+    /// The version covering everything either token covers.
+    ///
+    /// Two replicas that removed the same document independently each hold
+    /// a floor the other does not, and neither is wrong. Merging them keeps
+    /// both removals, which is what makes the floors converge rather than
+    /// depend on which offer arrived first.
+    pub fn union(&self, other: &VersionToken) -> DataResult<VersionToken> {
+        let mut ours = decode_version(&self.0)?;
+        ours.merge(&decode_version(&other.0)?);
+        Ok(Self(ours.encode()))
+    }
+
+    /// Whether these bytes decode as a version at all.
+    ///
+    /// A removal floor arrives off a wire and is then stored for the life
+    /// of its space, so it is checked once on the way in rather than
+    /// failing every question later asked of it. Bytes that do not decode
+    /// are not a version of anything, and a floor made of them would cover
+    /// nothing while still costing a record.
+    pub fn validate(&self) -> DataResult<()> {
+        decode_version(&self.0).map(|_| ())
+    }
+}
+
+fn decode_version(bytes: &[u8]) -> DataResult<VersionVector> {
+    VersionVector::decode(bytes).map_err(|err| DataError::Corrupt(err.to_string()))
+}
+
+/// The version a blob would leave a document at, without importing it.
+///
+/// Not a header read. The engine decodes every change the blob carries into
+/// a scratch document to answer this (a snapshot's whole change store, or a
+/// run's changes), with the checksum on, using the same decoder an import
+/// runs. For containment it *is* an import: a crafted blob that ends the
+/// process inside the decoder ends it here too, and under `panic = "abort"`
+/// nothing catches that. A caller MUST run this inside the same in-flight
+/// marker an import runs inside, or the blob that ended one process is
+/// retried on every launch. [`DataDoc::inspect`] carries the same
+/// obligation and is called under the same marker.
+///
+/// It says nothing about whether the blob will apply; it answers what the
+/// bytes carry. A caller compares this against a removal floor: a blob
+/// whose end version the floor already covers carries nothing the removal
+/// did not delete, and importing it would recreate a document that was
+/// removed on purpose.
+pub fn blob_end_version(bytes: &[u8]) -> DataResult<VersionToken> {
+    let meta = LoroDoc::decode_import_blob_meta(bytes, true)
+        .map_err(|err| DataError::Corrupt(err.to_string()))?;
+    Ok(VersionToken(meta.partial_end_vv.encode()))
 }
 
 /// A committed change, ready to persist and (from F3) to send.

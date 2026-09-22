@@ -14,6 +14,7 @@
 //! | `data_docs` | `{space}/{doc}` | The compacted document |
 //! | `data_delta_log` | `{space}/{doc}/{seq:016x}` | One persisted commit |
 //! | `data_spaces` | `{space}` | The document index for the space |
+//! | `data_doc_meta` | `{space}/{doc}` | What a name says after a removal |
 //!
 //! # Why the listing is the truth and the index is a cache
 //!
@@ -23,6 +24,15 @@
 //! names, so a document created and never written still lists. Any crash
 //! therefore leaves a readable store rather than a bookkeeping claim that
 //! has to be reconciled against reality.
+//!
+//! Removals are the one thing the listing cannot express, and the reason
+//! `data_doc_meta` exists. A removed document has no records, and neither
+//! does a document nobody ever created: reading the truth off the listing
+//! would make those two the same state, which is exactly what lets a peer's
+//! next offer refill something this device deleted on purpose. The removal
+//! record is therefore written *before* the records it removes, so a crash
+//! in between leaves a name already marked removed rather than a name whose
+//! surviving records vote it back into existence.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -34,7 +44,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::error::{Error, Result};
-use crate::events::Event;
+use crate::events::{DocRemovedBy, Event};
+use crate::protocol::data_sync::MAX_REMOVAL_FLOOR_BYTES;
 use crate::protocol::storage::StateRecord;
 use crate::protocol::types::{storage_keys, MAX_PROTOCOL_STATE_RECORD_BYTES};
 use crate::protocol::OfflineProtocol;
@@ -50,6 +61,52 @@ use crate::protocol_state_storage::ProtocolStateStorage;
 struct SpaceRecord {
     #[serde(default)]
     docs: BTreeSet<String>,
+}
+
+/// What a document's name says after a removal.
+///
+/// The `gone` field is the removal *floor*: the version the document stood
+/// at when it was removed, which is the whole of what a removal decided
+/// about. Content at or below it was removed; content beyond it is an edit
+/// made concurrently with the removal or after it, which the removal never
+/// saw. That is what makes an edit win over a removal without either side
+/// needing to know which happened first.
+///
+/// `alive` is separate from the floor on purpose, and is not derivable from
+/// whether records exist. A crash between the removal record and the
+/// deletes leaves records behind, and reading those as "alive" is precisely
+/// the resurrection this record prevents. The floor survives a document
+/// coming back, so a stale replica's copy of the removed content is still
+/// refused afterwards.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DocMeta {
+    /// Base64 of the version the document was removed at.
+    gone: String,
+    /// Whether the name holds a document again.
+    ///
+    /// Defaults false so a record that fails to carry the field reads as
+    /// removed, which is the answer that loses no data: a document read as
+    /// removed comes back from any replica that still holds it, while one
+    /// wrongly read as live is a resurrection nothing reports.
+    #[serde(default)]
+    alive: bool,
+}
+
+/// What applying a peer's removal did to this device's copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TombstoneOutcome {
+    /// The copy held here was content the floor covered, and is gone.
+    Deleted,
+    /// The copy held here carries an edit the removal never saw, so it
+    /// stays and goes back to the peer through the ordinary exchange.
+    Kept,
+    /// Nothing was held under that name; the floor is recorded so a replica
+    /// that still holds the removed content cannot seed it back.
+    Recorded,
+    /// A floor already held here covers this one, so it carried nothing
+    /// new and nothing was written or opened. The common case: floors
+    /// travel on every offer for the life of the space.
+    Unchanged,
 }
 
 /// A document held open in memory.
@@ -84,6 +141,8 @@ struct LoadedDoc {
 pub(crate) struct DataLayer {
     docs: BTreeMap<(String, String), LoadedDoc>,
     spaces: BTreeMap<String, SpaceRecord>,
+    /// Removal state per document, loaded with the space that holds it.
+    meta: BTreeMap<(String, String), DocMeta>,
 }
 
 impl std::fmt::Debug for DataLayer {
@@ -91,6 +150,7 @@ impl std::fmt::Debug for DataLayer {
         f.debug_struct("DataLayer")
             .field("open_docs", &self.docs.len())
             .field("loaded_spaces", &self.spaces.len())
+            .field("removed_docs", &self.meta.len())
             .finish()
     }
 }
@@ -214,8 +274,211 @@ impl OfflineProtocol {
             }
         }
 
+        // Removals last, because they overrule the listing. A name the
+        // reconciliation above just voted back into existence may be one a
+        // previous run removed and did not finish deleting, and the records
+        // it left are what that vote was counted from.
+        let mut half_removed = Vec::new();
+        if let Ok(keys) = storage.list_keys(storage_keys::DATA_DOC_META) {
+            let prefix = format!("{space}/");
+            for key in keys {
+                let Some(name) = key.strip_prefix(&prefix) else {
+                    continue;
+                };
+                if name.is_empty() || name.contains('/') {
+                    continue;
+                }
+                let meta = match self.read_state_record(storage, storage_keys::DATA_DOC_META, &key)
+                {
+                    Ok(Some(bytes)) => match serde_json::from_slice::<DocMeta>(&bytes) {
+                        Ok(meta) => meta,
+                        Err(err) => {
+                            // Unreadable here is not the index's "costs a
+                            // name" case: this record is the only thing that
+                            // says a document was removed, so a damaged one
+                            // is left in place and the name is left alone
+                            // rather than being silently revived.
+                            warn!(space, doc = name, error = %err, "Unreadable document removal record");
+                            continue;
+                        }
+                    },
+                    Ok(None) => continue,
+                    Err(err) => {
+                        warn!(space, doc = name, error = %err, "Failed to read a document removal record");
+                        continue;
+                    }
+                };
+                if !meta.alive && record.docs.remove(name) {
+                    half_removed.push(name.to_string());
+                }
+                self.data
+                    .meta
+                    .insert((space.to_string(), name.to_string()), meta);
+            }
+        }
+
         self.data.spaces.insert(space.to_string(), record);
+
+        // Finish what a crash interrupted. Best effort, and repeated on
+        // every open until it succeeds: the name is already removed as far
+        // as every reader is concerned, so what is left is storage to
+        // reclaim rather than a decision to make.
+        for doc in half_removed {
+            debug!(
+                space,
+                doc, "Finishing a removal a previous run did not complete"
+            );
+            self.purge_doc_records(storage, space, &doc, None);
+        }
         Ok(())
+    }
+
+    /// Delete every record belonging to one document, reporting the first
+    /// failure and attempting the rest regardless.
+    ///
+    /// A record that survives is replayed into the *next* document of the
+    /// same name, which resurrects the removed contents, so a partial
+    /// failure is worth hearing about even though every caller here can only
+    /// log it.
+    ///
+    /// `delta_keys` is the delta log's listing when the caller already holds
+    /// one, so a caller purging many documents lists once rather than once
+    /// per document. It has to postdate the document's last flush, or the
+    /// delta that flush wrote is exactly the record that survives.
+    fn purge_doc_records(
+        &mut self,
+        storage: &dyn ProtocolStateStorage,
+        space: &str,
+        doc: &str,
+        delta_keys: Option<&[String]>,
+    ) -> Option<String> {
+        fn note(
+            first_error: &mut Option<String>,
+            err: crate::protocol_state_storage::ProtocolStateError,
+        ) {
+            if first_error.is_none() {
+                *first_error = Some(err.to_string());
+            }
+        }
+        let mut first_error: Option<String> = None;
+
+        if let Err(err) = storage.delete(storage_keys::DATA_DOCS, &doc_key(space, doc)) {
+            note(&mut first_error, err);
+        }
+        let prefix = format!("{space}/{doc}/");
+        let listed;
+        let keys: &[String] = match delta_keys {
+            Some(keys) => keys,
+            None => match storage.list_keys(storage_keys::DATA_DELTA_LOG) {
+                Ok(keys) => {
+                    listed = keys;
+                    &listed
+                }
+                Err(err) => {
+                    note(&mut first_error, err);
+                    &[]
+                }
+            },
+        };
+        for key in keys.iter().filter(|key| key.starts_with(&prefix)) {
+            if let Err(err) = storage.delete(storage_keys::DATA_DELTA_LOG, key) {
+                note(&mut first_error, err);
+            }
+        }
+        first_error
+    }
+
+    /// Write one document's removal record.
+    fn persist_doc_meta(
+        &mut self,
+        storage: &dyn ProtocolStateStorage,
+        space: &str,
+        doc: &str,
+        meta: &DocMeta,
+    ) -> Result<()> {
+        let bytes =
+            serde_json::to_vec(meta).map_err(|err| Error::Serialization(err.to_string()))?;
+        self.write_state_record(
+            storage,
+            storage_keys::DATA_DOC_META,
+            &doc_key(space, doc),
+            &bytes,
+        )
+        .map_err(|err| {
+            Error::Other(format!(
+                "failed to record the removal of {space}/{doc}: {err}"
+            ))
+        })
+    }
+
+    /// Write one document's removal record and then remember it, in that
+    /// order: what memory says must never be ahead of what a relaunch will
+    /// read.
+    fn set_doc_meta(
+        &mut self,
+        storage: &dyn ProtocolStateStorage,
+        space: &str,
+        doc: &str,
+        meta: DocMeta,
+    ) -> Result<()> {
+        self.persist_doc_meta(storage, space, doc, &meta)?;
+        self.data
+            .meta
+            .insert((space.to_string(), doc.to_string()), meta);
+        Ok(())
+    }
+
+    /// Whether this name currently stands removed.
+    ///
+    /// The space must already be loaded.
+    fn doc_is_removed(&self, space: &str, doc: &str) -> bool {
+        self.data
+            .meta
+            .get(&(space.to_string(), doc.to_string()))
+            .is_some_and(|meta| !meta.alive)
+    }
+
+    /// Let a removed name hold a document again, keeping its floor.
+    ///
+    /// The floor outlives the removal it recorded, because a replica that
+    /// never heard about the removal still holds the old contents and will
+    /// offer them back. Dropping the floor here would let exactly that
+    /// offer refill the new document with the old one.
+    fn revive_doc(
+        &mut self,
+        storage: &dyn ProtocolStateStorage,
+        space: &str,
+        doc: &str,
+    ) -> Result<()> {
+        let key = (space.to_string(), doc.to_string());
+        let Some(meta) = self.data.meta.get(&key) else {
+            return Ok(());
+        };
+        if meta.alive {
+            return Ok(());
+        }
+        let revived = DocMeta {
+            gone: meta.gone.clone(),
+            alive: true,
+        };
+        self.set_doc_meta(storage, space, doc, revived)
+    }
+
+    /// The removal floor recorded for one document, if it has one.
+    ///
+    /// The space must already be loaded; every caller reaches this through a
+    /// path that loads it.
+    fn doc_floor(&self, space: &str, doc: &str) -> Option<VersionToken> {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+        let meta = self.data.meta.get(&(space.to_string(), doc.to_string()))?;
+        match BASE64.decode(&meta.gone) {
+            Ok(bytes) => Some(VersionToken::from_bytes(bytes)),
+            Err(err) => {
+                warn!(space, doc, error = %err, "Undecodable removal floor; treating the document as never removed");
+                None
+            }
+        }
     }
 
     fn persist_space(&mut self, storage: &dyn ProtocolStateStorage, space: &str) -> Result<()> {
@@ -234,6 +497,12 @@ impl OfflineProtocol {
     /// order and safe to repeat: duplicates are absorbed by the merge, which
     /// is exactly why a crash at any point during compaction leaves a
     /// recoverable store.
+    ///
+    /// A removed name is refused rather than opened empty. Opening it would
+    /// create a live document out of a removal, and every write to it would
+    /// then be a change to something no replica holds. Bringing the name
+    /// back is a decision with a caller: `data_create_doc` locally, or a
+    /// peer's change from beyond the removal floor.
     fn open_doc(
         &mut self,
         storage: &dyn ProtocolStateStorage,
@@ -248,6 +517,11 @@ impl OfflineProtocol {
             return Ok(());
         }
         self.load_space(storage, space)?;
+        if self.doc_is_removed(space, doc) {
+            return Err(Error::InvalidState(format!(
+                "document {space}/{doc} was removed; create it again to reuse the name"
+            )));
+        }
 
         let mut document = DataDoc::new();
         let mut compacted_bytes = 0usize;
@@ -590,13 +864,33 @@ impl OfflineProtocol {
         for space in spaces {
             self.persist_space(storage, &space)?;
         }
+
+        // Removal records have no document to carry them, so a backend swap
+        // that left them behind would move a space into a store where every
+        // removed name reads as one nobody ever created, and the next offer
+        // from any peer would refill all of them.
+        let removals: Vec<((String, String), DocMeta)> = self
+            .data
+            .meta
+            .iter()
+            .map(|(key, meta)| (key.clone(), meta.clone()))
+            .collect();
+        for ((space, doc), meta) in removals {
+            self.persist_doc_meta(storage, &space, &doc, &meta)?;
+        }
         Ok(())
     }
 
     /// Create a document, or do nothing if it already exists.
+    ///
+    /// A name that was removed comes back empty, keeping its removal floor,
+    /// so the old contents cannot arrive from a replica that never heard
+    /// about the removal.
     pub fn data_create_doc(&mut self, space: &str, doc: &str) -> Result<()> {
         Self::validate_ids(space, doc)?;
         let storage = self.require_data_storage()?;
+        self.load_space(storage.as_ref(), space)?;
+        self.revive_doc(storage.as_ref(), space, doc)?;
         self.open_doc(storage.as_ref(), space, doc)?;
         self.persist_space(storage.as_ref(), space)
     }
@@ -645,6 +939,240 @@ impl OfflineProtocol {
         Ok(versions)
     }
 
+    /// Every removal this space knows about, with the floor it recorded.
+    ///
+    /// Names that came back are included, because the floor still describes
+    /// content that was removed: a third replica that never heard about the
+    /// removal is holding exactly that content, and this is what tells it
+    /// to drop it.
+    pub(crate) fn data_sync_tombstones(&mut self, space: &str) -> Result<BTreeMap<String, String>> {
+        let Some(storage) = self.data_storage_for_sync() else {
+            return Ok(BTreeMap::new());
+        };
+        offline_protocol_data::validate_space_name(space).map_err(map_data_error)?;
+        self.load_space(storage.as_ref(), space)?;
+        Ok(self
+            .data
+            .meta
+            .range((space.to_string(), String::new())..)
+            .take_while(|((known, _), _)| known == space)
+            .map(|((_, doc), meta)| (doc.clone(), meta.gone.clone()))
+            .collect())
+    }
+
+    /// Apply a removal a peer told us about.
+    ///
+    /// The floor decides, never the message: a copy the floor covers is
+    /// removed, and a copy carrying anything beyond it is kept, because that
+    /// is an edit the removal never saw. Either way the floor is recorded,
+    /// including for a name this device has never held, so a third replica
+    /// still holding the removed content cannot seed it back later.
+    ///
+    /// A floor this device already holds, or one a held floor covers, is
+    /// answered from memory with no write and no open. Floors are carried on
+    /// every offer for the life of the space, so that is the common case,
+    /// and it has to be free for two reasons. The obvious one is cost: one
+    /// sealed record per removed name per exchange, from every peer. The
+    /// other is a name that was brought back on purpose and not yet written
+    /// to: every version covers the empty one, so a floor that was already
+    /// judged would read the fresh document as removed content and delete
+    /// it. A floor decides once, when it first arrives.
+    pub(crate) fn data_apply_tombstone(
+        &mut self,
+        space: &str,
+        doc: &str,
+        floor: &VersionToken,
+    ) -> Result<TombstoneOutcome> {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+        Self::validate_ids(space, doc)?;
+        // Checked once on the way in. A floor that does not decode is stored
+        // for the life of the space and covers nothing, which costs a record
+        // for no removal at all.
+        floor.validate().map_err(map_data_error)?;
+        let storage = self.require_data_storage()?;
+        self.load_space(storage.as_ref(), space)?;
+
+        let held = self
+            .data
+            .spaces
+            .get(space)
+            .is_some_and(|record| record.docs.contains(doc));
+
+        let merged = match self.doc_floor(space, doc) {
+            Some(existing) if existing.includes(floor).map_err(map_data_error)? => {
+                return Ok(TombstoneOutcome::Unchanged);
+            }
+            Some(existing) => existing.union(floor).map_err(map_data_error)?,
+            None => floor.clone(),
+        };
+        // The union only ever grows, and a peer can grow it by naming a
+        // fresh replica in every offer. Bounded here rather than at the
+        // frame, because the frame bounds one floor and this bounds the
+        // sum of every floor ever merged into this name.
+        if merged.as_bytes().len() > MAX_REMOVAL_FLOOR_BYTES {
+            return Err(Error::Other(format!(
+                "removal floor for {space}/{doc} would exceed {MAX_REMOVAL_FLOOR_BYTES} bytes"
+            )));
+        }
+        let encoded = BASE64.encode(merged.as_bytes());
+
+        if !held {
+            let alive = self
+                .data
+                .meta
+                .get(&(space.to_string(), doc.to_string()))
+                .is_some_and(|meta| meta.alive);
+            self.set_doc_meta(
+                storage.as_ref(),
+                space,
+                doc,
+                DocMeta {
+                    gone: encoded,
+                    alive,
+                },
+            )?;
+            return Ok(TombstoneOutcome::Recorded);
+        }
+
+        // Pending edits count as ours and are flushed before the comparison,
+        // or an edit made a moment ago would read as content the removal
+        // covered and be deleted by it.
+        if let Err(err) = self.data_flush(space, doc) {
+            debug!(space, doc, error = %err, "Could not flush before judging a removal; judging the last durable version");
+        }
+        let ours =
+            VersionToken::from_bytes(BASE64.decode(self.data_doc_version(space, doc)?).map_err(
+                |err| Error::Serialization(format!("undecodable document version: {err}")),
+            )?);
+
+        if !merged.includes(&ours).map_err(map_data_error)? {
+            // Beyond the floor: an edit the removal never saw. The document
+            // stays, the floor is kept, and the peer gets the edit back
+            // through the ordinary exchange.
+            self.set_doc_meta(
+                storage.as_ref(),
+                space,
+                doc,
+                DocMeta {
+                    gone: encoded,
+                    alive: true,
+                },
+            )?;
+            return Ok(TombstoneOutcome::Kept);
+        }
+
+        self.set_doc_meta(
+            storage.as_ref(),
+            space,
+            doc,
+            DocMeta {
+                gone: encoded,
+                alive: false,
+            },
+        )?;
+
+        self.data.docs.remove(&(space.to_string(), doc.to_string()));
+        let first_error = self.purge_doc_records(storage.as_ref(), space, doc, None);
+        if let Some(record) = self.data.spaces.get_mut(space) {
+            record.docs.remove(doc);
+        }
+        self.persist_space(storage.as_ref(), space)?;
+        if let Some(detail) = first_error {
+            warn!(
+                space,
+                doc,
+                detail,
+                "Removed a document a peer removed, but not every record could be deleted"
+            );
+        }
+
+        self.emit_event(Event::DataDocRemoved {
+            space_id: space.to_string(),
+            doc_id: doc.to_string(),
+            by: DocRemovedBy::Peer,
+        });
+        Ok(TombstoneOutcome::Deleted)
+    }
+
+    /// Let a removed name hold a document again, because something beyond
+    /// its floor is about to be imported into it.
+    ///
+    /// Separate from the refusal, and called only after it: content beyond a
+    /// removal floor is an edit the removal never saw, and an edit beats a
+    /// removal. The name comes back keeping its floor, so the *rest* of the
+    /// removed content still cannot arrive from a replica that has not heard
+    /// about the removal.
+    pub(crate) fn data_revive_removed_doc(&mut self, space: &str, doc: &str) -> Result<()> {
+        let storage = self.require_data_storage()?;
+        self.load_space(storage.as_ref(), space)?;
+        self.revive_doc(storage.as_ref(), space, doc)
+    }
+
+    /// The removal floor for a document, with its space loaded first.
+    ///
+    /// [`Self::doc_floor`] answers off memory and needs the space loaded.
+    /// The sync paths below can be the first thing to touch a space after
+    /// a launch, on the media road in particular, and a floor missed there
+    /// is a removed document refilled.
+    fn loaded_doc_floor(&mut self, space: &str, doc: &str) -> Option<VersionToken> {
+        let storage = self.data_storage_for_sync()?;
+        self.load_space(storage.as_ref(), space).ok()?;
+        self.doc_floor(space, doc)
+    }
+
+    /// Whether a document has a removal floor at all.
+    ///
+    /// What decides whether a blob for it has to be judged against one.
+    /// That judgement is an engine decode and has to run inside an
+    /// in-flight marker, so a name with no floor, which is every name in a
+    /// space nobody has removed anything from, skips the marker and the
+    /// decode both.
+    pub(crate) fn data_doc_has_floor(&mut self, space: &str, doc: &str) -> bool {
+        self.loaded_doc_floor(space, doc).is_some()
+    }
+
+    /// Whether a version a peer offers is content a removal already covered.
+    ///
+    /// Cheap and answered from memory: the overwhelming case is a space with
+    /// no removals at all, where there is nothing to decode.
+    pub(crate) fn data_version_below_floor(
+        &mut self,
+        space: &str,
+        doc: &str,
+        theirs: &VersionToken,
+    ) -> bool {
+        let Some(floor) = self.loaded_doc_floor(space, doc) else {
+            return false;
+        };
+        floor.includes(theirs).unwrap_or(false)
+    }
+
+    /// Whether a blob carries nothing beyond a removal floor.
+    ///
+    /// An engine decode, not a header read: the blob's changes are decoded
+    /// into a scratch document to find the version they end at, with the
+    /// same decoder an import runs. The caller owes it the containment an
+    /// import gets, an in-flight marker written before and cleared after;
+    /// see [`offline_protocol_data::blob_end_version`]. A document with no
+    /// floor skips the decode entirely, which is every document in a space
+    /// nobody has removed anything from.
+    pub(crate) fn data_blob_below_floor(&mut self, space: &str, doc: &str, blob: &[u8]) -> bool {
+        let Some(floor) = self.loaded_doc_floor(space, doc) else {
+            return false;
+        };
+        match offline_protocol_data::blob_end_version(blob) {
+            Ok(end) => floor.includes(&end).unwrap_or(false),
+            Err(err) => {
+                // Undecodable bytes are refused a few steps later by the
+                // import itself, which reports properly. Not below the
+                // floor, because nothing here established that.
+                debug!(space, doc, error = %err, "Could not read a blob's version to judge it against a removal");
+                false
+            }
+        }
+    }
+
     /// The version we hold of one document, encoded as a frame carries it.
     pub(crate) fn data_doc_version(&mut self, space: &str, doc: &str) -> Result<String> {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -685,9 +1213,45 @@ impl OfflineProtocol {
     /// A space that cannot be read admits, rather than refusing on a storage
     /// hiccup: whatever follows fails on the same storage and reports it
     /// where the failure actually is.
+    /// Removed names count against the cap alongside held ones. Each one is
+    /// a record a peer talked this device into storing, and the record
+    /// outlives the document by design, so counting only what is held would
+    /// let a peer name a fresh thousand documents after every removal
+    /// sweep.
+    ///
+    /// A name already known here, held or removed, always admits: nothing a
+    /// peer says about it costs a record that does not already exist. That
+    /// matters at the ceiling, where a space stays for good once it gets
+    /// there, because floors never expire. Refusing a known name there
+    /// would refuse the floor a peer re-sends on every offer, and a removal
+    /// for a held document sorted after it.
     pub(crate) fn data_space_admits_doc(&mut self, space: &str, doc: &str, cap: usize) -> bool {
-        self.space_docs(space)
-            .is_none_or(|docs| docs.contains(doc) || docs.len() < cap)
+        // Called once per name in an inbound frame, so it reads both fields
+        // in place rather than cloning the index: a peer may send offers as
+        // fast as the link carries them, and this is one of the things each
+        // one pays for.
+        if self.space_docs(space).is_none() {
+            return true;
+        }
+        let Some(record) = self.data.spaces.get(space) else {
+            return true;
+        };
+        if record.docs.contains(doc)
+            || self
+                .data
+                .meta
+                .contains_key(&(space.to_string(), doc.to_string()))
+        {
+            return true;
+        }
+        let removed = self
+            .data
+            .meta
+            .range((space.to_string(), String::new())..)
+            .take_while(|((known, _), _)| known == space)
+            .filter(|((_, name), _)| !record.docs.contains(name.as_str()))
+            .count();
+        record.docs.len() + removed < cap
     }
 
     /// What a replica at `theirs` is missing from a document.
@@ -786,40 +1350,21 @@ impl OfflineProtocol {
         Ok(outcome)
     }
 
-    /// Delete a document and every record belonging to it.
+    /// Drop this device's copy of a document, leaving the peers' copies
+    /// alone.
+    ///
+    /// Eviction, not removal: it reclaims the space a document occupies here
+    /// and records nothing about the name, so the next version exchange with
+    /// a replica that still holds it recreates and refills it. That is the
+    /// right call for a cache and the wrong one for content somebody wants
+    /// gone from the room, which is what [`Self::data_remove_doc`] is for.
     pub fn data_delete_doc(&mut self, space: &str, doc: &str) -> Result<()> {
         Self::validate_ids(space, doc)?;
         let storage = self.require_data_storage()?;
         self.load_space(storage.as_ref(), space)?;
 
         self.data.docs.remove(&(space.to_string(), doc.to_string()));
-
-        // Every record is attempted even after one fails, so a partial
-        // failure still removes as much as it can; the first error is what
-        // the caller hears. Reporting matters because a record that survives
-        // a delete is replayed into the *next* document of the same name,
-        // which resurrects the deleted incarnation's contents.
-        let mut first_error: Option<String> = None;
-        let mut record_error = |err: crate::protocol_state_storage::ProtocolStateError| {
-            if first_error.is_none() {
-                first_error = Some(err.to_string());
-            }
-        };
-
-        if let Err(err) = storage.delete(storage_keys::DATA_DOCS, &doc_key(space, doc)) {
-            record_error(err);
-        }
-        let prefix = format!("{space}/{doc}/");
-        match storage.list_keys(storage_keys::DATA_DELTA_LOG) {
-            Ok(keys) => {
-                for key in keys.iter().filter(|key| key.starts_with(&prefix)) {
-                    if let Err(err) = storage.delete(storage_keys::DATA_DELTA_LOG, key) {
-                        record_error(err);
-                    }
-                }
-            }
-            Err(err) => record_error(err),
-        }
+        let first_error = self.purge_doc_records(storage.as_ref(), space, doc, None);
         if let Some(record) = self.data.spaces.get_mut(space) {
             record.docs.remove(doc);
         }
@@ -829,6 +1374,214 @@ impl OfflineProtocol {
             Some(detail) => Err(Error::Other(format!(
                 "failed to delete every record of document {space}/{doc}: {detail}"
             ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Remove a document from every replica of its space.
+    ///
+    /// Records the version the document stood at as its removal floor, then
+    /// deletes it here and tells the space. A replica whose copy the floor
+    /// covers deletes it too; a replica holding an edit the floor does not
+    /// cover keeps its copy and hands the document back, contents and all,
+    /// because that edit's history *is* those contents. An edit therefore
+    /// beats a removal, whichever happened first, and the pair never
+    /// produces a half-emptied document.
+    ///
+    /// Pending edits here are flushed first so the floor covers them:
+    /// removing a document must not leave this device's own unsent work
+    /// looking like somebody else's concurrent edit.
+    ///
+    /// Removing a name this device does not hold does nothing. There is no
+    /// version to take a floor from, and an empty floor would name no
+    /// content at all.
+    ///
+    /// Re-using the name afterwards starts a document whose history is
+    /// disjoint from the floor. What it does not do is fence the old
+    /// contents off: a replica that edited them concurrently keeps them and
+    /// the ordinary exchange merges them into the new document, and a
+    /// replica that never learned of the removal merges the new contents
+    /// into its old copy. A name is cheap; a fresh one is the safe choice.
+    pub fn data_remove_doc(&mut self, space: &str, doc: &str) -> Result<()> {
+        Self::validate_ids(space, doc)?;
+        let storage = self.require_data_storage()?;
+        self.load_space(storage.as_ref(), space)?;
+        if !self.removable(space, doc) {
+            return Ok(());
+        }
+
+        // Errors here are logged and stepped over, exactly as the import
+        // path's pre-flush does. A document over its cap fails every flush
+        // and must still be removable; refusing would leave the only way out
+        // of the cap closed. The floor is taken from the version held in
+        // memory either way, which already includes what the flush could
+        // not write.
+        if let Err(err) = self.data_flush(space, doc) {
+            debug!(space, doc, error = %err, "Could not flush before removing; the floor is taken from the version held in memory");
+        }
+
+        let first_error = self.record_removal(storage.as_ref(), space, doc, None)?;
+        self.persist_space(storage.as_ref(), space)?;
+        self.nudge_data_sync(space, None, "document_removed");
+
+        match first_error {
+            Some(detail) => Err(Error::Other(format!(
+                "document {space}/{doc} is removed, but not every record could be deleted: \
+                 {detail}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Whether a removal has anything to act on: the document is held here
+    /// and does not already stand removed.
+    ///
+    /// Removing a name this device does not hold does nothing. There is no
+    /// version to take a floor from, and an empty floor would name no
+    /// content at all. The space must already be loaded.
+    fn removable(&self, space: &str, doc: &str) -> bool {
+        if self.doc_is_removed(space, doc) {
+            return false;
+        }
+        let held = self
+            .data
+            .spaces
+            .get(space)
+            .is_some_and(|record| record.docs.contains(doc));
+        if !held {
+            debug!(
+                space,
+                doc, "Nothing to remove: this device does not hold the document"
+            );
+        }
+        held
+    }
+
+    /// Record a document's removal floor, drop the copy held here and purge
+    /// its records, reporting the first record that would not delete.
+    ///
+    /// What one removal writes, without what a batch of them shares: the
+    /// space index is not persisted here and the space is not told, so a
+    /// caller removing every document in a space does each once at the end
+    /// rather than once per document.
+    ///
+    /// The floor is written before the records it removes. A crash in
+    /// between leaves a name every reader already treats as removed, which
+    /// the next open finishes; the reverse order leaves records that vote
+    /// the document back into existence.
+    ///
+    /// `delta_keys` is the delta log's listing when the caller already has
+    /// one. It has to postdate the document's last flush, or the delta that
+    /// flush wrote is missed by the purge and replayed into the next
+    /// document of the same name.
+    fn record_removal(
+        &mut self,
+        storage: &dyn ProtocolStateStorage,
+        space: &str,
+        doc: &str,
+        delta_keys: Option<&[String]>,
+    ) -> Result<Option<String>> {
+        let floor = self.data_doc_version(space, doc)?;
+        let gone = match self.doc_floor(space, doc) {
+            // Two removals of one name, ours and one we learned from a
+            // peer, each cover changes the other does not.
+            Some(existing) => {
+                use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+                let taken = VersionToken::from_bytes(BASE64.decode(&floor).map_err(|err| {
+                    Error::Serialization(format!("undecodable document version: {err}"))
+                })?);
+                BASE64.encode(existing.union(&taken).map_err(map_data_error)?.as_bytes())
+            }
+            None => floor,
+        };
+        self.set_doc_meta(storage, space, doc, DocMeta { gone, alive: false })?;
+
+        self.data.docs.remove(&(space.to_string(), doc.to_string()));
+        let first_error = self.purge_doc_records(storage, space, doc, delta_keys);
+        if let Some(record) = self.data.spaces.get_mut(space) {
+            record.docs.remove(doc);
+        }
+
+        self.emit_event(Event::DataDocRemoved {
+            space_id: space.to_string(),
+            doc_id: doc.to_string(),
+            by: DocRemovedBy::Local,
+        });
+        Ok(first_error)
+    }
+
+    /// Remove every document a space holds, from every replica of it.
+    ///
+    /// Each document is attempted even after one fails, and the first error
+    /// is what the caller hears. What every removal shares is done once for
+    /// the lot: the delta log is listed once, the space index is written
+    /// once, and the space is told once, with one offer carrying every
+    /// removal. Per document that is two full listings and one sealed index
+    /// write fewer, which on a custom backend is three round trips under the
+    /// engine lock, for each of up to a thousand names.
+    pub fn data_remove_space(&mut self, space: &str) -> Result<()> {
+        offline_protocol_data::validate_space_name(space).map_err(map_data_error)?;
+        let storage = self.require_data_storage()?;
+        self.load_space(storage.as_ref(), space)?;
+        let docs: Vec<String> = self
+            .data_list_docs(space)?
+            .into_iter()
+            .filter(|doc| self.removable(space, doc))
+            .collect();
+        if docs.is_empty() {
+            return Ok(());
+        }
+
+        // Every document is flushed before the delta log is listed, and
+        // nothing writes to the log between the listing and the purges. A
+        // flush after the listing would write a delta the listing does not
+        // name, the purge would leave it behind, and the next document under
+        // that name would replay it: the removed contents, back.
+        for doc in &docs {
+            if let Err(err) = self.data_flush(space, doc) {
+                debug!(space, doc, error = %err, "Could not flush before removing; the floor is taken from the version held in memory");
+            }
+        }
+        let delta_keys = match storage.list_keys(storage_keys::DATA_DELTA_LOG) {
+            Ok(keys) => Some(keys),
+            Err(err) => {
+                // Each removal lists for itself, as a single one does.
+                warn!(space, error = %err, "Could not list the delta log once for the space; listing per document");
+                None
+            }
+        };
+
+        let mut first_error: Option<Error> = None;
+        let mut note = |err: Error| {
+            if first_error.is_none() {
+                first_error = Some(err);
+            }
+        };
+        for doc in &docs {
+            match self.record_removal(storage.as_ref(), space, doc, delta_keys.as_deref()) {
+                Ok(None) => {}
+                Ok(Some(detail)) => note(Error::Other(format!(
+                    "document {space}/{doc} is removed, but not every record could be deleted: \
+                     {detail}"
+                ))),
+                Err(err) => note(err),
+            }
+        }
+
+        // The index once, at the end. A crash before it leaves an index
+        // that still lists the removed names, and the next open reads the
+        // removal records after it and drops them: the index is a cache,
+        // and the removal record is what decides.
+        if let Err(err) = self.persist_space(storage.as_ref(), space) {
+            note(err);
+        }
+        // Told regardless of errors. An error past a removal record is
+        // still a removal, and one before it costs at worst an offer that
+        // says nothing new.
+        self.nudge_data_sync(space, None, "space_removed");
+
+        match first_error {
+            Some(err) => Err(err),
             None => Ok(()),
         }
     }
@@ -849,14 +1602,20 @@ impl OfflineProtocol {
     /// Every space the store knows of.
     ///
     /// Derived from what is on disk, so a space whose last document was
-    /// deleted still lists while its index record survives.
+    /// deleted still lists while its index record survives, and a space
+    /// whose documents were all removed lists for as long as its removal
+    /// records do, which is the life of the space.
     pub fn data_list_spaces(&mut self) -> Result<Vec<String>> {
         let storage = self.require_data_storage()?;
         let mut spaces = BTreeSet::new();
+        // Removal records count: a space whose documents were all removed
+        // still has something to say to its peers, and leaving it out of
+        // this list is what would stop the start-up sweep telling them.
         for key_type in [
             storage_keys::DATA_SPACES,
             storage_keys::DATA_DOCS,
             storage_keys::DATA_DELTA_LOG,
+            storage_keys::DATA_DOC_META,
         ] {
             if let Ok(keys) = storage.list_keys(key_type) {
                 for key in keys {
@@ -1326,6 +2085,7 @@ impl OfflineProtocol {
         };
         self.data.docs.clear();
         self.data.spaces.clear();
+        self.data.meta.clear();
         // Every window and every outstanding question goes with the content
         // they were about. Left behind, a window suppresses the first offer
         // or the first blob request made after the wipe, which is the same
@@ -1362,6 +2122,7 @@ impl OfflineProtocol {
             storage_keys::DATA_DELTA_LOG,
             storage_keys::DATA_SPACES,
             storage_keys::DATA_SYNC,
+            storage_keys::DATA_DOC_META,
         ] {
             match storage.list_keys(key_type) {
                 Ok(keys) => {

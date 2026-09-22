@@ -1881,8 +1881,42 @@ interface DataStore {
     [Throws=ProtocolError]
     void create_doc(string space_id, string doc_id);
 
+    // Drop this device's copy, leaving the peers' copies alone.
+    //
+    // Eviction rather than removal: it reclaims what the document occupies
+    // here and records nothing about the name, so the next version exchange
+    // with a replica that still holds it recreates and refills it. That is
+    // the right call for a cache and the wrong one for content somebody
+    // wants gone from the room, which is what remove_doc is for.
     [Throws=ProtocolError]
     void delete_doc(string space_id, string doc_id);
+
+    // Remove a document from every replica of its space.
+    //
+    // Records the version the document stood at, then deletes it here and
+    // tells the space. A replica whose copy that version covers deletes it
+    // too; a replica holding an edit made concurrently with the removal
+    // keeps its copy and hands the document back, contents and all, because
+    // that edit's history is those contents. An edit therefore beats a
+    // removal whichever happened first, and the pair never produces a
+    // half-emptied document.
+    //
+    // Removing a name this device does not hold does nothing: there is no
+    // version to record, and no content to name.
+    //
+    // Re-using the name afterwards is not fenced off: a replica that kept
+    // the old contents past the removal merges them into the new document,
+    // and a replica on an older build merges the new contents into its old
+    // copy. Give new content a fresh name.
+    [Throws=ProtocolError]
+    void remove_doc(string space_id, string doc_id);
+
+    // Remove every document a space holds, from every replica of it.
+    //
+    // Each document is attempted even after one fails, and the first error
+    // is what the caller hears.
+    [Throws=ProtocolError]
+    void remove_space(string space_id);
 
     [Throws=ProtocolError]
     sequence<string> list_docs(string space_id);
@@ -1961,12 +1995,15 @@ interface DataStore {
     // Delete every record the data layer owns. The logout path for an
     // application that configured its own backend.
     //
-    // Only durable once replication has stopped. There are no deletion
-    // tombstones, so a peer cannot tell a wiped space from one this device
-    // has never seen, and on a running engine with live sessions its next
-    // version offer recreates and refills every document. Stopping covers it
-    // only while it stays stopped: the peer still holds them, so they return
-    // when replication resumes. This clears the device, not the content.
+    // Only durable once replication has stopped, and it removes nothing from
+    // anybody else. A wipe leaves no removal records behind (it has to,
+    // because a logout must leave a custom backend empty), so a peer cannot
+    // tell a wiped space from one this device has never seen, and on a
+    // running engine with live sessions its next version offer recreates and
+    // refills every document. Stopping covers it only while it stays
+    // stopped: the peer still holds them, so they return when replication
+    // resumes. This clears the device; remove_space is what clears the
+    // room.
     [Throws=ProtocolError]
     void wipe_all();
 
