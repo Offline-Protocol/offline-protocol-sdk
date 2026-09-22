@@ -33,6 +33,57 @@ impl VersionToken {
     pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
         Self(bytes.into())
     }
+
+    /// Whether this version covers every change `other` names.
+    ///
+    /// The question a deletion floor asks. A document removed at version
+    /// `T` is removed along with everything at or below `T`, and anything a
+    /// peer offers or sends from below it is content that removal already
+    /// covered. What sits *beyond* `T` is an edit made concurrently with
+    /// the removal or after it, which is content the removal never saw and
+    /// therefore never decided about.
+    ///
+    /// Both tokens are decoded, so a caller holding bytes that came off a
+    /// wire gets an error rather than a wrong answer. Equality is not
+    /// enough for this question and neither is byte comparison: two
+    /// encodings of one version need not be identical, and a version that
+    /// merely *overlaps* another is neither below it nor beyond it.
+    pub fn includes(&self, other: &VersionToken) -> DataResult<bool> {
+        Ok(decode_version(&self.0)?.includes_vv(&decode_version(&other.0)?))
+    }
+
+    /// The version covering everything either token covers.
+    ///
+    /// Two replicas that removed the same document independently each hold
+    /// a floor the other does not, and neither is wrong. Merging them keeps
+    /// both removals, which is what makes the floors converge rather than
+    /// depend on which offer arrived first.
+    pub fn union(&self, other: &VersionToken) -> DataResult<VersionToken> {
+        let mut ours = decode_version(&self.0)?;
+        ours.merge(&decode_version(&other.0)?);
+        Ok(Self(ours.encode()))
+    }
+}
+
+fn decode_version(bytes: &[u8]) -> DataResult<VersionVector> {
+    VersionVector::decode(bytes).map_err(|err| DataError::Corrupt(err.to_string()))
+}
+
+/// The version a blob would leave a document at, without importing it.
+///
+/// Decoded from the blob's own header with the checksum on, so this says
+/// nothing about whether the blob will apply: it answers what the bytes
+/// claim to carry, which is the only question that can be asked before the
+/// engine is allowed to touch them. That ordering is the same one
+/// [`DataDoc::inspect`] exists for, and for the same reason.
+///
+/// A caller compares this against a removal floor: a blob whose end version
+/// the floor already covers carries nothing the removal did not delete, and
+/// importing it would recreate a document that was removed on purpose.
+pub fn blob_end_version(bytes: &[u8]) -> DataResult<VersionToken> {
+    let meta = LoroDoc::decode_import_blob_meta(bytes, true)
+        .map_err(|err| DataError::Corrupt(err.to_string()))?;
+    Ok(VersionToken(meta.partial_end_vv.encode()))
 }
 
 /// A committed change, ready to persist and (from F3) to send.

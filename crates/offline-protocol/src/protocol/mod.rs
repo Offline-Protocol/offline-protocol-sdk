@@ -435,6 +435,19 @@ pub struct OfflineProtocol {
     /// [`DATA_MEDIA_V1`]: crate::protocol::types::DATA_MEDIA_V1
     peer_data_media: std::collections::HashSet<String>,
 
+    /// Peers whose key package advertised document removals
+    /// ([`DATA_TOMBSTONE_V1`] in `data_versions`), so a version offer toward
+    /// them carries the `gone` field.
+    ///
+    /// A fourth set for the same reason as the third, with one difference
+    /// worth keeping in mind: this one gates traffic, not safety. A peer
+    /// missing from it ignores the field rather than mishandling it, and
+    /// this device still refuses that peer's offers of removed content
+    /// against its own floor.
+    ///
+    /// [`DATA_TOMBSTONE_V1`]: crate::protocol::types::DATA_TOMBSTONE_V1
+    peer_data_tombstones: std::collections::HashSet<String>,
+
     /// Peers already flagged with a `PlaintextSend` security warning, so the
     /// explicit-opt-out plaintext path warns once per peer instead of once
     /// per message.
@@ -1020,6 +1033,7 @@ impl OfflineProtocol {
             peer_data_group: std::collections::HashSet::new(),
             peer_data_group_attested: std::collections::HashSet::new(),
             peer_data_media: std::collections::HashSet::new(),
+            peer_data_tombstones: std::collections::HashSet::new(),
             peer_rich_attested: std::collections::HashSet::new(),
             plaintext_send_warned: std::collections::HashSet::new(),
             plaintext_receive_warned: std::collections::HashSet::new(),
@@ -1221,6 +1235,7 @@ impl OfflineProtocol {
         let previous_peer_data_group = self.peer_data_group.clone();
         let previous_peer_data_group_attested = self.peer_data_group_attested.clone();
         let previous_peer_data_media = self.peer_data_media.clone();
+        let previous_peer_data_tombstones = self.peer_data_tombstones.clone();
 
         let previous_local_id = std::mem::replace(&mut self.local_id, local_id.clone());
         let previous_identity_established = self.identity_established;
@@ -1381,6 +1396,7 @@ impl OfflineProtocol {
             self.peer_data_group = previous_peer_data_group;
             self.peer_data_group_attested = previous_peer_data_group_attested;
             self.peer_data_media = previous_peer_data_media;
+            self.peer_data_tombstones = previous_peer_data_tombstones;
             return Err(err);
         }
 
@@ -2128,6 +2144,7 @@ impl OfflineProtocol {
         self.peer_data_group.remove(peer);
         self.peer_data_group_attested.remove(peer);
         self.peer_data_media.remove(peer);
+        self.peer_data_tombstones.remove(peer);
         // A peer we have stopped replicating with cannot answer anything we
         // asked them for, so the questions go too. Left behind they would
         // hold slots against the fetch bound until they timed out.
@@ -2143,6 +2160,7 @@ impl OfflineProtocol {
         self.peer_data_group.clear();
         self.peer_data_group_attested.clear();
         self.peer_data_media.clear();
+        self.peer_data_tombstones.clear();
         // Reported, not merely dropped, exactly as the single-peer road
         // reports. Nothing the application did reaches this one: the bound
         // on remembered peers is hit, a stranger's key package forgets every

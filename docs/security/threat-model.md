@@ -514,6 +514,16 @@ rather than a crash loop driven by the delivery ladder faithfully doing its
 job. See
 [ADR 0019](../adr/0019-remote-document-imports-are-contained-not-trusted.md).
 
+**A member can also remove a document from the space.** A removal travels, so
+any member can make one and every replica applies it. Same trust class as
+above rather than a new one: it takes somebody the user accepted into a shared
+document, it is attributable to the member whose leaf signed the frame, and it
+does not destroy content a replica still has a claim on, because a replica
+holding an edit the removal did not cover keeps the document and hands it back
+to everyone. What it does cost is a small record per removed name, which
+counts against the same per-space document ceiling every other name a peer
+introduces does.
+
 **A smaller cost at the same boundary:** every version offer a peer sends
 makes this device read the version of each document in that space, and a peer
 may send offers as fast as the link carries them. The work is bounded by the

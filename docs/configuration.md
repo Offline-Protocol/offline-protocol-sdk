@@ -733,11 +733,12 @@ Two obligations come with a custom backend:
 - Wipe it on logout. `wipePersistedState()` clears the **default** provider's
   account directory, which a custom backend is not inside, so call
   `DataStore.wipeAll()` as well or documents outlive the account. Stop the
-  engine first: there are no deletion tombstones, so a wipe on a running
-  engine with live sessions is undone by the peer's next version offer, which
-  recreates and refills every document with no error and no event. Stopping
-  covers it only while it stays stopped, because the peer still holds the
-  documents: the call clears this device, it does not delete content.
+  engine first: a wipe records no removals, because a logout has to leave a
+  custom backend empty, so on a running engine with live sessions it is undone
+  by the peer's next version offer, which recreates and refills every document
+  with no error and no event. Stopping covers it only while it stays stopped,
+  because the peer still holds the documents: the call clears this device.
+  `DataStore.removeSpace()` is what clears the room.
 
 **Limits.** A document is capped at 1 MiB compacted, with a
 `data_doc_size_warning` event at 768 KiB. Passing the cap raises `DocTooLarge`;

@@ -5,7 +5,7 @@ use super::{
     lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
     PeerCapabilities, PendingDecryptRecord, PendingMessage, PendingMessageRecord,
     ReceivedKeyPackage, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord, DATA_GROUP_V1,
-    DATA_MEDIA_V1, DATA_SYNC_V1, MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO,
+    DATA_MEDIA_V1, DATA_SYNC_V1, DATA_TOMBSTONE_V1, MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO,
     MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH, MAX_PENDING_KEY_PACKAGES, MAX_PENDING_MESSAGES_GLOBAL,
     MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
     MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_PERSISTED_CAPABILITY_VERSIONS,
@@ -105,6 +105,10 @@ pub(crate) enum StateCategory {
     /// [`Self::DataDocs`], and absent from
     /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] for the same reason.
     DataSync,
+    /// What a replicated document's name says after a removal. Post-split
+    /// only, like [`Self::DataDocs`], and absent from
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] for the same reason.
+    DataDocMeta,
 }
 
 impl StateCategory {
@@ -133,6 +137,7 @@ impl StateCategory {
             storage_keys::DATA_DELTA_LOG => Self::DataDeltaLog,
             storage_keys::DATA_SPACES => Self::DataSpaces,
             storage_keys::DATA_SYNC => Self::DataSync,
+            storage_keys::DATA_DOC_META => Self::DataDocMeta,
             _ => return None,
         })
     }
@@ -170,6 +175,7 @@ impl StateCategory {
         Self::DataDeltaLog,
         Self::DataSpaces,
         Self::DataSync,
+        Self::DataDocMeta,
     ];
 
     /// The storage key type this category is written under.
@@ -200,6 +206,7 @@ impl StateCategory {
             Self::DataDeltaLog => storage_keys::DATA_DELTA_LOG,
             Self::DataSpaces => storage_keys::DATA_SPACES,
             Self::DataSync => storage_keys::DATA_SYNC,
+            Self::DataDocMeta => storage_keys::DATA_DOC_META,
         }
     }
 
@@ -303,6 +310,7 @@ impl StateCategory {
             | Self::DataDeltaLog
             | Self::DataSpaces
             | Self::DataSync
+            | Self::DataDocMeta
             | Self::DedupSeenIds => true,
             Self::PeerCapabilities
             | Self::SessionStates
@@ -3137,6 +3145,14 @@ impl OfflineProtocol {
             if self.config.data.enabled && caps.data_versions.contains(&DATA_MEDIA_V1) {
                 self.peer_data_media.insert(peer_id.clone());
             }
+            // And removals, which cost the least of the four to skip: the
+            // field would simply be left out of the next offer until the
+            // peer's key package arrives again. Restored anyway, because a
+            // removal that waits for that is a document the peer keeps
+            // offering back meanwhile.
+            if self.config.data.enabled && caps.data_versions.contains(&DATA_TOMBSTONE_V1) {
+                self.peer_data_tombstones.insert(peer_id.clone());
+            }
             // Not gated on the sealing kill switch: this is a destination
             // address, and the transport decides whether to seal at all. A
             // restore that skipped it would leave the peer addressed by the
@@ -5452,15 +5468,24 @@ mod category_registration_tests {
         }
     }
 
-    /// Documents carry user content, so all three data categories are sealed.
+    /// Documents carry user content, so every data category is sealed.
     /// Stated as a test because the failure it prevents (plaintext documents
     /// at rest) is silent: nothing observable changes when sealing is lost.
+    ///
+    /// The two that carry no document bytes are here for the same reason the
+    /// three that do are. A replication record names the blobs a device
+    /// refused, and a document-meta record carries the version a document
+    /// was removed at: both describe what somebody wrote and when, which is
+    /// the content question asked about the shape of the answer rather than
+    /// its bytes.
     #[test]
     fn data_categories_are_sealed_at_rest() {
         for category in [
             StateCategory::DataDocs,
             StateCategory::DataDeltaLog,
             StateCategory::DataSpaces,
+            StateCategory::DataSync,
+            StateCategory::DataDocMeta,
         ] {
             assert!(
                 category.requires_sealing(),
@@ -5479,6 +5504,7 @@ mod category_registration_tests {
             storage_keys::DATA_DELTA_LOG,
             storage_keys::DATA_SPACES,
             storage_keys::DATA_SYNC,
+            storage_keys::DATA_DOC_META,
         ] {
             assert!(
                 !storage_keys::ADOPTABLE_STATE_KEY_TYPES.contains(&key_type),

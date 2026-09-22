@@ -112,6 +112,7 @@ impl Node {
             .expect("initialize_mls");
         protocol.peer_data_sync.insert(peer.to_string());
         protocol.peer_data_media.insert(peer.to_string());
+        protocol.peer_data_tombstones.insert(peer.to_string());
 
         let mock = MockTransport::new(TransportType::BLE);
         mock.start().expect("transport start");
@@ -187,6 +188,13 @@ fn pair_of(mut alice: Node, mut bob: Node) -> (Node, Node) {
     bob.protocol.peer_data_sync.insert(alice.address.clone());
     alice.protocol.peer_data_media.insert(bob.address.clone());
     bob.protocol.peer_data_media.insert(alice.address.clone());
+    alice
+        .protocol
+        .peer_data_tombstones
+        .insert(bob.address.clone());
+    bob.protocol
+        .peer_data_tombstones
+        .insert(alice.address.clone());
 
     (alice, bob)
 }
@@ -1300,6 +1308,9 @@ impl ProtocolStateStorage for RecordingStateStorage {
     }
 
     fn delete(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<()> {
+        // Prefixed so a removal's ordering can be asserted without the
+        // write-ordering assertions above having to know about deletes.
+        self.writes.lock().unwrap().push(format!("del:{key_type}"));
         self.inner.delete(key_type, key_id)
     }
 
@@ -3468,4 +3479,590 @@ fn aborting_a_document_layer_transfer_does_not_fail_a_file_nobody_sent() {
         1,
         "an ordinary transfer aborted the same way must still report"
     );
+}
+
+// ---- removals -----------------------------------------------------------
+//
+// A removal is the one thing a version exchange cannot express by absence:
+// a document this device deleted and one it has never seen look identical
+// in an offer, and the rules above answer both by sending the whole
+// document. What follows pins the floor that tells them apart, and the case
+// it deliberately loses to, which is an edit made while the removal was in
+// flight.
+
+/// Whether a node currently holds a document.
+fn holds(node: &mut Node, space: &str, doc: &str) -> bool {
+    node.protocol
+        .data_list_docs(space)
+        .expect("list")
+        .iter()
+        .any(|name| name == doc)
+}
+
+fn removal_records(node: &Node) -> Vec<String> {
+    node.state
+        .list_keys(storage_keys::DATA_DOC_META)
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_removal_reaches_the_other_replica_and_is_not_offered_back() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut alice, &alice_space, "notes", "title", "hello");
+    settle(&mut alice, &mut bob);
+    assert!(
+        holds(&mut bob, &bob_space, "notes"),
+        "the fixture never replicated"
+    );
+
+    alice
+        .protocol
+        .data_remove_doc(&alice_space, "notes")
+        .expect("remove");
+    let rounds = settle(&mut alice, &mut bob);
+
+    assert!(!holds(&mut alice, &alice_space, "notes"));
+    assert!(
+        !holds(&mut bob, &bob_space, "notes"),
+        "the removal did not reach the peer"
+    );
+    assert_eq!(
+        rounds.last(),
+        Some(&0),
+        "the exchange did not terminate: {rounds:?}"
+    );
+
+    // And it stays removed. This is the whole point: before the floor
+    // existed, the next offer from either side recreated and refilled it,
+    // because neither could tell a removed document from one the other had
+    // never seen.
+    alice.protocol.kick_data_sync(&alice_space, "test");
+    bob.protocol.kick_data_sync(&bob_space, "test");
+    settle(&mut alice, &mut bob);
+    assert!(!holds(&mut alice, &alice_space, "notes"));
+    assert!(!holds(&mut bob, &bob_space, "notes"));
+    // Reading it is refused rather than answered empty: an empty answer
+    // would be indistinguishable from a document whose contents were
+    // cleared, which is the other thing an application might have done.
+    assert!(matches!(
+        bob.protocol.data_map_get(&bob_space, "notes", "m", "title"),
+        Err(crate::Error::InvalidState(_))
+    ));
+}
+
+#[test]
+fn an_edit_made_while_a_removal_was_in_flight_brings_the_document_back() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut alice, &alice_space, "notes", "title", "hello");
+    settle(&mut alice, &mut bob);
+
+    // Partitioned: Alice removes, Bob edits. Neither has heard the other.
+    alice
+        .protocol
+        .data_remove_doc(&alice_space, "notes")
+        .expect("remove");
+    write(&mut bob, &bob_space, "notes", "added", "B");
+    alice.transport.clear_sent_messages();
+    bob.transport.clear_sent_messages();
+
+    alice.protocol.kick_data_sync(&alice_space, "test");
+    bob.protocol.kick_data_sync(&bob_space, "test");
+    let rounds = settle(&mut alice, &mut bob);
+
+    // The edit wins, and it brings the whole document with it: the edit's
+    // own history *is* the pre-removal content, so there is no such thing
+    // as getting back the edit alone.
+    assert!(
+        holds(&mut bob, &bob_space, "notes"),
+        "the editing replica lost its own concurrent edit"
+    );
+    assert!(
+        holds(&mut alice, &alice_space, "notes"),
+        "the removing replica never got the concurrent edit back"
+    );
+    assert_eq!(
+        read(&mut alice, &alice_space, "notes", "added"),
+        Some(DataValue::text("B"))
+    );
+    assert_eq!(
+        read(&mut alice, &alice_space, "notes", "title"),
+        Some(DataValue::text("hello")),
+        "the document came back without the content the edit was made on"
+    );
+    assert_eq!(
+        rounds.last(),
+        Some(&0),
+        "the exchange did not terminate: {rounds:?}"
+    );
+}
+
+#[test]
+fn a_removal_is_reported_to_the_application_on_both_sides() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut alice, &alice_space, "notes", "title", "hello");
+    settle(&mut alice, &mut bob);
+    alice.events.lock().unwrap().clear();
+    bob.events.lock().unwrap().clear();
+
+    alice
+        .protocol
+        .data_remove_doc(&alice_space, "notes")
+        .expect("remove");
+    settle(&mut alice, &mut bob);
+
+    let reported = |node: &Node| -> Vec<String> {
+        node.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                crate::Event::DataDocDeleted { doc_id, by, .. } => Some(format!("{doc_id}:{by}")),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(reported(&alice), vec!["notes:local".to_string()]);
+    assert_eq!(
+        reported(&bob),
+        vec!["notes:peer".to_string()],
+        "the peer was never told why the document disappeared"
+    );
+}
+
+#[test]
+fn a_blob_carrying_only_removed_content_never_reaches_the_engine() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut alice, &alice_space, "notes", "title", "hello");
+    settle(&mut alice, &mut bob);
+
+    // Alice removes. Bob never hears about it, so his next exchange offers
+    // the document and then sends the whole thing.
+    alice
+        .protocol
+        .data_remove_doc(&alice_space, "notes")
+        .expect("remove");
+    alice.transport.clear_sent_messages();
+    bob.transport.clear_sent_messages();
+
+    bob.protocol.kick_data_sync(&bob_space, "test");
+    settle(&mut alice, &mut bob);
+
+    assert!(
+        !holds(&mut alice, &alice_space, "notes"),
+        "a peer's copy of removed content recreated the document"
+    );
+}
+
+#[test]
+fn a_name_that_was_removed_can_be_used_again_without_its_old_contents() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut alice, &alice_space, "notes", "old", "gone");
+    settle(&mut alice, &mut bob);
+    alice
+        .protocol
+        .data_remove_doc(&alice_space, "notes")
+        .expect("remove");
+    settle(&mut alice, &mut bob);
+
+    alice
+        .protocol
+        .data_create_doc(&alice_space, "notes")
+        .expect("create again");
+    write(&mut alice, &alice_space, "notes", "new", "fresh");
+    settle(&mut alice, &mut bob);
+
+    for (node, space, label) in [
+        (&mut alice, alice_space.as_str(), "alice"),
+        (&mut bob, bob_space.as_str(), "bob"),
+    ] {
+        assert_eq!(
+            read(node, space, "notes", "new"),
+            Some(DataValue::text("fresh")),
+            "{label} did not get the new document"
+        );
+        assert_eq!(
+            read(node, space, "notes", "old"),
+            None,
+            "{label} carried the removed contents into the new document"
+        );
+    }
+}
+
+#[test]
+fn a_removal_survives_a_relaunch() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+
+    write(&mut alice, &alice_space, "notes", "title", "hello");
+    settle(&mut alice, &mut bob);
+    alice
+        .protocol
+        .data_remove_doc(&alice_space, "notes")
+        .expect("remove");
+
+    alice.restart(&bob.address);
+    assert!(
+        !holds(&mut alice, &alice_space, "notes"),
+        "a relaunch read the removed name as live"
+    );
+    // The records are gone, so the name could only come back from the
+    // removal record itself being mis-read.
+    assert!(matches!(
+        alice
+            .protocol
+            .data_map_get(&alice_space, "notes", "m", "title"),
+        Err(crate::Error::InvalidState(_))
+    ));
+}
+
+#[test]
+fn a_removal_the_peer_cannot_read_still_holds_here() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut alice, &alice_space, "notes", "title", "hello");
+    settle(&mut alice, &mut bob);
+
+    // Bob is a build that predates removals: he never advertised the entry,
+    // so the field is left out of every offer toward him and he keeps his
+    // copy. What must not happen is his copy coming back here.
+    alice.protocol.peer_data_tombstones.remove(&bob.address);
+    alice
+        .protocol
+        .data_remove_doc(&alice_space, "notes")
+        .expect("remove");
+    let rounds = settle(&mut alice, &mut bob);
+
+    assert!(
+        holds(&mut bob, &bob_space, "notes"),
+        "a peer that cannot read removals should have kept its copy"
+    );
+    assert!(
+        !holds(&mut alice, &alice_space, "notes"),
+        "an old peer's re-offer resurrected a removed document"
+    );
+    assert_eq!(
+        rounds.last(),
+        Some(&0),
+        "the exchange with an old peer did not terminate: {rounds:?}"
+    );
+
+    // Repeated exchanges do not wear the refusal down either.
+    for _ in 0..3 {
+        bob.protocol.kick_data_sync(&bob_space, "test");
+        settle(&mut alice, &mut bob);
+    }
+    assert!(!holds(&mut alice, &alice_space, "notes"));
+}
+
+#[test]
+fn evicting_a_document_records_no_removal_and_is_refilled() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut alice, &alice_space, "notes", "title", "hello");
+    settle(&mut alice, &mut bob);
+
+    // `data_delete_doc` is eviction: it reclaims the space this copy takes
+    // and says nothing about the name, so the peer's next offer refills it.
+    // That is the behaviour it shipped with, and the reason a second verb
+    // exists rather than this one changing meaning.
+    alice
+        .protocol
+        .data_delete_doc(&alice_space, "notes")
+        .expect("delete");
+    assert!(
+        removal_records(&alice).is_empty(),
+        "eviction wrote a removal record"
+    );
+
+    bob.protocol.kick_data_sync(&bob_space, "test");
+    settle(&mut alice, &mut bob);
+    assert_eq!(
+        read(&mut alice, &alice_space, "notes", "title"),
+        Some(DataValue::text("hello")),
+        "an evicted document was not refilled by the peer"
+    );
+}
+
+#[test]
+fn removing_a_space_removes_every_document_in_it() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    for doc in ["one", "two", "three"] {
+        write(&mut alice, &alice_space, doc, "k", "v");
+    }
+    settle(&mut alice, &mut bob);
+    assert_eq!(
+        bob.protocol.data_list_docs(&bob_space).expect("list").len(),
+        3
+    );
+
+    alice
+        .protocol
+        .data_remove_space(&alice_space)
+        .expect("remove space");
+    settle(&mut alice, &mut bob);
+
+    assert!(alice
+        .protocol
+        .data_list_docs(&alice_space)
+        .expect("list")
+        .is_empty());
+    assert!(
+        bob.protocol
+            .data_list_docs(&bob_space)
+            .expect("list")
+            .is_empty(),
+        "removing a space left documents on the peer"
+    );
+}
+
+#[test]
+fn a_wipe_takes_the_removal_records_with_it() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+
+    write(&mut alice, &alice_space, "notes", "title", "hello");
+    settle(&mut alice, &mut bob);
+    alice
+        .protocol
+        .data_remove_doc(&alice_space, "notes")
+        .expect("remove");
+    assert!(
+        !removal_records(&alice).is_empty(),
+        "the fixture never wrote a removal record"
+    );
+
+    alice.protocol.data_wipe_all().expect("wipe");
+    assert!(
+        removal_records(&alice).is_empty(),
+        "a logout left the removal records behind on a custom backend"
+    );
+}
+
+#[test]
+fn the_removal_record_reaches_disk_before_the_records_it_removes() {
+    // The ordering is the mechanism, and like the crash marker above it is
+    // invisible in what it writes: a removal record written after the
+    // deletes holds exactly the same floor. What it does not do is survive
+    // a crash in between, which leaves records whose presence votes the
+    // document back into existence at the next open.
+    let mut config = create_test_config_for_user("alice");
+    config.encryption.enabled = true;
+    config.data.enabled = true;
+    let mut alice = OfflineProtocol::new(config).expect("protocol");
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    alice
+        .initialize_mls(
+            crate::test_identity::seeded_storage("alice"),
+            Arc::new(RecordingStateStorage {
+                inner: TestProtocolStateStorage {
+                    storage: Arc::new(InMemoryStorage::new()),
+                },
+                writes: writes.clone(),
+            }),
+        )
+        .expect("initialize_mls");
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.start().expect("transport start");
+    alice
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    alice.start().expect("start");
+
+    let space = id("bob");
+    alice
+        .data_map_set(&space, "notes", "m", "title", DataValue::text("hello"))
+        .expect("set");
+    alice.data_flush(&space, "notes").expect("flush");
+    assert!(
+        alice.data_doc_size(&space, "notes").expect("size") > 0,
+        "precondition: the document has to exist for its removal to delete anything"
+    );
+
+    writes.lock().unwrap().clear();
+    alice.data_remove_doc(&space, "notes").expect("remove");
+
+    let order: Vec<String> = writes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|entry| {
+            entry.as_str() == storage_keys::DATA_DOC_META
+                || entry.as_str() == format!("del:{}", storage_keys::DATA_DOCS)
+                || entry.as_str() == format!("del:{}", storage_keys::DATA_DELTA_LOG)
+        })
+        .cloned()
+        .collect();
+
+    assert_eq!(
+        order.first().map(String::as_str),
+        Some(storage_keys::DATA_DOC_META),
+        "the removal record has to be durable before the records it removes: {order:?}"
+    );
+    assert!(
+        order
+            .iter()
+            .any(|entry| entry == &format!("del:{}", storage_keys::DATA_DOCS)),
+        "precondition: the removal has to delete the document record: {order:?}"
+    );
+}
+
+#[test]
+fn a_backend_swap_carries_the_removals() {
+    let mut alice = Node::new("alice");
+    let space = id("bob");
+    alice
+        .protocol
+        .data_map_set(&space, "notes", "m", "title", DataValue::text("hello"))
+        .expect("set");
+    alice.protocol.data_flush(&space, "notes").expect("flush");
+    alice
+        .protocol
+        .data_remove_doc(&space, "notes")
+        .expect("remove");
+
+    // A removal has no document to carry it, so a swap that moved only the
+    // documents would land in a store where the removed name reads as one
+    // nobody ever created, and the next offer from any peer would refill it.
+    let second = Arc::new(InMemoryStorage::new());
+    alice
+        .protocol
+        .set_data_storage(Arc::new(TestProtocolStateStorage {
+            storage: second.clone(),
+        }))
+        .expect("swap");
+
+    assert!(
+        !second
+            .list_keys(storage_keys::DATA_DOC_META)
+            .unwrap_or_default()
+            .is_empty(),
+        "the new backend has no record that the document was ever removed"
+    );
+    assert!(
+        !alice
+            .protocol
+            .data_list_docs(&space)
+            .expect("list")
+            .iter()
+            .any(|name| name == "notes"),
+        "the swap brought a removed document back"
+    );
+}
+
+#[test]
+fn removed_names_count_against_the_document_ceiling() {
+    // A removal record is a record a peer talked this device into storing,
+    // and it outlives the document by design. Counting only what is held
+    // would let a peer name a fresh thousand documents after every removal
+    // sweep, which is the bound this ceiling exists to be.
+    let mut alice = Node::new("alice");
+    let space = id("bob");
+
+    for n in 0..4 {
+        let doc = format!("doc{n}");
+        alice
+            .protocol
+            .data_map_set(&space, &doc, "m", "k", DataValue::text("v"))
+            .expect("set");
+        alice.protocol.data_flush(&space, &doc).expect("flush");
+        alice
+            .protocol
+            .data_remove_doc(&space, &doc)
+            .expect("remove");
+    }
+
+    assert!(
+        alice
+            .protocol
+            .data_list_docs(&space)
+            .expect("list")
+            .is_empty(),
+        "precondition: every document was removed"
+    );
+    assert!(
+        !alice.protocol.data_space_admits_doc(&space, "fresh", 4),
+        "four removed names did not count toward a ceiling of four"
+    );
+    assert!(
+        alice.protocol.data_space_admits_doc(&space, "fresh", 5),
+        "the ceiling refused a name it had room for"
+    );
+}
+
+#[test]
+fn a_removal_a_crash_interrupted_is_finished_at_the_next_open() {
+    // The crash this stages is the one the write order exists for: the
+    // removal record reached disk and the records it removes did not. The
+    // listing still shows a document, and reading the truth off the listing
+    // is exactly what would vote it back into existence.
+    let mut alice = Node::new("alice");
+    let space = id("bob");
+    write(&mut alice, &space, "notes", "title", "hello");
+    assert!(
+        alice.delta_records(&space, "notes") > 0,
+        "precondition: the document has to have records for their survival to mean anything"
+    );
+
+    // What a run that died between the two writes leaves behind: the floor
+    // is durable, the records are not deleted. Seeded through the sealed
+    // writer, because raw bytes in the store do not open.
+    let storage = alice
+        .protocol
+        .data_storage_for_sync()
+        .expect("the data layer is on");
+    let floor = alice
+        .protocol
+        .data_doc_version(&space, "notes")
+        .expect("version");
+    let bytes =
+        serde_json::to_vec(&serde_json::json!({ "gone": floor, "alive": false })).expect("encode");
+    alice
+        .protocol
+        .write_state_record(
+            storage.as_ref(),
+            storage_keys::DATA_DOC_META,
+            &format!("{space}/notes"),
+            &bytes,
+        )
+        .expect("seed the removal record");
+
+    alice.restart(&bob_address());
+
+    assert!(
+        !holds(&mut alice, &space, "notes"),
+        "surviving records voted a removed document back into existence"
+    );
+    assert_eq!(
+        alice.delta_records(&space, "notes"),
+        0,
+        "the interrupted removal was never finished, so its records are still there to \
+         be replayed into the next document of that name"
+    );
+}
+
+/// An address that is not this node's, for a space name.
+fn bob_address() -> String {
+    id("bob")
 }

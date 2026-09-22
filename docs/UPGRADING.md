@@ -1595,6 +1595,49 @@ config section if present.
 
 ---
 
+## Removals: `removeDoc`, `removeSpace`, and what `deleteDoc` now means
+
+Replicated documents can be removed from every replica of a space. Nothing
+about an existing call changes, and no application has to act.
+
+**`deleteDoc` is unchanged.** It drops this device's copy and records nothing
+about the name, so a replica that still holds the document refills it at the
+next exchange. If you were using it to reclaim space, it still does that. If
+you were using it to remove content and finding it came back, that is what the
+new call is for.
+
+**`removeDoc(space, doc)` removes the document everywhere.** It records the
+version the document stood at, deletes it here, and tells the space. A replica
+whose copy that version covers deletes it too and reports
+`data_doc_deleted` with `by: "peer"`. `removeSpace(space)` does the same for
+every document a space holds.
+
+**An edit made while a removal was crossing wins, and brings the whole
+document back.** Not the edit alone: it was made on the old contents, so its
+history is those contents. Both replicas converge on the document, and your
+application sees an ordinary `data_changed` on a document it removed. If your
+product needs a removal that cannot be undone this way, model it as a field
+your application writes rather than as a document that disappears.
+
+**A removal never expires.** A device away for a year still learns about it
+when it returns. The cost is a small record per removed name, which counts
+against the existing 1024-document ceiling a peer can fill in one space.
+
+**`wipeAll()` is still not a removal.** It clears this device and leaves no
+removal records, because a logout has to leave a custom backend empty. On a
+running engine the peers refill it, exactly as before. Use `removeSpace()` to
+clear the room.
+
+**A peer on an older build keeps its copy.** It does not understand the
+removal, so it offers the document back on every exchange; this device refuses
+each offer, and the document stays removed here. Nothing loops and nothing is
+surfaced wrongly. It disappears there when they update and the next exchange
+runs.
+
+**One new event and two new methods.** `data_doc_deleted` carries `space_id`,
+`doc_id` and `by` (`local` or `peer`). The two methods are on `DataStore` in
+every binding. No error code was added.
+
 ## 16. Replicated documents are available, 1:1 and in groups *(v0.23.0)*
 
 A new `DataStore` object ships on every binding: offline-first documents any
@@ -1645,7 +1688,10 @@ change made on the other side depends on. Nothing is lost on either device and
 nothing crashes; the documents simply stay apart, and the refusal is logged.
 
 **Deleting a document does not delete it from the peer, and does not keep it
-deleted here.** There are no deletion tombstones in this release. `deleteDoc`
+deleted here.** *(True of this release. A later release adds `removeDoc`,
+which does remove a document everywhere; see the removals section at the top
+of this file. `deleteDoc` itself still behaves exactly as described here.)*
+There are no deletion tombstones in this release. `deleteDoc`
 removes the records on this device, and the peer's next version offer names the
 document again, so it is recreated and refilled from their copy. In a space
 named after a peer, treat deletion as local cleanup that replication may undo,
@@ -1694,7 +1740,9 @@ logging it, because nothing inside the application will show the difference.
 
 **A wipe is only durable once replication has stopped.** It is the same
 missing tombstone described above: nothing distinguishes a space this device
-wiped from one it has never seen. Called while the engine is still running
+wiped from one it has never seen. (Still true in every later release: a wipe
+records no removals, because a logout has to leave a custom backend empty.
+`removeSpace()` is the call that clears the room.) Called while the engine is still running
 with live sessions, every document comes back, from both directions. The
 peer's next version offer names the documents and they are recreated and
 refilled from the peer's copy, and an offer of our own naming nothing reads to

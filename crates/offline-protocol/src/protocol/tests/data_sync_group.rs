@@ -18,7 +18,7 @@ use crate::group_mesh::{RosterRatchetGap, MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS
 use crate::mls::InMemoryStorage;
 use crate::protocol::prefixes::internal_prefixes;
 use crate::protocol::tests::{create_test_config_for_user, id};
-use crate::protocol::types::{DATA_GROUP_V1, DATA_MEDIA_V1, DATA_SYNC_V1};
+use crate::protocol::types::{DATA_GROUP_V1, DATA_MEDIA_V1, DATA_SYNC_V1, DATA_TOMBSTONE_V1};
 use crate::protocol::{OfflineProtocol, TestProtocolStateStorage};
 
 /// One member of the group, with the transport its frames go through.
@@ -733,11 +733,19 @@ fn the_group_capability_is_advertised_and_recorded() {
     let (alice, _bob, _carol, _group) = trio();
     assert_eq!(
         alice.protocol.advertised_data_versions(),
-        vec![DATA_SYNC_V1, DATA_GROUP_V1, DATA_MEDIA_V1],
+        vec![
+            DATA_SYNC_V1,
+            DATA_GROUP_V1,
+            DATA_MEDIA_V1,
+            DATA_TOMBSTONE_V1
+        ],
         "a build that intercepts group frames has to say so, or no peer \
          will ever send it one. The media entry rides the same list and is \
          read independently: it says nothing about groups, because v1 \
-         carries blobs on 1:1 sessions only"
+         carries blobs on 1:1 sessions only. The removal entry is read \
+         independently too, and a group carries removals without consulting \
+         it: one ciphertext reaches the whole roster, so there is no \
+         per-member choice to make"
     );
 }
 
@@ -1241,5 +1249,181 @@ fn a_group_document_too_large_to_frame_is_reported_not_carried() {
             .iter()
             .all(|event| event["reason"].as_str() == Some("group_space_has_no_media_path")),
         "a group dead end must name itself: {reported:?}"
+    );
+}
+
+// ---- removals in a group ------------------------------------------------
+
+fn holds(member: &mut Member, space: &str, doc: &str) -> bool {
+    member
+        .protocol
+        .data_list_docs(space)
+        .expect("list")
+        .iter()
+        .any(|name| name == doc)
+}
+
+/// The ciphertext of the frame a removal produces, as the roster receives it.
+fn group_removal_frame(from: &mut Member, group: &str, doc: &str) -> String {
+    from.transport.clear_sent_messages();
+    from.protocol.data_remove_doc(group, doc).expect("remove");
+    let frame = from
+        .transport
+        .sent_messages()
+        .iter()
+        .find_map(|m| {
+            let payload = m.content.strip_prefix(internal_prefixes::GROUP_MLS_MSG)?;
+            let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+            Some(value.get("ciphertext")?.as_str()?.to_string())
+        })
+        .expect("the removal produced a group frame");
+    from.transport.clear_sent_messages();
+    frame
+}
+
+#[test]
+fn a_removal_reaches_every_member_of_a_group() {
+    let (mut alice, mut bob, mut carol, group) = trio();
+    write(&mut alice, &group, "notes", "title", "hello");
+    settle(&mut alice, &mut bob, &mut carol);
+    assert!(
+        holds(&mut bob, &group, "notes") && holds(&mut carol, &group, "notes"),
+        "precondition: the document has to reach the roster before its removal can"
+    );
+
+    alice
+        .protocol
+        .data_remove_doc(&group, "notes")
+        .expect("remove");
+    let rounds = settle(&mut alice, &mut bob, &mut carol);
+
+    for (member, label) in [
+        (&mut alice, "alice"),
+        (&mut bob, "bob"),
+        (&mut carol, "carol"),
+    ] {
+        assert!(
+            !holds(member, &group, "notes"),
+            "{label} still holds a document the group removed"
+        );
+    }
+    assert_eq!(
+        rounds.last(),
+        Some(&0),
+        "the exchange did not terminate: {rounds:?}"
+    );
+}
+
+#[test]
+fn a_removal_delivered_by_the_relay_is_applied() {
+    // The second of the three inbound group routes. A hardening fix that
+    // lands on one and not its siblings is a shape this repository has
+    // already paid for twice, so each route gets its own test.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    write(&mut alice, &group, "notes", "title", "hello");
+    settle(&mut alice, &mut bob, &mut carol);
+    assert!(holds(&mut bob, &group, "notes"), "precondition");
+
+    let ciphertext = group_removal_frame(&mut alice, &group, "notes");
+    bob.protocol.handle_relay_group_message_with_mls(
+        &group,
+        &alice.address,
+        &ciphertext,
+        "2026-09-22T00:00:00Z",
+        "relay-removal-1",
+        None,
+        None,
+    );
+
+    assert!(
+        !holds(&mut bob, &group, "notes"),
+        "a removal delivered by the relay was not applied"
+    );
+    assert!(
+        !bob.saw_group_message(),
+        "the removal was surfaced to the application as a chat message"
+    );
+}
+
+#[test]
+fn a_removal_buffered_before_the_group_was_ready_is_applied_on_drain() {
+    // The third route: a frame that arrived before local group state could
+    // open it waits in the pending buffer and is re-judged on drain.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    write(&mut alice, &group, "notes", "title", "hello");
+    settle(&mut alice, &mut bob, &mut carol);
+    assert!(holds(&mut bob, &group, "notes"), "precondition");
+
+    let ciphertext = group_removal_frame(&mut alice, &group, "notes");
+    bob.protocol.buffer_pending_group_message(
+        &group,
+        crate::group_mesh::PendingGroupMessage {
+            sender: alice.address.clone(),
+            message_id: "buffered-removal-1".to_string(),
+            logical_id: None,
+            ciphertext_b64: ciphertext,
+            timestamp: Some("2026-09-22T00:00:00Z".to_string()),
+            reply_to: None,
+            forward_info: None,
+            buffered_at: std::time::Instant::now(),
+            received_via: None,
+        },
+    );
+    bob.protocol.drain_pending_group_messages(&group);
+
+    assert!(
+        !holds(&mut bob, &group, "notes"),
+        "a removal drained from the pending buffer was not applied"
+    );
+    assert!(
+        !bob.saw_group_message(),
+        "the drained removal was surfaced to the application as a chat message"
+    );
+}
+
+#[test]
+fn a_member_that_edited_while_a_removal_crossed_keeps_the_document_for_everyone() {
+    // Edit-wins inside a group, where the third member is the interesting
+    // one: Carol neither removed nor edited, so whatever she ends up with
+    // is what the rule actually resolved to rather than what either actor
+    // decided locally.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    write(&mut alice, &group, "notes", "title", "hello");
+    settle(&mut alice, &mut bob, &mut carol);
+
+    alice.transport.clear_sent_messages();
+    bob.transport.clear_sent_messages();
+    carol.transport.clear_sent_messages();
+    alice
+        .protocol
+        .data_remove_doc(&group, "notes")
+        .expect("remove");
+    write(&mut bob, &group, "notes", "added", "B");
+    let rounds = settle(&mut alice, &mut bob, &mut carol);
+
+    for (member, label) in [
+        (&mut alice, "alice"),
+        (&mut bob, "bob"),
+        (&mut carol, "carol"),
+    ] {
+        assert!(
+            holds(member, &group, "notes"),
+            "{label} lost a document an edit had kept alive"
+        );
+        assert_eq!(
+            read(member, &group, "notes", "added"),
+            Some(DataValue::text("B")),
+            "{label} did not converge on the edit that won"
+        );
+        assert_eq!(
+            read(member, &group, "notes", "title"),
+            Some(DataValue::text("hello")),
+            "{label} kept the document without the content the edit was made on"
+        );
+    }
+    assert_eq!(
+        rounds.last(),
+        Some(&0),
+        "the exchange did not terminate: {rounds:?}"
     );
 }

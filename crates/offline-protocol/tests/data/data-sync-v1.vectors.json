@@ -32,6 +32,12 @@
       "wire": "__DATA_V1__{\"v\":1,\"k\":\"vv\",\"reply\":false,\"partial\":false,\"docs\":{}}"
     },
     {
+      "name": "version offer carrying a removal",
+      "kind": "vv",
+      "wire": "__DATA_V1__{\"v\":1,\"k\":\"vv\",\"reply\":false,\"partial\":false,\"docs\":{\"kept\":\"AQID\"},\"gone\":{\"removed\":\"BAUG\"}}",
+      "note": "Entry 4. `gone` follows `docs` and maps a document name to the version it was removed at. A name may appear in both maps: a document that came back after a removal is offered and its floor is still reported, because a third replica may hold the removed content. Absent when nothing has been removed, which is what every frame above says."
+    },
+    {
       "name": "delta",
       "kind": "delta",
       "wire": "__DATA_V1__{\"v\":1,\"k\":\"delta\",\"doc\":\"notes\",\"blob\":\"AAECAwQFBgc=\"}",
@@ -69,7 +75,17 @@
       "body": "{\"v\":1,\"k\":\"vv\",\"docs\":{}}",
       "expect": {
         "reply": false,
-        "partial": false
+        "partial": false,
+        "gone": {}
+      }
+    },
+    {
+      "name": "an offer that names no removals removes nothing",
+      "body": "{\"v\":1,\"k\":\"vv\",\"docs\":{\"notes\":\"AQID\"}}",
+      "expect": {
+        "reply": false,
+        "partial": false,
+        "gone": {}
       }
     }
   ],

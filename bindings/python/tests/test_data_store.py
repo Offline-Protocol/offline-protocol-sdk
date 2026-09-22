@@ -152,3 +152,54 @@ def test_a_malformed_value_is_refused_with_a_useful_error(data_config) -> None:
 def _in_memory_mls_storage() -> InMemoryStorage:
     """The MLS-side stand-in: keeps the login keychain out of the tests."""
     return InMemoryStorage()
+
+
+def test_removing_a_document_and_evicting_one_are_different_calls(data_config) -> None:
+    # Both take a document out of this store. Only one of them records that
+    # it was removed, and that record is the whole difference: a peer cannot
+    # otherwise tell a document this device deleted from one it has never
+    # seen, so it offers it straight back.
+    protocol = OfflineProtocol(data_config)
+    protocol.initialize_mls(_in_memory_mls_storage(), DictStateStorage())
+    documents = DictStateStorage()
+    store = DataStore.with_storage(protocol, documents)
+
+    store.map_set("space-1", "kept", "fields", "k", value("text", value="v"))
+    store.map_set("space-1", "evicted", "fields", "k", value("text", value="v"))
+    store.map_set("space-1", "removed", "fields", "k", value("text", value="v"))
+    store.flush_all()
+
+    store.delete_doc("space-1", "evicted")
+    store.remove_doc("space-1", "removed")
+
+    assert store.list_docs("space-1") == ["kept"]
+    removals = [
+        key_id
+        for (key_type, key_id) in documents.snapshot()
+        if key_type == "data_doc_meta"
+    ]
+    assert removals == ["space-1/removed"], (
+        "eviction must record nothing about the name, and removal must record it"
+    )
+
+    # The name is refused rather than answered empty, so an application
+    # cannot mistake a removed document for a cleared one.
+    with pytest.raises(ProtocolError.InvalidState):
+        store.map_get_json("space-1", "removed", "fields", "k")
+
+    # And it can be used again, without its old contents.
+    store.create_doc("space-1", "removed")
+    assert store.map_get_json("space-1", "removed", "fields", "k") is None
+
+
+def test_removing_a_space_removes_every_document_in_it(data_config) -> None:
+    protocol = OfflineProtocol(data_config)
+    protocol.initialize_mls(_in_memory_mls_storage(), DictStateStorage())
+    store = DataStore.with_storage(protocol, DictStateStorage())
+
+    for doc in ("one", "two", "three"):
+        store.map_set("space-1", doc, "fields", "k", value("text", value="v"))
+    store.flush_all()
+
+    store.remove_space("space-1")
+    assert store.list_docs("space-1") == []

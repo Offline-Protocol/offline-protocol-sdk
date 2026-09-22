@@ -974,6 +974,7 @@ impl OfflineProtocol {
                     super::types::DATA_SYNC_V1,
                     super::types::DATA_GROUP_V1,
                     super::types::DATA_MEDIA_V1,
+                    super::types::DATA_TOMBSTONE_V1,
                 ];
             }
         }
@@ -1027,6 +1028,31 @@ impl OfflineProtocol {
         #[cfg(feature = "data")]
         {
             self.data_sync_active(recipient) && self.peer_data_media.contains(recipient)
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            let _ = recipient;
+            false
+        }
+    }
+
+    /// Whether removals may be carried toward `recipient`: 1:1 replication
+    /// is live with them and they advertised [`DATA_TOMBSTONE_V1`], so they
+    /// read the `gone` field rather than ignoring it.
+    ///
+    /// Unlike the two gates above it, this one guards traffic rather than
+    /// correctness. A peer without the entry ignores the field, keeps its
+    /// copy and re-offers it; this device refuses the offer and any blob
+    /// behind it against its own floor, so the removal holds here either
+    /// way. Sending the field anyway would be harmless and useless, and
+    /// leaving it out keeps that exchange as small as it can be.
+    ///
+    /// [`DATA_TOMBSTONE_V1`]: crate::protocol::types::DATA_TOMBSTONE_V1
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(super) fn data_tombstones_active(&self, recipient: &str) -> bool {
+        #[cfg(feature = "data")]
+        {
+            self.data_sync_active(recipient) && self.peer_data_tombstones.contains(recipient)
         }
         #[cfg(not(feature = "data"))]
         {

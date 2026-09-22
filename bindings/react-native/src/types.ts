@@ -2484,6 +2484,27 @@ export interface DataChangedEvent extends BaseEvent {
 }
 
 /**
+ * A replicated document was removed from every replica of its space.
+ *
+ * Distinct from a document merely disappearing here: this one is a decision
+ * that travels. It fires when this device removes a document and when it
+ * learns of a removal from a peer, so a UI holding the document open can
+ * close it either way.
+ *
+ * A removal loses to a concurrent edit, so a document may come back after
+ * this fires. That arrives as an ordinary `data_changed` on a document the
+ * app thought was gone, which is the honest report: the edit won, and its
+ * contents are the contents.
+ */
+export interface DataDocDeletedEvent extends BaseEvent {
+  type: 'data_doc_deleted';
+  space_id: string;
+  doc_id: string;
+  /** `local` for this device, `peer` for a removal learned from the space. */
+  by: 'local' | 'peer';
+}
+
+/**
  * A replicated document is approaching the per-document size cap.
  *
  * Fires while there is still room to act (archive, split, prune). Without
@@ -2739,6 +2760,7 @@ export type ProtocolEvent =
   | UserBlockedEvent
   | UserUnblockedEvent
   | DataChangedEvent
+  | DataDocDeletedEvent
   | DataDocSizeWarningEvent
   | DataAttachmentRequestedEvent
   | DataAttachmentReceivedEvent

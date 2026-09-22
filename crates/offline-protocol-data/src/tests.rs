@@ -1189,3 +1189,127 @@ fn a_name_or_type_at_the_bound_is_accepted() {
         Some(crate::MAX_ATTACHMENT_MIME_LEN)
     );
 }
+
+// A removal floor is a version vector, and the three questions a deletion
+// asks of one are all `includes`: is this blob content the removal already
+// covered, is this offered version, and is the copy we hold. The tests
+// below pin each answer against the engine rather than against a mental
+// model of version vectors, because the whole feature rests on them.
+
+#[test]
+fn a_version_covers_the_changes_it_was_taken_after() {
+    let (source, deltas) = source_with_commits(2);
+    let floor = source.version();
+
+    // Every delta that went into the document is content the floor covers.
+    for delta in &deltas {
+        let end = crate::blob_end_version(delta).expect("end version");
+        assert!(
+            floor.includes(&end).expect("includes"),
+            "a delta taken before the floor read as beyond it"
+        );
+    }
+}
+
+#[test]
+fn a_change_made_after_a_floor_reads_as_beyond_it() {
+    let (mut source, _deltas) = source_with_commits(1);
+    let floor = source.version();
+
+    source
+        .map_set("m", "later", DataValue::text("after the removal"))
+        .expect("set");
+    let delta = source.commit().expect("commit").expect("a delta");
+    let end = crate::blob_end_version(&delta.bytes).expect("end version");
+
+    assert!(
+        !floor.includes(&end).expect("includes"),
+        "an edit made after the floor read as covered by it"
+    );
+    // And the floor is not beyond the edit either: the edit supersedes it.
+    assert!(end.includes(&floor).expect("includes"));
+}
+
+#[test]
+fn a_snapshot_of_a_fresh_document_is_beyond_every_earlier_floor() {
+    // Re-creating a removed name starts a document whose history is
+    // disjoint from the floor, which is what makes it alive by the same
+    // rule that keeps a concurrent edit alive: nothing about it is covered.
+    let (source, _deltas) = source_with_commits(1);
+    let floor = source.version();
+
+    let mut fresh = DataDoc::new();
+    fresh
+        .map_set("m", "k", DataValue::text("second incarnation"))
+        .expect("set");
+    fresh.commit().expect("commit").expect("a delta");
+    let snapshot = fresh.export_compacted().expect("compact");
+
+    let end = crate::blob_end_version(&snapshot).expect("end version");
+    assert!(
+        !floor.includes(&end).expect("includes"),
+        "a document created after a removal read as covered by the removal"
+    );
+}
+
+#[test]
+fn an_empty_version_covers_nothing_and_round_trips() {
+    let empty = DataDoc::new().version();
+    let (source, _deltas) = source_with_commits(1);
+
+    assert!(
+        empty.includes(&empty).expect("includes"),
+        "a version did not cover itself"
+    );
+    assert!(!empty.includes(&source.version()).expect("includes"));
+    // Every version covers the empty one, so a floor taken before any
+    // change never deletes anything on its own.
+    assert!(source.version().includes(&empty).expect("includes"));
+}
+
+#[test]
+fn two_independent_removals_merge_into_one_floor() {
+    // Two replicas edit apart and each removes its own copy. Neither floor
+    // covers the other's change; the union covers both, which is what
+    // stops the order the offers arrive in from deciding the outcome.
+    let (mut left, deltas) = source_with_commits(1);
+    let mut right = DataDoc::new();
+    right.import(&deltas[0]).expect("import");
+
+    left.map_set("m", "l", DataValue::text("left"))
+        .expect("set");
+    let left_delta = left.commit().expect("commit").expect("a delta");
+    right
+        .map_set("m", "r", DataValue::text("right"))
+        .expect("set");
+    let right_delta = right.commit().expect("commit").expect("a delta");
+
+    let left_floor = left.version();
+    let right_floor = right.version();
+    assert!(!left_floor.includes(&right_floor).expect("includes"));
+    assert!(!right_floor.includes(&left_floor).expect("includes"));
+
+    let merged = left_floor.union(&right_floor).expect("union");
+    for delta in [&left_delta.bytes, &right_delta.bytes] {
+        let end = crate::blob_end_version(delta).expect("end version");
+        assert!(
+            merged.includes(&end).expect("includes"),
+            "the merged floor did not cover a change one of the removals saw"
+        );
+    }
+}
+
+#[test]
+fn a_floor_question_about_unreadable_bytes_is_an_error_not_an_answer() {
+    let floor = DataDoc::new().version();
+    let garbage = crate::VersionToken::from_bytes(vec![0xff, 0xfe, 0xfd, 0xfc]);
+
+    assert!(matches!(
+        floor.includes(&garbage),
+        Err(DataError::Corrupt(_))
+    ));
+    assert!(matches!(
+        crate::blob_end_version(&[0xff, 0xfe, 0xfd]),
+        Err(DataError::Corrupt(_))
+    ));
+}

@@ -2929,14 +2929,20 @@ fn data_sync_is_advertised_only_when_the_layer_is_on() {
     let on = protocol_with_data_storage(Arc::new(InMemoryStorage::new()));
     assert_eq!(
         on.advertised_data_versions(),
-        vec![DATA_SYNC_V1, DATA_GROUP_V1, DATA_MEDIA_V1],
+        vec![
+            DATA_SYNC_V1,
+            DATA_GROUP_V1,
+            DATA_MEDIA_V1,
+            DATA_TOMBSTONE_V1
+        ],
         "every entry, and the order is append-only. Each says something a \
          build advertising only its predecessors does not do: intercept a \
-         sync frame inside a group ciphertext, and route a data-purposed \
+         sync frame inside a group ciphertext, route a data-purposed \
          media transfer into the data layer instead of handing it to a \
-         person as a received file. A peer reads them independently, so \
-         replacing rather than appending would silently stop 1:1 \
-         replication with every shipped install"
+         person as a received file, and read the removals an offer carries \
+         rather than offering the removed documents straight back. A peer \
+         reads them independently, so replacing rather than appending would \
+         silently stop 1:1 replication with every shipped install"
     );
 }
 

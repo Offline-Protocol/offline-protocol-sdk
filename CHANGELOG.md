@@ -13,6 +13,50 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ## [Unreleased]
 
+### Added
+
+- **Replicated documents can be removed from every replica.**
+  `DataStore.removeDoc(space, doc)` records the version the document stood at
+  and tells the space; a replica whose copy that version covers deletes it too
+  and reports the new `data_doc_deleted` event with `by: "peer"`.
+  `removeSpace(space)` does the same for every document a space holds. Before
+  this, a document deleted on one device was absent from its next offer and
+  still present on the peer's, and the rules that exist to carry a document a
+  peer has never seen recreated and refilled it: a delete was undone by the
+  next exchange, with no error and no event.
+
+  The removal is a version rather than a flag, which is what lets every
+  replica reach the same answer without knowing what happened first. Content
+  at or below it is what the removal decided about; anything beyond it is an
+  edit made concurrently with the removal, and **an edit wins**. It brings the
+  whole document back, not the edit alone, because the edit was made on the
+  old contents and its history is those contents. That arrives as an ordinary
+  `data_changed` on a document the application removed. A product that needs a
+  removal which cannot be undone that way should model it as a field it
+  writes rather than as a document that disappears.
+
+  A removal never expires, so a device away for a year still learns about it,
+  and a removed name keeps a small record for the life of the space. Those
+  records count against the existing 1024-document ceiling a peer can fill,
+  because a floor outlives its document and counting only what is held would
+  let a peer name a fresh thousand after every removal. The record is written
+  before the records it removes: the reverse order leaves, after a crash in
+  between, records whose presence votes the document back into existence at
+  the next open.
+
+  `deleteDoc` is unchanged and is eviction: it drops this device's copy and
+  records nothing, so a replica that still holds the document refills it.
+  `wipeAll()` is unchanged too and records no removals, because a logout has
+  to leave a custom backend empty. The four documents that described the old
+  behaviour say so.
+
+  Negotiated as `data_versions` entry 4, appended. A peer without it ignores
+  the new field, keeps its copy, and offers it back on every exchange; the
+  removing side refuses each offer and each blob against its own record, so
+  the removal holds there regardless. Nothing loops and nothing is surfaced
+  wrongly. New storage category `data_doc_meta`, sealed like every other, and
+  no new error code.
+
 ### Changed
 
 - **The telemetry pipe caps `protocol.message.failed` rows per reason.** Each

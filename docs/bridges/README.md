@@ -357,14 +357,14 @@ directory, so an application that configures one **must** call
 `DataStore.wipeAll()` on logout. Without it, documents outlive the account
 that created them: a privacy failure with no symptom inside the app.
 
-The call is only durable once replication has stopped. There are no deletion
-tombstones, so a peer cannot tell a wiped space from one this device has never
-seen, and on a running engine with live sessions its next version offer
-recreates and refills every document. Logout tears the engine down anyway;
-a wipe used for anything else has to stop it first, and only for as long as it
-stays stopped: the peer still holds the documents, so they return when
-replication resumes. The call clears this device, it does not delete
-content.
+The call is only durable once replication has stopped. It records no
+removals, because a logout has to leave a custom backend empty, so a peer
+cannot tell a wiped space from one this device has never seen, and on a
+running engine with live sessions its next version offer recreates and refills
+every document. Logout tears the engine down anyway; a wipe used for anything
+else has to stop it first, and only for as long as it stays stopped: the peer
+still holds the documents, so they return when replication resumes. The call
+clears this device; `removeSpace()` is what clears the room.
 
 A platform cache is not account state, and is deliberately outside both
 providers. The iOS bridge keeps one: a last-seen map of CoreBluetooth
