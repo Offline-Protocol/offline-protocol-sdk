@@ -308,7 +308,7 @@ Three rules keep it from losing documents:
    happened to carry instead drops a document the sender has never seen, with
    no symptom on either device; that rule is stated as a MUST NOT under
    [Sizes](#sizes) and interest does not weaken it.
-2. **A counter-offer carries the complete list.** An implementation MAY NOT
+2. **A counter-offer carries the complete list.** An implementation MUST NOT
    narrow its own offer by the peer's want. The saving is one name per
    unwanted document, and the hazard is the one in rule 1.
 3. **Removals are not scoped.** A peer that narrows keeps what it already

@@ -52,7 +52,6 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   deliberately not collapsed, because collapsing them would turn the
   narrowest request into the widest.
 
-
 - **Replicated documents can be removed from every replica.**
   `DataStore.removeDoc(space, doc)` records the version the document stood at
   and tells the space; a replica whose copy that version covers deletes it too

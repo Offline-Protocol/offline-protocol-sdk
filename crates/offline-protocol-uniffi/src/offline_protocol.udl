@@ -1927,7 +1927,7 @@ interface DataStore {
     // Two halves. Toward a peer it is carried in every version offer, so the
     // peer sends nothing else: that is the traffic saving, and it needs the
     // peer to read it. Locally it is a refusal, so a document outside it is
-    // never stored however it arrives — which is what makes a narrowing mean
+    // never stored however it arrives, which is what makes a narrowing mean
     // something against a peer that ignores the request.
     //
     // Not persisted: declare it at launch, before start(). Narrowing does not

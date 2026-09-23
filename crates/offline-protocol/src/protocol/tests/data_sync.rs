@@ -4703,15 +4703,44 @@ fn an_unwanted_document_is_refused_even_from_a_peer_that_sends_it_anyway() {
     let alice_space = Node::space_for(&bob);
     let bob_space = Node::space_for(&alice);
 
+    write(&mut alice, &alice_space, "other.notes", "k", "no");
+    write(&mut alice, &alice_space, "wanted.notes", "k", "yes");
+    settle(&mut alice, &mut bob);
+    bob.protocol
+        .data_delete_doc(&bob_space, "wanted.notes")
+        .expect("evict");
+    bob.protocol
+        .data_delete_doc(&bob_space, "other.notes")
+        .expect("evict");
+    // Alice is on a build that never advertised entry 5, so Bob's offer must
+    // leave the field out however narrow his interest is.
     bob.protocol.peer_data_interest.remove(&alice.address);
     bob.protocol
         .data_set_interest(&bob_space, vec!["wanted*".to_string()])
         .expect("interest");
+    alice.transport.clear_sent_messages();
+    bob.transport.clear_sent_messages();
 
-    write(&mut alice, &alice_space, "other.notes", "k", "no");
-    write(&mut alice, &alice_space, "wanted.notes", "k", "yes");
+    bob.protocol.nudge_data_sync(&bob_space, None, "test");
+    pump(&mut bob, &mut alice);
+    // Counted, not just inspected. The end state is the same whether or not
+    // the request was gated, because the refusal below drops the unwanted
+    // document either way, so what the frames say is the only thing that
+    // shows the gate is there at all.
+    let answers = alice
+        .transport
+        .sent_messages()
+        .iter()
+        .filter(|message| !message.metadata.contains_key(ACK_FOR_KEY))
+        .count();
     let rounds = settle(&mut alice, &mut bob);
 
+    assert_eq!(
+        answers, 3,
+        "the answering side sent {answers} frames where three were asked for: a catch-up for \
+         each of the two documents and one counter-offer. Two is the request going out to a \
+         peer that never advertised entry 5, which is the gate this test exists for"
+    );
     assert!(holds(&mut bob, &bob_space, "wanted.notes"));
     assert!(
         !holds(&mut bob, &bob_space, "other.notes"),

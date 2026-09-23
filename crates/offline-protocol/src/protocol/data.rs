@@ -77,35 +77,22 @@ pub(crate) fn interest_matches(pattern: &str, doc: &str) -> bool {
 /// application hears about a typo at the call that made it instead of
 /// silently receiving nothing.
 fn validate_interest_pattern(pattern: &str) -> Result<()> {
+    // `*` alone is the default expressed explicitly, and it is the one
+    // pattern whose body is empty.
+    if pattern == "*" {
+        return Ok(());
+    }
+    // Everything else is a document name with an optional trailing `*`, so
+    // the document validator judges it rather than a second copy of the
+    // charset. A copy would drift the day `validate_name` widens, and the
+    // symptom would be a pattern that cannot match a name the store accepts.
     let body = pattern.strip_suffix('*').unwrap_or(pattern);
-    if body.is_empty() {
-        // Either `*` (everything) or an empty exact name. The first is
-        // valid, the second cannot match a name, since names are non-empty.
-        return if pattern == "*" {
-            Ok(())
-        } else {
-            Err(Error::InvalidArgument(
-                "an interest pattern may not be empty".to_string(),
-            ))
-        };
-    }
-    if body.len() > offline_protocol_data::MAX_NAME_LEN {
-        return Err(Error::InvalidArgument(format!(
-            "an interest pattern may not exceed {} bytes, got {}",
-            offline_protocol_data::MAX_NAME_LEN,
-            body.len()
-        )));
-    }
-    if !body
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-    {
-        return Err(Error::InvalidArgument(format!(
-            "an interest pattern may only use the document charset \
-             (A-Z a-z 0-9 . _ -), with an optional trailing `*`: {pattern}"
-        )));
-    }
-    Ok(())
+    offline_protocol_data::validate_name(body).map_err(|err| {
+        Error::InvalidArgument(format!(
+            "an interest pattern is a document name with an optional \
+             trailing `*`: {pattern:?} {err}"
+        ))
+    })
 }
 
 /// The document index for one space.
@@ -1186,6 +1173,10 @@ impl OfflineProtocol {
     /// with them.
     pub fn data_set_interest(&mut self, space: &str, patterns: Vec<String>) -> Result<()> {
         offline_protocol_data::validate_space_name(space).map_err(map_data_error)?;
+        // The same door every other `DataStore` method goes through. Without
+        // it this is the one call that reports success with the layer off,
+        // and an application would read that as a narrowing it never got.
+        self.require_data_storage()?;
         if patterns.len() > MAX_INTEREST_PATTERNS {
             return Err(Error::InvalidArgument(format!(
                 "at most {MAX_INTEREST_PATTERNS} interest patterns per space, got {}",

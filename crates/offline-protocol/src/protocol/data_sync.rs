@@ -108,6 +108,14 @@ pub(crate) const MAX_SYNC_BLOB_BYTES: usize = 32 * 1024;
 /// having to measure it. A space with more documents than this sends
 /// several frames, which converges identically: the exchange is per
 /// document, not per frame.
+///
+/// The declared interest rides every frame and is not weighed here, because
+/// it is bounded where it is set: [`MAX_INTEREST_PATTERNS`] names of at most
+/// [`MAX_NAME_LEN`] bytes is about 4 KiB, which this budget leaves free. A
+/// wider bound on either would have to be weighed rather than assumed.
+///
+/// [`MAX_INTEREST_PATTERNS`]: super::data::MAX_INTEREST_PATTERNS
+/// [`MAX_NAME_LEN`]: offline_protocol_data::MAX_NAME_LEN
 const MAX_DOCS_PER_VERSION_FRAME: usize = 128;
 
 /// How long an offer to one peer suppresses the next one.
@@ -334,7 +342,7 @@ fn offer_batches(entries: &[OfferEntry]) -> Vec<&[OfferEntry]> {
 ///
 /// The three fields travel together in both directions and mean the same
 /// thing in both: what the sender holds, what it removed, and what it wants
-/// back. Grouping them is not tidiness — passed separately they are three
+/// back. Grouping them is not tidiness: passed separately they are three
 /// arguments a caller can transpose, and two of them have the same type.
 #[derive(Debug, Default)]
 struct OfferContents {
