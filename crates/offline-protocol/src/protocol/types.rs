@@ -909,6 +909,26 @@ pub(crate) const DATA_TOMBSTONE_V1: u8 = 4;
 /// is the reason interest is safe to ship before any peer speaks it.
 pub(crate) const DATA_INTEREST_V1: u8 = 5;
 
+/// Attachment bytes inside a group, advertised in
+/// [`KeyPackagePayload::data_versions`] alongside [`DATA_SYNC_V1`]: the
+/// sender answers a `need_blob` that arrives inside a group ciphertext, and
+/// carries the bytes back as `chunk` frames under the group key.
+///
+/// A sixth entry rather than a bump, and the first `data_versions` entry
+/// since the second with an attested sibling. [`DATA_MEDIA_V1`] has none
+/// because carriage was 1:1 and there was nothing about it for a group
+/// inviter to attest; this one is about a group, so there is.
+///
+/// What it gates is a better answer to a question, not safety. A member
+/// without it receives a `need_blob` it understands the shape of and
+/// refuses, and receives `chunk` frames whose kind it does not know and
+/// drops: the version is read before the body, so an unknown kind is
+/// consumed rather than surfaced. Nothing is shown to anybody wrongly. What
+/// the entry buys is refusing a fetch at the call instead of leaving an
+/// application waiting out the silence timeout for an answer that was never
+/// coming.
+pub(crate) const DATA_GROUP_BLOB_V1: u8 = 6;
+
 /// Rich fields accepted by the `send_message_with` surface. Only ever
 /// delivered inside the sealed [`RichPayloadV1`] body — toward a recipient
 /// that did not advertise [`RICH_PAYLOAD_V1`] they are silently dropped,

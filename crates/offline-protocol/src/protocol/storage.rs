@@ -4,10 +4,11 @@ use super::state_crypto::{StateRecordCipher, SEALED_RECORD_OVERHEAD, STATE_RECOR
 use super::{
     lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
     PeerCapabilities, PendingDecryptRecord, PendingMessage, PendingMessageRecord,
-    ReceivedKeyPackage, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord, DATA_GROUP_V1,
-    DATA_INTEREST_V1, DATA_MEDIA_V1, DATA_SYNC_V1, DATA_TOMBSTONE_V1, MAX_BLOCKED_USERS,
-    MAX_KEY_PACKAGE_SENT_TO, MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH, MAX_PENDING_KEY_PACKAGES,
-    MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
+    ReceivedKeyPackage, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
+    DATA_GROUP_BLOB_V1, DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1, DATA_SYNC_V1,
+    DATA_TOMBSTONE_V1, MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO,
+    MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH, MAX_PENDING_KEY_PACKAGES, MAX_PENDING_MESSAGES_GLOBAL,
+    MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
     MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_PERSISTED_CAPABILITY_VERSIONS,
     MAX_PROTOCOL_STATE_RECORD_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_DECRYPT_RECORD_VERSION,
     RICH_PAYLOAD_V1, WELCOME_LIFECYCLE_TTL_SECS,
@@ -2975,6 +2976,20 @@ impl OfflineProtocol {
                 self.peer_data_group_attested.clear();
             }
             self.peer_data_group_attested.insert(peer_id.to_string());
+
+            // The blob entry rides the same attestation and is read
+            // independently: a member may speak group replication without
+            // carrying bytes inside one, which is every build between the
+            // two releases.
+            if versions.contains(&DATA_GROUP_BLOB_V1) {
+                if !self.peer_data_group_blob_attested.contains(peer_id)
+                    && self.peer_data_group_blob_attested.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.peer_data_group_blob_attested.clear();
+                }
+                self.peer_data_group_blob_attested
+                    .insert(peer_id.to_string());
+            }
         }
         let Ok(existing) = self.load_peer_capabilities(peer_id) else {
             warn!(
@@ -3155,6 +3170,13 @@ impl OfflineProtocol {
             }
             if self.config.data.enabled && caps.data_versions.contains(&DATA_INTEREST_V1) {
                 self.peer_data_interest.insert(peer_id.clone());
+            }
+            if self.config.data.enabled && caps.data_versions.contains(&DATA_GROUP_BLOB_V1) {
+                self.peer_data_group_blob.insert(peer_id.clone());
+            }
+            if self.config.data.enabled && caps.attested_data_versions.contains(&DATA_GROUP_BLOB_V1)
+            {
+                self.peer_data_group_blob_attested.insert(peer_id.clone());
             }
             // Not gated on the sealing kill switch: this is a destination
             // address, and the transport decides whether to seal at all. A

@@ -11,8 +11,8 @@
 
 use crate::protocol::{
     base64_decode, base64_encode, internal_prefixes, GroupMemberRemovedPayload,
-    InternalMessageResult, OfflineProtocol, RichPayloadV1, RichSendExtras, DATA_GROUP_V1,
-    RICH_PAYLOAD_V1,
+    InternalMessageResult, OfflineProtocol, RichPayloadV1, RichSendExtras, DATA_GROUP_BLOB_V1,
+    DATA_GROUP_V1, RICH_PAYLOAD_V1,
 };
 use crate::{Error, Event, Result};
 use chrono::{DateTime, Utc};
@@ -3391,9 +3391,19 @@ impl OfflineProtocol {
                     // the single error that puts `__DATA_V1__` in front of a
                     // user as text, and a self-attestation is the one place
                     // the claim cannot be corrected by a direct exchange.
-                    self.advertised_data_versions()
-                        .contains(&DATA_GROUP_V1)
-                        .then(|| (m.clone(), vec![DATA_GROUP_V1]))
+                    // Read off the same list every peer is told, so a
+                    // self-attestation can never claim more than this device
+                    // advertises. Entry 2 is what makes the attestation
+                    // usable at all; the blob entry rides beside it and is
+                    // read independently.
+                    let advertised = self.advertised_data_versions();
+                    advertised.contains(&DATA_GROUP_V1).then(|| {
+                        let mut versions = vec![DATA_GROUP_V1];
+                        if advertised.contains(&DATA_GROUP_BLOB_V1) {
+                            versions.push(DATA_GROUP_BLOB_V1);
+                        }
+                        (m.clone(), versions)
+                    })
                 } else {
                     self.attestable_data_versions(m).map(|v| (m.clone(), v))
                 }
@@ -5138,9 +5148,12 @@ impl OfflineProtocol {
         // all-members gate that every roster-wide delivery answers to: a
         // member that does not intercept these frames renders one as
         // literal `__DATA_V1__` text. A directed frame needs no such check
-        // (the member it answers asked for it, which is proof enough), but
-        // handing that same frame to the whole roster is exactly the send
-        // the gate exists to refuse. Consulted here rather than upstream
+        // here: it either answers something that member sent, which is
+        // proof enough that they intercept these frames, or it is the one
+        // question this layer puts to a member who asked for nothing, and
+        // that one is refused at its own call against the same per-member
+        // predicate this gate is built from. Handing either to the whole
+        // roster is still exactly the send the gate exists to refuse. Consulted here rather than upstream
         // because this is the only place a directed frame can become a
         // roster-wide one.
         let gate_open = self.group_data_sync_active(&members);

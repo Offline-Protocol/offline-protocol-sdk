@@ -15,6 +15,52 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Attachment bytes move inside a group.** `DataStore.fetchAttachmentFrom(space, peer, hash)`
+  asks one member for the bytes behind a reference, and they come back as
+  frames sealed under the group key. Before this, references replicated to
+  every member and the bytes reached nobody: fetching them needed a confirmed
+  pairwise session, and two members of a group need not have one with each
+  other.
+
+  The fetch names the member for two reasons. A reference says what the bytes
+  are and nothing about who holds them, so somebody has to choose; and a
+  directed frame is promoted to a roster-wide delivery when the sender's
+  ratchet budget runs out, which means a request arrives at every member
+  whether or not it was addressed to them. Without the name in the frame,
+  every member's application would be asked for bytes the requester can
+  accept from only one of them. The SDK does not try members in turn, because
+  each miss costs the whole silence timeout.
+
+  **A group attachment is at most 1 MiB**, 32 frames of 32 KiB. That bound is
+  what keeps the request a single question with a single answer: the whole
+  answer leaves at once, so nothing has to ask for the next window and there
+  is no chain of questions to terminate. `provideAttachment` refuses a larger
+  blob at the call, while the application still has the file in hand, and
+  says to use a 1:1 session instead. Nothing about the 1:1 path changed; it
+  still carries up to the transfer layer's own limit.
+
+  A chunk is admitted only against an outstanding request and only from the
+  member that request was put to, and the assembled bytes are still checked
+  against the hash that asked for them. The first two bound what a member can
+  spend of another's memory and stop one member answering or refusing a
+  question put to somebody else; only the hash says what the bytes are.
+
+  Negotiated as `data_versions` entry 6, appended, and the first entry since
+  the second to have an attested sibling: a group inviter now attests every
+  group-relevant entry it knows about a member, rather than only entry 2. A
+  member without entry 6 refuses the request it understands and drops the
+  chunk frames it does not, so nothing is shown to anybody wrongly; what the
+  entry buys is refusing a fetch at the call instead of waiting out the
+  timeout.
+
+  A fetch is refused at the call for a member this device does not know
+  receives replication frames inside a group, because one that does not
+  would be shown the question as text, and for this device itself. Asking a
+  second member is a fallback rather than a repeat: the question put to the
+  first is reported as `evicted`, naming that member, and the new one goes
+  out at once. Every report of a fetch that ended without bytes now names
+  the member it was put to rather than the space.
+
 - **A space can replicate in part.** `DataStore.setInterest(space, patterns)`
   names the documents this device wants from its peers: document names, each
   optionally ending in `*` to match a prefix, at most 32 per space. `["*"]`

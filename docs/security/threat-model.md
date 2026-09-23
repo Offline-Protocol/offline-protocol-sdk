@@ -560,6 +560,15 @@ peer's bytes outside the quarantine, on a path a peer can steer a blob onto
 by sending the floor first; see
 [ADR 0019](../adr/0019-remote-document-imports-are-contained-not-trusted.md).
 
+**A member can hold a megabyte of this device's memory per blob**, and only
+for blobs this device asked that member for. A chunk is admitted against an
+outstanding question and from nobody but the member it was put to, so what a
+member can spend is bounded by the fetches the application started: at most
+64 outstanding, each assembling at most 32 pieces of 32 KiB. A member that
+sends one piece and stops holds its share until the question times out.
+Bytes nobody asked for are assembled nowhere, which is what stops a member
+spending this memory unprompted.
+
 **A smaller cost at the same boundary:** every version offer a peer sends
 makes this device read the version of each document in that space, and a peer
 may send offers as fast as the link carries them. The work is bounded by the

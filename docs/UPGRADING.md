@@ -2255,6 +2255,51 @@ exactly the one whose removal you still need to hear about.
 
 ---
 
+## 24. Attachment bytes inside a group *(unreleased)*
+
+References always replicated to every member; now the bytes can follow.
+
+**`fetchAttachmentFrom(space, peer, hash)` asks one member.** The reference
+says what the bytes are and nothing about who has them, so the call takes the
+member; the SDK does not try members in turn, because each miss costs the
+full silence timeout. The answer arrives as the same `data_attachment_received`
+event a 1:1 fetch produces.
+
+**`fetchAttachment` still refuses a group space**, and its message now names
+the call that works.
+
+**A group attachment is capped at 1 MiB.** `provideAttachment` refuses a
+larger blob at the call, while your app still has the file, and says to send
+it over a 1:1 session. The 1:1 path is unchanged and still carries up to the
+transfer layer's limit.
+
+**`provideAttachment` and `declineAttachment` now accept a group space**, with
+the member that asked as the peer.
+
+**A member on an older build refuses the request and drops the chunks.**
+Nothing is surfaced wrongly there; the fetch ends at the silence timeout with
+`data_attachment_unavailable`. Where an inviter has attested the member's
+capability, the fetch is refused at the call instead.
+
+**`fetchAttachmentFrom` throws for a member this device knows nothing
+about**, and for your own address. A member who cannot intercept replication
+frames would be shown the question as chat text, so the call refuses rather
+than send it; an inviter's attestation is what supplies that knowledge for
+members you have never exchanged key packages with, which is the ordinary
+case in a group.
+
+**Falling back to another member works immediately.** Asking a second member
+for the same blob is a new question, not a repeat: the one put to the first
+member ends with `data_attachment_unavailable` and `reason: "evicted"`, and
+the new one goes out at once. Do not wait out the timeout first.
+
+**`data_attachment_unavailable` names the member, not the space.** In a
+group these differ, and every road that ends a fetch now reports the member
+the question was put to. If you keyed anything on that field being the space
+in a group, it was the group id before this release by mistake.
+
+---
+
 ## Appendix A: limits reference
 
 | Limit | Value | Where enforced |

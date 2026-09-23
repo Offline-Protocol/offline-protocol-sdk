@@ -2401,8 +2401,8 @@ fn a_fetch_nobody_answers_eventually_reports() {
     let stale = std::time::Instant::now()
         - crate::protocol::data_sync::ATTACHMENT_FETCH_TIMEOUT
         - std::time::Duration::from_secs(1);
-    for asked_at in bob.protocol.pending_attachment_fetches.values_mut() {
-        *asked_at = stale;
+    for pending in bob.protocol.pending_attachment_fetches.values_mut() {
+        pending.last_seen = stale;
     }
     bob.protocol.expire_attachment_fetches();
 
@@ -2412,6 +2412,44 @@ fn a_fetch_nobody_answers_eventually_reports() {
     assert!(
         bob.protocol.pending_attachment_fetches.is_empty(),
         "and release the slot"
+    );
+}
+
+#[test]
+fn a_chunk_on_a_one_to_one_session_is_dropped() {
+    // Chunks are the group road. A 1:1 fetch is answered over the media
+    // path, which has its own reassembly, its own resource caps and its own
+    // failure report, so admitting a chunk here too would give one outcome
+    // two roads to arrive by that are alike in nothing but the hash check.
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    let alice_space = Node::space_for(&bob);
+    let bytes = vec![4u8; 2048];
+    let hash = OfflineProtocol::data_attachment_hash(&bytes);
+
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+    clear_events(&bob);
+
+    alice.protocol.send_chunk_for_test(
+        &alice_space,
+        &crate::protocol::data_sync::SyncChannel::Peer,
+        &hash,
+        0,
+        1,
+        &base64::engine::general_purpose::STANDARD.encode(&bytes),
+    );
+    pump(&mut alice, &mut bob);
+
+    assert!(
+        events_named(&bob, "data_attachment_received").is_empty(),
+        "a chunk was assembled on a session where bytes ride the media path"
+    );
+    assert!(
+        !bob.protocol.pending_attachment_fetches.is_empty(),
+        "the fetch was ended by a frame this road does not carry"
     );
 }
 
@@ -2811,8 +2849,8 @@ fn a_fetch_does_not_expire_while_its_own_answer_is_arriving() {
     let stale = std::time::Instant::now()
         - crate::protocol::data_sync::ATTACHMENT_FETCH_TIMEOUT
         - std::time::Duration::from_secs(1);
-    for seen_at in bob.protocol.pending_attachment_fetches.values_mut() {
-        *seen_at = stale;
+    for pending in bob.protocol.pending_attachment_fetches.values_mut() {
+        pending.last_seen = stale;
     }
     alice.protocol.pump_media_transfers();
     pump(&mut alice, &mut bob);
@@ -3375,8 +3413,8 @@ fn the_requester_bounds_how_often_it_asks() {
     let stale = std::time::Instant::now()
         - crate::protocol::data_sync::DATA_SYNC_OFFER_INTERVAL
         - std::time::Duration::from_secs(1);
-    for asked_at in bob.protocol.pending_attachment_fetches.values_mut() {
-        *asked_at = stale;
+    for pending in bob.protocol.pending_attachment_fetches.values_mut() {
+        pending.last_seen = stale;
     }
     bob.protocol
         .data_fetch_attachment(&bob_space, &hash)

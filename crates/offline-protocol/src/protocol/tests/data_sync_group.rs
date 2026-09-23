@@ -16,10 +16,14 @@ use offline_protocol_transport::{MockTransport, Transport, TransportType};
 
 use crate::group_mesh::{RosterRatchetGap, MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS};
 use crate::mls::InMemoryStorage;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+use crate::protocol::data_sync::{SyncChannel, MAX_GROUP_BLOB_CHUNKS, MAX_SYNC_BLOB_BYTES};
 use crate::protocol::prefixes::internal_prefixes;
 use crate::protocol::tests::{create_test_config_for_user, id};
 use crate::protocol::types::{
-    DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1, DATA_SYNC_V1, DATA_TOMBSTONE_V1,
+    DATA_GROUP_BLOB_V1, DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1, DATA_SYNC_V1,
+    DATA_TOMBSTONE_V1,
 };
 use crate::protocol::{OfflineProtocol, TestProtocolStateStorage};
 
@@ -137,7 +141,13 @@ fn trio() -> (Member, Member, Member, String) {
         (&mut carol, [&a, &b]),
     ] {
         for other in others {
+            // Both entries, because one advertisement carries both: a build
+            // that intercepts group frames at all is a build that carries
+            // bytes inside one. Seeding entry 2 alone would model a peer no
+            // release produces, and would quietly hold the blob gate open
+            // by making every member look like one never heard from.
             member.protocol.peer_data_group.insert(other.clone());
+            member.protocol.peer_data_group_blob.insert(other.clone());
         }
     }
 
@@ -497,9 +507,11 @@ fn a_joining_member_catches_up_on_documents_written_before_it_arrived() {
     );
     for other in [&bob.address, &carol.address, &dave.address] {
         alice.protocol.peer_data_group.insert(other.clone());
+        alice.protocol.peer_data_group_blob.insert(other.clone());
     }
     for other in [&alice.address, &bob.address, &carol.address] {
         dave.protocol.peer_data_group.insert(other.clone());
+        dave.protocol.peer_data_group_blob.insert(other.clone());
     }
 
     // What the inviter does on a real invite: offer the newcomer what this
@@ -740,7 +752,8 @@ fn the_group_capability_is_advertised_and_recorded() {
             DATA_GROUP_V1,
             DATA_MEDIA_V1,
             DATA_TOMBSTONE_V1,
-            DATA_INTEREST_V1
+            DATA_INTEREST_V1,
+            DATA_GROUP_BLOB_V1
         ],
         "a build that intercepts group frames has to say so, or no peer \
          will ever send it one. The media entry rides the same list and is \
@@ -1207,25 +1220,30 @@ fn a_member_that_narrows_its_interest_refuses_what_the_group_broadcasts() {
 }
 
 #[test]
-fn a_group_space_refuses_attachment_carriage_in_this_version() {
-    // The honest limit rather than a silent one. A blob rides the media
-    // path, which is a transfer to a confirmed 1:1 session, and two members
-    // of a group need not have one with each other: requiring one would make
-    // an attachment depend on a handshake that may never happen.
-    //
-    // Written against a real group, because the refusal is the group arm of
-    // `data_fetch_attachment` and a space this device is not in would be
-    // refused a rung lower, by the capability gate, and prove nothing.
+fn a_group_fetch_has_to_name_the_member_it_asks() {
+    // A reference replicates to everybody and says nothing about who holds
+    // the bytes, so a group fetch takes the member. The unaddressed call is
+    // refused rather than quietly asking somebody, and the refusal says
+    // which call to use instead.
     let (mut alice, _bob, _carol, group) = trio();
+    let hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     let err = alice
         .protocol
-        .data_fetch_attachment(
-            &group,
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        )
-        .expect_err("a group fetch must refuse");
+        .data_fetch_attachment(&group, hash)
+        .expect_err("an unaddressed group fetch must refuse");
     assert!(
-        format!("{err}").contains("1:1"),
+        format!("{err}").contains("data_fetch_attachment_from"),
+        "the refusal must name the call that works: {err}"
+    );
+
+    // And a member who is not in the group is refused too, rather than
+    // being sent a frame under a key they do not hold.
+    let err = alice
+        .protocol
+        .data_fetch_attachment_from(&group, &id("stranger"), hash)
+        .expect_err("a fetch from a non-member must refuse");
+    assert!(
+        format!("{err}").contains("not a member"),
         "the refusal must name the reason: {err}"
     );
 }
@@ -1470,5 +1488,825 @@ fn a_member_that_edited_while_a_removal_crossed_keeps_the_document_for_everyone(
         rounds.last(),
         Some(&0),
         "the exchange did not terminate: {rounds:?}"
+    );
+}
+
+#[test]
+fn a_long_run_of_directed_frames_all_arrive_and_decrypt() {
+    // Carrying a blob inside a group means a run of directed frames, and
+    // this is what that rests on: every one of them decrypting, in one
+    // epoch, at a length a blob actually produces. A blob at the cap is 32
+    // frames; this sends twice that.
+    let (mut alice, mut bob, mut carol, group) = trio();
+
+    // A real version token, so each offer is a frame Bob genuinely acts on
+    // rather than one he merely fails to parse. Acting on it is the positive
+    // signal: a frame that did not decrypt creates no document.
+    write(&mut alice, &group, "seed", "k", "v");
+    settle(&mut alice, &mut bob, &mut carol);
+    let version = alice
+        .protocol
+        .data_doc_version(&group, "seed")
+        .expect("version");
+    alice.transport.clear_sent_messages();
+
+    let total = 64usize;
+    for index in 0..total {
+        alice
+            .protocol
+            .send_group_internal_frame(
+                &group,
+                Some(&bob.address),
+                &format!(
+                    "{}{{\"v\":1,\"k\":\"vv\",\"reply\":true,\"partial\":true,\"docs\":{{\"spike{index}\":\"{version}\"}}}}",
+                    internal_prefixes::DATA_V1
+                ),
+            )
+            .expect("send a directed frame");
+    }
+    pump(&mut alice, &mut [&mut bob, &mut carol]);
+
+    let arrived = bob
+        .protocol
+        .data_list_docs(&group)
+        .expect("list")
+        .iter()
+        .filter(|name| name.starts_with("spike"))
+        .count();
+    let carol_saw = carol
+        .protocol
+        .data_list_docs(&group)
+        .expect("list")
+        .iter()
+        .filter(|name| name.starts_with("spike"))
+        .count();
+    assert_eq!(
+        carol_saw, 0,
+        "a directed frame reached a member it was not addressed to"
+    );
+    assert!(
+        !bob.saw_group_message(),
+        "a replication frame was surfaced to the application as a chat message"
+    );
+    assert_eq!(
+        arrived, total,
+        "directed frames were lost or did not decrypt"
+    );
+}
+
+#[test]
+fn a_run_of_directed_frames_survives_the_ratchet_promotion() {
+    let (mut alice, mut bob, mut carol, group) = trio();
+    write(&mut alice, &group, "seed", "k", "v");
+    settle(&mut alice, &mut bob, &mut carol);
+    let version = alice
+        .protocol
+        .data_doc_version(&group, "seed")
+        .expect("version");
+
+    // Put the sender one frame short of the bound, so a run crosses it.
+    spend_the_budget(&mut alice, &group);
+    alice.transport.clear_sent_messages();
+
+    let total = 8usize;
+    for index in 0..total {
+        alice
+            .protocol
+            .send_group_internal_frame(
+                &group,
+                Some(&bob.address),
+                &format!(
+                    "{}{{\"v\":1,\"k\":\"vv\",\"reply\":true,\"partial\":true,\"docs\":{{\"promo{index}\":\"{version}\"}}}}",
+                    internal_prefixes::DATA_V1
+                ),
+            )
+            .expect("send a directed frame");
+    }
+    pump(&mut alice, &mut [&mut bob, &mut carol]);
+
+    let bob_saw = bob
+        .protocol
+        .data_list_docs(&group)
+        .expect("list")
+        .iter()
+        .filter(|name| name.starts_with("promo"))
+        .count();
+    let carol_saw = carol
+        .protocol
+        .data_list_docs(&group)
+        .expect("list")
+        .iter()
+        .filter(|name| name.starts_with("promo"))
+        .count();
+    assert_eq!(
+        bob_saw, total,
+        "a run of directed frames lost one at the promotion"
+    );
+    // The promoted frame is a roster-wide delivery, so the members it was
+    // not addressed to receive it and act on it. That is why a chunk frame
+    // has to be droppable by a member with no fetch outstanding: promotion
+    // puts one in front of every member eventually.
+    assert_eq!(
+        carol_saw, 1,
+        "the promotion did not reach the rest of the roster, or reached it more than once"
+    );
+}
+
+// ---- attachment bytes inside a group ------------------------------------
+
+/// Events of one kind, as the application sees them.
+///
+/// Serialized rather than matched, because that is the shape an application
+/// actually receives across the FFI and it keeps the assertions about the
+/// fields rather than about the variant.
+fn attachment_events(member: &Member, name: &str) -> Vec<serde_json::Value> {
+    member
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| serde_json::to_value(event).ok())
+        .filter(|value| value.get("type").and_then(|t| t.as_str()) == Some(name))
+        .collect()
+}
+
+/// One string field of an event.
+fn field<'a>(event: &'a serde_json::Value, key: &str) -> &'a str {
+    event
+        .get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| panic!("event has no {key}: {event}"))
+}
+
+#[test]
+fn a_member_fetches_a_blob_from_another_member() {
+    // Nothing roster-wide has gone out yet, so this device has no entry
+    // against the ratchet-gap budget and its first directed frame is
+    // promoted to the whole roster. That is not incidental to this test: it
+    // is why Carol receives the request at all, and so it is the `to` field
+    // rather than the addressing that keeps her application out of it.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let bytes = vec![7u8; 40 * 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&bytes);
+
+    // Bob asks Alice, by name: the reference says what the bytes are, never
+    // who has them.
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+
+    let asked = attachment_events(&alice, "data_attachment_requested");
+    assert_eq!(asked.len(), 1, "the holder was not asked");
+    assert!(
+        attachment_events(&carol, "data_attachment_requested").is_empty(),
+        "a directed request reached a member it was not addressed to"
+    );
+
+    // Only the application has the bytes, so only it can answer.
+    alice
+        .protocol
+        .data_provide_attachment(&group, &bob.address, &hash, bytes.clone())
+        .expect("provide");
+    pump(&mut alice, &mut [&mut bob, &mut carol]);
+
+    let received = attachment_events(&bob, "data_attachment_received");
+    assert_eq!(received.len(), 1, "the bytes never arrived");
+    assert_eq!(field(&received[0], "hash"), hash);
+    assert_eq!(
+        BASE64.decode(field(&received[0], "data")).expect("base64"),
+        bytes,
+        "the blob came back changed"
+    );
+    assert!(
+        attachment_events(&carol, "data_attachment_received").is_empty(),
+        "a member who asked for nothing was handed a blob"
+    );
+    assert!(
+        !carol.saw_group_message() && !bob.saw_group_message(),
+        "a chunk frame was surfaced to the application as a chat message"
+    );
+}
+
+#[test]
+fn a_fetch_toward_a_member_known_not_to_carry_bytes_is_refused_at_the_call() {
+    // What entry 6 actually buys. The member receives the question, knows
+    // its shape, and refuses; the entry is what lets the asking device say
+    // so at the call instead of leaving an application waiting out the
+    // silence timeout for an answer that was never coming.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes alice cannot carry");
+
+    // Alice speaks group replication and not the blob entry: every build
+    // between the two releases.
+    bob.protocol.peer_data_group_blob.remove(&alice.address);
+    bob.protocol
+        .peer_data_group_blob_attested
+        .remove(&alice.address);
+
+    let err = bob
+        .protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect_err("a member known not to carry bytes must be refused");
+    assert!(
+        format!("{err}").contains("does not carry attachment bytes"),
+        "the refusal must name the reason: {err}"
+    );
+    assert!(
+        bob.protocol.pending_attachment_fetches.is_empty(),
+        "a refused fetch still spent a slot"
+    );
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+    assert!(
+        attachment_events(&alice, "data_attachment_requested").is_empty(),
+        "a refused fetch still asked"
+    );
+}
+
+#[test]
+fn a_fetch_toward_a_member_nothing_is_known_about_is_refused_at_the_call() {
+    // The one directed frame this layer sends to a member who asked for
+    // nothing, so it answers to the same rule a broadcast does: a member
+    // not known to intercept `__DATA_V1__` renders it as chat text, and
+    // neither road may put one in front of them.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes from a stranger");
+
+    bob.protocol.forget_data_sync_peer(&alice.address);
+
+    let err = bob
+        .protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect_err("a member nothing is known about must be refused");
+    assert!(
+        format!("{err}").contains("shown to them as text"),
+        "the refusal must name the failure it prevents: {err}"
+    );
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+    assert!(
+        attachment_events(&alice, "data_attachment_requested").is_empty(),
+        "a refused fetch still asked"
+    );
+}
+
+#[test]
+fn an_inviters_attestation_is_enough_to_ask_a_member() {
+    // The whole reason entry 6 has an attested sibling. Members of a group
+    // never exchange key packages with each other, so on a group nobody
+    // built out of existing 1:1 contacts the direct knowledge is empty and
+    // the inviter is the only source there is. Read independently of entry
+    // 2, which is what makes the fetch gate and the frame gate separable.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes only an inviter vouched for");
+
+    bob.protocol.forget_data_sync_peer(&alice.address);
+    bob.protocol
+        .record_attested_data(&alice.address, &[DATA_GROUP_V1, DATA_GROUP_BLOB_V1]);
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("an attested member can be asked");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+    assert_eq!(
+        attachment_events(&alice, "data_attachment_requested").len(),
+        1,
+        "the attested member was never asked"
+    );
+}
+
+#[test]
+fn an_attestation_without_the_blob_entry_still_lets_the_question_go() {
+    // An inviter on a build that predates entry 6 attests entry 2 alone,
+    // which says nothing either way about the bytes. "We have not heard"
+    // must not read as "they cannot": asking and hearing nothing is the
+    // honest outcome, and the silence timeout reports it.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes an old inviter said nothing about");
+
+    bob.protocol.forget_data_sync_peer(&alice.address);
+    bob.protocol
+        .record_attested_data(&alice.address, &[DATA_GROUP_V1]);
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("silence about the entry is not knowledge that it is absent");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+    assert_eq!(
+        attachment_events(&alice, "data_attachment_requested").len(),
+        1,
+        "a member an inviter said nothing about was never asked"
+    );
+}
+
+#[test]
+fn chunks_nobody_asked_for_are_dropped() {
+    // The rule the promotion makes load-bearing: a roster-wide frame puts a
+    // chunk in front of members who asked for nothing, and they must not
+    // assemble it.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let bytes = vec![3u8; 8 * 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&bytes);
+
+    // Nobody fetched, and Alice answers anyway.
+    alice
+        .protocol
+        .data_provide_attachment(&group, &bob.address, &hash, bytes)
+        .expect("provide");
+    pump(&mut alice, &mut [&mut bob, &mut carol]);
+
+    for (member, label) in [(&bob, "bob"), (&carol, "carol")] {
+        assert!(
+            attachment_events(member, "data_attachment_received").is_empty(),
+            "{label} assembled a blob nothing asked for"
+        );
+        assert!(
+            !member.saw_group_message(),
+            "{label} was shown a chunk frame as a chat message"
+        );
+    }
+}
+
+#[test]
+fn a_blob_that_does_not_hash_to_what_was_asked_for_is_refused() {
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let wanted = vec![1u8; 4 * 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&wanted);
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+
+    // A holder that sends different bytes under the asked-for address. The
+    // send seam is reached directly, because `provide` checks the hash on
+    // the way out and this is about the check on the way in.
+    let lie = vec![2u8; 4 * 1024];
+    alice.protocol.send_chunk_for_test(
+        &group,
+        &SyncChannel::GroupDirected(bob.address.clone()),
+        &hash,
+        0,
+        1,
+        &BASE64.encode(&lie),
+    );
+    pump(&mut alice, &mut [&mut bob, &mut carol]);
+
+    assert!(
+        attachment_events(&bob, "data_attachment_received").is_empty(),
+        "bytes that did not hash to the request were handed to the application"
+    );
+    let ended = attachment_events(&bob, "data_attachment_unavailable");
+    assert_eq!(ended.len(), 1, "the fetch ended without saying so");
+    assert_eq!(field(&ended[0], "reason"), "hash_mismatch");
+    assert_eq!(
+        field(&ended[0], "peer_id"),
+        alice.address,
+        "the report names the group rather than the member that was asked"
+    );
+}
+
+#[test]
+fn a_group_fetch_that_nobody_answers_names_the_member_it_was_put_to() {
+    // Every road that ends a fetch owes the same event, and in a group the
+    // space is not the peer: an application told the group id cannot stop
+    // asking that member, or ask the next one. The refusal road already
+    // named the member because it reads the sender; these roads read the
+    // record, which is the only place the member survives.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes nobody sends");
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+
+    let stale = std::time::Instant::now()
+        - crate::protocol::data_sync::ATTACHMENT_FETCH_TIMEOUT
+        - std::time::Duration::from_secs(1);
+    for pending in bob.protocol.pending_attachment_fetches.values_mut() {
+        pending.last_seen = stale;
+    }
+    bob.protocol.expire_attachment_fetches();
+
+    let ended = attachment_events(&bob, "data_attachment_unavailable");
+    assert_eq!(ended.len(), 1, "the silence was never reported");
+    assert_eq!(field(&ended[0], "reason"), "timeout");
+    assert_eq!(
+        field(&ended[0], "space_id"),
+        group,
+        "the report names the wrong space"
+    );
+    assert_eq!(
+        field(&ended[0], "peer_id"),
+        alice.address,
+        "the report names the group rather than the member that was asked"
+    );
+}
+
+#[test]
+fn forgetting_a_member_ends_the_group_fetch_put_to_them() {
+    // A fetch keyed by a group is not keyed by the member, so the road that
+    // forgets a peer has to read the record to find it. Left behind, the
+    // question holds a slot against the fetch bound until it times out, for
+    // a member this device has stopped replicating with entirely.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes alice was asked for");
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+    assert!(
+        !bob.protocol.pending_attachment_fetches.is_empty(),
+        "the question was never recorded"
+    );
+
+    bob.protocol.forget_data_sync_peer(&alice.address);
+
+    assert!(
+        bob.protocol.pending_attachment_fetches.is_empty(),
+        "a question put to a forgotten member outlived them"
+    );
+    let ended = attachment_events(&bob, "data_attachment_unavailable");
+    assert_eq!(ended.len(), 1, "the fetch was dropped without saying so");
+    assert_eq!(field(&ended[0], "reason"), "peer_gone");
+    assert_eq!(
+        field(&ended[0], "peer_id"),
+        alice.address,
+        "the report names the group rather than the member that was asked"
+    );
+}
+
+#[test]
+fn asking_a_second_member_is_a_new_question_rather_than_a_repeat() {
+    // The SDK does not walk the roster, so falling back to another member
+    // is the application's move to make, and it has to work the moment the
+    // first member goes quiet. The record is keyed by the space and the
+    // blob, neither of which changes when the member does.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let bytes = vec![8u8; 4 * 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&bytes);
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+    assert_eq!(
+        attachment_events(&alice, "data_attachment_requested").len(),
+        1,
+        "the first member was never asked"
+    );
+
+    // Alice says nothing. Well inside the repeat window, the application
+    // asks Carol instead.
+    bob.protocol
+        .data_fetch_attachment_from(&group, &carol.address, &hash)
+        .expect("fallback");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+    assert_eq!(
+        attachment_events(&carol, "data_attachment_requested").len(),
+        1,
+        "the fallback was swallowed as a repeat and asked nobody"
+    );
+
+    // The question put to Alice is closed, and names her.
+    let ended = attachment_events(&bob, "data_attachment_unavailable");
+    assert_eq!(ended.len(), 1, "the displaced question never ended");
+    assert_eq!(field(&ended[0], "peer_id"), alice.address);
+
+    // And the member who was actually asked can still answer.
+    carol
+        .protocol
+        .data_provide_attachment(&group, &bob.address, &hash, bytes)
+        .expect("provide");
+    pump(&mut carol, &mut [&mut alice, &mut bob]);
+    let received = attachment_events(&bob, "data_attachment_received");
+    assert_eq!(
+        received.len(),
+        1,
+        "the fallback member's answer was refused"
+    );
+    assert_eq!(field(&received[0], "peer_id"), carol.address);
+}
+
+#[test]
+fn a_group_fetch_cannot_be_put_to_this_device() {
+    // A device is in the roster it just read. An application walking that
+    // roster to choose a member reaches this, and a question put to
+    // nobody would be answered by the silence timeout fifteen minutes
+    // later.
+    let (mut alice, _bob, _carol, group) = trio();
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes this device would already have");
+
+    let err = alice
+        .protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect_err("a device must not ask itself");
+    assert!(
+        format!("{err}").contains("not a peer of itself"),
+        "the refusal must name the reason: {err}"
+    );
+    assert!(
+        alice.protocol.pending_attachment_fetches.is_empty(),
+        "a refused fetch still spent a slot"
+    );
+}
+
+#[test]
+fn a_blob_too_large_for_a_group_is_refused_at_the_call() {
+    // The cap is what keeps a request a single-hop question: the whole
+    // answer leaves at once, so nothing has to ask for the next window.
+    // The holder hears about it while it still has the file in hand.
+    let (mut alice, mut bob, _carol, group) = trio();
+    let bytes = vec![9u8; (MAX_GROUP_BLOB_CHUNKS as usize + 1) * 32 * 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&bytes);
+
+    let err = alice
+        .protocol
+        .data_provide_attachment(&group, &bob.address, &hash, bytes)
+        .expect_err("an oversized group attachment must refuse");
+    assert!(
+        format!("{err}").contains("1:1"),
+        "the refusal must say where a blob this size goes: {err}"
+    );
+}
+
+#[test]
+fn a_member_that_has_none_says_so_rather_than_going_quiet() {
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes alice does not have");
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+    alice
+        .protocol
+        .data_decline_attachment(&group, &bob.address, &hash)
+        .expect("decline");
+    pump(&mut alice, &mut [&mut bob, &mut carol]);
+
+    let ended = attachment_events(&bob, "data_attachment_unavailable");
+    assert_eq!(ended.len(), 1, "a refusal left the asker waiting");
+    assert_eq!(field(&ended[0], "reason"), "declined");
+    assert_eq!(
+        field(&ended[0], "peer_id"),
+        alice.address,
+        "the report names the wrong member"
+    );
+}
+
+#[test]
+fn an_answer_from_a_member_the_question_was_not_put_to_is_refused() {
+    // Two members can both hold the bytes, and only one was asked. A blob
+    // from the other is not an answer: admitting it would let any member
+    // end a question that was put to somebody else.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let bytes = vec![5u8; 4 * 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&bytes);
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+
+    carol
+        .protocol
+        .data_provide_attachment(&group, &bob.address, &hash, bytes)
+        .expect("provide");
+    pump(&mut carol, &mut [&mut alice, &mut bob]);
+
+    assert!(
+        attachment_events(&bob, "data_attachment_received").is_empty(),
+        "a member who was not asked answered the question anyway"
+    );
+}
+
+#[test]
+fn a_chunk_declaring_a_shape_this_layer_does_not_carry_is_dropped() {
+    // The receiver's own bound, not a restatement of the sender's. A holder
+    // that ignores the cap would otherwise spend this device's memory on
+    // whatever count it felt like declaring, and an index outside the count
+    // would sit in the assembly forever, keeping it one piece short.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let bytes = vec![4u8; 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&bytes);
+    let blob = BASE64.encode(&bytes);
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+
+    for (index, total, shape) in [
+        (0u32, 0u32, "a count of nothing"),
+        (0, MAX_GROUP_BLOB_CHUNKS + 1, "a count past the cap"),
+        (5, 1, "an index outside its own count"),
+    ] {
+        alice.protocol.send_chunk_for_test(
+            &group,
+            &SyncChannel::GroupDirected(bob.address.clone()),
+            &hash,
+            index,
+            total,
+            &blob,
+        );
+        pump(&mut alice, &mut [&mut bob, &mut carol]);
+        assert!(
+            attachment_events(&bob, "data_attachment_received").is_empty(),
+            "a chunk declaring {shape} was assembled anyway"
+        );
+    }
+
+    // And the fetch is still open, so the well-formed answer still lands:
+    // a malformed piece must not cancel a carriage that is otherwise on its
+    // way.
+    alice
+        .protocol
+        .data_provide_attachment(&group, &bob.address, &hash, bytes)
+        .expect("provide");
+    pump(&mut alice, &mut [&mut bob, &mut carol]);
+    assert_eq!(
+        attachment_events(&bob, "data_attachment_received").len(),
+        1,
+        "a malformed chunk cancelled the fetch it arrived against"
+    );
+}
+
+#[test]
+fn a_chunk_over_the_frame_budget_is_dropped() {
+    // The per-piece bound, which is this device's and not a restatement of
+    // the sender's. A holder that ignored it would otherwise decide on its
+    // own how much of another member's memory one piece may cost.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let bytes = vec![2u8; 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&bytes);
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+
+    let oversized = BASE64.encode(vec![0u8; MAX_SYNC_BLOB_BYTES + 1]);
+    alice.protocol.send_chunk_for_test(
+        &group,
+        &SyncChannel::GroupDirected(bob.address.clone()),
+        &hash,
+        0,
+        1,
+        &oversized,
+    );
+    pump(&mut alice, &mut [&mut bob, &mut carol]);
+    assert!(
+        attachment_events(&bob, "data_attachment_received").is_empty(),
+        "a chunk over the frame budget was assembled anyway"
+    );
+
+    // And the carriage survives it, like every other malformed piece.
+    alice
+        .protocol
+        .data_provide_attachment(&group, &bob.address, &hash, bytes)
+        .expect("provide");
+    pump(&mut alice, &mut [&mut bob, &mut carol]);
+    assert_eq!(
+        attachment_events(&bob, "data_attachment_received").len(),
+        1,
+        "an oversized chunk cancelled the fetch it arrived against"
+    );
+}
+
+#[test]
+fn a_carriage_that_stops_half_way_still_ends() {
+    // Arriving bytes refresh the clock, which is what keeps a carriage in
+    // progress from expiring underneath itself. The other side of that is
+    // this: a member that sends one piece and stops has refreshed the clock
+    // once, and the question must still end rather than hold its slot and
+    // its assembled bytes for good.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let bytes: Vec<u8> = (0..(MAX_SYNC_BLOB_BYTES + 512)).map(|i| i as u8).collect();
+    let hash = OfflineProtocol::data_attachment_hash(&bytes);
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+
+    // One piece of two, then silence.
+    let first = BASE64.encode(&bytes[..MAX_SYNC_BLOB_BYTES]);
+    alice.protocol.send_chunk_for_test(
+        &group,
+        &SyncChannel::GroupDirected(bob.address.clone()),
+        &hash,
+        0,
+        2,
+        &first,
+    );
+    pump(&mut alice, &mut [&mut bob, &mut carol]);
+    assert!(
+        attachment_events(&bob, "data_attachment_received").is_empty(),
+        "an incomplete answer was handed over"
+    );
+    assert_eq!(
+        bob.protocol.pending_attachment_fetches.len(),
+        1,
+        "the half-arrived answer left no question behind"
+    );
+
+    let stale = std::time::Instant::now()
+        - crate::protocol::data_sync::ATTACHMENT_FETCH_TIMEOUT
+        - std::time::Duration::from_secs(1);
+    for pending in bob.protocol.pending_attachment_fetches.values_mut() {
+        pending.last_seen = stale;
+    }
+    bob.protocol.expire_attachment_fetches();
+
+    assert!(
+        bob.protocol.pending_attachment_fetches.is_empty(),
+        "a half-arrived answer held its slot and its bytes for good"
+    );
+    let ended = attachment_events(&bob, "data_attachment_unavailable");
+    assert_eq!(ended.len(), 1, "the stalled carriage was never reported");
+    assert_eq!(field(&ended[0], "reason"), "timeout");
+    assert_eq!(field(&ended[0], "peer_id"), alice.address);
+}
+
+#[test]
+fn a_duplicate_chunk_replaces_rather_than_appends() {
+    // What carrying the count on every piece buys: the pieces are
+    // independent, so one arriving twice is one piece and not two, and the
+    // answer still completes at the count it declared. Appending would
+    // leave the blob longer than it was and fail the hash that asked for
+    // it.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let bytes: Vec<u8> = (0..(MAX_SYNC_BLOB_BYTES + 512)).map(|i| i as u8).collect();
+    let hash = OfflineProtocol::data_attachment_hash(&bytes);
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+
+    let pieces: Vec<String> = bytes
+        .chunks(MAX_SYNC_BLOB_BYTES)
+        .map(|chunk| BASE64.encode(chunk))
+        .collect();
+    assert_eq!(pieces.len(), 2, "this test needs a blob of two pieces");
+    let total = pieces.len() as u32;
+    for index in [0usize, 0, 1] {
+        alice.protocol.send_chunk_for_test(
+            &group,
+            &SyncChannel::GroupDirected(bob.address.clone()),
+            &hash,
+            index as u32,
+            total,
+            &pieces[index],
+        );
+    }
+    pump(&mut alice, &mut [&mut bob, &mut carol]);
+
+    let received = attachment_events(&bob, "data_attachment_received");
+    assert_eq!(received.len(), 1, "the repeated piece broke the count");
+    assert_eq!(
+        BASE64.decode(field(&received[0], "data")).expect("base64"),
+        bytes,
+        "a duplicate piece was appended rather than replacing"
+    );
+}
+
+#[test]
+fn a_refusal_from_a_member_the_question_was_not_put_to_is_ignored() {
+    // Any member can send a refusal, and a promoted frame puts one in front
+    // of everybody. Only the member the question was put to can end it,
+    // or one member could close another member's fetch and the asker would
+    // stop waiting for an answer that was still coming.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let bytes = vec![6u8; 2048];
+    let hash = OfflineProtocol::data_attachment_hash(&bytes);
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+
+    carol
+        .protocol
+        .data_decline_attachment(&group, &bob.address, &hash)
+        .expect("decline");
+    pump(&mut carol, &mut [&mut alice, &mut bob]);
+    assert!(
+        attachment_events(&bob, "data_attachment_unavailable").is_empty(),
+        "a member who was not asked ended somebody else's fetch"
+    );
+
+    // The member who *was* asked still gets through.
+    alice
+        .protocol
+        .data_provide_attachment(&group, &bob.address, &hash, bytes)
+        .expect("provide");
+    pump(&mut alice, &mut [&mut bob, &mut carol]);
+    assert_eq!(
+        attachment_events(&bob, "data_attachment_received").len(),
+        1,
+        "the fetch did not survive a refusal from the wrong member"
     );
 }

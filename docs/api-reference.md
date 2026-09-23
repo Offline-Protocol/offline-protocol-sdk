@@ -1052,7 +1052,8 @@ await store.flush('space-1', 'profile');
 | `docSize(space, doc)` | `number` | Compacted size in bytes |
 | `wipeAll()` | `void` | Delete every data-layer record. Only durable once replication has stopped |
 | `attachmentHash(bytesBase64)` | `string` | The address of some bytes, for writing a reference |
-| `fetchAttachment(space, hash)` | `void` | Ask the peer for a blob. Answers arrive as events; throws for a group space or a peer that cannot carry blobs |
+| `fetchAttachment(space, hash)` | `void` | Ask a 1:1 peer for a blob. Answers arrive as events; throws for a group space, which needs `fetchAttachmentFrom`, or for a peer that cannot carry blobs |
+| `fetchAttachmentFrom(space, peer, hash)` | `void` | Ask one member of a group for a blob. The bytes ride frames under the group key, so no pairwise session is needed, and they are capped at 1 MiB. Throws for a 1:1 space, a non-member, your own address, or a member nothing is known about |
 | `provideAttachment(space, peer, hash, bytesBase64)` | `void` | Answer a peer's request. Throws if the bytes do not hash to `hash` |
 | `declineAttachment(space, peer, hash)` | `void` | Tell a peer the bytes are gone. Throws for a peer that cannot carry blobs |
 
@@ -1151,10 +1152,13 @@ Five things worth knowing before you build on this:
 - **`size` describes bytes somewhere else.** Do not use it to size a buffer.
   It exists so a person can decide whether they want the thing before it comes
   over Bluetooth.
-- **1:1 only in this release.** References replicate in group spaces like any
-  other value, but fetching the bytes from a group member is refused: the
-  transfer needs a confirmed pairwise session and two members of a group need
-  not have one.
+- **A group fetch names its member, and is capped at 1 MiB.** A reference
+  replicates to everybody and says nothing about who holds the bytes, so
+  `fetchAttachmentFrom` takes the member; the SDK does not try members in
+  turn, because each miss costs the whole silence timeout. The bytes ride
+  frames under the group key, so no pairwise session is needed, and the whole
+  answer leaves at once, which is what caps it. `provideAttachment` rejects a
+  larger blob at the call, while the app still has the file in hand.
 
 ### Durability
 

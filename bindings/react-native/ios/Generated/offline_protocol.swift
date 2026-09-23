@@ -658,6 +658,8 @@ public protocol DataStoreProtocol: AnyObject, Sendable {
     
     func fetchAttachment(spaceId: String, hash: String) throws 
     
+    func fetchAttachmentFrom(spaceId: String, peerId: String, hash: String) throws 
+    
     func flush(spaceId: String, docId: String) throws 
     
     func flushAll() throws 
@@ -853,6 +855,16 @@ open func fetchAttachment(spaceId: String, hash: String)throws   {try rustCallWi
     uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(hash),$0
+    )
+}
+}
+    
+open func fetchAttachmentFrom(spaceId: String, peerId: String, hash: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment_from(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterString.lower(peerId),
         FfiConverterString.lower(hash),$0
     )
 }
@@ -9545,6 +9557,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment() != 64859) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from() != 5000) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_datastore_flush() != 53125) {

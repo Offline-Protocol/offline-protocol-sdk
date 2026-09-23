@@ -2056,8 +2056,9 @@ interface DataStore {
     // application, per blob, when somebody opens one. The answer arrives as
     // DataAttachmentReceived or DataAttachmentUnavailable, never inline.
     //
-    // Group spaces are refused in this version: a blob rides a transfer to a
-    // confirmed 1:1 session, and two group members need not have one.
+    // A group space is refused here and answered by fetch_attachment_from:
+    // a reference replicates to everybody and says nothing about who holds
+    // the bytes, so a group fetch names the member.
     [Throws=ProtocolError]
     void fetch_attachment(string space_id, string hash);
 
@@ -2077,6 +2078,19 @@ interface DataStore {
     // somebody a spinner that never resolves.
     [Throws=ProtocolError]
     void decline_attachment(string space_id, string peer_id, string hash);
+
+    // Ask one member of a group for the bytes behind a reference.
+    //
+    // The bytes come back as frames under the group key, so this needs no
+    // pairwise session with that member, and they are bounded at 1 MiB:
+    // anything larger travels over a 1:1 session instead, and the holder is
+    // told so at the call rather than halfway through.
+    //
+    // The SDK does not try members in turn. Each miss costs the whole
+    // silence timeout, so a reference nobody holds would spend one per
+    // member; the application knows who wrote the reference.
+    [Throws=ProtocolError]
+    void fetch_attachment_from(string space_id, string peer_id, string hash);
 };
 
 // BLE fragment for outgoing data

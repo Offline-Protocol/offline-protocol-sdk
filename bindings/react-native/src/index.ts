@@ -3948,6 +3948,30 @@ export class DataStore {
   }
 
   /**
+   * Asks one member of a group for the bytes behind a reference.
+   *
+   * A reference replicates to everybody and says nothing about who holds the
+   * bytes, so a group fetch names the member; the SDK does not try members
+   * in turn, because each miss costs the whole silence timeout. The bytes
+   * come back as frames under the group key, so no pairwise session with
+   * that member is needed, and they are bounded at 1 MiB. Anything larger
+   * travels over a 1:1 session, and the holder is told so at the call.
+   *
+   * Use {@link fetchAttachment} for a 1:1 space.
+   */
+  async fetchAttachmentFrom(
+    spaceId: string,
+    peerId: string,
+    hash: string
+  ): Promise<void> {
+    await OfflineProtocolNativeModule.dataFetchAttachmentFrom(
+      spaceId,
+      peerId,
+      hash
+    );
+  }
+
+  /**
    * The documents this device wants from its peers in one space.
    *
    * Each pattern is a document name, optionally ending in `*` to match a

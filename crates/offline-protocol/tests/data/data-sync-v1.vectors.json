@@ -73,6 +73,18 @@
       "kind": "blob_gone",
       "wire": "__DATA_V1__{\"v\":1,\"k\":\"blob_gone\",\"hash\":\"d73deca5a2a317edda0925823c6c775c9acefea1d69889f22b27566b403d8a1c\"}",
       "note": "Entry 3."
+    },
+    {
+      "name": "blob request addressed to one member",
+      "kind": "need_blob",
+      "wire": "__DATA_V1__{\"v\":1,\"k\":\"need_blob\",\"hash\":\"d73deca5a2a317edda0925823c6c775c9acefea1d69889f22b27566b403d8a1c\",\"to\":\"off1qy60a3pu0l9tnthnk08c4w59teq7u6w28gjwg8zk\"}",
+      "note": "Entry 6. `to` follows `hash` and names the member the question is for. Absent on a 1:1 session, where there is only one peer, which is what the request above says. Inside a group it is load-bearing: a directed frame is promoted to a roster-wide delivery when the sender's ratchet budget runs out, and a receiver cannot otherwise tell a promoted frame from one addressed to it."
+    },
+    {
+      "name": "blob chunk",
+      "kind": "chunk",
+      "wire": "__DATA_V1__{\"v\":1,\"k\":\"chunk\",\"hash\":\"d73deca5a2a317edda0925823c6c775c9acefea1d69889f22b27566b403d8a1c\",\"i\":0,\"n\":2,\"blob\":\"AAECAw==\"}",
+      "note": "Entry 6. One piece of a blob travelling as a frame under the group key, because two members need not share a 1:1 session. `i` is the index and `n` the count, on every piece rather than on the first, so they may arrive in any order and a duplicate replaces rather than appends. At most 32 pieces, which is what lets the request stay a single-hop question."
     }
   ],
   "parse_defaults": [
