@@ -2347,6 +2347,25 @@ impl OfflineProtocol {
                 "{peer} is not a member of {space}"
             )));
         }
+        // A question, and the only directed frame this layer puts to a
+        // member who asked for nothing. Every other one answers something
+        // that member sent, which is itself proof they intercept these
+        // frames; this one carries no such proof, so it needs the positive
+        // knowledge the roster-wide gate requires of every member before a
+        // frame is broadcast to them. Without it a member on a build that
+        // does not intercept `__DATA_V1__` is handed the question as chat
+        // text, which is the single failure that gate exists to refuse.
+        //
+        // An inviter attests this for members a device has never dealt with
+        // directly, which is what keeps the ordinary case working: a group
+        // is not built out of existing 1:1 contacts.
+        if !self.data_group_frames_known_received(peer) {
+            return Err(Error::InvalidArgument(format!(
+                "nothing is known about whether member {peer} receives replication \
+                 frames inside a group, and a question they cannot intercept would \
+                 be shown to them as text"
+            )));
+        }
         // Refused only on knowledge, never on its absence. Members do not
         // exchange key packages with each other, so "we have not heard" is
         // the ordinary case and must not read as "they cannot": the

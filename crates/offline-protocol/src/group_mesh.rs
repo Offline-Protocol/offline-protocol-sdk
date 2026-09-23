@@ -5148,9 +5148,12 @@ impl OfflineProtocol {
         // all-members gate that every roster-wide delivery answers to: a
         // member that does not intercept these frames renders one as
         // literal `__DATA_V1__` text. A directed frame needs no such check
-        // (the member it answers asked for it, which is proof enough), but
-        // handing that same frame to the whole roster is exactly the send
-        // the gate exists to refuse. Consulted here rather than upstream
+        // here: it either answers something that member sent, which is
+        // proof enough that they intercept these frames, or it is the one
+        // question this layer puts to a member who asked for nothing, and
+        // that one is refused at its own call against the same per-member
+        // predicate this gate is built from. Handing either to the whole
+        // roster is still exactly the send the gate exists to refuse. Consulted here rather than upstream
         // because this is the only place a directed frame can become a
         // roster-wide one.
         let gate_open = self.group_data_sync_active(&members);

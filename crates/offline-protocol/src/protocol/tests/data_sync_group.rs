@@ -141,7 +141,13 @@ fn trio() -> (Member, Member, Member, String) {
         (&mut carol, [&a, &b]),
     ] {
         for other in others {
+            // Both entries, because one advertisement carries both: a build
+            // that intercepts group frames at all is a build that carries
+            // bytes inside one. Seeding entry 2 alone would model a peer no
+            // release produces, and would quietly hold the blob gate open
+            // by making every member look like one never heard from.
             member.protocol.peer_data_group.insert(other.clone());
+            member.protocol.peer_data_group_blob.insert(other.clone());
         }
     }
 
@@ -501,9 +507,11 @@ fn a_joining_member_catches_up_on_documents_written_before_it_arrived() {
     );
     for other in [&bob.address, &carol.address, &dave.address] {
         alice.protocol.peer_data_group.insert(other.clone());
+        alice.protocol.peer_data_group_blob.insert(other.clone());
     }
     for other in [&alice.address, &bob.address, &carol.address] {
         dave.protocol.peer_data_group.insert(other.clone());
+        dave.protocol.peer_data_group_blob.insert(other.clone());
     }
 
     // What the inviter does on a real invite: offer the newcomer what this
@@ -1674,6 +1682,116 @@ fn a_member_fetches_a_blob_from_another_member() {
     assert!(
         !carol.saw_group_message() && !bob.saw_group_message(),
         "a chunk frame was surfaced to the application as a chat message"
+    );
+}
+
+#[test]
+fn a_fetch_toward_a_member_known_not_to_carry_bytes_is_refused_at_the_call() {
+    // What entry 6 actually buys. The member receives the question, knows
+    // its shape, and refuses; the entry is what lets the asking device say
+    // so at the call instead of leaving an application waiting out the
+    // silence timeout for an answer that was never coming.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes alice cannot carry");
+
+    // Alice speaks group replication and not the blob entry: every build
+    // between the two releases.
+    bob.protocol.peer_data_group_blob.remove(&alice.address);
+    bob.protocol
+        .peer_data_group_blob_attested
+        .remove(&alice.address);
+
+    let err = bob
+        .protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect_err("a member known not to carry bytes must be refused");
+    assert!(
+        format!("{err}").contains("does not carry attachment bytes"),
+        "the refusal must name the reason: {err}"
+    );
+    assert!(
+        bob.protocol.pending_attachment_fetches.is_empty(),
+        "a refused fetch still spent a slot"
+    );
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+    assert!(
+        attachment_events(&alice, "data_attachment_requested").is_empty(),
+        "a refused fetch still asked"
+    );
+}
+
+#[test]
+fn a_fetch_toward_a_member_nothing_is_known_about_is_refused_at_the_call() {
+    // The one directed frame this layer sends to a member who asked for
+    // nothing, so it answers to the same rule a broadcast does: a member
+    // not known to intercept `__DATA_V1__` renders it as chat text, and
+    // neither road may put one in front of them.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes from a stranger");
+
+    bob.protocol.forget_data_sync_peer(&alice.address);
+
+    let err = bob
+        .protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect_err("a member nothing is known about must be refused");
+    assert!(
+        format!("{err}").contains("shown to them as text"),
+        "the refusal must name the failure it prevents: {err}"
+    );
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+    assert!(
+        attachment_events(&alice, "data_attachment_requested").is_empty(),
+        "a refused fetch still asked"
+    );
+}
+
+#[test]
+fn an_inviters_attestation_is_enough_to_ask_a_member() {
+    // The whole reason entry 6 has an attested sibling. Members of a group
+    // never exchange key packages with each other, so on a group nobody
+    // built out of existing 1:1 contacts the direct knowledge is empty and
+    // the inviter is the only source there is. Read independently of entry
+    // 2, which is what makes the fetch gate and the frame gate separable.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes only an inviter vouched for");
+
+    bob.protocol.forget_data_sync_peer(&alice.address);
+    bob.protocol
+        .record_attested_data(&alice.address, &[DATA_GROUP_V1, DATA_GROUP_BLOB_V1]);
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("an attested member can be asked");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+    assert_eq!(
+        attachment_events(&alice, "data_attachment_requested").len(),
+        1,
+        "the attested member was never asked"
+    );
+}
+
+#[test]
+fn an_attestation_without_the_blob_entry_still_lets_the_question_go() {
+    // An inviter on a build that predates entry 6 attests entry 2 alone,
+    // which says nothing either way about the bytes. "We have not heard"
+    // must not read as "they cannot": asking and hearing nothing is the
+    // honest outcome, and the silence timeout reports it.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes an old inviter said nothing about");
+
+    bob.protocol.forget_data_sync_peer(&alice.address);
+    bob.protocol
+        .record_attested_data(&alice.address, &[DATA_GROUP_V1]);
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("silence about the entry is not knowledge that it is absent");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+    assert_eq!(
+        attachment_events(&alice, "data_attachment_requested").len(),
+        1,
+        "a member an inviter said nothing about was never asked"
     );
 }
 

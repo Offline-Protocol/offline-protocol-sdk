@@ -1087,6 +1087,38 @@ impl OfflineProtocol {
         }
     }
 
+    /// Whether `peer` is known to intercept replication frames inside a
+    /// group ([`DATA_GROUP_V1`]), either directly or by an inviter's
+    /// attestation.
+    ///
+    /// Positive knowledge, and the opposite rule to its blob sibling below,
+    /// because it answers a different question. This one decides whether a
+    /// `__DATA_V1__` frame may be *put in front of* a member: one that does
+    /// not intercept them renders the frame to its user as literal text, so
+    /// an unknown member closes this and an application is told at the call.
+    /// The blob sibling decides whether a member can usefully answer a
+    /// question they will certainly receive, where the honest answer to "we
+    /// have not heard" is to ask.
+    ///
+    /// The roster-wide gate is this predicate over every member, which is
+    /// not a coincidence to be refactored apart: a directed frame can be
+    /// promoted to a roster-wide delivery, so the two must agree about what
+    /// a member has to be known to do before a frame reaches them.
+    ///
+    /// [`DATA_GROUP_V1`]: crate::protocol::types::DATA_GROUP_V1
+    #[cfg_attr(not(feature = "data"), allow(dead_code))]
+    pub(super) fn data_group_frames_known_received(&self, peer: &str) -> bool {
+        #[cfg(feature = "data")]
+        {
+            self.peer_data_group.contains(peer) || self.peer_data_group_attested.contains(peer)
+        }
+        #[cfg(not(feature = "data"))]
+        {
+            let _ = peer;
+            false
+        }
+    }
+
     /// Whether `peer` is *known* not to carry attachment bytes inside a
     /// group.
     ///
@@ -1101,7 +1133,16 @@ impl OfflineProtocol {
     pub(super) fn data_group_blob_known_absent(&self, peer: &str) -> bool {
         #[cfg(feature = "data")]
         {
-            let heard_directly = self.peer_data_sync.contains(peer);
+            // Any direct knowledge of what this peer replicates, not just
+            // the first entry. A key package carries the whole list at
+            // once, so a peer in one of these sets is one whose
+            // advertisement this device has actually read, and the blob
+            // entry's absence from it is knowledge rather than silence.
+            // Reading entry 1 alone would make a peer known only by a
+            // later entry look like one never heard from, and the refusal
+            // this predicate exists to make would never fire for them.
+            let heard_directly =
+                self.peer_data_sync.contains(peer) || self.peer_data_group.contains(peer);
             let attested = self.peer_data_group_blob_attested.contains(peer);
             let carries = self.peer_data_group_blob.contains(peer) || attested;
             (heard_directly || attested) && !carries
@@ -1207,10 +1248,7 @@ impl OfflineProtocol {
                 && members
                     .iter()
                     .filter(|m| m.as_str() != self.local_id)
-                    .all(|m| {
-                        self.peer_data_group.contains(m.as_str())
-                            || self.peer_data_group_attested.contains(m.as_str())
-                    })
+                    .all(|m| self.data_group_frames_known_received(m.as_str()))
         }
         #[cfg(not(feature = "data"))]
         {
