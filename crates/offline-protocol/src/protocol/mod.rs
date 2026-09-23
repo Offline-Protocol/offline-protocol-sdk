@@ -3831,7 +3831,7 @@ impl OfflineProtocol {
     /// forever. Once running, this is a plain emit — the same call is used from
     /// `process()`-driven expiry, where no deferral is wanted.
     pub(crate) fn settle_restored_message_failure(&mut self, event: Event) {
-        let running = self.event_pipeline_is_live();
+        let running = self.protocol_is_running();
         self.settle_one_restored_message_failure(event, running);
     }
 
@@ -3842,13 +3842,21 @@ impl OfflineProtocol {
         &mut self,
         events: impl IntoIterator<Item = Event>,
     ) {
-        let running = self.event_pipeline_is_live();
+        let running = self.protocol_is_running();
         for event in events {
             self.settle_one_restored_message_failure(event, running);
         }
     }
 
-    fn event_pipeline_is_live(&self) -> bool {
+    /// Whether [`Self::start`] has run and nothing has stopped it since.
+    ///
+    /// Two callers want different things from the same fact. The restore
+    /// paths above want to know whether an emit reaches an application at
+    /// all. The document layer wants to know whether a frame it is about to
+    /// build can leave the device, because a send attempted before the
+    /// transports are up stamps a rate-limit window against an offer that
+    /// was never carried.
+    pub(crate) fn protocol_is_running(&self) -> bool {
         lock_shared_state(&self.shared_state)
             .map(|state| state.state == ProtocolState::Running)
             .unwrap_or(false)

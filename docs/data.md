@@ -272,7 +272,9 @@ It does two things, and they are worth telling apart.
 **Set it before `start()`.** It is not persisted, on purpose: it is your
 application's policy for this launch rather than a fact about the store, and
 a durable copy would be a second thing to reconcile against an app that has
-changed its mind.
+changed its mind. Declaring it costs nothing there: the exchange `start()`
+makes already carries it, and declaring the same patterns twice sends
+nothing.
 
 **`wipeAll()` clears it too**, along with the documents it was scoping,
 because nothing may distinguish a wiped space from one this device has never

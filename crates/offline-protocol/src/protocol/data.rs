@@ -1171,6 +1171,19 @@ impl OfflineProtocol {
     /// Widening asks: the newly wanted documents are absent from this
     /// device's next offer and inside its declared want, so the peer answers
     /// with them.
+    ///
+    /// The question that asks is skipped in the two cases where it would
+    /// cost something and buy nothing, because both are the ordinary way an
+    /// application calls this. Declaring the same patterns again asks for
+    /// nothing new: the offer would carry exactly what the last one did.
+    /// And declaring anything at all before `start()`, which is the
+    /// documented order, cannot reach a peer: the transports are not up, so
+    /// the frame is dropped for want of a session, and the offer path has
+    /// already stamped the window that suppresses the next sweep. That stamp
+    /// would then suppress the start-up sweep and the first rediscovery,
+    /// delaying the exchange this call exists to bring forward by the length
+    /// of the window. Both paths already carry the new interest: the sweep
+    /// in `start` and every rediscovery build their offer from it.
     pub fn data_set_interest(&mut self, space: &str, patterns: Vec<String>) -> Result<()> {
         offline_protocol_data::validate_space_name(space).map_err(map_data_error)?;
         // The same door every other `DataStore` method goes through. Without
@@ -1186,6 +1199,7 @@ impl OfflineProtocol {
         for pattern in &patterns {
             validate_interest_pattern(pattern)?;
         }
+        let previous = self.data.interest.get(space).cloned();
         let everything = patterns.len() == 1 && patterns[0] == "*";
         if everything {
             // The default, expressed explicitly. Held as absence so the wire
@@ -1194,7 +1208,12 @@ impl OfflineProtocol {
         } else {
             self.data.interest.insert(space.to_string(), patterns);
         }
-        self.nudge_data_sync(space, None, "interest_changed");
+        // Both guards are about the same thing: an offer that would carry
+        // nothing new, or could not be carried at all, must not spend the
+        // window that suppresses the offer which can. See the note above.
+        if previous.as_ref() != self.data.interest.get(space) && self.protocol_is_running() {
+            self.nudge_data_sync(space, None, "interest_changed");
+        }
         Ok(())
     }
 

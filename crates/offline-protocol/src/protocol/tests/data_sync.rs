@@ -5002,3 +5002,66 @@ fn wiping_the_store_clears_the_interest_it_scoped() {
         "a narrowing outlived the wipe that cleared the documents it scoped"
     );
 }
+
+#[test]
+fn declaring_interest_before_start_does_not_spend_the_offer_window() {
+    // The documented order is `setInterest` and then `start()`. Before the
+    // transports are up the offer cannot leave the device, but the offer
+    // path stamps its rate-limit window before it finds that out, and the
+    // stamp would go on to suppress the sweep in `start` and the first
+    // rediscovery after it. Both of those already build their offer from
+    // the new interest, so nothing is lost by not asking twice.
+    let mut config = create_test_config_for_user("alice");
+    config.encryption.enabled = true;
+    config.data.enabled = true;
+    let mut protocol = OfflineProtocol::new(config).expect("protocol");
+    let state = Arc::new(InMemoryStorage::new());
+    protocol
+        .initialize_mls(
+            crate::test_identity::seeded_storage("alice"),
+            Arc::new(TestProtocolStateStorage {
+                storage: state.clone(),
+            }),
+        )
+        .expect("initialize_mls");
+    // Without these the nudge stops at the channel lookup and this test
+    // would pass for a protocol that never reached the offer path at all.
+    let peer = bob_address();
+    protocol.peer_data_sync.insert(peer.clone());
+    protocol.peer_data_interest.insert(peer.clone());
+
+    protocol
+        .data_set_interest(&peer, vec!["wanted*".to_string()])
+        .expect("interest");
+
+    assert!(
+        !protocol.last_data_sync_offer.contains_key(&peer),
+        "an interest declared before start() spent the window that suppresses \
+         the sweep start() makes"
+    );
+
+    // The other half: once the engine is running, a change still asks.
+    // Without this the assertion above passes for a guard that never lets
+    // anything through.
+    protocol.start().expect("start");
+    protocol
+        .data_set_interest(&peer, vec!["wanted*".to_string(), "later*".to_string()])
+        .expect("widen");
+    assert!(
+        protocol.last_data_sync_offer.contains_key(&peer),
+        "widening the interest of a running engine did not ask the peer for what it added"
+    );
+
+    // And the same patterns again carry nothing new, so they ask nothing.
+    // An application that declares its interest at every launch would
+    // otherwise spend a window on a frame identical to the last one.
+    protocol.last_data_sync_offer.clear();
+    protocol
+        .data_set_interest(&peer, vec!["wanted*".to_string(), "later*".to_string()])
+        .expect("same patterns again");
+    assert!(
+        protocol.last_data_sync_offer.is_empty(),
+        "re-declaring the same interest spent a window on an offer that would have \
+         carried exactly what the last one did"
+    );
+}
