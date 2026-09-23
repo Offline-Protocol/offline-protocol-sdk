@@ -4970,3 +4970,35 @@ fn an_offer_declaring_more_patterns_than_are_read_is_answered_not_refused() {
         "a peer set its own cost by declaring more interest patterns than the bound reads"
     );
 }
+
+#[test]
+fn wiping_the_store_clears_the_interest_it_scoped() {
+    // The wipe promises that nothing distinguishes a space it cleared from
+    // one this device has never seen, and a narrowing that outlived it is
+    // exactly such a distinction. It is also the logout path, so a surviving
+    // narrowing would be one account's policy silently applied to the next
+    // account that replicates with the same peer.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    bob.protocol
+        .data_set_interest(&bob_space, vec!["wanted*".to_string()])
+        .expect("interest");
+    write(&mut alice, &alice_space, "other.notes", "k", "v");
+    settle(&mut alice, &mut bob);
+    assert!(
+        !holds(&mut bob, &bob_space, "other.notes"),
+        "precondition: the narrowing has to be refusing the document"
+    );
+
+    bob.protocol.data_wipe_all().expect("wipe");
+    bob.protocol.nudge_data_sync(&bob_space, None, "test");
+    settle(&mut alice, &mut bob);
+
+    assert_eq!(
+        read(&mut bob, &bob_space, "other.notes", "k"),
+        Some(DataValue::text("v")),
+        "a narrowing outlived the wipe that cleared the documents it scoped"
+    );
+}

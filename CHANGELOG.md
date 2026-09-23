@@ -41,11 +41,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   it no longer wants is exactly the one it still needs.
 
   Interest is not persisted: it is application policy for this launch rather
-  than a fact about the store, so declare it before `start()`. Narrowing does
-  not delete what is already held, because a policy change should not destroy
-  data nobody asked to lose; `deleteDoc` is how a document leaves. Widening
-  asks, since the newly wanted documents are absent from this device's next
-  offer and inside its declared interest.
+  than a fact about the store, so declare it before `start()`. `wipeAll()`
+  clears it along with the documents it scoped, because nothing may
+  distinguish a wiped space from one this device has never seen. Narrowing
+  does not delete what is already held, because a policy change should not
+  destroy data nobody asked to lose; `deleteDoc` is how a document leaves.
+  Widening asks, since the newly wanted documents are absent from this
+  device's next offer and inside its declared interest.
 
   Negotiated as `data_versions` entry 5, appended. On the wire an absent
   `want` means everything and an empty one means nothing; the two are

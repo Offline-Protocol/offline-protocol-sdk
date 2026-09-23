@@ -274,6 +274,12 @@ application's policy for this launch rather than a fact about the store, and
 a durable copy would be a second thing to reconcile against an app that has
 changed its mind.
 
+**`wipeAll()` clears it too**, along with the documents it was scoping,
+because nothing may distinguish a wiped space from one this device has never
+seen. On the logout path that is what you want, and it is also why a
+narrowing does not leak into the next account. If you wipe while the engine
+is running and want to stay narrowed, declare it again afterwards.
+
 **Narrowing does not delete what is already held.** A document that falls
 outside the new patterns stops being updated and stays where it is, because a
 policy change should not destroy data you did not ask to lose. Use

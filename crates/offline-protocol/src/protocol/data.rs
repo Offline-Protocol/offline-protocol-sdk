@@ -2204,6 +2204,13 @@ impl OfflineProtocol {
         self.data.docs.clear();
         self.data.spaces.clear();
         self.data.meta.clear();
+        // Interest goes with the content it was scoping, for the reason
+        // stated above: nothing may distinguish a space this device wiped
+        // from one it has never seen, and a surviving narrowing is exactly
+        // such a distinction. It is also the logout path, so a narrowing
+        // left behind would be one account's policy silently applied to the
+        // next account that happens to replicate with the same peer.
+        self.data.interest.clear();
         // Every window and every outstanding question goes with the content
         // they were about. Left behind, a window suppresses the first offer
         // or the first blob request made after the wipe, which is the same

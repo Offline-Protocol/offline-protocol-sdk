@@ -2237,7 +2237,9 @@ is a document name, optionally ending in `*` to match a prefix; `["*"]` is
 everything and is the default, `[]` is nothing, and a space takes at most 32.
 
 **Set it before `start()`.** It is not persisted, on purpose: it is your
-policy for this launch, not a fact about the store.
+policy for this launch, not a fact about the store. `wipeAll()` clears it
+along with the documents it scoped, so re-declare it if you wipe while the
+engine is running.
 
 **It is a request toward the peer and a refusal here.** The peer answers
 inside it, which is the bandwidth saving; this device refuses what falls
