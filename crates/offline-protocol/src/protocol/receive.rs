@@ -1172,7 +1172,25 @@ impl OfflineProtocol {
                 // a whole reassembly to reach a refusal that was decided
                 // before the first chunk. The completion check stays as the
                 // backstop against a header that lied.
-                crate::media_envelope::DataPurpose::Snapshot { .. } => {
+                crate::media_envelope::DataPurpose::Snapshot { doc } => {
+                    // The same refusal the import path makes, made before
+                    // the reassembly rather than after it, and for the same
+                    // reason the size check is here: the answer is already
+                    // certain. A document outside this space's interest is
+                    // refused whatever arrives, so admitting one spends a
+                    // whole transfer, up to the record ceiling, to reach a
+                    // decision that was made when the application narrowed
+                    // the space. Only a peer without entry 5 sends one,
+                    // which is exactly the peer whose traffic the declared
+                    // interest could not save.
+                    if !self.data_wants(sender, doc) {
+                        debug!(
+                            peer = %sender,
+                            doc,
+                            "Refusing a carried snapshot for a document outside this space's interest"
+                        );
+                        return false;
+                    }
                     if declared_size > crate::protocol::data_sync::MAX_MEDIA_SNAPSHOT_BYTES as u64 {
                         warn!(
                             peer = %sender,

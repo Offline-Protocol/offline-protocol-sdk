@@ -5065,3 +5065,69 @@ fn declaring_interest_before_start_does_not_spend_the_offer_window() {
          carried exactly what the last one did"
     );
 }
+
+#[test]
+fn a_carried_snapshot_outside_the_interest_is_refused_before_it_is_reassembled() {
+    // The refusal the import path makes, made at the descriptor instead.
+    // Only a peer without entry 5 sends one of these, so nothing here is a
+    // regression; what it saves is a whole transfer, up to the record
+    // ceiling, spent reaching a decision the narrowing already made.
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    bob.protocol
+        .data_set_interest(&bob_space, vec!["wanted*".to_string()])
+        .expect("interest");
+
+    // Large enough that one window cannot finish it, so the assembly is
+    // observably open at the point the gate either refused it or did not.
+    let payload = vec![7u8; 2 * 1024 * 1024];
+    alice
+        .protocol
+        .send_media_inner(
+            bob.address.clone(),
+            payload,
+            "other.notes".to_string(),
+            offline_protocol_core::ContentType::File,
+            crate::protocol::types::MediaSendOptions::default(),
+            Some(crate::media_envelope::DataPurpose::Snapshot {
+                doc: "other.notes".to_string(),
+            }),
+        )
+        .expect("a peer that advertised carriage accepts the send");
+    pump(&mut alice, &mut bob);
+
+    assert_eq!(
+        bob.protocol.file_transfer_manager.active_transfer_count(),
+        0,
+        "a narrowed device buffered a snapshot for a document it had already refused"
+    );
+
+    // The control, over the same send and the same chunk count: a document
+    // inside the interest IS admitted and the assembly IS open. Without it
+    // the assertion above passes for a fixture that never sent anything.
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    bob.protocol
+        .data_set_interest(&bob_space, vec!["wanted*".to_string()])
+        .expect("interest");
+    let payload = vec![7u8; 2 * 1024 * 1024];
+    alice
+        .protocol
+        .send_media_inner(
+            bob.address.clone(),
+            payload,
+            "wanted.notes".to_string(),
+            offline_protocol_core::ContentType::File,
+            crate::protocol::types::MediaSendOptions::default(),
+            Some(crate::media_envelope::DataPurpose::Snapshot {
+                doc: "wanted.notes".to_string(),
+            }),
+        )
+        .expect("send");
+    pump(&mut alice, &mut bob);
+    assert_eq!(
+        bob.protocol.file_transfer_manager.active_transfer_count(),
+        1,
+        "the same transfer must be admitted for a document inside the interest"
+    );
+}
