@@ -1737,6 +1737,83 @@ fn a_blob_that_does_not_hash_to_what_was_asked_for_is_refused() {
     let ended = attachment_events(&bob, "data_attachment_unavailable");
     assert_eq!(ended.len(), 1, "the fetch ended without saying so");
     assert_eq!(field(&ended[0], "reason"), "hash_mismatch");
+    assert_eq!(
+        field(&ended[0], "peer_id"),
+        alice.address,
+        "the report names the group rather than the member that was asked"
+    );
+}
+
+#[test]
+fn a_group_fetch_that_nobody_answers_names_the_member_it_was_put_to() {
+    // Every road that ends a fetch owes the same event, and in a group the
+    // space is not the peer: an application told the group id cannot stop
+    // asking that member, or ask the next one. The refusal road already
+    // named the member because it reads the sender; these roads read the
+    // record, which is the only place the member survives.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes nobody sends");
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+
+    let stale = std::time::Instant::now()
+        - crate::protocol::data_sync::ATTACHMENT_FETCH_TIMEOUT
+        - std::time::Duration::from_secs(1);
+    for pending in bob.protocol.pending_attachment_fetches.values_mut() {
+        pending.last_seen = stale;
+    }
+    bob.protocol.expire_attachment_fetches();
+
+    let ended = attachment_events(&bob, "data_attachment_unavailable");
+    assert_eq!(ended.len(), 1, "the silence was never reported");
+    assert_eq!(field(&ended[0], "reason"), "timeout");
+    assert_eq!(
+        field(&ended[0], "space_id"),
+        group,
+        "the report names the wrong space"
+    );
+    assert_eq!(
+        field(&ended[0], "peer_id"),
+        alice.address,
+        "the report names the group rather than the member that was asked"
+    );
+}
+
+#[test]
+fn forgetting_a_member_ends_the_group_fetch_put_to_them() {
+    // A fetch keyed by a group is not keyed by the member, so the road that
+    // forgets a peer has to read the record to find it. Left behind, the
+    // question holds a slot against the fetch bound until it times out, for
+    // a member this device has stopped replicating with entirely.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes alice was asked for");
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+    assert!(
+        !bob.protocol.pending_attachment_fetches.is_empty(),
+        "the question was never recorded"
+    );
+
+    bob.protocol.forget_data_sync_peer(&alice.address);
+
+    assert!(
+        bob.protocol.pending_attachment_fetches.is_empty(),
+        "a question put to a forgotten member outlived them"
+    );
+    let ended = attachment_events(&bob, "data_attachment_unavailable");
+    assert_eq!(ended.len(), 1, "the fetch was dropped without saying so");
+    assert_eq!(field(&ended[0], "reason"), "peer_gone");
+    assert_eq!(
+        field(&ended[0], "peer_id"),
+        alice.address,
+        "the report names the group rather than the member that was asked"
+    );
 }
 
 #[test]

@@ -2131,13 +2131,20 @@ impl OfflineProtocol {
                 .min_by_key(|(_, pending)| pending.last_seen)
                 .map(|(key, _)| key.clone())
             {
-                self.pending_attachment_fetches.remove(&oldest);
+                let evicted = self.pending_attachment_fetches.remove(&oldest);
                 // Reported, exactly as an expiry is. Eviction reaches the
                 // same end state by a different road: the fetch is over and
                 // no bytes will ever be admitted for it, so an application
                 // told nothing is left showing the spinner that the whole
                 // refusal mechanism exists to end.
-                Self::report_fetch_ended(&self.shared_state, &oldest, "evicted");
+                Self::report_fetch_ended(
+                    &self.shared_state,
+                    &oldest,
+                    evicted
+                        .as_ref()
+                        .and_then(|pending| pending.holder.as_deref()),
+                    "evicted",
+                );
             }
         }
         self.pending_attachment_fetches
@@ -2282,7 +2289,10 @@ impl OfflineProtocol {
             .values()
             .flat_map(|chunk| chunk.iter().copied())
             .collect();
-        self.pending_attachment_fetches.remove(&key);
+        let asked = self
+            .pending_attachment_fetches
+            .remove(&key)
+            .and_then(|pending| pending.holder);
 
         let actual = Self::data_attachment_hash(&assembled);
         if actual != hash {
@@ -2290,7 +2300,7 @@ impl OfflineProtocol {
                 space,
                 sender, "Assembled blob does not hash to what was asked for"
             );
-            Self::report_fetch_ended(&self.shared_state, &key, "hash_mismatch");
+            Self::report_fetch_ended(&self.shared_state, &key, asked.as_deref(), "hash_mismatch");
             return Ok(());
         }
         if let Ok(state) = crate::protocol::lock_shared_state(&self.shared_state) {
@@ -2369,8 +2379,15 @@ impl OfflineProtocol {
                 .min_by_key(|(_, pending)| pending.last_seen)
                 .map(|(key, _)| key.clone())
             {
-                self.pending_attachment_fetches.remove(&oldest);
-                Self::report_fetch_ended(&self.shared_state, &oldest, "evicted");
+                let evicted = self.pending_attachment_fetches.remove(&oldest);
+                Self::report_fetch_ended(
+                    &self.shared_state,
+                    &oldest,
+                    evicted
+                        .as_ref()
+                        .and_then(|pending| pending.holder.as_deref()),
+                    "evicted",
+                );
             }
         }
         self.pending_attachment_fetches
@@ -2632,15 +2649,23 @@ impl OfflineProtocol {
         // record silently also forecloses the expiry that would have
         // reported it later, so the spinner this event exists to end never
         // ends at all.
-        let ended: Vec<String> = self
+        let ended: Vec<(String, Option<String>)> = self
             .pending_attachment_fetches
-            .keys()
-            .filter(|key| key.starts_with(&prefix))
-            .cloned()
+            .iter()
+            // Two roads reach the same peer. On a 1:1 space the peer *is*
+            // the space, so the key carries it; in a group the space is the
+            // group and the member asked is inside the record. A question
+            // put to a peer this device has stopped replicating with cannot
+            // be answered by either road, so both go, and a group fetch
+            // left behind would hold its slot until it timed out.
+            .filter(|(key, pending)| {
+                key.starts_with(&prefix) || pending.holder.as_deref() == Some(peer)
+            })
+            .map(|(key, pending)| (key.clone(), pending.holder.clone()))
             .collect();
-        for key in ended {
+        for (key, holder) in ended {
             self.pending_attachment_fetches.remove(&key);
-            Self::report_fetch_ended(&self.shared_state, &key, "peer_gone");
+            Self::report_fetch_ended(&self.shared_state, &key, holder.as_deref(), "peer_gone");
         }
         self.blob_request_windows
             .retain(|key, _| !key.starts_with(&prefix));
@@ -2654,8 +2679,13 @@ impl OfflineProtocol {
     /// remembered peers is reached, so by then there is no peer left to name
     /// and a fetch keyed by one would be swept by nothing.
     pub(crate) fn end_every_pending_fetch(&mut self) {
-        for key in std::mem::take(&mut self.pending_attachment_fetches).into_keys() {
-            Self::report_fetch_ended(&self.shared_state, &key, "peer_gone");
+        for (key, pending) in std::mem::take(&mut self.pending_attachment_fetches) {
+            Self::report_fetch_ended(
+                &self.shared_state,
+                &key,
+                pending.holder.as_deref(),
+                "peer_gone",
+            );
         }
     }
 
@@ -2667,9 +2697,15 @@ impl OfflineProtocol {
     /// is a road that quietly owes it nothing. `reason` is a fixed token this
     /// crate chooses, never a peer's words: see the producer rule in
     /// `telemetry::scrub_event`.
+    ///
+    /// `holder` is the member the question was put to, which every caller
+    /// reads off the record it is ending. It is carried rather than derived
+    /// because it cannot be: the key composes the *space*, and in a group
+    /// the space is not the peer.
     fn report_fetch_ended(
         shared_state: &std::sync::Arc<std::sync::Mutex<crate::protocol::SharedState>>,
         key: &str,
+        holder: Option<&str>,
         reason: &str,
     ) {
         let Some((space, hash)) = key.split_once(GROUP_OFFER_KEY_SEP) else {
@@ -2678,11 +2714,16 @@ impl OfflineProtocol {
         debug!(space, reason, "A blob fetch ended with no bytes");
         if let Ok(state) = crate::protocol::lock_shared_state(shared_state) {
             state.emit_event(Event::DataAttachmentUnavailable {
-                // A 1:1 space IS the peer, which is why one key composes
-                // both: a fetch is only ever made in a space named after the
-                // peer that can answer it.
                 space_id: space.to_string(),
-                peer_id: space.to_string(),
+                // The member the question was put to. A 1:1 space IS the
+                // peer, which is why the key alone composes both there; a
+                // group space is one scope with many members, so the record
+                // carries the one asked and this reads it. Falling back to
+                // the space in a group would hand an application a group id
+                // where this event's own documentation promises the peer
+                // that was asked, and every road but the refusal would
+                // report it.
+                peer_id: holder.unwrap_or(space).to_string(),
                 hash: hash.to_string(),
                 reason: reason.to_string(),
             });
@@ -2744,17 +2785,17 @@ impl OfflineProtocol {
     /// resolves.
     pub(crate) fn expire_attachment_fetches(&mut self) {
         let now = Instant::now();
-        let expired: Vec<String> = self
+        let expired: Vec<(String, Option<String>)> = self
             .pending_attachment_fetches
             .iter()
             .filter(|(_, pending)| {
                 now.duration_since(pending.last_seen) >= ATTACHMENT_FETCH_TIMEOUT
             })
-            .map(|(key, _)| key.clone())
+            .map(|(key, pending)| (key.clone(), pending.holder.clone()))
             .collect();
-        for key in expired {
+        for (key, holder) in expired {
             self.pending_attachment_fetches.remove(&key);
-            Self::report_fetch_ended(&self.shared_state, &key, "timeout");
+            Self::report_fetch_ended(&self.shared_state, &key, holder.as_deref(), "timeout");
         }
     }
 
