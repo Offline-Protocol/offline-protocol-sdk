@@ -362,6 +362,18 @@ struct OfferContents {
 /// sender's: a sender's own list is bounded where it is set.
 const MAX_INTEREST_PATTERNS_PER_FRAME: usize = 32;
 
+/// The two bounds are the same number for a reason, and the reason is not
+/// coincidence: a pattern an application is allowed to declare has to be one
+/// a conforming peer actually reads. Raised past this on the sending side
+/// alone, the tail of every declared list would be dropped by every peer
+/// with no symptom on either device, and the frame-budget note on
+/// [`MAX_DOCS_PER_VERSION_FRAME`] would be reasoning about a list longer than
+/// it weighs.
+const _: () = assert!(
+    super::data::MAX_INTEREST_PATTERNS <= MAX_INTEREST_PATTERNS_PER_FRAME,
+    "a pattern an application may declare must be one every peer reads"
+);
+
 /// Where a sync frame goes and what it is sealed under.
 ///
 /// The one thing F4 added to this module. 1:1 replication could treat the
