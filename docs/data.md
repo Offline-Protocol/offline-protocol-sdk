@@ -306,6 +306,7 @@ exist because of that, and each one is reported rather than silent.
 | Whole document over the media path | 4 MiB, the record ceiling | A document past it is refused at the start of the transfer, because the receiver could not persist it even if every byte arrived |
 | Nowhere left to go | | `data_doc_unsyncable`, which is worth handling: the replicas will not converge, both sides keep accepting edits, and nothing else about that state looks like a problem |
 | Documents a peer may name in one space | 1024 | Bounds abuse rather than product use. Documents this application creates are not counted against it |
+| Interest patterns per space | 32 | `InvalidArgument` at `setInterest`. A peer reads the same 32 from one offer, so a longer list would have its tail dropped silently |
 
 Keep documents small on purpose. A shared list per conversation converges in
 one frame; a single document holding every list a person owns eventually does

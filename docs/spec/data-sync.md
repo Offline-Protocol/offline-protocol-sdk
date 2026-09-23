@@ -325,7 +325,21 @@ A receiver MUST bound how many patterns it reads from one frame, because a
 peer chooses the list and every pattern is walked per document. Reading a
 prefix of an over-long list and answering it is preferable to refusing the
 frame: the patterns are a request, and a truncated answer is closer to what
-was asked for than none.
+was asked for than none. This implementation reads at most 32 patterns from
+one frame and accepts at most 32 per space. The two numbers are the same one
+on purpose: a pattern an application is allowed to declare has to be one a
+conforming peer reads, or the tail of every list is dropped with no symptom
+on either device.
+
+Interest does not narrow what a removal costs. A floor is recorded for a
+removed name whether or not the declarer wants it, and the reason is not
+caution. A floor refused on interest is one a later widening has to
+re-acquire, and in the window before the next offer carries it again, a third
+replica offering the removed content would have it created here: the removal
+undone by the replica that outlived it, which is the failure floors exist to
+prevent. So the per-space ceiling under [Sizes](#sizes) counts removed names
+a narrowed device will never hold, and narrowing a space does not reduce what
+a peer can spend of that budget.
 
 ## Every leg ends
 
@@ -336,7 +350,7 @@ symptom on either device except traffic that never stops.
 | Inbound | Answer |
 |---------|--------|
 | Offer (`reply: false`) | Removals applied, catch-up for each stale document the sender asked for, then one `reply: true` offer |
-| Offer (`reply: true`) | Catch-up for each stale document, plus one targeted offer naming any document this frame caused the receiver to create |
+| Offer (`reply: true`) | Catch-up for each stale document the sender asked for, plus one targeted offer naming any document this frame caused the receiver to create |
 | `delta` that applies, is already held, is unreadable, or is covered by a removal | Nothing |
 | `delta` held behind a missing predecessor | One targeted offer (`reply: true`, `partial: true`) for that document |
 | `delta` needing trimmed history | `need_snap` for that document |
