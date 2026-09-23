@@ -636,8 +636,10 @@ Answer every one, with `provideAttachment` or `declineAttachment`: without a
 refusal the asking side cannot tell a peer that lost the file from one on a
 slow radio, and shows somebody a spinner forever. Fetched bytes arrive whole,
 base64, in `data_attachment_received`, and a fetch that ends without them
-arrives as `data_attachment_unavailable`. Blob carriage is 1:1 in this release;
-references replicate in a group but the bytes do not. Worked code is in the
+arrives as `data_attachment_unavailable`. In a group the bytes travel as
+frames under the group key, up to 1 MiB: ask a named member with
+`fetchAttachmentFrom`, because a reference says nothing about who holds the
+bytes. Worked code is in the
 [API reference](api-reference.md#attachments).
 
 ### 11.12 MLS (End-to-End Encryption)

@@ -922,7 +922,7 @@ pub(crate) const DATA_INTEREST_V1: u8 = 5;
 /// What it gates is a better answer to a question, not safety. A member
 /// without it receives a `need_blob` it understands the shape of and
 /// refuses, and receives `chunk` frames whose kind it does not know and
-/// drops — the version is read before the body, so an unknown kind is
+/// drops: the version is read before the body, so an unknown kind is
 /// consumed rather than surfaced. Nothing is shown to anybody wrongly. What
 /// the entry buys is refusing a fetch at the call instead of leaving an
 /// application waiting out the silence timeout for an answer that was never

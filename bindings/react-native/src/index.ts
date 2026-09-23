@@ -3954,7 +3954,7 @@ export class DataStore {
    * bytes, so a group fetch names the member; the SDK does not try members
    * in turn, because each miss costs the whole silence timeout. The bytes
    * come back as frames under the group key, so no pairwise session with
-   * that member is needed, and they are bounded at 1 MiB — anything larger
+   * that member is needed, and they are bounded at 1 MiB. Anything larger
    * travels over a 1:1 session, and the holder is told so at the call.
    *
    * Use {@link fetchAttachment} for a 1:1 space.

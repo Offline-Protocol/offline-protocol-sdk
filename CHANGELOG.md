@@ -53,6 +53,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   entry buys is refusing a fetch at the call instead of waiting out the
   timeout.
 
+  A fetch is refused at the call for a member this device does not know
+  receives replication frames inside a group, because one that does not
+  would be shown the question as text, and for this device itself. Asking a
+  second member is a fallback rather than a repeat: the question put to the
+  first is reported as `evicted`, naming that member, and the new one goes
+  out at once. Every report of a fetch that ended without bytes now names
+  the member it was put to rather than the space.
 
 - **A space can replicate in part.** `DataStore.setInterest(space, patterns)`
   names the documents this device wants from its peers: document names, each

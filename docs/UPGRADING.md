@@ -2281,6 +2281,23 @@ Nothing is surfaced wrongly there; the fetch ends at the silence timeout with
 `data_attachment_unavailable`. Where an inviter has attested the member's
 capability, the fetch is refused at the call instead.
 
+**`fetchAttachmentFrom` throws for a member this device knows nothing
+about**, and for your own address. A member who cannot intercept replication
+frames would be shown the question as chat text, so the call refuses rather
+than send it; an inviter's attestation is what supplies that knowledge for
+members you have never exchanged key packages with, which is the ordinary
+case in a group.
+
+**Falling back to another member works immediately.** Asking a second member
+for the same blob is a new question, not a repeat: the one put to the first
+member ends with `data_attachment_unavailable` and `reason: "evicted"`, and
+the new one goes out at once. Do not wait out the timeout first.
+
+**`data_attachment_unavailable` names the member, not the space.** In a
+group these differ, and every road that ends a fetch now reports the member
+the question was put to. If you keyed anything on that field being the space
+in a group, it was the group id before this release by mistake.
+
 ---
 
 ## Appendix A: limits reference

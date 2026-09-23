@@ -1053,7 +1053,7 @@ await store.flush('space-1', 'profile');
 | `wipeAll()` | `void` | Delete every data-layer record. Only durable once replication has stopped |
 | `attachmentHash(bytesBase64)` | `string` | The address of some bytes, for writing a reference |
 | `fetchAttachment(space, hash)` | `void` | Ask a 1:1 peer for a blob. Answers arrive as events; throws for a group space, which needs `fetchAttachmentFrom`, or for a peer that cannot carry blobs |
-| `fetchAttachmentFrom(space, peer, hash)` | `void` | Ask one member of a group for a blob. The bytes ride frames under the group key, so no pairwise session is needed, and they are capped at 1 MiB |
+| `fetchAttachmentFrom(space, peer, hash)` | `void` | Ask one member of a group for a blob. The bytes ride frames under the group key, so no pairwise session is needed, and they are capped at 1 MiB. Throws for a 1:1 space, a non-member, your own address, or a member nothing is known about |
 | `provideAttachment(space, peer, hash, bytesBase64)` | `void` | Answer a peer's request. Throws if the bytes do not hash to `hash` |
 | `declineAttachment(space, peer, hash)` | `void` | Tell a peer the bytes are gone. Throws for a peer that cannot carry blobs |
 

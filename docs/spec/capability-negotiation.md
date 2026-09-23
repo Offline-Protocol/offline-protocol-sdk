@@ -81,10 +81,11 @@ is, so it hands the bytes to its user as a downloaded file. For an attachment
 that is a file nobody asked for; for a document too large to fit a frame it is
 a CRDT encoding presented as a document. Entry 3 gates both the `need_blob` and
 `blob_gone` frames and every transfer marked for the data layer. It has no
-attested sibling: blob carriage is 1:1 in this version, so there is nothing
-about it for a group inviter to attest.
+attested sibling, because what it gates is a transfer to a confirmed pairwise
+session and a group inviter has nothing to say about one. Entry 6 carries
+bytes inside a group and has a sibling for exactly that reason.
 
-Entry 4 is the quietest of the four, and the only one whose gate is about
+Entry 4 is the quietest of them, and the only one whose gate is about
 traffic rather than about what a peer would do wrong. A peer without it
 ignores the `gone` field of an offer it otherwise understands, keeps its copy
 of a removed document, and offers it back on every exchange; the removing

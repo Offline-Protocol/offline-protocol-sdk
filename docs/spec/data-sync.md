@@ -662,6 +662,30 @@ in turn on the application's behalf: each miss costs the whole silence
 timeout, so a reference nobody holds would spend one per member. The
 application knows who wrote the reference.
 
+**A request goes only to a member known to receive it.** This is the one
+directed frame that is a question rather than an answer, so nothing the
+member already sent stands as proof they intercept these frames, and one
+that does not renders the question to its user as literal text. A requester
+MUST therefore hold the same knowledge of the member it asks that it would
+need of every member before broadcasting, which is entry 2, directly or
+attested. A directed frame can be promoted into a roster-wide delivery, so
+the two rules cannot differ. What is required is knowledge of capability and
+not of the bytes: whether that member *has* them is what the question is
+for.
+
+**A second member is a new question, not a repeat.** An implementation that
+suppresses a repeated request MUST key that suppression on the member as
+well as the blob, or an application falling back after silence asks nobody
+and is told nothing. The displaced question MUST be reported, so an
+application tracking one question per member is not left holding one that
+never ends. A report MUST name the member the question was put to, which in
+a group is not the space.
+
+**A `chunk` belongs to the group road.** On a 1:1 session the bytes ride the
+media path, and an implementation MUST NOT admit a chunk there: the two
+roads answer to different bounds and share nothing but the hash check at the
+end.
+
 References themselves replicate in group spaces like any other value, and
 have never needed anything from this section.
 

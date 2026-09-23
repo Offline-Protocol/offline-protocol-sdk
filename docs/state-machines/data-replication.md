@@ -234,6 +234,7 @@ single-hop question.
 | Per-hash window | 30 seconds | A peer re-asking for one blob it has already been answered about |
 | Per-peer budget | 32 live windows | A peer asking for a different hash every time, each costing a map entry and an app callback |
 | Global windows | 256, oldest evicted | The bound that still holds when a peer's budget resets |
+| Group answer | 32 chunks of 32 KiB | One member spending another's memory on a single answer, and it is also what keeps a request a single-hop question |
 
 `provideAttachment` verifies that the bytes hash to the requested address
 before anything is sent, so a mistake is reported to the application that made

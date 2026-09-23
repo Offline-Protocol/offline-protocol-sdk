@@ -490,8 +490,8 @@ const _: () = assert!(
 ///
 /// That is far below what the 1:1 path carries, and deliberately so. Moving
 /// a hundred megabytes this way would mean flow control, a holder keeping
-/// the bytes between windows, and a re-ask clock — the machinery the media
-/// path already has and that a frame path would have to grow. A group
+/// the bytes between windows, and a re-ask clock, which is the machinery the
+/// media path already has and that a frame path would have to grow. A group
 /// attachment is a receipt, a signature, a small photo; anything larger
 /// travels 1:1, and the sender is told which it is at the call.
 pub(crate) const MAX_GROUP_BLOB_CHUNKS: u32 = 32;
@@ -1622,9 +1622,14 @@ impl OfflineProtocol {
     /// above this exists to try, and the two replicas stay apart until
     /// somebody makes the document smaller.
     ///
-    /// Only ever 1:1 in this version. The media path is a transfer to a
-    /// confirmed session and two members of a group need not have one with
-    /// each other, so a group space that reaches this rung reports instead.
+    /// Only ever 1:1, and it stayed that way when attachment bytes stopped
+    /// being. The media path is a transfer to a confirmed session and two
+    /// members of a group need not have one with each other, so a group
+    /// space that reaches this rung reports instead. Carrying it as frames
+    /// the way a blob now travels would need a rule this layer does not
+    /// have: a blob is asked for, so a chunk of one is admitted against an
+    /// outstanding request, while a snapshot is unsolicited by design and
+    /// frames carrying one would be admitted on the sender's say-so alone.
     fn carry_snapshot_over_media(
         &mut self,
         space: &str,
