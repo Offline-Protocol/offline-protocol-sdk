@@ -23,6 +23,7 @@ def mock_protocol() -> MagicMock:
     proto.internet_confirm_sent = MagicMock()
     proto.internet_send_failed = MagicMock()
     proto.internet_send_failed_with_reason = MagicMock()
+    proto.local_address = MagicMock(return_value=None)
     return proto
 
 
@@ -142,6 +143,133 @@ class TestInternetManagerAppId:
         call_args = mock_protocol.internet_message_received.call_args
         data = json.loads(bytes(call_args.kwargs["data"]))
         assert data["app_id"] == "custom-app"
+
+
+class TestRelayGroupFrames:
+    """The relay's group frames reach the core under the core's prefixes.
+
+    Mirrors the iOS and Android inbound switch. Two rules fail silently if
+    broken: a relay answer injected with an actor is dropped as unsigned, and
+    a frame missing `id`/`timestamp` or with a capitalized priority is dropped
+    by the transport.
+    """
+
+    ADDRESS = "off1localaddress"
+
+    def _manager(self, mock_protocol: MagicMock) -> InternetManager:
+        mock_protocol.local_address = MagicMock(return_value=self.ADDRESS)
+        return InternetManager(mock_protocol, "dev-1", app_id="custom-app")
+
+    @staticmethod
+    def _injected(mock_protocol: MagicMock) -> tuple[str, dict]:
+        call = mock_protocol.internet_message_received.call_args
+        return call.kwargs["sender_id"], json.loads(bytes(call.kwargs["data"]))
+
+    def test_group_message_received_is_attributed_and_addressed_to_us(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        mgr = self._manager(mock_protocol)
+        mgr._process_received(json.dumps({
+            "type": "GroupMessageReceived",
+            "group_id": "g1",
+            "sender": "off1peer",
+            "content": "ciphertext",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message_id": "m1",
+            "reply_to_msg": "m0",
+            "forward_info": {"original_sender": "off1other"},
+        }).encode())
+        sender_id, frame = self._injected(mock_protocol)
+        assert sender_id == "off1peer"
+        assert frame["sender"] == "off1peer"
+        assert frame["recipient"] == self.ADDRESS
+        assert frame["priority"] == "medium"
+        assert frame["requires_ack"] is False
+        assert frame["app_id"] == "custom-app"
+        assert isinstance(frame["id"], str) and frame["id"]
+        assert isinstance(frame["timestamp"], int)
+        assert frame["content"].startswith("__GROUP_MSG__")
+        assert json.loads(frame["content"][len("__GROUP_MSG__"):]) == {
+            "group_id": "g1",
+            "sender": "off1peer",
+            "content": "ciphertext",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message_id": "m1",
+            "reply_to_msg": "m0",
+            "forward_info": {"original_sender": "off1other"},
+        }
+
+    def test_group_message_without_an_id_is_dropped(self, mock_protocol: MagicMock) -> None:
+        mgr = self._manager(mock_protocol)
+        mgr._process_received(json.dumps({
+            "type": "GroupMessageReceived", "group_id": "g1", "sender": "p", "content": "c",
+        }).encode())
+        mock_protocol.internet_message_received.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("relay", "prefix", "payload"),
+        [
+            (
+                {"type": "GroupCreated", "group_id": "g1", "name": "testers"},
+                "__GROUP_CREATED__",
+                {"group_id": "g1", "name": "testers"},
+            ),
+            (
+                {"type": "GroupMemberAdded", "group_id": "g1", "user_id": "u", "added_by": "a"},
+                "__GROUP_MEMBER_ADDED__",
+                {"group_id": "g1", "user_id": "u", "added_by": "a"},
+            ),
+            (
+                {"type": "GroupMemberRemoved", "group_id": "g1", "user_id": "u", "removed_by": "a"},
+                "__GROUP_MEMBER_REMOVED__",
+                {"group_id": "g1", "user_id": "u", "removed_by": "a"},
+            ),
+            (
+                {"type": "GroupError", "group_id": "g1", "reason": "denied"},
+                "__GROUP_ERROR__",
+                {"reason": "denied", "group_id": "g1"},
+            ),
+            (
+                {"type": "GroupError", "reason": "denied"},
+                "__GROUP_ERROR__",
+                {"reason": "denied"},
+            ),
+        ],
+    )
+    def test_relay_answers_are_injected_unattributed(
+        self, mock_protocol: MagicMock, relay: dict, prefix: str, payload: dict
+    ) -> None:
+        mgr = self._manager(mock_protocol)
+        mgr._process_received(json.dumps(relay).encode())
+        sender_id, frame = self._injected(mock_protocol)
+        assert sender_id == ""
+        assert frame["sender"] == "relay"
+        assert frame["recipient"] == self.ADDRESS
+        assert frame["content"] == prefix + json.dumps(payload)
+
+    def test_group_delivery_report_stays_off_the_message_plane(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        mgr = self._manager(mock_protocol)
+        report = {"type": "GroupMessageSent", "group_id": "g1", "message_id": "m1"}
+        mgr._process_received(json.dumps(report).encode())
+        mock_protocol.internet_message_received.assert_not_called()
+        raw = mock_protocol.internet_group_report_received.call_args.kwargs["report_json"]
+        assert json.loads(raw) == report
+
+    def test_plain_text_fallback_frame_is_addressed_to_us(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        mgr = self._manager(mock_protocol)
+        mgr._process_received(json.dumps({
+            "type": "MessageReceived", "sender": "off1peer", "content": "hi", "message_id": "m1",
+        }).encode())
+        _, frame = self._injected(mock_protocol)
+        assert frame["id"] == "m1"
+        assert frame["recipient"] == self.ADDRESS
+        assert frame["priority"] == "medium"
+        assert frame["requires_ack"] is True
+        assert isinstance(frame["timestamp"], int)
 
 
 class TestInternetManagerConnectionClosedGuard:
